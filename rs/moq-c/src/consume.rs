@@ -214,8 +214,6 @@ enum RawControl {
 	Pending(Option<moq_net::track::Subscription>),
 	/// Subscribed: updates apply at once, so a refusal reaches the caller.
 	Live(moq_net::track::Control),
-	/// A socket's `tcp` half: one group, with no subscription to update.
-	Group,
 }
 
 /// Outcome of polling a raw track source alongside its control channels.
@@ -936,34 +934,22 @@ impl Consume {
 		}
 	}
 
-	/// Read a socket stream's peer half as a raw track reader: `track` for a `track` session,
-	/// or the one group of a `tcp` session.
+	/// Read a socket stream's peer half as a raw track reader.
 	///
-	/// The `track` half keeps the reliable, oldest-first subscription the socket opened it with
-	/// until [`Self::raw_track_update`] changes it.
+	/// It keeps the reliable, oldest-first subscription the socket opened it with until
+	/// [`Self::raw_track_update`] changes it.
 	pub(crate) fn socket_read(
 		&mut self,
-		half: crate::socket::Half,
+		half: moq_net::track::Subscriber,
 		driver: crate::ffi::Background,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let (task, mut close) = Task::new(on_frame);
-		let control = match &half {
-			crate::socket::Half::Track(track) => RawControl::Live(track.control()),
-			crate::socket::Half::Group(_) => RawControl::Group,
-		};
+		let (task, close) = Task::new(on_frame);
+		let control = RawControl::Live(half.control());
 		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
 
 		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				match half {
-					crate::socket::Half::Track(track) => Self::run_raw(on_frame, (*track).ordered(), close).await,
-					crate::socket::Half::Group(mut group) => {
-						Self::run_group(on_frame, &mut group, &mut close).await.map(drop)
-					}
-				}
-			}))
-			.await;
+			let res = crate::ffi::run(driver.watch(Self::run_raw(on_frame, half.ordered(), close))).await;
 
 			let entry = State::lock().consume.raw_task.remove(id);
 			if let Some(entry) = entry {
@@ -984,9 +970,6 @@ impl Consume {
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
 			RawControl::Live(control) => Self::update_raw(control, subscription)?,
-			RawControl::Group => {
-				return Err(Error::Unsupported("a tcp socket stream has no subscription".into()));
-			}
 		}
 		Ok(())
 	}

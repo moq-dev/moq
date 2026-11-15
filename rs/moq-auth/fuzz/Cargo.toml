@@ -1,0 +1,42 @@
+# The libFuzzer harness for moq-auth's token and key parsers. `just rs fuzz token` and
+# `just rs fuzz jwk` drive it, and nightly.yml runs both.
+#
+# A workspace member so it shares the root lockfile, which is the only thing that
+# keeps its resolve from drifting when a sibling it depends on is bumped. It is
+# excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
+# toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
+#
+# The target bodies live in `moq-auth`'s `fuzz` module, not here: they verify without
+# the clock through a private method, and sharing the bodies is what lets the crate's
+# own tests replay the corpus on stable.
+[package]
+name = "moq-auth-fuzz"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+publish = false
+edition = "2024"
+autobins = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "token"
+path = "fuzz_targets/token.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwk"
+path = "fuzz_targets/jwk.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+moq-auth = { workspace = true, features = ["fuzz"] }
+
+[lints]
+workspace = true

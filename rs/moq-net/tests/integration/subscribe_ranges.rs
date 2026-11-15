@@ -8,7 +8,7 @@ use moq_net::track::Delay;
 
 use std::time::Duration;
 
-use moq_net::track::{Info, Range, Subscription};
+use moq_net::track::{Info, Order, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -209,6 +209,13 @@ struct RangeFixture {
 	_sessions: Vec<support::harness::MockPair>,
 	_origins: [moq_net::origin::Producer; 3],
 	_broadcast: moq_net::origin::Route,
+}
+
+impl RangeFixture {
+	/// The forwarding hop's own view of the broadcast, which reads its cache directly.
+	fn relay(&self) -> moq_net::origin::Consumer {
+		self._origins[1].consume()
+	}
 }
 
 async fn range_fixture(relay: bool) -> RangeFixture {
@@ -756,5 +763,126 @@ async fn a_covered_bounded_subscription_stays_open() {
 			.unwrap_or_else(|_| panic!("{version}: the demand leaves with the readers"))
 			.unwrap();
 		drop((track, session, subscriber, broadcast, publisher));
+	}
+}
+
+/// A relay whose cache holds only some of a track's history answers one subscription for a
+/// past range wider than it holds plus the live edge, newest or oldest first: it serves what
+/// it caches and fills the rest from the publisher. Every sequence in range is delivered once
+/// or skipped, so the read ends with the track instead of waiting on a hole.
+#[kio::test]
+async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
+	// With no budget only SUBSCRIBE_DROP settles the holes, so that path is tested on its own.
+	for budget in [None, Some(BUDGET)] {
+		holes_through_a_relay("moq-lite-07-wip", budget).await;
+	}
+}
+
+/// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, which marks
+/// no hole, so one is skipped only once the reader's max age rules it out.
+#[kio::test]
+#[ignore = "stalls on a hole until /quest/m3/ietf-hole-stall.md"]
+async fn a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport() {
+	for version in ["moq-transport-18", "moq-transport-22"] {
+		holes_through_a_relay(version, Some(BUDGET)).await;
+	}
+}
+
+/// A budget the past range stays inside while it's read, and the live group then leaves behind.
+const BUDGET: Duration = Duration::from_secs(60);
+
+async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
+	// The publisher drops group 4 and never produces group 7. Group 8 lies outside both ranges.
+	const DROPPED: u64 = 4;
+	const ABSENT: u64 = 7;
+	const WANT: [u64; 8] = [0, 1, 2, 3, 5, 6, 9, LIVE_MILLIS];
+	// History is stamped within a second, so the whole past range is fresh when read. The
+	// live group lands far past the budget, which then rules both holes out.
+	const LIVE_MILLIS: u64 = 100_000;
+	let mut failures = Vec::new();
+	for order in [Order::Ascending, Order::Descending] {
+		let name = format!("{version} {order:?} budget={budget:?}");
+		let fixture = range_fixture_history(version, true, 0).await;
+		for key in (0..=9).filter(|key| *key != ABSENT) {
+			let mut group = fixture.track.create_group(moq_net::group::Info { start: key }).unwrap();
+			if key == DROPPED {
+				group.abort(moq_net::Error::App(1)).unwrap();
+				continue;
+			}
+			group
+				.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.close().unwrap();
+		}
+
+		// Warm the relay's cache with groups 1 and 5 alone, one-group runs every wire fills.
+		let relay = kio::clock::timeout(TIMEOUT, fixture.relay().follow("ranges", None).unwrap().available())
+			.await
+			.expect("relay resolve timeout")
+			.unwrap()
+			.expect("the relay resolves the broadcast");
+		let mut warm = subscribe(
+			&relay,
+			Subscription::default()
+				.with_delay(Delay::default().with_max(None))
+				.with_ranges([keys(1..2), keys(5..6)]),
+		)
+		.await;
+		let mut warmed = read_all(&mut warm).await;
+		warmed.sort_unstable();
+		assert_eq!(warmed, [1, 5], "{name}: the warm reader");
+		drop(warm);
+
+		let mut reader = subscribe(
+			&fixture.remote,
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_order(order)
+				.with_ranges([keys(0..8), Range::live()]),
+		)
+		.await;
+		// Everything in range that exists now, before the live edge moves.
+		let mut got = Vec::new();
+		for _ in 0..WANT.len() - 1 {
+			got.extend(next(&mut reader).await);
+		}
+		let mut group = fixture
+			.track
+			.create_group(moq_net::group::Info { start: LIVE_MILLIS })
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(LIVE_MILLIS).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.close().unwrap();
+		let _finished = fixture.track.clone().finish().unwrap();
+		// The read ends only once every key in range was delivered or skipped.
+		loop {
+			match kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
+				Ok(Ok(Some(group))) => got.push(group.start),
+				Ok(Ok(None)) => break,
+				Ok(Err(err)) => {
+					failures.push(format!("{name}: {err} after {got:?}"));
+					break;
+				}
+				Err(_) => {
+					failures.push(format!("{name}: stalled after {got:?}"));
+					break;
+				}
+			}
+		}
+		let mut sorted = got.clone();
+		sorted.sort_unstable();
+		if sorted != WANT {
+			failures.push(format!("{name}: {got:?}"));
+		}
+	}
+	assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The groups keyed in `range`, as a time range: a time end is the last key it holds.
+fn keys(range: std::ops::Range<u64>) -> Range {
+	Range {
+		start: moq_net::track::Anchor::Time(range.start),
+		end: Some(moq_net::track::Anchor::Time(range.end - 1)),
 	}
 }

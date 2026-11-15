@@ -114,11 +114,7 @@ pub async fn handle_viewers(
 }
 
 /// Accept one viewer's dial and relay its commands until the session ends.
-async fn run_viewer(
-	viewer: ViewerId,
-	incoming: moq_net::socket::Incoming<moq_net::socket::TrackStream>,
-	cmd_tx: tokio::sync::mpsc::Sender<Command>,
-) {
+async fn run_viewer(viewer: ViewerId, incoming: moq_net::socket::Incoming, cmd_tx: tokio::sync::mpsc::Sender<Command>) {
 	let peer = incoming.peer().to_string();
 	let stream = match incoming.accept(None).await {
 		Ok(stream) => stream,

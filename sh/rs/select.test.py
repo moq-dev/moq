@@ -74,7 +74,7 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        features = [*DEVICE_FEATURES.split(), "moq-webrtc/p2p", *(["moq-relay/io-uring"] if LINUX else [])]
+        features = [*DEVICE_FEATURES.split(), *(["moq-relay/io-uring"] if LINUX else [])]
         features += [feature for feature in target_features() if feature not in features]
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
@@ -177,13 +177,6 @@ class SelectTest(unittest.TestCase):
                 self.assertEqual(len(calls), 1, calls)
                 # The targets' required features follow the device ones.
                 self.assertIn(f" --features {features}", calls[0])
-        # moq-webrtc's data channel transport is off by default too.
-        calls = self.selected("rs/moq-webrtc/src/p2p/mod.rs", action="test")
-        self.assertEqual(len(calls), 1, calls)
-        self.assertIn(" moq-webrtc/p2p", calls[0])
-        # So is a change to qmux, which only that optional feature pulls in.
-        calls = self.selected("rs/qmux/src/lib.rs", action="test")
-        self.assertTrue(any(" moq-webrtc/p2p" in call for call in calls), calls)
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])

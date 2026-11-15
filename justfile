@@ -34,6 +34,7 @@ mod carla 'demo/carla'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
 mod sub 'demo/sub'
+mod vr 'demo/vr'
 mod web 'demo/web'
 
 # Run the demo by default.

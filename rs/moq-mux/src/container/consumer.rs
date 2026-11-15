@@ -208,6 +208,16 @@ pub struct Consumer<F: Container> {
 
 	// When the wire frame behind the last frame read landed in this node's cache.
 	arrived: Option<Instant>,
+
+	// The newest group the publisher's largest named so far.
+	largest: Option<u64>,
+
+	// The publisher's largest group as the start was decided: one at or below it was produced
+	// before the subscription, so dropping it unread skips the join's backlog.
+	joined: Option<u64>,
+
+	// When the latest backlog group dropped without delivering all of it landed.
+	backlog: Option<Instant>,
 }
 
 /// Whether a [`Consumer`] still reads its subscription.
@@ -423,6 +433,9 @@ impl<F: Container> Consumer<F> {
 			next: None,
 			group: 0,
 			arrived: None,
+			largest: None,
+			joined: None,
+			backlog: None,
 		}
 	}
 
@@ -455,6 +468,18 @@ impl<F: Container> Consumer<F> {
 	/// packed into one wire frame, as a CMAF fragment packs its samples, share its arrival.
 	pub fn arrival(&self) -> Option<Instant> {
 		self.arrived
+	}
+
+	/// When the latest backlog group this reader dropped without delivering all of it landed in
+	/// this node's cache, or `None` before the first.
+	///
+	/// Backlog is a group at or below the publisher's largest when the subscription began, so it
+	/// was produced before. Its frames were never read, so a caller timing
+	/// [`arrival`](Self::arrival)s learns when a join's backlog finished arriving even when the
+	/// reader skipped it: one that arrived below the cursor, or below the start, or that a skip
+	/// passed over.
+	pub fn backlog(&self) -> Option<Instant> {
+		self.backlog
 	}
 
 	/// The group sequence of the last event read.
@@ -560,6 +585,14 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn poll_event_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
+		// Where the publisher stood as the subscription began, read as soon as its answer resolves
+		// the start: groups landing later raise the largest past it. A start decided first, or a
+		// largest not yet in range, takes the first one that is.
+		if self.joined.is_none()
+			&& (matches!(self.startup, Startup::Started) || self.subscriber().poll_start(waiter).is_ready())
+		{
+			self.join(waiter);
+		}
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 
@@ -583,7 +616,15 @@ impl<F: Container> Consumer<F> {
 				(floor, served) => floor.or(served),
 			};
 			if let Some(start) = start {
-				self.pending.retain(|group| group.start >= start);
+				self.join(waiter);
+				let (joined, backlog) = (self.joined, &mut self.backlog);
+				self.pending.retain(|group| {
+					let keep = group.start >= start;
+					if !keep {
+						Self::skip(joined, backlog, group);
+					}
+					keep
+				});
 				self.current = start;
 				self.startup = Startup::Started;
 			}
@@ -605,11 +646,9 @@ impl<F: Container> Consumer<F> {
 				// budget past them.
 				let start = match matches!(self.startup, Startup::Newest) {
 					true => {
-						let mut start = self.pending.back().expect("a group has a frame").start;
-						while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
-							start = start.max(largest.group);
-						}
-						start
+						self.poll_largest(waiter);
+						let back = self.pending.back().expect("a group has a frame").start;
+						back.max(self.largest.unwrap_or(back))
 					}
 					// The start may still wait for a group earlier than any that arrived.
 					false => match self.reach_start(waiter, finished) {
@@ -617,6 +656,7 @@ impl<F: Container> Consumer<F> {
 						None => return Poll::Pending,
 					},
 				};
+				self.join(waiter);
 				// Nothing has been read, so discarding what lies below the start is no gap.
 				self.discard(|group| group.start < start)?;
 				self.current = start;
@@ -1168,6 +1208,7 @@ impl<F: Container> Consumer<F> {
 
 			if sequence < self.current {
 				tracing::debug!(old = ?sequence, current = ?self.current, "skipping old group");
+				Self::skip(self.joined, &mut self.backlog, &reader);
 				continue;
 			}
 
@@ -1207,6 +1248,31 @@ impl<F: Container> Consumer<F> {
 		self.memory.full() && self.pending.len() >= 2
 	}
 
+	// Note `group` dropped without delivering all of it: backlog when the publisher's largest at the
+	// subscription's start reached it. One above was produced since, such as an outage's.
+	fn skip(joined: Option<u64>, backlog: &mut Option<Instant>, group: &GroupBuffer<F>) {
+		if joined.is_some_and(|joined| group.start <= joined) {
+			*backlog = (*backlog).max(Some(group.group.arrived()));
+		}
+	}
+
+	// Take every largest the publisher reported since the last poll.
+	fn poll_largest(&mut self, waiter: &kio::Waiter) {
+		while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
+			self.largest = self.largest.max(Some(largest.group));
+		}
+	}
+
+	// Where the publisher stood as the subscription began, taken once: after its answer rather than
+	// from a group that raced it, and at the latest as the start is decided, before anything is
+	// dropped against it.
+	fn join(&mut self, waiter: &kio::Waiter) {
+		self.poll_largest(waiter);
+		if self.joined.is_none() {
+			self.joined = self.largest;
+		}
+	}
+
 	// Drop the pending groups `pick` selects without delivering them. A drop must not hide what
 	// was already found, so the lowest one holding a fault, or with frames below the start of the
 	// latest delivered group, ends the reader instead. What was never read stays unread: decoding
@@ -1214,10 +1280,12 @@ impl<F: Container> Consumer<F> {
 	fn discard(&mut self, mut pick: impl FnMut(&mut GroupBuffer<F>) -> bool) -> Result<(), F::Error> {
 		let start = self.start;
 		let mut fault = None;
+		let (joined, backlog) = (self.joined, &mut self.backlog);
 		self.pending.retain_mut(|group| {
 			if !pick(group) {
 				return true;
 			}
+			Self::skip(joined, backlog, group);
 			if fault.is_none() {
 				fault = Self::discard_fault(start, group);
 			}
@@ -1232,6 +1300,7 @@ impl<F: Container> Consumer<F> {
 		let start = self.start;
 		let mut fault = None;
 		for mut group in self.pending.drain(..count) {
+			Self::skip(self.joined, &mut self.backlog, &group);
 			if fault.is_none() {
 				fault = Self::discard_fault(start, &mut group);
 			}
@@ -2077,6 +2146,124 @@ mod tests {
 		marker.close().unwrap();
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 2, .. })));
 		assert_eq!(reader.arrival(), Some(second), "an end carries no arrival of its own");
+	}
+
+	/// A group at or below the publisher's largest when the subscription began was produced
+	/// before it: dropped unread below the cursor, it is the join's backlog, and the reader
+	/// reports when it landed. One produced since, such as an outage's, is not.
+	#[tokio::test(start_paused = true)]
+	async fn a_backlog_group_below_the_cursor_reports_when_it_landed() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
+		reader.set_wait(Duration::from_millis(50));
+
+		// The publisher stood at group 5 as the subscription began.
+		write_group(&mut track, 5, &[ts(100_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 5, .. })
+		));
+		write_group(&mut track, 6, &[ts(120_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 6, .. })
+		));
+
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 4, &[ts(80_000)]);
+		write_group(&mut track, 7, &[ts(140_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 7, .. })
+		));
+		let landed = kio::clock::now();
+		assert_eq!(reader.backlog(), Some(landed));
+
+		// Group 6 itself came after the subscription began, so a copy of it would not be backlog.
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 8, &[ts(160_000)]);
+		write_group(&mut track, 10, &[ts(200_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 8, .. })
+		));
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 10, .. })
+		));
+		write_group(&mut track, 9, &[ts(180_000)]);
+		write_group(&mut track, 11, &[ts(220_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 11, .. })
+		));
+		assert_eq!(
+			reader.backlog(),
+			Some(landed),
+			"group 9 was produced after the subscription"
+		);
+	}
+
+	/// The start drops the backlog below it unread, which still reports when it landed.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_start_reports_the_backlog_it_drops() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let landed = kio::clock::now();
+		write_group(&mut track, 3, &[ts(0)]);
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 4, &[ts(20_000)]);
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio)).live();
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 4, .. })
+		));
+		assert_eq!(reader.backlog(), Some(landed));
+	}
+
+	/// The join's boundary is where the publisher stood as it answered, not the newer largest by the
+	/// time a live start found a frame to start on.
+	#[tokio::test(start_paused = true)]
+	async fn the_join_is_the_largest_at_the_answer_not_at_the_start() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let landed = kio::clock::now();
+		let mut open = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio)).live();
+		// Group 3 holds no frame yet, so the start waits, though the publisher answered.
+		assert!(
+			kio::clock::timeout(Duration::from_millis(1), reader.read())
+				.await
+				.is_err()
+		);
+
+		// Groups 4 and 5 were produced after the subscription began, so they are no backlog.
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 4, &[ts(20_000)]);
+		write_group(&mut track, 5, &[ts(40_000)]);
+		let frame = Frame {
+			timestamp: ts(0),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(&mut open, &[frame])
+			.unwrap();
+		open.close().unwrap();
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 5, .. })
+		));
+		assert_eq!(reader.backlog(), Some(landed), "group 4 was produced after the answer");
 	}
 
 	/// The holes a source left behind when it stopped expire together, a budget after the groups

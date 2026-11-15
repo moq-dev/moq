@@ -9282,6 +9282,44 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 	}
 
+	/// A group stream the subscriber stopped is named in SUBSCRIBE_DROP, with the stop's code
+	/// where the wire carries one: a stream stopped before its header was read leaves the
+	/// subscriber no other way to learn which group it carried.
+	#[kio::test]
+	async fn a_stopped_group_stream_is_dropped_with_its_stop_code() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(None);
+			let evicted = version.encode_stream_code(&crate::StreamError::Evicted);
+			let session = SinkSession::new(Log::default()).with_stopped_unis(evicted);
+			let (mut run, mut writer, log) = lite_run(version, session, subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+			let writes = log.writes.lock().unwrap().clone();
+			let mut buf = writes.as_slice();
+			let mut dropped = Vec::new();
+			while !buf.is_empty() {
+				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
+				buf = &buf[size..];
+				if let lite::SubscribeResponse::Drop(drop) = msg {
+					dropped.push((drop.groups.clone(), drop.error(version)));
+				}
+			}
+			let error = match version.has_drop_code() {
+				true => crate::StreamError::Evicted,
+				// An application code, which this side reads as stale.
+				false => crate::StreamError::Old,
+			};
+			assert_eq!(dropped, [(0..1, error)], "{version:?}");
+		}
+	}
+
 	/// A wide upstream DROP is held and forwarded as a range, never one entry per key,
 	/// and a wider one later forwards only what is new.
 	#[kio::test]

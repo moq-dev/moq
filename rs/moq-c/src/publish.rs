@@ -1208,11 +1208,6 @@ impl Publish {
 		children.insert(&mut self.tracks, raw, Child::Track)
 	}
 
-	/// Hand a socket stream's `tcp` half to C as a group handle.
-	pub(crate) fn socket_group(&mut self, group: moq_net::group::Producer) -> Result<Id, Error> {
-		self.insert_group(group)
-	}
-
 	/// End a closed endpoint's open `track` halves, as a broadcast's close ends its tracks,
 	/// and let go of its finished ones.
 	pub(crate) fn socket_close(&mut self, children: &Children) {

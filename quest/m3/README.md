@@ -25,7 +25,7 @@ Dependencies on m1 and m2 remain explicit. An implementation that discovers
 a new necessary API break brings that decision to the maintainer before
 proceeding.
 
-Decided 2026-11-03 (maintainer, Kixel's quest audit): [byte streams](/quest/m1/stream/README.md)
+Decided 2026-11-03 (maintainer, Kixel's quest audit): byte streams
 and the [mesh libraries](/quest/m3/mesh/README.md) rank first here, ahead
 of [release execution](/quest/m3/release/README.md). Kixel's daemon builds on
 them from `main` through a git submodule, so it needs them merged, not
@@ -33,7 +33,7 @@ released. They stay out of m1 and m2 so the cut does not wait on them; each
 starts as soon as its prerequisites (sockets, fastest-reader pacing, outbound
 federation) land. Superseded 2026-11-12 (maintainer, /quest-audit): both moved
 to [m1](/quest/m1/README.md), since the cut no longer waits on m1. The mesh
-libraries came back 2026-11-13, below; byte streams stay in m1.
+libraries came back 2026-11-13, below; byte streams moved to Kixel 2026-11-14.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut), from a read of
 every quest against the code and the downstream quest trees:

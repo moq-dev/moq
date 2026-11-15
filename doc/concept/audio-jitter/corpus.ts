@@ -26,6 +26,8 @@ export interface Case {
 	media: number[];
 	/** Indices of the frames observed right after a declared end, in ascending order. */
 	ends?: number[];
+	/** Indices of the frames skipped unread, reported by arrival instead of observed, in ascending order. */
+	skipped?: number[];
 	/** `[frame index, target]` wherever the target differs from the previous frame's. */
 	target: [number, number][];
 }
@@ -107,7 +109,7 @@ function paced(frames: number, frame: number, base: number): Trace {
 
 /** Replay a trace through the reference and keep only the frames where the target moved. */
 function run(
-	trace: Trace & { ends?: number[] },
+	trace: Trace & { ends?: number[]; skipped?: number[] },
 	config: { frame: number; advertised?: number; delay?: number },
 ): [number, number][] {
 	if (config.delay !== undefined) return [[0, config.delay]];
@@ -117,9 +119,11 @@ function run(
 	let previous: number | undefined;
 
 	const ends = new Set(trace.ends);
+	const skipped = new Set(trace.skipped);
 	for (let i = 0; i < trace.arrival.length; i++) {
 		if (ends.has(i)) estimator.end();
-		estimator.observe({ arrival: trace.arrival[i], media: trace.media[i] });
+		if (skipped.has(i)) estimator.backlog(trace.arrival[i]);
+		else estimator.observe({ arrival: trace.arrival[i], media: trace.media[i] });
 		const value = estimator.target;
 		if (value !== previous) target.push([i, value]);
 		previous = value;
@@ -130,13 +134,39 @@ function run(
 
 const FRAME = 20;
 
-/** The first `until` ms of a recorded replay trace under `test/audio-quality/traces`. */
-function recorded(name: string, until: number): Trace {
+/** A recorded replay trace under `test/audio-quality/traces`: each frame's arrival, media, and group. */
+function arrivals(name: string): [number, number, number][] {
 	const here = dirname(fileURLToPath(import.meta.url));
 	const path = join(here, "../../../test/audio-quality/traces", `${name}.json`);
-	const { arrivals } = JSON.parse(readFileSync(path, "utf8")) as { arrivals: [number, number][] };
-	const kept = arrivals.filter(([arrival]) => arrival < until);
+	return (JSON.parse(readFileSync(path, "utf8")) as { arrivals: [number, number, number][] }).arrivals;
+}
+
+/** The first `until` ms of a recorded replay trace. */
+function recorded(name: string, until: number): Trace {
+	const kept = arrivals(name).filter(([arrival]) => arrival < until);
 	return { arrival: kept.map(([arrival]) => arrival), media: kept.map(([, media]) => media) };
+}
+
+/**
+ * The first `until` ms of a recorded replay trace, with the frames of every group that arrives two or
+ * more below the newest one within `[from, to)` ms skipped, as a container consumer closes the groups
+ * that arrive below its cursor.
+ */
+function skipping(name: string, until: number, from: number, to: number): Trace & { skipped: number[] } {
+	const kept = arrivals(name).filter(([arrival]) => arrival < until);
+	const skipped: number[] = [];
+	const closed = new Set<number>();
+	const opened = new Set<number>();
+	let newest = Number.NEGATIVE_INFINITY;
+	kept.forEach(([arrival, , group], i) => {
+		if (!opened.has(group)) {
+			opened.add(group);
+			if (arrival >= from && arrival < to && group < newest - 1) closed.add(group);
+		}
+		if (closed.has(group)) skipped.push(i);
+		newest = Math.max(newest, group);
+	});
+	return { arrival: kept.map(([arrival]) => arrival), media: kept.map(([, media]) => media), skipped };
 }
 
 const traces: Omit<Case, "target">[] = [
@@ -203,6 +233,12 @@ const traces: Omit<Case, "target">[] = [
 		about: "The first 30 s of a real microphone's subscription through the public relay (`relay-mic-rtt40`). The relay delivers its backlog interleaved with the live edge, and the live frames produced meanwhile queue behind it, up to 760 ms late. Every interval holding a frame due before the backlog finished arriving measured the join, not the path, so it folds nothing: the target leaves the prior for the path's own 60 to 100 ms within seconds, instead of holding 780 ms for a 20 s half-life.",
 		frame: FRAME,
 		...recorded("relay-mic-rtt40", 30_000),
+	},
+	{
+		name: "skipped",
+		about: "The `join` recording as a container consumer reads it: from 0.9 s on, it closes every group arriving two or more below the newest unread, the join's stale backlog among them, and reports each one's arrival instead of observing it. The estimator never sees those frames are backlog, but the join still lasts until they arrived, so the target leaves the prior for the path's own as in `join`, instead of folding the live frames queued behind the backlog as a 300 ms stall. A group skipped once an interval has measured the path is an outage's, and leaves the join where it ended.",
+		frame: FRAME,
+		...skipping("relay-mic-rtt40", 30_000, 900, 30_000),
 	},
 	{
 		name: "idle",

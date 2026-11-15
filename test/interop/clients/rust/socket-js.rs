@@ -6,32 +6,22 @@ use tokio::io::AsyncBufReadExt;
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
-		args.len() == 6,
-		"usage: interop-socket-js dial|accept URL PREFIX tcp|track VERSION"
+		args.len() == 5,
+		"usage: interop-socket-js dial|accept URL PREFIX VERSION"
 	);
 	let dial = match args[1].as_str() {
 		"dial" => true,
 		"accept" => false,
 		_ => anyhow::bail!("unknown role"),
 	};
-	let tcp = match args[4].as_str() {
-		"tcp" => true,
-		"track" => false,
-		_ => anyhow::bail!("unknown protocol"),
-	};
 	let mut config = moq_tokio::connect::Config::default();
-	config.version.push(args[5].parse().map_err(anyhow::Error::msg)?);
+	config.version.push(args[4].parse().map_err(anyhow::Error::msg)?);
 	config.websocket.enabled = Some(false);
 	let client = config.init(Default::default())?.with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 	let endpoint = moq_net::socket::Endpoint::new(&origin, args[3].as_str(), if dial { "dialer" } else { "acceptor" })?;
 	if !dial {
-		let waiter = kio::Waiter::noop();
-		if tcp {
-			ensure!(endpoint.poll_accept_tcp(&waiter).is_pending());
-		} else {
-			ensure!(endpoint.poll_accept_track(&waiter).is_pending());
-		}
+		ensure!(endpoint.poll_accept_track(&kio::Waiter::noop()).is_pending());
 	}
 	let connection = client
 		.clone()
@@ -45,120 +35,63 @@ async fn main() -> anyhow::Result<()> {
 	}
 	// Probe refusal before data sessions can generate late queries for closed halves.
 	if dial {
-		if tcp {
-			ensure!(
-				endpoint.dial_tcp("acceptor", 0)?.await.is_err(),
-				"rejected dial connected"
-			);
-		} else {
-			ensure!(
-				endpoint.dial_track("acceptor", None)?.await.is_err(),
-				"rejected dial connected"
-			);
-		}
-	} else if tcp {
-		endpoint.accept_tcp().await?.reject();
+		ensure!(
+			endpoint.dial_track("acceptor", None)?.await.is_err(),
+			"rejected dial connected"
+		);
 	} else {
 		endpoint.accept_track().await?.reject();
 	}
 	let own: u8 = if dial { 16 } else { 32 };
 	let peer: u8 = if dial { 32 } else { 16 };
-	let _hold: Box<dyn std::any::Any> = if tcp {
-		let mut stream = if dial {
-			endpoint.dial_tcp("acceptor", 0)?.await?
-		} else {
-			accepted_tcp(&endpoint).await?
-		};
-		ensure!(stream.peer() == if dial { "acceptor" } else { "dialer" });
-		ensure!(stream.session().len() == 32);
-		for i in 0..3 {
-			stream
-				.producer
-				.write_frame(moq_net::Timestamp::unscaled(stream.producer.start), vec![own + i])?;
-		}
-		let finished = stream.producer.close()?;
-		for i in 0..3 {
-			let frame = stream.consumer.read_frame().await?.context("short TCP half")?;
-			ensure!(frame.payload.as_ref() == [peer + i], "wrong TCP frame");
-		}
-		ensure!(stream.consumer.read_frame().await?.is_none(), "extra TCP frame");
-		Box::new((finished, stream.consumer))
+	let mut stream = if dial {
+		endpoint.dial_track("acceptor", None)?.await?
 	} else {
-		let stream = if dial {
-			endpoint.dial_track("acceptor", None)?.await?
-		} else {
-			accepted_track(&endpoint).await?
-		};
-		ensure!(stream.peer() == if dial { "acceptor" } else { "dialer" });
-		ensure!(stream.session().len() == 32);
-		let mut reader = stream.consumer.ordered();
-		for i in 0..3 {
-			if dial {
-				send(&stream.producer, vec![own + i])?;
-			}
-			let mut group = reader.next_group().await?.context("short track half")?;
-			ensure!(group.start == u64::from(i), "wrong group start");
-			let frame = group.read_frame().await?.context("empty track message")?;
-			ensure!(frame.payload.as_ref() == [peer + i], "wrong track frame");
-			ensure!(group.read_frame().await?.is_none(), "extra frame in track message");
-			if !dial {
-				send(&stream.producer, vec![own + i])?;
-			}
-		}
-		let finished = stream.producer.finish()?;
-		ensure!(reader.next_group().await?.is_none(), "extra track frame");
-		Box::new((finished, reader))
+		accepted(&endpoint).await?
 	};
-	eprintln!("socket data verified {} {}", args[4], args[1]);
-	if tcp {
-		let mut reset = if dial {
-			endpoint.dial_tcp("acceptor", 0)?.await?
-		} else {
-			accepted_tcp(&endpoint).await?
-		};
+	ensure!(stream.peer() == if dial { "acceptor" } else { "dialer" });
+	ensure!(stream.session().len() == 32);
+	let mut reader = stream.consumer.ordered();
+	for i in 0..3 {
 		if dial {
-			reset
-				.producer
-				.write_frame(moq_net::Timestamp::unscaled(reset.producer.start), vec![48])?;
-			ensure!(reset.consumer.read_frame().await.is_err(), "TCP RST became FIN");
-			eprintln!("socket reset verified tcp dial");
-		} else {
-			ensure!(
-				reset
-					.consumer
-					.read_frame()
-					.await?
-					.context("missing reset signal")?
-					.payload
-					.as_ref() == [48]
-			);
-			reset.producer.abort(moq_net::Error::App(6))?;
+			stream.producer.write_frame(key(i), vec![own + i])?;
 		}
-	} else {
-		let reset = if dial {
-			endpoint.dial_track("acceptor", None)?.await?
-		} else {
-			accepted_track(&endpoint).await?
-		};
-		let mut reader = reset.consumer.ordered();
-		if dial {
-			send(&reset.producer, vec![48])?;
-			ensure!(reader.next_group().await.is_err(), "track RST became FIN");
-			eprintln!("socket reset verified track dial");
-		} else {
-			let mut group = reader.next_group().await?.context("missing reset signal")?;
-			ensure!(
-				group
-					.read_frame()
-					.await?
-					.context("empty reset signal")?
-					.payload
-					.as_ref() == [48]
-			);
-			reset.producer.abort(moq_net::Error::App(6))?;
+		let mut group = reader.next_group().await?.context("short track half")?;
+		ensure!(group.start == u64::from(i), "wrong group key");
+		let frame = group.read_frame().await?.context("empty track message")?;
+		ensure!(frame.payload.as_ref() == [peer + i], "wrong track frame");
+		ensure!(group.read_frame().await?.is_none(), "extra frame in track message");
+		if !dial {
+			stream.producer.write_frame(key(i), vec![own + i])?;
 		}
 	}
-	eprintln!("socket verified {} {}", args[4], args[1]);
+	let _finished = stream.producer.finish()?;
+	ensure!(reader.next_group().await?.is_none(), "extra track frame");
+	eprintln!("socket data verified {}", args[1]);
+
+	let mut reset = if dial {
+		endpoint.dial_track("acceptor", None)?.await?
+	} else {
+		accepted(&endpoint).await?
+	};
+	let mut reset_reader = reset.consumer.ordered();
+	if dial {
+		reset.producer.write_frame(key(0), vec![48])?;
+		ensure!(reset_reader.next_group().await.is_err(), "track RST became FIN");
+		eprintln!("socket reset verified dial");
+	} else {
+		let mut group = reset_reader.next_group().await?.context("missing reset signal")?;
+		ensure!(
+			group
+				.read_frame()
+				.await?
+				.context("empty reset signal")?
+				.payload
+				.as_ref() == [48]
+		);
+		reset.producer.abort(moq_net::Error::App(6))?;
+	}
+	eprintln!("socket verified {}", args[1]);
 	if !dial {
 		let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 		ensure!(
@@ -166,6 +99,8 @@ async fn main() -> anyhow::Result<()> {
 			"peer did not drain"
 		);
 	}
+	// Held to here so the finished half and its reader outlive the drain.
+	drop(reader);
 	endpoint.close();
 	let _ = connection.close().await;
 	client.close().await;
@@ -173,29 +108,16 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // An Incoming's claimed original dial can disappear before verification.
-/// Send `payload` as a group of its own. A session track carries no timescale, so its groups
-/// count up from 0.
-fn send(track: &moq_net::track::Producer, payload: Vec<u8>) -> anyhow::Result<()> {
-	let mut group = track.append_group(track.largest().map_or(0, |largest| largest.group + 1))?;
-	group.write_frame(moq_net::Timestamp::unscaled(group.start), payload)?;
-	group.close()?;
-	Ok(())
-}
-
-async fn accepted_tcp(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TcpStream> {
-	loop {
-		let incoming = endpoint.accept_tcp().await?;
-		if let Ok(stream) = incoming.accept(0).await {
-			return Ok(stream);
-		}
-	}
-}
-
-async fn accepted_track(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TrackStream> {
+async fn accepted(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TrackStream> {
 	loop {
 		let incoming = endpoint.accept_track().await?;
 		if let Ok(stream) = incoming.accept(None).await {
 			return Ok(stream);
 		}
 	}
+}
+
+/// Message `i`'s key: a session track is scale-less, so each message's group is keyed by its index.
+fn key(i: u8) -> moq_net::Timestamp {
+	moq_net::Timestamp::unscaled(u64::from(i))
 }
