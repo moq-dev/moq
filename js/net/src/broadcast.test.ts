@@ -337,6 +337,7 @@ test("a request exposes the aggregate subscription options", async () => {
 		delay: { min: Duration.ZERO, max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 0n }, end: { absolute: 30n } }],
+		meta: false,
 	});
 	expect(request?.priority).toBe(7);
 });

@@ -4056,8 +4056,7 @@ export class Subscriber {
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
-		hooks.reofferGroups = (subscriber, start, end, from, meta) =>
-			subscriber.#reofferGroups(start, end, from, meta);
+		hooks.reofferGroups = (subscriber, start, end, from, meta) => subscriber.#reofferGroups(start, end, from, meta);
 		hooks.updateSubscriber = (subscriber, options, payload) => subscriber.#update(options, payload);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);

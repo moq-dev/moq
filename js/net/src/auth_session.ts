@@ -1,7 +1,16 @@
 import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
-import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError, Unsupported } from "./error.ts";
+import {
+	closeReason,
+	error,
+	ProtocolViolation,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	StreamError,
+	Unsupported,
+} from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
 

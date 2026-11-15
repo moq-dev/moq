@@ -452,6 +452,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 		delay: { min: Duration.millis(0), max: Duration.millis(0) },
 		order: "descending",
 		ranges: [{ start: { absolute: 0n } }],
+		meta: false,
 	});
 
 	// The wire layer watches the producer's signal to emit SUBSCRIBE_UPDATE.
@@ -467,6 +468,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 		delay: { min: Duration.millis(0), max: Duration.millis(250) },
 		order: "ascending",
 		ranges: [{ start: { absolute: 2n }, end: { absolute: 9n } }],
+		meta: false,
 	});
 });
 
@@ -623,6 +625,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 		delay: { min: Duration.millis(50), max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 5n } }],
+		meta: false,
 	});
 
 	legacy.close();
@@ -633,6 +636,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 		delay: { min: Duration.millis(400), max: Duration.millis(100) },
 		order: "ascending",
 		ranges: [{ start: { absolute: 10n }, end: { absolute: 20n } }],
+		meta: false,
 	});
 
 	const none = producer.subscription.changed();
@@ -1206,6 +1210,7 @@ test("an omitted delay is the default zero, and a null max sets no limit", async
 		priority: 0,
 		delay: { min: Duration.ZERO, max: Duration.ZERO },
 		order: "descending",
+		meta: false,
 	});
 
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(5000) });

@@ -19,6 +19,7 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
+import { plainBytes } from "../frame.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
@@ -36,7 +37,6 @@ import {
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { plainBytes } from "../frame.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";

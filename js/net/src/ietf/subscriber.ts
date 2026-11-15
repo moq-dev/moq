@@ -18,6 +18,7 @@ import {
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
+	Unsupported,
 	unauthorized,
 } from "../error.ts";
 import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
@@ -786,6 +787,11 @@ export class Subscriber {
 			request.reject(refused);
 			return;
 		}
+		// moq-transport carries no metadata mode, and never emulates it by fetching the payload.
+		if (request.subscription.meta) {
+			request.reject(unsupportedMeta());
+			return;
+		}
 
 		if (!known && (bounded(request.subscription.ranges ?? [{}]) || request.demand().wanted.peek() === undefined)) {
 			await this.#runHistory(broadcast, request, valid);
@@ -1412,6 +1418,11 @@ export class Subscriber {
 			// With no subscriber left there is nothing to follow: the subscription is ending, or
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = hooks.requested(producer).peek();
+			// Demand turning metadata-only ends its readers: this wire cannot ask for it.
+			if (subscription?.meta) {
+				producer.abort(unsupportedMeta());
+				return;
+			}
 			const wanted = toWire(subscription?.priority ?? 0);
 			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
@@ -2408,4 +2419,9 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.shareState());
 	}
+}
+
+// The error a metadata-only demand gets: moq-transport has no metadata mode.
+function unsupportedMeta(): Unsupported {
+	return new Unsupported("metadata subscriptions need moq-lite-07");
 }
