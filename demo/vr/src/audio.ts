@@ -53,10 +53,10 @@ export class Spatial {
 		this.#nodes.push(root);
 	}
 
-	// Decodes out to fixed speakers around the scene
+	// Decodes out to fixed speakers around the scene. A higher order plays at first order: the
+	// splitter's discrete downmix keeps ACN channels 0 to 3 and drops the rest.
 	#ambisonic(root: AudioNode, destination: AudioNode) {
-		if (root.channelCount !== 4)
-			throw new Error(`first-order ambisonics needs 4 channels, got ${root.channelCount}`);
+		if (root.channelCount < 4) throw new Error(`ambisonics needs at least 4 channels, got ${root.channelCount}`);
 
 		const split = new ChannelSplitterNode(this.#context, { numberOfOutputs: 4 });
 		root.connect(split);

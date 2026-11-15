@@ -24,11 +24,10 @@ def full(kind: bytes, body: bytes) -> bytes:
 # Each equirectangular bound is the 0.32 fixed-point fraction of the sphere left uncovered: a
 # quarter off each side leaves 180 degrees of longitude.
 QUARTER = 1 << 30
-SPATIAL = full(b"st3d", bytes([2])) + box(  # 2 is left-right
-    b"sv3d",
-    full(b"svhd", b"moq\0")
-    + box(b"proj", full(b"prhd", struct.pack(">iii", 0, 0, 0)) + full(b"equi", struct.pack(">IIII", 0, 0, QUARTER, QUARTER))),
-)
+POSE = full(b"prhd", struct.pack(">iii", 0, 0, 0))
+EQUI = full(b"equi", struct.pack(">IIII", 0, 0, QUARTER, QUARTER))
+# Stereo mode 2 is left-right.
+SPATIAL = full(b"st3d", bytes([2])) + box(b"sv3d", full(b"svhd", b"moq\0") + box(b"proj", POSE + EQUI))
 
 
 def patch(data: bytearray, start: int, end: int) -> int:

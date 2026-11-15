@@ -1,4 +1,9 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
-serve url = "http://localhost:4443":
-	bun install
-	VITE_RELAY_URL="{{url}}" bun --bun vite
+
+# Serve the VR demo against a relay; the page takes ?url= and ?name= to override.
+serve url="http://localhost:4443": install
+    VITE_RELAY_URL="{{ url }}" bun --bun vite
+
+# Install the workspace deps that vite and the demo's imports need.
+install:
+    uv run --no-project python ../../sh/js/install.py update

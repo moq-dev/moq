@@ -155,11 +155,7 @@ try {
 		layout: "ambisonic",
 		channels: 4,
 	};
-	check(
-		Bun.deepEquals(catalog, want),
-		"the catalog carries the fixture's VR fields",
-		() => JSON.stringify(catalog),
-	);
+	check(Bun.deepEquals(catalog, want), "the catalog carries the fixture's VR fields", () => JSON.stringify(catalog));
 
 	// Straight ahead is the left eye's centre: the stereo packing cropped the frame and the
 	// equirectangular projection faced its centre forward.

@@ -216,7 +216,7 @@ export class Scene {
 		head.getWorldDirection(this.#headDirection);
 		const yaw = Math.atan2(-this.#headDirection.x, -this.#headDirection.z);
 		this.#content.rotation.set(0, yaw, 0);
-this.#content.position.set(this.#headPosition.x, 0, this.#headPosition.z);
+		this.#content.position.set(this.#headPosition.x, 0, this.#headPosition.z);
 		this.#content.updateMatrixWorld();
 	};
 
