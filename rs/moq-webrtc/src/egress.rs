@@ -588,6 +588,10 @@ fn us_to_ticks(timestamp_us: u64, clock_rate: Frequency) -> u64 {
 /// `UnknownPt` error after renegotiation isn't worth tearing down the
 /// session over.
 pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant) {
+	// str0m holds what it takes before the peer connects, sending it only once SRTP is up and
+	// then only what its buffers kept, so only a write once connected counts. The few frames
+	// held across the handshake go uncounted rather than charge a peer that never connects.
+	let connected = rtc.is_connected();
 	let Some(writer) = rtc.writer(request.mid) else {
 		tracing::debug!(?request.mid, "egress write before media available");
 		return;
@@ -600,7 +604,8 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 		mid: _,
 	} = request;
 	match writer.write(pt, wallclock.into_std(), time, payload.to_vec()) {
-		Ok(()) => bill.deliver(bytes),
+		Ok(()) if connected => bill.deliver(bytes),
+		Ok(()) => {}
 		Err(err) => tracing::warn!(%err, "egress write rejected by str0m"),
 	}
 }
@@ -1400,5 +1405,52 @@ mod tests {
 			),
 			t0
 		);
+	}
+
+	/// What str0m takes before the peer connects waits there, and goes nowhere if the peer
+	/// never connects, so it counts nothing.
+	#[tokio::test(start_paused = true)]
+	async fn a_write_before_the_peer_connects_counts_nothing() {
+		use str0m::media::{Direction, MediaKind};
+
+		let origin = produce_origin();
+		let route = origin.route("live", Default::default()).unwrap();
+		let _track = (route.broadcast())
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+		let session = (registry.tier(moq_net::stats::Tier::default()))
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer")));
+		let consumer = origin.consume().with_stats(session);
+		let resolved = consumer.request("live", None).await.unwrap();
+		let mut subscriber = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let bill = subscriber.bill();
+
+		let now = kio::clock::now().into_std();
+		let mut server = crate::session::rtc_config().unwrap().build(now);
+		let mut client = crate::session::rtc_config().unwrap().build(now);
+		let mut offer = server.sdp_api();
+		let mid = offer.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+		let (offer, pending) = offer.apply().unwrap();
+		let answer = client.sdp_api().accept_offer(offer).unwrap();
+		server.sdp_api().accept_answer(pending, answer).unwrap();
+		let pt = server.writer(mid).unwrap().payload_params().next().unwrap().pt();
+		assert!(!server.is_connected());
+
+		let request = WriteRequest {
+			mid,
+			pt,
+			time: MediaTime::new(0, Frequency::NINETY_KHZ),
+			payload: Bytes::from_static(b"frame"),
+			charge: (bill, 5),
+		};
+		dispatch(&mut server, request, kio::clock::now());
+		let billed: u64 = (registry.snapshot().traffic().into_iter())
+			.map(|(_, _, traffic)| traffic.bytes)
+			.sum();
+		assert_eq!(billed, 0);
 	}
 }
