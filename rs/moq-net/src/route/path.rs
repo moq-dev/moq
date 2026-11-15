@@ -640,6 +640,58 @@ pub(super) fn meet(a: &Path, b: &Path) -> Option<Path> {
 	}
 }
 
+/// The bytes the prefixes a node asks one neighbour for may take: a peer holds the
+/// whole set as the Adds of one ANNOUNCE_REQUEST.
+pub(crate) const ASK_BYTES: usize = 65_535;
+
+/// An upper bound on the bytes `set` takes as the Adds of one ANNOUNCE_REQUEST: each
+/// prefix with its length and its flag, behind the two counts.
+fn ask_bytes(set: &BTreeSet<Path>) -> usize {
+	set.iter().map(|prefix| prefix.as_str().len() + 5).sum::<usize>() + 8
+}
+
+/// The prefixes of `set` that lie inside no other.
+fn widest(set: &BTreeSet<Path>) -> BTreeSet<Path> {
+	set.iter()
+		.filter(|prefix| !ancestors(prefix).any(|above| above != **prefix && set.contains(&above)))
+		.cloned()
+		.collect()
+}
+
+/// `set`, asked for more coarsely until it takes no more than [`ASK_BYTES`]: the
+/// prefixes inside one of the scope's `regions`, or all of them without a scope, give
+/// way to the longest prefix they share, the largest such group first. That prefix
+/// lies inside the region, so the node asks for more than it wants and never for more
+/// than the scope allows. Regions that are too many on their own lose the last of them.
+fn coarsen(mut set: BTreeSet<Path>, regions: &[Path]) -> BTreeSet<Path> {
+	while ask_bytes(&set) > ASK_BYTES {
+		// Each prefix files under the widest region holding it.
+		let mut groups: BTreeMap<Option<&Path>, Vec<&Path>> = BTreeMap::new();
+		for prefix in &set {
+			let region = (regions.iter())
+				.filter(|region| within(prefix, region))
+				.min_by_key(|region| region.as_str().len());
+			groups.entry(region).or_default().push(prefix);
+		}
+		let largest = (groups.values())
+			.filter(|group| group.len() > 1)
+			.max_by_key(|group| group.iter().map(|prefix| prefix.as_str().len()).sum::<usize>());
+		match largest {
+			Some(group) => {
+				let shared = (ancestors(group[0]).rev())
+					.find(|above| group.iter().all(|prefix| within(prefix, above)))
+					.unwrap_or_default();
+				set.insert(shared);
+				set = widest(&set);
+			}
+			None => {
+				set.pop_last();
+			}
+		}
+	}
+	set
+}
+
 /// Whether a prefix of `set` lies inside another.
 #[cfg(test)]
 fn nested(set: &BTreeSet<Path>) -> bool {
@@ -1125,7 +1177,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// The prefixes this node asks `neighbor` for: its interest met with what the
 	/// session's link wants of it and with the regions of the neighbour's scope,
-	/// keeping the wider of two nested ones.
+	/// keeping the wider of two nested ones. A set past [`ASK_BYTES`] is asked for
+	/// more coarsely (see [`coarsen`]).
 	pub fn asks(&self, neighbor: N) -> BTreeSet<Path> {
 		let Some(session) = self.sessions.get(&neighbor) else {
 			return BTreeSet::new();
@@ -1141,10 +1194,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if let Some(scope) = &link.scope {
 			met = meets(&met, &mut scope.regions.iter());
 		}
-		met.iter()
-			.filter(|prefix| !ancestors(prefix).any(|above| above != **prefix && met.contains(&above)))
-			.cloned()
-			.collect()
+		let regions = link.scope.as_ref().map(|scope| scope.regions.as_slice());
+		coarsen(widest(&met), regions.unwrap_or_default())
 	}
 
 	/// Send `neighbor` an edit bringing what this node asks it for to [`Self::asks`],

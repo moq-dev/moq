@@ -636,7 +636,7 @@ export class Routed {
 		// The link's first read lands before the route's first claims show, as Rust reads the link
 		// before it serves them: a listing reports a path's route when it turns present and not
 		// again for an RTT, so a read landing after would never reach it.
-		if (started) await Promise.race([this.#firstRead, this.#closed.promise]);
+		if (started) await race([this.#firstRead, this.#closed.promise]);
 	}
 
 	// The peer let go of the route and every claim under it: offline, not withdrawn.
@@ -1019,8 +1019,10 @@ export class Routed {
 			shows(wire);
 		}
 		for (const wire of ended) {
+			// A widened route keeps its Route ID, and with it the entry of each claim it carried over.
+			const kept = replaced.has(wire.id) ? this.#routes.get(wire.id) : undefined;
 			for (const path of wire.view.claims.keys()) {
-				this.#unindex(path, wire.id);
+				if (!kept?.view.claims.has(path)) this.#unindex(path, wire.id);
 				touched.add(path);
 			}
 		}

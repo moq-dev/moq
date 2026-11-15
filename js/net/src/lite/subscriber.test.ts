@@ -5526,6 +5526,51 @@ test("a lite-07 DEAD and its ROUTE_UPDATEs apply as one", async () => {
 	subscriber.close();
 });
 
+// A reader of a wider prefix widens the route in place: the claim it carried stays shown to
+// both readers, and only what the wider prefix adds arrives.
+test("a lite-07 edit to a wider prefix keeps the claims the route carried", async () => {
+	const half = Path.from("a");
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(
+		undefined,
+		undefined,
+		Path.Pattern.subtree(half),
+	);
+	const [x, y] = [Path.from("a/x"), Path.from("b/y")];
+	const instance = Instance.parse("i");
+	expect(edits).toMatchObject([{ remove: [], add: [{ prefix: half }] }]);
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({ status: "synced", prefix: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
+
+	// The root takes the place of the narrower prefix in one edit, which the harness answers.
+	const wide = await another();
+	expect(edits).toMatchObject([{}, { remove: [0n], add: [{ prefix: Path.empty() }] }]);
+	expect(await wide.announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	// The route now lies at the root, which a request through the claim names by its depth.
+	for (const reader of [announced, wide.announced]) {
+		expect(await reader.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 0, available: true } });
+	}
+
+	// The publisher sends what the widened route lacks, then its floor.
+	await send({ status: "active", suffix: y, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	await send({ status: "synced", prefix: 1n });
+	expect(await wide.announced.next()).toMatchObject({ prefix: y, kind: "start" });
+
+	// The claim both prefixes cover never left: its end is the next thing either reader sees.
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 2n });
+	await settled();
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "end" });
+	expect(await wide.announced.next()).toMatchObject({ prefix: x, kind: "end" });
+
+	wide.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // DRAIN: a node on a route's path sent GOAWAY, so it ranks below every route without one, until
 // its next offer.
 test("a lite-07 DRAIN ranks the routes through its node last", async () => {

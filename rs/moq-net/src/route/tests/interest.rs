@@ -356,6 +356,51 @@ fn a_scope_with_several_regions_asks_for_each() {
 	);
 }
 
+/// A node wanting more prefixes than one request holds asks for the prefix they share,
+/// inside each region of the neighbour's scope, so the neighbour never refuses the set.
+#[test]
+fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
+	let long = |head: &str, n: usize| p(&format!("{head}/{}", format!("{n:02}").repeat(500)));
+	let fits = |set: &BTreeSet<Path>| {
+		let bytes: usize = set.iter().map(|prefix| prefix.as_str().len() + 5).sum();
+		bytes + 8 <= path::ASK_BYTES
+	};
+	let wanted: BTreeSet<Path> = (0..40).flat_map(|n| [long("live/a", n), long("live/b", n)]).collect();
+	assert!(!fits(&wanted));
+
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(wanted.clone()).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	assert_eq!(router.asks(1), BTreeSet::from([p("live")]));
+
+	// Each region's prefixes give way on their own, and only until the set fits.
+	let link = Link {
+		scope: Some(Scope {
+			regions: vec![p("live/a"), p("live/b")],
+			qualify: Arc::new(|id| id | QUALIFIED),
+		}),
+		..Link::default()
+	};
+	router.connect(2, 2, link).unwrap();
+	let asks = router.asks(2);
+	assert!(fits(&asks));
+	assert!(
+		asks.contains(&p("live/a")) != asks.contains(&p("live/b")),
+		"{}",
+		asks.len()
+	);
+	assert_eq!(asks.len(), 41);
+	assert!(
+		asks.iter()
+			.all(|prefix| wanted.contains(prefix) || prefix.as_str().len() == 6)
+	);
+
+	// A set that fits is asked for as it is.
+	let few: BTreeSet<Path> = wanted.iter().take(8).cloned().collect();
+	router.watch(few.clone()).unwrap();
+	assert_eq!(router.asks(1), few);
+}
+
 /// Widening several prefixes into one keeps the route this node was using at any of
 /// them, though the sender reflects a cheaper one from another prefix there: that
 /// one crosses a node this node doubts, which only a route already in use may stay
