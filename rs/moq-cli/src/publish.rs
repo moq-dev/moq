@@ -813,7 +813,7 @@ impl Republish {
 	/// A new instance of the broadcast under a new instance, announced once its catalog goes out.
 	///
 	/// `mux_rate` is the previous instance's measurement of the same multiplex, which the new
-	/// catalog carries from its first media rather than waiting on a fresh window.
+	/// catalog carries from its first media, so an export of it needn't wait on a fresh window.
 	fn instance(&self, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
 		let control = self
 			.origin
@@ -2212,7 +2212,7 @@ pub(crate) mod tests {
 	/// resolves the broadcast the moment it is announced finds them (#4352).
 	#[tokio::test(start_paused = true)]
 	async fn an_import_announces_once_its_input_declares_its_tracks() {
-		// Longer than the two seconds a live TS catalog waits on to measure its mux rate.
+		// Longer than the two seconds a live TS import takes to measure its mux rate.
 		const TS: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 		const FMP4: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/av1.mp4");
 		for (format, input) in [
@@ -2330,13 +2330,13 @@ pub(crate) mod tests {
 
 	/// A source whose clock steps back republishes the path under a new instance, announced once
 	/// its catalog goes out, with the sections the first instance's catalog carried. The new
-	/// catalog reuses the first instance's mux rate, so it goes out with the first media rather
-	/// than after a fresh two-second measurement window.
+	/// catalog reuses the first instance's mux rate, so an export of it needn't wait on a fresh
+	/// measurement window.
 	#[tokio::test(start_paused = true)]
 	async fn a_clock_step_republishes_under_a_new_instance() {
 		// 5 s of H.264 and AAC at a constant 400 kb/s, its clock on PID 0x100.
 		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
-		// Its first 1.5 s: short of a measurement window, so only a reused rate releases a catalog.
+		// Its first 1.5 s: short of a measurement window, so only a reused rate is in the catalog.
 		const HEAD: &[u8] = CLIP.split_at(400 * 188).0;
 		let mut flag = vec![0x47, 0x01, 0x00, 0x20, 183, 0x80];
 		flag.resize(188, 0xff);

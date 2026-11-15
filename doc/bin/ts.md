@@ -148,11 +148,14 @@ track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 
 An importer joining a live feed waits for what it needs before publishing.
 
-- **Semantic:** the import waits for the PAT, PMT, and a PCR, and holds the
-  catalog until two seconds of PCR have measured a constant mux rate or shown
-  the input to be variable-rate. A subscriber joins at a keyframe, and the
-  export puts a PAT and PMT ahead of it. From there a late exporter writes the
-  same packets as a running one, but for continuity counters.
+- **Semantic:** the import waits for the PAT, PMT, and a PCR, and publishes the
+  catalog with the first media. A constant mux rate follows as a catalog update
+  once two seconds of PCR have measured it; a variable-rate source never records
+  one. An export without `--mux-rate` waits up to those two seconds for the rate
+  before it starts, so a variable-rate source costs it one wait. A subscriber
+  joins at a keyframe, and the export puts a PAT and PMT ahead of it. From
+  there a late exporter writes the same packets as a running one, but for
+  continuity counters.
 - **Passthrough:** nothing is published until the PAT, the clock program's
   PMT, a PCR, and a group start. Bytes before that, and bytes off the 188-byte
   grid, are dropped: the output equals the input over the *admitted interval*,

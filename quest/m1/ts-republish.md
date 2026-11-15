@@ -15,8 +15,8 @@ CLI's `Republish` (`rs/moq-cli/src/publish.rs`), and moq-srt's `Instance`
 (`rs/moq-srt/src/ts.rs`). [moq-dev/moq#7293](https://github.com/moq-dev/moq/pull/7293)
 and [moq-dev/moq#7780](https://github.com/moq-dev/moq/pull/7780) fixed only
 the CLI copy, so moq-srt's `Instance::publish` builds a default catalog on a
-default, visible route, and `Import::new` re-arms the 2 s mux-rate hold on
-every step. The guide (`doc/bin/ts.md`, Programs and changes) says a
+default, visible route, and its catalog carries no mux rate, so an export of
+the new instance waits a window for one on every step. The guide (`doc/bin/ts.md`, Programs and changes) says a
 republished stream "keeps the measured mux rate", which is false for SRT,
 the path a live contributor uses. Both callers also find the step by
 `err.downcast::<ts::Restart>()`, which AGENTS.md's "never match on errors"

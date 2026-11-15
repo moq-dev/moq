@@ -31,14 +31,15 @@ pub(super) async fn open_export(
 	Ok(Export::new(source, catalog, delay))
 }
 
-/// Open an export with the MPEG-TS catalog extension and explicit encoding.
+/// Open an export with the MPEG-TS catalog extension and explicit encoding, which starts at once
+/// whether or not the catalog records a rate.
 pub(super) async fn open_ts(
 	source: crate::Source,
 	format: crate::catalog::CatalogFormat,
 	delay: Duration,
 ) -> crate::Result<Export<crate::catalog::Consumer<tscat::Ext>>> {
 	let catalog = source.catalog::<tscat::Ext>(format).await?;
-	Ok(Export::new(source, catalog, delay))
+	Ok(Export::new(source, catalog, delay).without_rate_wait())
 }
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -7967,6 +7968,120 @@ async fn export_refuses_an_absurd_catalog_mux_rate() {
 async fn export_without_a_mux_rate_is_unpadded() {
 	let ts = export_fixture(include_bytes!("test_data/scte35/bbb5s.ts"), None).await;
 	assert_eq!(Clocked::of(&ts).nulls, 0, "null packets in an unpadded export");
+}
+
+/// A TS source arriving in real time, written to an import 100 ms of data a step, and an export
+/// that has not been told to start at once. It joins before the import's first PCR window
+/// completes: `head` bytes are all the import has read.
+struct Joined {
+	data: &'static [u8],
+	read: usize,
+	import: crate::container::ts::Import<tscat::Ext>,
+	export: Export<crate::catalog::Consumer<tscat::Ext>>,
+	_broadcast: moq_net::broadcast::Consumer,
+	started: kio::clock::Instant,
+	/// What the export wrote, and when its first output came.
+	out: BytesMut,
+	first: Option<Duration>,
+}
+
+/// How much the source and the clock advance in a step.
+const STEP: Duration = Duration::from_millis(100);
+
+impl Joined {
+	async fn new(data: &'static [u8], head: usize) -> Self {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+		import.decode(&data[..head]).unwrap();
+		let source = crate::source::announced(&consumer).await;
+		let stream = source
+			.catalog::<tscat::Ext>(crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap();
+		Self {
+			data,
+			read: head,
+			import,
+			export: Export::new(source, stream, Duration::from_millis(500)),
+			_broadcast: consumer,
+			started: kio::clock::now(),
+			out: BytesMut::new(),
+			first: None,
+		}
+	}
+
+	/// Run for `steps`, the source writing a step's worth of its data each.
+	async fn run(&mut self, steps: usize) {
+		// The bytes a step of a five-second source carries, in whole packets.
+		let chunk = self.data.len() / 50 / 188 * 188;
+		for _ in 0..steps {
+			let end = (self.read + chunk).min(self.data.len());
+			self.import.decode(&self.data[self.read..end]).unwrap();
+			self.read = end;
+			let until = kio::clock::now().saturating_add(STEP);
+			while let Ok(frame) = kio::clock::timeout_at(until, self.export.next()).await {
+				let Some(frame) = frame.expect("exporter error") else {
+					break;
+				};
+				self.first.get_or_insert(self.started.elapsed());
+				self.out.extend_from_slice(&frame.payload);
+			}
+		}
+	}
+}
+
+/// A padded export joining inside the first PCR window waits for the rate the import is still
+/// measuring, then pads to it.
+#[tokio::test(start_paused = true)]
+async fn export_waits_for_the_rate_a_window_is_measuring() {
+	// The first 0.4 s of a 400 kb/s constant-rate source: its catalog is out, its rate not yet.
+	let mut joined = Joined::new(include_bytes!("test_data/bbb5s_cbr.ts"), 188 * 100).await;
+	joined.run(15).await;
+	assert_eq!(
+		joined.first, None,
+		"the export started before the import measured a rate"
+	);
+
+	joined.run(25).await;
+	joined.first.expect("the rate arrived and the export started");
+	assert_packet_aligned(&joined.out);
+	assert!(
+		Clocked::of(&joined.out).nulls > 0,
+		"the export joined a window early without padding"
+	);
+}
+
+/// A source that records no rate costs an export one wait, and its output is unpadded.
+#[tokio::test(start_paused = true)]
+async fn export_stops_waiting_for_a_rate_that_never_comes() {
+	let mut joined = Joined::new(include_bytes!("test_data/scte35/bbb5s.ts"), 188 * 100).await;
+	joined.run(40).await;
+	let first = joined.first.expect("the export gave up on the rate");
+	assert!(
+		first >= super::mux_rate::WAIT,
+		"the export started {first:?} in, before its wait ran out"
+	);
+	assert_eq!(
+		Clocked::of(&joined.out).nulls,
+		0,
+		"null packets in an export with no rate"
+	);
+}
+
+/// A rate given on the command line stands in for the one being measured.
+#[tokio::test(start_paused = true)]
+async fn export_with_a_rate_override_does_not_wait() {
+	let mut joined = Joined::new(include_bytes!("test_data/bbb5s_cbr.ts"), 188 * 100).await;
+	joined.export = joined.export.with_mux_rate(2_000_000);
+	joined.run(30).await;
+	let first = joined.first.expect("an export with a rate override started");
+	assert!(first < STEP * 5, "the export started {first:?} in");
 }
 
 /// 1 Mb/s is 16.62 packets per 25 ms slot. The fractional remainder carries across slots
