@@ -277,6 +277,24 @@ async fn headers_keep_flowing_after_the_last_payload_reader_leaves() {
 }
 
 #[kio::test]
+async fn the_last_metadata_reader_leaving_cancels_upstream() {
+	let chain = Chain::new(LITE07.parse().unwrap()).await;
+	let (_route, track) = chain.publish();
+	let mut sub = chain.subscribe(from_start(true)).await;
+	subscribed(&track).await;
+	write_group(&track, 0, 1);
+	assert_eq!(infos(&mut sub, 0).await.len(), 1);
+
+	drop(sub);
+	let mut watched = track.clone();
+	kio::clock::timeout(TIMEOUT, async {
+		while watched.subscription_changed().await.expect("track open").is_some() {}
+	})
+	.await
+	.expect("the relay kept its upstream subscription");
+}
+
+#[kio::test]
 async fn older_versions_refuse_metadata_only() {
 	for version in ["moq-lite-06", "moq-transport-18"] {
 		let chain = Chain::new(version.parse().unwrap()).await;

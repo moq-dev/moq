@@ -172,6 +172,9 @@ struct Shape {
 	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
 	/// datagram track instead of groups.
 	datagrams: bool,
+	/// The metadata sweep (lite-07 only): `Some(true)` subscribes for frame headers alone,
+	/// without the payload, and `Some(false)` is its payload baseline.
+	meta: Option<bool>,
 }
 
 impl Shape {
@@ -194,14 +197,19 @@ impl Shape {
 		fetch: false,
 		compress: false,
 		datagrams: false,
+		meta: None,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
 	/// subscription writes off as late.
 	fn subscription(&self) -> Option<track::Subscription> {
-		(self.burst > 1).then(|| {
+		let subscription = (self.burst > 1).then(|| {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
-		})
+		});
+		match self.meta {
+			Some(true) => Some(subscription.unwrap_or_default().with_meta(true)),
+			_ => subscription,
+		}
 	}
 
 	fn total(&self) -> usize {
@@ -216,7 +224,9 @@ impl Shape {
 	/// Whether `version` carries this shape. Datagram tracks run on moq-lite and on
 	/// moq-transport-22, which maps one to OBJECT_DATAGRAM at object ID 0.
 	fn runs_on(&self, version: &str) -> bool {
-		!self.datagrams || version.parse::<Version>().unwrap().is_lite() || version == "moq-transport-22"
+		let datagrams =
+			!self.datagrams || version.parse::<Version>().unwrap().is_lite() || version == "moq-transport-22";
+		datagrams && (self.meta.is_none() || version == "moq-lite-07-wip")
 	}
 
 	/// The broadcasts viewer `viewer` watches: a contiguous window starting at
@@ -255,6 +265,15 @@ impl Shape {
 			return format!(
 				"{version}/publishers={}/viewers={}/burst={}/fetch",
 				self.publishers, self.viewers, self.burst
+			);
+		}
+		if let Some(meta) = self.meta {
+			return format!(
+				"{version}/relays={}/viewers={}/frame={}/{}",
+				self.relays,
+				self.viewers,
+				self.frame,
+				if meta { "meta" } else { "payload" }
 			);
 		}
 		format!(
@@ -549,9 +568,16 @@ fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
 /// like a speedup.
+/// The payload bytes of the next group, or what its frames declare when it arrived as metadata.
 async fn read_group(subscriber: &mut track::Subscriber) -> usize {
 	let mut group = subscriber.recv_group().await.unwrap().expect("track ended");
 	let mut bytes = 0;
+	if group.is_meta() {
+		while let Some(info) = group.read_info().await.unwrap() {
+			bytes += info.size as usize;
+		}
+		return bytes;
+	}
 	while let Some(frame) = group.read_frame().await.unwrap() {
 		bytes += frame.payload.len();
 	}
@@ -1279,6 +1305,26 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 		}
 	}
 	group.finish();
+}
+
+/// Metadata-only delivery against the same rooms with the payload, over relays and viewers
+/// at a large frame: the headers' cost must not grow with the payload they stand for.
+pub(crate) fn meta<B: Backend>(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let shapes = [1, 3].into_iter().flat_map(|relays| {
+		[1, 16, 64].into_iter().flat_map(move |viewers| {
+			[false, true].map(move |meta| Shape {
+				relays,
+				viewers,
+				frame: 16 * 1024,
+				meta: Some(meta),
+				..Shape::BASE
+			})
+		})
+	});
+	delivery::<B>(c, "meta", shapes);
 }
 
 /// Small-group cost over independent publisher/viewer axes, with both egress request paths.
