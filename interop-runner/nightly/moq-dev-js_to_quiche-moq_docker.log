@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-quiche-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    https://relay:4443
-time="2026-11-11T16:13:58Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T16:13:58Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T16:13:58Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T16:13:58Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-11T16:13:58Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:42:43Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:42:43Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:42:43Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:42:43Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:42:43Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1 Recreate 
  Container runner-upstream-relay-1 Recreated 
 Attaching to relay-1, test-client-1
@@ -29,30 +29,30 @@ test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 210
+test-client-1  |   duration_ms: 196
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 609
+test-client-1  |   duration_ms: 606
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 809
+test-client-1  |   duration_ms: 807
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/907fb766f85c217021264f365671f23c active=true
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/907fb766f85c217021264f365671f23c active=false
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/24b5d7c01b2f20c07d0eba1eb190f9cc active=true
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/24b5d7c01b2f20c07d0eba1eb190f9cc active=false
 test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 217
+test-client-1  |   duration_ms: 212
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
@@ -78,7 +78,7 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 415
+test-client-1  |   duration_ms: 411
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
@@ -90,8 +90,8 @@ test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-tra
 test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
 test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
-test-client-1  | announced: broadcast=moq-test/interop active=false
 test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-track error=publish done: status=0x4 reason=Publisher is gone
+test-client-1  | announced: broadcast=moq-test/interop active=false
 test-client-1  | publish done: broadcast=moq-test/interop track=test-track
 test-client-1  | publish error: broadcast=moq-test/interop track=test-track error=session error: connection error: closed
 test-client-1  | subscribe_namespace error: session error: connection error: closed
@@ -111,7 +111,7 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 521
+test-client-1  |   duration_ms: 516
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
@@ -144,42 +144,27 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 7 - subscribe-before-announce
 test-client-1  |   ---
-test-client-1  |   duration_ms: 717
+test-client-1  |   duration_ms: 712
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f active=true
-test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe error: id=2 broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track error=publish done: status=0x4 reason=Publisher is gone
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/01a4f917dd538fd9699aa9885c28d72f active=false
-test-client-1  | subscribe_namespace error: session error: connection error: closed
-test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
-test-client-1  | 173 |             return false;
-test-client-1  | 174 |         }
-test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
-test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
-test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
-test-client-1  |                                                        ^
-test-client-1  | error: session error: connection error: closed
-test-client-1  |  code: "GenericFailure"
-test-client-1  | 
-test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
-test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
-test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
-test-client-1  | 
-test-client-1  | ok 8 - data-subgroup-basic
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe error: id=2 broadcast=moq-test/data-subgroup-basic/951ade72c3058ae3598d8a9b74259fdf/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track error=publish done: status=0x4 reason=Publisher is gone
+test-client-1  | not ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 288
+test-client-1  |   duration_ms: 44
 test-client-1  |   test_spec_revision: 2
+test-client-1  |   message: "publish done: status=0x4 reason=Publisher is gone; missing objects (0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (2, 0), (2, 1), (2, 2), (2, 3), (2, 4)"
 test-client-1  |   ...
-[Ktest-client-1 exited with code 0
+[Ktest-client-1 exited with code 1
  Compose Stopping Aborting on container exit...
  Container runner-upstream-test-client-1 Stopping 
  Container runner-upstream-test-client-1 Stopped 
@@ -187,4 +172,4 @@ test-client-1  |   ...
  Container runner-upstream-relay-1 Stopped 
 [Krelay-1 exited with code 143
 
-Test results in mlog/
+make: *** [Makefile:86: test] Error 1

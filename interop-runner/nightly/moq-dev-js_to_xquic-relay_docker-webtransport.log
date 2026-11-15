@@ -1,0 +1,306 @@
+rm -rf mlog/
+mkdir -p mlog/relay mlog/client
+Running interop tests...
+  Relay:  ghcr.io/englishm/moq-interop-runner-xquic-relay:latest
+  Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
+  URL:    https://relay:4443
+time="2026-11-15T08:43:54Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:43:54Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:43:54Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:43:54Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:43:54Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+ Container runner-upstream-test-client-1 Recreate 
+ Container runner-upstream-test-client-1 Recreated 
+Attaching to relay-1, test-client-1
+ Container runner-upstream-relay-1 Starting 
+ Container runner-upstream-relay-1 Started 
+ Container runner-upstream-relay-1 Waiting 
+relay-1  | relay server moqt-22 transport=dual UDP/4443
+ Container runner-upstream-relay-1 Healthy 
+ Container runner-upstream-test-client-1 Starting 
+ Container runner-upstream-test-client-1 Started 
+test-client-1  | TAP version 14
+test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
+test-client-1  | # Relay: https://relay:4443
+test-client-1  | 1..8
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+relay-1        | [2026/11/15 08:44:01 185266] [error] |scid:82f795a5d685c909|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 185280] [error] |scid:82f795a5d685c909|xqc_process_conn_close_frame|conn:00005E87779BE0D0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-82f795a5d685c909 p-172.18.0.3-34028-851fe9f9c36776c0|
+test-client-1  | not ok 1 - setup-only
+test-client-1  |   ---
+test-client-1  |   duration_ms: 94
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+relay-1        | [2026/11/15 08:44:01 190609] [error] |scid:f14c8f596d93a917|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 190620] [error] |scid:f14c8f596d93a917|xqc_process_conn_close_frame|conn:00005E87779F8D40|err:0x52e4a40fa8dc|l-0.0.0.0-4443-f14c8f596d93a917 p-172.18.0.3-33906-de0f9039c1f2271a|
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | not ok 2 - announce-only
+test-client-1  |   ---
+test-client-1  |   duration_ms: 3
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+relay-1        | [2026/11/15 08:44:01 193132] [error] |scid:566a7e718c462fba|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 193145] [error] |scid:566a7e718c462fba|xqc_process_conn_close_frame|conn:00005E8777A2CC80|err:0x52e4a40fa8dc|l-0.0.0.0-4443-566a7e718c462fba p-172.18.0.3-43555-7725ada8f1c97608|
+test-client-1  | not ok 3 - publish-namespace-done
+test-client-1  |   ---
+test-client-1  |   duration_ms: 3
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+relay-1        | [2026/11/15 08:44:01 195429] [error] |scid:4e7a7336c2d908d0|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 195440] [error] |scid:4e7a7336c2d908d0|xqc_process_conn_close_frame|conn:00005E8777A60BB0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-4e7a7336c2d908d0 p-172.18.0.3-36245-9d804ff65f3b3af0|
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | not ok 4 - subscribe-namespace-lifecycle
+test-client-1  |   ---
+test-client-1  |   duration_ms: 2
+test-client-1  |   test_spec_revision: 1
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | not ok 5 - subscribe-error
+test-client-1  |   ---
+test-client-1  |   duration_ms: 2
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+relay-1        | [2026/11/15 08:44:01 197642] [error] |scid:86e27ea5ee87eb90|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 197655] [error] |scid:86e27ea5ee87eb90|xqc_process_conn_close_frame|conn:00005E8777A94AB0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-86e27ea5ee87eb90 p-172.18.0.3-35036-37052e763e6d94a5|
+relay-1        | [2026/11/15 08:44:01 200176] [error] |scid:aface5c61deb969e|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 200187] [error] |scid:aface5c61deb969e|xqc_process_conn_close_frame|conn:00005E8777AC89E0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-aface5c61deb969e p-172.18.0.3-47158-bfd7d69ab79119be|
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | not ok 6 - announce-subscribe
+test-client-1  |   ---
+test-client-1  |   duration_ms: 3
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+relay-1        | [2026/11/15 08:44:01 202467] [error] |scid:7383bf853a2b51ed|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 202476] [error] |scid:7383bf853a2b51ed|xqc_process_conn_close_frame|conn:00005E8777AFC910|err:0x52e4a40fa8dc|l-0.0.0.0-4443-7383bf853a2b51ed p-172.18.0.3-60734-2ac7262c89cac1da|
+test-client-1  | not ok 7 - subscribe-before-announce
+test-client-1  |   ---
+test-client-1  |   duration_ms: 2
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+relay-1        | [2026/11/15 08:44:01 205033] [error] |scid:d4dc3a6d41fd250f|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
+relay-1        | [2026/11/15 08:44:01 205044] [error] |scid:d4dc3a6d41fd250f|xqc_process_conn_close_frame|conn:00005E8777B30840|err:0x52e4a40fa8dc|l-0.0.0.0-4443-d4dc3a6d41fd250f p-172.18.0.3-57053-34bc8390ffa582c8|
+test-client-1  | not ok 8 - data-subgroup-basic
+test-client-1  |   ---
+test-client-1  |   duration_ms: 3
+test-client-1  |   test_spec_revision: 2
+test-client-1  |   message: "remote error: 1"
+test-client-1  |   ...
+relay-1        | [2026/11/15 08:44:01 264959] [report] |scid:82f795a5d685c909|xqc_conn_destroy|00005E87779BE0D0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1462|first_send_delay:1672|conn_persist:81543|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-82f795a5d685c909 p-172.18.0.3-34028-851fe9f9c36776c0|hsk_recv:1176|close_recv:1850|close_send:1880|last_recv:1836|last_send:1880|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,32,41,40004,8,1,0,4,24,33,4,6,1,0,4,41,4000,10,1,4,55,84,11,1,4,35,40000,12,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3301,0-5900,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 265009] [report] |scid:82f795a5d685c909|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241185056|blkd:0|nblkd:0|hdr_b:2|hdr_e:11|bdy_b:0|fin:0|recv_end:0|hrd_send:39|bdy_send:48|fin_send:51|fin_ack:202|last_send:240|last_recv:196|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,1)#0-1-1-33-224-208-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:51|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,67073,134147,0)|end_state:(0,16,0,0,77463,154926,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 269239] [report] |scid:f14c8f596d93a917|xqc_conn_destroy|00005E87779F8D40|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:958|first_send_delay:1167|conn_persist:79902|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-f14c8f596d93a917 p-172.18.0.3-33906-de0f9039c1f2271a|hsk_recv:839|close_recv:1272|close_send:1298|last_recv:1265|last_send:1298|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,12,69,0,255,i0,4,1380,1389,3,8,1,0,4,34,43,40004,9,1,0,4,24,33,4,7,1,0,4,41,4000,15,1,4,55,84,16,1,4,35,40000,17,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3300,0-5931,0-15,0-12,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 269313] [report] |scid:f14c8f596d93a917|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241190483|blkd:0|nblkd:0|hdr_b:2|hdr_e:7|bdy_b:0|fin:0|recv_end:0|hrd_send:27|bdy_send:34|fin_send:37|fin_ack:97|last_send:152|last_recv:119|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-160-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:37|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,93585,187170,0)|end_state:(0,16,0,0,96601,193202,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 273673] [report] |scid:566a7e718c462fba|xqc_conn_destroy|00005E8777A2CC80|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:953|first_send_delay:1140|conn_persist:81815|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-566a7e718c462fba p-172.18.0.3-43555-7725ada8f1c97608|hsk_recv:876|close_recv:1273|close_send:1303|last_recv:1260|last_send:1303|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,13,11,69,0,255,i0,4,32,41,40004,8,1,0,4,24,33,4,6,1,0,4,1380,1389,3,7,1,0,4,41,4000,15,1,4,55,84,16,1,4,35,40000,17,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5898,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 273699] [report] |scid:566a7e718c462fba|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241192974|blkd:0|nblkd:0|hdr_b:3|hdr_e:9|bdy_b:0|fin:0|recv_end:0|hrd_send:33|bdy_send:43|fin_send:48|fin_ack:149|last_send:187|last_recv:144|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-161-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:48|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,93038,186077,0)|end_state:(0,16,0,0,98868,197736,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 275856] [report] |scid:4e7a7336c2d908d0|xqc_conn_destroy|00005E8777A60BB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:891|first_send_delay:1091|conn_persist:81617|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-4e7a7336c2d908d0 p-172.18.0.3-36245-9d804ff65f3b3af0|hsk_recv:814|close_recv:1190|close_send:1216|last_recv:1177|last_send:1216|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,13,11,69,0,255,i0,4,32,41,40004,8,1,0,4,24,33,4,6,1,0,4,1380,1389,3,7,1,0,4,41,4000,14,1,4,55,84,15,1,4,35,40000,16,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5900,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 275889] [report] |scid:4e7a7336c2d908d0|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241195311|blkd:0|nblkd:0|hdr_b:2|hdr_e:7|bdy_b:0|fin:0|recv_end:0|hrd_send:26|bdy_send:32|fin_send:35|fin_ack:110|last_send:144|last_recv:105|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-150-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:35|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,94132,188265,0)|end_state:(0,16,0,0,103756,207513,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 278033] [report] |scid:86e27ea5ee87eb90|xqc_conn_destroy|00005E8777A94AB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:903|first_send_delay:1081|conn_persist:81582|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-86e27ea5ee87eb90 p-172.18.0.3-35036-37052e763e6d94a5|hsk_recv:824|close_recv:1191|close_send:1220|last_recv:1174|last_send:1220|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,13,11,69,0,255,i0,4,32,41,40004,9,1,0,4,22,31,4,7,1,0,4,1380,1389,3,8,1,0,4,41,4000,8,1,4,55,84,9,1,4,35,40000,10,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3298,0-5892,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 278055] [report] |scid:86e27ea5ee87eb90|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241197513|blkd:0|nblkd:0|hdr_b:2|hdr_e:6|bdy_b:0|fin:0|recv_end:0|hrd_send:26|bdy_send:32|fin_send:34|fin_ack:118|last_send:158|last_recv:112|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-148-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:34|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,96381,192762,0)|end_state:(0,16,0,0,106377,212754,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 280211] [report] |scid:aface5c61deb969e|xqc_conn_destroy|00005E8777AC89E0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:925|first_send_delay:1110|conn_persist:81251|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-aface5c61deb969e p-172.18.0.3-47158-bfd7d69ab79119be|hsk_recv:678|close_recv:1217|close_send:1260|last_recv:1203|last_send:1260|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,34,43,40004,8,1,0,4,24,33,4,6,1,0,4,41,4000,14,1,4,55,84,15,1,4,35,40000,16,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5896,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 280238] [report] |scid:aface5c61deb969e|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241200050|blkd:0|nblkd:0|hdr_b:2|hdr_e:7|bdy_b:0|fin:0|recv_end:0|hrd_send:26|bdy_send:32|fin_send:35|fin_ack:118|last_send:169|last_recv:112|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-149-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:35|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,95240,190481,0)|end_state:(0,16,0,0,105047,210095,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 282387] [report] |scid:7383bf853a2b51ed|xqc_conn_destroy|00005E8777AFC910|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:889|first_send_delay:1088|conn_persist:81122|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-7383bf853a2b51ed p-172.18.0.3-60734-2ac7262c89cac1da|hsk_recv:812|close_recv:1203|close_send:1227|last_recv:1195|last_send:1227|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,13,11,69,0,255,i0,4,32,41,40004,8,1,0,4,22,31,4,6,1,0,4,1380,1389,3,7,1,0,4,41,4000,8,1,4,55,84,9,1,4,35,40000,10,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5892,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 282415] [report] |scid:7383bf853a2b51ed|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241202333|blkd:0|nblkd:0|hdr_b:2|hdr_e:7|bdy_b:0|fin:0|recv_end:0|hrd_send:26|bdy_send:32|fin_send:35|fin_ack:129|last_send:158|last_recv:126|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-148-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:35|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,98752,197505,0)|end_state:(0,16,0,0,107747,215494,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/15 08:44:01 284550] [report] |scid:d4dc3a6d41fd250f|xqc_conn_destroy|00005E8777B30840|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:924|first_send_delay:1111|conn_persist:80780|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-d4dc3a6d41fd250f p-172.18.0.3-57053-34bc8390ffa582c8|hsk_recv:679|close_recv:1263|close_send:1288|last_recv:1245|last_send:1288|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,34,43,40004,8,1,0,4,24,33,4,6,1,0,4,41,4000,9,1,4,55,84,10,1,4,35,40000,11,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5896,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/15 08:44:01 284580] [report] |scid:d4dc3a6d41fd250f|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794732241204862|blkd:0|nblkd:0|hdr_b:2|hdr_e:7|bdy_b:0|fin:0|recv_end:0|hrd_send:27|bdy_send:33|fin_send:36|fin_ack:163|last_send:196|last_recv:153|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-160-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:36|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,96381,192762,0)|end_state:(0,16,0,0,101250,202501,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+[Ktest-client-1 exited with code 1
+ Compose Stopping Aborting on container exit...
+ Container runner-upstream-test-client-1 Stopping 
+ Container runner-upstream-test-client-1 Stopped 
+ Container runner-upstream-relay-1 Stopping 
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/huffman/xqc_huffman.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_prefixed_str.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_prefixed_int.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/2d_hash/xqc_2d_hash_table.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/ringmem/xqc_ring_mem.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/vint/xqc_discrete_int_parser.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/xqc_null_crypto.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/xqc_hkdf.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_conn.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ext_bytestream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/dtable/xqc_dtable.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/stable/xqc_stable.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_ins.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_rep.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_encoder.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_decoder.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_qpack.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_header.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/frame/xqc_h3_frame.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_request.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_stream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_conn.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/congestion_control/xqc_sample.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/congestion_control/xqc_cubic.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/var_buf/xqc_var_buf.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/ringarray/xqc_ring_array.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/vint/xqc_variable_len_int.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/xqc_time.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/xqc_log_event_callback.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/xqc_log.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/xqc_str.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/xqc_random.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/babassl/xqc_ssl_if_impl.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/babassl/xqc_crypto_impl.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/babassl/xqc_hkdf_impl.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/xqc_tls.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/xqc_tls_ctx.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/xqc_crypto.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/scheduler/xqc_scheduler_rap.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/scheduler/xqc_scheduler_common.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/scheduler/xqc_scheduler_minrtt.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/reinjection_control/xqc_reinj_dgram.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_recv_timestamps_info.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_reinjection.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_timer.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_transport_params.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_multipath.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_utils.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_pacing.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_recv_record.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_frame.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_packet.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_send_queue.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_send_ctl.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_packet_in.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_packet_out.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_datagram.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_stream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_frame_parser.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_packet_parser.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_cid.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_client.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_conn.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/transport/xqc_engine.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_stream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_session.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_request_adapter.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_h3_stream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_dgram.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_ctx.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ext_dgram.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ctx.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_webtransport.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/cjson/cJSON.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_session.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_transport.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_quic.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_fetch.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_object.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_track.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_request.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_message.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_codec.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt_relay/xqc_moqt_relay_data.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt_relay/xqc_moqt_relay.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/msf/xqc_msf.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/loc/xqc_loc.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/tests/CMakeFiles/moqt_interop.dir/complex_case/complex_case_common.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/tests/CMakeFiles/moqt_interop.dir/__/interop/moqt/media.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/tests/CMakeFiles/moqt_interop.dir/__/interop/moqt/fixture.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/tests/CMakeFiles/moqt_interop.dir/__/interop/moqt/endpoint.c.gcda:Skip
+ Container runner-upstream-relay-1 Stopped 
+[Krelay-1 exited with code 0
+
+make: *** [Makefile:86: test] Error 1

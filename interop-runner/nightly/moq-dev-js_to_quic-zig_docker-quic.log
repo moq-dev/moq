@@ -1,0 +1,86 @@
+rm -rf mlog/
+mkdir -p mlog/relay mlog/client
+Running interop tests...
+  Relay:  ghcr.io/endel/quic-zig-moq-relay:latest
+  Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
+  URL:    moqt://relay:4443
+time="2026-11-15T08:44:01Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:44:01Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:44:01Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:44:01Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-15T08:44:01Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+ Container runner-upstream-relay-1 Recreate 
+ Container runner-upstream-relay-1 Recreated 
+ Container runner-upstream-test-client-1 Recreate 
+ Container runner-upstream-test-client-1 Recreated 
+Attaching to relay-1, test-client-1
+ Container runner-upstream-relay-1 Starting 
+ Container runner-upstream-relay-1 Started 
+ Container runner-upstream-relay-1 Waiting 
+relay-1  | 
+relay-1  | === MoQ Relay (drafts 17, 18, 22; WebTransport + QUIC) ===
+relay-1  | Certificate SHA-256: e57042d45479e239716cdbcd27f7ebff87b10afb3cce8ed04d8644b0f2b1b1dd
+relay-1  | 
+relay-1  | Listening on https://0.0.0.0:4443
+relay-1  | Video demo: https://127.0.0.1:4443/moq_video.html
+relay-1  | Clock demo: https://127.0.0.1:4443/moq.html
+relay-1  | 
+ Container runner-upstream-relay-1 Healthy 
+ Container runner-upstream-test-client-1 Starting 
+ Container runner-upstream-test-client-1 Started 
+test-client-1  | TAP version 14
+test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
+test-client-1  | # Relay: moqt://relay:4443
+test-client-1  | 1..8
+test-client-1  | not ok 1 - setup-only
+test-client-1  |   ---
+test-client-1  |   duration_ms: 504
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 2 - announce-only
+test-client-1  |   ---
+test-client-1  |   duration_ms: 503
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 3 - publish-namespace-done
+test-client-1  |   ---
+test-client-1  |   duration_ms: 503
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 4 - subscribe-namespace-lifecycle
+test-client-1  |   ---
+test-client-1  |   duration_ms: 503
+test-client-1  |   test_spec_revision: 1
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 5 - subscribe-error
+test-client-1  |   ---
+test-client-1  |   duration_ms: 502
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 6 - announce-subscribe
+test-client-1  |   ---
+test-client-1  |   duration_ms: 502
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 7 - subscribe-before-announce
+test-client-1  |   ---
+test-client-1  |   duration_ms: 501
+test-client-1  |   message: ""
+test-client-1  |   ...
+test-client-1  | not ok 8 - data-subgroup-basic
+test-client-1  |   ---
+test-client-1  |   duration_ms: 503
+test-client-1  |   test_spec_revision: 2
+test-client-1  |   message: ""
+test-client-1  |   ...
+[Ktest-client-1 exited with code 1
+ Compose Stopping Aborting on container exit...
+ Container runner-upstream-test-client-1 Stopping 
+ Container runner-upstream-test-client-1 Stopped 
+ Container runner-upstream-relay-1 Stopping 
+relay-1        | [relay] draining: GOAWAY → 0 clients
+ Container runner-upstream-relay-1 Stopped 
+[Krelay-1 exited with code 0
+
+make: *** [Makefile:86: test] Error 1

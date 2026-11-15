@@ -54,6 +54,12 @@
     "status": "selected"
   },
   {
+    "implementation": "moq-mbt",
+    "role": "client",
+    "image": "ghcr.io/ojii3/moq-mbt-interop-client:latest",
+    "status": "selected"
+  },
+  {
     "implementation": "moq-rs",
     "role": "relay",
     "image": "ghcr.io/englishm/moq-interop-runner-moq-relay-ietf:latest",
@@ -150,27 +156,21 @@
     "status": "selected"
   },
   {
-    "implementation": "xquic",
-    "role": "relay",
-    "image": "ghcr.io/englishm/moq-interop-runner-xquic-moq-relay:latest",
-    "status": "selected"
-  },
-  {
-    "implementation": "xquic",
+    "implementation": "stitcher-moq-media",
     "role": "client",
-    "image": "ghcr.io/englishm/moq-interop-runner-xquic-moq-client:latest",
+    "image": "ghcr.io/englishm/moq-interop-runner-stitcher-moq-media-client:latest",
     "status": "selected"
   },
   {
-    "implementation": "xquic-draft-18",
-    "role": "relay",
-    "image": "ghcr.io/englishm/moq-interop-runner-xquic-moq-relay-draft-18:latest",
-    "status": "selected"
-  },
-  {
-    "implementation": "xquic-draft-18",
+    "implementation": "xquic-client",
     "role": "client",
-    "image": "ghcr.io/englishm/moq-interop-runner-xquic-moq-client-draft-18:latest",
+    "image": "ghcr.io/englishm/moq-interop-runner-xquic-client:latest",
+    "status": "selected"
+  },
+  {
+    "implementation": "xquic-relay",
+    "role": "relay",
+    "image": "ghcr.io/englishm/moq-interop-runner-xquic-relay:latest",
     "status": "selected"
   },
   {
