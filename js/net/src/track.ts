@@ -1758,7 +1758,8 @@ export class Producer {
 	// already handed out keeps the mode it was read in.
 	#remode(sink: TrackState): void {
 		const meta = sink.update.peek()?.meta === true;
-		for (const mirror of sink.groups.peek()) {
+		// A snapshot: each re-read takes its group out of the buffer and puts the new read back.
+		for (const mirror of [...sink.groups.peek()]) {
 			if (mirror.meta === meta) continue;
 			const entry = this.#cached.get(mirror.sequence);
 			if (!entry || entry.mirrors.get(sink) !== mirror) continue;
