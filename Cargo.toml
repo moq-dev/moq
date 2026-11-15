@@ -210,6 +210,7 @@ pkcs8 = "0.11.0"
 pollster = "1.0"
 # default-features off to skip the fork and timeout machinery; crates opt into what they use.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+qlog = "0.18"
 qmux = { version = "0.7.0", path = "rs/qmux", default-features = false }
 rand = "0.10.1"
 rand_pcg = "0.10"

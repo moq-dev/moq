@@ -46,9 +46,6 @@ pub struct Config {
 	/// moq-quic takes one sink per transport config, so this writes one file
 	/// per endpoint on the accept side and per dial on the connect side, each
 	/// event tagged with the qlog `group_id` of the connection it belongs to.
-	///
-	/// Only compiled with the `qlog` feature, so a build without it cannot ask
-	/// for traces the backends would not produce.
 	pub qlog: Option<qlog::Sink>,
 }
 
