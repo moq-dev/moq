@@ -177,6 +177,60 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 	}
 });
 
+test("the join's boundary is the publisher's answer, not the largest by the first group", async () => {
+	// The publisher answers that it stood at group 200, then groups up to 210 land before the first
+	// reaches this consumer. Group 205 then arrives below the cursor: produced after the subscription
+	// began, so it is no backlog, unlike group 160.
+	const track = new Track.Producer("audio");
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
+	let advanced = false;
+	let answer!: () => void;
+	const started = new Promise<void>((resolve) => {
+		answer = resolve;
+	});
+	const raced = new Proxy(subscriber, {
+		get(target, key) {
+			if (key === "start") return () => started.then(() => undefined);
+			if (key === "largest") return async () => ({ group: advanced ? 210n : 200n, frame: 0 });
+			const value = Reflect.get(target, key, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const consumer = new Consumer(raced, {
+		format: new Format("audio"),
+		delay: { max: Duration.millis(2000) },
+		wait: Duration.millis(100),
+	});
+	const write = (sequence: number, media: number) => {
+		const group = track.createGroup(BigInt(sequence));
+		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
+		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
+		group.finish();
+	};
+	try {
+		answer();
+		await clock.advance(Duration.ZERO);
+		advanced = true;
+		write(210, 200);
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 210n });
+		write(205, 100);
+		await clock.advance(Duration.ZERO);
+		expect(reported).toHaveLength(0);
+		write(160, 0);
+		await clock.advance(Duration.ZERO);
+		expect(reported).toHaveLength(1);
+	} finally {
+		backlog.mockRestore();
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});
+
 test("a range capped below the largest still delivers", async () => {
 	// The track holds groups 0 to 5, and the subscriber's range ends before 3, so it never reports a
 	// largest: the consumer reports no backlog, but delivers what it can read.

@@ -273,6 +273,14 @@ export class Consumer {
 		this.#spread = new Signal(Duration.millis(this.#jitter.measured));
 		this.spread = this.#spread;
 
+		// Where the publisher stood as the subscription began, read as soon as its answer resolves the
+		// start: after it rather than from a cached group that raced it, and before live groups landing
+		// later raise the largest past it. Off the delivery path: a range capped below the largest never
+		// reports one, which reports no backlog rather than stalling delivery.
+		this.#signals.spawn(async () => {
+			await this.#track.start();
+			this.#joined = (await this.#track.largest())?.group;
+		});
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
 			this.#track.close();
@@ -313,12 +321,6 @@ export class Consumer {
 					const floor = this.#track.floor();
 					const served = await this.#track.start();
 					const start = served !== undefined && (floor === undefined || served > floor) ? served : floor;
-					// Read once the start resolved, so the publisher's answer is in it rather than a group
-					// that raced it here, and off the delivery path: a range capped below the largest never
-					// reports one, which reports no backlog rather than stalling delivery.
-					this.#signals.spawn(async () => {
-						this.#joined = (await this.#track.largest())?.group;
-					});
 					this.#active = this.#startAt(start) ?? consumer.sequence;
 				}
 
