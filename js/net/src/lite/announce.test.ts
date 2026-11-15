@@ -556,6 +556,12 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	// More hops than a route may carry.
 	const over = Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n);
 	expect(await decode(await start(1n, over, 0))).toMatchObject({ status: "refused", reason: "hops" });
+	// Far past the limit, only the hops up to one past it are kept.
+	const far = Array.from({ length: 4 * (ROUTE_MAX_HOPS + 1) }, () => 1n);
+	const kept = await decode(await start(1n, far, 0));
+	expect(kept).toMatchObject({ status: "refused", reason: "hops" });
+	if (kept.status !== "refused" || kept.message.kind !== "routeStart") throw new Error("a refused ROUTE_START");
+	expect(kept.message.path).toHaveLength(ROUTE_MAX_HOPS + 1);
 	// An empty path is the sender's own error: it names itself last.
 	await expect(decode(await start(1n, [], 0))).rejects.toThrow(ProtocolViolation);
 

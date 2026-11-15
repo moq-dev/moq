@@ -163,11 +163,25 @@ Code this replaces, for lite-07 only:
   [moq-dev/moq#8731](https://github.com/moq-dev/moq/pull/8731)'s decision
   12): ✅ deferred here (rejected: tracking per filed slot which wire routes
   file into it in #8731, state this quest deletes).
+- `route::Node::closing` and the quiet retire of a stream dropped outside
+  it (`route/node.rs`), for lite-07: with each side's stream living as long
+  as its session, every drop of one is a session close. Today a session's
+  receive stream lands under the guard only because `Publisher::poll`
+  returns the transport error before `poll_protocol` reaches the
+  subscriber, which [#8731](https://github.com/moq-dev/moq/pull/8731)'s
+  review flagged as resting on poll order. A guard taken on every poll
+  would lock the node on each session wake, so the stream's lifetime is
+  the fix.
 - `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
   `Discovery` has. Its route layer keeps per-stream state, so this PR changes `js/net`
-  too.
+  too. A floor that changes what a claim covers, with no route change, also
+  re-runs admission for the open requests it affects: `forwardAnnounced`
+  (`js/net/src/connection/forward.ts`) asks `session.covers` only when a
+  request is admitted, so a request can stay on a node that no longer
+  covers it until something else refreshes it (flagged in
+  [#8731](https://github.com/moq-dev/moq/pull/8731)'s review).
 
 Also touching the same files, to merge around:
 [moq-dev/moq#8458](https://github.com/moq-dev/moq/pull/8458) (its

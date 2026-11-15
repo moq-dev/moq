@@ -585,10 +585,15 @@ async fn waits_out_the_doubt(version: &str) {
 	let remote = topology.subscriber.consume().request("live", None).await.unwrap();
 	let mut fresh = read(remote.track("video").unwrap().subscribe(None).await.unwrap());
 	assert_eq!(next(&mut fresh).await, (1, payload(1, 0)), "{version}: through B");
-	assert!(
-		std::iter::from_fn(|| rx.try_recv().ok()).all(|(_, frame)| frame.is_err()),
-		"{version}: the subscription through A read nothing more"
-	);
+	match kio::clock::timeout(Duration::from_secs(10), rx.next())
+		.await
+		.expect("the subscription through A hung")
+	{
+		Some((_, Err(_))) => {}
+		None => panic!("{version}: the subscription through A ended cleanly"),
+		Some((group, Ok(_))) => panic!("{version}: the subscription through A read group {group}"),
+	}
+	assert!(rx.try_recv().is_err(), "{version}: a delivery after the error");
 }
 
 macro_rules! route_change_tests {

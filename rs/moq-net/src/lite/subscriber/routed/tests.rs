@@ -682,3 +682,91 @@ async fn a_refused_route_still_follows_a_dead() {
 		Some(1)
 	);
 }
+
+/// A DEAD the node does not credit, here naming the wrong far node, still changes the
+/// stream's routes as the peer applies it, and the node hears each change as the
+/// peer's own: a gone route ends there too, and a kept one holds, so neither side
+/// keeps a route the other let go.
+#[kio::test]
+async fn an_uncredited_dead_keeps_the_node_in_step() {
+	use crate::lite::Dead;
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let prefix = Path::empty();
+	let shown = |routed: &super::Routed| -> Vec<(String, bool)> {
+		(routed.node.shown().into_iter())
+			.map(|((_, path), (_, available))| (path.to_string(), available))
+			.collect()
+	};
+	for gone in [true, false] {
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let route = Msg::RouteStart {
+			node: 7,
+			suffix: Path::empty(),
+			offer: Offer {
+				path: [Hop { node: 7, session: 0 }, Hop { node: 5, session: 3 }].into(),
+				..offer()
+			},
+		};
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		for msg in [route, start("live"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		routed.outputs(&subscriber);
+		assert_eq!(shown(&routed), [("live".to_string(), true)], "gone: {gone}");
+
+		// Node 7, not 9, is the far end of the session node 5 learned the route on.
+		let dead = Msg::Dead(Dead::Closed {
+			hop: Hop { node: 5, session: 3 },
+			far: 9,
+			gone,
+			more: false,
+			moved: Vec::new(),
+		});
+		routed.receive(&prefix, dead, &mut decoder).unwrap();
+		routed.outputs(&subscriber);
+		match gone {
+			true => {
+				assert!(routed.routes.is_empty());
+				assert_eq!(shown(&routed), []);
+			}
+			false => {
+				assert!(routed.routes[&0].held);
+				assert_eq!(shown(&routed), [("live".to_string(), false)]);
+			}
+		}
+	}
+}
+
+/// A scoped peer's DRAIN ranks only its own routes through the node draining, which the
+/// node keeps in their offers alone, so a new limit files them again still draining.
+/// An unscoped peer's drain is the node's to remember, and the offers stay as sent.
+#[kio::test]
+async fn a_scoped_drain_survives_a_new_limit() {
+	use crate::lite::Dead;
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let prefix = Path::empty();
+	for (permit, scoped) in [(limited("live/**"), true), (Permit::default(), false)] {
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &permit).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let route = Msg::RouteStart {
+			node: 9,
+			suffix: Path::empty(),
+			offer: Offer {
+				path: [Hop { node: 9, session: 0 }, Hop { node: 7, session: 1 }].into(),
+				..offer()
+			},
+		};
+		routed.receive(&prefix, route, &mut decoder).unwrap();
+		routed
+			.receive(&prefix, Msg::Dead(Dead::Drain { node: 9 }), &mut decoder)
+			.unwrap();
+		let draining = |routed: &super::Routed| routed.routes[&0].offer.as_ref().unwrap().draining;
+		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
+		routed.limit(&subscriber, &limited("live/a/**")).unwrap();
+		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
+	}
+}

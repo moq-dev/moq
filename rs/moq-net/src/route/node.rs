@@ -188,7 +188,9 @@ struct Outbox {
 	/// them.
 	withheld: HashMap<RouteId, (Held, Option<Rev>)>,
 	/// What the segments a DEAD closed hold unread: each DEAD, its moved routes, and the
-	/// routes with changes queued ahead of it. See [`Self::overrun`].
+	/// routes it left the reader holding with changes queued ahead of it. A route the
+	/// DEAD ended is read once and gone, so its changes count against nothing. See
+	/// [`Self::overrun`].
 	sealed: usize,
 }
 
@@ -220,6 +222,12 @@ struct Pending {
 	batch: Option<Batch>,
 	/// The claims `batch` starts that the reader did not hold when the entry began.
 	fresh: BTreeSet<Path>,
+	/// A DEAD sealed the entry while the reader still held its route: it counts in
+	/// [`Outbox::sealed`] until read.
+	sealed: bool,
+	/// A DEAD sealed the entry while claims of its route were held back, which go after
+	/// the DEAD once confirmed: its floor certifies nothing, since it cannot cover them.
+	uncertified: bool,
 }
 
 impl Pending {
@@ -513,8 +521,14 @@ impl Outbox {
 				}
 			}
 		}
-		let segment = self.segment();
-		let sealed = 1 + segment.pending.len() + moved(&dead);
+		self.segment();
+		let segment = self.segments.back_mut().expect("just opened");
+		let mut sealed = 1 + moved(&dead);
+		for (key, (_, pending)) in &mut segment.pending {
+			pending.sealed = self.known.contains_key(key);
+			pending.uncertified = self.withheld.contains_key(key);
+			sealed += usize::from(pending.sealed);
+		}
 		segment.dead = Some(dead);
 		self.sealed += sealed;
 	}
@@ -540,7 +554,7 @@ impl Outbox {
 			match segment.order.pop_first() {
 				Some((_, key)) => {
 					let (_, pending) = segment.pending.remove(&key).expect("every queued route is pending");
-					if segment.dead.is_some() {
+					if pending.sealed {
 						self.sealed -= 1;
 					}
 					self.take(key, pending);
@@ -595,6 +609,7 @@ impl Outbox {
 					*last = floor;
 					None
 				}
+				None if pending.uncertified => None,
 				None => floor,
 			};
 			self.ready.push_back(Output::Batch {
@@ -1081,6 +1096,12 @@ impl Stream {
 	/// The peer sent DEAD.
 	pub fn dead(&self, dead: Dead) {
 		self.with(|router, key, now| router.dead(key, dead, now));
+	}
+
+	/// Whether the node applies a DEAD from the peer naming `hop` and `far`, as
+	/// [`Router::credits`] says; the node drops any other.
+	pub fn credits(&self, hop: Hop, far: Id) -> bool {
+		self.with(|router, key, _| router.credits(key, hop, far))
 	}
 
 	/// The peer sent GOAWAY: its routes rank below every other.

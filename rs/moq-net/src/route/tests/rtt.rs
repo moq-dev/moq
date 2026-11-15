@@ -83,7 +83,7 @@ fn an_unknown_link_ends_the_sum() {
 	assert!(sim.run());
 	assert_eq!(advertised(&sim, a, b, 7), ms(10));
 	assert_eq!(advertised(&sim, b, c, 7), None);
-	assert_eq!(route(&sim, c, 7).and_then(|(_, _, rtt)| rtt), None);
+	assert_eq!(route(&sim, c, 7), Some((Some(b), 3, None)));
 }
 
 /// The metric selects; a far lower RTT through a costlier link changes nothing.

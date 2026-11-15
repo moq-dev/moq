@@ -332,6 +332,19 @@ fn a_reader_behind_repeated_failures_overruns() {
 		outbox.dead(7, dead(publishers, true), &mut waiting);
 	}
 	assert!(outbox.known.is_empty(), "every route ended with its DEAD");
+
+	// Many routes through one hop queued unread, which one DEAD ends together: a
+	// single failure, however many routes it ends, never overruns.
+	let mut outbox = Outbox::default();
+	let routes = 4 * MAX_HOPS as u64;
+	for id in 1..=routes {
+		outbox.route(7, (id, Path::empty()), Some(Reach::Finite(offer(1))), &mut waiting);
+	}
+	outbox.dead(7, dead(1, true), &mut waiting);
+	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
+	let read = std::iter::from_fn(|| outbox.pop()).count() as u64;
+	assert_eq!(read, routes + 1, "each route's start, then the DEAD that ends it");
+	assert_eq!(outbox.sealed, 0, "everything read");
 }
 
 /// A claim started and withdrawn before the reader read it leaves nothing queued, so a
@@ -681,4 +694,46 @@ fn an_identity_travels_as_its_own_hop() {
 	let hops: BTreeSet<u64> = (0..256).map(|key| hop(QUALIFIED | key).id()).collect();
 	assert_eq!(hops.len(), 256, "one hop per key");
 	assert!(hops.iter().all(|id| (1..=GENERATED).contains(id)), "{hops:?}");
+}
+
+/// A claim held back for confirmation when a DEAD seals its batch goes after the DEAD
+/// once confirmed, so the sealed batch's floor certifies nothing: it cannot cover a
+/// claim read only later.
+#[test]
+fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
+	let offer = Offer {
+		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	};
+	let instance = Instance::random();
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let key = (1, Path::empty());
+	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
+	let changes = vec![
+		(p("live/x"), Some(claim(&instance, 0))),
+		(p("live/y"), Some(claim(&instance, 0))),
+	];
+	let awaits = |path: &Path, _: &Claim| Some(*path == p("live/y"));
+	outbox.batch(7, key.clone(), (changes, Some(5)), awaits, &mut waiting);
+	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
+	outbox.release(&key, &p("live/y"));
+
+	let batches: Vec<(Vec<Path>, Option<Rev>)> = (std::iter::from_fn(|| outbox.pop()))
+		.filter_map(|output| match output {
+			Output::Batch { changes, floor, .. } => Some((changes.into_iter().map(|(path, _)| path).collect(), floor)),
+			_ => None,
+		})
+		.collect();
+	assert_eq!(batches.len(), 2, "{batches:?}");
+	assert_eq!(
+		batches[0],
+		(vec![p("live/x")], None),
+		"sealed before live/y was confirmed"
+	);
+	assert_eq!(batches[1].0, [p("live/y")]);
 }

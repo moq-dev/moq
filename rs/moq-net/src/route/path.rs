@@ -680,8 +680,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// How `neighbor` names itself in a path: as it declared, else as the stream its
-	/// session's routes arrive on learned.
-	/// How `neighbor`'s peer names itself in a path, or 0 while this node has not learned it.
+	/// session's routes arrive on learned, or 0 while this node has learned neither.
 	pub fn hop_of(&self, neighbor: N) -> Id {
 		match self.sessions.get(&neighbor).map_or(0, |session| session.hop) {
 			0 => self
@@ -1146,6 +1145,23 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.run([id].into(), Vec::new(), Some(delta), BTreeMap::new(), Some(key));
 	}
 
+	/// Whether this node applies a DEAD from `from` naming `hop` and `far`: a peer only
+	/// reports hops it advertised to us, so one of the routes heard from it must cross
+	/// `hop` right after `far`. Binding the far node to that path keeps unrelated DEADs
+	/// from allocating hop or doubt state. Any other DEAD is dropped whole.
+	pub fn credits(&self, from: N, hop: Hop, far: Id) -> bool {
+		let credited = self.rx_hops.get(&hop).and_then(|peers| peers.get(&from));
+		credited.is_some_and(|keys| {
+			keys.iter().any(|key| {
+				self.rx[key][&from]
+					.offer
+					.path
+					.windows(2)
+					.any(|pair| pair[1] == hop && pair[0].node == far)
+			})
+		})
+	}
+
 	/// A [`Dead`] from `from`, at `now`.
 	pub fn dead(&mut self, from: N, dead: Dead, now: Instant) {
 		self.clock(now);
@@ -1191,18 +1207,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				return;
 			}
 		};
-		// A peer only reports hops it previously advertised to us. Also bind the far
-		// node to that path: unrelated DEADs must not allocate hop or doubt state.
-		let credited = self.rx_hops.get(&hop).and_then(|peers| peers.get(&from));
-		if !credited.is_some_and(|keys| {
-			keys.iter().any(|key| {
-				self.rx[key][&from]
-					.offer
-					.path
-					.windows(2)
-					.any(|pair| pair[1] == hop && pair[0].node == far)
-			})
-		}) {
+		if !self.credits(from, hop, far) {
 			return;
 		}
 		let mut filed = Vec::new();
@@ -1792,7 +1797,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		ids
 	}
 
-	// --- Internals: selection ---
 	// --- Internals: selection ---
 
 	/// Every identity this node keeps any state for.

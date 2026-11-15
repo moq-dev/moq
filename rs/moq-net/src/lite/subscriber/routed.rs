@@ -430,6 +430,17 @@ impl Routed {
 	fn dead(&mut self, dead: lite::Dead, decoder: &mut lite::AnnounceDecoder) -> Result<(), Error> {
 		let (hop, far, gone, more, moved) = match dead {
 			lite::Dead::Drain { node } => {
+				// The node ranks a scoped peer's routes through `node` draining by their
+				// offers alone, so the offers keep it for a new limit to file again.
+				if regions(&self.root, &self.permit).is_some() && node != self.node.hop() {
+					for route in self.routes.values_mut() {
+						if let Ok(offer) = &mut route.offer
+							&& offer.path.iter().any(|hop| hop.node == node)
+						{
+							offer.draining = true;
+						}
+					}
+				}
 				self.stream.dead(Dead::Draining { node });
 				return Ok(());
 			}
@@ -466,6 +477,10 @@ impl Routed {
 			self.continued = Some(parts);
 			return Ok(());
 		}
+		// The node applies only a DEAD it credits. One it drops still changes the stream's
+		// routes, as the peer applies it to what it sent, so the node then hears each
+		// change as the peer's own end, hold, or update, and both keep the same routes.
+		let credited = self.stream.credits(hop, far);
 		let mut offers = parts.offers;
 		let mut ids: Vec<u64> = (self.routes.iter())
 			.filter(|(_, route)| route.path().contains(&hop))
@@ -477,6 +492,8 @@ impl Routed {
 		let mut ended = Vec::new();
 		// Routes this node starts or stops refusing, told to the node after the DEAD.
 		let mut changed = Vec::new();
+		// What the DEAD changed of each route still live, for a node that drops it.
+		let mut touched = Vec::new();
 		for id in ids {
 			let route = self.routes.get_mut(&id).expect("listed above");
 			let before = route.reach();
@@ -492,17 +509,31 @@ impl Routed {
 							prefix: prefix.clone(),
 							offer,
 						}),
-						_ => changed.push((id, before)),
+						_ => changed.push((id, before.clone())),
 					}
+					touched.push((id, before));
 				}
 				None if gone => ended.push(id),
 				// The peer learned it from this node, which it holds under: unchanged.
 				None if child => {}
-				None => route.held = true,
+				None => {
+					route.held = true;
+					touched.push((id, before));
+				}
 			}
 		}
 		for id in ended {
-			self.end_route(id, decoder)?;
+			let route = self.end_route(id, decoder)?;
+			if let (false, Some(_), Some(prefix)) = (credited, route.reach(), route.prefix) {
+				self.stream.route(route.node, prefix, None);
+			}
+		}
+		if !credited {
+			tracing::debug!(?hop, far, "the node drops a DEAD no route from the peer credits");
+			for (id, before) in touched {
+				self.sync(id, before);
+			}
+			return Ok(());
 		}
 		self.stream.dead(Dead::Closed {
 			hop,

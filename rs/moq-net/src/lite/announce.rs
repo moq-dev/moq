@@ -349,7 +349,9 @@ fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 /// the path a later DEAD may name. An empty path is the sender's own error, since it
 /// names itself last. Hops past the limit, a hop naming Node ID 0, and a flag this node
 /// does not know refuse the offer: a newer flag may change what the route means, or add
-/// a field after the ones this node reads, so a refusal skips the rest of `r`.
+/// a field after the ones this node reads, so a refusal skips the rest of `r`. Of a path
+/// past the limit only the hops up to one past it are kept: a sender within the limit
+/// never sends one, and the whole would hold a body's worth for each route.
 fn decode_offer(r: &mut Decoder<'_>) -> Result<Heard, DecodeError> {
 	let count = r.varint()?;
 	if count == 0 {
@@ -359,7 +361,7 @@ fn decode_offer(r: &mut Decoder<'_>) -> Result<Heard, DecodeError> {
 	if count > (r.remaining() / 2) as u64 {
 		return Err(DecodeError::TooMany);
 	}
-	let path: Arc<[route::path::Hop]> = (0..count)
+	let path: Arc<[route::path::Hop]> = (0..count.min(route::MAX_HOPS as u64 + 1))
 		.map(|_| {
 			Ok(route::path::Hop {
 				node: r.varint()?,
@@ -2407,6 +2409,12 @@ mod tests {
 				start(1, Box::new(path(0, over, over, 1))),
 				named(1, hops(over, 1)),
 				Refusal::Hops(over),
+			),
+			// Far past the limit: only the hops up to one past it are kept.
+			(
+				start(1, Box::new(path(0, 4 * over, 4 * over, 1))),
+				named(1, hops(over, 1)),
+				Refusal::Hops(4 * over),
 			),
 			(
 				start(1, Box::new(path(0, 1, 1, 0))),
