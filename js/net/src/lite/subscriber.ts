@@ -2423,10 +2423,7 @@ export class Subscriber {
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
 			// for a late group anyway, and no longer than the publisher keeps one fresh.
-			tail: new Tail({
-				grace: () => hooks.tailGrace(producer),
-				bill: hooks.billTrack(producer),
-			}),
+			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
 			asked: [...ranges],
@@ -2898,7 +2895,7 @@ export class Subscriber {
 			track: producer,
 			compress: copy.compress,
 			timescale: copy.timescale,
-			tail: new Tail({ grace: () => hooks.tailGrace(producer), bill: hooks.billTrack(producer) }),
+			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
 			asked: ranges,
@@ -3348,9 +3345,6 @@ export class Subscriber {
 				// and a reader that wants it fills it meanwhile.
 				if (stale && update < entry.update) continue;
 				this.#reoffered(entry.track, start, end);
-				// Asked before this drop is accounted: what a fold forgot finishing that the ledger
-				// already accounted may be a stream this drop overtook.
-				const overtaken = stale ? entry.tail.overtaken(start, end) : [];
 				// Lite-07 tells a stream a final drop overtook from one whose gap the grace gave up on.
 				if (!stale && hasYield(this.version)) entry.tail.drop(start, end);
 				else entry.tail.account(start, end);
@@ -3365,10 +3359,9 @@ export class Subscriber {
 				// A final drop is never reopened, even where it replaces a stale one. A sequence
 				// already skipped stays skipped, and one whose group arrived keeps it, so no update
 				// reopens either.
-				// Owed again by the next update, save what a stream may have won.
-				const owed = overtaken.reduce((runs, run) => removeRun(runs, run.start, run.end), recorded);
+				// Owed again by the next update.
 				entry.stale = stale
-					? owed.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
+					? recorded.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
 					: removeRun(entry.stale ?? [], start, end);
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
