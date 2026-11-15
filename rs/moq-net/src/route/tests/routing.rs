@@ -1925,11 +1925,12 @@ fn a_starving_relay_keeps_forwarding_the_newer_seqno_its_requester_asked_for() {
 fn a_path_route_whose_cost_overflows_is_let_go() {
 	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
 	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
 	let hops = [(7, 0), (1, 1)];
-	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, 1))), 0);
-	router.batch(1, 7, p(""), vec![(p("live/x"), Some(1))], Some(1), 0);
+	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, 1))));
+	router.batch(1, 7, p(""), vec![(p("live/x"), Some(1))], Some(1));
 	assert!(router.shown()[&(7, p("live/x"))].available);
-	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, Metric::MAX))), 0);
+	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, Metric::MAX))));
 	assert_eq!(router.route_for(7, &p("")), None);
 	assert!(router.shown().is_empty());
 }
@@ -1949,17 +1950,19 @@ fn a_qualified_route_is_not_returned_to_a_scoped_neighbour_it_crossed() {
 	let (near, far) = (2, 3);
 	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
 	router.connect(near, near as Id, grant()).unwrap();
+	router.edited(near);
 	router.connect(far, far as Id, grant()).unwrap();
+	router.edited(far);
 	// The near neighbour offers the raw key from the publisher, and the far one a
 	// cheaper path through the near one.
 	let direct = along(&[(7, 0), (near as Id, 1)], 5);
-	router.route(near, 7, p("a"), Some(path::Reach::Finite(direct)), 0);
+	router.route(near, 7, p("a"), Some(path::Reach::Finite(direct)));
 	let through = along(&[(7, 0), (near as Id, 1), (far as Id, 1)], 1);
-	router.route(far, 7, p("a"), Some(path::Reach::Finite(through)), 0);
-	router.batch(far, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	router.route(far, 7, p("a"), Some(path::Reach::Finite(through)));
+	router.batch(far, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1));
 	let key = qualified("ga", 7);
 	assert_eq!(router.route_for(key, &p("a")).and_then(path::Route::next), Some(far));
-	router.peer_interest(near, Some(p("a"))).unwrap();
+	reask(&mut router, near, &["a"]).unwrap();
 	let messages = router.drain();
 	assert!(
 		!messages
@@ -1980,13 +1983,15 @@ fn a_down_only_route_inside_an_upstreams_interest_is_not_sent_there() {
 	let (asker, source) = (1, 3);
 	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
 	router.connect(asker, asker as Id, upstream.clone()).unwrap();
+	router.edited(asker);
 	router.connect(source, source as Id, upstream).unwrap();
+	router.edited(source);
 	let offer = along(&[(7, 0), (source as Id, 1)], 1);
-	router.route(source, 7, p("a"), Some(path::Reach::Finite(offer)), 0);
-	router.batch(source, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	router.route(source, 7, p("a"), Some(path::Reach::Finite(offer)));
+	router.batch(source, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1));
 	let route = router.route_for(7, &p("a")).and_then(path::Route::offer);
 	assert!(route.is_some_and(|offer| offer.down_only));
-	router.peer_interest(asker, Some(p(""))).unwrap();
+	reask(&mut router, asker, &[""]).unwrap();
 	let messages = router.drain();
 	assert!(
 		!messages
@@ -2004,13 +2009,14 @@ fn a_dead_alternative_does_not_keep_a_lost_route_held() {
 	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
 	}
 	// Both paths cross the session node 6 opened to node 4.
 	let hop = path::Hop { node: 4, session: 1 };
 	for (peer, metric) in [(1, 1), (2, 5)] {
 		let offer = along(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)], metric);
-		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)), 0);
-		router.batch(peer, 7, p(""), vec![(p("live/x"), Some(1))], Some(1), 0);
+		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)));
+		router.batch(peer, 7, p(""), vec![(p("live/x"), Some(1))], Some(1));
 	}
 	assert_eq!(router.route_for(7, &p("")).and_then(path::Route::next), Some(1));
 	let dead = path::Dead::Closed {
