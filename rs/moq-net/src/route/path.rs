@@ -333,7 +333,8 @@ impl Suspicion {
 }
 
 /// What this node last sent a neighbour for a route. `src` remains after END
-/// while a child may still answer, but an ended route holds no offer or claims.
+/// while this node has that route, since the neighbour may still offer it back
+/// and answer its loss, but an ended route holds no offer or claims.
 #[derive(Clone, Debug)]
 struct Sent<A> {
 	src: Path,
@@ -3093,14 +3094,17 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 		}
-		// Only entries visited above can have ended in this update.
+		// Only entries visited above can have ended in this update. An ended entry keeps
+		// its source while this node has the route it reflected: the neighbour may offer
+		// that route back, sent before it heard the END, and losing it waits for the
+		// answer. With no such route, nothing asks, so the entry goes.
 		for (peer, prefixes) in planned {
 			for prefix in prefixes {
 				let key = (id, prefix);
 				let Some(sent) = self.answering[&peer].tx.get(&key) else {
 					continue;
 				};
-				if sent.offer().is_some() || self.child_pending(id, peer, &key.1) {
+				if sent.offer().is_some() || self.routes.contains_key(&(id, sent.src.clone())) {
 					continue;
 				}
 				let src = sent.src.clone();

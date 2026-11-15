@@ -1802,3 +1802,53 @@ fn an_ended_stream_waits_on_the_route_it_reflected_last() {
 		router.dump()
 	);
 }
+
+/// A neighbour whose stream ended still owes an answer if its offer back was sent
+/// before it heard the END: the offer arrives after, and losing the route holds it
+/// until the neighbour answers, as for a child that offered before the END.
+#[test]
+fn an_ended_stream_waits_on_a_child_whose_offer_arrives_after_the_end() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(1, 7, p(""), Some(through(1)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1)), (p("b/x"), Some(1))], Some(1));
+	reask(&mut router, 1, &[""]).unwrap();
+	reask(&mut router, 2, &["b"]).unwrap();
+	reask(&mut router, 3, &[""]).unwrap();
+	router.route(
+		3,
+		7,
+		p(""),
+		Some(reach(&[(7, 0), (6, 1), (4, 1), (1, 1), (99, 3), (3, 1)])),
+	);
+	// Not a child: its path names another node past this one.
+	router.route(2, 7, p("b"), Some(reach(&[(7, 0), (99, 9), (5, 1), (2, 1)])));
+	// The "b" stream to peer 2 ends.
+	router.batch(1, 7, p(""), vec![(p("b/x"), None)], Some(2));
+	router.dead(1, closed(Vec::new(), false), Instant::ZERO);
+	// Peer 2's offer back, sent before the END reached it.
+	router.route(
+		2,
+		7,
+		p("b"),
+		Some(reach(&[(7, 0), (6, 1), (4, 1), (1, 1), (99, 2), (2, 1)])),
+	);
+	router.drain();
+	router.route(3, 7, p(""), None);
+	assert_eq!(sent_to(&mut router, 1), [], "peer 2 still owes an answer");
+	router.route(2, 7, p("b"), None);
+	let end = path::Out::Route {
+		to: 1,
+		id: 7,
+		prefix: p(""),
+		reach: None,
+	};
+	assert_eq!(sent_to(&mut router, 1), [end], "answered: {}", router.dump());
+	// Once the route is gone, no ended stream keeps its source.
+	router.timeout(Instant::ZERO.saturating_add(path::HOLD));
+	assert_eq!(router.routes(7).count(), 0, "{}", router.dump());
+	assert!(!router.dump().contains("sent {("), "{}", router.dump());
+}
