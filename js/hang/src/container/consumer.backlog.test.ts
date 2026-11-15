@@ -135,6 +135,7 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 	const raced = new Proxy(subscriber, {
 		get(target, key) {
 			if (key === "start") return () => started.then(() => undefined);
+			if (key === "info") return () => started.then(() => ({}));
 			if (key === "largest") return async () => ({ group: answered ? 200n : 150n, frame: 0 });
 			const value = Reflect.get(target, key, target);
 			return typeof value === "function" ? value.bind(target) : value;
@@ -178,11 +179,13 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 });
 
 test("the join's boundary is the publisher's answer, not the largest by the first group", async () => {
-	// The publisher answers that it stood at group 200, then groups up to 210 land before the first
-	// reaches this consumer. Group 205 then arrives below the cursor: produced after the subscription
-	// began, so it is no backlog, unlike group 160.
+	// The start resolves before the subscription is established, while the largest still names cached
+	// group 150. The publisher answers that it stood at group 200, then groups up to 210 land before
+	// the first reaches this consumer. Group 205 then arrives below the cursor: produced after the
+	// subscription began, so it is no backlog, unlike group 160.
 	const track = new Track.Producer("audio");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
+	let answered = false;
 	let advanced = false;
 	let answer!: () => void;
 	const started = new Promise<void>((resolve) => {
@@ -190,8 +193,9 @@ test("the join's boundary is the publisher's answer, not the largest by the firs
 	});
 	const raced = new Proxy(subscriber, {
 		get(target, key) {
-			if (key === "start") return () => started.then(() => undefined);
-			if (key === "largest") return async () => ({ group: advanced ? 210n : 200n, frame: 0 });
+			if (key === "start") return async () => undefined;
+			if (key === "info") return () => started.then(() => ({}));
+			if (key === "largest") return async () => ({ group: advanced ? 210n : answered ? 200n : 150n, frame: 0 });
 			const value = Reflect.get(target, key, target);
 			return typeof value === "function" ? value.bind(target) : value;
 		},
@@ -212,6 +216,8 @@ test("the join's boundary is the publisher's answer, not the largest by the firs
 		group.finish();
 	};
 	try {
+		await clock.advance(Duration.ZERO);
+		answered = true;
 		answer();
 		await clock.advance(Duration.ZERO);
 		advanced = true;

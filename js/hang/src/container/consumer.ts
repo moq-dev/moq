@@ -1,6 +1,6 @@
 import { Duration, Instant, now } from "@moq/clock";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
+import { Effect, type Getter, type GetterInit, getter, Once, race, Signal } from "@moq/signals";
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
@@ -260,6 +260,8 @@ export class Consumer {
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
+	// Set once the first group arrived, which establishes the subscription like its info.
+	#tuned = new Once<true>();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
@@ -275,9 +277,11 @@ export class Consumer {
 
 		// Where the publisher stood as the subscription began, read as soon as its answer resolves the
 		// start: after it rather than from a cached group that raced it, and before live groups landing
-		// later raise the largest past it. Off the delivery path: a range capped below the largest never
+		// later raise the largest past it. The start says only once the info or a first group shows the
+		// subscription established. Off the delivery path: a range capped below the largest never
 		// reports one, which reports no backlog rather than stalling delivery.
 		this.#signals.spawn(async () => {
+			await race([this.#track.info().catch(() => undefined), this.#tuned]);
 			await this.#track.start();
 			this.#joined = (await this.#track.largest())?.group;
 		});
@@ -318,6 +322,7 @@ export class Consumer {
 				// newest first, so the first arrival is not the oldest served; without either it stands
 				// in. Mirrors Rust's `Consumer::poll_read`.
 				if (this.#active === undefined) {
+					this.#tuned.set(true);
 					const floor = this.#track.floor();
 					const served = await this.#track.start();
 					const start = served !== undefined && (floor === undefined || served > floor) ? served : floor;
