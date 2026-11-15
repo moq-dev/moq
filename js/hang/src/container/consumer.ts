@@ -94,6 +94,8 @@ export interface ConsumerProps {
 export interface Playhead {
 	/** The media time presenting now, or undefined while nothing presents. */
 	now(): Duration | undefined;
+	/** Changes whenever {@link Playhead.now} jumps rather than advancing with the wall clock: a re-anchor, a new delay, or a pause. */
+	readonly anchor: Getter<unknown>;
 }
 
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
@@ -1067,6 +1069,8 @@ export class Consumer {
 				timer = new Effect();
 				timer.run((effect) => {
 					const delay = effect.get(this.#delay);
+					// A clock that jumps moves when it reaches the group past a hole.
+					if (this.#playhead) effect.get(this.#playhead.anchor);
 					// The start waits out its reach, and a hole the wait, which an unlimited one never does.
 					const budget =
 						starting === undefined ? this.#holeWait(delay, effect.get(this.#wait)) : this.#reach(delay);

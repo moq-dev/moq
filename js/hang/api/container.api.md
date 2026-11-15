@@ -81,6 +81,7 @@ export * as Loc from "@moq/loc";
 export const MAX_AGE: Net.Clock.Duration;
 
 export interface Playhead {
+	readonly anchor: Signals.Getter<unknown>;
 	now(): Net.Clock.Duration | undefined;
 }
 
