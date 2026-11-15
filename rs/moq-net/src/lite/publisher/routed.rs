@@ -758,6 +758,13 @@ impl Answer {
 		path.strip_prefix(self.prefix.as_ref()?)
 	}
 
+	/// How many segments the peer's path for the absolute `path` has: the most a claim shown
+	/// there can be above it, since a claim above the handle's root covers the whole of what
+	/// the peer sees.
+	fn depth(&self, path: &Path) -> u64 {
+		path.parts().count().saturating_sub(self.origin.root().parts().count()) as u64
+	}
+
 	/// Whether the peer is shown the claim at the absolute `path`.
 	fn shows(&self, path: &Path) -> bool {
 		let Some(suffix) = self.suffix(path) else {
@@ -781,6 +788,7 @@ impl Answer {
 			.map(|claim| claim.chain.clone())
 			.unwrap_or_default();
 		let claim_key = (key.clone(), path);
+		let depth = self.depth(&claim_key.1);
 		match (self.live.get_mut(&claim_key), wanted) {
 			(None, Some(claim)) => {
 				let wire = self.start(stream, key)?;
@@ -794,7 +802,7 @@ impl Answer {
 					epoch: claim.epoch,
 					hops: chain,
 					cost: origin::Cost::new(claim.cost),
-					above: claim.above,
+					above: claim.above.min(depth),
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(claim_key, (announce, claim));
@@ -803,8 +811,9 @@ impl Answer {
 			(Some((announce, held)), Some(claim)) => {
 				let announce = *announce;
 				let restart = held.instance != claim.instance || held.epoch != claim.epoch;
-				let update =
-					held.cost != claim.cost || held.above != claim.above || (self.chains && held.chain != claim.chain);
+				let update = held.cost != claim.cost
+					|| held.above.min(depth) != claim.above.min(depth)
+					|| (self.chains && held.chain != claim.chain);
 				if restart {
 					tracing::debug!(route = %claim_key.1, "restart");
 					stream.writer.buffer(&Msg::Restart {
@@ -813,14 +822,14 @@ impl Answer {
 						epoch: claim.epoch,
 						cost: origin::Cost::new(claim.cost),
 						hops: chain,
-						above: claim.above,
+						above: claim.above.min(depth),
 					})?;
 				} else if update {
 					stream.writer.buffer(&Msg::Update {
 						id: announce,
 						hops: chain,
 						cost: origin::Cost::new(claim.cost),
-						above: claim.above,
+						above: claim.above.min(depth),
 					})?;
 				}
 				self.live.insert(claim_key, (announce, claim));

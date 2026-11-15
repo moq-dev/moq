@@ -10544,6 +10544,11 @@ mod tests {
 	/// An ANNOUNCE_START body on route 0 whose suffix keeps `keep` segments of the claim
 	/// `base` Announce IDs back.
 	fn based_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8]) -> Vec<u8> {
+		above_start_body(base, keep, path, instance, 0)
+	}
+
+	/// The same body for a claim `above` segments broader than the path it is shown at.
+	fn above_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8], above: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		let w = &mut crate::coding::Encoder::new(&mut body, Version::Lite07.into());
 		w.varint(base).unwrap();
@@ -10554,7 +10559,7 @@ mod tests {
 		w.bool(false);
 		w.varint(0).unwrap();
 		w.varint(0).unwrap();
-		w.varint(0).unwrap();
+		w.varint(above).unwrap();
 		body
 	}
 
@@ -10679,6 +10684,40 @@ mod tests {
 		cursor.assert_next_active("c");
 		cursor.assert_next_wait();
 		assert_eq!(refusals(&registry), 1);
+	}
+
+	/// A claim shown below the requested prefix may still be broader than its path, as a
+	/// relay forwards one it learned from a narrower stream; one broader than its path has
+	/// segments cannot be, and closes the session.
+	#[kio::test]
+	async fn a_claim_above_its_path_stays_within_the_path() {
+		let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
+		let (mut prefix, consumer) = root_prefix(Version::Lite07, session.clone());
+		let mut cursor = consumer.routes();
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.assert_next_active("a");
+		cursor.assert_next_active("b");
+		session.push(&announce_script(
+			Version::Lite07,
+			&[
+				&raw(ANNOUNCE_START, above_start_body(0, 0, b"x/y", b"i", 2)),
+				&floor(0, Some(1)),
+			],
+		));
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.assert_next_active("x/y");
+
+		let mut script = two_routes();
+		script.extend(announce_script(
+			Version::Lite07,
+			&[&raw(ANNOUNCE_START, above_start_body(0, 0, b"x/y", b"i", 3))],
+		));
+		let (mut prefix, _consumer) = root_prefix(
+			Version::Lite07,
+			crate::lite::test_transport::ScriptedSession::new(script),
+		);
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation), "{err}");
 	}
 
 	/// Only the neighbour's own framing and state close the session: a refused route

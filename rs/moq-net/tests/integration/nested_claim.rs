@@ -110,3 +110,26 @@ async fn a_nested_broadcast_wins_over_the_claim_above_it() {
 		);
 	}
 }
+
+/// A claim at the origin's root, exported through a handle rooted at `tenant`, covers all the
+/// peer sees: at the peer's empty prefix it is no broader than the prefix is deep, so the peer
+/// keeps the session.
+#[kio::test]
+async fn a_claim_above_a_rooted_export_keeps_the_session() {
+	let relay = produce_origin(1);
+	let source = produce_origin(10);
+	let _published = publish(&source, "", "root");
+
+	let mut options = MockConnectOptions::new(lite07());
+	options.server_publish = Some(
+		source
+			.consume()
+			.scope("tenant", &Patterns::from(Pattern::all()))
+			.unwrap(),
+	);
+	options.client_subscribe = Some(relay.clone());
+	let pair = connect_mock(options).await;
+	settle().await;
+	assert_eq!(pair.client_transport.close_reason(), None);
+	assert_eq!(pair.server_transport.close_reason(), None);
+}

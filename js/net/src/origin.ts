@@ -26,6 +26,7 @@ import {
 	firstEligible,
 	hiddenBelow,
 	hooks,
+	mostSpecific,
 	routeHops,
 	scopeCaptures,
 	scopeHead,
@@ -1142,19 +1143,21 @@ class OriginState {
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		const routes = this.routes.peek();
 		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
-		for (const prefix of coveringPrefixes(path)) {
-			const entries = routes.get(prefix);
-			if (!entries) continue;
-			const entry = preferredEntry(
-				path,
-				prefix,
-				entries,
-				(candidate) => !admits(candidate, prefix, path) || (skip?.(candidate) ?? false),
-				prefix === path && local ? [local] : [],
-			);
-			if (entry) return entry;
-		}
-		return undefined;
+		return mostSpecific(
+			path,
+			(prefix) => {
+				const entries = routes.get(prefix);
+				if (!entries) return undefined;
+				return preferredEntry(
+					path,
+					prefix,
+					entries,
+					(candidate) => !admits(candidate, prefix, path) || (skip?.(candidate) ?? false),
+					prefix === path && local ? [local] : [],
+				);
+			},
+			(entry) => entry.route.peek(),
+		);
 	}
 
 	/**

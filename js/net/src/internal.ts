@@ -1465,6 +1465,32 @@ export function bestCandidate<T>(
 	return best;
 }
 
+/**
+ * What `pick` finds at the most specific claim covering `path`: it picks at each covering prefix,
+ * deepest first, and a claim shown above its own prefix counts for the shallower prefix it is
+ * really at. Of claims as specific as each other the deepest prefix wins. Mirrors
+ * `RouteTable::best_route` in rs/moq-net.
+ */
+export function mostSpecific<T>(
+	path: Path.Valid,
+	pick: (prefix: Path.Valid) => T | undefined,
+	route: (found: T) => WireRoute,
+): T | undefined {
+	let best: T | undefined;
+	let bestSpecificity = -1;
+	let depth = Path.parts(path).length;
+	for (const prefix of coveringPrefixes(path)) {
+		const found = pick(prefix);
+		const specificity = found === undefined ? 0 : depth - Number(route(found).above ?? 0n);
+		if (found !== undefined && specificity > bestSpecificity) {
+			best = found;
+			bestSpecificity = specificity;
+		}
+		depth--;
+	}
+	return best;
+}
+
 /** Covering prefixes, most specific first, including the empty root. */
 export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
 	for (;;) {

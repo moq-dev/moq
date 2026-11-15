@@ -619,14 +619,13 @@ impl Routed {
 		self.stream.batch(node, prefix, changes, revision);
 	}
 
-	/// The peer's `above` for the claim at `path`, if it can be: only a claim presented at
-	/// the requested prefix itself can be broader than its path, and by no more than the
-	/// path has segments.
+	/// The peer's `above` for the claim at `path`, if it can be: a claim is no more than its
+	/// path's segments broader than the path it is shown at.
 	fn above(&self, path: Option<&Path>, above: u64) -> Result<u64, Error> {
 		let Some(path) = path else {
 			return Ok(above);
 		};
-		match above == 0 || *path == self.prefix && above <= path.parts().count() as u64 {
+		match above <= path.parts().count() as u64 {
 			true => Ok(above),
 			false => Err(Error::ProtocolViolation),
 		}

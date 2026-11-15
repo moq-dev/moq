@@ -1364,13 +1364,12 @@ export class Subscriber {
 			for (const path of wire.view.claims.keys()) if (byPath.get(path)?.size === 0) byPath.delete(path);
 		};
 
-		// The peer's `above` for the claim at `path`, if it can be: only a claim presented at the
-		// requested prefix itself can be broader than its path, and by no more than the path has
-		// segments. Mirrors rs/moq-net's `Routed::above`.
+		// The peer's `above` for the claim at `path`, if it can be: a claim is no more than its
+		// path's segments broader than the path it is shown at. Mirrors rs/moq-net's `Routed::above`.
 		const aboveOf = (path: Path.Valid | undefined, above: bigint | undefined): bigint => {
 			const value = above ?? 0n;
 			if (path === undefined || value === 0n) return value;
-			if (path !== prefix || value > BigInt(Path.parts(path).length))
+			if (value > BigInt(Path.parts(path).length))
 				throw new ProtocolViolation(`a claim at ${path} cannot be ${value} segments above it`);
 			return value;
 		};

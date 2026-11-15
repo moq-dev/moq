@@ -6,7 +6,7 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { chainHash, compareRouteCandidates, presented, rendezvousHash, spreadHash } from "./internal.ts";
+import { chainHash, compareRouteCandidates, mostSpecific, presented, rendezvousHash, spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -2133,6 +2133,32 @@ test("a claim nearer its path outranks a broader one", () => {
 	expect(compareRouteCandidates(path, path, exact, broad)).toBeLessThan(0);
 	expect(compareRouteCandidates(path, path, broad, exact)).toBeGreaterThan(0);
 	expect(compareRouteCandidates(path, path, exact, { ...broad, above: 0n })).toBeGreaterThan(0);
+});
+
+// A claim shown above its own prefix is filed deeper than it is: it counts for where it really is,
+// so a broad claim shown deep never beats the more specific claim filed shallower.
+test("the most specific claim wins whichever prefix shows it", () => {
+	const path = Path.from("src/a/b/c");
+	const broad = { ...WireRoute.default, node: 1n, above: 2n };
+	const exact = { ...WireRoute.default, node: 2n };
+	const at = new Map([
+		[Path.from("src/a/b"), broad],
+		[Path.from("src/a"), exact],
+	]);
+	const pick = (prefix: Path.Valid) => at.get(prefix);
+	expect(mostSpecific(path, pick, (route) => route)).toBe(exact);
+	// Claims as specific as each other go to the deepest prefix.
+	const same = new Map([
+		[Path.from("src/a/b"), { ...WireRoute.default, node: 3n, above: 1n }],
+		[Path.from("src/a"), exact],
+	]);
+	expect(
+		mostSpecific(
+			path,
+			(prefix) => same.get(prefix),
+			(route) => route,
+		)?.node,
+	).toBe(3n);
 });
 
 // A lite-07 claim ranks as the one hop to its origin node in what the origin announces, as in

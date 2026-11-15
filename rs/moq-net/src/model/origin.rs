@@ -1434,6 +1434,13 @@ struct RouteEntry {
 }
 
 impl RouteEntry {
+	/// How many segments the claim's own prefix has: the entry's, less how far above it the
+	/// claim was shown. The most specific claim covering a path wins, however deep the entry
+	/// that shows it is filed.
+	fn specificity(&self) -> usize {
+		(self.prefix.parts().count()).saturating_sub(usize::from(self.lane.above))
+	}
+
 	/// Whether the announcing producer may serve the absolute `path`.
 	fn authorizes(&self, path: &Path) -> bool {
 		self.scope.matches(path.as_str()) && !self.excluded.iter().any(|excluded| path.has_prefix(excluded))
@@ -1881,15 +1888,21 @@ impl TableCursor {
 		}
 	}
 
-	/// The visible entry among `candidates` that presents here: the longest prefix,
-	/// then the first eligible one in [`route_order`].
+	/// The visible entry among `candidates` that presents here: the most specific claim,
+	/// the deepest where claims tie, then the first eligible one in [`route_order`].
 	fn best<'a>(&self, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
 		let visible = candidates.filter(|entry| self.visible(entry));
 		let epochs = Epochs::of(visible.clone());
 		visible
 			.clone()
 			.filter(|entry| !epochs.superseded(entry))
-			.min_by_key(|entry| (Reverse(entry.prefix.len()), route_order(&entry.prefix, entry)))
+			.min_by_key(|entry| {
+				(
+					Reverse(entry.specificity()),
+					Reverse(entry.prefix.len()),
+					route_order(&entry.prefix, entry),
+				)
+			})
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -6065,9 +6078,11 @@ impl RouteTable {
 	) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
-		// node decides.
+		// node decides. A claim shown above its own prefix is filed deeper than it
+		// is, so a node whose best claim is less specific than the one decided above
+		// it does not take over.
 		let (above, at) = self.split(path);
-		let mut best = None;
+		let mut best: Option<(usize, Option<&RouteEntry>)> = None;
 		for node in above.into_iter().chain(at) {
 			let mut candidates = node
 				.entries
@@ -6080,14 +6095,25 @@ impl RouteTable {
 				.peekable();
 			if candidates.peek().is_some() {
 				let epochs = Epochs::of(candidates.clone());
-				best = candidates
+				// The node's most specific candidate speaks for it, serving or not: one
+				// that refuses the path still shadows what is broader.
+				let specificity = candidates
+					.clone()
+					.map(RouteEntry::specificity)
+					.max()
+					.unwrap_or_default();
+				if best.is_some_and(|(decided, _)| specificity < decided) {
+					continue;
+				}
+				let found = candidates
 					.clone()
 					.filter(|entry| entry.serves(path))
 					.filter(|entry| !epochs.superseded(entry))
 					.min_by_key(|entry| route_order(path, entry));
+				best = Some((specificity, found));
 			}
 		}
-		best
+		best.and_then(|(_, found)| found)
 	}
 
 	/// The nodes above `path` and the node at it, as far as the table has them.
@@ -10669,6 +10695,37 @@ mod tests {
 		assert!(
 			demoted.poll_requested(&kio::Waiter::noop()).is_pending(),
 			"the cheaper path through a demoted link must not serve"
+		);
+	}
+
+	/// The most specific claim wins whichever prefix shows it: a claim for `src` shown at
+	/// `src/a/b` is deeper in the table than one for `src/a` shown at its own prefix, yet
+	/// broader, so it must not take the request the more specific claim's publisher serves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn request_prefers_the_more_specific_claim_whichever_prefix_shows_it() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let route = |node, above, cost| {
+			RouteInfo::new()
+				.with_hops(hops(&[node]))
+				.with_node(Some(node))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+				.with_cost(cost)
+		};
+
+		let broad = producer.forward("src/a/b", route(10, 2, 1)).unwrap();
+		let exact = producer.forward("src/a", route(11, 0, 5)).unwrap();
+
+		let _pending = consumer.request("src/a/b/c", None);
+		let request = queued(&exact).await;
+		assert_eq!(request.path().as_str(), "src/a/b/c");
+		assert!(
+			broad.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"the broader claim must not serve what a more specific one covers"
 		);
 	}
 
