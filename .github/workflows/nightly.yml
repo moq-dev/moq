@@ -37,8 +37,11 @@ name: Nightly
 #
 # `tla` model-checks every TLA+ config: TLC explores every ordering a model
 # allows, which takes minutes per config, and a model only changes when the code
-# it covers does, which review checks (see REVIEW.md). It also fails when an
-# open finding's config starts passing, so the fix promotes its rule.
+# it covers does, which review checks (see REVIEW.md). A config whose inputs fix
+# its result, as with an exhaustive model or a pinned seed, reruns only when its
+# spec, config, or TLC changed; a simulation without a seed runs every night. It
+# also fails when an open finding's config starts passing, so the fix promotes
+# its rule.
 #
 # Main PRs run only the landing gate's selection as a signal, so every
 # path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
@@ -474,9 +477,20 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/nix
+      # Passing results, one marker per config (see sh/tla.sh). The key changes
+      # with anything a result reads, so a hit means nothing needs saving; a miss
+      # starts from the last markers and saves them only if the leg passes.
+      - name: Restore passing results
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tmp/tla-cache
+          key: tla-v1-${{ strategy.job-index }}-${{ hashFiles('rs/**/verify/**', 'js/**/verify/**', 'sh/tla.sh', 'sh/tlc.py', 'flake.lock') }}
+          restore-keys: tla-v1-${{ strategy.job-index }}-
       # No dev shell: the recipes fetch TLC themselves.
       - name: Model-check
         run: nix shell --inputs-from . nixpkgs#just --command just test tla ${{ matrix.paths }}
+        env:
+          TLA_CACHE: .tmp/tla-cache
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has
