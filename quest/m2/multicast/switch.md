@@ -76,4 +76,3 @@ Public API: the per-link `proxy` switch, if removed. Wire: lite-07-wip only.
 ## Required
 
 - [The router](/quest/m2/multicast/router.md) - the rule these sessions drive
-- [The route stream](/quest/m2/cluster-routes/route-stream.md) - one announce stream per side, which this builds on

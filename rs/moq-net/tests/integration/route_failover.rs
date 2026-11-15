@@ -323,7 +323,8 @@ const MOVE: u64 = 75;
 ///
 /// Proves the reader gets every frame once, in order, with its subscription intact; that
 /// `R` and `D` each show the moves as updates in place, never a retraction, a restart, or
-/// an unavailable route; and that each move costs `D` one ROUTE message.
+/// an unavailable route; and that each move costs `D` one ROUTE_UPDATE, behind a DEAD when
+/// a closed session caused it.
 #[kio::test]
 async fn next_hop_moves_keep_a_live_reader() {
 	let links = Links::new();
@@ -375,7 +376,8 @@ async fn next_hop_moves_keep_a_live_reader() {
 		);
 		assert_eq!(seen.len(), 5, "{node}: one update per move: {seen:?}");
 	}
-	assert_eq!(sent.get("r-d"), Some(&4), "one ROUTE message per move: {sent:?}");
+	// Four ROUTE_UPDATEs, and a DEAD before each of the two moves a closed session caused.
+	assert_eq!(sent.get("r-d"), Some(&6), "one ROUTE_UPDATE per move: {sent:?}");
 	drop(broadcast);
 }
 

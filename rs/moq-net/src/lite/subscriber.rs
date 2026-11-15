@@ -1461,6 +1461,10 @@ impl Drop for SubscriberDriver {
 		// `abort` already recorded a session error when the driver failed. A driver
 		// dropped without that still has to name an end before its setup machines drop.
 		self.subscriber.note_end(&Error::Cancel);
+		// The route stream disconnects before `cleanup` aborts what is still subscribed, so
+		// the routes through this session have left the route layer by the time a reader
+		// sees its copy fail, and a front fails over rather than ending.
+		self.routes = None;
 	}
 }
 
