@@ -22,7 +22,9 @@ children for the causes nothing owned.
 
 This README's own work, after the children:
 
-- Confirm a scheduled run on `main` passes; never dispatch Nightly. Failures
+- Confirm a scheduled run on `main` passes; never dispatch Nightly. A
+  triage counts a cancelled job as failed: a workload that overruns fails at
+  its step's timeout, so a job cancelled at its own timeout hung outside it. Failures
   already owned elsewhere stay there: the audio near-zero p95 row belongs to
   [audio playout](/quest/m2/audio-playout/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
