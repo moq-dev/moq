@@ -1194,7 +1194,7 @@ fn deferred_accept_uses_handshake_idle_timeout() {
 	pair.time = start.saturating_add(Duration::from_secs(3));
 	assert!(pair.server.try_accept(delayed, pair.time).is_ok());
 
-	pair.time = start.saturating_add(Duration::from_secs(10));
+	pair.time = start.saturating_add(transport::Config::default().handshake_timeout);
 	assert_matches!(pair.server.try_accept(late, pair.time), Err(ConnectionError::TimedOut));
 }
 

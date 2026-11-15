@@ -533,7 +533,7 @@ fn an_unroutable_dial_fails_alone() {
 	let unroutable = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), port);
 	worker
 		.block_on(async move {
-			// Well inside the 10s handshake timeout a swallowed error waits for.
+			// Well inside the 30s handshake timeout a swallowed error waits for.
 			match within(
 				&handle,
 				"the unroutable dial to fail",
