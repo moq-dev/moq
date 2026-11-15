@@ -27,11 +27,7 @@ for (const touched of ["watched", "unrelated"])
 		for (const followers of [1, 8, 32]) {
 			const origin = new Producer();
 			const path = Path.from("room/0");
-			const broadcasts = Array.from({ length: routes }, (_, i) => {
-				const broadcastRoute = origin.route(Path.from(`room/${i}`));
-				const broadcast = broadcastRoute.broadcast;
-				return broadcast;
-			});
+			const broadcasts = Array.from({ length: routes }, (_, i) => origin.route(Path.from(`room/${i}`)));
 			const requests = Array.from({ length: followers }, () => origin.follow(path));
 			await settle();
 			let current = broadcasts[0];
@@ -40,8 +36,7 @@ for (const touched of ["watched", "unrelated"])
 			for (let round = 0; round < 6; round++) {
 				const start = performance.now();
 				for (let i = 0; i < 128; i++) {
-					const nextRoute = origin.route(touched === "watched" ? path : Path.from("other"));
-					const next = nextRoute.broadcast;
+					const next = origin.route(touched === "watched" ? path : Path.from("other"));
 					if (touched === "watched") {
 						current.close();
 						current = next;
@@ -50,8 +45,9 @@ for (const touched of ["watched", "unrelated"])
 						unrelated = next;
 					}
 					await settle();
+					// A follower reads its own consumer of the route's broadcast, so match the instance.
 					for (const request of requests)
-						if (request.active.peek()?.closed !== current.closed)
+						if (request.active.peek()?.instance !== current.instance)
 							throw new Error("wrong publisher instance");
 				}
 				if (round > 0) samples.push(((performance.now() - start) * 1000) / 128);
@@ -142,7 +138,8 @@ for (const failovers of [0, 1, 16, 128])
 				const primary = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 0n });
 				const ar = primary.requested();
 				const br = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 1n }).requested();
-				const held = origin.request(path);
+				// Pinned, or the path's earlier instance would answer it and this claim never hears it.
+				const held = origin.request(path, { instance });
 				const source = new Broadcast();
 				sources.push(source);
 				const answer = (await ar.next()).value;

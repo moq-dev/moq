@@ -251,12 +251,17 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
+      # Inside the job's hour, so a workload that overruns fails the job, where the
+      # failure-based triage sees it, instead of cancelling it, and later steps still run.
       - name: Run workload
         id: workload
+        timeout-minutes: 55
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: default
           BENCH_BASE: ${{ matrix.paired && (inputs.bench-base || 'previous-nightly') || '' }}
+          # The previous Nightly's copy is the paired base's executables (see sh/gh/nightly.sh).
+          BENCH_BUILDS_ARTIFACT: ${{ matrix.paired && format('builds-{0}', matrix.artifact) || '' }}
           GH_TOKEN: ${{ matrix.paired && github.token || '' }}
 
       - name: Record benchmark outcome
@@ -270,6 +275,16 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
           retention-days: 45
+
+      # Only scheduled runs serve as a later run's base.
+      - name: Keep bench executables
+        if: ${{ matrix.paired && github.event_name == 'schedule' && !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: builds-${{ matrix.artifact }}
+          path: target/bench/builds
+          if-no-files-found: ignore
+          retention-days: 3
 
       # After the upload, so the benchmark site still records tonight's history and
       # publishes the comparison that failed this job before the alert links to it.

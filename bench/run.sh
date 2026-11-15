@@ -496,6 +496,38 @@ unavailable() {
     printf 'Paired comparison unavailable for %s: %s\n' "$1" "$2" >&2
 }
 
+# Copy the executables a list names to BENCH_KEEP_BUILDS, with the commit they were built
+# from, so a later run can measure them as its base without relinking them.
+keep_builds() {
+    local list=$1 dir=$BENCH_KEEP_BUILDS index=0 key package executable
+    rm -rf "$dir"
+    mkdir -p "$dir/bin"
+    (cd "$ROOT" && git rev-parse HEAD) >"$dir/commit"
+    : >"$dir/targets.tsv"
+    while IFS=$'\t' read -r key package executable; do
+        cp "$executable" "$dir/bin/$index"
+        printf '%s\t%s\t%s\n' "$key" "${package#"$ROOT"/}" "bin/$index" >>"$dir/targets.tsv"
+        index=$((index + 1))
+    done <"$list"
+}
+
+# List the base's kept executables in OUT, as criterion_build would, from the base checkout's
+# packages. Fails when BENCH_BASE_BUILDS holds no builds of BASE covering every current target.
+kept_base() {
+    local out=$1 current=$2 dir=${BENCH_BASE_BUILDS:-} key package file
+    [[ -n $dir && -s $dir/targets.tsv && -f $dir/commit && $(<"$dir/commit") == "$BASE" ]] || return 1
+    dir=$(cd "$dir" && pwd -P)
+    while IFS=$'\t' read -r key _; do
+        [[ -n $(target_line "$dir/targets.tsv" "$key") ]] || return 1
+    done <"$current"
+    : >"$out"
+    while IFS=$'\t' read -r key package file; do
+        # An artifact download drops the executable bit.
+        chmod +x "$dir/$file"
+        printf '%s\t%s\t%s\n' "$key" "$WORKTREE/$package" "$dir/$file" >>"$out"
+    done <"$dir/targets.tsv"
+}
+
 # Measure the selected targets in quick mode. With a base, run each target's base build
 # beside it, alternating which goes first, then confirm the screen's worst slowdowns.
 # A failed current target fails the run; the base only marks its targets unavailable.
@@ -506,6 +538,7 @@ measure_criterion() {
     local key side targets index=0 status=0
     local filters=(${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"})
     criterion_build "$current" "$ROOT" ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"}
+    if [[ -n ${BENCH_KEEP_BUILDS:-} ]]; then keep_builds "$current"; fi
     mapfile -t targets < <(cut -f1 "$current")
     if ((${#targets[@]} == 0)); then
         printf 'no Criterion bench targets selected\n' >&2
@@ -517,15 +550,22 @@ measure_criterion() {
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
         printf 'Criterion paired with base %s\n' "$BASE"
-        printf 'Base build log: %s/base-build.log\n' "$RUN"
-        local build_status=(0 0)
-        criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
-        if ((build_status[1] != 0)); then
-            printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
-        fi
-        if ((build_status[0] != 0)); then
-            : >"$base"
-            for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
+        if kept_base "$base" "$current"; then
+            printf 'Base executables kept by an earlier run: %s\n' "$BENCH_BASE_BUILDS"
+        else
+            if [[ -n ${BENCH_BASE_BUILDS:-} ]]; then
+                printf 'No kept base executable of every target in %s; building the base\n' "$BENCH_BASE_BUILDS"
+            fi
+            printf 'Base build log: %s/base-build.log\n' "$RUN"
+            local build_status=(0 0)
+            criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
+            if ((build_status[1] != 0)); then
+                printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
+            fi
+            if ((build_status[0] != 0)); then
+                : >"$base"
+                for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
+            fi
         fi
     fi
     : >"$RUN/paired-identical.txt"
