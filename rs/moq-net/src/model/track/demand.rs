@@ -26,6 +26,8 @@ pub(super) struct Subscriptions {
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
+	/// Subscribers that want the payload, not only frame headers; see [`Subscription::meta`].
+	payload: usize,
 	/// The lowest group consumers want while no refresh is pending, never lowered. See
 	/// [`super::Demand::wanted`].
 	wanted: u64,
@@ -39,16 +41,17 @@ pub(super) struct Subscriptions {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Delay, Order, bool);
+type Scalars = (i8, Delay, Order, bool, bool);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed) = self.scalars()?;
+		let (priority, delay, order, feed, meta) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			delay,
 			ranges: self.ranges.union(),
 			order,
+			meta,
 			feed,
 		})
 	}
@@ -74,6 +77,8 @@ impl Subscriptions {
 					Order::Descending
 				},
 				self.feed != 0,
+				// Headers alone only while no subscriber wants the payload.
+				self.payload == 0,
 			)
 		})
 	}
@@ -153,6 +158,7 @@ impl Subscriptions {
 			}
 			self.descending += usize::from(new.order == Order::Descending);
 			self.feed += usize::from(new.feed);
+			self.payload += usize::from(!new.meta);
 			self.count += 1;
 		}
 		if let Some(old) = old {
@@ -168,6 +174,7 @@ impl Subscriptions {
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
 			self.feed -= usize::from(old.feed);
+			self.payload -= usize::from(!old.meta);
 			self.count -= 1;
 		}
 		if reshaped || self.scalars() != prev {
@@ -337,6 +344,7 @@ mod tests {
 				} else {
 					Order::Descending
 				},
+				meta: rng.random_bool(0.5),
 				feed: rng.random_bool(0.25),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {

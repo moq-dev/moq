@@ -1609,6 +1609,15 @@ struct Alive {
 	pace: Arc<Pace>,
 	// When the group was created here, on the ambient clock; see [`Consumer::arrived`].
 	arrived: crate::time::Instant,
+	// Whether this copy holds frame headers without payload: each frame stores its
+	// declared size in place of its bytes (see [`Producer::write_meta`]).
+	meta: bool,
+}
+
+/// How a metadata frame stores its declared size in place of its payload.
+fn meta_size(payload: &[u8]) -> Result<u64> {
+	let bytes: [u8; 8] = payload.try_into().map_err(|_| Error::ProtocolViolation)?;
+	Ok(u64::from_le_bytes(bytes))
 }
 
 impl Drop for Producer {
@@ -1671,6 +1680,18 @@ impl Producer {
 	/// Charges the group into `cache`, so its cached bytes count against the budget the
 	/// track evicts toward under memory pressure.
 	pub(super) fn new(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
+		Self::create(info, track, cache, false)
+	}
+
+	/// [`Self::new`] for a copy holding frame headers without payload, written with
+	/// [`Self::write_meta`]. It stores no compressed stream, whatever the track declares,
+	/// since it holds no bytes to compress.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn new_meta(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
+		Self::create(info, track.with_compression(track::Compression::None), cache, true)
+	}
+
+	fn create(info: Info, track: track::Info, cache: Arc<cache::Track>, meta: bool) -> Self {
 		let state = kio::Producer::<GroupState>::default();
 		let charge = cache.charge();
 		let access = charge.access();
@@ -1695,6 +1716,7 @@ impl Producer {
 			log,
 			pace,
 			arrived: super::clock::now(),
+			meta,
 		});
 		Self {
 			handle: Handle {
@@ -1796,8 +1818,36 @@ impl Producer {
 	/// is [`Timestamp::unscaled`] at this group's start; a frame that doesn't match its track
 	/// is [`Error::TimestampMismatch`].
 	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
+		// A metadata copy holds no payload, so nothing writes one into it.
+		if self.handle.alive.meta {
+			return Err(Error::Unsupported);
+		}
+		self.write_stored(timestamp, data.into_bytes())
+	}
+
+	/// Write the header of a frame of `size` bytes at `timestamp` into a metadata copy (see
+	/// [`Self::new_meta`]): its timestamp and declared size, without its payload.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn write_meta(&mut self, timestamp: Timestamp, size: u64) -> Result<()> {
+		if !self.handle.alive.meta {
+			return Err(Error::Unsupported);
+		}
+		// No copy could hold the payload it names.
+		if size > MAX_CACHE_BYTES {
+			return Err(Error::FrameTooLarge);
+		}
+		self.write_stored(timestamp, Bytes::copy_from_slice(&size.to_le_bytes()))
+	}
+
+	/// Whether this copy holds frame headers without payload.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_meta(&self) -> bool {
+		self.handle.alive.meta
+	}
+
+	/// Write one whole frame as the group stores it.
+	fn write_stored(&mut self, timestamp: Timestamp, payload: Bytes) -> Result<()> {
 		let timestamp = self.handle.track.rescale_in(timestamp, self.handle.info.start)?;
-		let payload = data.into_bytes();
 		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
@@ -2023,6 +2073,10 @@ impl Producer {
 	/// [`Self::create_frame`] with the moq-transport object fields a relay forwards.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
+		// A metadata copy holds no payload, so nothing streams one into it.
+		if self.handle.alive.meta {
+			return Err(Error::Unsupported);
+		}
 		let meter = self.chunk_meter(frame.inflated);
 		let (info, buf, admission) = match self.open_frame(frame) {
 			Ok(opened) => opened,
@@ -2799,6 +2853,11 @@ impl Handle {
 	#[cfg(feature = "async")]
 	pub(crate) fn compressed(&self) -> bool {
 		self.track.compressed()
+	}
+
+	/// Whether this copy holds frame headers without payload, which no payload reader takes.
+	pub(crate) fn is_meta(&self) -> bool {
+		self.alive.meta
 	}
 
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
@@ -4265,8 +4324,14 @@ impl Consumer {
 	///
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
+	///
+	/// A metadata copy (see [`Self::is_meta`]) has no payload to stream, so this is
+	/// [`Error::Unsupported`] there; read its frames with [`Self::poll_read_info`].
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.is_meta() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
 		let res = match self.recover().is_none() {
 			true => {
 				let res = self.poll_next_frame_once(waiter);
@@ -4331,8 +4396,42 @@ impl Consumer {
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
+	///
+	/// [`Error::Unsupported`] on a metadata copy, which holds no payload (see
+	/// [`Self::is_meta`]).
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		if self.is_meta() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
 		self.poll_read_as(waiter, Prefetch::pop)
+	}
+
+	/// Whether this group was received as frame headers without payload, as a
+	/// [`Subscription::meta`](crate::track::Subscription::meta) subscriber may be handed:
+	/// read its frames with [`Self::poll_read_info`], since a payload read is
+	/// [`Error::Unsupported`]. A payload subscriber is never handed one.
+	pub fn is_meta(&self) -> bool {
+		self.cursor.alive.meta
+	}
+
+	/// The next frame's header, its timestamp and declared size, without its payload: as
+	/// soon as the frame exists, never waiting for its bytes. Works on any group, and is the
+	/// only read of a metadata one (see [`Self::is_meta`]).
+	///
+	/// Returns `None` once the group finished and every frame was read.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_read_info(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Info>>> {
+		if !self.is_meta() {
+			let frame = ready!(self.poll_next_frame(waiter))?;
+			return Poll::Ready(Ok(frame.map(|frame| *frame)));
+		}
+		let Some(frame) = ready!(self.poll_read_as(waiter, Prefetch::pop))? else {
+			return Poll::Ready(Ok(None));
+		};
+		Poll::Ready(Ok(Some(frame::Info {
+			size: meta_size(&frame.payload)?,
+			timestamp: frame.timestamp,
+		})))
 	}
 
 	/// Read the next frame as stored, so a frame in segments stays in them.
@@ -4389,6 +4488,10 @@ impl Consumer {
 	/// Read the next frame with its relay metadata, for wire egress.
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Object>>> {
+		// Egress serves a metadata copy only to a metadata stream, through `poll_read_info`.
+		if self.is_meta() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
 		// Every frame is served through the cursor's prefetch, which holds its fields.
 		let frame = ready!(self.poll_read_cached(waiter))?;
 		Poll::Ready(Ok(frame.map(|frame| frame::Object {
@@ -4630,7 +4733,9 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
 		// Without building a future or allocating a waker.
-		if let Some(frame) = self.take_prefetched(Prefetch::pop) {
+		if !self.is_meta()
+			&& let Some(frame) = self.take_prefetched(Prefetch::pop)
+		{
 			return Ok(Some(frame));
 		}
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await

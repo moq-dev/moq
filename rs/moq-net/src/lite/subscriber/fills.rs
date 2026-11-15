@@ -69,7 +69,9 @@ impl FillAsk {
 	/// own (see [`Recovery`]).
 	pub fn merge(&self, demand: Subscription) -> Subscription {
 		let priority = demand.priority.max(self.priority);
-		demand.with_priority(priority)
+		// A fill wants the payload, so the subscription asks for it.
+		let meta = demand.meta && self.is_empty();
+		demand.with_priority(priority).with_meta(meta)
 	}
 
 	/// A subscription asking for the fills alone: no range of its own, so no floor.

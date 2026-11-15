@@ -3570,6 +3570,12 @@ impl kio::Task for RunSubscribe {
 						None => continue,
 					}
 					let request = request.take().expect("admitted once");
+					// No draft carries a metadata-only subscription, which is never emulated with
+					// the payload.
+					if request.subscription().is_some_and(|subscription| subscription.meta) {
+						request.reject(Error::Unsupported);
+						return Poll::Ready(());
+					}
 					// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model
 					// request pending until its immutable track metadata is known.
 					//
@@ -4811,6 +4817,10 @@ impl SubscribeOnce {
 				.is_some_and(|subscription| !subscription.ranges.is_empty());
 			live.unsettled = None;
 			if let Some(subscription) = subscription {
+				// Only metadata is wanted now, which no draft carries.
+				if subscription.meta {
+					return Poll::Ready(ServeEnd::Invalid(Error::Unsupported));
+				}
 				live.priority = subscription.priority;
 				match settle_bounds(&mut self.resolved, &live.track, &subscription) {
 					Ok(Some(bounds)) => live.wanted_bounds = Ok(bounds),

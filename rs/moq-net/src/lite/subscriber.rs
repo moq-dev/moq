@@ -492,7 +492,7 @@ impl TrackEntry {
 
 	/// Open the group of a stream whose header is `hdr` in the copy.
 	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
-		if self.is_paused(hdr.key) {
+		if self.is_paused(hdr.key, hdr.meta) {
 			let reading = Reading::open(&self.tail, Some(hdr.key), now);
 			return self.resume(hdr, reading).expect("checked paused above");
 		}
@@ -506,7 +506,7 @@ impl TrackEntry {
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
-		let received = producer.create_group_at(group_info, hdr.frame_start);
+		let received = producer.create_group_at(group_info, hdr.frame_start, hdr.meta);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !self.tail.read().accounts(hdr.key);
 		// The subscription's end waits until this stream is read. Counted
@@ -552,10 +552,10 @@ impl TrackEntry {
 		self.copy.as_ref().is_some_and(|copy| copy.framing.ietf.is_some())
 	}
 
-	/// Whether a YIELDED reset paused the group `key`, which the cache still holds. One the
-	/// cache gave up on is let go here, releasing the subscription's end its stream held, since
-	/// the stream asking opens the group afresh.
-	fn is_paused(&mut self, key: u64) -> bool {
+	/// Whether a YIELDED reset paused the group `key` in the mode `meta`, which the cache still
+	/// holds. One the cache gave up on, or paused in the other mode, is let go here, releasing
+	/// the subscription's end its stream held, since the stream asking opens the group afresh.
+	fn is_paused(&mut self, key: u64, meta: bool) -> bool {
 		let Some(registry) = &self.paused else {
 			return false;
 		};
@@ -564,7 +564,7 @@ impl TrackEntry {
 		};
 		match state.groups.get(&key) {
 			None => false,
-			Some(paused) if !paused.group.handle().is_aborted() => true,
+			Some(paused) if !paused.group.handle().is_aborted() && paused.group.handle().is_meta() == meta => true,
 			Some(_) => {
 				let given_up = state.groups.remove(&key);
 				drop(state);
@@ -677,7 +677,7 @@ impl TrackEntry {
 		let Some(Accepted { producer, .. }) = &self.copy else {
 			return Err(Error::Cancel);
 		};
-		let received = producer.create_group_at(group::Info { start: hdr.key }, hdr.frame_start);
+		let received = producer.create_group_at(group::Info { start: hdr.key }, hdr.frame_start, hdr.meta);
 		// Served again, so owed again.
 		self.place(hdr, version, received, reading, YieldVerdict::Owed)
 	}
@@ -1790,7 +1790,7 @@ impl GroupRecv {
 				};
 				let paused = duplicate.paused.get_or_insert_with(|| entry.watch_paused());
 				let _ = paused.poll(waiter, |_| Poll::<()>::Pending);
-				if entry.is_paused(hdr.key) {
+				if entry.is_paused(hdr.key, hdr.meta) {
 					let resumed = entry.resume(hdr, duplicate.reading).expect("checked paused above");
 					match resumed {
 						Ok(resumed) => {
@@ -1853,8 +1853,14 @@ impl GroupRecv {
 		// Guarded: dropping this machine mid-group is a cancellation, not a clean end.
 		let group: crate::recv::Group = group;
 		let track: track::Producer = track;
-		let mut ingest: FrameIngest =
-			FrameIngest::new(framing, ietf, hdr.frame_start).yielding(yields, cut.map(|cut| *cut));
+		// The stream's header says how its frames read: a continuation keeps its group's mode.
+		if group.is_meta() != hdr.meta {
+			let _ = group.abort(Error::ProtocolViolation);
+			return Poll::Ready(Err(Error::ProtocolViolation));
+		}
+		let mut ingest: FrameIngest = FrameIngest::new(framing, ietf, hdr.frame_start)
+			.yielding(yields, cut.map(|cut| *cut))
+			.meta(hdr.meta);
 		let reading: Reading = reading;
 
 		// Filling the group, bailing if the track or group dies first. The track or group
@@ -1951,6 +1957,9 @@ pub(crate) struct FrameIngest {
 	/// The frame a YIELDED reset cut short, holding the group's writer: kept on a pause, and
 	/// completed by the continuation.
 	partial: Option<frame::Producer>,
+	/// A lite-07 Group Stream in metadata mode: each FRAME carries its size and timestamp, and
+	/// no payload follows.
+	meta: bool,
 }
 
 /// A group's object records on ingest, under the `ietf` extension.
@@ -2022,7 +2031,14 @@ impl FrameIngest {
 			index: frame_start,
 			yields: false,
 			partial: None,
+			meta: false,
 		}
+	}
+
+	/// Whether the stream is in metadata mode, so no FRAME carries its payload.
+	pub(crate) fn meta(mut self, meta: bool) -> Self {
+		self.meta = meta;
+		self
 	}
 
 	/// Whether a YIELDED reset pauses the group rather than ends it (a lite-07 Group Stream
@@ -2266,6 +2282,19 @@ impl FrameIngest {
 						false => None,
 					};
 					self.phase = match size {
+						// A metadata FRAME ends at its timestamp: the group stores its header.
+						Some(size) if self.meta => {
+							let header = self.header(group, timestamp, inflated, size)?;
+							let index = self.index;
+							self.index = index.checked_add(1).ok_or(Error::ProtocolViolation)?;
+							// A continuation re-sends the headers its group holds.
+							if index >= group.frame_count() as u64 {
+								group.write_meta(header.info.timestamp, header.info.size)?;
+							}
+							self.phase = self.next_frame();
+							ready!(budget.poll_yield(waiter));
+							continue;
+						}
 						Some(size) => {
 							let header = self.header(group, timestamp, inflated, size)?;
 							self.dispatch(group, header)?
@@ -3808,6 +3837,7 @@ mod tests {
 			_working: crate::session::Work::default().start(),
 			update: 0,
 			stale: RangeSet::new(),
+			meta: false,
 		})
 	}
 
@@ -3970,6 +4000,7 @@ mod tests {
 				_working: crate::session::Work::default().start(),
 				update: 0,
 				stale: RangeSet::new(),
+				meta: false,
 			});
 			if update {
 				h.serve
@@ -4445,6 +4476,7 @@ mod tests {
 			_working: crate::session::Work::default().start(),
 			update: 0,
 			stale: RangeSet::new(),
+			meta: false,
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4562,6 +4594,7 @@ mod tests {
 			_working: crate::session::Work::default().start(),
 			update: 0,
 			stale: RangeSet::new(),
+			meta: false,
 		};
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
@@ -4631,6 +4664,7 @@ mod tests {
 			_working: crate::session::Work::default().start(),
 			update: 0,
 			stale: RangeSet::new(),
+			meta: false,
 		};
 		assert_eq!(sub.owed(None), Some(vec![4..10]));
 
@@ -5620,7 +5654,7 @@ mod tests {
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription.clone());
 			// The original copy, still arriving: one frame in, no end yet.
-			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { start: 3 }, 0, false) else {
 				panic!("the first copy opens");
 			};
 			first
@@ -6495,6 +6529,7 @@ mod tests {
 			_working: crate::session::Work::default().start(),
 			update: 0,
 			stale: RangeSet::new(),
+			meta: false,
 		});
 		(serve, serving, tail, broadcast)
 	}
@@ -11283,6 +11318,8 @@ struct SubStream {
 	fill_groups: rangemap::RangeSet<u64>,
 	priority: i8,
 	order: crate::track::Order,
+	/// Whether the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for metadata only.
+	meta: bool,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
 	/// SUBSCRIBE_START describes this demand and no fresh one follows an update,
 	/// so a buffered START only applies while `start` still equals it: while the
@@ -11932,6 +11969,10 @@ impl TrackServe {
 			}),
 		};
 
+		// An older version refuses a metadata-only subscription rather than emulate it.
+		if request.as_ref().is_some_and(|wire| wire.subscription.meta) && !self.subscriber.version.has_meta() {
+			return Err(Error::Unsupported);
+		}
 		match request {
 			Some(wire) => {
 				match sub {
@@ -11955,6 +11996,21 @@ impl TrackServe {
 						active.order = subscription.order;
 						active.max_delay = wire_max_delay(subscription.delay.max);
 						active.min_delay = subscription.delay.min;
+						// The payload is asked for again: every group received as metadata is
+						// owed again, until its payload arrives or the publisher drops it.
+						let promoted = match active.meta && !subscription.meta {
+							true => producer.promote(),
+							false => Vec::new(),
+						};
+						active.meta = subscription.meta;
+						if !promoted.is_empty()
+							&& let Ok(mut tail) = active.tail.write()
+						{
+							let now = self.subscriber.runtime.now();
+							for key in promoted {
+								tail.unaccount(key..key.saturating_add(1), now);
+							}
+						}
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
 						// restarts.
@@ -12333,7 +12389,8 @@ fn buffer_update(
 		ranges,
 		order: active.order,
 		update: active.update,
-		meta: false,
+		meta: active.meta,
+		// A relay asks for every group it received as metadata from its first frame.
 		payload: None,
 	})
 }
@@ -12404,7 +12461,7 @@ impl Establish {
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
 			update: 0,
-			meta: false,
+			meta: self.subscription.meta,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -12455,6 +12512,7 @@ impl Establish {
 			fill_groups: self.fill_groups.clone(),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
+			meta: self.subscription.meta,
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			started: None,

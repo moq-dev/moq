@@ -43,6 +43,18 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
+	/// Whether this subscriber wants each group's frame progress without its payload:
+	/// every frame's timestamp and declared size, read with
+	/// [`group::Consumer::read_info`](crate::group::Consumer::read_info), and no bytes.
+	///
+	/// Defaults to `false`, the payload. Aggregated across subscribers as headers only
+	/// while none wants the payload, so a relay pulls payload upstream only for payload
+	/// readers and serves metadata from a payload copy while it holds one. A metadata group
+	/// is never handed to a payload subscriber, and clearing this with
+	/// [`crate::track::Subscriber::update`] asks again for the payload of the groups seen as
+	/// metadata. Carried by moq-lite-07; any other wire refuses a metadata-only request with
+	/// [`Error::Unsupported`](crate::Error::Unsupported) rather than fetch payload to discard.
+	pub meta: bool,
 	/// Whether this reader needs the source's live feed, not only its history: a wire
 	/// publisher owes its peer an answer naming the live edge, which only the upstream's own
 	/// answer gives. A session holding no upstream subscription for its copy subscribes again
@@ -361,6 +373,7 @@ impl Default for Subscription {
 			delay: Delay::default(),
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
+			meta: false,
 			feed: false,
 		}
 	}
@@ -393,6 +406,13 @@ impl Subscription {
 	/// Set which pending group the publisher sends first, returning `self` for chaining.
 	pub fn with_order(mut self, order: Order) -> Self {
 		self.order = order;
+		self
+	}
+
+	/// Set whether to receive frame headers without payload ([`Self::meta`]), returning
+	/// `self` for chaining.
+	pub fn with_meta(mut self, meta: bool) -> Self {
+		self.meta = meta;
 		self
 	}
 
@@ -560,6 +580,7 @@ impl Combined {
 			combined.order = Order::Descending;
 		}
 		combined.feed |= sub.feed;
+		combined.meta &= sub.meta;
 	}
 
 	/// The aggregate, or `None` without a subscriber.
