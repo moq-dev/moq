@@ -27,7 +27,7 @@ bytes = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true, features = ["async"] }
 # Codecs only: OBS and the other C consumers do their own device I/O.
-moq-audio = { workspace = true, features = ["aac"] }
+moq-audio = { workspace = true }
 moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }

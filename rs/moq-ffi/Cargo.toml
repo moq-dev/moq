@@ -16,18 +16,11 @@ name = "moq_ffi"
 crate-type = ["staticlib", "cdylib"]
 
 [features]
-# On by default so every existing consumer (the language wrappers, `build.sh`)
-# keeps the surface it has. Opt out with `default-features = false` to skip the
-# ~40 crates that only the codecs pull in.
-default = ["audio", "video"]
-
-audio = ["dep:moq-audio"]
-video = ["dep:moq-video", "dep:pollster"]
-# The OpenH264 software H.264 fallback (vendored C++) for `video`. Off for
+# The OpenH264 software H.264 fallback (vendored C++) for video. Off for
 # development and linting; `cargo build-ffi` (.cargo/config.toml), maturin, and
 # CI's tests turn it on. It is the only encoder on API-24 Android and the Apple
 # simulators, so every release build needs it.
-openh264 = ["moq-video?/openh264"]
+openh264 = ["moq-video/openh264"]
 # qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
 # machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
 qlog = ["moq-tokio/qlog"]
@@ -41,7 +34,7 @@ bytes = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # Codecs only: the language wrappers do their own device I/O.
-moq-audio = { workspace = true, optional = true, features = ["aac"] }
+moq-audio = { workspace = true }
 moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
@@ -53,10 +46,10 @@ moq-tokio = { workspace = true }
 # `cfg(target_os = "linux")` and Android is `target_os = "android"`. On Linux
 # both dlopen the driver, so the wrappers still link GPU-less and start
 # driverless, and neither needs anything on the build host.
-moq-video = { workspace = true, optional = true, features = ["nvidia", "vaapi"] }
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
-pollster = { workspace = true, optional = true }
+pollster = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
@@ -75,8 +68,6 @@ moq-shaper = { path = "../moq-shaper" }
 # The video tests encode with OpenH264, the one encoder a GPU-less host has, so
 # they turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }
-# One non-codec test blocks on a future; the main dep is `video`-only.
-pollster = { workspace = true }
 # Runs the key log tests with `SSLKEYLOGFILE` set or unset, in a child process.
 test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }

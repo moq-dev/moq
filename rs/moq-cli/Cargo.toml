@@ -38,7 +38,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["nvidia", "vaapi", "s3", "gcs", "azure"]
+default = ["nvidia", "v4l2", "vaapi", "s3", "gcs", "azure"]
 jemalloc = ["moq-tokio/jemalloc"]
 # qlog trace capture (`--client-quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
@@ -84,9 +84,9 @@ openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
 # `capture`, `transcode`, or `play` pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
-# opt-in like the moq-video feature it turns on. Costs the build nothing: moq-v4l
-# checks its bindings in. Only applies when `capture`, `transcode`, or `play`
-# pulls in moq-video.
+# on by default like the moq-video feature it turns on: moq-v4l checks its
+# bindings in, so nothing is needed on the build host. Only applies when
+# `capture`, `transcode`, or `play` pulls in moq-video.
 v4l2 = ["moq-video?/v4l2", "moq-transcode?/v4l2"]
 # Software VP8 / VP9 decode through libvpx, opt-in like the moq-video feature it
 # turns on because libvpx comes from the build host. Only applies when `play`
@@ -114,7 +114,7 @@ hang = { workspace = true, features = ["async"] }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 moq-archive = { workspace = true }
-moq-audio = { workspace = true, optional = true, features = ["aac"] }
+moq-audio = { workspace = true, optional = true }
 moq-auth = { workspace = true, features = ["serve"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }

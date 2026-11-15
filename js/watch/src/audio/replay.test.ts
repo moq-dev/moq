@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
+import { Track } from "@moq/net";
+import { type Arrival, answering, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -429,5 +430,25 @@ describe("buffered replay against the shared clock", () => {
 		// slow-down only adds to what is heard.
 		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(40_000);
 		expect(warn).not.toHaveBeenCalled();
+	});
+});
+
+describe("answering", () => {
+	it("names the publisher's largest group first, then each newer group, and delegates the rest", async () => {
+		const track = new Track.Producer("audio");
+		const subscriber = answering(track.subscribe(), 5n);
+		try {
+			// A group at or below the answer is no news: the track's own largest is older than it.
+			track.createGroup(3n);
+			expect(await subscriber.largest()).toEqual({ group: 5n, frame: 0 });
+			const next = subscriber.largest();
+			track.createGroup(5n);
+			track.createGroup(9n);
+			expect((await next)?.group).toBe(9n);
+			expect(subscriber.name).toBe("audio");
+		} finally {
+			subscriber.close();
+			track.close();
+		}
 	});
 });
