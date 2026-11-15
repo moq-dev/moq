@@ -324,6 +324,15 @@ impl Links {
 		open
 	}
 
+	/// Control messages of every kind each link sent, by name.
+	fn control(&self) -> BTreeMap<String, u64> {
+		let mut sent = BTreeMap::new();
+		for (tier, _, totals) in self.registry.snapshot().control() {
+			*sent.entry(tier.as_str().to_string()).or_default() += totals.tx_messages;
+		}
+		sent
+	}
+
 	/// Announce-stream messages each link sent, by name.
 	fn sent(&self) -> BTreeMap<String, u64> {
 		let mut sent = BTreeMap::new();
@@ -969,4 +978,82 @@ async fn a_request_into_a_routing_loop_follows_the_routes_out() {
 	}
 	drop(between);
 	drop(broadcast);
+}
+
+/// A moq-transport relay that announces back a name it learned from us, which is
+/// unsupported (the multicast epic's item 10): its wire carries no path or Instance, so the
+/// name looks like a nearer publisher. `R` pulls `live` from its publisher `P` over a link
+/// it ranks below the moq-transport ones, and publishes to `M`, which `N` pulls. `O`, a
+/// relay of another make, claims `live` toward `R` and answers by reading it from `N`,
+/// naming nobody it came through. `R`'s reader of `live` follows `O`, whose request comes
+/// back to `R` through `M`, and `R` sends it to `O` again, where it joins the request
+/// already waiting.
+///
+/// Proves the loop costs bounded work and touches nothing else: the reader of `live`
+/// stays pending, no message or subscription is sent once it formed, `O` is asked once,
+/// and the other broadcasts on both sides of it read on.
+#[kio::test]
+async fn a_name_announced_back_over_moq_transport_waits_without_retrying() {
+	let links = Links::new();
+	let transport: moq_net::Version = "moq-transport-18".parse().unwrap();
+	let [p, r, m, n, o] = [1, 2, 3, 4, 5].map(produce_origin);
+	let live = p.route("live", origin::RouteOptions::hidden()).unwrap();
+	live.broadcast().create_track("video", timed()).unwrap();
+	live.announce().unwrap();
+	let mut options = links.options("p-r", &p, &r);
+	options.client_subscribe = Some(r.clone().with_preference(origin::Preference::new(-1)));
+	let _p_r = connect_mock(options).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let mut pairs = Vec::new();
+	for (name, from, to) in [("r-m", &r, &m), ("m-n", &m, &n), ("o-r", &o, &r)] {
+		let mut options = links.options(name, from, to);
+		options.version = transport;
+		pairs.push(connect_mock(options).await);
+	}
+	let claim = o.claim("live", origin::RouteOptions::default()).unwrap();
+	let from = n.consume();
+	let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+	let counted = asked.clone();
+	drop(kio::clock::sim::spawn(async move {
+		while let Some(request) = claim.requested().await {
+			counted.set(counted.get() + 1);
+			match from.request("live", None).await {
+				Ok(broadcast) => request.serve(broadcast),
+				Err(err) => request.reject(err),
+			}
+		}
+	}));
+	let at_r = r.route("at-r", origin::RouteOptions::hidden()).unwrap();
+	let at_o = o.route("at-o", origin::RouteOptions::hidden()).unwrap();
+	let mut feeds = Vec::new();
+	let start = kio::clock::now();
+	for route in [&at_r, &at_o] {
+		let track = route.broadcast().create_track("video", timed()).unwrap();
+		route.announce().unwrap();
+		feeds.push(Feed::new(track, start, STEP));
+	}
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	let mut others = [reader(&m, "at-r", start).await, reader(&r, "at-o", start).await];
+	let looped = r.consume().request("live", None).await.unwrap();
+	let mut looped = looped.track("video").unwrap().subscribe(None);
+	let run = async |feeds: &mut Vec<Feed>, count| {
+		futures::future::join_all(feeds.iter_mut().map(|feed| feed.run(count))).await;
+	};
+	run(&mut feeds, MOVE).await;
+	let (control, subscriptions) = (links.control(), links.subscriptions());
+	run(&mut feeds, 10 * MOVE).await;
+
+	assert!(
+		kio::clock::timeout(Duration::from_millis(1), &mut looped).await.is_err(),
+		"the looped request stays pending"
+	);
+	assert_eq!(links.control(), control, "nothing sent once the loop formed");
+	assert_eq!(links.subscriptions(), subscriptions);
+	assert_eq!(asked.get(), 1, "O asked once");
+	for (rx, feed) in others.iter_mut().zip(&feeds) {
+		let live = Liveness::of(rx, feed);
+		assert!(live.seamless(), "{live:?}");
+	}
+	drop((pairs, live, at_r, at_o));
 }
