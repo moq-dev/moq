@@ -495,7 +495,7 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 	Ok(Frame::new(bytes.into(), moq_net::Timestamp::from_micros(timestamp_us)?))
 }
 
-#[cfg(all(test, feature = "bus"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::bus::{Bus, Config as BusConfig, Strip};

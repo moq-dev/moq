@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Duration;
 
 use super::observe::{self, Ledger};
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use crate::resample::Remix;
 use crate::ring::{self, Read};
 use crate::{Error, Layout};
@@ -32,7 +32,7 @@ const RAMP: f32 = 0.003;
 
 /// The echo reference is the mix downmixed to stereo, whatever layout the
 /// device plays, so the canceller's model survives a device switch.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 pub(crate) const REFERENCE_CHANNELS: usize = 2;
 
 /// Sinks one device will mix. The entry list is allocated to this up front and
@@ -110,7 +110,7 @@ pub(super) enum Command {
 	/// device.
 	Remove { id: u64 },
 	/// Copy the mix into an echo-cancellation reference, or stop with `None`.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	Reference(Option<ring::Producer>),
 }
 
@@ -146,7 +146,7 @@ pub(super) enum Retired {
 	/// A sink that was removed or rebuilt.
 	Sink(Entry),
 	/// The echo reference a canceller replaced or gave up.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	Reference(ring::Producer),
 }
 
@@ -175,13 +175,13 @@ pub(super) struct Mixer {
 	/// Where echo cancellation reads what was played. Fed the clipped mix, since
 	/// that is the signal the speaker gets and therefore the one the microphone
 	/// hears back.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	reference: Option<ring::Producer>,
 	/// Downmixes the bus to the reference's stereo.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	downmix: Remix,
 	/// Stereo scratch for the downmixed reference.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	stereo: Vec<f32>,
 }
 
@@ -215,11 +215,11 @@ impl Mixer {
 			scratch: vec![0.0; CHUNK * channels],
 			ledger: Ledger::new(observe, rate),
 			heard: 0,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			reference: None,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			downmix: Remix::new(layout, Layout::Stereo)?,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			stereo: vec![0.0; CHUNK * REFERENCE_CHANNELS],
 		})
 	}
@@ -307,7 +307,7 @@ impl Mixer {
 						self.retire(Retired::Sink(entry));
 					}
 				}
-				#[cfg(feature = "aec")]
+				#[cfg(all(feature = "capture", feature = "playback"))]
 				Ok(Command::Reference(reference)) => {
 					// The old tap owns a heap ring, so it leaves the same way a
 					// removed sink does rather than being freed here.
@@ -329,11 +329,11 @@ impl Mixer {
 			scratch,
 			ledger,
 			heard,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			reference,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			downmix,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			stereo,
 			..
 		} = self;
@@ -436,7 +436,7 @@ impl Mixer {
 			// Tap the mix on its way out. Overflow means the microphone stopped
 			// draining, which the canceller notices on its own; there is nothing
 			// useful to do about it from here and nothing may be logged.
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			if let Some(reference) = reference.as_mut() {
 				let stereo = &mut stereo[..frames * REFERENCE_CHANNELS];
 				downmix.apply(&bus[..samples], stereo);
@@ -824,14 +824,14 @@ mod tests {
 			.expect("the removed sink was dropped in the callback");
 		match retired {
 			Retired::Sink(entry) => assert_eq!(entry.id, id),
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			Retired::Reference(_) => panic!("the mixer retired the echo reference instead"),
 		}
 	}
 
 	/// Echo cancellation reads what the speaker was given, so the tap has to see
 	/// the summed and clipped mix rather than any one sink.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[test]
 	fn the_echo_reference_gets_the_mix() {
 		let mut harness = Harness::new(Layout::Stereo);
@@ -866,7 +866,7 @@ mod tests {
 
 	/// The tap owns a heap ring, so replacing or clearing it must leave by the
 	/// same route a removed sink does.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[test]
 	fn a_replaced_echo_reference_is_handed_back() {
 		let mut harness = Harness::new(Layout::Stereo);
@@ -899,7 +899,7 @@ mod tests {
 
 	/// A tap running at the device rate, so the assertions see the mix untouched
 	/// by resampling.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	fn reference_channel() -> (ring::Producer, ring::Consumer) {
 		ring::channel(
 			REFERENCE_CHANNELS,
@@ -961,7 +961,7 @@ mod tests {
 
 	/// The canceller models a stereo reference whatever the device plays, so a
 	/// surround bus reaches it downmixed rather than cut to its front pair.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[test]
 	fn the_echo_reference_downmixes_a_surround_bus() {
 		let mut harness = Harness::new(Layout::FivePointOne);

@@ -17561,7 +17561,6 @@ rec {
           {
             name = "ringbuf";
             packageId = "ringbuf";
-            optional = true;
           }
           {
             name = "rubato";
@@ -17575,12 +17574,10 @@ rec {
           {
             name = "symphonia-codec-aac";
             packageId = "symphonia-codec-aac";
-            optional = true;
           }
           {
             name = "symphonia-core";
             packageId = "symphonia-core";
-            optional = true;
           }
           {
             name = "thiserror";
@@ -17648,18 +17645,8 @@ rec {
           }
         ];
         features = {
-          "aac" = [
-            "dep:symphonia-codec-aac"
-            "dep:symphonia-core"
-          ];
-          "aec" = [
-            "capture"
-            "playback"
-          ];
-          "bus" = [ "dep:ringbuf" ];
           "capture" = [
             "dep:cpal"
-            "dep:ringbuf"
             "dep:tokio"
             "dep:tracing"
             "dep:block2"
@@ -17671,23 +17658,15 @@ rec {
             "dep:objc2-foundation"
             "dep:objc2-screen-capture-kit"
           ];
-          "default" = [
-            "aac"
-            "bus"
-          ];
           "pipewire" = [ "cpal?/pipewire" ];
           "playback" = [
             "dep:cpal"
-            "dep:ringbuf"
             "dep:tokio"
             "dep:tracing"
           ];
           "pulseaudio" = [ "cpal?/pulseaudio" ];
         };
         resolvedDefaultFeatures = [
-          "aac"
-          "aec"
-          "bus"
           "capture"
           "default"
           "pipewire"
@@ -18246,7 +18225,6 @@ rec {
             name = "moq-audio";
             packageId = "moq-audio";
             usesDefaultFeatures = false;
-            features = [ "aac" ];
           }
           {
             name = "moq-json";
@@ -18427,7 +18405,6 @@ rec {
             packageId = "moq-audio";
             optional = true;
             usesDefaultFeatures = false;
-            features = [ "aac" ];
           }
           {
             name = "moq-auth";
@@ -18669,6 +18646,7 @@ rec {
             "quic"
             "websocket"
             "nvidia"
+            "v4l2"
             "vaapi"
             "s3"
             "gcs"
@@ -19004,9 +18982,7 @@ rec {
           {
             name = "moq-audio";
             packageId = "moq-audio";
-            optional = true;
             usesDefaultFeatures = false;
-            features = [ "aac" ];
           }
           {
             name = "moq-json";
@@ -19029,7 +19005,6 @@ rec {
           {
             name = "moq-video";
             packageId = "moq-video";
-            optional = true;
             usesDefaultFeatures = false;
             features = [
               "nvidia"
@@ -19039,7 +19014,6 @@ rec {
           {
             name = "pollster";
             packageId = "pollster";
-            optional = true;
           }
           {
             name = "uniffi";
@@ -19089,10 +19063,6 @@ rec {
             features = [ "openh264" ];
           }
           {
-            name = "pollster";
-            packageId = "pollster";
-          }
-          {
             name = "test-env";
             packageId = "test-env";
           }
@@ -19107,26 +19077,14 @@ rec {
           }
         ];
         features = {
-          "audio" = [ "dep:moq-audio" ];
-          "default" = [
-            "audio"
-            "video"
-          ];
-          "openh264" = [ "moq-video?/openh264" ];
+          "openh264" = [ "moq-video/openh264" ];
           "qlog" = [ "moq-tokio/qlog" ];
           "testing" = [ "kio/manual" ];
-          "video" = [
-            "dep:moq-video"
-            "dep:pollster"
-          ];
         };
         resolvedDefaultFeatures = [
-          "audio"
-          "default"
           "openh264"
           "qlog"
           "testing"
-          "video"
         ];
       };
       "moq-gst" = rec {
@@ -20379,11 +20337,6 @@ rec {
             features = [ "lab" ];
           }
           {
-            name = "moq-quic";
-            packageId = "moq-quic";
-            features = [ "mux" ];
-          }
-          {
             name = "proptest";
             packageId = "proptest";
             usesDefaultFeatures = false;
@@ -20434,7 +20387,6 @@ rec {
         resolvedDefaultFeatures = [
           "default"
           "fuzz"
-          "mux"
           "qlog"
           "sim"
         ];
@@ -20989,7 +20941,6 @@ rec {
           {
             name = "rustls";
             packageId = "rustls";
-            optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
           }
@@ -21015,7 +20966,6 @@ rec {
           {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
@@ -21063,17 +21013,8 @@ rec {
           }
         ];
         features = {
-          "default" = [ "tls" ];
-          "tls" = [
-            "dep:rustls"
-            "dep:tokio-rustls"
-          ];
         };
-        resolvedDefaultFeatures = [
-          "default"
-          "fuzz"
-          "tls"
-        ];
+        resolvedDefaultFeatures = [ "fuzz" ];
       };
       "moq-rtmp-fuzz" = rec {
         crateName = "moq-rtmp-fuzz";
@@ -22176,6 +22117,7 @@ rec {
         features = {
           "default" = [
             "nvidia"
+            "v4l2"
             "vaapi"
           ];
           "nvidia" = [ "moq-video/nvidia" ];
@@ -22657,7 +22599,6 @@ rec {
           {
             name = "libc";
             packageId = "libc";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
           }
           {
@@ -22674,7 +22615,6 @@ rec {
           {
             name = "linux-raw-sys";
             packageId = "linux-raw-sys 0.12.1";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
             features = [ "ioctl" ];
           }
@@ -22915,7 +22855,6 @@ rec {
         ];
         features = {
           "capture" = [
-            "dep:libc"
             "dep:moq-v4l"
             "dep:x11rb"
             "dep:zune-jpeg"
@@ -22923,11 +22862,8 @@ rec {
           "default" = [
             "mediacodec"
             "nvidia"
+            "v4l2"
             "vaapi"
-          ];
-          "dmabuf" = [
-            "dep:libc"
-            "dep:linux-raw-sys"
           ];
           "mediacodec" = [ "dep:ndk" ];
           "nvidia" = [
@@ -22942,12 +22878,10 @@ rec {
           ];
           "pipewire" = [
             "capture"
-            "dmabuf"
             "dep:pipewire"
             "dep:ashpd"
           ];
           "render" = [
-            "dmabuf"
             "dep:ash"
             "dep:bytemuck"
             "dep:wgpu"
@@ -22956,20 +22890,13 @@ rec {
             "objc2-core-video/CVMetalTextureCache"
             "objc2-core-video/objc2-metal"
           ];
-          "v4l2" = [
-            "dep:moq-v4l"
-            "dep:libc"
-          ];
-          "vaapi" = [
-            "dmabuf"
-            "dep:moq-vaapi"
-          ];
+          "v4l2" = [ "dep:moq-v4l" ];
+          "vaapi" = [ "dep:moq-vaapi" ];
           "vpx" = [ "dep:libvpx-native-sys" ];
         };
         resolvedDefaultFeatures = [
           "capture"
           "default"
-          "dmabuf"
           "mediacodec"
           "nvidia"
           "openh264"
@@ -39765,7 +39692,6 @@ rec {
             name = "moq-quic";
             packageId = "moq-quic";
             usesDefaultFeatures = false;
-            features = [ "mux" ];
           }
           {
             name = "rustls";

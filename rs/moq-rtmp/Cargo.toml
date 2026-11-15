@@ -16,18 +16,12 @@ keywords = ["rtmp", "moq", "media", "live", "flv"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["tls"]
-# RTMPS (RTMP over TLS): the `Conn::Tls` variant, `Server::with_tls`, and the
-# `pub use rustls`. Plaintext RTMP needs none of this, so an embedder can drop
-# TLS with `default-features = false`.
-tls = ["dep:rustls", "dep:tokio-rustls"]
 # Exposes the AMF0 fuzz target body and seeds to the `fuzz/` harness through the `fuzz`
 # module. Off by default.
 fuzz = []
 
 # Pure library: the RTMP <-> MoQ gateway. The CLI lives in `moq-cli` (the `rtmp`
 # subcommand); a relay can also embed `moq_rtmp::Server` against its own origin.
-# Only rustls + tokio-rustls (RTMPS, the `tls` feature) are optional.
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 # Deps of the vendored `rml` module (our fork of the unmaintained rml_rtmp 0.8):
@@ -43,7 +37,7 @@ moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 rand = { workspace = true }
 rind = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 # TCP keepalive on accepted sockets, so a half-open connection (a peer that
 # vanished without a FIN/RST) is reaped instead of pinning a broadcast forever.
 socket2 = { workspace = true }
@@ -52,7 +46,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"
 # RTMPS: TLS-terminate accepted connections. Mirrors moq-relay's pinning so the
 # workspace shares one tokio-rustls; the crypto provider comes from the supplied
 # `rustls::ServerConfig`, so no default crypto feature is needed here.
-tokio-rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 

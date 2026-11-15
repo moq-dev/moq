@@ -17,9 +17,9 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # default: every feature that needs libclang or a system library on the build
 # host, however cheap it is on other platforms, since a default is one setting
 # for every host. `pipewire` links libpipewire; a consumer whose build host has
-# it turns it on. `capture` and `v4l2` no longer cost anything on Linux (moq-v4l
-# checks its bindings in) and stay opt-in only until every distribution ships
-# them. The features exist so a consumer can pick what it wants, not to hide code
+# it turns it on. `capture` no longer costs anything on Linux (moq-v4l checks its
+# bindings in) and stays opt-in only until every distribution ships it. The
+# features exist so a consumer can pick what it wants, not to hide code
 # from the default compile (`just check` lints default features only, so the
 # opt-in ones are compiled by nightly's `just rs features` and platform.yml's
 # `just rs macos`).
@@ -28,13 +28,13 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # explicitly. Workspace consumers opt out at the root manifest
 # (`default-features = false`) and pick per crate, so the relay and the language
 # bindings never build device or rendering stacks.
-default = ["mediacodec", "nvidia", "vaapi"]
+default = ["mediacodec", "nvidia", "v4l2", "vaapi"]
 # Native camera and screen capture. Costs the build nothing on any platform:
 # Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
 # frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
 # Still off by default until every distribution ships it, which is
 # a packaging decision rather than a build cost. moq-cli's `capture` turns it on.
-capture = ["dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
+capture = ["dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
 # language-binding artifacts still support API 24 and disable default features.
@@ -63,7 +63,7 @@ vpx = ["dep:libvpx-native-sys"]
 # cargo, and libva is dlopen'd at runtime, so the binary carries no NEEDED libva
 # and still starts on a libva-less host, where automatic backend selection falls
 # back to the next candidate.
-vaapi = ["dmabuf", "dep:moq-vaapi"]
+vaapi = ["dep:moq-vaapi"]
 # The V4L2 stateful memory-to-memory hardware codecs on Linux: the H.264 encoder
 # and decoder most ARM SoCs expose (a Raspberry Pi's VideoCore, and the
 # equivalent block on Rockchip / Amlogic / Allwinner / Exynos). One feature
@@ -73,24 +73,20 @@ vaapi = ["dmabuf", "dep:moq-vaapi"]
 # on `/dev/video11` produced Constrained Baseline 640x360 that plays back
 # correctly, and the decoder played a 640x360 stream for a minute without a
 # failure and is what automatic selection picks on that board. Costs the build
-# nothing (moq-v4l checks its bindings in) and shares that dependency with
-# `capture`; still off by default alongside it. A host with no M2M codec node
-# fails at open, so automatic backend selection falls through to the next
+# nothing (moq-v4l checks its bindings in), so it is on by default beside
+# `vaapi` and `nvidia`, and stays a feature as one vendor's hardware path that a
+# consumer can build alone. A host with no M2M codec node fails at open, so
+# automatic backend selection falls through to the next
 # encoder or decoder; `Kind::Named("openh264")` sidesteps it on a board whose
 # driver misbehaves.
-v4l2 = ["dep:moq-v4l", "dep:libc"]
-# Linux DMA-BUF surface vocabulary and CPU fallback support. Enabled by every
-# backend that can produce or consume one. It pulls no graphics API by itself.
-dmabuf = ["dep:libc", "dep:linux-raw-sys"]
+v4l2 = ["dep:moq-v4l"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
 # converts a frame to RGBA and hands back a texture the caller presents, and the
 # export that hands a drawn texture to an encoder. wgpu loads Vulkan / Metal / D3D
 # at runtime, so this costs compile time and nothing else; a relay or headless
-# publisher drops it. `dmabuf` adds the Linux surface vocabulary; Vulkan itself
-# still comes from wgpu, and `ash` names the handles the export allocates on
-# wgpu's own Vulkan device.
+# publisher drops it. Vulkan itself still comes from wgpu, and `ash` names the
+# handles the export allocates on wgpu's own Vulkan device.
 render = [
-    "dmabuf",
     "dep:ash",
     "dep:bytemuck",
     "dep:wgpu",
@@ -106,7 +102,7 @@ render = [
 # libpipewire-0.3 via pkg-config at build time (and its bindgen needs libclang),
 # so it only belongs in builds that use it. V4L2 camera capture needs only what
 # `capture` already does.
-pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
+pipewire = ["capture", "dep:pipewire", "dep:ashpd"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -196,13 +192,13 @@ cudarc = { workspace = true, features = ["nvrtc"], optional = true }
 # Mapping a linear DMA-BUF for the universal CPU I420 fallback, and the V4L2 M2M
 # codec node's poll / mmap flags. Non-linear modifiers stay GPU-only and return
 # an honest error instead of treating tiled memory as rows.
-libc = { workspace = true, optional = true }
+libc = { workspace = true }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic if their library is absent. Lets a GPU-less host fall back to the
 # next encoder instead of crashing.
 libloading = { workspace = true, optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
-linux-raw-sys = { workspace = true, optional = true }
+linux-raw-sys = { workspace = true }
 moq-nvenc = { workspace = true, optional = true }
 # Native V4L2 webcam capture and, behind the `v4l2` feature, the M2M hardware
 # codecs. An in-tree fork of `v4l` (see rs/moq-v4l) with the videodev2.h

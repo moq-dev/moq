@@ -7,7 +7,7 @@
 //! [`open`] tries the platform decoders before the software ones, skipping any
 //! that does not advertise the catalog codec, and refuses when none opens the
 //! track. Which backend decodes a codec stays the library's choice. The software tier is libopus for Opus, a passthrough for PCM, and
-//! symphonia for AAC-LC mono and stereo (behind the `aac` feature). No platform
+//! symphonia for AAC-LC mono and stereo. No platform
 //! decoder is wired in yet.
 
 use hang::catalog::{AudioCodec, AudioConfig};
@@ -22,7 +22,6 @@ mod conformance;
 
 mod libopus;
 mod pcm;
-#[cfg(feature = "aac")]
 mod symphonia;
 
 /// An opened decoder: packets in, interleaved `f32` PCM out.
@@ -89,7 +88,6 @@ const SOFTWARE: &[Candidate] = &[
 	// Claims every AAC profile and refuses at open what it can't decode: the
 	// profile that matters is the description's, which the catalog string can
 	// contradict.
-	#[cfg(feature = "aac")]
 	Candidate {
 		name: symphonia::NAME,
 		supports: |codec| matches!(codec, AudioCodec::AAC(_)),
