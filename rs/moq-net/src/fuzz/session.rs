@@ -979,9 +979,15 @@ impl Recorder {
 impl poll::SendStream for Recorded<memory::SendStream> {
 	type Error = memory::Error;
 	type Group = poll::Ungrouped;
-	type Offset = ();
+	type Offset = u64;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> u64 {
+		self.inner.offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+		self.inner.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let written = std::task::ready!(self.inner.poll_write(waiter, buf))?;
@@ -1015,18 +1021,6 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_closed(waiter)
-	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.inner.acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.inner.delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.poll_delivered(waiter)
 	}
 }
 
