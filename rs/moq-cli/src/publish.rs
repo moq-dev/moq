@@ -177,9 +177,9 @@ enum PublishDecoder {
 		import: Box<moq_mux::codec::h264::Import>,
 	},
 	Fmp4(Box<fmp4::Import>),
-	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-	// verbatim, so it uses the `mpegts` catalog extension rather than the media-only `()`.
-	Ts(Box<ts::Import<ts::Ext>>),
+	/// `import ts`: one program, owning its route and catalog, republished on each change of
+	/// source.
+	Ts(Box<ts::Republish>),
 	/// `import ts --program all`: one importer, broadcast, and catalog per program.
 	TsPrograms(Box<ts::Programs>),
 	/// `import ts --passthrough`: the multiplex whole, on one track.
@@ -191,19 +191,22 @@ impl PublishDecoder {
 	/// Decode a chunk of stdin bytes. Each importer buffers any partial trailing
 	/// frame internally, so the caller feeds fresh chunks rather than an
 	/// accumulating buffer.
-	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
+	///
+	/// A TS import whose source changed returns the change before reading on; see
+	/// [`ts::Republish::decode`].
+	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Option<ts::Republished>> {
 		match self {
 			Self::Avc3 { split, import } => {
 				let frames = split.decode(chunk, None)?;
 				import.decode(frames)?;
 			}
 			Self::Fmp4(d) => d.decode(chunk)?,
-			Self::Ts(d) => d.decode(chunk).map_err(suggest_program)?,
+			Self::Ts(d) => return d.decode(chunk).map_err(suggest_program),
 			Self::TsPrograms(d) => d.decode(chunk)?,
 			Self::TsPassthrough(d) => d.decode(chunk)?,
 			Self::Flv(d) => d.decode(chunk)?,
 		}
-		Ok(())
+		Ok(None)
 	}
 
 	/// What each elementary stream has delivered and the audio frame sync lost so far, for
@@ -253,16 +256,17 @@ impl PublishDecoder {
 enum FinishedDecoder {
 	Avc3(Box<moq_mux::codec::h264::Import>),
 	Fmp4(Box<fmp4::Finished>),
-	Ts(Box<ts::Finished<ts::Ext>>),
+	Ts(Box<ts::republish::Finished>),
 	TsPrograms(Box<ts::programs::Finished>),
 	TsPassthrough(Box<ts::passthrough::Finished>),
 	Flv(Box<flv::Finished>),
 }
 
 impl FinishedDecoder {
-	/// The broadcasts `import ts --program all` owns; see [`ts::Programs::finish`].
+	/// The broadcasts a TS import owns; see [`ts::Republish::finish`] and [`ts::Programs::finish`].
 	fn broadcasts(&self) -> Vec<moq_net::broadcast::Producer> {
 		match self {
+			Self::Ts(d) => vec![d.broadcast().clone()],
 			Self::TsPrograms(d) => d.broadcasts(),
 			_ => Vec::new(),
 		}
@@ -298,20 +302,19 @@ fn suggest_program(err: anyhow::Error) -> anyhow::Error {
 	}
 }
 
-/// The catalog a stdin decoder publishes into. TS carries the `mpegts` extension.
+/// The catalog a stdin decoder publishes into.
 enum PublishCatalog {
-	Media(moq_mux::catalog::Producer),
-	Ts(moq_mux::catalog::Producer<ts::Ext>),
-	/// `import ts --program all`: each program's catalog, finished by [`ts::Programs::finish`].
-	TsPrograms,
+	Media(Box<moq_mux::catalog::Producer>),
+	/// A TS import's: each instance's or program's, with the `mpegts` extension, finished by
+	/// [`ts::Republish::finish`] or [`ts::Programs::finish`].
+	Ts,
 }
 
 impl PublishCatalog {
 	fn abort(self, err: moq_net::Error) {
 		match self {
 			Self::Media(catalog) => catalog.abort(err),
-			Self::Ts(catalog) => catalog.abort(err),
-			Self::TsPrograms => {}
+			Self::Ts => {}
 		}
 	}
 
@@ -319,42 +322,10 @@ impl PublishCatalog {
 	fn finish(&mut self) -> anyhow::Result<()> {
 		match self {
 			Self::Media(catalog) => catalog.finish()?,
-			Self::Ts(catalog) => catalog.finish()?,
-			Self::TsPrograms => {}
+			Self::Ts => {}
 		}
 		Ok(())
 	}
-
-	/// The multiplex rate a TS catalog records.
-	fn mux_rate(&self) -> Option<u64> {
-		match self {
-			Self::Ts(catalog) => catalog.snapshot().ext.mpegts.mux_rate,
-			Self::Media(_) | Self::TsPrograms => None,
-		}
-	}
-}
-
-/// Build the importer and `mpegts` catalog for one TS broadcast.
-///
-/// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...) verbatim, so it
-/// uses the `mpegts` catalog extension rather than the media-only `()`. The catalog producer
-/// owns the broadcast's catalog tracks, so each broadcast gets exactly one.
-fn ts_import(
-	broadcast: &mut moq_net::broadcast::Producer,
-	config: moq_mux::catalog::Config,
-	program: Option<u16>,
-	mux_rate: Option<u64>,
-) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
-	let mut initial = moq_mux::catalog::hang::Catalog::<ts::Ext>::default();
-	// A rate already measured on this multiplex releases the catalog with the first media.
-	initial.ext.mpegts.mux_rate = mux_rate;
-	let config = config.with_catalog(initial);
-	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
-	let mut import = ts::Import::new(broadcast.clone(), catalog.timebase().reserve());
-	if let Some(program) = program {
-		import = import.with_program(program);
-	}
-	Ok((import, catalog))
 }
 
 #[cfg_attr(
@@ -401,8 +372,8 @@ pub struct Publish {
 	report: Option<crate::report::Stats>,
 	// How long a stdin import keeps its broadcast up after EOF; see [`Self::with_linger`].
 	linger: std::time::Duration,
-	// How a stdin TS import republishes when its source changes; see [`Self::stdin`].
-	republish: Option<Republish>,
+	// What a stdin TS import sets on each instance it republishes; see [`Self::stdin`].
+	sections: Sections,
 }
 
 /// A broadcast's announcement, held until its catalog first goes out.
@@ -447,23 +418,10 @@ impl Publish {
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
-		// TS builds its `Ext` catalog instead of the shared `()` below.
-		if let PublishFormat::Ts { program } = *format {
-			let (ts, catalog) = ts_import(&mut broadcast, config, program, None)?;
-			return Ok(Self {
-				source: Source::Stream {
-					decoder: PublishDecoder::Ts(Box::new(ts)),
-					catalog: PublishCatalog::Ts(catalog),
-				},
-				broadcast: Some(broadcast),
-				route: None,
-				announce: false,
-				report: None,
-				linger: moq_mux::Linger::DEFAULT,
-				republish: None,
-			});
-		}
-
+		anyhow::ensure!(
+			!matches!(format, PublishFormat::Ts { .. }),
+			"a TS import publishes through an origin, which republishes it as its source changes"
+		);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let decoder = match format {
 			PublishFormat::Avc3 => {
@@ -480,7 +438,7 @@ impl Publish {
 				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
-			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
+			PublishFormat::Ts { .. } => unreachable!("refused above"),
 			// The `m2ts` section is in the base catalog: nothing about the multiplex is described
 			// beyond the track that carries it.
 			PublishFormat::TsPassthrough { pcr_pid } => {
@@ -503,23 +461,24 @@ impl Publish {
 		Ok(Self {
 			source: Source::Stream {
 				decoder,
-				catalog: PublishCatalog::Media(catalog),
+				catalog: PublishCatalog::Media(Box::new(catalog)),
 			},
 			broadcast: Some(broadcast),
 			route: None,
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
-			republish: None,
+			sections: Sections::default(),
 		})
 	}
 
 	/// Build a publisher decoding `format` from stdin into a new broadcast at `name` on
 	/// `origin` under `instance`, retaining its route alongside the decoder's fill handle.
 	///
-	/// A TS import whose source changes ([`ts::Restart`]), such as a changeover between two
-	/// encoders whose clocks were never locked or whose PATs name another program, finishes the broadcast
-	/// and republishes the rest of the input at `name` under a new instance.
+	/// A TS import whose source changes, such as a changeover between two encoders whose clocks
+	/// were never locked or whose PATs name another program, finishes the broadcast and republishes
+	/// the rest of the input at `name` under a new instance ([`ts::Republish`]). Its first
+	/// instance is `instance`.
 	pub(super) fn stdin(
 		origin: &moq_net::origin::Producer,
 		name: &str,
@@ -527,23 +486,30 @@ impl Publish {
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
+		if let PublishFormat::Ts { program } = *format {
+			let mut republish =
+				ts::Republish::new(origin.clone(), moq_net::Path::new(name)?, config)?.with_instance(instance)?;
+			if let Some(program) = program {
+				republish = republish.with_program(program);
+			}
+			return Ok(Self {
+				source: Source::Stream {
+					decoder: PublishDecoder::Ts(Box::new(republish)),
+					catalog: PublishCatalog::Ts,
+				},
+				broadcast: None,
+				route: None,
+				announce: false,
+				report: None,
+				linger: moq_mux::Linger::DEFAULT,
+				sections: Sections::default(),
+			});
+		}
 		let route = origin
 			.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
 			.context("failed to create broadcast")?;
-		let republish = match *format {
-			PublishFormat::Ts { program } => Some(Republish {
-				origin: origin.clone(),
-				name: name.to_string(),
-				config: config.clone(),
-				program,
-				report: None,
-				echo: None,
-			}),
-			_ => None,
-		};
 		let mut result = Self::new(route.broadcast().clone(), format, config)?;
 		result.route = Some(route);
-		result.republish = republish;
 		Ok(result)
 	}
 
@@ -561,14 +527,14 @@ impl Publish {
 		Self {
 			source: Source::Stream {
 				decoder: PublishDecoder::TsPrograms(Box::new(ts::Programs::new(origin, name, config))),
-				catalog: PublishCatalog::TsPrograms,
+				catalog: PublishCatalog::Ts,
 			},
 			broadcast: None,
 			route: None,
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
-			republish: None,
+			sections: Sections::default(),
 		}
 	}
 
@@ -613,7 +579,7 @@ impl Publish {
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
-			republish: None,
+			sections: Sections::default(),
 		})
 	}
 
@@ -623,20 +589,21 @@ impl Publish {
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
 	pub fn with_report(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
-		let Some(broadcast) = self.broadcast.as_mut() else {
-			anyhow::bail!("`import ts --program all` builds a catalog per program");
-		};
-		if let Some(republish) = &mut self.republish {
-			republish.report = Some(connection.clone());
-		}
 		let report = match &self.source {
-			Source::Stream { catalog, .. } => match catalog {
-				PublishCatalog::Media(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
-				PublishCatalog::Ts(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
-				PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			Source::Stream { decoder, catalog } => match (decoder, catalog, self.broadcast.as_mut()) {
+				(_, PublishCatalog::Media(catalog), Some(broadcast)) => {
+					crate::report::Stats::new(broadcast, catalog, connection)?
+				}
+				(PublishDecoder::Ts(republish), _, _) => {
+					self.sections.report = Some(connection.clone());
+					report(republish, connection)?
+				}
+				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => crate::report::Stats::new(broadcast, catalog, connection)?,
+			Source::Capture { broadcast, catalog, .. } => {
+				crate::report::Stats::new(&mut broadcast.clone(), catalog, connection)?
+			}
 		};
 		self.report = Some(report);
 		Ok(self)
@@ -646,21 +613,20 @@ impl Publish {
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
 	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
-		let catalog = match &mut self.source {
-			Source::Stream { catalog, .. } => catalog,
+		match &mut self.source {
+			Source::Stream { decoder, catalog } => match (decoder, catalog) {
+				(_, PublishCatalog::Media(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+				(PublishDecoder::Ts(republish), _) => {
+					self.sections.echo = Some(echo.clone());
+					republish
+						.catalog()
+						.clone()
+						.mutate(|catalog| catalog.echo = Some(echo))?;
+				}
+				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => {
-				catalog.mutate(|catalog| catalog.echo = Some(echo))?;
-				return Ok(self);
-			}
-		};
-		if let Some(republish) = &mut self.republish {
-			republish.echo = Some(echo.clone());
-		}
-		match catalog {
-			PublishCatalog::Media(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-			PublishCatalog::Ts(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
 		}
 		Ok(self)
 	}
@@ -700,7 +666,7 @@ impl Publish {
 					pending,
 					report: self.report,
 					linger: self.linger,
-					republish: self.republish,
+					sections: self.sections,
 				};
 				decode(decoder, catalog, tokio::io::stdin(), publication).await
 			}
@@ -793,53 +759,41 @@ struct Publication {
 	report: Option<crate::report::Stats>,
 	/// How long the finished broadcasts stay up after EOF.
 	linger: std::time::Duration,
-	/// How a change of source republishes, or `None` to end the import there.
-	republish: Option<Republish>,
+	/// What a TS import sets on each instance it republishes.
+	sections: Sections,
 }
 
-/// How a stdin TS import republishes its path when the source changes ([`ts::Restart`]): as a
-/// new broadcast under a new instance, with the same catalog sections.
-struct Republish {
-	origin: moq_net::origin::Producer,
-	name: String,
-	config: moq_mux::catalog::Config,
-	program: Option<u16>,
+/// The catalog sections a stdin TS import sets again on each instance it republishes.
+#[derive(Clone, Default)]
+struct Sections {
 	/// The connection `--report` measures, when the import reports.
 	report: Option<Option<moq_tokio::connection::Monitor>>,
 	echo: Option<hang::catalog::Echo>,
 }
 
-impl Republish {
-	/// A new instance of the broadcast under a new instance, announced once its catalog goes out.
-	///
-	/// `mux_rate` is the previous instance's measurement of the same multiplex, which the new
-	/// catalog carries from its first media rather than waiting on a fresh window.
-	fn instance(&self, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
-		let control = self
-			.origin
-			.route(&self.name, moq_net::origin::RouteOptions::hidden())
-			.context("failed to create broadcast")?;
-		let mut broadcast = control.broadcast().clone();
-		let (import, mut catalog) = ts_import(&mut broadcast, self.config.clone(), self.program, mux_rate)?;
-		// Before the import declares a track, so the sections ride the first catalog.
-		let report = match &self.report {
-			Some(connection) => Some(crate::report::Stats::new(&mut broadcast, &catalog, connection.clone())?),
-			None => None,
-		};
+impl Sections {
+	/// Set these sections on the instance `republish` just opened, before it declares a track so
+	/// they ride its first catalog, returning its report.
+	fn apply(&self, republish: &ts::Republish) -> anyhow::Result<Option<crate::report::Stats>> {
 		if let Some(echo) = &self.echo {
-			catalog.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
+			republish
+				.catalog()
+				.clone()
+				.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
 		}
-		tracing::info!(instance = %control.instance(), "publisher instance");
-		let pending = Pending::new(control.clone())?;
-		Ok(Instance {
-			decoder: PublishDecoder::Ts(Box::new(import)),
-			catalog: PublishCatalog::Ts(catalog),
-			control: Some(control),
-			broadcast: Some(broadcast),
-			pending: Some(pending),
-			report,
-		})
+		self.report
+			.as_ref()
+			.map(|connection| report(republish, connection.clone()))
+			.transpose()
 	}
+}
+
+/// A `--report` track on the current instance of `republish`.
+fn report(
+	republish: &ts::Republish,
+	connection: Option<moq_tokio::connection::Monitor>,
+) -> anyhow::Result<crate::report::Stats> {
+	crate::report::Stats::new(&mut republish.broadcast().clone(), republish.catalog(), connection)
 }
 
 /// One publisher instance of a stdin import: the decoder filling its broadcast, and what
@@ -872,8 +826,8 @@ struct Reader<R> {
 /// The finished broadcasts then stay servable for the linger, so a subscriber that saw the
 /// final catalog only at EOF can still request them.
 ///
-/// A change of source ([`ts::Restart`]) ends the instance there. With `republish`, the rest of the
-/// input publishes a new instance on the same path; otherwise the import fails with it.
+/// A change of source ([`ts::Republished`]) ends a TS import's instance there, and the rest of the
+/// input publishes a new instance on the same path.
 async fn decode(
 	decoder: PublishDecoder,
 	catalog: PublishCatalog,
@@ -886,7 +840,7 @@ async fn decode(
 		pending,
 		report,
 		linger,
-		republish,
+		sections,
 	} = publication;
 	let mut instance = Instance {
 		decoder,
@@ -908,15 +862,12 @@ async fn decode(
 	};
 
 	let result = loop {
-		let restart = match instance.read(&mut reader).await {
-			Ok(Some(restart)) => restart,
+		let republished = match instance.read(&mut reader).await {
+			Ok(Some(republished)) => republished,
 			Ok(None) => break Ok(()),
 			Err(err) => break Err(err),
 		};
-		let Some(republish) = &republish else {
-			break Err(restart.into());
-		};
-		if let Err(err) = instance.restart(republish, restart, &mut reader.log) {
+		if let Err(err) = instance.republished(&sections, republished, &mut reader.log) {
 			break Err(err);
 		}
 	};
@@ -929,7 +880,7 @@ impl Instance {
 	async fn read<R: tokio::io::AsyncRead + Unpin>(
 		&mut self,
 		reader: &mut Reader<R>,
-	) -> anyhow::Result<Option<ts::Restart>> {
+	) -> anyhow::Result<Option<ts::Republished>> {
 		let Self {
 			decoder,
 			pending,
@@ -946,8 +897,8 @@ impl Instance {
 				if n == 0 {
 					return Ok(None); // EOF
 				}
-				if let Some(restart) = feed(decoder, pending, &reader.buffer)? {
-					return Ok(Some(restart));
+				if let Some(republished) = feed(decoder, pending, &reader.buffer)? {
+					return Ok(Some(republished));
 				}
 
 				if reader.sampled.elapsed() >= ts::stats::Log::INTERVAL {
@@ -970,39 +921,29 @@ impl Instance {
 		}
 	}
 
-	/// The source changed: finish this instance before the change, and replace it with a new one
-	/// on the same path that takes the rest of the input.
-	fn restart(&mut self, republish: &Republish, restart: ts::Restart, log: &mut ts::stats::Log) -> anyhow::Result<()> {
-		let mut restart = restart;
+	/// The source changed, and the importer republished: end this instance's report, and set the
+	/// sections on the new instance before it reads the rest of the input.
+	fn republished(
+		&mut self,
+		sections: &Sections,
+		republished: ts::Republished,
+		log: &mut ts::stats::Log,
+	) -> anyhow::Result<()> {
+		let mut republished = republished;
 		loop {
-			tracing::warn!(step = %restart.step, "the source changed; republishing");
-			// Hidden until its catalog goes out, so it announces only after this instance finished.
-			let next = republish.instance(self.catalog.mux_rate())?;
-			let Self {
-				decoder,
-				mut catalog,
-				mut report,
-				control,
-				broadcast,
-				pending,
-			} = std::mem::replace(self, next);
-			let decoder = match decoder.finish() {
-				Ok(decoder) => decoder,
-				Err(err) => return Err(fail(catalog, report, err)),
+			let PublishDecoder::Ts(republish) = &self.decoder else {
+				unreachable!("only a TS import republishes");
 			};
-			if let Some(stats) = decoder.stats() {
-				report_mpegts(&report, &stats);
-				log.finish(&stats);
-			}
-			if let Some(report) = &mut report {
+			tracing::warn!(step = %republished.step, instance = %republish.instance(), "the source changed; republishing");
+			report_mpegts(&self.report, &republished.stats);
+			log.finish(&republished.stats);
+			if let Some(report) = &mut self.report {
 				report.finish();
 			}
-			catalog.finish()?;
-			// The finished broadcast ends as its handles drop, withdrawing its announcement.
-			drop((decoder, catalog, report, control, broadcast, pending));
+			self.report = sections.apply(republish)?;
 			*log = ts::stats::Log::default();
-			match feed(&mut self.decoder, &mut self.pending, &restart.remainder)? {
-				Some(next) => restart = next,
+			match feed(&mut self.decoder, &mut self.pending, &[])? {
+				Some(next) => republished = next,
 				None => return Ok(()),
 			}
 		}
@@ -1100,9 +1041,9 @@ fn feed(
 	decoder: &mut PublishDecoder,
 	pending: &mut Option<Pending>,
 	chunk: &[u8],
-) -> anyhow::Result<Option<ts::Restart>> {
-	if let Err(err) = decoder.decode_chunk(chunk) {
-		return err.downcast::<ts::Restart>().map(Some);
+) -> anyhow::Result<Option<ts::Republished>> {
+	if let Some(republished) = decoder.decode_chunk(chunk)? {
+		return Ok(Some(republished));
 	}
 	if let Some(announce) = pending
 		&& announce.announce()?
@@ -1527,6 +1468,35 @@ pub(crate) mod tests {
 	}
 
 	/// A source for the broadcast at `path`, resolved through `origin`.
+	/// A stdin TS import of `demo` on an origin of its own, and a reader of its first instance's
+	/// broadcast.
+	fn ts_stdin() -> (Publish, moq_net::broadcast::Consumer) {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(moq_net::time::run(driver));
+		} else {
+			// Nothing polls the driver in a sync test, and dropping it would tear the origin down.
+			std::mem::forget(driver);
+		}
+		let publish = Publish::stdin(
+			&origin,
+			"demo",
+			moq_net::Instance::random(),
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+		)
+		.unwrap();
+		let Source::Stream {
+			decoder: PublishDecoder::Ts(republish),
+			..
+		} = &publish.source
+		else {
+			panic!("a TS import");
+		};
+		let consumer = republish.broadcast().consume();
+		(publish, consumer)
+	}
+
 	async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
 		let consumer = origin.consume();
 		let broadcast = consumer.request(path, None).await.unwrap();
@@ -1557,9 +1527,10 @@ pub(crate) mod tests {
 		// fire instantly instead of waiting on the wall clock.
 		let input = manufacture_input().await;
 
-		// Publish side: `Publish::new(Ts)` builds a `ts::Import<Ext>`, so the verbatim
-		// streams land in the broadcast instead of being dropped by the media-only path.
-		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
+		// Publish side: a TS import uses the `mpegts` catalog, so the verbatim streams land in
+		// the broadcast instead of being dropped by the media-only path. The broadcast is created
+		// on a throwaway origin so the exporter can resolve it by path, announced once its
+		// catalog goes out.
 		let origin = moq_tokio::origin::spawn();
 		let publish = Publish::stdin(
 			&origin,
@@ -1569,8 +1540,6 @@ pub(crate) mod tests {
 			Default::default(),
 		)
 		.unwrap();
-		publish.route.as_ref().unwrap().announce().unwrap();
-		settle().await;
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -1941,9 +1910,7 @@ pub(crate) mod tests {
 	/// clock on it, so the first frame is live on arrival.
 	#[tokio::test]
 	async fn ts_import_anchors_the_catalog_clock_on_arrival() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, consumer) = ts_stdin();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -1988,13 +1955,9 @@ pub(crate) mod tests {
 	/// would announce a stdin import before it can serve anything.
 	#[tokio::test]
 	async fn echo_rides_the_first_catalog() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
+		let (publish, consumer) = ts_stdin();
 		let echo = hang::catalog::Echo::new(moq_net::path::Relative::new("viewers").unwrap());
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default())
-			.unwrap()
-			.with_echo(echo.clone())
-			.unwrap();
+		let publish = publish.with_echo(echo.clone()).unwrap();
 		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
 		let mut published = || {
 			matches!(
@@ -2050,8 +2013,7 @@ pub(crate) mod tests {
 			}
 		}
 
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, _) = ts_stdin();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -2095,8 +2057,7 @@ pub(crate) mod tests {
 			}
 			file.flush().unwrap();
 			let input = tokio::fs::File::open(file.path()).await.unwrap();
-			let broadcast = moq_net::broadcast::Info::new().produce();
-			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+			let (publish, _) = ts_stdin();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2119,9 +2080,7 @@ pub(crate) mod tests {
 	/// subscriber reads a finished broadcast rather than its tracks being removed.
 	#[tokio::test(start_paused = true)]
 	async fn eof_finishes_the_catalog_with_its_renditions() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, consumer) = ts_stdin();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
 		#[cfg_attr(
@@ -2157,9 +2116,7 @@ pub(crate) mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_import_serves_its_tracks_for_the_linger() {
 		const LINGER: Duration = Duration::from_secs(30);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, consumer) = ts_stdin();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
 		#[cfg_attr(
@@ -2232,7 +2189,8 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			let broadcast = publish.route.clone().unwrap();
+			// A TS import announces through its own route.
+			let pending = publish.route.clone().map(|route| Pending::new(route).unwrap());
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2243,10 +2201,9 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let pending = Pending::new(broadcast).unwrap();
 			let (mut stdin, input_end) = tokio::io::duplex(input.len());
 			let publication = Publication {
-				pending: Some(pending),
+				pending,
 				..Default::default()
 			};
 			let mut import = std::pin::pin!(decode(decoder, catalog, input_end, publication));
@@ -2295,15 +2252,8 @@ pub(crate) mod tests {
 				std::task::Poll::Ready(Err(std::io::Error::other("stdin failed")))
 			}
 		}
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let publish = Publish::new(
-			broadcast.clone(),
-			&PublishFormat::Ts { program: None },
-			Default::default(),
-		)
-		.unwrap();
-		let mut catalog_reader = broadcast
-			.consume()
+		let (publish, consumer) = ts_stdin();
+		let mut catalog_reader = consumer
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
 			.subscribe(None)
@@ -2366,12 +2316,8 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		let control = publish.route.unwrap();
 		let publication = Publication {
-			pending: Some(Pending::new(control.clone()).unwrap()),
-			control: Some(control),
-			broadcast: publish.broadcast,
-			republish: publish.republish,
+			sections: publish.sections,
 			..Default::default()
 		};
 		let (mut stdin, input_end) = tokio::io::duplex(2 * CLIP.len() + flag.len());
@@ -2442,6 +2388,7 @@ pub(crate) mod tests {
 
 		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 		let origin = moq_tokio::origin::spawn();
+		let mut announced = origin.consume().announced();
 		let publish = Publish::stdin(
 			&origin,
 			"demo",
@@ -2457,24 +2404,28 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("a stream source");
 		};
-		let control = publish.route.unwrap();
 		let mut instance = Instance {
 			decoder,
 			catalog,
-			pending: Some(Pending::new(control.clone()).unwrap()),
-			control: Some(control),
-			broadcast: publish.broadcast,
+			pending: None,
+			control: None,
+			broadcast: None,
 			report: None,
 		};
-		let republish = publish.republish.unwrap();
 		let mut log = ts::stats::Log::default();
 		let mut follower = None;
+		let mut listed = false;
 		let mut output = [Vec::new(), Vec::new()];
 		for chunk in CLIP.iter().chain(CLIP).copied().collect::<Vec<_>>().chunks(8 * 188) {
-			if let Some(restart) = feed(&mut instance.decoder, &mut instance.pending, chunk).unwrap() {
-				instance.restart(&republish, restart, &mut log).unwrap();
+			if let Some(republished) = feed(&mut instance.decoder, &mut instance.pending, chunk).unwrap() {
+				instance
+					.republished(&Sections::default(), republished, &mut log)
+					.unwrap();
 			}
-			if follower.is_none() && instance.pending.is_none() {
+			while let Some(event) = announced.try_next() {
+				listed |= matches!(event, moq_net::announce::Event::Present(_));
+			}
+			if follower.is_none() && listed {
 				let export = open_export(
 					resolved(&origin, "demo").await,
 					CatalogFormat::Hang,
@@ -2590,7 +2541,8 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			let broadcast = publish.route.clone().unwrap();
+			// A TS import announces through its own route.
+			let pending = publish.route.clone().map(|route| Pending::new(route).unwrap());
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2601,9 +2553,8 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let pending = Pending::new(broadcast).unwrap();
 			let publication = Publication {
-				pending: Some(pending),
+				pending,
 				..Default::default()
 			};
 			let err = decode(decoder, catalog, &input[..], publication).await.unwrap_err();
@@ -2710,8 +2661,7 @@ pub(crate) mod tests {
 	/// Plain `import ts` refuses a multiplex, naming its programs and the flag that picks one.
 	#[test]
 	fn a_multiplex_is_refused_with_the_programs_and_the_flag() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (mut publish, _) = ts_stdin();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(

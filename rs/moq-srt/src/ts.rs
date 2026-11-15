@@ -34,13 +34,14 @@ pub enum Program {
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
+/// Each broadcast is announced once its catalog goes out.
 /// [`Self::finish`] keeps the finished broadcasts up for a linger; dropping the
 /// publisher ends them and unannounces their paths.
 ///
-/// A step of the source's clock onto another timeline ([`ts::Restart`]), such as a
-/// changeover between two encoders whose clocks were never locked, finishes the broadcast
-/// and republishes the rest of the input on the same path under a new instance, on the same
-/// connection. [`Program::All`] still ends the ingest there.
+/// A change of source ([`ts::Republished`]), such as a changeover between two encoders whose
+/// clocks were never locked, finishes the broadcast and republishes the rest of the input on
+/// the same path under a new instance, on the same connection. [`Program::All`] still ends the
+/// ingest there.
 pub struct Publisher {
 	importer: Importer,
 	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
@@ -51,90 +52,21 @@ pub struct Publisher {
 }
 
 enum Importer {
-	One(Box<One>),
+	One(Box<ts::Republish>),
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
 	/// declares its tracks.
 	All(Box<ts::Programs>),
 }
 
-/// One program's broadcast, and what the next instance publishes with when the source's
-/// clock steps.
-struct One {
-	instance: Instance,
-	origin: origin::Producer,
-	path: String,
-	config: moq_mux::catalog::Config,
-	program: Option<u16>,
-}
-
-/// One program's broadcast, under one instance.
-struct Instance {
-	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
-	// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
-	import: ts::Import<ts::Ext>,
-	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
-	catalog: moq_mux::catalog::Producer<ts::Ext>,
-	// Keeps the path announced while the importer fills it, through the linger after a clean end.
-	route: moq_net::origin::Route,
-}
-
-impl Instance {
-	/// Publish `path` under a new instance, importing `program` of the input, or its only one.
-	///
-	/// Each instance is its own publisher, so an encoder reconnecting under the same stream id,
-	/// or a source whose clock stepped, replaces the stale broadcast instead of resuming into it.
-	fn publish(
-		origin: &origin::Producer,
-		path: &str,
-		config: moq_mux::catalog::Config,
-		program: Option<u16>,
-	) -> Result<(Self, moq_net::Instance)> {
-		let route = origin.route(path, moq_net::origin::RouteOptions::default())?;
-		let id = route.instance();
-		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-		let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
-		let mut import = ts::Import::new(route.broadcast().clone(), catalog.reserve());
-		if let Some(program) = program {
-			import = import.with_program(program);
-		}
-		let instance = Self { import, catalog, route };
-		Ok((instance, id))
-	}
-
-	/// Flush the buffered media and finish every track, the catalog included.
-	fn finish(self) -> Result<Finished> {
-		let Self {
-			import,
-			mut catalog,
-			route,
-		} = self;
-		let import = import.finish().map_err(moq_mux::Error::from)?;
-		catalog.finish()?;
-		Ok(Finished {
-			import,
-			_catalog: catalog,
-			route,
-		})
-	}
-}
-
-/// One program's broadcast once its tracks finished, served while held.
-struct Finished {
-	import: ts::Finished<ts::Ext>,
-	_catalog: moq_mux::catalog::Producer<ts::Ext>,
-	route: moq_net::origin::Route,
-}
-
 /// What a finished [`Publisher`] holds to keep serving its broadcasts.
 enum Ended {
-	One { _finished: Box<Finished> },
+	One { _finished: Box<ts::republish::Finished> },
 	All { _finished: Box<ts::programs::Finished> },
 }
 
 impl Publisher {
-	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
-	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
+	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast once
+	/// its catalog goes out, or each program's for [`Program::All`].
 	///
 	/// `config` is the catalog the importer publishes into: max age
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
@@ -145,30 +77,23 @@ impl Publisher {
 		config: moq_mux::catalog::Config,
 		program: Option<Program>,
 	) -> Result<Self> {
+		let name = moq_net::Path::new(path).map_err(moq_net::Error::from)?;
 		let importer = match program {
 			// `ts::Programs` mints an instance per program.
 			Some(Program::All) => {
 				tracing::info!(%path, ?program, "publishing ingest broadcasts");
-				Importer::All(Box::new(ts::Programs::new(
-					origin.clone(),
-					moq_net::Path::new(path).map_err(moq_net::Error::from)?,
-					config,
-				)))
+				Importer::All(Box::new(ts::Programs::new(origin.clone(), name, config)))
 			}
 			Some(Program::One(_)) | None => {
-				let program = match program {
-					Some(Program::One(program)) => Some(program),
-					_ => None,
-				};
-				let (instance, id) = Instance::publish(origin, path, config.clone(), program)?;
-				tracing::info!(%path, ?program, instance = %id, "publishing ingest broadcast");
-				Importer::One(Box::new(One {
-					instance,
-					origin: origin.clone(),
-					path: path.to_string(),
-					config,
-					program,
-				}))
+				// Each instance is its own publisher, so an encoder reconnecting under the same
+				// stream id, or a source whose clock stepped, replaces the stale broadcast instead
+				// of resuming into it.
+				let mut republish = ts::Republish::new(origin.clone(), name, config).map_err(moq_mux::Error::from)?;
+				if let Some(Program::One(program)) = program {
+					republish = republish.with_program(program);
+				}
+				tracing::info!(%path, ?program, instance = %republish.instance(), "publishing ingest broadcast");
+				Importer::One(Box::new(republish))
 			}
 		};
 
@@ -188,27 +113,16 @@ impl Publisher {
 	/// per-stream counters.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
 		match &mut self.importer {
-			Importer::One(one) => {
-				let One {
-					instance,
-					origin,
-					path,
-					config,
-					program,
-				} = &mut **one;
-				let mut data = data;
-				while let Err(err) = instance.import.decode(&data) {
-					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
-					// The rest of the input republishes the path under a new instance, and the
-					// instance before the step finishes.
-					let (next, id) = Instance::publish(origin, path, config.clone(), *program)?;
-					let previous = std::mem::replace(instance, next).finish()?;
-					self.span.in_scope(|| self.log.finish(&previous.import.stats()));
-					tracing::warn!(%path, step = %restart.step, instance = %id, "the source's clock stepped; republishing");
-					// The finished broadcast ends with its route.
-					drop(previous);
+			Importer::One(republish) => {
+				let mut data = &data[..];
+				while let Some(republished) = republish.decode(data).map_err(moq_mux::Error::from)? {
+					let instance = republish.instance();
+					self.span.in_scope(|| {
+						self.log.finish(&republished.stats);
+						tracing::warn!(step = %republished.step, %instance, "the source changed; republishing");
+					});
 					self.log = ts::stats::Log::default();
-					data = restart.remainder;
+					data = &[];
 				}
 			}
 			Importer::All(programs) => programs.decode(&data).map_err(moq_mux::Error::from)?,
@@ -223,7 +137,7 @@ impl Publisher {
 
 	fn stats(&self) -> ts::stats::Snapshot {
 		match &self.importer {
-			Importer::One(one) => one.instance.import.stats(),
+			Importer::One(republish) => republish.stats(),
 			Importer::All(programs) => programs.stats(),
 		}
 	}
@@ -235,10 +149,10 @@ impl Publisher {
 			importer, log, span, ..
 		} = self;
 		let (ended, broadcasts, stats) = match importer {
-			Importer::One(one) => {
-				let finished = one.instance.finish()?;
-				let broadcasts = vec![finished.route.broadcast().clone()];
-				let stats = finished.import.stats();
+			Importer::One(republish) => {
+				let finished = republish.finish().map_err(moq_mux::Error::from)?;
+				let broadcasts = vec![finished.broadcast().clone()];
+				let stats = finished.stats();
 				(
 					Ended::One {
 						_finished: Box::new(finished),
@@ -270,11 +184,7 @@ impl Publisher {
 	/// Consumes the publisher and closes the broadcasts.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.importer {
-			Importer::One(one) => {
-				let Instance { import, route, .. } = one.instance;
-				import.abort(err);
-				route.broadcast().close();
-			}
+			Importer::One(republish) => republish.abort(err),
 			Importer::All(programs) => programs.abort(err),
 		}
 	}
@@ -700,14 +610,15 @@ mod tests {
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is
-	/// still open restarts the broadcast at once: each connection is its own instance, so
-	/// a fresh request reaches the reconnect, while the stale viewer stays on the old
-	/// one until it leaves.
+	/// still open restarts the broadcast once the reconnect's catalog is out: each connection
+	/// is its own instance, so a fresh request reaches the reconnect, while the stale viewer
+	/// stays on the old one until it leaves.
 	#[tokio::test(start_paused = true)]
 	async fn a_reconnect_replaces_the_stale_connection() {
 		let origin = produce_origin();
 		let consumer = origin.consume();
-		let _stale = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		let mut stale_publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		stale_publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 		let stale = consumer.request("ingest", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
@@ -716,7 +627,10 @@ mod tests {
 			.await
 			.unwrap();
 
-		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		let mut fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		// Hidden until its catalog goes out, so a request still reaches the stale connection.
+		assert!(consumer.request("ingest", None).await.unwrap().is_clone(&stale));
+		fresh.feed(Bytes::from_static(BBB5S)).unwrap();
 		let stale_viewer = kio::clock::timeout(Duration::from_secs(1), async {
 			loop {
 				match catalog.recv_group().await {
@@ -802,9 +716,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100)]));
-		ts.extend_from_slice(&psi_packet(0x0100, &pmt(1, 0x1b, 0x0101)));
-		publisher.feed(Bytes::from(ts)).unwrap();
+		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
 		let broadcast = consumer
@@ -814,7 +726,15 @@ mod tests {
 			.await
 			.unwrap()
 			.unwrap();
-		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
+		let catalog = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.expect("a catalog");
+		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
+		let info = broadcast.track(name.as_str()).unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 
@@ -882,6 +802,8 @@ mod tests {
 	async fn publisher_preserves_scte35_cues() {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		// Announced once its catalog goes out.
+		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
 		let broadcast = consumer
@@ -891,8 +813,6 @@ mod tests {
 			.await
 			.unwrap()
 			.unwrap();
-
-		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
