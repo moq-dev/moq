@@ -45,9 +45,10 @@ Two approaches:
   joining mid-stream can no longer tell that its first segment is whole
   without the group before it.
 
-Recommended: bounding the end early. It keeps the numbering every edge and
-recording agrees on, and gives back part of the delay without a wire or URL
-change.
+Decided 2026-11-15 (maintainer, /quest-plan): ✅ bound a group's end early
+(rejected: numbering a group by the slot it starts in). Reason: it keeps the
+numbering every edge and recording agrees on, and gives back part of the
+delay without a wire or URL change.
 
 Tests (the grid's unit tests, on a controlled clock): a group whose frames
 cross the next line completes the open segment before the next group starts;
@@ -56,7 +57,3 @@ segment's `EXTINF` and number are unchanged from today's for the same groups.
 
 Public API: none expected. Wire: none.
 
-## Waiting
-
-- Maintainer: pick the approach above (recommended: bound a group's end
-  early), and record it in this Plan.
