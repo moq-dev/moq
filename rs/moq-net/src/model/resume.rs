@@ -399,6 +399,7 @@ impl Consumer {
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
+				received: RangeSet::new(),
 				reported_stale: RangeSet::new(),
 				declared: None,
 				declared_error: None,
@@ -950,8 +951,8 @@ impl Subscriber {
 	/// Take back every stale run this reader queued or the serving route's copy reported;
 	/// see [`track::Subscriber::reoffer_stale`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
-		self.reader().reoffer_stale()
+	pub(super) fn reoffer_stale(&mut self, delivered: &Delivered) -> Vec<std::ops::Range<u64>> {
+		self.reader().reoffer_stale(delivered)
 	}
 
 	/// Poll for keys the serving copy gave up that no copy may still deliver; see
@@ -1115,9 +1116,10 @@ struct Reader {
 	out: Vec<(u64, Weak<()>)>,
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
-	/// Each with whether it is a received stale run the serving copy held, which new terms
-	/// can supersede.
-	drops: RangeMap<u64, (track::Hole, bool)>,
+	drops: RangeMap<u64, track::Hole>,
+	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
+	/// new terms can supersede. Kept apart so a poll costs these runs, not every queued one.
+	received: RangeSet<u64>,
 	/// The stale runs reported since the last [`Reader::reoffer_stale`], whichever copy gave
 	/// them up: an update reopens each, and the copy that reported it may no longer serve.
 	reported_stale: RangeSet<u64>,
@@ -1253,6 +1255,7 @@ impl Reader {
 		self.generation = Some(generation);
 		// What a former route gave up is no verdict on the one that serves now.
 		self.drops = RangeMap::new();
+		self.received = RangeSet::new();
 		let Some(track) = serving else { return };
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
@@ -1831,17 +1834,20 @@ impl Reader {
 	/// judged again: a replaced copy may no longer deliver, so what it gave up is the new
 	/// route's to deliver or give up.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
+	fn reoffer_stale(&mut self, delivered: &Delivered) -> Vec<std::ops::Range<u64>> {
 		let mut runs = std::mem::take(&mut self.reported_stale);
 		let queued: Vec<_> = self
 			.drops
 			.iter()
-			.filter(|(_, (hole, _))| hole.stale_budget().is_some())
+			.filter(|(_, hole)| hole.stale_budget().is_some())
 			.map(|(run, _)| run.clone())
 			.collect();
 		for run in queued {
-			self.drops.remove(run.clone());
-			runs.insert(run);
+			self.remove_drop(run.clone());
+			// A run delivered since it queued is owed nothing; see [`Self::poll_drop`].
+			if !delivered.covers(run.clone()) {
+				runs.insert(run);
+			}
 		}
 		if let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) {
 			runs.extend(sub.reoffer_stale());
@@ -1861,12 +1867,7 @@ impl Reader {
 		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
-		let queued: Vec<_> = self
-			.drops
-			.iter()
-			.filter(|(_, (_, received))| *received)
-			.map(|(run, _)| run.clone())
-			.collect();
+		let queued: Vec<_> = self.received.iter().cloned().collect();
 		let mut given_up = Vec::new();
 		let mut superseded = Vec::new();
 		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
@@ -1887,21 +1888,24 @@ impl Reader {
 			}
 		}
 		for run in superseded {
-			self.drops.remove(run);
+			self.remove_drop(run);
 		}
 		for (run, hole, received) in given_up {
 			if !Error::Stream(hole.error()).retryable() {
-				self.drops.insert(run, (hole, received));
+				match received {
+					true => self.received.insert(run.clone()),
+					false => self.received.remove(run.clone()),
+				}
+				self.drops.insert(run, hole);
 			}
 		}
-		let covered: Vec<_> = self
-			.drops
-			.iter()
-			.map(|(run, _)| run.clone())
-			.filter(|run| delivered.covers(run.clone()))
-			.collect();
-		for run in covered {
-			self.drops.remove(run);
+		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
+		// each poll reports one run, so such a pass would cost the queue squared to drain it,
+		// and a new reader can be handed one run per cached group and per gap between them.
+		while let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone())
+			&& delivered.covers(run.clone())
+		{
+			self.remove_drop(run);
 		}
 		// The common case: nothing to report on one route, and the serving copy's own poll
 		// above wakes this for the next run it gives up. A replaced copy is still judged:
@@ -1925,7 +1929,12 @@ impl Reader {
 				feeding.insert(from..until);
 			}
 		}
-		let next = self.drops.iter().find_map(|(run, (err, _))| {
+		let mut passed = Vec::new();
+		let next = self.drops.iter().find_map(|(run, err)| {
+			if delivered.covers(run.clone()) {
+				passed.push(run.clone());
+				return None;
+			}
 			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
 			let open = delivered
 				.gaps(run)
@@ -1933,18 +1942,27 @@ impl Reader {
 				.find_map(|gap| feeding.gaps(&gap).next())?;
 			Some((open, err.clone()))
 		});
+		for run in passed {
+			self.remove_drop(run);
+		}
 		let Some((open, err)) = next else {
 			return Poll::Pending;
 		};
 		// Reported once. As on a plain cursor, the report is not final: a miss (a fill given
 		// up) may still land, and is handed out if it does.
-		self.drops.remove(open.clone());
+		self.remove_drop(open.clone());
 		match &err {
 			err if err.stale_budget().is_some() => self.reported_stale.insert(open.clone()),
 			// A skip or final drop is final, so no update reopens a stale report it replaced.
 			track::Hole::Skip | track::Hole::Drop { .. } => self.reported_stale.remove(open.clone()),
 		}
 		Poll::Ready((open, err))
+	}
+
+	/// Forget `run` as queued, received or not.
+	fn remove_drop(&mut self, run: std::ops::Range<u64>) {
+		self.received.remove(run.clone());
+		self.drops.remove(run);
 	}
 
 	/// The serving copy's subscription, once it answered; `None` once the track ended
