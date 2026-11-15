@@ -22,7 +22,7 @@ pub struct Writer<S: crate::transport::poll::SendStream, V> {
 	/// Bytes the stream took through this writer.
 	written: u64,
 	/// The payload this stream carries, billed as the transport delivers it. See [`Self::bill`].
-	delivery: Option<Box<Billing<S::Offset>>>,
+	billing: Option<Box<Billing<S::Offset>>>,
 }
 
 impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
@@ -35,7 +35,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			version,
 			stats: Default::default(),
 			written: 0,
-			delivery: None,
+			billing: None,
 		}
 	}
 
@@ -44,8 +44,8 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// A stream carrying several groups bills all of them to the first meter: a stream serves one
 	/// track, so they count alike.
 	pub(crate) fn bill(&mut self, meter: crate::stats::Meter) {
-		if self.delivery.is_none() && meter.is_tracked() {
-			self.delivery = Some(Box::new(Billing::new(meter)));
+		if self.billing.is_none() && meter.is_tracked() {
+			self.billing = Some(Box::new(Billing::new(meter)));
 		}
 	}
 
@@ -55,16 +55,16 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// serve loop's next park, close or drop bills what was delivered by then.
 	pub(crate) fn frame(&mut self, size: u64) {
 		let start = self.written + (self.buffer.len() - self.flushed) as u64;
-		if let Some(delivery) = &mut self.delivery {
-			delivery.delivery.frame(start, size);
+		if let Some(billing) = &mut self.billing {
+			billing.delivery.frame(start, size);
 		}
 	}
 
 	/// Mint an offset to ask the transport about once a write ends a frame, so a reset still
 	/// bills each frame acknowledged before it.
 	fn ask(&mut self) {
-		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.ask(stream, self.written, false);
+		if let (Some(billing), Some(stream)) = (&mut self.billing, &self.stream) {
+			billing.ask(stream, self.written, false);
 		}
 	}
 
@@ -77,8 +77,8 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// a stream idle after its last frame still bills that frame as it lands. A serve loop
 	/// calls this whenever it parks, since a write it just made may be waiting on delivery.
 	pub(crate) fn poll_settle(&mut self, waiter: &kio::Waiter) {
-		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.poll(stream, self.written, waiter);
+		if let (Some(billing), Some(stream)) = (&mut self.billing, &self.stream) {
+			billing.poll(stream, self.written, waiter);
 		}
 	}
 
@@ -286,7 +286,7 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			stream,
 			version,
 			written: self.written,
-			delivery: self.delivery.take(),
+			billing: self.billing.take(),
 		})
 	}
 
@@ -334,14 +334,14 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			version,
 			stats: self.stats.clone(),
 			written: self.written,
-			delivery: self.delivery.take(),
+			billing: self.billing.take(),
 		}
 	}
 }
 
 /// A stream's payload billed as the transport acknowledges it, through offsets the writer asks
 /// [`poll_acked`](crate::transport::poll::SendStream::poll_acked) about.
-pub(crate) struct Billing<O> {
+struct Billing<O> {
 	delivery: crate::stats::Delivery,
 	ack: Ack<O>,
 }
@@ -392,7 +392,12 @@ impl<O> Billing<O> {
 	/// oldest offset still waiting.
 	///
 	/// The transport is asked nothing while no frame waits, since it may lock to answer.
-	fn poll<S: crate::transport::poll::SendStream<Offset = O>>(&mut self, stream: &S, written: u64, waiter: &kio::Waiter) {
+	fn poll<S: crate::transport::poll::SendStream<Offset = O>>(
+		&mut self,
+		stream: &S,
+		written: u64,
+		waiter: &kio::Waiter,
+	) {
 		use crate::transport::poll::Acked;
 
 		loop {
@@ -438,7 +443,7 @@ pub struct Closing<S: crate::transport::poll::SendStream, V> {
 	stream: Option<S>,
 	version: V,
 	written: u64,
-	delivery: Option<Box<Billing<S::Offset>>>,
+	billing: Option<Box<Billing<S::Offset>>>,
 }
 
 impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
@@ -447,8 +452,8 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
 		let Some(stream) = &self.stream else {
 			return Poll::Ready(Ok(()));
 		};
-		if let Some(delivery) = &mut self.delivery {
-			delivery.poll(stream, self.written, waiter);
+		if let Some(billing) = &mut self.billing {
+			billing.poll(stream, self.written, waiter);
 		}
 		let closed = ready!(stream.poll_closed(waiter));
 		self.settle();
@@ -458,8 +463,8 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Closing<S, V> {
 
 impl<S: crate::transport::poll::SendStream, V> Closing<S, V> {
 	fn settle(&mut self) {
-		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.poll(stream, self.written, &kio::Waiter::noop());
+		if let (Some(billing), Some(stream)) = (&mut self.billing, &self.stream) {
+			billing.poll(stream, self.written, &kio::Waiter::noop());
 		}
 	}
 }
@@ -498,8 +503,8 @@ impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 
 impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 	fn drop(&mut self) {
-		if let (Some(delivery), Some(stream)) = (&mut self.delivery, &self.stream) {
-			delivery.poll(stream, self.written, &kio::Waiter::noop());
+		if let (Some(billing), Some(stream)) = (&mut self.billing, &self.stream) {
+			billing.poll(stream, self.written, &kio::Waiter::noop());
 		}
 		if let Some(mut stream) = self.stream.take() {
 			// Unlike the Quinn default, we abort the stream on drop.
@@ -744,7 +749,11 @@ mod tests {
 		write_frame(&mut writer, 100, 100);
 		write_frame(&mut writer, 100, 100);
 		assert!(writer.poll_closed(waiter).is_pending());
-		assert_eq!(billed(&registry), (0, 0), "the stream took it all, the transport acknowledged none");
+		assert_eq!(
+			billed(&registry),
+			(0, 0),
+			"the stream took it all, the transport acknowledged none"
+		);
 		assert_eq!(stream.waits(), 1, "the wait for the peer waits on acknowledgment too");
 
 		// Into the second frame: the first bills, though both went out before the park.
@@ -764,7 +773,11 @@ mod tests {
 		assert!(writer.poll_closed(waiter).is_pending());
 		stream.ack(1 + 3 * 102);
 		assert!(writer.poll_closed(waiter).is_pending());
-		assert_eq!(billed(&registry), (250, 2), "the acknowledged half bills, not the frame");
+		assert_eq!(
+			billed(&registry),
+			(250, 2),
+			"the acknowledged half bills, not the frame"
+		);
 
 		// A reset bills what was acknowledged by then, and nothing after.
 		writer.buffer_raw(&[b'x'; 50]);

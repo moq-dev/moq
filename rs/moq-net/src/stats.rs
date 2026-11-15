@@ -52,10 +52,12 @@
 //!   `frames` / `groups`.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model. A
-//!   session's egress `bytes` / `frames` count only payload the transport
-//!   delivered (see [`SendStream::delivered`](crate::transport::poll::SendStream::delivered)),
-//!   never what a reset or a lost session discarded: a frame's bytes as they
-//!   land, and the frame with its last byte. An in-process reader counts on read,
+//!   session's egress `bytes` / `frames` count only payload the peer
+//!   acknowledged (see [`SendStream::poll_acked`](crate::transport::poll::SendStream::poll_acked)),
+//!   never what a reset or a lost session discarded: a frame's bytes once an
+//!   offset past them is acknowledged, and the frame with its last byte. A
+//!   transport that cannot see acknowledgments counts the bytes the stream
+//!   took instead. An in-process reader counts on read,
 //!   unless it takes a [`Bill`] to count only what it delivers onward.
 //! * `datagrams`: cumulative datagrams of datagram tracks. A datagram belongs to
 //!   no group, so it bumps `bytes` but not `groups` or `frames`. A session counts

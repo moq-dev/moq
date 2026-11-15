@@ -1187,7 +1187,10 @@ mod tests {
 		let acked = |send: &SendStream, offset: u64| send.poll_acked(&noop(), &offset);
 		let (a, b) = pair(Config::default());
 		let (mut send, mut recv) = uni(&a, &b);
-		assert!(matches!(acked(&send, send.offset()), Poll::Ready(Ok(poll::Acked::Delivered))));
+		assert!(matches!(
+			acked(&send, send.offset()),
+			Poll::Ready(Ok(poll::Acked::Delivered))
+		));
 
 		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
 		let one = send.offset();
@@ -1212,7 +1215,10 @@ mod tests {
 		let (mut send, mut recv) = uni(&a, &b);
 		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
 		recv.stop(3);
-		assert!(matches!(acked(&send, send.offset()), Poll::Ready(Err(Error::Stopped(3)))));
+		assert!(matches!(
+			acked(&send, send.offset()),
+			Poll::Ready(Err(Error::Stopped(3)))
+		));
 	}
 
 	#[test]

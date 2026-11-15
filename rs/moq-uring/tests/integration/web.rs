@@ -321,7 +321,12 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 				.expect("open uni");
 			send.write_all(PAYLOAD).await.expect("write");
 			let payload = SendStream::offset(&send);
-			let acked = within(&handle, "the ACK", kio::wait(|waiter| send.poll_acked(waiter, &payload))).await;
+			let acked = within(
+				&handle,
+				"the ACK",
+				kio::wait(|waiter| send.poll_acked(waiter, &payload)),
+			)
+			.await;
 			assert!(matches!(acked, Ok(Acked::Delivered)), "{acked:?}");
 
 			// The connection is driven on this thread, so nothing acknowledges this before the reset.
@@ -330,7 +335,10 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 			let cut = SendStream::offset(&send);
 			SendStream::reset(&mut send, 1);
 			let acked = |offset| SendStream::poll_acked(&send, &kio::Waiter::noop(), offset);
-			assert!(matches!(acked(&payload), Poll::Ready(Ok(Acked::Delivered))), "the reset forgot it");
+			assert!(
+				matches!(acked(&payload), Poll::Ready(Ok(Acked::Delivered))),
+				"the reset forgot it"
+			);
 			assert!(matches!(acked(&cut), Poll::Ready(Err(_))), "the reset cut it");
 			assert_eq!(SendStream::offset(&send), cut);
 
