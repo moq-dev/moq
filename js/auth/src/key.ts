@@ -3,6 +3,7 @@ import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
+import * as Json from "./json.ts";
 import * as Path from "./path.ts";
 import { encodeGrants, nestRates } from "./wire.ts";
 
@@ -35,7 +36,7 @@ const EC_ALGORITHM_TO_CURVE: Record<"ES256" | "ES384", "P-256" | "P-384"> = {
 
 const Base64FieldSchema = z.string().check(
 	z.minLength(1),
-	z.refine((value) => decodeBase64Flexible(value) !== null, {
+	z.refine((value) => decodeBase64url(value, true) !== null, {
 		message: "Field must be valid base64url data",
 	}),
 );
@@ -130,28 +131,28 @@ function toPublic(key: Key): PublicKey {
 
 /** Parse a key from a string, auto-detecting JSON or base64url encoding. */
 function parse(jwk: string): Key {
-	const trimmed = jwk.trim();
+	// Trimmed as Rust's `str::trim` does, which differs from `String.trim` on U+0085 and U+FEFF.
+	const trimmed = jwk.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 
-	let data: unknown;
-	if (trimmed.startsWith("{")) {
-		// Plain JSON
-		try {
-			data = JSON.parse(trimmed);
-		} catch {
-			throw new Error("Failed to parse JWK: invalid JSON format");
-		}
-	} else {
-		// Base64url encoded JSON
-		const decoded = decodeBase64Flexible(trimmed);
+	let json = trimmed;
+	if (!trimmed.startsWith("{")) {
+		// Base64url encoded JSON, unpadded as both languages write it.
+		const decoded = decodeBase64url(trimmed, false);
 		if (!decoded) {
 			throw new Error("Failed to decode JWK: invalid base64url encoding");
 		}
 		try {
-			const jsonString = new TextDecoder().decode(decoded);
-			data = JSON.parse(jsonString);
+			json = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(decoded);
 		} catch {
-			throw new Error("Failed to parse JWK: invalid JSON format after base64url decode");
+			throw new Error("Failed to decode JWK: invalid UTF-8 after base64url decode");
 		}
+	}
+
+	let data: unknown;
+	try {
+		data = Json.parse(json);
+	} catch (error) {
+		throw new Error(`Failed to parse JWK: ${error instanceof Error ? error.message : "invalid JSON"}`);
 	}
 
 	try {
@@ -413,7 +414,7 @@ function keyIssue(
 	switch (key.kty) {
 		case "oct": {
 			if (!HMAC_ALGORITHMS.has(key.alg)) return `Algorithm ${key.alg} is incompatible with oct keys`;
-			const secret = decodeBase64Flexible(key.k);
+			const secret = decodeBase64url(key.k, true);
 			if (!secret || secret.byteLength < MIN_HMAC_SECRET_BYTES) {
 				return `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`;
 			}
@@ -428,8 +429,8 @@ function keyIssue(
 			if (key.crv !== expectedCurve) return `Algorithm ${key.alg} requires curve ${expectedCurve}`;
 			const length = key.crv === "P-256" ? 32 : 48;
 			if (
-				decodeBase64Flexible(key.x)?.byteLength !== length ||
-				decodeBase64Flexible(key.y)?.byteLength !== length
+				decodeBase64url(key.x, true)?.byteLength !== length ||
+				decodeBase64url(key.y, true)?.byteLength !== length
 			) {
 				return `Coordinates must be ${length} bytes for ${key.crv}`;
 			}
@@ -483,16 +484,20 @@ async function importJoseKey(key: Key | PublicKey): Promise<CryptoKey | Uint8Arr
 	return jose.importJWK(jwk, key.alg);
 }
 
-function decodeBase64Flexible(value: string): Uint8Array | null {
-	const trimmed = value.trim();
-	if (!trimmed) {
-		return null;
-	}
+const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-	try {
-		// Accept standard base64 too by mapping it onto the base64url alphabet.
-		return jose.base64url.decode(trimmed.replaceAll("+", "-").replaceAll("/", "_"));
-	} catch {
-		return null;
-	}
+/**
+ * Decode base64url exactly as `moq-auth` does, or return null: unpadded, or with canonical
+ * padding when `padded` allows it, never empty, and with no whitespace, standard-alphabet
+ * characters, or nonzero trailing bits.
+ */
+function decodeBase64url(value: string, padded: boolean): Uint8Array | null {
+	const body = padded && value.length % 4 === 0 ? value.replace(/==?$/, "") : value;
+	if (!/^[A-Za-z0-9_-]+$/.test(body) || body.length % 4 === 1) return null;
+
+	// The last character's low bits fall past the final byte, so a canonical encoding zeroes them.
+	const spare = [0, 0, 0b1111, 0b11][body.length % 4] ?? 0;
+	if (BASE64URL.indexOf(body[body.length - 1] ?? "") & spare) return null;
+
+	return jose.base64url.decode(body);
 }

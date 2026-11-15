@@ -338,11 +338,13 @@ pub fn seeds() -> Vec<Seed> {
 	for jwk in corpus["keys"].as_object().expect("keys").values() {
 		push("jwk", 0, &jwk.to_string());
 	}
+	// A case given as a string is the document's raw text.
+	let text = |document: &Value| document.as_str().map_or_else(|| document.to_string(), str::to_owned);
 	for case in corpus["jwk"].as_array().expect("jwk cases") {
-		push("jwk", 0, &case["jwk"].to_string());
+		push("jwk", 0, &text(&case["jwk"]));
 	}
 	for case in corpus["sets"].as_array().expect("set cases") {
-		push("jwk", 1, &case["jwks"].to_string());
+		push("jwk", 1, &text(&case["jwks"]));
 	}
 	for key in KEYS {
 		push("jwk", 0, key);

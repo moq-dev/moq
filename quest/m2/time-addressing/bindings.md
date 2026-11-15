@@ -15,7 +15,7 @@ keep their optional timestamp"): every read and write carries a timestamp.
 Reads drop the `Option` that exact timestamps keeps for untimed, producer
 arguments take a required one, and nothing is wall-clock stamped. A
 scale-less track's frames carry their group's key. See
-[the model](/quest/m2/time-addressing/model.md).
+[the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md).
 
 Resized from M to S 2026-11-14 (the m2 triage before the cut, under
 /quest-afk, for the maintainer's review): [moq-dev/moq#8638](https://github.com/moq-dev/moq/pull/8638)
@@ -29,7 +29,3 @@ It stays in m2 because the rename is breaking and the cut would otherwise
 publish a `sequence` that holds a start.
 
 Public API: breaking in every binding. Wire: none.
-
-## Required
-
-- [Rust groups by start](/quest/m2/time-addressing/model.md) - the API these wrap

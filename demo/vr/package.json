@@ -11,10 +11,10 @@
 	},
 	"dependencies": {
 		"@moq/watch": "workspace:^",
-		"three": "^0.186.1"
+		"three": "^0.187.0"
 	},
 	"devDependencies": {
-		"@types/three": "^0.186.0",
+		"@types/three": "^0.187.0",
 		"rolldown": "^1.2.16",
 		"typescript": "7.0.2",
 		"vite": "^8.3.5"

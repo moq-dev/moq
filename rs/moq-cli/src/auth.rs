@@ -396,13 +396,9 @@ pub struct Serve {
 	#[usage(long, default = "127.0.0.1:4440", setting = "listen")]
 	listen: String,
 
-	/// Allow a bind on a non-loopback address. Needs `--listen-secret`.
-	#[usage(long, setting = "listen_public")]
-	#[serde(default)]
-	listen_public: bool,
-
 	/// A file holding the secret every request must carry as its HTTP Basic password;
-	/// relays send it from `--auth-url https://relay:<secret>@host/`.
+	/// relays send it from `--auth-url https://relay:<secret>@host/`. A non-loopback
+	/// `--listen` address needs it.
 	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, setting = "listen_secret")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	listen_secret: Option<PathBuf>,
@@ -520,8 +516,6 @@ struct SessionLimits {
 struct ServeSettings {
 	#[usage(cli("--listen"))]
 	listen: Option<String>,
-	#[usage(cli("--listen-public"))]
-	listen_public: Option<bool>,
 	#[usage(cli("--listen-secret"))]
 	listen_secret: Option<String>,
 	#[usage(cli("--key"))]
@@ -694,14 +688,8 @@ impl Serve {
 		Ok(policy)
 	}
 
-	/// Where to listen, refusing a non-loopback address without `--listen-public`, and
-	/// that without `--listen-secret`.
+	/// Where to listen, refusing a non-loopback address without `--listen-secret`.
 	fn listener(&self) -> anyhow::Result<Listen> {
-		if self.listen_public && self.listen_secret.is_none() {
-			anyhow::bail!(
-				"--listen-public needs --listen-secret, so only relays can record sessions and fill the session limits"
-			);
-		}
 		if let Some(path) = self.listen.strip_prefix("unix:") {
 			// A unix URL carries no userinfo for a client to send the secret from.
 			if self.listen_secret.is_some() {
@@ -715,9 +703,9 @@ impl Serve {
 			.listen
 			.parse()
 			.with_context(|| format!("--listen expects a socket address or unix:<path>, got {}", self.listen))?;
-		if !addr.ip().is_loopback() && !self.listen_public {
+		if !addr.ip().is_loopback() && self.listen_secret.is_none() {
 			anyhow::bail!(
-				"--listen {addr} is not a loopback address; pass --listen-public with --listen-secret to expose it on purpose"
+				"--listen {addr} is not a loopback address; pass --listen-secret, so only relays can record sessions and fill the session limits"
 			);
 		}
 		Ok(Listen::Tcp(addr))
@@ -737,8 +725,8 @@ impl Serve {
 	}
 
 	/// The settings only a restart applies: the listener and its secret.
-	fn restart_only(&self) -> (&str, bool, Option<&PathBuf>) {
-		(&self.listen, self.listen_public, self.listen_secret.as_ref())
+	fn restart_only(&self) -> (&str, Option<&PathBuf>) {
+		(&self.listen, self.listen_secret.as_ref())
 	}
 
 	/// The secret in [`listen_secret`](Self::listen_secret), without its trailing newline.
@@ -1018,14 +1006,9 @@ mod tests {
 	}
 
 	#[test]
-	fn serve_refuses_a_public_bind_without_saying_so() {
-		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
-			.listener()
-			.unwrap_err();
-		assert!(err.to_string().contains("--listen-public"), "{err}");
-
+	fn serve_refuses_a_public_bind_without_a_secret() {
 		// Public, anyone could record sessions under a victim's address.
-		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440", "--listen-public"])
+		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
 			.listener()
 			.unwrap_err();
 		assert!(err.to_string().contains("--listen-secret"), "{err}");
@@ -1036,7 +1019,6 @@ mod tests {
 				"serve",
 				"--listen",
 				"0.0.0.0:4440",
-				"--listen-public",
 				"--listen-secret",
 				"secret.txt"
 			])
@@ -1165,7 +1147,6 @@ mod tests {
 			format!(
 				r#"
 listen = "0.0.0.0:4440"
-listen_public = true
 listen_secret = "/etc/moq/auth.secret"
 tier = "from-file"
 revalidate = "30s"

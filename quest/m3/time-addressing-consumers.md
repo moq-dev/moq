@@ -13,7 +13,7 @@ by its start.
 Moved from m2 to m3 2026-11-14 (the m2 triage before the cut, under
 /quest-afk, for the maintainer's review): ✅ m3, since what remains breaks
 nothing (rejected: m2; splitting a breaking part out, since none is left).
-[The model](/quest/m2/time-addressing/model.md)
+[The model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md)
 ([moq-dev/moq#8638](https://github.com/moq-dev/moq/pull/8638)) converts the
 Rust consumers whose API named group numbers: `moq fetch --group` and the
 relay's `/fetch?group=` keep their names and take a start, moq-mux `seek` and reads carry starts,
@@ -60,6 +60,5 @@ readers already tolerate.
 
 ## Required
 
-- [Rust groups by start](/quest/m2/time-addressing/model.md) - the Rust API these consume
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - the JS API these consume
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - GROUP_END carries the end the duration marker did
