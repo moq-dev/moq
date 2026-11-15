@@ -162,3 +162,32 @@ fn a_publisher_leaving_every_relay_at_once_loops_until_the_news_arrives() {
 		}
 	}
 }
+
+/// A relay doubting the publisher still moves at once onto its own link to it,
+/// opened before the doubt began, even as the last session it opened; only the
+/// replaced rule holds it until the timer.
+#[test]
+fn a_link_opened_before_the_doubt_is_taken_at_once() {
+	let (origin, r1, r2) = (0, 1, 2);
+	for (rule, moves) in [(Rule::PATH, true), (Rule::ORIGIN, false)] {
+		let mut sim = Sim::with(rule, 3);
+		sim.leaf(origin);
+		sim.join(origin, r1, 1);
+		sim.join(r1, r2, 1);
+		sim.join(origin, r2, 5);
+		sim.originate(origin, 7, 0);
+		sim.announce(origin, "live/x", 0, None);
+		assert!(sim.run());
+		assert_eq!(sim.toward(r2, 7), Some(Some(r1)), "{}", rule.as_str());
+		sim.disconnect(origin, r1);
+		assert!(sim.flow());
+		assert_eq!(sim.toward(r2, 7) == Some(Some(origin)), moves, "{}", rule.as_str());
+		assert!(sim.run());
+		assert_eq!(
+			sim.toward(r2, 7),
+			Some(Some(origin)),
+			"{}: after the timer",
+			rule.as_str()
+		);
+	}
+}
