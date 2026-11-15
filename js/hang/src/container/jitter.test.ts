@@ -123,21 +123,6 @@ describe("Jitter", () => {
 		}
 	});
 
-	it("ends a join that skips hold open", () => {
-		// A skip reported ahead of every frame of `outage` keeps each interval measuring the join, but
-		// only for its first 2 s: the outages after it are still measured.
-		const outage = cases.find((c) => c.name === "outage") as Case;
-		const plain = new Jitter();
-		const reported = new Jitter();
-		for (let i = 0; i < outage.arrival.length; i++) {
-			plain.observe(outage.arrival[i], outage.media[i]);
-			reported.backlog(outage.arrival[i]);
-			reported.observe(outage.arrival[i], outage.media[i]);
-		}
-		expect(plain.measured).toBeGreaterThan(new Jitter().measured);
-		expect(reported.measured).toBe(plain.measured);
-	});
-
 	it("does not follow the absolute delay", () => {
 		// Only the spread of arrivals matters, not how far away the sender is.
 		const near = new Jitter();

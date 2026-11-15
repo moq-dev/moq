@@ -1,0 +1,123 @@
+// Pairs `rs/moq-audio`'s decode-path tests of the join's backlog: a group the consumer closes below
+// its cursor unread still tells the estimator when it arrived, but only when the publisher's largest
+// at the subscription's start shows it was produced before.
+
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { Duration, type Installed, Instant, now } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
+import { Time, Track, Varint } from "@moq/net";
+import { Consumer } from "./consumer.ts";
+import { Jitter } from "./jitter.ts";
+import { Format } from "./legacy.ts";
+
+let clock: Manual;
+let installed: Installed;
+beforeEach(() => {
+	clock = new Manual();
+	installed = clock.install();
+});
+afterEach(() => {
+	installed.close();
+});
+
+/** `[arrival, group, media]` in ms, in arrival order. */
+type Event = [number, number, number];
+
+/**
+ * Write `events`, one frame per group, reading everything readable as each lands, and return the
+ * consumer's measured term once they all have, beside the estimator fed the same arrivals with each
+ * group `backlog` names reported rather than observed.
+ */
+async function play(events: Event[], backlog: (group: number) => boolean): Promise<[number, number]> {
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(2000) } }), {
+		format: new Format("audio"),
+		delay: { max: Duration.millis(2000) },
+		wait: Duration.millis(100),
+	});
+	const oracle = new Jitter();
+	const base = now().since(Instant.ZERO).asMillis();
+	let read = consumer.next();
+	try {
+		for (const [at, sequence, media] of events) {
+			await clock.advance(Duration.millis(base + at).saturatingSub(now().since(Instant.ZERO)));
+			const group = track.createGroup(BigInt(sequence));
+			const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
+			group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
+			group.finish();
+			if (backlog(sequence)) oracle.backlog(base + at);
+			else oracle.observe(base + at, media);
+			// Read whatever is ready, so the cursor moves as a player's does.
+			for (;;) {
+				const flushed = clock.advance(Duration.ZERO);
+				const done = await Promise.race([read.then(() => true), flushed.then(() => false)]);
+				await flushed;
+				if (!done) break;
+				read = consumer.next();
+			}
+		}
+		return [consumer.spread.peek().asMillis(), oracle.measured];
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+}
+
+/** The live edge, group 200 onward, a frame every 20 ms over a 40 ms path, arrivals moved by `delay` in order. */
+function live(delay: (produced: number) => number): Event[] {
+	let last = 0;
+	return Array.from({ length: 300 }, (_, k) => {
+		const at = Math.max(delay(20 * k), last);
+		last = at;
+		return [at, 200 + k, 100_000 + 20 * k];
+	});
+}
+
+const order = (a: Event, b: Event) => a[0] - b[0] || a[1] - b[1];
+
+// The publisher stood at group 200 as the subscription began. Its backlog lands behind it, 41 groups
+// over the first 400 ms and 15 more 1.0 to 1.3 s in, with the live frames produced meanwhile queued
+// behind them. Without `delivered`, that backlog never reaches this node, though the live frames still
+// queue behind it.
+async function join(delivered: boolean): Promise<number> {
+	const events = live((produced) => {
+		const at = produced + 40;
+		if (at <= 400) return 400 + produced / 10;
+		if (at >= 1000 && at < 1300) return 1300 + (produced - 960) / 10;
+		return at;
+	});
+	events[0][0] = 0;
+	if (delivered) {
+		for (let i = 0; i < 41; i++) events.push([5 + 10 * i, 100 + i, 90_000 + 20 * i]);
+		for (let s = 0; s < 15; s++) events.push([1000 + 20 * s, 141 + s, 99_700 + 20 * s]);
+	}
+	events.sort(order);
+	const [measured, oracle] = await play(events, (group) => group < 200);
+	expect(measured).toBe(oracle);
+	return measured;
+}
+
+test("a join's backlog skipped below the cursor folds nothing", async () => {
+	const skipped = await join(true);
+	const unseen = await join(false);
+	expect(skipped).toBeLessThanOrEqual(80);
+	expect(unseen).toBeGreaterThanOrEqual(280);
+});
+
+test("late groups dropped from the start hold no join open", async () => {
+	// Every fifth frame arrives 300 ms late from the start: after the cursor passed it, so it is closed
+	// unread, but it was produced after the subscription began, so it is no backlog. The estimator
+	// measures the path from what it observes, as if the late frames never arrived.
+	const late = (group: number) => group > 200 && group % 5 === 0;
+	const events = live((produced) => produced + 40).map(
+		([at, group, media]): Event => [at + (late(group) ? 300 : 0), group, media],
+	);
+	events.sort(order);
+	const [dropped] = await play(events, () => false);
+	const [lost] = await play(
+		events.filter(([, group]) => !late(group)),
+		() => false,
+	);
+	expect(dropped).toBe(lost);
+});

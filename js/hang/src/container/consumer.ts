@@ -241,6 +241,9 @@ export class Consumer {
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#jitter: Jitter;
+	// The publisher's largest group when the subscription began: one at or below it was produced
+	// before, so dropping it unread skips the join's backlog.
+	#joined?: bigint;
 	#spread: Signal<Duration>;
 	/**
 	 * How much buffer late arrivals need, measured as frames come off the transport.
@@ -270,6 +273,9 @@ export class Consumer {
 		this.#spread = new Signal(Duration.millis(this.#jitter.measured));
 		this.spread = this.#spread;
 
+		this.#signals.spawn(async () => {
+			this.#joined = (await this.#track.largest())?.group;
+		});
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
 			this.#track.close();
@@ -317,9 +323,11 @@ export class Consumer {
 				// gap that moved the cursor, or was never read. Mirrors Rust's consumer. While the start
 				// still waits for a group covering its reach, it starts at the lowest that arrived.
 				if (!this.#starting && consumer.sequence < this.#active) {
-					// Its frames go unobserved, so the estimator learns when they arrived: a join's backlog
-					// still has to end before the join's intervals count.
-					this.#jitter.backlog(consumer.arrived.since(Instant.ZERO).asMillis());
+					// Its frames go unobserved, so the estimator learns when backlog arrived: a join's
+					// intervals count only once it has. One produced since, such as an outage's, is no backlog.
+					if (this.#joined !== undefined && consumer.sequence <= this.#joined) {
+						this.#jitter.backlog(consumer.arrived.since(Instant.ZERO).asMillis());
+					}
 					consumer.close();
 					continue;
 				}

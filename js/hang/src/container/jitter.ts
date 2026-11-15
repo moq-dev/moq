@@ -23,13 +23,6 @@ const RESAMPLE = 500;
 /** The most weight one observation takes, so a lone one holds the quantile for one half-life at most. */
 const FRESH_MAX = 0.1;
 
-/**
- * Milliseconds after the first arrival a skipped group can still extend the join. A skip carries no
- * timestamp, so a path dropping a late group every interval from the start would otherwise hold the
- * join open, and the estimate unmeasured, for as long as it lasts.
- */
-const JOIN_MAX = 2000;
-
 /** Idle intervals folded at once, purely to bound the work. */
 const IDLE_MAX = 1024;
 
@@ -235,9 +228,7 @@ export class Jitter {
 	backlog(arrival: number): void {
 		// Before any observation the join has not started, and starts later than this.
 		// Once an interval measured the path the join is over, and a skip is an outage's.
-		if (this.#start !== undefined && this.#open && arrival < this.#start + JOIN_MAX) {
-			this.#joined = Math.max(this.#joined, arrival);
-		}
+		if (this.#start !== undefined && this.#open) this.#joined = Math.max(this.#joined, arrival);
 	}
 
 	/**

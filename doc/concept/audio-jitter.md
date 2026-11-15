@@ -38,9 +38,9 @@ frame:
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
 age budget. Except one skip: both consumers close a group below where delivery
-stands unread, so its frames are never observed. They report its arrival
-instead, which ends a [join](#the-joins-backlog) as late as its observed backlog
-would.
+stands unread, so its frames are never observed. When it is
+[backlog](#the-joins-backlog), they report its arrival instead, which ends the
+join as late as its observed backlog would.
 
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
@@ -154,8 +154,8 @@ settle():                               # a stall is one observation
     if a stall is open:
         fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
 
-backlog(arrival):                       # a group skipped unread arrived
-    if not first observation and open and arrival < start + JOIN_MAX:
+backlog(arrival):                       # a backlog group skipped unread arrived
+    if not first observation and open:
         joined = max(joined, arrival)
 
 end():                                  # a declared end precedes the next observation
@@ -329,17 +329,19 @@ is measured from its first flush past the backlog. A first frame slower than the
 path after it is itself backlog, so most subscriptions skip their first interval,
 which leaves the prior 500 ms later.
 
-A backlog the consumer skips unread carries no timestamp to test, only its
-arrival, which `backlog` reports. It extends the join only while the join is
+A group the consumer skips unread carries no timestamp to test, so the consumer
+tells backlog by its sequence instead: one at or below the publisher's largest
+group when the subscription began, the first largest the subscriber learns (from
+moq-lite's subscribe answer, or the first group to land when the publisher
+reports none), was produced before it. Only such a group's arrival is reported,
+with `backlog`, so a path that drops late groups from the start, all produced
+since, holds no join open. A report extends the join only while the join is
 **open**, before any interval has measured the path: after that, a skipped group
 is an outage's, whose frames queued behind it belong to the stall rule. On
 `relay-mic-rtt40` the browser closes 267 groups 5 to 6 s old, arriving 1.0 to
 1.3 s in, and the live frames queued behind them are up to 300 ms late; observed
-or reported, they fold nothing, where unreported they held the target at 320 ms
-for a 20 s half-life. A skip that lands before an interval closes keeps that
-interval measuring the join, so a path dropping a late group every interval
-would hold the join open for good: a skip extends it only `JOIN_MAX` past the
-start, after which the estimator measures what it observes.
+or reported, they fold nothing, where unreported they hold the target at 320 ms
+for a 20 s half-life.
 
 ### The histogram
 
@@ -741,7 +743,6 @@ The exceptions are marked.
 | `FRESH_MAX` | 0.1 | Ours, twice the quantile's tail. NetEq ramps the forget factor from a start weight of 2 instead; see [the histogram](#the-histogram) |
 | `PRIOR[i]` | `0.5^(i+1)` | NetEq's histogram seed |
 | `IDLE_MAX` | 1024 intervals | Ours. A work bound with no effect on output |
-| `JOIN_MAX` | 2000 ms | Ours. How long after the first arrival a skipped group can extend the join; see [the join's backlog](#the-joins-backlog) |
 | `MAX_HISTORY` | 8192 arrivals | Ours. Bounds a rate the publisher chooses; see [Bounding the history](#bounding-the-history) |
 | Out-of-range delays | clamped, not dropped | Ours. See [the histogram](#the-histogram) |
 

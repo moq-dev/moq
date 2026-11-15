@@ -206,8 +206,15 @@ pub struct Consumer<F: Container> {
 	// When the wire frame behind the last frame read landed in this node's cache.
 	arrived: Option<Instant>,
 
-	// When the latest group dropped without delivering all of it landed.
-	skipped: Option<Instant>,
+	// The newest group the publisher's largest named so far.
+	largest: Option<u64>,
+
+	// The publisher's largest group when the subscription began: one at or below it was produced
+	// before, so dropping it unread skips the join's backlog.
+	joined: Option<u64>,
+
+	// When the latest backlog group dropped without delivering all of it landed.
+	backlog: Option<Instant>,
 }
 
 /// Whether a [`Consumer`] still reads its subscription.
@@ -422,7 +429,9 @@ impl<F: Container> Consumer<F> {
 			next: None,
 			group: 0,
 			arrived: None,
-			skipped: None,
+			largest: None,
+			joined: None,
+			backlog: None,
 		}
 	}
 
@@ -445,14 +454,16 @@ impl<F: Container> Consumer<F> {
 		self.arrived
 	}
 
-	/// When the latest group this reader dropped without delivering all of it landed in this
-	/// node's cache, or `None` before the first.
+	/// When the latest backlog group this reader dropped without delivering all of it landed in
+	/// this node's cache, or `None` before the first.
 	///
-	/// Its frames were never read, so a caller timing [`arrival`](Self::arrival)s learns when a
-	/// join's backlog finished arriving even when the reader skipped it: one that arrived below
-	/// the cursor, or below the start, or that a skip passed over.
-	pub fn skipped(&self) -> Option<Instant> {
-		self.skipped
+	/// Backlog is a group at or below the publisher's largest when the subscription began, so it
+	/// was produced before. Its frames were never read, so a caller timing
+	/// [`arrival`](Self::arrival)s learns when a join's backlog finished arriving even when the
+	/// reader skipped it: one that arrived below the cursor, or below the start, or that a skip
+	/// passed over.
+	pub fn backlog(&self) -> Option<Instant> {
+		self.backlog
 	}
 
 	/// The group sequence of the last event read.
@@ -558,6 +569,11 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn poll_event_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
+		// Where the publisher stood as the subscription began, before any group can be dropped
+		// against it. Polled only until then, so later groups wake nothing extra.
+		if self.joined.is_none() {
+			self.poll_largest(waiter);
+		}
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 
@@ -581,11 +597,11 @@ impl<F: Container> Consumer<F> {
 				(floor, served) => floor.or(served),
 			};
 			if let Some(start) = start {
-				let skipped = &mut self.skipped;
+				let (joined, backlog) = (self.joined, &mut self.backlog);
 				self.pending.retain(|group| {
 					let keep = group.sequence >= start;
 					if !keep {
-						*skipped = (*skipped).max(Some(group.group.arrived()));
+						Self::skip(joined, backlog, group);
 					}
 					keep
 				});
@@ -610,11 +626,9 @@ impl<F: Container> Consumer<F> {
 				// budget past them.
 				let start = match matches!(self.startup, Startup::Newest) {
 					true => {
-						let mut start = self.pending.back().expect("a group has a frame").sequence;
-						while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
-							start = start.max(largest.group);
-						}
-						start
+						self.poll_largest(waiter);
+						let back = self.pending.back().expect("a group has a frame").sequence;
+						back.max(self.largest.unwrap_or(back))
 					}
 					// The start may still wait for a group earlier than any that arrived.
 					false => match self.reach_start(waiter, finished) {
@@ -1140,7 +1154,7 @@ impl<F: Container> Consumer<F> {
 
 			if sequence < self.current {
 				tracing::debug!(old = ?sequence, current = ?self.current, "skipping old group");
-				self.skipped = self.skipped.max(Some(reader.group.arrived()));
+				Self::skip(self.joined, &mut self.backlog, &reader);
 				continue;
 			}
 
@@ -1182,6 +1196,23 @@ impl<F: Container> Consumer<F> {
 		self.memory.full() && self.pending.len() >= 2
 	}
 
+	// Note `group` dropped without delivering all of it: backlog when the publisher's largest at the
+	// subscription's start reached it. One above was produced since, such as an outage's.
+	fn skip(joined: Option<u64>, backlog: &mut Option<Instant>, group: &GroupBuffer<F>) {
+		if joined.is_some_and(|joined| group.sequence <= joined) {
+			*backlog = (*backlog).max(Some(group.group.arrived()));
+		}
+	}
+
+	// Take every largest the publisher reported since the last poll; the first is the one the
+	// subscription began at.
+	fn poll_largest(&mut self, waiter: &kio::Waiter) {
+		while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
+			self.joined.get_or_insert(largest.group);
+			self.largest = self.largest.max(Some(largest.group));
+		}
+	}
+
 	// Drop the pending groups `pick` selects without delivering them. A drop must not hide what
 	// was already found, so the lowest one holding a fault, or with frames below the start of the
 	// latest delivered group, ends the reader instead. What was never read stays unread: decoding
@@ -1189,18 +1220,17 @@ impl<F: Container> Consumer<F> {
 	fn discard(&mut self, mut pick: impl FnMut(&mut GroupBuffer<F>) -> bool) -> Result<(), F::Error> {
 		let start = self.start;
 		let mut fault = None;
-		let mut skipped = self.skipped;
+		let (joined, backlog) = (self.joined, &mut self.backlog);
 		self.pending.retain_mut(|group| {
 			if !pick(group) {
 				return true;
 			}
-			skipped = skipped.max(Some(group.group.arrived()));
+			Self::skip(joined, backlog, group);
 			if fault.is_none() {
 				fault = Self::discard_fault(start, group);
 			}
 			false
 		});
-		self.skipped = skipped;
 		self.discarded(fault)
 	}
 
@@ -1210,7 +1240,7 @@ impl<F: Container> Consumer<F> {
 		let start = self.start;
 		let mut fault = None;
 		for mut group in self.pending.drain(..count) {
-			self.skipped = self.skipped.max(Some(group.group.arrived()));
+			Self::skip(self.joined, &mut self.backlog, &group);
 			if fault.is_none() {
 				fault = Self::discard_fault(start, &mut group);
 			}
@@ -2020,33 +2050,83 @@ mod tests {
 		assert_eq!(reader.arrival(), Some(second), "an end carries no arrival of its own");
 	}
 
-	/// A group that arrives below the cursor is dropped unread, and the reader reports when it
-	/// landed, so a caller timing arrivals knows when the backlog it never saw arrived.
+	/// A group at or below the publisher's largest when the subscription began was produced
+	/// before it: dropped unread below the cursor, it is the join's backlog, and the reader
+	/// reports when it landed. One produced since, such as an outage's, is not.
 	#[tokio::test(start_paused = true)]
-	async fn a_group_below_the_cursor_reports_when_it_landed() {
+	async fn a_backlog_group_below_the_cursor_reports_when_it_landed() {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscriber = track.subscribe(
 			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
+		reader.set_wait(Duration::from_millis(50));
 
+		// The publisher stood at group 5 as the subscription began.
 		write_group(&mut track, 5, &[ts(100_000)]);
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 5, .. })
 		));
-		assert_eq!(reader.skipped(), None, "nothing dropped yet");
-
-		tokio::time::advance(Duration::from_millis(30)).await;
-		let below = kio::clock::now();
-		write_group(&mut track, 2, &[ts(40_000)]);
-		tokio::time::advance(Duration::from_millis(30)).await;
 		write_group(&mut track, 6, &[ts(120_000)]);
 		assert!(matches!(
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 6, .. })
 		));
-		assert_eq!(reader.skipped(), Some(below));
+
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 4, &[ts(80_000)]);
+		write_group(&mut track, 7, &[ts(140_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 7, .. })
+		));
+		let landed = kio::clock::now();
+		assert_eq!(reader.backlog(), Some(landed));
+
+		// Group 6 itself came after the subscription began, so a copy of it would not be backlog.
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 8, &[ts(160_000)]);
+		write_group(&mut track, 10, &[ts(200_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 8, .. })
+		));
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 10, .. })
+		));
+		write_group(&mut track, 9, &[ts(180_000)]);
+		write_group(&mut track, 11, &[ts(220_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 11, .. })
+		));
+		assert_eq!(
+			reader.backlog(),
+			Some(landed),
+			"group 9 was produced after the subscription"
+		);
+	}
+
+	/// The start drops the backlog below it unread, which still reports when it landed.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_start_reports_the_backlog_it_drops() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let landed = kio::clock::now();
+		write_group(&mut track, 3, &[ts(0)]);
+		tokio::time::advance(Duration::from_millis(30)).await;
+		write_group(&mut track, 4, &[ts(20_000)]);
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio)).live();
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 4, .. })
+		));
+		assert_eq!(reader.backlog(), Some(landed));
 	}
 
 	/// The holes a source left behind when it stopped expire together, a budget after the groups

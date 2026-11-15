@@ -648,10 +648,11 @@ impl Consumer {
 						Encoded::Gap { .. } if self.declared.take().is_some() => self.target.end(),
 						_ => {}
 					}
-					// A group the container dropped unread is never observed, so the estimator
-					// learns when it arrived instead: a join lasts until its skipped backlog has.
-					if let Some(skipped) = self.track.skipped() {
-						self.target.backlog(jitter::millis(skipped.duration_since(self.origin)));
+					// A backlog group the container dropped unread is never observed, so the
+					// estimator learns when it arrived instead: a join lasts until its skipped
+					// backlog has.
+					if let Some(backlog) = self.track.backlog() {
+						self.target.backlog(jitter::millis(backlog.duration_since(self.origin)));
 					}
 					// Every packet the container hands over is an arrival, including one the
 					// decoder will refuse, so it is observed before anything can fail.
@@ -2694,42 +2695,12 @@ mod tests {
 		}
 	}
 
-	/// Replay a join through the whole decode path, one PCM packet per group written at
-	/// its arrival, and return the delay once it has settled. Observed backlog opens the
-	/// join and the live edge queues behind it, then 15 stale groups land 1.0 to 1.3 s
-	/// in, after the cursor waited out their sequences, and the live packets produced
-	/// meanwhile queue behind them. Without `delivered`, those groups never reach this
-	/// node, though the live packets still queued behind them.
-	async fn join_delay(delivered: bool) -> f64 {
+	/// Write `events`, `(arrival, group, media)` in ms in arrival order, through the whole
+	/// decode path, one PCM packet per group, reading each one `read` admits as it lands.
+	/// Returns the delay once they have all landed, and whether the container reported a
+	/// backlog.
+	async fn play(events: &[(u64, u64, u64)], read: impl Fn(u64) -> bool) -> (f64, bool) {
 		use moq_mux::container::Container as _;
-
-		// `(arrival, group, media)` in ms.
-		let mut events: Vec<(u64, u64, u64)> = Vec::new();
-		for i in 0..=40 {
-			events.push((10 * i, 100 + i, 90_000 + 20 * i));
-		}
-		if delivered {
-			// Produced before the subscription, within the transport's budget.
-			for s in 0..15 {
-				events.push((1000 + 20 * s, 141 + s, 99_700 + 20 * s));
-			}
-		}
-		let (mut opening, mut held, mut last) = (0, 0, 0);
-		for k in 0..300 {
-			let mut at = 20 * k + 40;
-			if at <= 400 {
-				opening += 1;
-				at = 400 + 2 * opening;
-			} else if (1000..1300).contains(&at) {
-				held += 1;
-				at = 1300 + 2 * held;
-			}
-			// A queue drains in order, so nothing overtakes the packets still in it.
-			at = at.max(last);
-			last = at;
-			events.push((at, 156 + k, 100_000 + 20 * k));
-		}
-		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -2751,7 +2722,7 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
 		let start = kio::clock::now();
-		for (at, sequence, media) in events {
+		for &(at, sequence, media) in events {
 			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			let frame = moq_mux::container::Frame {
@@ -2762,21 +2733,100 @@ mod tests {
 			};
 			container.write(&mut group, &[frame]).unwrap();
 			group.finish().unwrap();
-			if !(141..156).contains(&sequence) {
+			if read(sequence) {
 				next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
 			}
 		}
-		crate::jitter::millis(consumer.delay())
+		(
+			crate::jitter::millis(consumer.delay()),
+			consumer.track.backlog().is_some(),
+		)
+	}
+
+	/// The live edge, group 200 onward, a packet every 20 ms over a 40 ms path, its arrivals
+	/// moved by `delay`, which never lets one overtake another.
+	fn live(delay: impl Fn(u64) -> u64) -> Vec<(u64, u64, u64)> {
+		let mut last = 0;
+		(0..300)
+			.map(|k| {
+				let at = delay(20 * k).max(last);
+				last = at;
+				(at, 200 + k, 100_000 + 20 * k)
+			})
+			.collect()
 	}
 
 	/// A join's backlog that arrives below the cursor is dropped unread, yet the target
 	/// still learns when it arrived: the live packets queued behind it measured the join,
-	/// not the path, so they fold nothing rather than a 300 ms stall.
+	/// not the path, so they fold nothing rather than a 300 ms stall. The publisher stood at
+	/// group 200 as the subscription began; its backlog lands behind it, 41 groups over the
+	/// first 400 ms and 15 more 1.0 to 1.3 s in, with the live packets produced meanwhile
+	/// queued behind them. Without `delivered`, that backlog never reaches this node, though
+	/// the live packets still queue behind it.
+	async fn join_delay(delivered: bool) -> f64 {
+		let mut events = live(|produced| match produced + 40 {
+			at if at <= 400 => 400 + produced / 10,
+			at if (1000..1300).contains(&at) => 1300 + (produced - 960) / 10,
+			at => at,
+		});
+		// Group 200 lands first, so the publisher's largest names it.
+		events[0].0 = 0;
+		if delivered {
+			for i in 0..41 {
+				events.push((5 + 10 * i, 100 + i, 90_000 + 20 * i));
+			}
+			for s in 0..15 {
+				events.push((1000 + 20 * s, 141 + s, 99_700 + 20 * s));
+			}
+		}
+		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
+		let (delay, backlog) = play(&events, |sequence| sequence >= 200).await;
+		assert_eq!(backlog, delivered);
+
+		// The estimator fed the same arrivals directly, each skipped group reported.
+		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
+		target.set_frame(20.0);
+		for &(at, sequence, media) in &events {
+			match sequence >= 200 {
+				true => target.observe(at as f64, media as f64),
+				false => target.backlog(at as f64),
+			}
+		}
+		assert_eq!(delay, target.millis());
+		delay
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn a_join_backlog_skipped_below_the_cursor_folds_nothing() {
-		// The path's own 40 ms plus the frame, where an unseen backlog folds the stall.
-		assert_eq!(join_delay(true).await, 60.0);
-		assert_eq!(join_delay(false).await, 340.0);
+		let skipped = join_delay(true).await;
+		let unseen = join_delay(false).await;
+		assert!(
+			skipped <= 100.0 && unseen >= 300.0,
+			"{skipped} ms skipped, {unseen} ms unseen"
+		);
+	}
+
+	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
+	/// the cursor passed it and is dropped unread, but was produced after the subscription
+	/// began, so it is no backlog and holds no join open. The estimator measures the path
+	/// from what it observes, as if the late packets never arrived.
+	#[tokio::test(start_paused = true)]
+	async fn late_groups_dropped_from_the_start_hold_no_join_open() {
+		let late = |sequence: u64| sequence > 200 && sequence.is_multiple_of(5);
+		let mut events: Vec<_> = live(|produced| produced + 40)
+			.into_iter()
+			.map(|(at, sequence, media)| (at + if late(sequence) { 300 } else { 0 }, sequence, media))
+			.collect();
+		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
+		let (dropped, backlog) = play(&events, |sequence| !late(sequence)).await;
+		assert!(!backlog);
+		let never: Vec<_> = events
+			.iter()
+			.copied()
+			.filter(|&(_, sequence, _)| !late(sequence))
+			.collect();
+		let (lost, _) = play(&never, |_| true).await;
+		assert_eq!(dropped, lost);
 	}
 
 	/// A group lost between a declared end and what resumes leaves the end declared, as the

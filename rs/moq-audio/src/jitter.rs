@@ -32,12 +32,6 @@ const RESAMPLE: f64 = 500.0;
 /// The most weight one observation takes, so a lone one holds the quantile for one half-life at most.
 const FRESH_MAX: f64 = 0.1;
 
-/// Milliseconds after the first arrival a skipped group can still extend the join. A
-/// skip carries no timestamp, so a path dropping a late group every interval from the
-/// start would otherwise hold the join open, and the estimate unmeasured, for as long
-/// as it lasts.
-const JOIN_MAX: f64 = 2000.0;
-
 /// Idle intervals folded at once, purely to bound the work.
 const IDLE_MAX: f64 = 1024.0;
 
@@ -493,10 +487,7 @@ impl Estimator {
 	fn backlog(&mut self, arrival: f64) {
 		// Before any observation the join has not started, and starts later than this. Once
 		// an interval measured the path the join is over, and a skip is an outage's.
-		if let Some(start) = self.start
-			&& self.open
-			&& arrival < start + JOIN_MAX
-		{
+		if self.start.is_some() && self.open {
 			self.joined = self.joined.max(arrival);
 		}
 	}
@@ -673,22 +664,6 @@ pub(crate) mod tests {
 			}
 			assert_eq!(reported.millis(), plain.millis());
 		}
-	}
-
-	/// A skip reported ahead of every frame of `outage` keeps each interval measuring
-	/// the join, but only for its first 2 s: the outages after it are still measured.
-	#[test]
-	fn ends_a_join_that_skips_hold_open() {
-		let case = case("outage");
-		let mut plain = Target::new(Duration::ZERO, true, None);
-		let mut reported = Target::new(Duration::ZERO, true, None);
-		for (&arrival, &media) in case.arrival.iter().zip(&case.media) {
-			plain.observe(arrival, media);
-			reported.backlog(arrival);
-			reported.observe(arrival, media);
-		}
-		assert!(plain.millis() > Target::new(Duration::ZERO, true, None).millis());
-		assert_eq!(reported.millis(), plain.millis());
 	}
 
 	/// The #3517 regression, without the corpus: a stale frame then paced audio far
