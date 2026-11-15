@@ -48,7 +48,6 @@
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
-import type { Reader as CacheReader } from "./cache.ts";
 import { Delivered } from "./delivered.ts";
 import { NotFound, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
@@ -735,12 +734,6 @@ class Reader implements ResumeSource {
 		if (!serving) return { groups: [], givenUp: [{ start, end }] };
 		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end, from);
 		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
-	}
-
-	/** The bill on the serving copy's account, whose pool holds what this reader reads. */
-	bill(current: CacheReader | undefined): CacheReader | undefined {
-		const serving = this.#serving();
-		return serving ? hooks.billSubscriber(serving.sub, current) : current;
 	}
 
 	/**

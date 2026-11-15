@@ -64,7 +64,7 @@ mod linux {
 
 	pub fn benchmark(c: &mut Criterion) {
 		let mut group = c.benchmark_group("unreachable_dials");
-		// The background dials end at the 10s handshake timeout, so each point
+		// The background dials end at the 30s handshake timeout, so each point
 		// has to finish well inside it.
 		group
 			.sample_size(10)

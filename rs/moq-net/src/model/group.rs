@@ -1642,64 +1642,22 @@ impl std::ops::Deref for Producer {
 impl Producer {
 	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
-		self.handle.state.read().wire().cloned()
+		self.handle.wire()
 	}
 
 	#[cfg(feature = "async")]
-	pub(crate) fn set_wire(&self, mut wire: Wire) -> Result<()> {
-		let mut state = modify(&self.handle.state)?;
-		// A head adopted before the header arrived holds the objects below the stream's.
-		if let Some(first_object) = state.adopted {
-			wire.first_object = first_object;
-			wire.first_id = state.offset as u64;
-			wire.last = wire.last.or((state.next_index as u64).checked_sub(1));
-		}
-		state.relay().wire = Some(wire);
-		Ok(())
+	pub(crate) fn set_wire(&self, wire: Wire) -> Result<()> {
+		self.handle.set_wire(wire)
 	}
 
 	#[cfg(feature = "async")]
 	pub(crate) fn mark_gap(&self, id: u64, gap: Option<u64>) -> Result<()> {
-		if gap.is_some_and(|gap| gap > id) {
-			return Err(Error::MalformedTrack);
-		}
-		let mut state = modify(&self.handle.state)?;
-		let offset = state.offset as u64;
-		if let Some(wire) = state.wire_mut() {
-			let missing = match wire.last {
-				None => id.checked_sub(offset).ok_or(Error::MalformedTrack)?,
-				Some(prior) => id
-					.checked_sub(prior)
-					.and_then(|step| step.checked_sub(1))
-					.ok_or(Error::MalformedTrack)?,
-			};
-			if wire.last.is_some() && gap.is_some_and(|gap| gap > missing) {
-				return Err(Error::MalformedTrack);
-			}
-			// A first object's gap may also cover IDs below where this copy starts.
-			wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
-		}
-		Ok(())
+		self.handle.mark_gap(id, gap)
 	}
 
-	#[cfg(feature = "async")]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn set_end_object(&self, fields: super::object::Fields) -> Result<()> {
-		let mut state = modify(&self.handle.state)?;
-		if state.outcome.frames().is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
-			return Err(Error::MalformedTrack);
-		}
-		let bytes = fields.heap();
-		if !state.trim(bytes) {
-			return Err(Error::GroupTooLarge);
-		}
-		state.charge.add(bytes);
-		let relay = state.relay();
-		relay.bytes += bytes;
-		if let Some(wire) = &mut relay.wire {
-			wire.last = Some(fields.id);
-		}
-		relay.end_object = Some(Arc::new(fields));
-		Ok(())
+		self.handle.set_end_object(fields)
 	}
 
 	/// Create a group producer bound to its parent track's [`track::Info`] and cache
@@ -2503,6 +2461,68 @@ impl Finished {
 }
 
 impl Handle {
+	#[cfg(feature = "async")]
+	pub(crate) fn wire(&self) -> Option<Wire> {
+		self.state.read().wire().cloned()
+	}
+
+	#[cfg(feature = "async")]
+	pub(crate) fn set_wire(&self, mut wire: Wire) -> Result<()> {
+		let mut state = modify(&self.state)?;
+		// A head adopted before the header arrived holds the objects below the stream's.
+		if let Some(first_object) = state.adopted {
+			wire.first_object = first_object;
+			wire.first_id = state.offset as u64;
+			wire.last = wire.last.or((state.next_index as u64).checked_sub(1));
+		}
+		state.relay().wire = Some(wire);
+		Ok(())
+	}
+
+	#[cfg(feature = "async")]
+	pub(crate) fn mark_gap(&self, id: u64, gap: Option<u64>) -> Result<()> {
+		if gap.is_some_and(|gap| gap > id) {
+			return Err(Error::MalformedTrack);
+		}
+		let mut state = modify(&self.state)?;
+		let offset = state.offset as u64;
+		if let Some(wire) = state.wire_mut() {
+			let missing = match wire.last {
+				None => id.checked_sub(offset).ok_or(Error::MalformedTrack)?,
+				Some(prior) => id
+					.checked_sub(prior)
+					.and_then(|step| step.checked_sub(1))
+					.ok_or(Error::MalformedTrack)?,
+			};
+			if wire.last.is_some() && gap.is_some_and(|gap| gap > missing) {
+				return Err(Error::MalformedTrack);
+			}
+			// A first object's gap may also cover IDs below where this copy starts.
+			wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
+		}
+		Ok(())
+	}
+
+	#[cfg(feature = "async")]
+	pub(crate) fn set_end_object(&self, fields: super::object::Fields) -> Result<()> {
+		let mut state = modify(&self.state)?;
+		if state.outcome.frames().is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
+			return Err(Error::MalformedTrack);
+		}
+		let bytes = fields.heap();
+		if !state.trim(bytes) {
+			return Err(Error::GroupTooLarge);
+		}
+		state.charge.add(bytes);
+		let relay = state.relay();
+		relay.bytes += bytes;
+		if let Some(wire) = &mut relay.wire {
+			wire.last = Some(fields.id);
+		}
+		relay.end_object = Some(Arc::new(fields));
+		Ok(())
+	}
+
 	/// Whether `reader` may ride this copy at its frame: it holds the frame, no further
 	/// than [`ADMIT`] behind the end of the last frame its fastest reader took, so the
 	/// front shedding as the writer runs a whole window ahead still leaves it in place.
@@ -3725,6 +3745,9 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
+
+	/// What the reader asks a fill with, such as the flight it boards.
+	fn asking(&self) -> super::track::Asking;
 }
 
 /// The read cursor over a [`Producer`]'s shared state.
@@ -3926,6 +3949,18 @@ impl Consumer {
 		Idle::disarm(&mut self.idle);
 		self.expiry = Some(expiry);
 		self
+	}
+
+	/// What this reader asks a fill with: its subscription's or fetch's, else the defaults.
+	pub(super) fn asking(&self) -> super::track::Asking {
+		self.expiry.as_ref().map_or(
+			super::track::Asking {
+				priority: 0,
+				max_delay: None,
+				order: super::subscription::Order::Ascending,
+			},
+			|expiry| expiry.asking(),
+		)
 	}
 
 	/// The hand-off of this copy's head, shared by every reader that could resume it
@@ -7558,6 +7593,14 @@ mod test {
 
 		fn for_track(&self, _: &track::Consumer) -> Arc<dyn Expiry> {
 			Arc::new(self.clone())
+		}
+
+		fn asking(&self) -> crate::model::track::Asking {
+			crate::model::track::Asking {
+				priority: 0,
+				max_delay: None,
+				order: crate::model::subscription::Order::Ascending,
+			}
 		}
 	}
 

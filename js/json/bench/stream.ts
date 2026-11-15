@@ -1,6 +1,9 @@
 /** Sweep buffered JSON stream reads over record count, payload size, and track compression. */
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Consumer, Producer } from "../src/stream/index.ts";
+
+// A scale-less log opens its one group at this key, and every record carries it.
+const at = Time.Timestamp.unscaled(0n);
 
 console.log("records,payload_bytes,compress,ns_per_record");
 for (const records of [64, 1024]) {
@@ -11,14 +14,19 @@ for (const records of [64, 1024]) {
 				const track = new Track.Producer("stream-bench").accept({ compression: compress ? "deflate" : "none" });
 				const producer = new Producer<{ n: number; text: string }>({ track });
 				const text = "x".repeat(bytes);
-				for (let n = 0; n < records; n++) producer.append({ value: { n, text } });
+				for (let n = 0; n < records; n++) producer.append({ value: { n, text }, at });
 				producer.finish();
 
 				const consumer = new Consumer<{ n: number; text: string }>({ track: track.subscribe() });
 				const start = performance.now();
 				for (let n = 0; n < records; n++) {
 					const record = await consumer.next();
-					if (record?.value.n !== n || record.value.text !== text || record.at !== undefined) {
+					if (
+						record?.value.n !== n ||
+						record.value.text !== text ||
+						record.at.scale !== undefined ||
+						record.at.value !== at.value
+					) {
 						throw new Error("stream benchmark lost a record");
 					}
 				}

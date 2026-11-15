@@ -28,6 +28,9 @@ use crate::{Error, Result, StreamError, group, util::SendCell};
 pub(in crate::model) struct FillState {
 	// Live `Requests` handles: a fill queues only while one can take it.
 	handlers: usize,
+	// Live handles that take only fetches, a finished copy's session: a reader's miss
+	// settles without them, since the subscription already settled what it owed.
+	fetchers: usize,
 	next: u64,
 	// Every fill not yet ended, queued or taken, by id.
 	pending: HashMap<u64, Pending>,
@@ -52,6 +55,8 @@ struct Pending {
 	// A flight: a separate copy of one group from its start frame, which no other reader
 	// joins by key; see [`FillState::fly`].
 	flight: bool,
+	// A fetch asked or joined it, so a fetch-only handler still takes it.
+	fetch: bool,
 	// How many joins still read each key: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
 	// What its handler accepted that no join has picked up yet, which holds back the next
@@ -109,7 +114,7 @@ impl Pending {
 
 /// What a reader asks its fills with, which it may change while they are out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Asking {
+pub(in crate::model) struct Asking {
 	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
@@ -283,6 +288,8 @@ pub(super) struct Ask {
 	pub asking: Asking,
 	/// A lookup of the group holding this time within the run, which owes none of it.
 	pub time: Option<u64>,
+	/// Asked by a fetch rather than a reader's miss, so a fetch-only handler takes it.
+	pub fetch: bool,
 }
 
 /// A reader's place in one fill: the part of it the reader wants.
@@ -405,16 +412,48 @@ impl FillState {
 	/// waiting on those fills finds them gone; a fill already taken stays with its handler.
 	pub(super) fn remove_handler(&mut self) {
 		self.handlers -= 1;
+		self.release_queued();
+	}
+
+	/// Turn a handler into one that takes only fetches.
+	pub(super) fn fetches_only(&mut self) {
+		self.add_fetcher();
+		self.remove_handler();
+	}
+
+	pub(super) fn add_fetcher(&mut self) {
+		self.fetchers += 1;
+	}
+
+	/// Count a fetch-only handler out; see [`Self::remove_handler`].
+	pub(super) fn remove_fetcher(&mut self) {
+		self.fetchers -= 1;
+		self.release_queued();
+	}
+
+	/// Drop each queued fill no handler left would take.
+	fn release_queued(&mut self) {
 		if self.handlers > 0 {
 			return;
 		}
-		for id in std::mem::take(&mut self.queue) {
+		let fetchers = self.fetchers;
+		let pending = &self.pending;
+		let (keep, drop): (VecDeque<u64>, VecDeque<u64>) = std::mem::take(&mut self.queue)
+			.into_iter()
+			.partition(|id| fetchers > 0 && pending.get(id).is_some_and(|pending| pending.fetch));
+		self.queue = keep;
+		for id in drop {
 			self.end(id);
 		}
 	}
 
 	pub(super) fn has_handlers(&self) -> bool {
 		self.handlers > 0
+	}
+
+	/// Whether a handler would take a fetch.
+	pub(super) fn takes_fetches(&self) -> bool {
+		self.handlers > 0 || self.fetchers > 0
 	}
 
 	pub(super) fn has_queued(&self) -> bool {
@@ -487,6 +526,7 @@ impl FillState {
 				continue;
 			}
 			pending.want(groups.clone());
+			pending.fetch |= ask.fetch;
 			pending.asks.lock().add(&ask.asking);
 			joins.push(Join {
 				fills: shared.clone(),
@@ -504,8 +544,12 @@ impl FillState {
 		if ask.asking.order == Order::Descending {
 			gaps.reverse();
 		}
+		let takes = match ask.fetch {
+			true => self.takes_fetches(),
+			false => self.has_handlers(),
+		};
 		for groups in gaps {
-			if self.handlers == 0 {
+			if !takes {
 				unfillable.push(groups);
 				continue;
 			}
@@ -541,6 +585,7 @@ impl FillState {
 					asks,
 					queued: true,
 					flight: false,
+					fetch: ask.fetch,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					unseen: RangeSet::new(),
 					result,
@@ -592,6 +637,7 @@ impl FillState {
 						asks: kio::Shared::new(asks),
 						queued: true,
 						flight: true,
+						fetch: false,
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
 						unseen: RangeSet::new(),
 						result: Default::default(),
@@ -642,6 +688,7 @@ impl FillState {
 				asks,
 				queued: true,
 				flight: false,
+				fetch: false,
 				wants: RangeMap::new(),
 				unseen: RangeSet::new(),
 				result,
@@ -861,6 +908,19 @@ impl Fill {
 	/// The first group to fill, and the frame within it to start from.
 	pub fn start(&self) -> Position {
 		self.inner.start
+	}
+
+	/// Whether a [`Consumer::fetch_group`](super::Consumer::fetch_group) asked or joined it,
+	/// rather than only readers that missed it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_fetch(&self) -> bool {
+		let inner = &self.inner;
+		inner
+			.fills
+			.read()
+			.pending
+			.get(&inner.id)
+			.is_some_and(|pending| pending.fetch)
 	}
 
 	/// The frame group `key` starts from: [`start`](Self::start)'s frame for the first

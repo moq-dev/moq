@@ -1322,6 +1322,7 @@ impl Misses {
 				frame_end: None,
 				asking: *asking,
 				time: None,
+				fetch: false,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
 			self.wanted.insert(run.clone());

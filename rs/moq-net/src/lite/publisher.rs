@@ -2547,6 +2547,7 @@ impl Request for SubscribeServe {
 						stamp,
 						outcomes: Default::default(),
 						ietf,
+						object_records: ietf && track.info().ietf().is_some(),
 					};
 
 					let latest = match shared.version {
@@ -4916,6 +4917,9 @@ struct Subscription {
 	outcomes: Arc<GroupOutcomes>,
 	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
 	ietf: bool,
+	/// Whether the track carries moq-transport object records on `ietf` streams, which a
+	/// continuation cannot resume.
+	object_records: bool,
 }
 
 /// Each group keeps its own steering cursor, without a session or send-group owner.
@@ -4931,6 +4935,9 @@ struct GroupContext {
 	outcomes: Arc<GroupOutcomes>,
 	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
 	ietf: bool,
+	/// Whether the track carries moq-transport object records on `ietf` streams, which a
+	/// continuation cannot resume.
+	object_records: bool,
 }
 
 impl GroupContext {
@@ -4999,6 +5006,7 @@ impl Subscription {
 			stamp: self.stamp,
 			outcomes: self.outcomes.clone(),
 			ietf: self.ietf,
+			object_records: self.object_records,
 		}
 	}
 
@@ -6289,6 +6297,7 @@ impl CoverageBench {
 			stamp: None,
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 		let mut this = Self {
 			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
@@ -6412,7 +6421,7 @@ struct GroupServe {
 	frame_start: u64,
 	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
 	capped: bool,
-	/// Lite-07 without the `ietf` extension's object records: an unread copy of `group` at
+	/// Lite-07 on a track without the `ietf` extension's object records: an unread copy of `group` at
 	/// `frame_start`, which a new stream continues from if the session resets this one to
 	/// make room.
 	rewind: Option<group::Consumer>,
@@ -6856,10 +6865,10 @@ impl kio::Task for GroupServe {
 }
 
 impl GroupServe {
-	/// Whether a stream reset to make room pauses its group: lite-07, unless the stream
+	/// Whether a stream reset to make room pauses its group: lite-07, unless the track
 	/// carries the `ietf` extension's object records, which a continuation cannot resume.
 	fn yields(ctx: &GroupContext) -> bool {
-		ctx.version.has_yield() && !ctx.ietf
+		ctx.version.has_yield() && !ctx.object_records
 	}
 
 	/// Whether the session reset `writer`'s stream to make room, pausing a group that yields.
@@ -7100,6 +7109,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7146,6 +7156,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7213,6 +7224,7 @@ mod serve_group_test {
 				stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 				outcomes: Default::default(),
 				ietf: false,
+				object_records: false,
 			};
 			let track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -7287,6 +7299,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 		let track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -7357,6 +7370,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7407,6 +7421,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7474,6 +7489,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7653,6 +7669,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7725,6 +7742,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7774,6 +7792,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7822,6 +7841,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 
 		let track = track::Producer::new(
@@ -7898,6 +7918,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			ietf: false,
+			object_records: false,
 		};
 		let bounds = Bounds::new(&[lite::Range::span(Some(0), 0, None, None)], false);
 		(TrackRun::new(ctx, track, bounds, 0, steer), writer, log)
@@ -10168,6 +10189,7 @@ mod serve_group_test {
 				stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
 				outcomes: outcomes.clone(),
 				ietf: false,
+				object_records: false,
 			};
 			let bounds = Bounds::new(&[lite::Range::span(Some(start_group), 0, None, None)], false);
 			Self {
