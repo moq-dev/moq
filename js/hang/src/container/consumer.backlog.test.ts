@@ -176,3 +176,27 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 		track.close();
 	}
 });
+
+test("a range capped below the largest still delivers", async () => {
+	// The track holds groups 0 to 5, and the subscriber's range ends before 3, so it never reports a
+	// largest: the consumer reports no backlog, but delivers what it can read.
+	const track = new Track.Producer("audio");
+	for (let sequence = 0; sequence <= 5; sequence++) {
+		const group = track.createGroup(BigInt(sequence));
+		const media = sequence * 20;
+		group.writeFrame({
+			payload: new Uint8Array([...Varint.encode(media * 1000), 1]),
+			timestamp: Time.Timestamp.fromMicros(media * 1000),
+		});
+		group.finish();
+	}
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } }).withRange({ end: { excluded: 3n } });
+	const consumer = new Consumer(subscriber, { format: new Format("audio"), delay: { max: Duration.millis(2000) } });
+	try {
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});

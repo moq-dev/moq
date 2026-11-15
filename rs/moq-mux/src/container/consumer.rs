@@ -569,6 +569,10 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn poll_event_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
+		// A start decided before the largest was in range takes the first one that is.
+		if self.joined.is_none() && matches!(self.startup, Startup::Started) {
+			self.join(waiter);
+		}
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 

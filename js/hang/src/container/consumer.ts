@@ -314,8 +314,11 @@ export class Consumer {
 					const served = await this.#track.start();
 					const start = served !== undefined && (floor === undefined || served > floor) ? served : floor;
 					// Read once the start resolved, so the publisher's answer is in it rather than a group
-					// that raced it here. A group has arrived, so the largest already covers it.
-					this.#joined = (await this.#track.largest())?.group;
+					// that raced it here, and off the delivery path: a range capped below the largest never
+					// reports one, which reports no backlog rather than stalling delivery.
+					this.#signals.spawn(async () => {
+						this.#joined = (await this.#track.largest())?.group;
+					});
 					this.#active = this.#startAt(start) ?? consumer.sequence;
 				}
 
