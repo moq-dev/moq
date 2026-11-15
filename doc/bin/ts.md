@@ -6,7 +6,8 @@ description: Carry a transport stream through MoQ, demultiplexed or whole, and w
 # MPEG-TS
 
 `moq import ts` reads a transport stream on stdin and `moq export ts` writes one
-to stdout. [SRT](/bin/srt) carries the same import and export over the network.
+to stdout. [SRT](/bin/srt) carries the semantic import and export over the
+network; it has no passthrough mode.
 There are two modes, and they make different promises.
 
 ```bash
@@ -85,14 +86,16 @@ A broadcast holds one program. A multi-program stream is refused until
 broadcast (`event.hang` becomes `event/1.hang`, `event/2.hang`), following the
 PAT: a program it adds publishes, one it drops ends, and one that returns
 publishes as a new [instance](/concept/moq-lite#publisher-instances). A listed
-program whose PMT does not arrive within 0.5 s of program clock ends the import.
+program whose PMT does not arrive within 0.5 s of program clock counts as
+`PMT_error_2` in the feed health while the others publish, and starts once its
+PMT arrives.
 
 A PMT that adds, removes, or retypes a stream, or reuses a PID, ends the old
 track and continues under a fresh name; the export announces each layout at its
 next PMT `version_number`. A PAT that moves the PMT is followed, and the export
 moves its own PMT behind a new PAT.
 
-The import republishes as a new instance when the source moves onto another
+The import, over stdin or SRT, republishes as a new instance when the source moves onto another
 timeline: the PCR and every stream stepping back, flagged or not, a step more
 than 10 s forward without `discontinuity_indicator`, or a PAT naming another
 `transport_stream_id` or program number. The new stream carries nothing over

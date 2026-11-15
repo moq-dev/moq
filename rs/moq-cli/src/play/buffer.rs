@@ -17,8 +17,6 @@ pub(super) struct Buffer {
 	pub floor: Option<moq_net::Timestamp>,
 	waiting_keyframe: bool,
 	pub ended: bool,
-	/// Exclusive endpoint declared for this encoder segment.
-	pub end: Option<moq_net::Timestamp>,
 }
 
 impl Default for Buffer {
@@ -33,21 +31,11 @@ impl Default for Buffer {
 			// A join resumes at its first keyframe, like any other break.
 			waiting_keyframe: true,
 			ended: false,
-			end: None,
 		}
 	}
 }
 
 impl Buffer {
-	pub fn clear(&mut self) {
-		self.frames.clear();
-		self.oldest.clear();
-		self.bytes = 0;
-		self.edge = None;
-		self.generation += 1;
-		self.waiting_keyframe = true;
-	}
-
 	/// The earliest presentation time still buffered, wherever it sits in
 	/// decode order.
 	pub fn oldest(&self) -> Option<moq_net::Timestamp> {
@@ -192,11 +180,6 @@ mod tests {
 			[0, 99, 33, 66]
 		);
 		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 99);
-		buffer.clear();
-		assert_eq!(buffer.bytes, 0);
-		assert!(buffer.frames.is_empty());
-		buffer.push(frame(1, true), Duration::ZERO);
-		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 1);
 	}
 	#[test]
 	fn age_expiry_finds_a_reordered_picture_behind_the_front() {

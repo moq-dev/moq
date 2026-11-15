@@ -1,5 +1,8 @@
 //! libwebrtc's Google Congestion Control (GoogCC), driven by QUIC receive timestamps.
 //!
+//! A candidate under test, compiled only with the `lab` test-support feature: no session can
+//! select it until the realtime bake-off picks it.
+//!
 //! The submodules are a Rust port of WebRTC's `modules/congestion_controller/goog_cc`, with the
 //! parts of `api/transport`, `api/units`, `modules/pacing` and `modules/remote_bitrate_estimator`
 //! it uses. They began as [goog_cc](https://github.com/kixelated/goog_cc) 0.1.4, a port of WebRTC

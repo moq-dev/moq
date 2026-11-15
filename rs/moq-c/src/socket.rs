@@ -271,6 +271,22 @@ pub unsafe extern "C" fn moq_socket_create(
 	})
 }
 
+/// Whether `path` is a socket endpoint's broadcast, which only routes sessions and carries no
+/// media, so a worker that acts on every announced broadcast can skip it.
+///
+/// Returns 1 if it is, 0 if not, or a negative code for a `path` that is not a valid path.
+///
+/// # Safety
+/// - `path` must point at `path_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_socket_is_endpoint(path: *const c_char, path_len: usize) -> i32 {
+	ffi::enter(move || {
+		let path = unsafe { ffi::parse_str(path, path_len)? };
+		let path = moq_net::Path::new(path).map_err(moq_net::Error::from)?;
+		Ok(i32::from(moq_net::socket::is_endpoint(&path)))
+	})
+}
+
 /// Close a socket endpoint and release its handle.
 ///
 /// Withdraws the endpoint, ends its accept loops with a terminal `0`, fails its pending dials

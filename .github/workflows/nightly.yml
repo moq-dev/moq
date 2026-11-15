@@ -37,8 +37,11 @@ name: Nightly
 #
 # `tla` model-checks every TLA+ config: TLC explores every ordering a model
 # allows, which takes minutes per config, and a model only changes when the code
-# it covers does, which review checks (see REVIEW.md). It also fails when an
-# open finding's config starts passing, so the fix promotes its rule.
+# it covers does, which review checks (see REVIEW.md). A config whose inputs fix
+# its result, as with an exhaustive model or a pinned seed, reruns only when its
+# spec, config, or TLC changed; a simulation without a seed runs every night. It
+# also fails when an open finding's config starts passing, so the fix promotes
+# its rule.
 #
 # Main PRs run only the landing gate's selection as a signal, so every
 # path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
@@ -251,12 +254,17 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
+      # Inside the job's hour, so a workload that overruns fails the job, where the
+      # failure-based triage sees it, instead of cancelling it, and later steps still run.
       - name: Run workload
         id: workload
+        timeout-minutes: 55
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: default
           BENCH_BASE: ${{ matrix.paired && (inputs.bench-base || 'previous-nightly') || '' }}
+          # The previous Nightly's copy is the paired base's executables (see sh/gh/nightly.sh).
+          BENCH_BUILDS_ARTIFACT: ${{ matrix.paired && format('builds-{0}', matrix.artifact) || '' }}
           GH_TOKEN: ${{ matrix.paired && github.token || '' }}
 
       - name: Record benchmark outcome
@@ -270,6 +278,16 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
           retention-days: 45
+
+      # Only scheduled runs serve as a later run's base.
+      - name: Keep bench executables
+        if: ${{ matrix.paired && github.event_name == 'schedule' && !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: builds-${{ matrix.artifact }}
+          path: target/bench/builds
+          if-no-files-found: ignore
+          retention-days: 3
 
       # After the upload, so the benchmark site still records tonight's history and
       # publishes the comparison that failed this job before the alert links to it.
@@ -474,9 +492,20 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/nix
+      # Passing results, one marker per config (see sh/tla.sh). The key changes
+      # with anything a result reads, so a hit means nothing needs saving; a miss
+      # starts from the last markers and saves them only if the leg passes.
+      - name: Restore passing results
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tmp/tla-cache
+          key: tla-v1-${{ strategy.job-index }}-${{ hashFiles('rs/**/verify/**', 'js/**/verify/**', 'sh/tla.sh', 'sh/tlc.py', 'flake.lock') }}
+          restore-keys: tla-v1-${{ strategy.job-index }}-
       # No dev shell: the recipes fetch TLC themselves.
       - name: Model-check
         run: nix shell --inputs-from . nixpkgs#just --command just test tla ${{ matrix.paths }}
+        env:
+          TLA_CACHE: .tmp/tla-cache
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has
@@ -578,7 +607,7 @@ jobs:
         run: nix develop --command just test audio-quality --runtimes chromium --enforce --capture
         shell: bash -leo pipefail {0}
         env:
-          # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
+          # Somewhere upload-artifact can reach; the harness default is the checkout's .tmp/.
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           # A passing run is kept too: budgets.json is measured from these nights.
           HARNESS_KEEP: 1
@@ -717,6 +746,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      packages: read
 
   # The three Docker images share one Dockerfile, so one package covers it.
   release-docker:

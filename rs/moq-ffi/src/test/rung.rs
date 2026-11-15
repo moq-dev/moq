@@ -46,7 +46,7 @@ async fn shaped_uplink_disables_and_resumes() {
 		tls: insecure_tls(),
 		once: true,
 		quic: MoqQuicConfig {
-			congestion_control: Some(MoqCongestionControl::Delay),
+			congestion_control: Some(MoqCongestionControl::delay()),
 			..Default::default()
 		},
 		websocket: MoqWebSocketConfig {

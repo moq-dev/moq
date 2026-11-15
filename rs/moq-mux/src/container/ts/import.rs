@@ -413,7 +413,17 @@ impl<E: catalog::Catalog> Import<E> {
 	///
 	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
 	/// or with the cause of a finish that failed.
+	///
+	/// [`Republish`](super::Republish) carries on past a restart instead, on a path of an origin.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		match self.decode_or_restart(data)? {
+			Some(restart) => Err(restart.into()),
+			None => Ok(()),
+		}
+	}
+
+	/// [`decode`](Self::decode), returning a restart rather than failing with it.
+	pub(super) fn decode_or_restart(&mut self, data: &[u8]) -> anyhow::Result<Option<super::Restart>> {
 		self.input.check()?;
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
@@ -421,7 +431,7 @@ impl<E: catalog::Catalog> Import<E> {
 		result
 	}
 
-	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
+	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<Option<super::Restart>> {
 		demux.push(data);
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
 		// registered) before the packets that follow it in the same chunk route.
@@ -458,13 +468,14 @@ impl<E: catalog::Catalog> Import<E> {
 				// Held input keeps its arrival, and is graded once routed.
 				super::step::Verdict::Hold => {
 					demux.drain();
-					return self.flush_batch();
+					self.flush_batch()?;
+					return Ok(None);
 				}
 				super::step::Verdict::Restart(step) => {
 					let remainder = demux.remainder();
 					demux.drain();
 					self.flush_batch()?;
-					return Err(super::Restart { step, remainder }.into());
+					return Ok(Some(super::Restart { step, remainder }));
 				}
 			}
 			let Some(packet) = demux.next() else { break };
@@ -473,7 +484,8 @@ impl<E: catalog::Catalog> Import<E> {
 		// Every packet this chunk completed is read: grade the input through its arrival.
 		self.health.flush();
 		demux.drain();
-		self.flush_batch()
+		self.flush_batch()?;
+		Ok(None)
 	}
 
 	/// Cut the snapshot groups for whatever SI committed since the last call, and flush the

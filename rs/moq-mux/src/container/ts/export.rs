@@ -2289,7 +2289,11 @@ where
 		let timer = program
 			.rate_timer
 			.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(until)));
-		let _ = waiter.poll_future(timer.as_mut());
+		// An elapsed deadline is ready on this first poll, so a wait never ends without a waker.
+		if waiter.poll_future(timer.as_mut()).is_ready() {
+			program.rate_timer = None;
+			return false;
+		}
 		true
 	}
 

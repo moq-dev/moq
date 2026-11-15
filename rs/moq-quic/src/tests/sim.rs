@@ -72,8 +72,113 @@ fn priority_on_a_clean_path() {
 	});
 }
 
+/// A handshake under up to the QUIC Interop Runner's 30% loss either completes or ends only
+/// after a side heard nothing for the whole handshake timeout, and the server leaves the client's
+/// initial CID for its next in order, retiring nothing else
+#[test]
+fn handshake_under_loss() {
+	let link = (0.0..=0.3, probability(0.05), probability(0.1), 0u64..=20_000).prop_map(
+		|(loss, duplicate, reorder, reorder_delay)| {
+			let mut link = Link::default();
+			link.loss = loss;
+			link.duplicate = duplicate;
+			link.reorder = reorder;
+			link.reorder_delay = Duration::from_micros(reorder_delay);
+			link
+		},
+	);
+	let cases = (any::<u64>(), 0u64..=50_000, link.clone(), link);
+	sweep(cases, |(seed, latency, to_server, to_client)| {
+		handshake(seed, Duration::from_micros(latency), to_server, to_client)
+	});
+}
+
+fn handshake(seed: u64, latency: Duration, to_server: Link, to_client: Link) -> TestCaseResult {
+	entropy::reseed(seed);
+	let bound = transport::Config::default().handshake_timeout;
+	let mut pair = Pair::new(Default::default(), server_config());
+	pair.latency = latency;
+	pair.to_server = to_server;
+	pair.to_client = to_client;
+	let start = pair.time;
+	let client_ch = pair.begin_connect(client_config());
+
+	// When each side last processed a packet from the other, to tell a give-up from a dead
+	// network: an arrival it cannot decrypt yet is no sign of life
+	let mut heard = [start; 2];
+	let mut frames = [String::new(), String::new()];
+	let server_ch = loop {
+		let now = pair.time;
+		let stepped = pair.step();
+		let server_ch = pair.server.connections.keys().next().copied();
+		for (index, ch) in [Some(client_ch), server_ch].into_iter().enumerate() {
+			let Some(ch) = ch else { continue };
+			let conn = match index {
+				0 => pair.client_conn_mut(ch),
+				_ => pair.server_conn_mut(ch),
+			};
+			let received = format!("{:?}", conn.stats().frame_rx);
+			if received != frames[index] {
+				frames[index] = received;
+				heard[index] = now;
+			}
+			let Some(error) = conn.error().cloned() else { continue };
+			prop_assert!(
+				matches!(error, ConnectionError::HandshakeTimeout),
+				"side {index} failed: {error}"
+			);
+			// The silence right before it gave up, not any earlier one
+			let silence = now - heard[index];
+			prop_assert!(silence >= bound, "side {index} gave up after {silence:?} of silence");
+			return Ok(());
+		}
+		if let Some(server_ch) = server_ch
+			&& is_confirmed(pair.client_conn_mut(client_ch))
+			&& is_connected(pair.server_conn_mut(server_ch))
+		{
+			break server_ch;
+		}
+		prop_assert!(pair.time - start < DEADLINE, "stalled for {DEADLINE:?}");
+		if !stepped {
+			// Only an idle timer or an arrival is left
+			let next = [
+				pair.client.inbound.front().map(|x| x.0),
+				pair.server.inbound.front().map(|x| x.0),
+				pair.client.next_wakeup(),
+				pair.server.next_wakeup(),
+			]
+			.into_iter()
+			.flatten()
+			.min();
+			let Some(next) = next else {
+				return Err(TestCaseError::fail("deadlocked mid-handshake"));
+			};
+			pair.time = next;
+		}
+	};
+
+	// Heal the path so every NEW_CONNECTION_ID and RETIRE_CONNECTION_ID lands
+	for link in [&mut pair.to_server, &mut pair.to_client] {
+		link.loss = 0.0;
+		link.reorder = 0.0;
+	}
+	pair.drive();
+	prop_assert_eq!(pair.server_conn_mut(server_ch).active_rem_cid_seq(), 1);
+	prop_assert_eq!(pair.client_conn_mut(client_ch).active_local_cid_seq().0, 1);
+	Ok(())
+}
+
+fn probability(max: f64) -> impl Strategy<Value = f64> + Clone {
+	prop_oneof![Just(0.0), 0.0..max]
+}
+
 /// Runs the cases `MOQ_QUIC_SEED` and `MOQ_QUIC_CASES` pick, then `property` on each outcome
 fn check(cases: impl Strategy<Value = Case>, property: impl Fn(&Outcome) -> TestCaseResult) {
+	sweep(cases, |case| property(&run(&case)?));
+}
+
+/// Runs `test` on the cases `MOQ_QUIC_SEED` and `MOQ_QUIC_CASES` pick
+fn sweep<S: Strategy>(cases: S, test: impl Fn(S::Value) -> TestCaseResult) {
 	let setting = |name: &str, fallback: u64| std::env::var(name).map_or(fallback, |value| value.parse().expect(name));
 	let seed = setting("MOQ_QUIC_SEED", 0x6d6f71);
 	let count = setting("MOQ_QUIC_CASES", 64) as u32;
@@ -84,7 +189,7 @@ fn check(cases: impl Strategy<Value = Case>, property: impl Fn(&Outcome) -> Test
 		failure_persistence: None,
 		..Default::default()
 	});
-	runner.run(&cases, |case| property(&run(&case)?)).unwrap();
+	runner.run(&cases, test).unwrap();
 }
 
 /// Long enough for BBR3 to cycle through ProbeBW, whose timing is random too
@@ -158,7 +263,6 @@ fn case(
 
 /// A direction of the path, which loses and reorders datagrams only when `lossy`
 fn link(lossy: bool) -> impl Strategy<Value = Link> + Clone {
-	let probability = |max: f64| prop_oneof![Just(0.0), 0.0..max];
 	let unless_clean = move |max: f64| match lossy {
 		true => probability(max).boxed(),
 		false => Just(0.0).boxed(),
@@ -412,7 +516,7 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	client_config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(client_config);
 
-	// Workloads start connected; deterministic handshake tests own flight loss.
+	// Workloads start connected; `handshake_under_loss` owns flight loss.
 	pair.to_server = case.to_server.clone();
 	pair.to_client = case.to_client.clone();
 	let start = pair.time;

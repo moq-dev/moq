@@ -680,3 +680,12 @@ fn native_surfaces_are_unsupported_off_apple() {
 		MOQ_ERROR_UNSUPPORTED
 	);
 }
+
+#[test]
+fn socket_is_endpoint() {
+	let is_endpoint = |path: &str| unsafe { moq_socket_is_endpoint(path.as_ptr().cast(), path.len()) };
+	assert_eq!(is_endpoint("room/.server/a"), 1);
+	assert_eq!(is_endpoint("room/.client/a"), 1);
+	assert_eq!(is_endpoint("room/a"), 0);
+	assert!(is_endpoint("room//a") < 0);
+}

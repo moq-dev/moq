@@ -181,6 +181,7 @@ export * as Signals from "@moq/signals";
 
 export class Sync {
 	constructor(props?: Signals.Inputs<SyncInput>);
+	readonly anchor: Signals.Getter<unknown>;
 	close(): void;
 	readonly in: Signals.Readonlys<SyncInput>;
 	now(): Clock.Duration | undefined;
