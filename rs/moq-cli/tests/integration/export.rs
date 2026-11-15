@@ -1128,7 +1128,7 @@ async fn repair_refuses_a_locked_recording() {
 	let output = moq_repair(&path).await;
 	assert!(!output.status.success(), "repaired a file a recorder holds");
 	assert!(
-		String::from_utf8_lossy(&output.stderr).contains("still open by a recorder"),
+		String::from_utf8_lossy(&output.stderr).contains("may still be open by a recorder"),
 		"{}",
 		String::from_utf8_lossy(&output.stderr)
 	);
@@ -1138,7 +1138,7 @@ async fn repair_refuses_a_locked_recording() {
 	drop(recorder);
 	let output = moq_repair(&path).await;
 	assert!(
-		!String::from_utf8_lossy(&output.stderr).contains("still open by a recorder"),
+		!String::from_utf8_lossy(&output.stderr).contains("may still be open by a recorder"),
 		"{}",
 		String::from_utf8_lossy(&output.stderr)
 	);
@@ -1183,7 +1183,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 	let mid = std::fs::read(&path).unwrap();
 	let refused = moq_repair(&path).await;
 	assert!(!refused.status.success(), "repaired a recording still being written");
-	assert!(String::from_utf8_lossy(&refused.stderr).contains("still open by a recorder"));
+	assert!(String::from_utf8_lossy(&refused.stderr).contains("may still be open by a recorder"));
 	assert!(
 		std::fs::read(&path).unwrap().starts_with(&mid),
 		"a refused repair rewrote the file"
