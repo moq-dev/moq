@@ -8,7 +8,7 @@ use moq_mux::catalog::hang::CatalogExt;
 use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
 
-use super::backlog::{Backlog, Raw};
+use super::backlog::{Backlog, Raw, Stamp};
 use super::encoded::Encoded;
 use super::encoder::{Config, Encoder, Input};
 use crate::resample::{Remix, Resampler};
@@ -100,11 +100,13 @@ pub struct Producer {
 	frames_produced: u64,
 	/// Stamps of the frames the codec has been given but has not yet returned a packet for,
 	/// oldest first: it returns one packet per frame in order, however late.
-	in_flight: VecDeque<Timestamp>,
-	/// Wall-clock anchor in microseconds, taken from the first frame after each
-	/// (re)start. Emitted PTS = `anchor + frames_produced / codec_rate`. `None`
-	/// until the first write so the next frame re-anchors to its timestamp.
-	anchor_us: Option<u64>,
+	in_flight: VecDeque<Stamp>,
+	/// Taken from the first frame after each (re)start. `None` until the first write so the
+	/// next frame re-anchors to its timestamp.
+	anchor: Option<Anchor>,
+	/// Where the latest stamped packet ends, in microseconds: the next anchor's floor, since
+	/// group starts strictly increase.
+	stamped: u64,
 	/// An encoder reset that still needs a marker group before its next packet.
 	pending_discontinuity: bool,
 	/// Whether no packet has been published since the last marker group, or the track began, so a
@@ -112,6 +114,16 @@ pub struct Producer {
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
+}
+
+/// Where a timeline begins: emitted PTS = `at + frames_produced / codec_rate`.
+#[derive(Clone, Copy, Debug)]
+struct Anchor {
+	/// The first frame's timestamp in microseconds, raised to `floor`.
+	at: u64,
+	/// Where the packets stamped before this timeline end, in microseconds. Codec priming folded
+	/// below `at` stops here.
+	floor: u64,
 }
 
 struct Terminal {
@@ -234,7 +246,8 @@ impl Reserved {
 			grouped: 0,
 			frames_produced: 0,
 			in_flight: VecDeque::new(),
-			anchor_us: None,
+			anchor: None,
+			stamped: 0,
 			pending_discontinuity: false,
 			decoder_boundary: true,
 			activity: Activity::Active,
@@ -358,7 +371,7 @@ impl Producer {
 	}
 
 	fn reset_state(&mut self) {
-		self.anchor_us = None;
+		self.anchor = None;
 		self.activity = Activity::Active;
 		self.frames_produced = 0;
 		self.pending.clear();
@@ -383,18 +396,29 @@ impl Producer {
 	/// The first frame after construction (or [`reanchor`](Self::reanchor))
 	/// anchors the timeline: its timestamp becomes the anchor, and emitted PTS
 	/// then advances purely by the running sample count, so subsequent frames'
-	/// timestamps are ignored. An idle gap is only reflected in the PTS if you
-	/// call [`reanchor`](Self::reanchor) on resume (which re-anchors from
-	/// the next frame's wall-clock stamp); writing straight across a gap without
-	/// resetting compresses it out.
+	/// timestamps are ignored. A timeline only moves forward, so an anchor before
+	/// where the packets already stamped end is raised to there. An idle gap is
+	/// only reflected in the PTS if you call [`reanchor`](Self::reanchor) on
+	/// resume (which re-anchors from the next frame's wall-clock stamp); writing
+	/// straight across a gap without resetting compresses it out.
 	///
 	/// [`Frame::activity`] is ignored: the encoder classifies what it actually
 	/// produced, which [`activity`](Self::activity) reports.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
 		self.check()?;
-		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
-			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
-		let anchor_us = *self.anchor_us.get_or_insert(timestamp_us);
+		let timestamp_us = (frame.timestamp.as_micros().ok())
+			.and_then(|micros| u64::try_from(micros).ok())
+			.ok_or_else(|| {
+				Error::Unsupported(format!(
+					"frame timestamp {:?} is unscaled or out of range",
+					frame.timestamp
+				))
+			})?;
+		let floor = self.stamped;
+		let anchor = *self.anchor.get_or_insert(Anchor {
+			at: timestamp_us.max(floor),
+			floor,
+		});
 
 		let input = &self.input;
 		let (format, channels) = (input.format, input.layout.channels());
@@ -410,7 +434,7 @@ impl Producer {
 
 		self.pending.extend(pcm);
 
-		self.publish_full_frames(anchor_us)
+		self.publish_full_frames(anchor)
 	}
 
 	/// Encode and publish every full frame in `pending`, keeping any partial
@@ -418,7 +442,7 @@ impl Producer {
 	///
 	/// Frames are read in place and the remainder moves to the front once, so a
 	/// large batch costs linear rather than quadratic copying.
-	fn publish_full_frames(&mut self, anchor_us: u64) -> Result<(), Error> {
+	fn publish_full_frames(&mut self, anchor: Anchor) -> Result<(), Error> {
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		// Taken so each frame can be borrowed while `self` encodes it; restored below on every path.
 		let mut pending = std::mem::take(&mut self.pending);
@@ -428,7 +452,7 @@ impl Producer {
 			let frame = &pending[consumed..consumed + frame_samples];
 			// A frame that fails is consumed too, so it is never encoded twice.
 			consumed += frame_samples;
-			result = self.publish_frame(anchor_us, frame);
+			result = self.publish_frame(anchor, frame);
 		}
 		pending.drain(..consumed);
 		self.pending = pending;
@@ -436,24 +460,18 @@ impl Producer {
 	}
 
 	/// Stamp one codec frame, then encode it now or keep it in the backlog.
-	fn publish_frame(&mut self, anchor_us: u64, samples: &[f32]) -> Result<(), Error> {
-		let timestamp = Self::timestamp(
-			anchor_us,
-			self.frames_produced,
-			self.encoder.folded_delay(),
-			self.encoder.codec_rate(),
-		)?;
-		self.frames_produced += self.encoder.frame_size() as u64;
-		let end = Self::timestamp(anchor_us, self.frames_produced, 0, self.encoder.codec_rate())?;
+	fn publish_frame(&mut self, anchor: Anchor, samples: &[f32]) -> Result<(), Error> {
+		let stamp = self.stamp(anchor)?;
+		let end = Self::timestamp(anchor, self.frames_produced, 0, self.encoder.codec_rate())?;
 		let reset = std::mem::take(&mut self.reset_pending);
 		let discontinuity = std::mem::take(&mut self.pending_discontinuity);
 		if self.active && self.backlog.is_empty() {
-			return self.encode_frame(samples, timestamp, reset, discontinuity);
+			return self.encode_frame(samples, stamp, reset, discontinuity);
 		}
 		// Only a frame that waits needs its own copy.
 		self.backlog.push(Raw {
 			samples: samples.to_vec(),
-			timestamp,
+			stamp,
 			end,
 			reset,
 			discontinuity,
@@ -461,13 +479,17 @@ impl Producer {
 		Ok(())
 	}
 
-	fn encode_frame(
-		&mut self,
-		samples: &[f32],
-		timestamp: Timestamp,
-		reset: bool,
-		discontinuity: bool,
-	) -> Result<(), Error> {
+	/// Stamp the next codec frame on `anchor`, and count it produced.
+	fn stamp(&mut self, anchor: Anchor) -> Result<Stamp, Error> {
+		let (delay, codec_rate) = (self.encoder.folded_delay(), self.encoder.codec_rate());
+		let start = Self::timestamp(anchor, self.frames_produced, delay, codec_rate)?;
+		self.frames_produced += self.encoder.frame_size() as u64;
+		let end = Self::timestamp(anchor, self.frames_produced, delay, codec_rate)?;
+		self.stamped = end.as_micros()? as u64;
+		Ok(Stamp { start, end })
+	}
+
+	fn encode_frame(&mut self, samples: &[f32], stamp: Stamp, reset: bool, discontinuity: bool) -> Result<(), Error> {
 		self.check()?;
 		// A break before anything was published, such as history expiring before the first
 		// subscriber, has nothing to separate.
@@ -481,15 +503,15 @@ impl Producer {
 			self.in_flight.clear();
 		}
 		encoder.encode(samples)?;
-		self.publish_ready(Some(timestamp))
+		self.publish_ready(Some(stamp))
 	}
 
 	/// Publish every packet the codec has ready, each stamped with the frame it pairs with:
 	/// the oldest held stamp, then `submitted`, the frame just encoded, which is queued only
 	/// when the codec holds its packet, so a codec that holds nothing never fills the queue.
-	fn publish_ready(&mut self, mut submitted: Option<Timestamp>) -> Result<(), Error> {
+	fn publish_ready(&mut self, mut submitted: Option<Stamp>) -> Result<(), Error> {
 		while let Some(packet) = self.encoder.receive()? {
-			let Some(timestamp) = self.in_flight.pop_front().or_else(|| submitted.take()) else {
+			let Some(stamp) = self.in_flight.pop_front().or_else(|| submitted.take()) else {
 				return Err(Error::Codec(format!(
 					"{} returned more packets than it was given frames",
 					self.encoder.name()
@@ -498,7 +520,7 @@ impl Producer {
 			self.activity = packet.activity;
 			// The codec and its timestamp queue already advanced past this packet, so no later
 			// write could stamp what follows: end the producer with the cause.
-			if let Err(err) = self.publish(packet, timestamp) {
+			if let Err(err) = self.publish(packet, stamp) {
 				self.fail_track();
 				self.failed = Some(err.clone());
 				return Err(err);
@@ -529,8 +551,8 @@ impl Producer {
 		self.active = active;
 		// One codec frame per turn lets capture keep draining while catching up.
 		if active && let Some(raw) = self.backlog.pop() {
-			self.track.history(raw.timestamp);
-			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
+			self.track.history(raw.stamp.start);
+			self.encode_frame(&raw.samples, raw.stamp, raw.reset, raw.discontinuity)?;
 		}
 		Ok(())
 	}
@@ -539,13 +561,13 @@ impl Producer {
 	/// are gone they expire on the same window, rather than reaching the track stale when it finishes.
 	#[cfg(any(feature = "capture", test))]
 	fn expire_partial(&mut self, now: Timestamp) -> Result<(), Error> {
-		let Some(anchor_us) = self.anchor_us else { return Ok(()) };
+		let Some(anchor) = self.anchor else { return Ok(()) };
 		if !self.backlog.is_empty() {
 			return Ok(());
 		}
 		let channels = self.encoder.codec_channels() as usize;
 		let frames = self.frames_produced + (self.pending.len() / channels) as u64;
-		let end = Self::timestamp(anchor_us, frames, 0, self.encoder.codec_rate())?;
+		let end = Self::timestamp(anchor, frames, 0, self.encoder.codec_rate())?;
 		if self.backlog.expired(end, now) {
 			self.reanchor();
 		}
@@ -571,18 +593,18 @@ impl Producer {
 	/// PTS of the frame `frames` samples past the anchor, stamped `delay` samples
 	/// earlier to fold in codec priming the catalog can't signal.
 	///
-	/// Priming that would land before a zero anchor is stamped at zero instead: it
-	/// decodes to the codec's warm-up rather than to input, so only its spacing is
-	/// lost.
-	fn timestamp(anchor_us: u64, frames: u64, delay: usize, codec_rate: u32) -> Result<Timestamp, Error> {
+	/// Priming that would land before the anchor's floor, zero or where the previous
+	/// timeline's packets end, is stamped at the floor instead: it decodes to the
+	/// codec's warm-up rather than to input, so only its spacing is lost.
+	fn timestamp(anchor: Anchor, frames: u64, delay: usize, codec_rate: u32) -> Result<Timestamp, Error> {
 		let frames = i128::from(frames) - delay as i128;
 		let offset_us = (frames * 1_000_000).div_euclid(i128::from(codec_rate));
-		let micros = (i128::from(anchor_us) + offset_us).max(0);
+		let micros = (i128::from(anchor.at) + offset_us).max(i128::from(anchor.floor));
 		let micros = u64::try_from(micros).map_err(|_| moq_net::TimeOverflow)?;
 		Ok(Timestamp::from_micros(micros)?)
 	}
 
-	fn publish(&mut self, encoded: Encoded, timestamp: Timestamp) -> Result<(), Error> {
+	fn publish(&mut self, encoded: Encoded, stamp: Stamp) -> Result<(), Error> {
 		// Every packet decodes on its own, so a group may start at any of them: the first packet
 		// after a cut opens one. Codecs recover independently after a dropped group.
 		let keyframe = self.track.needs_keyframe();
@@ -590,7 +612,7 @@ impl Producer {
 			self.grouped = 0;
 		}
 		let mux_frame = MuxFrame {
-			timestamp,
+			timestamp: stamp.start,
 			payload: encoded.payload,
 			keyframe,
 			duration: None,
@@ -598,10 +620,12 @@ impl Producer {
 		self.track.write(mux_frame)?;
 		self.grouped += self.encoder.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
-		// the relay sees it finish without waiting. No boundary to give: the next packet bounds
-		// this one, and codec frames have a deterministic duration anyway.
-		if self.grouped >= self.group_samples {
-			self.track.cut(None)?;
+		// the relay sees it finish without waiting. The group ends whole where its last packet
+		// ends, which is where the next one starts, so a reader can tell the group starting there
+		// continues it. Priming stamped at the floor ends where it starts, as the packet after it
+		// does: group starts strictly increase, so the group stays open for the packet that moves on.
+		if self.grouped >= self.group_samples && stamp.end > stamp.start {
+			self.track.cut(Some(stamp.end))?;
 		}
 		Ok(())
 	}
@@ -620,7 +644,8 @@ impl Producer {
 
 		for (index, packet) in terminal.packets.into_iter().enumerate() {
 			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
-				.convert(terminal.start.scale())?;
+				.convert(terminal.start.scale().ok_or(moq_net::TimeOverflow)?)?;
+
 			let timestamp = terminal.start.checked_add(offset)?;
 			track.write(MuxFrame {
 				timestamp,
@@ -687,8 +712,8 @@ impl Producer {
 		// Preserve the final retained history after capture ends, even without live demand.
 		self.active = true;
 		while let Some(raw) = self.backlog.pop() {
-			self.track.history(raw.timestamp);
-			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
+			self.track.history(raw.stamp.start);
+			self.encode_frame(&raw.samples, raw.stamp, raw.reset, raw.discontinuity)?;
 		}
 		if self.reset_pending {
 			self.encoder.reset();
@@ -703,8 +728,12 @@ impl Producer {
 
 		// The drained resampler tail can span multiple frames. Publish those first
 		// so only the final partial frame reaches the encoder's terminal drain.
-		let anchor_us = self.anchor_us.unwrap_or(0);
-		self.publish_full_frames(anchor_us)?;
+		// Nothing written since a reanchor: whatever is left continues where the stamps end.
+		let anchor = self.anchor.unwrap_or(Anchor {
+			at: self.stamped,
+			floor: self.stamped,
+		});
+		self.publish_full_frames(anchor)?;
 		// What the codec still holds came from full frames, so it goes out at their stamps, leaving
 		// the terminal drain's packets to start where the source's partial tail does.
 		self.encoder.flush()?;
@@ -728,9 +757,9 @@ impl Producer {
 		let channels = self.encoder.codec_channels() as usize;
 		let source_frames = self.pending.len() / channels;
 		let delay = self.encoder.folded_delay();
-		let start = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
+		let start = Self::timestamp(anchor, self.frames_produced, delay, codec_rate)?;
 		// The source ends where it ends: priming only moves the packets carrying it.
-		let end = Self::timestamp(anchor_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
+		let end = Self::timestamp(anchor, self.frames_produced + source_frames as u64, 0, codec_rate)?;
 		let finish = self.encoder.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
@@ -748,10 +777,9 @@ impl Producer {
 			)?;
 		} else {
 			for packet in packets {
-				let timestamp = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
+				let stamp = self.stamp(anchor)?;
 				self.activity = packet.activity;
-				self.publish(packet, timestamp)?;
-				self.frames_produced += frame_size as u64;
+				self.publish(packet, stamp)?;
 			}
 		}
 		Ok(())
@@ -926,12 +954,15 @@ mod tests {
 		for index in 0..150 {
 			// Capture buffers need not coincide with a codec frame, even across a demand gap.
 			producer
-				.write(&pcm_frame(&vec![index as f32; 274], at(index).as_micros() as u64))
+				.write(&pcm_frame(
+					&vec![index as f32; 274],
+					at(index).as_micros().unwrap() as u64,
+				))
 				.unwrap();
 			producer
 				.write(&pcm_frame(
 					&vec![index as f32; 1646],
-					at(index).as_micros() as u64 + 2854,
+					at(index).as_micros().unwrap() as u64 + 2854,
 				))
 				.unwrap();
 		}
@@ -967,12 +998,12 @@ mod tests {
 		}
 		producer.set_active(false, at(150)).unwrap();
 		producer
-			.write(&pcm_frame(&vec![0.5; 1920], at(150).as_micros() as u64))
+			.write(&pcm_frame(&vec![0.5; 1920], at(150).as_micros().unwrap() as u64))
 			.unwrap();
 		producer.set_active(true, at(151)).unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(150));
 		producer
-			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros() as u64))
+			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros().unwrap() as u64))
 			.unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(151));
 		let _finished = producer.finish().unwrap();
@@ -996,7 +1027,10 @@ mod tests {
 		producer.set_active(false, at(0)).unwrap();
 		for index in 0..150 {
 			producer
-				.write(&pcm_frame(&vec![index as f32; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(
+					&vec![index as f32; 1920],
+					at(index).as_micros().unwrap() as u64,
+				))
 				.unwrap();
 		}
 		let track = consumer
@@ -1037,13 +1071,13 @@ mod tests {
 		producer.set_active(false, at(0)).unwrap();
 		for index in 0..50 {
 			producer
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros().unwrap() as u64))
 				.unwrap();
 		}
 		// Another track already reached the live edge.
 		for index in 45..50 {
 			other
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros().unwrap() as u64))
 				.unwrap();
 		}
 		loop {
@@ -1054,7 +1088,7 @@ mod tests {
 		}
 		for index in 50..55 {
 			producer
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros().unwrap() as u64))
 				.unwrap();
 		}
 		let producer = producer.finish().unwrap();
@@ -1108,7 +1142,7 @@ mod tests {
 		// The terminal packet carries its own end; the marker ends the epoch before the gap, ahead of it.
 		let next = reader.read().await.unwrap().unwrap();
 		assert!(
-			matches!(next, moq_mux::container::Read::End { end, .. } if end.as_micros() < 1_040_000),
+			matches!(next, moq_mux::container::Read::End { end, .. } if end.as_micros().unwrap() < 1_040_000),
 			"the final partial frame joined the epoch before the gap: {next:?}"
 		);
 	}
@@ -1150,7 +1184,7 @@ mod tests {
 
 		let first = reader.read().await.unwrap().unwrap();
 		assert!(
-			matches!(first, moq_mux::container::Read::Frame { ref frame, .. } if frame.timestamp.as_micros() == 1_000_000),
+			matches!(first, moq_mux::container::Read::Frame { ref frame, .. } if frame.timestamp.as_micros().unwrap() == 1_000_000),
 			"{first:?}"
 		);
 		// Nothing retained reaches the track after it expired.
@@ -1590,7 +1624,7 @@ mod tests {
 
 		let mut resumed_frames = 0;
 		while let Some(frame) = decoded_frame(&mut audio).await.unwrap() {
-			if frame.timestamp.as_micros() >= 1_000_000 {
+			if frame.timestamp.as_micros().unwrap() >= 1_000_000 {
 				resumed_frames += frame.data.len() / size_of::<f32>();
 			}
 		}
@@ -1694,7 +1728,7 @@ mod tests {
 			}
 			producer.write(frame).unwrap();
 			let read = packet(&mut reader).await.expect("a packet per full frame");
-			pts.push(read.timestamp.as_micros());
+			pts.push(read.timestamp.as_micros().unwrap());
 		}
 		pts
 	}
@@ -1854,9 +1888,8 @@ mod tests {
 			assert!(partial.read_frame().await.unwrap().is_none());
 			let mut resumed = track.recv_group().await.unwrap().expect("resumed group");
 			assert_eq!(
-				resumed.sequence,
-				partial.sequence + 2,
-				"one marker separates the anchors"
+				resumed.start, 1_000_000,
+				"the resumed group starts at its first packet, in the track's microseconds"
 			);
 			for _ in 0..5 {
 				assert!(resumed.read_frame().await.unwrap().is_some());
@@ -1909,7 +1942,14 @@ mod tests {
 			producer.write(&pcm_frame(&[0.1; 4 * 1024], anchor_us)).unwrap();
 			let mut pts = Vec::new();
 			for _ in 0..4 {
-				pts.push(packet(&mut reader).await.expect("a packet").timestamp.as_micros());
+				pts.push(
+					packet(&mut reader)
+						.await
+						.expect("a packet")
+						.timestamp
+						.as_micros()
+						.unwrap(),
+				);
 			}
 			pts
 		}
@@ -1918,6 +1958,63 @@ mod tests {
 		assert_eq!(pts(1_000_000).await, vec![956_000, 977_333, 998_666, 1_020_000]);
 		// Priming before a zero anchor stamps at zero; the input still starts on time.
 		assert_eq!(pts(0).await, vec![0, 0, 0, 20_000]);
+	}
+
+	/// Group starts strictly increase, so a reanchor never stamps below where the packets before
+	/// it end: an AAC resume closer than its encoder delay stamps the priming there, and a resume
+	/// that rewinds starts there.
+	#[tokio::test]
+	async fn a_reanchor_resumes_no_earlier_than_the_packets_before_it_end() {
+		async fn pts(resume_us: u64) -> Vec<u128> {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let consumer = broadcast.consume();
+
+			let input = Input::new(48_000, Layout::Mono);
+			let options = Options {
+				track: Some("audio".to_string()),
+				config: Config::from_input(crate::encode::Codec::Aac, &input),
+				..Options::default()
+			};
+			let stub = crate::encode::backend::stub::install();
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			drop(stub);
+
+			let track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
+				.await
+				.unwrap();
+			let mut reader = moq_mux::container::Consumer::new(
+				track,
+				moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+			);
+
+			// Stamped 956_000 to 1_020_000, the last packet ending at 1_041_333.
+			producer.write(&pcm_frame(&[0.1; 4 * 1024], 1_000_000)).unwrap();
+			producer.reanchor();
+			producer.write(&pcm_frame(&[0.1; 4 * 1024], resume_us)).unwrap();
+			let mut pts = Vec::new();
+			for _ in 0..8 {
+				pts.push(
+					packet(&mut reader)
+						.await
+						.expect("a packet")
+						.timestamp
+						.as_micros()
+						.unwrap(),
+				);
+			}
+			pts.split_off(4)
+		}
+
+		// Priming would start at 1_006_000.
+		assert_eq!(pts(1_050_000).await, vec![1_041_333, 1_041_333, 1_048_666, 1_070_000]);
+		assert_eq!(pts(1_000_000).await, vec![1_041_333, 1_041_333, 1_041_333, 1_061_333]);
 	}
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp
@@ -1957,7 +2054,7 @@ mod tests {
 		let mut published = Vec::new();
 		while let Some(frame) = packet(&mut reader).await {
 			let index = u64::from_be_bytes(frame.payload[..].try_into().unwrap());
-			published.push((index, frame.timestamp.as_micros()));
+			published.push((index, frame.timestamp.as_micros().unwrap()));
 		}
 		// Each frame is stamped 2112 frames of priming early, the drain's three silent ones too.
 		assert_eq!(
@@ -2015,7 +2112,7 @@ mod tests {
 		producer.write(&pcm_frame(&vec![0.1; 44_100], 1_000_000)).unwrap();
 
 		let first = packet(&mut reader).await.expect("a packet");
-		assert_eq!(first.timestamp.as_micros(), 1_000_000);
+		assert_eq!(first.timestamp.as_micros().unwrap(), 1_000_000);
 	}
 
 	#[tokio::test]

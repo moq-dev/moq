@@ -1,6 +1,6 @@
 ---
 title: Demos
-description: The web demo, MoQ Boy, and CARLA
+description: The web demo, MoQ Boy, CARLA, and VR
 ---
 
 # Demos
@@ -69,3 +69,29 @@ What it demonstrates:
 - **Measured feedback.** Each truck's `status` track carries what the gate accepted and what the vehicle did, so the player draws requested against measured steering.
 
 Code: [`demo/carla`](https://github.com/moq-dev/moq/tree/main/demo/carla).
+
+## VR
+
+A WebXR player for 360 and VR180 video with spatial audio, in a headset or a
+desktop tab. It lays a broadcast out by the catalog's
+[spatial fields](/concept/hang#catalog): an equirectangular `projection` wraps
+the picture on a sphere spanning its field of view, `stereo` crops each eye
+from a packed frame, and an `ambisonic` audio layout decodes the sound field
+around the viewer's head, at first order: a higher order plays only its first
+four channels. Without them it shows a flat screen with the sound
+coming from it.
+
+```bash
+just relay    # a local relay
+ffmpeg -re -i vr180.mp4 -c copy -strict unofficial \
+    -movflags cmaf+frag_keyframe+empty_moov+default_base_moof -f mp4 - |
+    moq --connect http://localhost:4443 --broadcast vr.hang import fmp4
+just vr serve # the player: Enter VR in a headset, or drag to look around
+```
+
+The importer reads the projection and stereo packing from an MP4's Spherical
+Video V2 boxes, which ffmpeg writes only past `-strict unofficial`, and the
+ambisonic layout from Opus channel mapping family 2. In the player, a trigger
+or `R` recentres the picture where you look, and a grip or `M` mutes.
+
+Code: [`demo/vr`](https://github.com/moq-dev/moq/tree/main/demo/vr).

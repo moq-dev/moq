@@ -9,6 +9,7 @@ use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TrackStream};
 use moq_net::{Error, StreamError, Version, group, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -97,9 +98,11 @@ async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, 
 
 /// Write `payload` as one message of a session: one group.
 fn send(track: &track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(None, payload).unwrap();
-	group.finish().unwrap();
+	let mut group = track.append_next().unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+		.unwrap();
+	group.close().unwrap();
 }
 
 /// Read the next message from a session, or `None` once the peer finished.
@@ -167,17 +170,19 @@ async fn an_aborted_half_fails_the_read() {
 
 /// Messages are read in sequence even when they are written, and so arrive, out of order.
 #[kio::test]
-async fn track_messages_are_read_in_sequence() {
+async fn track_messages_are_read_in_key() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let (dialed, accepted) = connect_track(&alice, &bob).await;
 	let mut reader = accepted.consumer.ordered();
 
-	let write = |sequence: u64, payload: &'static [u8]| {
-		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, payload).unwrap();
-		group.finish().unwrap();
+	let write = |key: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.unwrap();
+		group.close().unwrap();
 	};
 	write(1, b"second");
 	// Let the later message arrive first.
@@ -202,10 +207,12 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 	accepted.consumer.control().update(lossy).unwrap();
 	let mut reader = accepted.consumer.ordered();
 
-	let write = |sequence: u64, payload: &'static [u8]| {
-		let mut group = dialed.producer.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, payload).unwrap();
-		group.finish().unwrap();
+	let write = |key: u64, payload: &'static [u8]| {
+		let mut group = dialed.producer.create_group(group::Info { start: key }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
+			.unwrap();
+		group.close().unwrap();
 	};
 	// Message 0 is never written: message 1 waits out the budget, then is read.
 	write(1, b"one");
@@ -513,7 +520,7 @@ async fn closing_an_endpoint_ends_its_sessions() {
 		matches!(ended, Err(Error::Stream(StreamError::Session(_)))),
 		"bob's half outlived his endpoint: {ended:?}"
 	);
-	assert!(accepted.producer.append_group().is_err());
+	assert!(accepted.producer.append_group(0).is_err());
 	assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 	assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));
 }

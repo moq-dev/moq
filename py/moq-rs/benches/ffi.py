@@ -129,7 +129,7 @@ async def sockets(results: list[dict]) -> None:
 
             async def dial(server: moq.socket.Endpoint) -> None:
                 stream = await client.dial_track(server.id)
-                stream.producer.write_frame(b"echo")
+                stream.producer.write_frame(b"echo", moq.Timestamp.unscaled(0))  # Scale-less: the first group is key 0.
                 stream.producer.finish()
                 assert [item async for item in stream.consumer] == []
 

@@ -37,29 +37,32 @@ export class Track {
 	track: string;
 	/** The publisher instance the subscriber expects. Lite-07+. */
 	instance?: Instance.Valid;
-	/** The origin node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
+	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
 	node: bigint;
+	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
+	depth: number;
 
-	constructor(broadcast: Path.Valid, track: string, instance?: Instance.Valid, node = 0n) {
+	constructor(broadcast: Path.Valid, track: string, instance?: Instance.Valid, node = 0n, depth = 0) {
 		this.broadcast = broadcast;
 		this.track = track;
 		this.instance = instance;
 		this.node = node;
+		this.depth = depth;
 	}
 
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.broadcast));
 		await encodePin(w, version, this.instance);
-		await encodeNode(w, version, this.node);
+		await encodeNode(w, version, this.node, this.depth);
 		await w.string(this.track);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Track> {
 		const broadcast = Path.decode(await r.string());
 		const instance = await decodePin(r, version);
-		const node = await decodeNode(r, version);
+		const { node, depth } = await decodeNode(r, version, broadcast);
 		const track = await r.string();
-		return new Track(broadcast, track, instance, node);
+		return new Track(broadcast, track, instance, node, depth);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

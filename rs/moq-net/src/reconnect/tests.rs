@@ -792,6 +792,106 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 	assert_eq!(run.events, ["offline"]);
 }
 
+/// A one-shot policy ends cleanly on a GOAWAY naming no URI, as on any other, under
+/// every restart policy and whether or not the session was healthy.
+#[kio::test]
+async fn a_one_shot_policy_ends_on_a_restart() {
+	for restart in [Restart::Redial, Restart::Wait, Restart::Handoff] {
+		let peer = url("tcp://peer:1/");
+		let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+		config.restart = restart;
+		config.once = true;
+		let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+		let mut run = Run::default();
+		let end = drive(&mut machine, &[(peer, Peer::Goaway(String::new()))], &mut run, |_| {
+			false
+		})
+		.await;
+		assert!(matches!(end, Some(Ok(()))), "{restart:?}: {end:?}");
+		assert_eq!(run.dials.len(), 1, "{restart:?} redialed");
+	}
+}
+
+/// The actions a policy asks for until it only waits, by name.
+async fn settle(machine: &mut Reconnect<Url, TestError>) -> Vec<&'static str> {
+	let mut events = Vec::new();
+	while let Ok(action) = kio::clock::timeout(Duration::from_secs(60), next(machine)).await {
+		events.push(match action {
+			Action::Migrating => "migrating",
+			Action::Retired => "retired",
+			Action::Offline(_) => "offline",
+			other => panic!("expected the policy to wait, got {other:?}"),
+		});
+	}
+	events
+}
+
+/// Under [`Restart::Handoff`] a healthy session's empty-URI GOAWAY redials the same address once
+/// while the drained session serves, so a replacement already serving beside the draining
+/// process takes over and the drained session retires once it carries nothing.
+#[kio::test]
+async fn a_handoff_restart_moves_to_a_replacement() {
+	let peer = url("tcp://peer:1/");
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+	config.restart = Restart::Handoff;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	let goaway = kio::clock::now();
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 2
+	})
+	.await;
+	assert_eq!(run.accepts[1].1, goaway, "the redial waited");
+	assert_eq!(run.events, ["migrating"]);
+	assert_eq!(settle(&mut machine).await, ["retired"]);
+	assert!(machine.session().is_some(), "the replacement serves");
+	assert_eq!(run.dials.len(), 2);
+}
+
+/// Under [`Restart::Handoff`] a redial that reaches the draining process again, drained before
+/// it is healthy, changes nothing while the peer keeps it: no further redial. Its close then
+/// reconnects like any drop.
+#[kio::test]
+async fn a_handoff_restart_redials_once_until_the_session_closes() {
+	let peer = url("tcp://peer:1/");
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+	config.restart = Restart::Handoff;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Goaway(String::new()))],
+		&mut run,
+		|run| run.accepts.len() == 2,
+	)
+	.await;
+	assert_eq!(run.events, ["migrating"]);
+	assert_eq!(settle(&mut machine).await, ["retired"], "the policy left the session");
+	assert_eq!(run.dials.len(), 2, "redialed the draining process again");
+
+	run.servers.remove(1).abort(Error::GoawayTimeout);
+	run.events.clear();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 3
+	})
+	.await;
+	assert_eq!(run.events, ["offline"]);
+}
+
 /// A session closed for a protocol violation or a refused credential reconnects like any
 /// other close: the policy does not judge the error's kind.
 #[kio::test]
@@ -1004,9 +1104,9 @@ async fn busy_handshake() -> (Session, Session, Vec<Box<dyn std::any::Any>>) {
 		.await
 		.expect("the broadcast resolves")
 		.unwrap();
-	let mut group = track.append_group().unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-	group.finish().unwrap();
+	group.close().unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	sub.recv_group().await.unwrap().expect("the track ended");
 	(

@@ -342,7 +342,7 @@ mod tests {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Producer::new(track, Default::default());
-		json.update(moq_net::Timed::from(&catalog).at(moq_net::Timestamp::ZERO))
+		json.update(moq_json::Timed::new(&catalog, moq_net::Timestamp::ZERO))
 			.unwrap();
 		catalog.video.renditions.clear();
 		catalog.include.insert(

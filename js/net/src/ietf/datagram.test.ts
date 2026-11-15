@@ -310,10 +310,10 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 			reader.setPriority(5);
 			try {
 				while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-				datagrams.append(undefined, Uint8Array.of(1));
+				datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(1));
 				if (finish) datagrams.finish();
 				await reader.info();
-				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
+				if (!finish) datagrams.append(Timestamp.unscaled(1n), Uint8Array.of(2));
 				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
 				// The end waits out the grace a late datagram gets.
 				if (finish) expect(await clock.drive(reader.recv())).toBeUndefined();
@@ -352,7 +352,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 		try {
 			await reader.info();
 			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
-			for (let i = 0; i < 64; i++) datagrams.append(undefined, Uint8Array.of(i));
+			for (let i = 0; i < 64; i++) datagrams.append(Timestamp.unscaled(i), Uint8Array.of(i));
 			datagrams.finish();
 			for (let i = 0; i < 64; i++) expect((await reader.recv())?.payload).toEqual(Uint8Array.of(i));
 			// The end waits out the grace a late datagram gets.

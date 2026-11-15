@@ -1,7 +1,7 @@
 import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
-import { Origin, Path } from "@moq/net";
+import { Origin, Path, Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../../../js/watch/src/broadcast";
 import { Sync } from "../../../js/watch/src/sync";
@@ -22,7 +22,10 @@ export function captions() {
 		textCatalog.renditions[name] = { format: "utf8", role: "subtitle", container: { kind: "legacy" } };
 		const track = producer.createTrack(name);
 		const group = track.appendGroup();
-		group.writeFrame({ payload: Legacy.encodeFrame(new TextEncoder().encode(text), Duration.micros(1_000_000)) });
+		group.writeFrame({
+			payload: Legacy.encodeFrame(new TextEncoder().encode(text), Duration.micros(1_000_000)),
+			timestamp: Time.Timestamp.unscaled(group.sequence),
+		});
 		group.finish();
 	}
 	producerRoute.announce();

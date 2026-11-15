@@ -507,7 +507,7 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 	const producer = broadcast.createTrack("video", { maxAge: null });
 	for (let sequence = 0; sequence < 5; sequence++) {
 		const group = producer.appendGroup();
-		group.writeFrame({ payload: new Uint8Array([sequence]) });
+		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.unscaled(group.sequence) });
 		group.finish();
 	}
 	const newest = producer.appendGroup();
@@ -521,7 +521,7 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 		await reader.info();
 		expect((await sibling.recvGroup())?.sequence).toBe(5n);
 		expect(await reader.start()).toBe(5n);
-		newest.writeFrame({ payload: new Uint8Array([5]) });
+		newest.writeFrame({ payload: new Uint8Array([5]), timestamp: Timestamp.unscaled(newest.sequence) });
 		newest.finish();
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
 	} finally {

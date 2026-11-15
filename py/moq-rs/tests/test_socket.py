@@ -103,7 +103,7 @@ async def test_track_default_retains_ascending_messages_and_subscription():
     assert consumer.info().max_age is None
     for sequence, payload in ((1, b"later"), (0, b"first")):
         group = producer.create_group(sequence)
-        group.write_frame(payload)
+        group.write_frame(payload, moq.Timestamp.unscaled(sequence))
         group.finish()
     producer.finish()
     assert [(group.sequence, [frame.payload async for frame in group]) async for group in consumer] == [

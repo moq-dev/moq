@@ -109,7 +109,8 @@ impl FrameChannel {
 		let floor = match state.native {
 			None => arrived,
 			Some(native) => match native.mapped.checked_add(Timestamp::from_micros(1).unwrap()) {
-				Ok(next) => arrived.max(next),
+				Ok(next) if next > arrived => next,
+				Ok(_) => arrived,
 				Err(err) => {
 					drop(state);
 					return self.fail(err.into());
@@ -312,7 +313,10 @@ mod tests {
 		let chan = FrameChannel::new();
 		let captured = chan.epoch.saturating_add(std::time::Duration::from_millis(12));
 		chan.push_at(frame(1), captured);
-		assert_eq!(chan.recv().await.unwrap().unwrap().timestamp.as_micros(), 12_000);
+		assert_eq!(
+			chan.recv().await.unwrap().unwrap().timestamp.as_micros().unwrap(),
+			12_000
+		);
 	}
 
 	#[tokio::test]
@@ -323,8 +327,8 @@ mod tests {
 		let first = chan.recv().await.unwrap().unwrap().timestamp;
 		chan.push_native(frame(2), Timestamp::from_micros(9_033_367).unwrap());
 		let second = chan.recv().await.unwrap().unwrap().timestamp;
-		assert_eq!(second.as_micros() - first.as_micros(), 33_367);
-		assert!(first.as_micros() < 9_000_000);
+		assert_eq!(second.as_micros().unwrap() - first.as_micros().unwrap(), 33_367);
+		assert!(first.as_micros().unwrap() < 9_000_000);
 	}
 
 	/// A device clock that restarts at zero mid-stream must not rewind the stream's
@@ -338,15 +342,18 @@ mod tests {
 		chan.push_native_at(frame(1), us(0), at(0));
 		// Real time passes with the device clock, so the mapping stays at arrival.
 		chan.push_native_at(frame(2), us(20_000), at(20));
-		assert_eq!(chan.recv().await.unwrap().unwrap().timestamp.as_micros(), 20_000);
+		assert_eq!(
+			chan.recv().await.unwrap().unwrap().timestamp.as_micros().unwrap(),
+			20_000
+		);
 
 		chan.push_native_at(frame(3), us(0), at(25));
 		let restarted = chan.recv().await.unwrap().unwrap().timestamp;
-		assert_eq!(restarted.as_micros(), 25_000, "re-anchored to arrival");
+		assert_eq!(restarted.as_micros().unwrap(), 25_000, "re-anchored to arrival");
 
 		chan.push_native_at(frame(4), us(33_000), at(58));
 		let next = chan.recv().await.unwrap().unwrap().timestamp;
-		assert_eq!(next.as_micros() - restarted.as_micros(), 33_000);
+		assert_eq!(next.as_micros().unwrap() - restarted.as_micros().unwrap(), 33_000);
 	}
 
 	/// A backlog drained faster than real time maps ahead of arrival, so a device
@@ -361,7 +368,7 @@ mod tests {
 		chan.push_native_at(frame(1), us(0), at(0));
 		chan.push_native_at(frame(2), us(40_000), at(1));
 		let drained = chan.recv().await.unwrap().unwrap().timestamp;
-		assert_eq!(drained.as_micros(), 40_000);
+		assert_eq!(drained.as_micros().unwrap(), 40_000);
 
 		chan.push_native_at(frame(3), us(0), at(2));
 		let restarted = chan.recv().await.unwrap().unwrap().timestamp;
@@ -370,7 +377,7 @@ mod tests {
 		chan.push_native_at(frame(4), us(33_000), at(3));
 		let next = chan.recv().await.unwrap().unwrap().timestamp;
 		assert_eq!(
-			next.as_micros() - restarted.as_micros(),
+			next.as_micros().unwrap() - restarted.as_micros().unwrap(),
 			33_000,
 			"the device's spacing resumes"
 		);
@@ -406,6 +413,6 @@ mod tests {
 		chan.push_native_at(frame(2), constant, at(5));
 		let second = chan.recv().await.unwrap().unwrap().timestamp;
 		assert!(second > first, "a stalled device clock repeated {first:?}");
-		assert_eq!(second.as_micros(), 5_000);
+		assert_eq!(second.as_micros().unwrap(), 5_000);
 	}
 }

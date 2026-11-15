@@ -225,9 +225,11 @@ impl Publisher {
 			.broadcast()
 			.create_track("video", timed())
 			.expect("create track");
-		let mut group = track.append_group().expect("append group");
+		let mut group = track
+			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.expect("append group");
 		group
-			.write_frame(moq_net::Timestamp::ZERO, payload)
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 			.expect("write frame");
 		self.held.push(Box::new((broadcast, track, group)));
 	}

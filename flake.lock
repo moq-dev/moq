@@ -63,11 +63,11 @@
         "token-max": "token-max"
       },
       "locked": {
-        "lastModified": 1794706220,
-        "narHash": "sha256-vMSsuCgGhFsIzeZ73uuwLbSeKk8GZALf9pEOvYMFu0o=",
+        "lastModified": 1794719707,
+        "narHash": "sha256-LR5TZWRy2p9BAmdlyqPdn+wUG3Mlc/gGQBtA90tWmU0=",
         "owner": "moq-dev",
         "repo": "quest",
-        "rev": "d084a349995900c48a477eca7d4a383f05a742d1",
+        "rev": "62d6b5e2d31b6a435d0729793593771464158dcd",
         "type": "github"
       },
       "original": {

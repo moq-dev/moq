@@ -51,18 +51,21 @@ try {
 	// Exchange each independent message as a request and reply.
 	const reader = stream.consumer.ordered();
 	for (let i = 0; i < 3; i++) {
-		if (role === "dial") stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
+		// Each message is its own group, so its frame carries that group's key.
+		const timestamp = Moq.Time.Timestamp.unscaled(BigInt(i));
+		if (role === "dial") stream.producer.writeFrame({ payload: new Uint8Array([own + i]), timestamp });
 		const frame = await reader.readFrame();
 		assert.equal(frame?.group, BigInt(i));
 		assert.deepEqual(frame?.payload, new Uint8Array([peer + i]));
-		if (role === "accept") stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
+		if (role === "accept") stream.producer.writeFrame({ payload: new Uint8Array([own + i]), timestamp });
 	}
 	stream.producer.finish();
 	assert.equal(await reader.readFrame(), undefined);
 	const second = next ? await accepted() : await endpoint.dialTrack("acceptor");
 	const resetReader = second.consumer.ordered();
 	if (role === "dial") {
-		second.producer.writeFrame({ payload: new Uint8Array([48]) });
+		// The first message is at key 0.
+		second.producer.writeFrame({ payload: new Uint8Array([48]), timestamp: Moq.Time.Timestamp.unscaled(0n) });
 		await assert.rejects(resetReader.readFrame());
 	} else {
 		assert.deepEqual((await resetReader.readFrame())?.payload, new Uint8Array([48]));

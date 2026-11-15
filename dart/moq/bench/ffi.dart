@@ -64,7 +64,7 @@ Future<void> throughput(
         final frame = await group.readFrame();
         require(
           frame != null &&
-              frame.timestamp?.value == n * c.frames + f &&
+              frame.timestamp.value == n * c.frames + f &&
               frame.payload.length == payload.length &&
               memcmp(frame.payload.address, payload.address, payload.length) ==
                   0,

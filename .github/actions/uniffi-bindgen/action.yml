@@ -25,7 +25,7 @@ runs:
             ;;
           go)
             repo=https://github.com/kixelated/uniffi-bindgen-go
-            rev=5ecaf7506c2957c400551c00b7c04247003b8170 # v0.10.0-kixelated.2+v0.32.0
+            rev=5f9bb07efe9bb377733f80a4ba659e120d5d086a # v0.10.0-kixelated.3+v0.32.0
             ;;
           *)
             echo "::error::unknown uniffi generator: $GENERATOR"

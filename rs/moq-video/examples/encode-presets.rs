@@ -148,7 +148,7 @@ fn run(config: &Config, pictures: &[&[u8]], paced: bool) -> anyhow::Result<Run> 
 		|encoder: &mut Encoder, submitted: &[Instant], emitted: &mut [Option<Duration>]| -> anyhow::Result<()> {
 			let now = Instant::now();
 			while let Some(packet) = encoder.receive()? {
-				let index = (packet.timestamp.as_micros() / frame_time.as_micros()) as usize;
+				let index = (packet.timestamp.as_micros()? / frame_time.as_micros()) as usize;
 				emitted[index] = Some(now - submitted[index]);
 				stream.extend_from_slice(&packet.payload);
 			}

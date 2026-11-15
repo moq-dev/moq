@@ -164,7 +164,7 @@ async def publish(
             producer.close()
             health = client.route(f"{broadcast}.health", hidden=True)
             live = health.broadcast.publish_track("live")
-            live.write_frame(b"session-alive")
+            live.write_frame(b"session-alive", moq.Timestamp.unscaled(0))
             live.finish()
             health.announce()
 
@@ -243,7 +243,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
             async for group in live:
                 async with group:
                     async for frame in group:
-                        # Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+                        # Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
                         if seen or frame.payload != b"session-alive":
                             raise RuntimeError("unexpected session health payload")
                         seen = True

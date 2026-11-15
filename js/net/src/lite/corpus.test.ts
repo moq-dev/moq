@@ -6,13 +6,7 @@ import { expect, test } from "bun:test";
 import { select } from "../connection/accept.ts";
 import { Reader, UnexpectedEnd, Writer } from "../stream.ts";
 import { isDecodeError } from "../util/decode_error.ts";
-import {
-	AnnounceInit,
-	decodeAnnounceBroadcast,
-	decodeAnnounceReplyMaybe,
-	encodeAnnounceBroadcast,
-	encodeAnnounceReply,
-} from "./announce.ts";
+import { AnnounceInit, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { ClientSetup } from "./compat.ts";
 import { Group } from "./group.ts";
 import { Version, versionName } from "./version.ts";
@@ -20,7 +14,7 @@ import { Version, versionName } from "./version.ts";
 interface Case {
 	name: string;
 	version: string;
-	message: "announce" | "announce_reply" | "announce_init" | "group" | "client_setup";
+	message: "announce" | "announce_init" | "group" | "client_setup";
 	hex: string;
 	/** `announce_init`: the announce slots left, unbounded when absent. */
 	budget?: number;
@@ -43,12 +37,14 @@ async function decode(c: Case, r: Reader, v: Version): Promise<((w: Writer) => P
 		case "announce": {
 			const msg = await decodeAnnounceBroadcast(r, v);
 			if (msg.status === "refused") return "withdrawn";
+			// A DEAD withdraws each route a refused moved offer names.
+			if (
+				msg.status === "dead" &&
+				msg.dead.kind === "closed" &&
+				msg.dead.moved.some(({ offer }) => "refused" in offer)
+			)
+				return "withdrawn";
 			return (w) => encodeAnnounceBroadcast(w, msg, v);
-		}
-		case "announce_reply": {
-			const msg = await decodeAnnounceReplyMaybe(r, v);
-			if (!msg) throw new Error("no reply");
-			return (w) => encodeAnnounceReply(w, msg, v);
 		}
 		case "announce_init": {
 			const msg = await AnnounceInit.decode(r, v, c.budget ?? Number.POSITIVE_INFINITY);

@@ -29,7 +29,10 @@ pub mod snapshot;
 mod state;
 pub mod stream;
 mod strict;
+mod timed;
 pub mod window;
+
+pub use timed::Timed;
 
 /// Test support for the codec bench, enabled by the `bench` feature: the merge-patch diff.
 #[cfg(feature = "bench")]
@@ -40,6 +43,22 @@ pub mod bench {
 /// The most a frame, or a group's frames together, may hold: 32 MiB, which moq-net's group cache
 /// also holds, so a larger frame is refused before it is written.
 pub(crate) const MAX_GROUP_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Whether a group whose first frame is at `timestamp`, rescaled to `track`, would start past
+/// every group on `track`, which a new group must: two groups never share a start. A timed group
+/// starts at its first frame's time, and a scale-less one at the key its unscaled timestamp names.
+pub(crate) fn starts_past(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> bool {
+	track.largest().is_none_or(|largest| timestamp.value() > largest.group)
+}
+
+/// `timestamp` for a frame of `group`: a scale-less track's frames carry their group's key, so a
+/// frame appended to an open group carries that group's key, whatever key the caller named.
+pub(crate) fn frame_time(group: &moq_net::group::Producer, timestamp: moq_net::Timestamp) -> moq_net::Timestamp {
+	match timestamp.scale() {
+		Some(_) => timestamp,
+		None => moq_net::Timestamp::unscaled(group.start),
+	}
+}
 
 /// Errors produced while publishing or consuming JSON.
 #[derive(thiserror::Error, Debug, Clone)]

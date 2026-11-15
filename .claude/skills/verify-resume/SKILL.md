@@ -50,7 +50,7 @@ Sync commit: `103052ed074a87f00269ecb0d639905482ecfb6f`. Run `git log 103052ed07
 | `rs/moq-net/src/model/resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
 | `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, the front's end | `Serve`, `FrontFinish`, `FrontFail` |
-| `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `latest_sequence`, `track::Subscriber::has_unread_group` | `Seal`, `Held`, `MayLand`, `Latest`, `HasUnread` |
+| `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `max_key`, `track::Subscriber::has_unread_group` | `Seal`, `Held`, `MayLand`, `Latest`, `HasUnread` |
 
 ## Not covered
 

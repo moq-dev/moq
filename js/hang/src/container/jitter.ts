@@ -70,6 +70,8 @@ export class Jitter {
 	#start?: number;
 	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
 	#joined = 0;
+	/** Every interval closed so far measured the join, so a skipped backlog can still extend it. */
+	#open = true;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
 	/** The earliest a frame stalled in this interval was due. */
@@ -140,7 +142,10 @@ export class Jitter {
 		}
 
 		if (this.#joining()) this.#pending += 1;
-		else this.#close(bucket(this.#peak));
+		else {
+			this.#open = false;
+			this.#close(bucket(this.#peak));
+		}
 
 		if (resumed) {
 			// A silence the publisher declared says nothing about the path, so the estimate keeps
@@ -214,6 +219,16 @@ export class Jitter {
 		this.#fold(this.#stall);
 		for (let i = 0; i < Math.min(this.#span, IDLE_MAX); i++) this.#fold(undefined);
 		this.#stall = undefined;
+	}
+
+	/**
+	 * A frame the subscription delivered from before it began, which arrived at `arrival` in
+	 * milliseconds and was skipped unread, so the join lasts until then as if it had been observed.
+	 */
+	backlog(arrival: number): void {
+		// Before any observation the join has not started, and starts later than this.
+		// Once an interval measured the path the join is over, and a skip is an outage's.
+		if (this.#start !== undefined && this.#open) this.#joined = Math.max(this.#joined, arrival);
 	}
 
 	/**

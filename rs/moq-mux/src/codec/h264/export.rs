@@ -218,16 +218,16 @@ mod tests {
 			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.
-		let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		write_length_prefixed(&mut g0, 0, &[idr]);
-		g0.finish().unwrap();
+		g0.close().unwrap();
 
 		// Group 1 (next group): one P-slice. Consumer marks the first frame
 		// of every group as keyframe by protocol invariant, so the exporter
 		// MUST treat both group-starts as keyframes and inject SPS+PPS twice.
-		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[p_slice]);
-		g1.finish().unwrap();
+		g1.close().unwrap();
 		let _track = track.finish().unwrap();
 
 		// Consumer side: run the exporter.
@@ -332,10 +332,10 @@ mod tests {
 			let track = broadcast
 				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
-			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 			let nals: &[&[u8]] = &[&[0x67, 0x42, 0, 0x1f], &[0x68, 0xce], &[0x65, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
-			group.finish().unwrap();
+			group.close().unwrap();
 			let _track = track.finish().unwrap();
 			let consumer = broadcast.consume();
 			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));

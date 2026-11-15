@@ -41,7 +41,6 @@ mod resume;
 mod resume_model;
 mod subscription;
 mod time;
-mod timed;
 mod weak_cache;
 
 use request_queue::RequestQueue;
@@ -49,7 +48,6 @@ use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
 pub use time::*;
-pub use timed::Timed;
 
 /// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
@@ -64,12 +62,12 @@ pub mod origin {
 	pub(crate) use super::origin_impl::Lookup;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::Mounted;
-	#[cfg(feature = "async")]
-	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
 		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,
 	};
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::{Lane, NodeFilter};
 	pub use crate::route::RouteKey;
 
 	// Relay-level: every route change, for forwarding and stats. Apps read

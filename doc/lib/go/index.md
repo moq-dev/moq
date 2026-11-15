@@ -18,9 +18,9 @@ Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an
 and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps are exact
 `moq.Timestamp` records (`Value` at `Scale` units per second), so a 90 kHz tick survives a read and republish;
-`TimestampFromDuration` converts exactly; `TimestampToDuration` rounds down to a whole nanosecond.
-A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
-Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`TimestampFromScale` and `TimestampFromDuration` build one exactly; `TimestampToDuration` rounds down to a whole nanosecond.
+Every write takes a timestamp, and the library never substitutes zero or now.
+A raw track with a `nil` timescale is untimed: each frame carries `moq.Unscaled(key)`, its group's key, whose `Scale` is `nil`.
 `TrackInfo.Compression` set to `CompressionDeflate` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `Update`, `Append`, `Push`, and `Pop` take a final `moq.Timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
@@ -98,8 +98,8 @@ import (
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
 broadcast := route.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
-timestamp := moq.Timestamp{Value: 960, Scale: 48_000} // 20 ms on the Opus sample clock
-_ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
+timestamp := moq.TimestampFromScale(960, 48_000) // 20 ms on the Opus sample clock
+_ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
@@ -109,7 +109,7 @@ video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
     Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
     Track: &track,
 })
-_ = video.Write(moqvideo.Frame{Timestamp: moq.Timestamp{Value: pts, Scale: 90_000}, Data: rgba})
+_ = video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(pts, 90_000), Data: rgba})
 _ = route.Announce() // each route mints a fresh instance (route.Instance())
 _ = audio.Finish()
 _ = video.Finish()

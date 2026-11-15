@@ -51,14 +51,12 @@ import { Budget } from "../util/yield.ts";
 import type { Resolved } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import {
-	type Advert,
 	type AnnounceBroadcast,
 	AnnounceInit,
 	AnnounceOk,
-	type AnnounceReply,
 	type AnnounceRequest,
-	decodeAnnounceReplyMaybe,
 	encodeAnnounceBroadcast,
+	type Offer,
 } from "./announce.ts";
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
@@ -146,8 +144,8 @@ interface Stamp {
 	timescale: Timescale;
 	/**
 	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
-	 * equals. Lite-05/06 cannot encode an untimed track, so an untimed one carries its send time
-	 * instead.
+	 * equals. Lite-05/06 cannot encode a scale-less track, so a scale-less one carries its send
+	 * time instead.
 	 */
 	timed?: { timescale?: Timescale | null };
 }
@@ -160,10 +158,9 @@ function stamping(version: Version, info: { timescale?: Timescale | null }): Sta
 	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
 }
 
-/** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
-function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
-	const own = stamp.timed && rescale(stamp.timed, timestamp);
-	return own ? own.value : floorAt(Timestamp.now(), stamp.timescale);
+/** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out scale-less. */
+function wireTime(timestamp: Timestamp, stamp: Stamp): number {
+	return stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale);
 }
 
 /**
@@ -829,18 +826,9 @@ export class Publisher {
 
 		// The route while the peer holds it: from the first claim shown until the last one goes.
 		// `certified` is whether its last floor certified, so a grant change alone re-floors it.
-		let route: { id: bigint; node: bigint; seqno: bigint; certified?: boolean } | undefined;
+		let route: { id: bigint; node: bigint; certified?: boolean } | undefined;
 		let nextRoute = 0n;
 		let nextAnnounce = 0n;
-		// Route IDs ended and not yet echoed, and the origin node each reached. No route starts
-		// until every end is echoed, so a peer that rotates our identity and withholds its echoes
-		// holds at most one here.
-		const ending = new Map<bigint, bigint>();
-		// Whether our route went out on this stream, making it a path to this origin: its close
-		// then advances the seqno, so a node remembering this shorter path accepts a longer one
-		// without a ROUTE_REQUEST. A new stream lengthens no path. Mirrors `links` in
-		// rs/moq-net's `route/node.rs` for a node that does not forward.
-		let link = false;
 		// The claims the peer holds, by suffix.
 		const live = new Map<Path.Valid, { id: bigint; snap: Advertised }>();
 
@@ -870,10 +858,9 @@ export class Publisher {
 		// End the route on the wire: it retires every claim under it.
 		const end = async () => {
 			if (!route) return;
-			const { id, node } = route;
+			const { id } = route;
 			route = undefined;
 			live.clear();
-			ending.set(id, node);
 			await write({ status: "routeEnd", id });
 		};
 
@@ -890,8 +877,6 @@ export class Publisher {
 			// A rotated identity ends the old route with every claim under it.
 			if (route && route.node !== identity?.node) await end();
 			if (!identity) return;
-			// Shown once the peer echoes the last route's end.
-			if (ending.size > 0) return;
 
 			let changed = false;
 			for (const [suffix, { id }] of [...live]) {
@@ -901,19 +886,15 @@ export class Publisher {
 				console.debug(`announce: broadcast=${suffix} active=false`);
 				await write({ status: "endedId", id });
 			}
-			if (route && route.seqno !== identity.seqno) {
-				route.seqno = identity.seqno;
-				await write({ status: "routeUpdate", id: route.id, advert: advert(identity.seqno) });
-			}
 			for (const [suffix, snap] of latest) {
 				const prev = live.get(suffix);
 				if (prev && !restarted(prev.snap, snap) && routesEqual(onWire(prev.snap.route), onWire(snap.route)))
 					continue;
 				changed = true;
 				if (!route) {
-					route = { id: nextRoute++, node: identity.node, seqno: identity.seqno };
-					link = true;
-					await write({ status: "routeStart", node: identity.node, advert: advert(identity.seqno) });
+					route = { id: nextRoute++, node: identity.node };
+					// The origin's own route covers every path, so the requested prefix too.
+					await write({ status: "routeStart", node: identity.node, suffix: Path.empty(), offer: offer() });
 				}
 				const { instance, epoch, cost } = snap.route;
 				if (!prev) {
@@ -936,13 +917,15 @@ export class Publisher {
 			if (live.size === 0) await end();
 		};
 
-		// The origin's own route: it starts its Hops, alone, and forwards no other.
-		const advert = (seqno: bigint): Advert => ({
-			seqno,
+		// The origin's own route: a path of its own hop alone, learned on no session, at the top
+		// priority and no cost. It forwards no other. Mirrors the origin's offer in rs/moq-net.
+		const offer = (): Offer => ({
+			path: origin ? [{ node: origin.own.hop, session: 0n }] : [],
+			draining: false,
+			priority: 127,
 			metric: 0n,
 			downOnly: false,
 			rtt: 0n,
-			hops: origin ? [origin.own.hop] : [],
 		});
 		// What the peer decodes for a claim: lite-07 carries its instance, epoch, and cost.
 		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
@@ -958,25 +941,12 @@ export class Publisher {
 			notify?.();
 		};
 
-		// Replies arrive on their own task, each applied as it lands, so a peer that keeps sending
-		// while our writes stall queues nothing: an echo frees a route to start again, and a request
-		// raises the identity, whose change marks the stream dirty.
+		// The subscriber sends nothing after its ANNOUNCE_REQUEST: a clean FIN ends the stream, and
+		// anything else is a violation. Mirrors rs/moq-net.
 		let departed: Error | null | undefined;
-		const reply = (msg: AnnounceReply) => {
-			if (msg.kind === "request") {
-				origin?.own.request(msg.node, msg.seqno);
-				return;
-			}
-			if (!ending.delete(msg.id)) throw new ProtocolViolation(`echo of route ${msg.id}, which is not ending`);
-			poke();
-		};
 		void (async () => {
 			try {
-				for (;;) {
-					const msg = await decodeAnnounceReplyMaybe(stream.reader, this.version);
-					if (!msg) break;
-					reply(msg);
-				}
+				if (!(await stream.reader.done())) throw new ProtocolViolation("a message after ANNOUNCE_REQUEST");
 				departed = null;
 			} catch (err) {
 				departed = error(err);
@@ -1028,7 +998,6 @@ export class Publisher {
 			}
 		} finally {
 			for (const stop of stops) stop?.();
-			if (link) origin?.own.bump();
 		}
 	}
 
@@ -2448,7 +2417,7 @@ export class Publisher {
 				const timestamp =
 					stamp === undefined
 						? undefined
-						: datagram.timestamp === undefined
+						: datagram.timestamp.scale === undefined
 							? floorAt(Timestamp.now(), stamp.timescale)
 							: floorAt(datagram.timestamp, stamp.timescale);
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(

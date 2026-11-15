@@ -11,8 +11,14 @@ pub(super) struct Cue<'a> {
 	pub settings: &'a str,
 }
 
-pub(super) fn stamp(value: Timestamp) -> String {
-	format_millis(value.as_micros() / 1000)
+/// A cue time's microseconds, refused when [unscaled](Timestamp::unscaled): a scale-less track's
+/// key is no time.
+fn micros(value: Timestamp) -> Result<u128, &'static str> {
+	value.as_micros().map_err(|_| "cue timestamp has no timescale")
+}
+
+fn stamp(value: Timestamp) -> Result<String, &'static str> {
+	Ok(format_millis(micros(value)? / 1000))
 }
 
 fn format_millis(millis: u128) -> String {
@@ -75,8 +81,8 @@ pub(super) fn append(output: &mut String, cue: Cue<'_>) -> Result<(), &'static s
 		output.push('\n');
 	}
 	// WebVTT has millisecond precision: round the end up so a sub-millisecond cue stays positive.
-	let start = cue.start.as_micros() / 1000;
-	let end = cue.end.as_micros().div_ceil(1000).max(start + 1);
+	let start = micros(cue.start)? / 1000;
+	let end = micros(cue.end)?.div_ceil(1000).max(start + 1);
 	output.push_str(&format_millis(start));
 	output.push_str(" --> ");
 	output.push_str(&format_millis(end));
@@ -101,7 +107,8 @@ pub(super) fn has_timestamp(body: &str) -> bool {
 pub(super) fn rebase(body: &str, cue: Range<Timestamp>, origin: Timestamp) -> Result<String, &'static str> {
 	let start = cue.start;
 	let end = cue.end;
-	let origin = origin.convert(start.scale()).map_err(|_| "inline timestamp overflow")?;
+	let scale = start.scale().ok_or("cue timestamp has no timescale")?;
+	let origin = origin.convert(scale).map_err(|_| "inline timestamp overflow")?;
 	let mut output = String::new();
 	let mut remaining = body;
 	let mut previous = start;
@@ -112,9 +119,7 @@ pub(super) fn rebase(body: &str, cue: Range<Timestamp>, origin: Timestamp) -> Re
 			let close = remaining.find('>').ok_or("unterminated inline timestamp")?;
 			let value = &remaining[..close];
 			let relative = timestamp(value)?;
-			let relative = relative
-				.convert(start.scale())
-				.map_err(|_| "inline timestamp overflow")?;
+			let relative = relative.convert(scale).map_err(|_| "inline timestamp overflow")?;
 			let relative = relative
 				.checked_sub(origin)
 				.map_err(|_| "inline timestamp before cue origin")?;
@@ -123,7 +128,7 @@ pub(super) fn rebase(body: &str, cue: Range<Timestamp>, origin: Timestamp) -> Re
 				return Err("inline timestamp outside cue");
 			}
 			previous = absolute;
-			output.push_str(&stamp(absolute));
+			output.push_str(&stamp(absolute)?);
 			remaining = &remaining[close..];
 		}
 	}

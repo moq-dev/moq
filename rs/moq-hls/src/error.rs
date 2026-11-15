@@ -116,8 +116,8 @@ pub enum Error {
 		limit: usize,
 	},
 
-	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
-	#[error("HLS {kind} sequence {value} is too large to encode")]
+	/// An HLS media or discontinuity sequence ran past `u64`.
+	#[error("HLS {kind} sequence {value} is too large")]
 	SequenceOverflow {
 		/// Which sequence overflowed.
 		kind: SequenceKind,

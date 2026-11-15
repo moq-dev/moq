@@ -98,10 +98,12 @@ async fn main() -> anyhow::Result<()> {
 			format!("{}.health", args.broadcast),
 			moq_net::origin::RouteOptions::hidden(),
 		)?;
-		let mut track = health
+		let track = health
 			.broadcast()
 			.create_track("live", moq_net::track::Info::default())?;
-		track.write_frame(None, b"session-alive".to_vec())?;
+		let mut group = track.append_group(0)?;
+		group.write_frame(moq_net::Timestamp::unscaled(group.start), b"session-alive".to_vec())?;
+		group.close()?;
 		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
@@ -139,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
 						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
-						.with_range(0..),
+						.with_ranges([moq_net::track::Range {
+							start: moq_net::track::Anchor::Time(0),
+							end: None,
+						}]),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;
@@ -177,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
 			let mut track = health.track("live")?.subscribe(None).await?;
 			let mut group = track.recv_group().await?.context("no health group")?;
 			let frame = group.read_frame().await?.context("no health frame")?;
-			// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+			// Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
 			ensure!(frame.payload.as_ref() == b"session-alive", "health payload");
 			ensure!(
 				group.read_frame().await?.is_none() && track.recv_group().await?.is_none(),

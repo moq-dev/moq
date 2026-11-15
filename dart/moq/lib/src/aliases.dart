@@ -3,10 +3,11 @@ import 'package:moq_ffi/moq_ffi.dart';
 // Re-export the UniFFI types without their `Moq` prefix, so consumers spell
 // them the way the Rust API does. These are type aliases, not wrappers: the
 // values are the exact same objects, so every generated method applies
-// unchanged and the prefixed names stay valid. `Delay` and `Subscription` are
-// extension types instead, which are the same objects too but give an omitted
-// delay bound the zero moq-net defaults to, where the generated record leaves
-// it null.
+// unchanged and the prefixed names stay valid. `Delay`, `Subscription`, and
+// `Timestamp` are extension types instead, which are the same objects too but
+// add constructors: an omitted delay bound is the zero moq-net defaults to,
+// where the generated record leaves it null, and a timestamp is built either
+// scaled or [Timestamp.unscaled], as in Rust.
 //
 // Four types are deliberately not aliased, because the unprefixed name is
 // already taken where this package is used:
@@ -144,14 +145,25 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// A datagram payload with its own sequence and optional timestamp.
+/// A datagram payload with its own sequence and timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
 
 /// An exact media time: `value` units at `scale` units per second.
-typedef Timestamp = MoqTimestamp;
+///
+/// A scale-less track has no time, so there `scale` is null and `value` is the
+/// frame's group key (a datagram's sequence), as [Timestamp.unscaled] builds.
+/// Reads return the generated [MoqTimestamp], which this type implements.
+extension type Timestamp._(MoqTimestamp _timestamp) implements MoqTimestamp {
+  /// `value` units at `scale` units per second.
+  Timestamp({required int value, required int scale})
+    : this._(MoqTimestamp(value: value, scale: scale));
+
+  /// The scale-less timestamp at group key `key`, or a datagram's sequence.
+  Timestamp.unscaled(int key) : this._(MoqTimestamp(value: key, scale: null));
+}
 
 /// How far behind the live edge a subscriber or decoder plays: where it starts, and how late it may fall.
 extension type Delay._(MoqDelay _delay) implements MoqDelay {

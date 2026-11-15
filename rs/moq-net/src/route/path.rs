@@ -31,15 +31,25 @@
 //! shows each claim from the narrowest view above it, available while a live
 //! route covers it.
 //!
-//! `rs/moq-net/verify/route/RouteHandoff.tla` model-checks the rule. Nothing drives
-//! this router on the wire yet: sessions run [`super::Router`] until the switch
-//! (`quest/m2/cluster-routes/switch.md`).
-
-#![cfg_attr(not(test), allow(dead_code, reason = "only the fixtures drive it until the switch"))]
+//! What a node asks a neighbour for is a set of prefixes, none inside another,
+//! edited in place: its own interest met with the neighbour's scope. The
+//! neighbour answers each edit with a marker on its stream, where the edit takes
+//! effect for both sides, then sends what the added prefixes newly cover and
+//! SYNCED for each. At the marker both sides rekey the stream's routes alike
+//! ([`rekey`]): a route inside a prefix both sets cover stays, a route at a
+//! removed prefix that an added one widens moves to the wider prefix with its
+//! claims, and a wider route carries its claims and floor to each added prefix
+//! inside it. So a swap re-sends nothing both sets cover.
+//!
+//! `rs/moq-net/verify/route/RouteHandoff.tla` model-checks the rule. Every lite-07
+//! session drives it through [`super::node::Node`]. Lite-07 opens one announce
+//! stream per prefix, so the node files each stream under a key of its own whose
+//! one edit is the prefix it opened with, in effect from the start; edits on one
+//! stream wait for the route stream (`quest/m2/cluster-routes/route-stream.md`).
 
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet},
+	collections::{BTreeMap, BTreeSet, VecDeque},
 	sync::Arc,
 	time::Duration,
 };
@@ -49,7 +59,7 @@ use kio::clock::Instant;
 use crate::Path;
 
 use super::reader::Reader;
-use super::view::{ancestors, below, covering, within_set};
+use super::view::{ancestors, below, covering, within_any, within_set};
 use super::{Error, Event, GENERATED, Id, Key, Link, MAX, MAX_HOPS, Metric, QUALIFIED, Rev, Shown, View, within};
 
 /// One node on a route's path, and the session it learned the route on. A
@@ -84,7 +94,7 @@ pub(crate) struct Offer {
 
 impl Offer {
 	/// A received path must leave room for this node's hop.
-	fn extendable(&self) -> bool {
+	pub(crate) fn extendable(&self) -> bool {
 		!self.path.is_empty() && self.path.len() < MAX_HOPS
 	}
 
@@ -157,10 +167,29 @@ pub(crate) enum Out<N, A> {
 		to: N,
 		dead: Dead,
 	},
-	/// The stream answering the neighbour's interest sent its initial set.
-	Synced {
+	/// ANNOUNCE_REQUEST: an edit of the prefixes this node asks the neighbour for.
+	Ask {
+		to: N,
+		edit: Edit,
+	},
+	/// The marker where the neighbour's oldest unanswered edit takes effect on this
+	/// node's stream to it, for both sides.
+	Edited {
 		to: N,
 	},
+	/// The stream sent the initial set of `prefix`, which the neighbour added.
+	Synced {
+		to: N,
+		prefix: Path,
+	},
+}
+
+/// An edit of the prefixes a node asks a neighbour for: the live ones it removes,
+/// then the ones it adds. A prefix both removed and added stays as it was.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Edit {
+	pub remove: Vec<Path>,
+	pub add: Vec<Path>,
 }
 
 /// When a doubt about a node lifts.
@@ -197,6 +226,12 @@ impl Default for Doubt {
 	}
 }
 
+/// The longest a node holds a route with no live path: a neighbour that has not answered
+/// by then counts as answering with nothing. A hold protects presence, not loop freedom,
+/// so ending it early is safe, and a neighbour that never answers holds nothing for good
+/// (epic Plan item 30).
+pub(crate) const HOLD: Duration = Duration::from_secs(10);
+
 /// Where a request for a claim goes from a node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Forward<N> {
@@ -221,10 +256,10 @@ enum State {
 struct Heard<A> {
 	offer: Offer,
 	state: State,
-	/// The interest generation of the stream it came on.
-	interest: u32,
 	/// Its claims as presented at its prefix, with one floor or none yet.
 	view: View<A>,
+	/// Whether its sender closed a batch of claims yet, so `view` is what it carries.
+	batched: bool,
 }
 
 /// A dead hop keeps its own deadline; another failure of the far node cannot extend it.
@@ -286,8 +321,9 @@ enum SentState<A> {
 #[derive(Clone, Debug)]
 struct SentOffer<A> {
 	offer: Offer,
-	/// The prefix of the view its claims were presented from.
-	from: Path,
+	/// The prefix of the view its claims were presented from, or `None` once an edit
+	/// rekeyed it: the next batch is diffed against all it holds.
+	from: Option<Path>,
 	view: View<A>,
 }
 
@@ -328,7 +364,7 @@ impl<A> Sent<A> {
 			}
 			SentState::Ended => SentOffer {
 				offer,
-				from: Path::empty(),
+				from: None,
 				view: View::default(),
 			},
 		};
@@ -394,7 +430,7 @@ impl<N: Copy> Route<N> {
 }
 
 #[derive(Clone, Debug)]
-struct Session {
+struct Session<N> {
 	/// How this node names the session in the hops of the routes it learns there.
 	number: u64,
 	/// How the neighbour names itself in a path.
@@ -402,17 +438,41 @@ struct Session {
 	link: Link,
 	rtt: Option<Duration>,
 	draining: bool,
-	/// The newest receive stream whose initial set has arrived (or was cancelled).
-	/// Older streams cannot recreate a route after that boundary.
-	synced: u32,
+	/// What this node asks the neighbour for as of the last marker, each prefix with
+	/// whether its initial set arrived (SYNCED).
+	asked: BTreeMap<Path, bool>,
+	/// The set each edit sent and not yet marked leaves, oldest first.
+	edits: VecDeque<BTreeSet<Path>>,
+	/// The key whose heard routes answer what this one was sent: another key of the same
+	/// session when the session answers each of its peer's streams under a key of its own.
+	listen: Option<N>,
 	/// The routes it offered, so closing it costs what it held.
 	heard: BTreeSet<RouteId>,
+}
+
+impl<N> Session<N> {
+	/// The prefixes this node asks the neighbour for once every edit in flight lands.
+	fn requested(&self) -> BTreeSet<Path> {
+		match self.edits.back() {
+			Some(set) => set.clone(),
+			None => self.asked.keys().cloned().collect(),
+		}
+	}
+
+	/// Whether this node asked the neighbour for `region` at the last marker and in
+	/// every edit still in flight: what the neighbour says there answers what this
+	/// node asks now, and no edit in flight may yet drop it.
+	fn asking(&self, region: &Path) -> bool {
+		ancestors(region).any(|prefix| self.asked.contains_key(&prefix))
+			&& self.edits.iter().all(|set| within_any(region, set))
+	}
 }
 
 /// Presence in `Router::answering` is the answering phase; absence is idle.
 #[derive(Clone, Debug)]
 struct Answer<A> {
-	watch: Path,
+	/// The prefixes the neighbour asks this node for, none inside another.
+	prefixes: BTreeSet<Path>,
 	tx: BTreeMap<RouteId, Sent<A>>,
 	/// The dead hops it was told of, while a route sent to it names one.
 	told: BTreeSet<Hop>,
@@ -489,7 +549,7 @@ pub(crate) struct Router<N, A> {
 	hop: Id,
 	doubt: Doubt,
 	opened: u64,
-	sessions: BTreeMap<N, Session>,
+	sessions: BTreeMap<N, Session<N>>,
 	/// The sessions currently answering an interest.
 	answering: BTreeMap<N, Answer<A>>,
 	origins: BTreeMap<Id, Origin<A>>,
@@ -517,8 +577,12 @@ pub(crate) struct Router<N, A> {
 	doubted: BTreeMap<Id, Suspicion>,
 	/// Nodes that sent GOAWAY, kept while a heard route names one or it is in doubt.
 	draining: BTreeSet<Id>,
-	watch: Path,
-	interest: u32,
+	/// When each held route lets go whatever is left unanswered.
+	held_until: BTreeMap<RouteId, Instant>,
+	/// The latest time any input carried.
+	now: Instant,
+	/// This node's interest: the prefixes its reader sees, none inside another.
+	watch: BTreeSet<Path>,
 	reader: Reader<A>,
 	/// Claim paths indexed by publisher, only for this rule's scoped reader updates.
 	shown_claims: BTreeMap<Id, BTreeSet<Path>>,
@@ -545,7 +609,7 @@ fn names(path: &[Hop], node: Id) -> bool {
 }
 
 /// Whether the node that offered `path` learned it from `node`.
-fn child(path: &[Hop], node: Id) -> bool {
+pub(crate) fn child(path: &[Hop], node: Id) -> bool {
 	path.len() >= 2 && path[path.len() - 2].node == node
 }
 
@@ -555,6 +619,186 @@ pub(super) fn meet(a: &Path, b: &Path) -> Option<Path> {
 		(true, _) => Some(a.clone()),
 		(_, true) => Some(b.clone()),
 		_ => None,
+	}
+}
+
+/// Whether a prefix of `set` lies inside another.
+#[cfg(test)]
+fn nested(set: &BTreeSet<Path>) -> bool {
+	set.iter()
+		.any(|prefix| ancestors(prefix).any(|above| above != *prefix && set.contains(&above)))
+}
+
+/// What a stream carries for a route, as [`rekey`] moves it.
+trait Carried<A>: Clone {
+	/// The offer it carries, unless it was ended.
+	fn offered(&self) -> Option<&Offer>;
+	/// Whether it is held: both sides agree, as both change it on the same messages.
+	fn held(&self) -> bool;
+	/// Its claims, unless it was ended.
+	fn view(&mut self) -> Option<&mut View<A>>;
+	/// It moved to a wider key with no floor: what its sender carries there is
+	/// unknown until the sender closes a batch at that key.
+	fn widened(&mut self) {}
+}
+
+impl<A: Clone> Carried<A> for Heard<A> {
+	fn offered(&self) -> Option<&Offer> {
+		Some(&self.offer)
+	}
+
+	fn held(&self) -> bool {
+		self.state == State::Held
+	}
+
+	fn view(&mut self) -> Option<&mut View<A>> {
+		Some(&mut self.view)
+	}
+
+	fn widened(&mut self) {
+		self.batched = false;
+	}
+}
+
+impl<A: Clone> Carried<A> for Sent<A> {
+	fn offered(&self) -> Option<&Offer> {
+		self.offer()
+	}
+
+	fn held(&self) -> bool {
+		Sent::held(self)
+	}
+
+	fn view(&mut self) -> Option<&mut View<A>> {
+		match &mut self.state {
+			SentState::Live(sent) | SentState::Held(sent) => {
+				// The receiver keeps what was rekeyed, so the next batch is diffed against it.
+				sent.from = None;
+				Some(&mut sent.view)
+			}
+			SentState::Ended => None,
+		}
+	}
+}
+
+/// What [`rekey`] leaves of a stream's routes.
+struct Rekeyed<T> {
+	routes: BTreeMap<RouteId, T>,
+	/// The keys whose route it no longer carries there.
+	gone: Vec<RouteId>,
+	/// Each route that moved to another key, as from, to: every route absorbed into
+	/// the key, the one whose offer it keeps first.
+	moved: Vec<(RouteId, RouteId)>,
+}
+
+/// Whether the sender would reflect `a` rather than `b` to `receiver` under one
+/// key, as [`Router::src`] picks: a live one first, then one not naming the
+/// receiver, then the better rank. Equals keep `b`. Both sides see the same
+/// offers and holds, so both agree.
+fn preferred<A, T: Carried<A>>(a: &T, b: &T, receiver: Id) -> bool {
+	let key = |route: &T| {
+		let offer = route.offered().expect("an offered route");
+		(route.held(), names(&offer.path, receiver), offer.rank())
+	};
+	key(a) < key(b)
+}
+
+/// The routes one stream carries once an edit of its prefixes from `old` to `new`
+/// takes effect at its marker. Both sides apply it alike to what was sent and what
+/// was heard, so they stay in step and nothing both sets cover is sent again.
+/// `receiver` names the stream's receiving node.
+///
+/// A route inside a prefix the new set covers stays. A route at a removed prefix
+/// that an added prefix widens moves to the wider prefix, with the claim presented
+/// at the removed prefix and every floor gone, since that claim may stand for a
+/// broader one and the floors certified only the narrower prefix. A route at a
+/// removed prefix is carried, as presented there, to each added prefix inside it,
+/// so its floor carries too. The rest go.
+///
+/// Where several routes reach one key, the key keeps the offer and state of the one
+/// the sender would reflect there ([`preferred`]), the narrowest or first by key
+/// among equals, and the claims of every route that widened into it. Keeping
+/// another could leave the receiver no usable route until the sender's next offer
+/// for the key, and its claims offline in between.
+fn rekey<A: Clone + Eq, T: Carried<A>>(
+	old: &BTreeSet<Path>,
+	new: &BTreeSet<Path>,
+	routes: BTreeMap<RouteId, T>,
+	receiver: Id,
+) -> Rekeyed<T> {
+	let mut kept: BTreeMap<RouteId, T> = BTreeMap::new();
+	let mut gone = Vec::new();
+	// The routes moving to each key, as from where and what they carry there.
+	let mut arriving: BTreeMap<RouteId, Vec<(RouteId, T)>> = BTreeMap::new();
+	for (key, route) in &routes {
+		let (id, prefix) = key;
+		let Some(region) = ancestors(prefix).find(|above| old.contains(above)) else {
+			gone.push(key.clone());
+			continue;
+		};
+		if within_any(prefix, new) && (new.contains(&region) || *prefix != region) {
+			kept.insert(key.clone(), route.clone());
+			continue;
+		}
+		gone.push(key.clone());
+		let mut route = route.clone();
+		if let Some(wider) = ancestors(&region).find(|above| new.contains(above)) {
+			let Some(view) = route.view() else {
+				continue;
+			};
+			view.items.remove(prefix);
+			view.floors.clear();
+			route.widened();
+			arriving.entry((*id, wider)).or_default().push((key.clone(), route));
+			continue;
+		}
+		if *prefix != region {
+			continue;
+		}
+		let Some(view) = route.view().map(|view| view.clone()) else {
+			continue;
+		};
+		for inside in within_set(new, &region) {
+			let mut copy = route.clone();
+			*copy.view().expect("a carried route") = view.present(inside);
+			arriving
+				.entry((*id, inside.clone()))
+				.or_default()
+				.push((key.clone(), copy));
+		}
+	}
+	let mut moved = Vec::new();
+	for (key, mut routes) in arriving {
+		let mut best = 0;
+		for (i, (_, route)) in routes.iter().enumerate().skip(1) {
+			if preferred(route, &routes[best].1, receiver) {
+				best = i;
+			}
+		}
+		let (from, mut route) = routes.remove(best);
+		let mut absorbed = Vec::new();
+		// The claims of the rest stay, though no floor certifies them.
+		for (other_from, mut other) in routes {
+			let items = std::mem::take(&mut other.view().expect("a carried route").items);
+			route.view().expect("a carried route").items.extend(items);
+			absorbed.push(other_from);
+		}
+		// A route the key already carries stays, unless the sender would reflect this one.
+		let staying = kept.get(&key).filter(|staying| staying.offered().is_some());
+		if staying.is_some_and(|staying| !preferred(&route, staying, receiver)) {
+			continue;
+		}
+		if kept.contains_key(&key) {
+			gone.push(key.clone());
+		}
+		moved.push((from, key.clone()));
+		moved.extend(absorbed.into_iter().map(|other| (other, key.clone())));
+		kept.insert(key, route);
+	}
+	Rekeyed {
+		routes: kept,
+		gone,
+		moved,
 	}
 }
 
@@ -589,8 +833,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			dead: BTreeMap::new(),
 			doubted: BTreeMap::new(),
 			draining: BTreeSet::new(),
-			watch: Path::empty(),
-			interest: 0,
+			held_until: BTreeMap::new(),
+			now: Instant::ZERO,
+			watch: BTreeSet::from([Path::empty()]),
 			reader: Reader::default(),
 			shown_claims: BTreeMap::new(),
 			rng: seed | 1,
@@ -618,9 +863,20 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.reader.changed()
 	}
 
+	/// The time is `now`: a hold started on the next input lets go at its deadline from here.
+	pub fn clock(&mut self, now: Instant) {
+		self.now = self.now.max(now);
+	}
+
+	/// The latest instant this router was handed.
+	pub fn now(&self) -> Instant {
+		self.now
+	}
+
 	// --- Sessions ---
 
-	/// A session to `neighbor`, which names itself `hop` in a path, opened.
+	/// A session to `neighbor`, which names itself `hop` in a path, opened. A `hop` of 0
+	/// is learned from the last hop of the first route the neighbour sends.
 	pub fn connect(&mut self, neighbor: N, hop: Id, link: Link) -> Result<(), Error> {
 		if link.cost == 0 {
 			return Err(Error::ZeroCost);
@@ -632,17 +888,83 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			link,
 			rtt: None,
 			draining: false,
-			synced: 0,
+			asked: BTreeMap::new(),
+			edits: VecDeque::new(),
+			listen: None,
 			heard: BTreeSet::new(),
 		};
 		self.sessions.insert(neighbor, session);
-		// Nothing is sent until the neighbour asks.
+		// It asks at once; nothing is answered until the neighbour asks.
+		self.ask(neighbor);
 		Ok(())
+	}
+
+	/// `answer` answers one of the streams the session `session` opened: the routes the
+	/// peer sends back on `session` are what answers a hold on what `answer` was sent.
+	/// A session whose peer opens several streams answers each under a key of its own.
+	pub fn pair(&mut self, answer: N, session: N) {
+		if let Some(entry) = self.sessions.get_mut(&answer) {
+			entry.listen = (answer != session).then_some(session);
+		}
+	}
+
+	/// How `neighbor` names itself in a path: as it declared, else as the stream its
+	/// session's routes arrive on learned, or 0 while this node has learned neither.
+	pub fn hop_of(&self, neighbor: N) -> Id {
+		match self.sessions.get(&neighbor).map_or(0, |session| session.hop) {
+			0 => self
+				.sessions
+				.get(&self.listen(neighbor))
+				.map_or(0, |session| session.hop),
+			hop => hop,
+		}
+	}
+
+	/// The key whose heard routes answer what `neighbor` was sent.
+	fn listen(&self, neighbor: N) -> N {
+		self.sessions
+			.get(&neighbor)
+			.and_then(|session| session.listen)
+			.unwrap_or(neighbor)
+	}
+
+	/// Drop `neighbor`, a stream that ended while its session stays up: what it heard
+	/// goes as ROUTE_ENDs would take it, and what it was sent as a cancelled interest.
+	/// No hop is reported dead and no node doubted, since no session closed.
+	pub fn retire(&mut self, neighbor: N) {
+		let rx = self.listen(neighbor);
+		let Some(session) = self.sessions.remove(&neighbor) else {
+			return;
+		};
+		let mut ids = BTreeSet::new();
+		for route in &session.heard {
+			ids.insert(route.0);
+			self.forget_heard(route, neighbor);
+			self.filed.remove(&(route.0, neighbor));
+			self.unwait(neighbor, route);
+		}
+		if let Some(answer) = self.answering.remove(&neighbor) {
+			for (key, sent) in answer.tx {
+				ids.insert(key.0);
+				if let Some(offer) = sent.offer() {
+					self.unindex_sent(neighbor, &key, &offer.path);
+				}
+				if self.child_pending(key.0, rx, &key.1) {
+					self.waiting
+						.entry((key.0, sent.src.clone()))
+						.or_default()
+						.insert((rx, key.1.clone()));
+				}
+				self.unreflect(neighbor, &key, &sent.src);
+			}
+		}
+		self.update(ids, Vec::new(), None);
 	}
 
 	/// The sessions to `neighbors` closed at `now`: everything learned or sent on them
 	/// goes, and each names its hop to the others.
 	pub fn disconnect(&mut self, neighbors: impl IntoIterator<Item = N>, now: Instant) {
+		self.clock(now);
 		let mut ids = BTreeSet::new();
 		let mut hops = Vec::new();
 		for neighbor in neighbors {
@@ -668,50 +990,118 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				session: session.number,
 			};
 			ids.extend(self.fail(hop, session.hop, None, Vec::new(), false, now));
-			hops.push(Report::Closed(hop));
+			// A scoped peer names itself as it likes, so its close neither doubts that node
+			// nor names it to the neighbours: the routes it sent end one by one instead.
+			if session.link.scope.is_none() {
+				ids.extend(self.suspect(session.hop, now));
+				hops.push(Report::Closed(hop));
+			}
 		}
 		self.update(ids, hops, None);
 	}
 
-	/// `neighbor` asked this node for announcements under `prefix`, or for none: its
-	/// stream starts over, a complete snapshot closed by SYNCED. Each neighbour has
-	/// one interest prefix; another call replaces it rather than adding a region.
-	pub fn peer_interest(&mut self, neighbor: N, prefix: Option<Path>) -> Result<(), Error> {
+	/// `neighbor` edited the prefixes it asks this node for. The edit takes effect at
+	/// once, behind the marker this node sends first: what both sets cover stays, and
+	/// the stream then sends what the added prefixes newly cover, closed by SYNCED for
+	/// each. An edit removing a prefix that is not live, or leaving one live prefix
+	/// inside another, is refused whole.
+	pub fn edit(&mut self, neighbor: N, edit: Edit) -> Result<(), Error> {
 		if !self.sessions.contains_key(&neighbor) {
 			return Err(Error::UnknownNeighbor);
 		}
-		if let Some(old) = self.answering.remove(&neighbor) {
-			for (key, sent) in old.tx {
-				if let Some(offer) = sent.offer() {
-					self.unindex_sent(neighbor, &key, &offer.path);
-				}
-				if self.child_pending(key.0, neighbor, &key.1) {
-					self.waiting
-						.entry((key.0, sent.src.clone()))
-						.or_default()
-						.insert((neighbor, key.1.clone()));
-				}
-				self.unreflect(neighbor, &key, &sent.src);
+		let old = (self.answering.get(&neighbor)).map_or_else(BTreeSet::new, |answer| answer.prefixes.clone());
+		let mut new = old.clone();
+		for prefix in &edit.remove {
+			if !new.remove(prefix) {
+				return Err(Error::UnknownPrefix);
 			}
 		}
-		let has = prefix.is_some();
-		if let Some(watch) = prefix {
-			self.answering.insert(
-				neighbor,
-				Answer {
-					watch,
+		for prefix in edit.add {
+			if within_any(&prefix, &new) || within_set(&new, &prefix).next().is_some() {
+				return Err(Error::Nested);
+			}
+			new.insert(prefix);
+		}
+		self.out.push(Out::Edited { to: neighbor });
+		if let Some(answer) = self.answering.get_mut(&neighbor) {
+			let tx = std::mem::take(&mut answer.tx);
+			for (key, sent) in &tx {
+				if let Some(offer) = sent.offer() {
+					self.unindex_sent(neighbor, key, &offer.path);
+				}
+				self.unreflect(neighbor, key, &sent.src);
+			}
+			let rekeyed = rekey(&old, &new, tx.clone(), self.hop_of(neighbor));
+			// A child that learned a route this stream no longer carries under its key
+			// may still owe an answer to the route it reflected.
+			let rx = self.listen(neighbor);
+			for key in rekeyed.gone {
+				if self.child_pending(key.0, rx, &key.1) {
+					let src = (key.0, tx[&key].src.clone());
+					self.waiting.entry(src).or_default().insert((rx, key.1));
+				}
+			}
+			let tx = rekeyed.routes;
+			for (key, sent) in &tx {
+				if let Some(offer) = sent.offer() {
+					self.index_sent(neighbor, key, &offer.path);
+				}
+				self.reflect(neighbor, key, &sent.src);
+			}
+			self.answering.get_mut(&neighbor).expect("answering").tx = tx;
+		}
+		let added: Vec<Path> = new.difference(&old).cloned().collect();
+		match new.is_empty() {
+			true => {
+				self.answering.remove(&neighbor);
+			}
+			false => {
+				let answer = self.answering.entry(neighbor).or_insert_with(|| Answer {
+					prefixes: BTreeSet::new(),
 					tx: BTreeMap::new(),
 					told: BTreeSet::new(),
 					told_draining: BTreeSet::new(),
-				},
-			);
+				});
+				answer.prefixes = new;
+			}
 		}
 		let ids = self.ids();
 		self.update(ids, Vec::new(), None);
-		if has {
-			self.out.push(Out::Synced { to: neighbor });
+		for prefix in added {
+			self.out.push(Out::Synced { to: neighbor, prefix });
 		}
 		Ok(())
+	}
+
+	/// The prefixes this node asks `neighbor` for: its interest met with the regions
+	/// of the neighbour's scope, keeping the wider of two nested ones.
+	fn asks(&self, neighbor: N) -> BTreeSet<Path> {
+		let Some(scope) = &self.sessions[&neighbor].link.scope else {
+			return self.watch.clone();
+		};
+		let met: BTreeSet<Path> = (self.watch.iter())
+			.flat_map(|watch| scope.regions.iter().filter_map(|region| meet(watch, region)))
+			.collect();
+		met.iter()
+			.filter(|prefix| !ancestors(prefix).any(|above| above != **prefix && met.contains(&above)))
+			.cloned()
+			.collect()
+	}
+
+	/// Send `neighbor` an edit bringing what this node asks it for to [`Self::asks`].
+	fn ask(&mut self, neighbor: N) {
+		let want = self.asks(neighbor);
+		let session = self.sessions.get_mut(&neighbor).expect("a session");
+		let requested = session.requested();
+		if want == requested {
+			return;
+		}
+		let edit = Edit {
+			remove: requested.difference(&want).cloned().collect(),
+			add: want.difference(&requested).cloned().collect(),
+		};
+		session.edits.push_back(want);
+		self.out.push(Out::Ask { to: neighbor, edit });
 	}
 
 	/// `neighbor` sent GOAWAY at `now`. Every path through it ranks below every path
@@ -719,12 +1109,20 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// once only onto a path that avoids it, and tells the neighbours it sent a route
 	/// through it.
 	pub fn goaway(&mut self, neighbor: N, now: Instant) {
+		self.clock(now);
 		let Some(session) = self.sessions.get_mut(&neighbor) else {
 			return;
 		};
 		session.draining = true;
 		let node = session.hop;
+		let scoped = session.link.scope.is_some();
 		let mut ids = self.through(neighbor);
+		// A scoped peer's GOAWAY drains only the routes it sent: the node it names itself
+		// could be any, and routes through that node outside its scope are not its to rank.
+		if scoped {
+			self.update(ids, Vec::new(), None);
+			return;
+		}
 		ids.extend(self.drains(node, now));
 		self.update(ids, vec![Report::Draining(node)], None);
 	}
@@ -749,41 +1147,46 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.collect()
 	}
 
-	/// Change the local interest to `prefix`, returning its new generation.
-	/// The driver replaces each neighbour's stream with the intersection of
-	/// `prefix` and its single scope region (the whole prefix if unscoped), then
-	/// calls `synced` after the replacement's initial set arrives. This interface
-	/// supports one prefix per neighbour: disjoint regions on the same neighbour
-	/// need the interest-set extension, including its per-prefix SYNCED.
-	/// Until then, old routes stay but only new claims are
-	/// believed. With no intersection, the driver cancels the old streams and
-	/// calls `synced` locally for this generation: no replacement can answer.
-	/// What this node knows outside `prefix` is forgotten.
-	pub fn watch(&mut self, prefix: Path) -> u32 {
-		self.interest += 1;
-		self.watch = prefix.clone();
+	/// Change this node's interest to `prefixes`, none inside another, and edit what
+	/// it asks each neighbour for to match. What this node knows outside them is
+	/// forgotten. A route a neighbour sends stays, but is believed for a region only
+	/// once every edit in flight that could drop it has taken effect.
+	#[cfg(test)]
+	pub fn watch(&mut self, prefixes: BTreeSet<Path>) -> Result<(), Error> {
+		if nested(&prefixes) {
+			return Err(Error::Nested);
+		}
+		self.watch = prefixes;
 		// The narrowest covering view carries the knowledge the reader already used.
 		let keys: Vec<RouteId> = self.views.keys().rev().cloned().collect();
 		for key in keys {
-			if within(&key.1, &prefix) {
+			if within_any(&key.1, &self.watch) {
 				continue;
 			}
 			let view = self.views.remove(&key).expect("a view");
-			self.forget(key.0, &key.1, Some(&prefix));
-			if within(&prefix, &key.1) {
-				let narrow = (key.0, prefix.clone());
+			let inside: Vec<Path> = within_set(&self.watch, &key.1).cloned().collect();
+			self.forget(key.0, &key.1, &inside);
+			for prefix in inside {
 				self.scopes.entry(key.0).or_default().insert(prefix.clone());
-				self.views.entry(narrow).or_insert_with(|| view.present(&prefix));
+				self.views
+					.entry((key.0, prefix.clone()))
+					.or_insert_with(|| view.present(&prefix));
 			}
+		}
+		let peers: Vec<N> = self.sessions.keys().copied().collect();
+		for peer in peers {
+			self.ask(peer);
 		}
 		let ids = self.ids();
 		self.refresh(ids);
-		self.interest
+		Ok(())
 	}
 
-	/// The current interest generation.
-	pub fn interest(&self) -> u32 {
-		self.interest
+	/// Whether `neighbor` sent the initial set of `prefix`, which this node asks it
+	/// for, or `None` when it does not ask for it.
+	#[cfg(test)]
+	pub fn is_synced(&self, neighbor: N, prefix: &Path) -> Option<bool> {
+		self.sessions.get(&neighbor)?.asked.get(prefix).copied()
 	}
 
 	// --- The origin's own identity ---
@@ -817,12 +1220,18 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.scopes.entry(id).or_default().insert(Path::empty());
 	}
 
+	/// How this node names itself in a path.
+	pub fn hop(&self) -> Id {
+		self.hop
+	}
+
 	/// The identity this node declares.
 	pub fn declared(&self) -> Option<Id> {
 		self.origins.keys().next().copied()
 	}
 
 	/// The declared identity's claim revision.
+	#[cfg(test)]
 	pub fn revision(&self) -> Option<Rev> {
 		let origin = self.origins.values().next()?;
 		origin.view.floors.get(&Path::empty()).copied()
@@ -891,29 +1300,33 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	// --- Received messages ---
 
-	/// A route `from` sent for `named` under `prefix`, on the stream answering interest
-	/// generation `interest`: ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD, or ROUTE_END for `None`.
-	pub fn route(&mut self, from: N, named: Id, prefix: Path, reach: Option<Reach>, interest: u32) {
-		if self.sessions.get(&from).is_none_or(|session| interest < session.synced) {
-			return;
-		}
-		let Some(id) = self.admit(from, named, &prefix) else {
+	/// A route `from` sent for `named` under `prefix`: ROUTE_START or ROUTE_UPDATE,
+	/// ROUTE_HOLD, or ROUTE_END for `None`, filed as [`Self::admit`] says.
+	pub fn route(&mut self, from: N, named: Id, prefix: Path, reach: Option<Reach>) {
+		let Some((id, prefixes)) = self.admit(from, named, &prefix) else {
 			return;
 		};
+		for prefix in prefixes {
+			self.route_at(from, (named, id), prefix, reach.clone());
+		}
+	}
+
+	/// [`Router::route`] for the route filed as `id` at `prefix`.
+	fn route_at(&mut self, from: N, (named, id): (Id, Id), prefix: Path, reach: Option<Reach>) {
+		if let Some(Reach::Finite(offer)) = &reach
+			&& let Some(last) = offer.path.last()
+		{
+			let session = self.sessions.get_mut(&from).expect("checked above");
+			if session.hop == 0 {
+				session.hop = last.node;
+			}
+		}
 		let key = (id, prefix);
 		let entry = self.rx.get(&key).and_then(|routes| routes.get(&from));
-		// A message from a stream older than the route it names.
-		if entry.is_some_and(|entry| entry.interest > interest) {
-			return;
-		}
-		let same = entry.is_some_and(|entry| entry.interest == interest);
 		match reach {
 			// A path a node could not extend is refused, as if ended.
 			Some(Reach::Finite(offer)) if offer.extendable() => {
-				let view = match same {
-					true => self.rx[&key][&from].view.clone(),
-					false => View::default(),
-				};
+				let (view, batched) = entry.map_or_else(Default::default, |entry| (entry.view.clone(), entry.batched));
 				if entry.is_some() {
 					self.forget_heard(&key, from);
 				}
@@ -924,23 +1337,23 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				let heard = Heard {
 					offer,
 					state,
-					interest,
 					view,
+					batched,
 				};
 				self.hear(key.clone(), from, heard);
 				if id != named {
 					self.filed.insert((id, from), named);
 				}
 			}
-			Some(Reach::Held) if same => {
+			Some(Reach::Held) => {
 				let heard = self.rx.get_mut(&key).and_then(|routes| routes.get_mut(&from));
-				if let Some(heard) = heard {
-					heard.state = State::Held;
-				}
+				let Some(heard) = heard else {
+					return;
+				};
+				heard.state = State::Held;
 			}
-			Some(Reach::Held) => return,
 			Some(Reach::Finite(_)) | None => {
-				if entry.is_none() || !same && reach.is_none() {
+				if entry.is_none() {
 					return;
 				}
 				self.forget_heard(&key, from);
@@ -950,30 +1363,37 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// A batch of claim changes for the route `from` sent for `named` under `prefix`,
-	/// closed by its floor, on the stream answering interest generation `interest`.
-	pub fn batch(
-		&mut self,
-		from: N,
-		named: Id,
-		prefix: Path,
-		changes: Vec<(Path, Option<A>)>,
-		floor: Option<Rev>,
-		interest: u32,
-	) {
-		let Some(id) = self.admit(from, named, &prefix) else {
+	/// closed by its floor.
+	pub fn batch(&mut self, from: N, named: Id, prefix: Path, changes: Vec<(Path, Option<A>)>, floor: Option<Rev>) {
+		let Some((id, prefixes)) = self.admit(from, named, &prefix) else {
 			return;
 		};
+		if let [only] = prefixes.as_slice()
+			&& *only == prefix
+		{
+			return self.batch_at(from, id, prefix, changes, floor);
+		}
+		// Narrowed to regions: each sees only the changes within it.
+		for prefix in prefixes {
+			let changes = (changes.iter())
+				.filter(|(claim, _)| within(claim, &prefix))
+				.cloned()
+				.collect();
+			self.batch_at(from, id, prefix, changes, floor);
+		}
+	}
+
+	/// [`Router::batch`] for the route filed as `id` at `prefix`.
+	fn batch_at(&mut self, from: N, id: Id, prefix: Path, changes: Vec<(Path, Option<A>)>, floor: Option<Rev>) {
 		let key = (id, prefix.clone());
 		let Some(heard) = self.rx.get_mut(&key).and_then(|routes| routes.get_mut(&from)) else {
 			return;
 		};
-		if heard.interest != interest {
-			return;
-		}
 		let was = heard.view.floors.get(&prefix).copied();
 		let claims: Vec<Path> = changes.iter().map(|(claim, _)| claim.clone()).collect();
 		let floors = floor.map(|rev| BTreeMap::from([(prefix, rev)])).unwrap_or_default();
 		heard.view.apply(changes, floors);
+		heard.batched = true;
 		let delta = Delta {
 			route: key.clone(),
 			from,
@@ -983,17 +1403,54 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.run([id].into(), Vec::new(), Some(delta), BTreeMap::new(), Some(key));
 	}
 
+	/// Whether this node applies a DEAD from `from` naming `hop` and `far`: a peer only
+	/// reports hops it advertised to us, so one of the routes heard from it must cross
+	/// `hop` right after `far`. Binding the far node to that path keeps unrelated DEADs
+	/// from allocating hop or doubt state. Any other DEAD is dropped whole.
+	pub fn credits(&self, from: N, hop: Hop, far: Id) -> bool {
+		let credited = self.rx_hops.get(&hop).and_then(|peers| peers.get(&from));
+		credited.is_some_and(|keys| {
+			keys.iter().any(|key| {
+				self.rx[key][&from]
+					.offer
+					.path
+					.windows(2)
+					.any(|pair| pair[1] == hop && pair[0].node == far)
+			})
+		})
+	}
+
 	/// A [`Dead`] from `from`, at `now`.
 	pub fn dead(&mut self, from: N, dead: Dead, now: Instant) {
+		self.clock(now);
 		if !self.sessions.contains_key(&from) {
 			return;
 		}
+		// A scoped peer's news covers only the routes it sent: it could otherwise name a hop
+		// it only read in a path and drop healthy routes outside its scope (epic Plan item 30).
+		let scoped = self.sessions[&from].link.scope.is_some();
 		let (hop, far, moved, gone) = match dead {
 			Dead::Closed { hop, far, moved, gone } => (hop, far, moved, gone),
 			Dead::Draining { node } => {
 				// As with a closed hop, only a node on a path this peer offered counts.
 				let credited = (self.rx_hops.range(hop_range(node))).any(|(_, peers)| peers.contains_key(&from));
 				if node == self.hop || !credited {
+					return;
+				}
+				if scoped {
+					let keys: BTreeSet<RouteId> = (self.rx_hops.range(hop_range(node)))
+						.filter_map(|(_, peers)| peers.get(&from))
+						.flatten()
+						.cloned()
+						.collect();
+					for key in &keys {
+						let heard = self.rx.get_mut(key).and_then(|routes| routes.get_mut(&from));
+						if let Some(heard) = heard {
+							heard.offer.draining = true;
+						}
+					}
+					let ids = keys.into_iter().map(|(id, _)| id).collect();
+					self.update(ids, Vec::new(), None);
 					return;
 				}
 				// A node already draining ranks and is doubted as before: the news only
@@ -1008,51 +1465,106 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				return;
 			}
 		};
-		// A peer only reports hops it previously advertised to us. Also bind the far
-		// node to that path: unrelated DEADs must not allocate hop or doubt state.
-		let credited = self.rx_hops.get(&hop).and_then(|peers| peers.get(&from));
-		if !credited.is_some_and(|keys| {
-			keys.iter().any(|key| {
-				self.rx[key][&from]
-					.offer
-					.path
-					.windows(2)
-					.any(|pair| pair[1] == hop && pair[0].node == far)
-			})
-		}) {
+		if !self.credits(from, hop, far) {
 			return;
 		}
 		let mut filed = Vec::new();
 		for moved in moved {
-			if let Some(id) = self.admit(from, moved.id, &moved.prefix) {
-				filed.push(((id, moved.prefix), moved.offer));
+			if let Some((id, prefixes)) = self.admit(from, moved.id, &moved.prefix) {
+				filed.extend(prefixes.into_iter().map(|prefix| ((id, prefix), moved.offer.clone())));
 			}
 		}
-		let ids = self.fail(hop, far, Some(from), filed, gone, now);
+		if scoped {
+			let ids = self.fail_heard(hop, from, filed, gone);
+			self.update(ids, Vec::new(), None);
+			return;
+		}
+		let mut ids = self.fail(hop, far, Some(from), filed, gone, now);
+		ids.extend(self.suspect(far, now));
 		self.update(ids, vec![Report::Closed(hop)], None);
 	}
 
-	/// `from`'s stream answering interest generation `interest` sent its initial set:
-	/// what an older stream left is gone. The driver also calls this after cancelling
-	/// every stream to a scoped peer whose scope no longer intersects the interest.
-	pub fn synced(&mut self, from: N, interest: u32) {
+	/// `from` sent the marker for this node's oldest edit in flight: the edit takes
+	/// effect, and the routes `from` sent are rekeyed as it rekeyed them ([`rekey`]).
+	/// A marker with no edit in flight is ignored.
+	pub fn edited(&mut self, from: N) {
 		let Some(session) = self.sessions.get_mut(&from) else {
 			return;
 		};
-		session.synced = session.synced.max(interest);
-		let stale: Vec<RouteId> = (session.heard.iter())
-			.filter(|key| self.rx[*key][&from].interest < interest)
-			.cloned()
+		let Some(new) = session.edits.pop_front() else {
+			return;
+		};
+		let old: BTreeSet<Path> = session.asked.keys().cloned().collect();
+		let asked = new
+			.iter()
+			.map(|prefix| (prefix.clone(), session.asked.get(prefix).copied().unwrap_or(false)))
 			.collect();
-		let ids: BTreeSet<Id> = stale.iter().map(|(id, _)| *id).collect();
-		for key in &stale {
+		session.asked = asked;
+		let keys: Vec<RouteId> = session.heard.iter().cloned().collect();
+		let ids: BTreeSet<Id> = keys.iter().map(|(id, _)| *id).collect();
+		let filed: Vec<(Id, Id)> = ids
+			.iter()
+			.filter_map(|id| Some((*id, *self.filed.get(&(*id, from))?)))
+			.collect();
+		let heard: BTreeMap<RouteId, Heard<A>> = keys
+			.iter()
+			.map(|key| (key.clone(), self.rx[key][&from].clone()))
+			.collect();
+		for key in &keys {
 			self.forget_heard(key, from);
 		}
-		self.update(ids, Vec::new(), None);
+		let rekeyed = rekey(&old, &new, heard, self.hop);
+		for (key, heard) in rekeyed.routes {
+			self.hear(key, from, heard);
+		}
+		// A route this node used or held through `from` moves with the route it heard,
+		// so a hold or a doubt carries over rather than letting go of its claims. Of
+		// several moving to one key, the one in use goes: only it may stay on a path
+		// through a doubted node. A hold keeps its deadline.
+		let mut carried: BTreeMap<RouteId, (Route<N>, RouteId)> = BTreeMap::new();
+		for (was, now) in rekeyed.moved {
+			let Some(route) = self.routes.get(&was).filter(|route| route.next() == Some(from)) else {
+				continue;
+			};
+			if self.routes.contains_key(&now) {
+				continue;
+			}
+			if carried.get(&now).is_none_or(|(kept, _)| !kept.live() && route.live()) {
+				carried.insert(now, (route.clone(), was));
+			}
+		}
+		for (now, (route, was)) in carried {
+			self.scopes.entry(now.0).or_default().insert(now.1.clone());
+			if let Some(&at) = self.held_until.get(&was) {
+				self.held_until.insert(now.clone(), at);
+			}
+			self.routes.insert(now, route);
+		}
+		for (id, named) in filed {
+			if of(&self.rx, id).any(|(_, routes)| routes.contains_key(&from)) {
+				self.filed.insert((id, from), named);
+			}
+		}
+		// A carried route may already have changed what the reader sees.
+		self.refresh(ids);
+	}
+
+	/// `from` sent the initial set of `prefix`, which this node asks it for.
+	#[cfg(test)]
+	pub fn synced(&mut self, from: N, prefix: Path) {
+		let synced = (self.sessions.get_mut(&from)).and_then(|session| session.asked.get_mut(&prefix));
+		if let Some(synced) = synced {
+			*synced = true;
+		}
 	}
 
 	/// Fire every doubt and dead-hop timer due by `now`.
 	pub fn timeout(&mut self, now: Instant) {
+		self.clock(now);
+		let lapsed: BTreeSet<Id> = (self.held_until.iter())
+			.filter(|(_, at)| **at <= now)
+			.map(|((id, _), _)| *id)
+			.collect();
 		let due: Vec<Id> = self
 			.doubted
 			.iter()
@@ -1063,10 +1575,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.iter()
 			.filter_map(|(hop, state)| state.deadline().filter(|at| *at <= now).map(|_| *hop))
 			.collect();
-		if due.is_empty() && expired.is_empty() {
+		if due.is_empty() && expired.is_empty() && lapsed.is_empty() {
 			return;
 		}
-		let mut ids = BTreeSet::new();
+		let mut ids = lapsed;
 		for node in due {
 			self.doubted.remove(&node);
 			ids.extend(self.naming(node));
@@ -1084,6 +1596,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.values()
 			.map(|state| state.deadline())
 			.chain(self.dead.values().filter_map(|state| state.deadline()))
+			.chain(self.held_until.values().copied())
 			.min()
 	}
 
@@ -1095,7 +1608,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let views: Vec<RouteId> = of(&self.views, id).map(|(key, _)| key.clone()).collect();
 		for key in views {
 			self.views.remove(&key);
-			self.forget(id, &key.1, None);
+			self.forget(id, &key.1, &[]);
 		}
 		self.refresh([id].into());
 	}
@@ -1103,6 +1616,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	// --- Queries ---
 
 	/// The route this node uses for `id` under `prefix`.
+	#[cfg(test)]
 	pub fn route_for(&self, id: Id, prefix: &Path) -> Option<&Route<N>> {
 		self.routes.get(&(id, prefix.clone()))
 	}
@@ -1116,13 +1630,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			self.dead, self.doubted, self.filed
 		);
 		for (peer, answer) in &self.answering {
-			out += &format!("  to {peer:?} watch {:?} sent {:?}\n", answer.watch, answer.tx);
+			out += &format!("  to {peer:?} prefixes {:?} sent {:?}\n", answer.prefixes, answer.tx);
+		}
+		for (peer, session) in &self.sessions {
+			out += &format!("  asked {peer:?} {:?} edits {:?}\n", session.asked, session.edits);
 		}
 		for (key, routes) in &self.rx {
 			for (peer, heard) in routes {
 				out += &format!(
-					"  heard {key:?} from {peer:?}: {:?} {:?} gen {} view {:?}\n",
-					heard.state, heard.offer.path, heard.interest, heard.view
+					"  heard {key:?} from {peer:?}: {:?} {:?} view {:?}\n",
+					heard.state, heard.offer.path, heard.view
 				);
 			}
 		}
@@ -1132,12 +1649,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for (key, view) in &self.views {
 			out += &format!("  view {key:?}: {view:?}\n");
 		}
-		out += &format!(
-			"  interest {} watch {:?} shown {:?}",
-			self.interest,
-			self.watch,
-			self.reader.shown()
-		);
+		out += &format!("  watch {:?} shown {:?}", self.watch, self.reader.shown());
 		out
 	}
 
@@ -1146,6 +1658,26 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	pub fn heard_offer(&self, id: Id, prefix: &Path, from: N) -> Option<&Offer> {
 		let heard = self.rx.get(&(id, prefix.clone()))?.get(&from)?;
 		(heard.state == State::Live).then_some(&heard.offer)
+	}
+
+	/// Whether this node files `from`'s route for `id` under `prefix` as held.
+	#[cfg(test)]
+	pub fn heard_held(&self, id: Id, prefix: &Path, from: N) -> Option<bool> {
+		let heard = self.rx.get(&(id, prefix.clone()))?.get(&from)?;
+		Some(heard.state == State::Held)
+	}
+
+	/// Whether what this node last sent `peer` for `id` under `prefix` holds it.
+	#[cfg(test)]
+	pub fn sent_held(&self, peer: N, id: Id, prefix: &Path) -> Option<bool> {
+		let sent = self.answering.get(&peer)?.tx.get(&(id, prefix.clone()))?;
+		sent.offer().map(|_| sent.held())
+	}
+
+	/// The prefixes `neighbor` asks this node for.
+	#[cfg(test)]
+	pub fn answers(&self, neighbor: N) -> BTreeSet<Path> {
+		(self.answering.get(&neighbor)).map_or_else(BTreeSet::new, |answer| answer.prefixes.clone())
 	}
 
 	/// Whether `from` offered a route for `id` under `prefix`, in any state.
@@ -1180,14 +1712,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				(prefix, None)
 			}
 			Some((prev, prefix)) => {
-				let watch = self.answering.get(&prev)?.watch.clone();
-				(self.src(id, &prefix, prev, &watch), Some(prev))
+				let answer = self.answering.get(&prev)?;
+				(self.src(id, &prefix, prev, &answer.prefixes), Some(prev))
 			}
 		};
 		let route = self.routes.get(&(id, prefix.clone()))?;
 		let offer = route.offer()?;
 		if let Some(prev) = prev
-			&& names(&offer.path, self.sessions[&prev].hop)
+			&& names(&offer.path, self.hop_of(prev))
 		{
 			return None;
 		}
@@ -1197,6 +1729,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			named: self.name(next, id),
 			prefix,
 		})
+	}
+
+	/// Whether this node sent `to` a live route for `id` covering `prefix`.
+	pub fn sent(&self, to: N, id: Id, prefix: &Path) -> bool {
+		(self.answering.get(&to))
+			.and_then(|answer| answer.tx.get(&(id, prefix.clone())))
+			.is_some_and(|sent| sent.offer().is_some())
 	}
 
 	/// The identity this node names for `id` to `next`: the one `next` sent, if this
@@ -1276,8 +1815,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			dead,
 			doubted,
 			draining,
+			held_until,
+			now: _,
 			watch,
-			interest,
 			reader,
 			shown_claims,
 			rng,
@@ -1293,9 +1833,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let doubted: Vec<_> = (doubted.iter())
 			.map(|(node, state)| (node, matches!(state, Suspicion::Doubted(_)), left(state.deadline())))
 			.collect();
+		let held: Vec<_> = (held_until.iter()).map(|(key, at)| (key, left(*at))).collect();
 		super::digest(hasher, &(hop, doubt, opened, sessions, answering, origins, rx));
 		super::digest(hasher, &(rx_hops, tx_hops, tx_nodes, reflects, waiting, routes, views));
-		super::digest(hasher, &(scopes, filed, dead, doubted, draining, watch, interest));
+		super::digest(hasher, &(scopes, filed, dead, doubted, draining, held, watch));
 		super::digest(hasher, &(reader, shown_claims, rng));
 	}
 
@@ -1338,21 +1879,42 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	// --- Internals: what is heard ---
 
 	/// The key this node files `named` under when `from` sends it a route covering
-	/// `prefix`, or `None` when refused: a scoped neighbour's identities are all
-	/// qualified, one already qualified is refused, and so is a route outside its scope.
-	/// A node also ignores routes to its own identities.
-	fn admit(&self, from: N, named: Id, prefix: &Path) -> Option<Id> {
+	/// `prefix`, and the prefixes it files the route at, or `None` when refused: a scoped
+	/// neighbour's identities are all qualified, one already qualified is refused, and
+	/// its route counts only within its regions, so one covering a region is filed at
+	/// that region and one outside them all is refused. One outside what this node asked
+	/// `from` for, as of the last marker, is refused too. A node also ignores routes to
+	/// its own identities.
+	fn admit(&self, from: N, named: Id, prefix: &Path) -> Option<(Id, Vec<Path>)> {
 		let session = self.sessions.get(&from)?;
-		let id = match &session.link.scope {
+		let (id, prefixes) = match &session.link.scope {
 			Some(scope) => {
-				if named & QUALIFIED != 0 || !scope.regions.iter().any(|region| within(prefix, region)) {
+				if named & QUALIFIED != 0 {
 					return None;
 				}
-				(scope.qualify)(named) | QUALIFIED
+				let prefixes: Vec<Path> = match scope.regions.iter().any(|region| within(prefix, region)) {
+					true => vec![prefix.clone()],
+					false => {
+						let inside: BTreeSet<&Path> =
+							(scope.regions.iter()).filter(|region| within(region, prefix)).collect();
+						// A region inside another is already covered by it.
+						(inside.iter())
+							.filter(|region| !inside.iter().any(|above| above != *region && within(region, above)))
+							.map(|region| (*region).clone())
+							.collect()
+					}
+				};
+				if prefixes.is_empty() {
+					return None;
+				}
+				((scope.qualify)(named) | QUALIFIED, prefixes)
 			}
-			None => named,
+			None => (named, vec![prefix.clone()]),
 		};
-		(!self.origins.contains_key(&id)).then_some(id)
+		let prefixes: Vec<Path> = (prefixes.into_iter())
+			.filter(|prefix| ancestors(prefix).any(|above| session.asked.contains_key(&above)))
+			.collect();
+		(!prefixes.is_empty() && !self.origins.contains_key(&id)).then_some((id, prefixes))
 	}
 
 	/// Whether `path` holds a hop this node knows is dead.
@@ -1466,9 +2028,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.naming(node)
 	}
 
-	/// The session `hop` names closed. `from` reported it, with what became of its own
-	/// routes through it, or this node saw it close. It casts doubt on `far`. Returns
-	/// the identities touched.
+	/// The session `hop` names closed, at the node `far` at its other end. `from`
+	/// reported it, with what became of its own routes through it, or this node saw it
+	/// close. Returns the identities touched.
 	fn fail(
 		&mut self,
 		hop: Hop,
@@ -1495,30 +2057,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for (key, peer) in through {
 			self.step();
 			ids.insert(key.0);
-			let reported = from == Some(peer);
-			if let Some(offer) = moved.get(&key).filter(|_| reported) {
-				if offer.extendable() {
-					self.repath(&key, peer, offer.clone());
-				} else {
-					self.forget_heard(&key, peer);
-				}
-				continue;
-			}
-			if reported {
-				if gone {
-					self.forget_heard(&key, peer);
-				} else {
-					let is_child = self.is_child(key.0, peer, &self.rx[&key][&peer].offer.path);
-					let heard = self
-						.rx
-						.get_mut(&key)
-						.and_then(|routes| routes.get_mut(&peer))
-						.expect("heard");
-					// A neighbour that holds under this node answers once those behind it have.
-					if !is_child {
-						heard.state = State::Held;
-					}
-				}
+			if from == Some(peer) {
+				self.reported(&key, peer, moved.get(&key), gone);
 				continue;
 			}
 			let heard = self
@@ -1530,12 +2070,64 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				heard.state = State::Dead;
 			}
 		}
-		if far != self.hop {
-			let at = now.saturating_add(self.doubt.timer);
-			let at = self.doubted.get(&far).map_or(at, |state| state.deadline().max(at));
-			self.doubted.insert(far, Suspicion::Doubted(at));
-			// Any route through that node may have become unusable.
-			ids.extend(self.naming(far));
+		ids
+	}
+
+	/// A session to `far` closed, as of `now`: no route through it is taken until the
+	/// timer fires. Returns the identities whose routes rank anew.
+	fn suspect(&mut self, far: Id, now: Instant) -> BTreeSet<Id> {
+		if far == self.hop {
+			return BTreeSet::new();
+		}
+		let at = now.saturating_add(self.doubt.timer);
+		let at = self.doubted.get(&far).map_or(at, |state| state.deadline().max(at));
+		self.doubted.insert(far, Suspicion::Doubted(at));
+		// Any route through that node may have become unusable.
+		self.naming(far)
+	}
+
+	/// What became of the route `peer` sent under `key` through a hop it reported dead:
+	/// its new path if it moved, else ended if `gone`, else held unless this node is the
+	/// one it learned the route from.
+	fn reported(&mut self, key: &RouteId, peer: N, moved: Option<&Offer>, gone: bool) {
+		if let Some(offer) = moved {
+			match offer.extendable() {
+				true => self.repath(key, peer, offer.clone()),
+				false => self.forget_heard(key, peer),
+			}
+			return;
+		}
+		if gone {
+			self.forget_heard(key, peer);
+			return;
+		}
+		let hop = self.hop;
+		let heard = (self.rx.get_mut(key))
+			.and_then(|routes| routes.get_mut(&peer))
+			.expect("heard");
+		// A neighbour that holds under this node answers once those behind it have.
+		// The neighbour cannot tell whether this node qualified the key, so both sides
+		// decide by the path alone, as the sender's report does.
+		if !child(&heard.offer.path, hop) {
+			heard.state = State::Held;
+		}
+	}
+
+	/// A scoped peer reported `hop` dead: only the routes it sent through the hop change,
+	/// and nothing is remembered or doubted. Returns the identities touched.
+	fn fail_heard(&mut self, hop: Hop, from: N, moved: Vec<(RouteId, Offer)>, gone: bool) -> BTreeSet<Id> {
+		let moved: BTreeMap<RouteId, Offer> = moved.into_iter().collect();
+		let through: Vec<RouteId> = (self.rx_hops.get(&hop))
+			.and_then(|peers| peers.get(&from))
+			.into_iter()
+			.flatten()
+			.cloned()
+			.collect();
+		let mut ids = BTreeSet::new();
+		for key in through {
+			self.step();
+			ids.insert(key.0);
+			self.reported(&key, from, moved.get(&key), gone);
 		}
 		ids
 	}
@@ -1567,56 +2159,94 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// Pick the best-ranked usable live route ([`Offer::rank`]), staying on the next
-	/// hop among equals.
+	/// hop among equals: on its node, through the latest of its sessions there
+	/// ([`Link::session`]), and on the stream it uses there.
 	/// Doubt keeps this node from moving to a route, not on the one it uses.
 	fn select(&self, key: &RouteId) -> Option<Route<N>> {
 		let was = self.routes.get(key);
 		let current = was.and_then(Route::next);
 		let using = current.filter(|_| was.is_some_and(Route::live));
-		type Rank<N> = ((bool, Reverse<i8>, Metric), bool, N);
+		// The node the next hop names itself, once known.
+		let staying = (current.and_then(|next| self.sessions.get(&next)))
+			.map(|session| session.hop)
+			.filter(|hop| *hop != 0);
+		type Rank<N> = ((bool, Reverse<i8>, Metric), bool, Reverse<u64>, bool, N);
 		let mut best: Option<(Rank<N>, Offer)> = None;
 		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
 			self.step();
-			if heard.state != State::Live || names(&heard.offer.path, self.hop) {
-				continue;
-			}
-			let session = &self.sessions[&peer];
-			let Some(metric) = heard.offer.metric.checked_add(session.link.cost) else {
+			let Some(offer) = self.usable_offer(peer, heard, using) else {
 				continue;
 			};
-			if Some(peer) != using && self.doubts_path(&heard.offer.path) {
-				// It may come back once the doubt lifts.
-				continue;
-			}
-			let draining = session.draining || heard.offer.draining || self.drains_path(&heard.offer.path);
-			let priority = session.link.priority.min(heard.offer.priority);
-			let rank = ((draining, Reverse(priority), metric), Some(peer) != current, peer);
+			let session = &self.sessions[&peer];
+			let stays = Some(session.hop) == staying;
+			// The model has one session per pair of nodes: a later one to the next hop's
+			// node replaces the one in use, as a GOAWAY migration leaves it.
+			let latest = Reverse(if stays { session.link.session } else { 0 });
+			let rank = (offer.rank(), !stays, latest, Some(peer) != current, peer);
 			if best.as_ref().is_some_and(|(best, _)| *best <= rank) {
 				continue;
 			}
-			let path: Arc<[Hop]> = (heard.offer.path.iter().copied())
-				.chain([Hop {
-					node: self.hop,
-					session: session.number,
-				}])
-				.collect();
-			let offer = Offer {
-				path,
-				draining,
-				priority,
-				metric,
-				down_only: session.link.upstream || heard.offer.down_only,
-				rtt: heard.offer.rtt.zip(session.rtt).and_then(|(a, b)| a.checked_add(b)),
-			};
 			best = Some((rank, offer));
 		}
 		best.map(|((.., next), offer)| Route::Live { next, offer })
 	}
 
+	/// The route `heard` from `peer` gives this node, extended by its hop, or `None` when
+	/// it is not usable: not live, naming this node, unreachable, or through a node in
+	/// doubt that this node is not already using it through (`using`).
+	fn usable_offer(&self, peer: N, heard: &Heard<A>, using: Option<N>) -> Option<Offer> {
+		if heard.state != State::Live || names(&heard.offer.path, self.hop) {
+			return None;
+		}
+		let session = &self.sessions[&peer];
+		let metric = heard.offer.metric.checked_add(session.link.cost)?;
+		if Some(peer) != using && self.doubts_path(&heard.offer.path) {
+			// It may come back once the doubt lifts.
+			return None;
+		}
+		let draining = session.draining || heard.offer.draining || self.drains_path(&heard.offer.path);
+		let path: Arc<[Hop]> = (heard.offer.path.iter().copied())
+			.chain([Hop {
+				node: self.hop,
+				session: session.number,
+			}])
+			.collect();
+		Some(Offer {
+			path,
+			draining,
+			priority: session.link.priority.min(heard.offer.priority),
+			metric,
+			down_only: session.link.upstream || heard.offer.down_only,
+			rtt: heard.offer.rtt.zip(session.rtt).and_then(|(a, b)| a.checked_add(b)),
+		})
+	}
+
+	/// Every usable route for `key` while this node has a live one, each as this node
+	/// would take it, the selected one first: a reader here fails over among them at
+	/// once when the selected one goes.
+	pub fn usable(&self, key: &RouteId) -> Vec<(N, Offer)> {
+		let Some(Route::Live { next, offer }) = self.routes.get(key) else {
+			return Vec::new();
+		};
+		let mut out = vec![(*next, offer.clone())];
+		for (&peer, heard) in self.rx.get(key).into_iter().flatten() {
+			if peer == *next {
+				continue;
+			}
+			if let Some(offer) = self.usable_offer(peer, heard, Some(*next)) {
+				out.push((peer, offer));
+			}
+		}
+		out
+	}
+
 	/// With no live route, keep what an upstream or a child has yet to answer.
 	fn retain(&self, key: &RouteId) -> Option<Route<N>> {
-		// Only a node that had the route holds it.
+		// Only a node that had the route holds it, and only until its deadline.
 		let was = self.routes.get(key)?;
+		if self.held_until.get(key).is_some_and(|at| *at <= self.now) {
+			return None;
+		}
 		let path = was.path().clone();
 		// Its next hop holds, or has yet to say what became of a dead route, on the
 		// path this node's route was built on. A next hop that has since sent another
@@ -1649,6 +2279,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	fn child_pending(&self, id: Id, peer: N, prefix: &Path) -> bool {
+		let peer = self.listen(peer);
 		self.rx
 			.get(&(id, prefix.clone()))
 			.and_then(|routes| routes.get(&peer))
@@ -1705,17 +2336,17 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	}
 
 	/// The prefix of this node's own route that what it offers a stream answering
-	/// `watch` under `prefix` reflects: the route itself inside the interest, and at the
-	/// interest the best-ranked live route covering it that does not name the
-	/// neighbour. Prefer the narrower scope among equal ranks. Without a usable
-	/// path, reflect a live or held route so a child can answer its loss. Preferring
-	/// a narrower route regardless of cost can make covering paths oscillate.
-	fn src(&self, id: Id, prefix: &Path, peer: N, watch: &Path) -> Path {
-		if prefix != watch {
+	/// `prefixes` under `prefix` reflects: the route itself inside one of them, and at
+	/// one the best-ranked live route covering it that does not name the neighbour.
+	/// Prefer the narrower scope among equal ranks. Without a usable path, reflect a
+	/// live or held route so a child can answer its loss. Preferring a narrower route
+	/// regardless of cost can make covering paths oscillate.
+	fn src(&self, id: Id, prefix: &Path, peer: N, prefixes: &BTreeSet<Path>) -> Path {
+		if !prefixes.contains(prefix) {
 			return prefix.clone();
 		}
 		let covering = || ancestors(prefix).rev().map(|above| (id, above));
-		let hop = self.sessions[&peer].hop;
+		let hop = self.hop_of(peer);
 		let best = |usable| {
 			covering()
 				.filter_map(|key| {
@@ -1738,6 +2369,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	// --- Internals: views ---
 
+	/// The views this node keeps of a route under `prefix`: the prefix itself within
+	/// its interest, else each prefix of its interest inside it.
+	fn watched(&self, prefix: &Path) -> Vec<Path> {
+		match within_any(prefix, &self.watch) {
+			true => vec![prefix.clone()],
+			false => within_set(&self.watch, prefix).cloned().collect(),
+		}
+	}
+
 	/// Whether this node holds a route of `id` covering `prefix`.
 	fn presence(&self, id: Id, prefix: &Path) -> bool {
 		ancestors(prefix).any(|above| self.routes.contains_key(&(id, above)))
@@ -1755,6 +2395,26 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.map(|((_, prefix), view)| (prefix, view))
 	}
 
+	/// What the live route this node selected covering `prefix` carries there, with
+	/// nothing certified, or `None` while it has none, does not believe it, or its sender
+	/// has not yet closed a batch of its claims.
+	fn carried(&self, id: Id, prefix: &Path) -> Option<View<A>> {
+		let (above, next) =
+			ancestors(prefix)
+				.rev()
+				.find_map(|above| match self.routes.get(&(id, above.clone()))? {
+					Route::Live { next, .. } => Some((above, *next)),
+					_ => None,
+				})?;
+		let heard = self.rx.get(&(id, above))?.get(&next)?;
+		if !heard.batched || !self.believed(next, heard, prefix) {
+			return None;
+		}
+		let mut view = heard.view.present(prefix);
+		view.floors.clear();
+		Some(view)
+	}
+
 	/// The narrowest view of `id` covering `prefix`, or the publisher's own.
 	fn covering_view(&self, id: Id, prefix: &Path) -> Option<(Path, &View<A>)> {
 		if let Some(origin) = self.origins.get(&id) {
@@ -1766,15 +2426,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.map(|((_, prefix), view)| (prefix.clone(), view))
 	}
 
-	/// Whether a route this node heard is believed for its claims: live, its path does
-	/// not name this node, and its stream answers the current interest.
-	fn believed(&self, heard: &Heard<A>) -> bool {
-		heard.state == State::Live && !names(&heard.offer.path, self.hop) && heard.interest == self.interest
+	/// Whether a route `peer` sent is believed for its claims within `region`: live,
+	/// its path does not name this node, and this node asks `peer` for the region with
+	/// no edit in flight that could drop it.
+	fn believed(&self, peer: N, heard: &Heard<A>, region: &Path) -> bool {
+		heard.state == State::Live && !names(&heard.offer.path, self.hop) && self.sessions[&peer].asking(region)
 	}
 
 	/// Bring every view of `id` up to date: each prefix within the interest that a route
 	/// covers keeps the newest floor a believed route covering it gave, kept whole while
-	/// a route covers it. Returns whether the views changed shape, and marks changed
+	/// a route covers it, or what the selected live route carries while none certifies it. Returns whether the views changed shape, and marks changed
 	/// claims in `dirty`.
 	fn know(&mut self, id: Id, keys: &BTreeSet<Path>, delta: Option<&Delta<N>>, dirty: &mut Dirty) {
 		if self.origins.contains_key(&id) {
@@ -1787,13 +2448,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				Some((prefix.clone(), view.floors.get(prefix).copied()))
 			})
 			.collect();
+		// A view no route covers goes only once the narrower views a route still covers
+		// have learned what it knew.
+		let mut lost = Vec::new();
 		for prefix in keys {
 			let key = (id, prefix.clone());
 			if !self.presence(id, prefix) {
-				if self.views.remove(&key).is_some() {
-					self.forget(id, prefix, None);
-					dirty.regions.insert(prefix.clone());
-				}
+				lost.push(key);
 				continue;
 			}
 			// Taken out while it is brought up to date, and always put back.
@@ -1808,8 +2469,10 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			};
 			self.scopes.entry(id).or_default().insert(prefix.clone());
 			let floor = base.floors.get(prefix).copied();
-			// The newest floor any believed route covering this prefix gave.
+			// The newest floor any believed route covering this prefix gave, and whether
+			// any gave one at all.
 			let mut best: Option<(Rev, RouteId, N)> = None;
+			let mut floored = false;
 			for above in ancestors(prefix) {
 				let route = (id, above);
 				for (&peer, heard) in self.rx.get(&route).into_iter().flatten() {
@@ -1817,7 +2480,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					let Some(&rev) = heard.view.floors.get(&route.1) else {
 						continue;
 					};
-					if !self.believed(heard) || Some(rev) <= floor {
+					if !self.believed(peer, heard, prefix) {
+						continue;
+					}
+					floored = true;
+					if Some(rev) <= floor {
 						continue;
 					}
 					if best.as_ref().is_none_or(|(best, ..)| rev > *best) {
@@ -1826,11 +2493,32 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 			let Some((_, route, peer)) = best else {
-				self.views.insert(key, base);
+				// While no believed route certifies the prefix, it shows what the live
+				// route this node selected carries there: a sender that cannot vouch for
+				// its whole interest, such as one refusing a claim it was sent, still
+				// shows its claims, uncertified.
+				let view = match floored {
+					true => None,
+					false => self.carried(id, prefix),
+				};
+				let view = match view {
+					Some(view) => {
+						for (claim, _) in view.diff(&base) {
+							dirty.claims.insert(claim);
+						}
+						view
+					}
+					None => base,
+				};
+				self.views.insert(key, view);
 				continue;
 			};
 			let heard = &self.rx[&route][&peer].view;
-			let follows = delta.filter(|delta| delta.route == route && delta.from == peer && delta.was == floor);
+			// A route with no floor yet may hold claims an edit carried to it, which the
+			// view never followed.
+			let follows = delta.filter(|delta| {
+				delta.route == route && delta.from == peer && delta.was.is_some() && delta.was == floor
+			});
 			let view = match follows {
 				Some(delta) => {
 					let mut view = base;
@@ -1855,6 +2543,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				dirty.regions.insert(prefix.clone());
 			}
 			self.views.insert(key, view);
+		}
+		for key in lost {
+			if self.views.remove(&key).is_some() {
+				self.forget(id, &key.1, &[]);
+				dirty.regions.insert(key.1);
+			}
 		}
 		// Which view the reader sees a claim at a view's own prefix from turns on floors.
 		let floors: Vec<(Path, Option<Rev>)> = keys
@@ -1890,35 +2584,33 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// Count a forget against each claim of `id` this node has shown within `prefix`,
 	/// outside `kept`.
-	fn forget(&mut self, id: Id, prefix: &Path, kept: Option<&Path>) {
+	fn forget(&mut self, id: Id, prefix: &Path, kept: &[Path]) {
 		let views = &self.views;
 		(self.reader).forget(id, |claim| {
 			!within(claim, prefix)
-				|| kept.is_some_and(|kept| within(claim, kept))
+				|| kept.iter().any(|kept| within(claim, kept))
 				|| of(views, id).any(|((_, prefix), view)| within(claim, prefix) && view.floors.contains_key(prefix))
 		});
 	}
 
 	// --- Internals: sending ---
 
-	/// What this node sends `peer`, whose stream answers `watch`, for `id` under `prefix`.
-	fn want(&self, id: Id, prefix: &Path, peer: N, watch: &Path) -> Want {
+	/// What this node sends `peer`, whose stream answers `prefixes`, for `id` under `prefix`.
+	fn want(&self, id: Id, prefix: &Path, peer: N, prefixes: &BTreeSet<Path>) -> Want {
 		let session = &self.sessions[&peer];
 		if !session.link.proxy && !self.origins.contains_key(&id) {
 			return Want::End;
 		}
-		let src = self.src(id, prefix, peer, watch);
+		let src = self.src(id, prefix, peer, prefixes);
 		let Some(route) = self.routes.get(&(id, src.clone())) else {
 			return Want::End;
 		};
 		// A route qualified here is a different key from the one this peer
 		// offered. Returning its own path under the qualified key would look like
 		// a child of another route. The peer cannot use that path anyway.
-		if self.name(peer, id) != id
-			&& (route.next() == Some(peer)
-				|| route
-					.offer()
-					.is_some_and(|offer| names(&offer.path, self.sessions[&peer].hop)))
+		if self.name(self.listen(peer), id) != id
+			&& (route.next() == Some(self.listen(peer))
+				|| route.offer().is_some_and(|offer| names(&offer.path, self.hop_of(peer))))
 		{
 			return Want::End;
 		}
@@ -1926,10 +2618,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			// A route goes to the node that published it no more than to an upstream link
 			// when down-only: neither would use it.
 			Some(offer) if session.link.upstream && offer.down_only => Want::End,
-			Some(offer) if offer.path[0].node == session.hop => Want::End,
+			Some(offer) if offer.path[0].node == self.hop_of(peer) => Want::End,
+			// The neighbour could not extend it, so it would refuse it.
+			Some(offer) if !offer.extendable() => Want::End,
 			Some(offer) => Want::Path(offer.clone(), src.clone()),
 			// The next hop it holds under hears nothing until those behind this node answered.
-			None if route.next() == Some(peer) => {
+			None if route.next() == Some(self.listen(peer)) => {
 				let key = (id, src.clone());
 				match self.pending(&key) || self.hopes(&key) {
 					true => return Want::Keep,
@@ -1964,9 +2658,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			|| covering(&view.floors, prefix, |claim| view.items.get(claim)).is_some()
 	}
 
-	/// The prefixes a stream answering `watch` carries for `id` to `peer`: the interest
-	/// itself, each route inside it, and each it was sent and may need to end.
-	fn stream(&self, id: Id, peer: N, watch: &Path, region: Option<&Path>) -> BTreeSet<Path> {
+	/// The prefixes a stream answering `prefixes` carries for `id` to `peer`: each of
+	/// them, each route inside one, and each it was sent and may need to end.
+	fn stream(&self, id: Id, peer: N, prefixes: &BTreeSet<Path>, region: Option<&Path>) -> BTreeSet<Path> {
 		let session = &self.sessions[&peer];
 		let answer = &self.answering[&peer];
 		let sent_only = !session.link.proxy && !self.origins.contains_key(&id);
@@ -1974,14 +2668,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			// A non-proxy peer is sent only what it was already sent, so skip scanning every route.
 			return of(&answer.tx, id).map(|((_, prefix), _)| prefix.clone()).collect();
 		}
-		let mut out = BTreeSet::new();
-		if region.is_none_or(|region| meet(watch, region).is_some()) {
-			out.insert(watch.clone());
-		}
+		let mut out: BTreeSet<Path> = match region {
+			Some(region) => (ancestors(region).filter(|above| prefixes.contains(above)))
+				.chain(within_set(prefixes, region).cloned())
+				.collect(),
+			None => prefixes.clone(),
+		};
 		if let Some(region) = region {
 			for prefix in self.prefixes(id, Some(region)) {
 				let key = (id, prefix.clone());
-				if self.routes.contains_key(&key) && within(&prefix, watch) || answer.tx.contains_key(&key) {
+				if self.routes.contains_key(&key) && within_any(&prefix, prefixes) || answer.tx.contains_key(&key) {
 					out.insert(prefix);
 				}
 			}
@@ -1989,7 +2685,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			out.extend(
 				of(&self.routes, id)
 					.map(|((_, prefix), _)| prefix)
-					.filter(|prefix| within(prefix, watch))
+					.filter(|prefix| within_any(prefix, prefixes))
 					.cloned(),
 			);
 			out.extend(of(&answer.tx, id).map(|((_, prefix), _)| prefix.clone()));
@@ -2017,13 +2713,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			let Some(answer) = self.answering.get(&peer) else {
 				continue;
 			};
-			let watch = answer.watch.clone();
+			let prefixes = answer.prefixes.clone();
 			let first = !self.answering[&peer].told.contains(&hop);
 			let (mut moved, mut holds, mut parents, mut ends, mut rest) =
 				(Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
 			for key in &through {
 				self.step();
-				let want = self.want(key.0, &key.1, peer, &watch);
+				let want = self.want(key.0, &key.1, peer, &prefixes);
 				let sent = &self.answering[&peer].tx[key];
 				match want {
 					Want::Path(offer, src) => {
@@ -2052,7 +2748,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						if !sent.held() {
 							// The neighbour it learned the route from takes silence to mean
 							// this node holds under it, so it is told outright.
-							let parent = child(&sent.offer().expect("sent").path, self.sessions[&peer].hop);
+							let parent = child(&sent.offer().expect("sent").path, self.hop_of(peer));
 							holds.push(key.clone());
 							if parent {
 								parents.push(key.clone());
@@ -2068,7 +2764,21 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						}
 						rest += 1;
 					}
-					Want::Keep => rest += 1,
+					Want::Keep => {
+						// The neighbour takes a first DEAD to mean this node holds every route it
+						// did not learn from the neighbour, so what was sent says so too.
+						if first && !sent.held() && !child(&sent.offer().expect("sent").path, self.hop_of(peer)) {
+							let sent = self
+								.answering
+								.get_mut(&peer)
+								.expect("answering")
+								.tx
+								.get_mut(key)
+								.expect("sent");
+							sent.hold();
+						}
+						rest += 1;
+					}
 					end @ (Want::End | Want::Empty) => {
 						let batch =
 							(matches!(end, Want::Empty) && self.covering_view(key.0, &key.1).is_some()).then(|| {
@@ -2200,19 +2910,19 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Bring what each watching neighbour was sent for `id` up to date, with the `dirty`
 	/// claims changed since.
 	fn advertise(&mut self, id: Id, dirty: &Dirty, region: Option<&Path>) {
-		let peers: Vec<(N, Path)> = self
+		let peers: Vec<(N, BTreeSet<Path>)> = self
 			.answering
 			.iter()
-			.map(|(peer, answer)| (*peer, answer.watch.clone()))
+			.map(|(peer, answer)| (*peer, answer.prefixes.clone()))
 			.collect();
 		// Plan every stream against the state as it stands, then send.
 		let mut plans = Vec::new();
 		let mut planned: BTreeMap<N, BTreeSet<Path>> = BTreeMap::new();
-		for (peer, watch) in &peers {
-			for prefix in self.stream(id, *peer, watch, region) {
+		for (peer, prefixes) in &peers {
+			for prefix in self.stream(id, *peer, prefixes, region) {
 				planned.entry(*peer).or_default().insert(prefix.clone());
 				self.step();
-				let want = self.want(id, &prefix, *peer, watch);
+				let want = self.want(id, &prefix, *peer, prefixes);
 				let on =
 					(self.answering[peer].tx.get(&(id, prefix.clone()))).is_some_and(|sent| sent.offer().is_some());
 				let batch = match &want {
@@ -2287,7 +2997,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 					});
 					sent.src = src;
 					let sent = sent.reoffer(offer);
-					sent.from = from;
+					sent.from = Some(from);
 					// Even unchanged claims need their newer floor forwarded: a neighbour
 					// may still hold an intervening revision learned on another path.
 					let advanced = floor.is_some() && sent.view.floors.get(&prefix).copied() != floor;
@@ -2314,13 +3024,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				let Some(sent) = self.answering[&peer].tx.get(&key) else {
 					continue;
 				};
-				if sent.offer().is_some()
-					|| self
-						.rx
-						.get(&key)
-						.and_then(|routes| routes.get(&peer))
-						.is_some_and(|heard| heard.state != State::Held && self.is_child(id, peer, &heard.offer.path))
-				{
+				if sent.offer().is_some() || self.child_pending(id, peer, &key.1) {
 					continue;
 				}
 				let src = sent.src.clone();
@@ -2332,8 +3036,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// Send a final withdrawing batch before retiring a sent offer.
 	fn end_sent(&mut self, peer: N, key: &RouteId, batch: Option<Presented<A>>) {
+		// A floor the neighbour already holds there, with no change, tells it nothing.
+		let held = (self.answering[&peer].tx.get(key))
+			.and_then(Sent::active)
+			.and_then(|sent| sent.view.floors.get(&key.1).copied());
 		if let Some((_, changes, floor)) = batch
-			&& (!changes.is_empty() || floor.is_some())
+			&& (!changes.is_empty() || floor.is_some() && floor != held)
 		{
 			self.out.push(Out::Batch {
 				to: peer,
@@ -2360,7 +3068,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let (from, view) = self.covering_view(id, prefix).expect("a route that meets");
 		let floor = view.floors.get(&from).copied();
 		let sent = self.answering[&peer].tx.get(&(id, prefix.clone()));
-		let fresh = sent.is_none_or(|sent| sent.active().is_none_or(|sent| sent.from != from));
+		let fresh = sent.is_none_or(|sent| sent.active().is_none_or(|sent| sent.from.as_ref() != Some(&from)));
 		let changes: Vec<(Path, Option<A>)> = match (sent, dirty.all || fresh) {
 			(Some(sent), false) => {
 				let old = &sent.active().expect("offered").view;
@@ -2499,6 +3207,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			route_changed |= self.routes.get(&key) != live.as_ref();
 			match live {
 				Some(route) => {
+					self.held_until.remove(&key);
 					self.routes.insert(key, route);
 				}
 				None => {
@@ -2515,13 +3224,18 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		// Reflected sources must move before old holds ask whether a child answered.
 		let mut sources = Vec::new();
 		for (&peer, answer) in self.answering.iter().filter(|_| route_changed) {
-			let watch = &answer.watch;
+			let prefixes = &answer.prefixes;
 			for &id in &ids {
 				let region = scope.as_ref().filter(|(key, _)| *key == id).map(|(_, prefix)| prefix);
-				for prefix in self.stream(id, peer, watch, region) {
+				for prefix in self.stream(id, peer, prefixes, region) {
 					let key = (id, prefix);
 					if let Some(sent) = answer.tx.get(&key).filter(|sent| sent.offer().is_some()) {
-						sources.push((peer, key.clone(), sent.src.clone(), self.src(id, &key.1, peer, watch)));
+						sources.push((
+							peer,
+							key.clone(),
+							sent.src.clone(),
+							self.src(id, &key.1, peer, prefixes),
+						));
 					}
 				}
 			}
@@ -2543,9 +3257,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		for key in held {
 			match self.retain(&key) {
 				Some(route) => {
+					self.held_until
+						.entry(key.clone())
+						.or_insert(self.now.saturating_add(HOLD));
 					self.routes.insert(key, route);
 				}
 				None => {
+					self.held_until.remove(&key);
 					self.routes.remove(&key);
 				}
 			}
@@ -2572,7 +3290,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						.chain(
 							self.routes
 								.contains_key(&key)
-								.then(|| meet(prefix, &self.watch))
+								.then(|| self.watched(prefix))
+								.into_iter()
 								.flatten(),
 						)
 				})
@@ -2722,6 +3441,26 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			self.answering.keys().all(|peer| self.sessions.contains_key(peer)),
 			"answering sessions"
 		);
+		for (peer, answer) in &self.answering {
+			assert!(
+				!answer.prefixes.is_empty() && !nested(&answer.prefixes),
+				"{peer:?}'s prefixes"
+			);
+			for (_, prefix) in answer.tx.keys() {
+				assert!(
+					within_any(prefix, &answer.prefixes),
+					"sent {prefix:?} outside {peer:?}'s prefixes"
+				);
+			}
+		}
+		for (peer, session) in &self.sessions {
+			for (_, prefix) in &session.heard {
+				assert!(
+					ancestors(prefix).any(|above| session.asked.contains_key(&above)),
+					"heard {prefix:?} outside what {peer:?} was asked"
+				);
+			}
+		}
 		assert!(
 			self.routes
 				.values()
@@ -2786,14 +3525,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				Some((claim.clone(), at))
 			}
 			(Some((above, wider)), _) => Some((above.clone(), wider)),
-			(None, at) => Some((claim.clone(), at.or_else(|| self.views.get(&(id, claim.clone())))?)),
+			(None, Some(at)) => Some((claim.clone(), at)),
+			// Nothing certified: the narrowest view covering the claim shows what it carries.
+			(None, None) => self.covering_view(id, claim),
 		}
 	}
 
 	/// How the reader sees `claim` of `id` now, from its [`Self::source`], available
 	/// while a live route covers it.
 	fn shown_now(&self, id: Id, claim: &Path) -> Option<Shown<A>> {
-		if !within(claim, &self.watch) {
+		if !within_any(claim, &self.watch) {
 			return None;
 		}
 		let available = || ancestors(claim).any(|above| self.routes.get(&(id, above)).is_some_and(Route::live));
@@ -2844,9 +3585,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.collect();
 		#[cfg(test)]
 		self.check_shown(id, dirty, &now);
-		// A claim no longer shown under a route that still covers it was withdrawn.
-		let routes = &self.routes;
-		let ended = |claim: &Path| ancestors(claim).any(|above| routes.contains_key(&(id, above)));
+		// A claim no longer shown under a route that still covers it was withdrawn, if a
+		// floor certified that; one that only stopped being carried goes offline.
+		let (routes, views, origin) = (&self.routes, &self.views, self.origins.contains_key(&id));
+		let ended = |claim: &Path| {
+			ancestors(claim).any(|above| routes.contains_key(&(id, above)))
+				&& (origin
+					|| of(views, id)
+						.any(|((_, prefix), view)| within(claim, prefix) && view.floors.contains_key(prefix)))
+		};
 		for (claim, shown) in &now {
 			match shown {
 				Some(_) => {
@@ -2862,7 +3609,8 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 		}
-		self.reader.apply(id, &self.watch, now, ended);
+		let watch = &self.watch;
+		self.reader.apply(id, |claim| within_any(claim, watch), now, ended);
 		#[cfg(test)]
 		assert_eq!(
 			self.shown_claims

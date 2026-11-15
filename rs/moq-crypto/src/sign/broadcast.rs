@@ -14,14 +14,14 @@ use crate::sign::{PublicKey, SecretKey};
 /// The publishing side of a signed broadcast.
 ///
 /// Signs under the instance of the route that serves it, which a route mints fresh, so a restart
-/// never signs a sequence an earlier instance already signed.
+/// never signs a group start an earlier instance already signed.
 #[derive(Clone)]
 pub struct Producer {
 	inner: moq_net::broadcast::Producer,
 	key: SecretKey,
 	path: moq_net::Path,
 	instance: moq_net::Instance,
-	// Each track's lowest unsigned sequence, kept across the track's replacements.
+	// Each track's lowest unsigned group start, kept across the track's replacements.
 	next: Arc<Mutex<HashMap<String, Arc<Mutex<u64>>>>>,
 }
 
@@ -60,7 +60,7 @@ impl Producer {
 		let next = Arc::clone(
 			self.next
 				.lock()
-				.expect("signed sequences")
+				.expect("signed starts")
 				.entry(name.to_owned())
 				.or_default(),
 		);
