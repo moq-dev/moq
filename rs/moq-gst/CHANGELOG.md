@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.27](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.26...moq-gst-v0.4.27) - 2026-11-15
+
+### Other
+
+- updated the following local packages: moq-tokio
+
 ## [0.4.26](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.25...moq-gst-v0.4.26) - 2026-11-11
 
 ### Other
