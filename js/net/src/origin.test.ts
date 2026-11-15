@@ -2124,6 +2124,17 @@ test("a lite-07 and a lite-06 route beneath one prefix rank by each one's own ke
 	expect(compareRouteCandidates(job, pool, legacy, claim)).toBeGreaterThan(0);
 });
 
+// A claim exactly at the path outranks one that only covers it, whatever else ranks them, as the
+// Rust router's `above` does: the covering one is cheaper and ahead on priority here.
+test("a claim nearer its path outranks a broader one", () => {
+	const path = Path.from("src/derived");
+	const exact = { ...WireRoute.default, instance: Instance.parse("a"), node: 1n, cost: 9n, priority: -5 };
+	const broad = { ...WireRoute.default, instance: Instance.parse("b"), node: 2n, cost: 1n, above: 1n };
+	expect(compareRouteCandidates(path, path, exact, broad)).toBeLessThan(0);
+	expect(compareRouteCandidates(path, path, broad, exact)).toBeGreaterThan(0);
+	expect(compareRouteCandidates(path, path, exact, { ...broad, above: 0n })).toBeGreaterThan(0);
+});
+
 // A lite-07 claim ranks as the one hop to its origin node in what the origin announces, as in
 // what a request resolves: tied with a newer one-hop route, the newer wins both.
 test("an announcement counts a lite-07 claim as one hop", async () => {

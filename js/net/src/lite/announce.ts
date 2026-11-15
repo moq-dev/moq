@@ -134,6 +134,8 @@ export type AnnounceBroadcast =
 			epoch?: bigint;
 			hops?: Hop[];
 			cost?: Cost;
+			/** Lite07+: how many segments broader the claim is than the path it is presented at. */
+			above?: bigint;
 			pathBase?: Base;
 	  }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
@@ -143,11 +145,11 @@ export type AnnounceBroadcast =
 	| { status: "endedId"; id: bigint }
 	/** Lite06+: atomically replace the metadata of the announcement with this id: its cost, and
 	 * before lite-07 its hop chain. The id stays live. */
-	| { status: "update"; id: bigint; hops?: Hop[]; cost?: Cost }
+	| { status: "update"; id: bigint; hops?: Hop[]; cost?: Cost; above?: bigint }
 	/** Lite07+: the announcement with this id now serves the instance and epoch given. Another
 	 * instance is another stream, so what the receiver resolved under its prefix is stale; a
 	 * higher epoch of the same one continues it. The id stays live. */
-	| { status: "restart"; id: bigint; instance?: Instance.Valid; epoch?: bigint; cost?: Cost }
+	| { status: "restart"; id: bigint; instance?: Instance.Valid; epoch?: bigint; cost?: Cost; above?: bigint }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
 	| { status: "skipped" }
 	/** Lite07+: the initial set has been delivered. */
@@ -300,6 +302,18 @@ async function encodeRouteCost(w: Writer, version: Version, cost: Cost | undefin
 	if (version === Version.DRAFT_06) await w.u62(MAX_COST);
 }
 
+// Lite07 follows the cost with how many segments broader the claim is than the path it is
+// presented at, so a claim exactly at a path outranks every broader one shown there. Older versions
+// carry no such field, and a claim they forward is never broader than its own path.
+async function encodeAbove(w: Writer, version: Version, above: bigint | undefined) {
+	if (hasRoutes(version)) await w.u62(above ?? 0n);
+	else if (above) throw new Error("a claim above its path needs lite-07");
+}
+
+async function decodeAbove(r: Reader, version: Version): Promise<bigint | undefined> {
+	return hasRoutes(version) ? await r.u62() : undefined;
+}
+
 async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | undefined> {
 	if (!hasRouteCost(version)) return undefined;
 	const cost = saturate(await r.u62());
@@ -422,7 +436,8 @@ async function decodeStart(r: Reader, version: Version): Promise<AnnounceBroadca
 	if (!path) return refused("path");
 	const { instance, epoch } = await decodeForwarded(r);
 	if (instance === undefined) return refused("instance");
-	return { status: "active", ...path, route, instance, epoch, cost: await decodeRouteCost(r, version) };
+	const cost = await decodeRouteCost(r, version);
+	return { status: "active", ...path, route, instance, epoch, cost, above: await decodeAbove(r, version) };
 }
 
 /** A lite-07 ANNOUNCE_RESTART: its Announce ID, instance and epoch, and cost. */
@@ -433,7 +448,8 @@ async function decodeRestart(r: Reader, version: Version): Promise<AnnounceBroad
 		await r.readAll();
 		return { status: "refused", message: { kind: "change", id }, reason: "instance" };
 	}
-	return { status: "restart", id, instance, epoch, cost: await decodeRouteCost(r, version) };
+	const cost = await decodeRouteCost(r, version);
+	return { status: "restart", id, instance, epoch, cost, above: await decodeAbove(r, version) };
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).
@@ -450,6 +466,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeAbove(w, version, msg.above);
 			break;
 		case "endedId":
 			await w.u62(msg.id);
@@ -458,11 +475,13 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await w.u62(msg.id);
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeAbove(w, version, msg.above);
 			break;
 		case "restart":
 			await w.u62(msg.id);
 			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeAbove(w, version, msg.above);
 			break;
 		case "routeStart":
 			if (msg.node === 0n) throw new Error("Node ID 0 names no origin");
@@ -556,7 +575,8 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ANNOUNCE_UPDATE: {
 			const id = await r.u62();
 			const hops = await decodeChain(r, version);
-			return { status: "update", id, ...hops, cost: await decodeRouteCost(r, version) };
+			const cost = await decodeRouteCost(r, version);
+			return { status: "update", id, ...hops, cost, above: await decodeAbove(r, version) };
 		}
 		case ANNOUNCE_RESTART: {
 			// Unknown before lite-07: skipped below like any other.

@@ -25,6 +25,7 @@ fn start(path: &'static str) -> Msg {
 		epoch: 0,
 		hops: Default::default(),
 		cost: Cost::new(0),
+		above: 0,
 	}
 }
 
@@ -389,6 +390,7 @@ async fn pending_changes_net_out() {
 			id: 0,
 			hops: Default::default(),
 			cost: Cost::new(cost),
+			above: 0,
 		};
 		routed.receive(&prefix, update, &mut decoder).unwrap();
 	}
@@ -398,6 +400,7 @@ async fn pending_changes_net_out() {
 		id: 0,
 		hops: Default::default(),
 		cost: Cost::new(0),
+		above: 0,
 	};
 	routed.receive(&prefix, back, &mut decoder).unwrap();
 	assert_eq!(pending(&routed), 0, "an update back to the committed claim");
@@ -438,6 +441,7 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 		epoch: 1,
 		cost: Cost::new(0),
 		hops: Default::default(),
+		above: 0,
 	};
 	// Each batch the edge would send for node 7: the paths it changes, whether each is
 	// present, and its floor.
@@ -480,6 +484,7 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 		id: 1,
 		hops: Default::default(),
 		cost: Cost::new(5),
+		above: 0,
 	};
 	for msg in [update, floor(2)] {
 		routed.receive(&prefix, msg, &mut decoder).unwrap();
@@ -592,6 +597,7 @@ async fn a_refused_route_still_follows_a_dead() {
 		epoch: 0,
 		hops: Default::default(),
 		cost: Cost::new(0),
+		above: 0,
 	};
 	let closed = |session, gone, moved| {
 		Msg::Dead(Dead::Closed {

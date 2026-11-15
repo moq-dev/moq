@@ -57,11 +57,25 @@ pub(crate) struct Claim {
 	/// older version: sent only to a peer this node proxies for, so a node that does
 	/// not proxy is never transit. Always unset on a claim off the wire.
 	pub learned: bool,
+	/// How many segments the claim's own prefix lacks of the path it is announced at: 0
+	/// for a claim exactly there, more for a broader claim presented at a narrower
+	/// request (see [`super::Item::lowered`]). A claim exactly at a path outranks every
+	/// broader one there.
+	pub above: u64,
 	/// The hop chain of a claim learned over moq-lite-06 or moq-transport, which
 	/// lite-07 carries as the Lite-06 Chain; empty for a native claim. A relay
 	/// translating the claim back to lite-06 extends it, so a node the claim reaches
 	/// again recognizes its own hop and drops it. Deleted with lite-06 compatibility.
 	pub chain: crate::Hops,
+}
+
+impl super::Item for Claim {
+	fn lowered(&self, by: u64) -> Self {
+		Self {
+			above: self.above.saturating_add(by),
+			..self.clone()
+		}
+	}
 }
 
 /// A shown claim as the origin serves it through one live route.

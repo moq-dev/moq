@@ -563,6 +563,11 @@ pub(crate) struct Lane {
 	/// The lowest priority of a link on the route's path, which ranks the route where a
 	/// session's preference does, or `None` for a route the route layer did not select.
 	pub priority: Option<i8>,
+	/// How many segments the claim's own prefix lacks of the path it entered at, which a
+	/// stream presenting a broader claim at a narrower request reports: 0 for a claim
+	/// exactly there. The longer prefix wins, so a claim at 0 outranks every broader one.
+	/// A path has at most 32 segments, so a byte holds it, and the route entry stays small.
+	pub above: u8,
 }
 
 impl Default for Lane {
@@ -573,6 +578,7 @@ impl Default for Lane {
 			selected: true,
 			path: std::sync::Arc::new([]),
 			priority: None,
+			above: 0,
 		}
 	}
 }
@@ -885,6 +891,10 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		None => (entry.is_anonymous(), entry.hops.len()),
 	};
 	(
+		// The most specific claim wins outright, however far its route's cost or state
+		// ranks below a broader one: a stream presents a broader claim at the request,
+		// where it ties an exact claim for the path.
+		entry.lane.above,
 		entry.draining || !entry.available,
 		// The route layer's selected route ahead of its alternates.
 		!entry.lane.selected,
@@ -912,6 +922,7 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (
+	u8,
 	bool,
 	bool,
 	Reverse<Preference>,
@@ -3996,6 +4007,7 @@ impl OwnClaims {
 			upstream: false,
 			// Only a route published here has crossed no node.
 			learned: !route.hops.is_empty(),
+			above: 0,
 			// Kept, so the claim that crossed into lite-07 here is still recognized
 			// wherever it leaves for lite-06 again.
 			chain: route.hops,

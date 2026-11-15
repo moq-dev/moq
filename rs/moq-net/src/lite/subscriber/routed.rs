@@ -284,10 +284,11 @@ impl Routed {
 				epoch,
 				hops,
 				cost,
+				above,
 			} => {
 				let path = decoder.start(Some(suffix))?;
 				let path = self.claim_path(prefix, path);
-				let claim = claim(instance, epoch, cost, hops)?;
+				let claim = claim(instance, epoch, cost, hops, self.above(path.as_ref(), above)?)?;
 				let id = decoder.last();
 				// Fields valid alone can still resolve, or join the prefix, past the path limits.
 				if path.is_none() {
@@ -297,11 +298,14 @@ impl Routed {
 				}
 				self.start(id, route, path, Some(claim))?;
 			}
-			Msg::Update { id, hops, cost } => {
+			Msg::Update { id, hops, cost, above } => {
+				let claim = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
+				let above = self.above(claim.path.as_ref(), above)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				// An update names none of what a refused claim lacks.
 				if let Some(held) = &mut claim.claim {
 					held.cost = cost.value();
+					held.above = above;
 					held.chain = hops;
 					let change = claim.claim.clone();
 					self.pending(id, change)?;
@@ -313,8 +317,10 @@ impl Routed {
 				epoch,
 				cost,
 				hops,
+				above,
 			} => {
-				let fresh = self::claim(instance, epoch, cost, hops)?;
+				let named = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
+				let fresh = self::claim(instance, epoch, cost, hops, self.above(named.path.as_ref(), above)?)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim = Some(fresh);
 				if let Some(route) = self.routes.get_mut(&claim.route) {
@@ -613,6 +619,19 @@ impl Routed {
 		self.stream.batch(node, prefix, changes, revision);
 	}
 
+	/// The peer's `above` for the claim at `path`, if it can be: only a claim presented at
+	/// the requested prefix itself can be broader than its path, and by no more than the
+	/// path has segments.
+	fn above(&self, path: Option<&Path>, above: u64) -> Result<u64, Error> {
+		let Some(path) = path else {
+			return Ok(above);
+		};
+		match above == 0 || *path == self.prefix && above <= path.parts().count() as u64 {
+			true => Ok(above),
+			false => Err(Error::ProtocolViolation),
+		}
+	}
+
 	/// The absolute path of a claim under the stream's prefix, or `None` when it, or the
 	/// suffix it joins, is no path this node can hold.
 	fn claim_path(&self, prefix: &Path, suffix: Option<Path>) -> Option<Path> {
@@ -832,6 +851,8 @@ impl Routed {
 			selected: served.selected,
 			path: served.path.clone(),
 			priority: Some(served.priority),
+			// A receiver refuses a claim above its path by more than the path's segments.
+			above: u8::try_from(served.claim.above).unwrap_or(u8::MAX),
 		};
 		// A route held without a path to it is unavailable: it serves only as a last
 		// resort, like a draining one, at its real cost.
@@ -956,6 +977,7 @@ fn claim(
 	epoch: u64,
 	cost: crate::origin::Cost,
 	chain: crate::Hops,
+	above: u64,
 ) -> Result<node::Claim, Error> {
 	Ok(node::Claim {
 		instance: instance.ok_or(Error::ProtocolViolation)?,
@@ -963,6 +985,7 @@ fn claim(
 		cost: cost.value(),
 		upstream: false,
 		learned: false,
+		above,
 		chain,
 	})
 }

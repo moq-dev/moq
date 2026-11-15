@@ -794,6 +794,7 @@ impl Answer {
 					epoch: claim.epoch,
 					hops: chain,
 					cost: origin::Cost::new(claim.cost),
+					above: claim.above,
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(claim_key, (announce, claim));
@@ -802,7 +803,8 @@ impl Answer {
 			(Some((announce, held)), Some(claim)) => {
 				let announce = *announce;
 				let restart = held.instance != claim.instance || held.epoch != claim.epoch;
-				let update = held.cost != claim.cost || (self.chains && held.chain != claim.chain);
+				let update =
+					held.cost != claim.cost || held.above != claim.above || (self.chains && held.chain != claim.chain);
 				if restart {
 					tracing::debug!(route = %claim_key.1, "restart");
 					stream.writer.buffer(&Msg::Restart {
@@ -811,12 +813,14 @@ impl Answer {
 						epoch: claim.epoch,
 						cost: origin::Cost::new(claim.cost),
 						hops: chain,
+						above: claim.above,
 					})?;
 				} else if update {
 					stream.writer.buffer(&Msg::Update {
 						id: announce,
 						hops: chain,
 						cost: origin::Cost::new(claim.cost),
+						above: claim.above,
 					})?;
 				}
 				self.live.insert(claim_key, (announce, claim));

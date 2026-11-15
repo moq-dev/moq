@@ -444,6 +444,7 @@ When the stream is closed, the subscriber MUST assume that every route and claim
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except in a claim, which it refuses instead (see [Refused Content](#refused-content)), including one resolved by [Compression](#announce-compression).
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher answering a request stream presents, per route, each claim inside the requested prefix and only the most specific claim at or above it, at the requested prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
+A claim presented above its own prefix carries how many segments broader it is than the requested prefix, its Above, so the subscriber can tell it from a claim exactly at the prefix.
 When that most specific covering claim changes, such as when it is withdrawn and a broader one still covers the request, the publisher moves the presented claim to the new one with an ANNOUNCE_UPDATE or ANNOUNCE_RESTART, and ends it only when no claim of the route covers the requested prefix.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK and messages.
 
@@ -606,7 +607,7 @@ It MAY also close it when the stream falls behind repeated failures of the route
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request naming no origin node names a path, and the receiver resolves it against the claims covering that path whose route it selected and is usable.
 
-Only the most specific covering claims are consulted: those with the longest prefix.
+Only the most specific covering claims are consulted: those with the longest prefix, or for a claim presented above the requested prefix, the lowest Above (see [ANNOUNCE_START](#announce-start)).
 A claim strictly inside another's paths always ranks above it, and a broadcast's exact path is the most specific claim there is, so a concrete announcement shadows every broader claim covering it at any cost; claims over the same prefix form one tier.
 The winning tier is the whole answer: a refusal from it never falls through to a less specific claim, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
 Nor is a refusal retried at another claim of the same prefix.
@@ -1469,6 +1470,7 @@ ANNOUNCE_START Message {
   Minted (8),
   Epoch (i),
   Announce Cost (i),
+  Above (i),
   [Lite-06 Chain (..)],
 }
 ~~~
@@ -1507,6 +1509,13 @@ Only an ANNOUNCE_RESTART changes the Instance or the Epoch; ANNOUNCE_UPDATE neve
 **Announce Cost**:
 The origin's price for this prefix, in the units of the [Cost Parameter](#cost-parameter): 0 for content it already produces, larger for a standby that starts work on demand.
 A relay forwards it unchanged; the cost of a path through the claim is the Announce Cost plus the route's metric.
+
+**Above**:
+How many segments the claim's prefix is broader than the requested prefix it is presented at (see [Announce](#announce)): 0 for a claim at or inside the requested prefix.
+A publisher presenting a claim above the requested prefix at the requested prefix itself writes the distance between them, plus the Above the claim already had where it learned it from a stream of a broader request.
+A claim with a non-zero Above sits at the requested prefix, and is no more above it than the prefix has segments; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
+A receiver ranks the claims of a request by their Above first, lowest first (see [Resolution](#resolution)), so the claim of a broadcast at exactly the requested path outranks a broader claim presented there, however the two compare otherwise.
+A relay forwards a claim's Above unchanged, adding the distance when it presents the claim at a narrower prefix than the one it learned it at.
 
 **Lite-06 Chain**:
 The moq-lite-06 Hop ID list a claim arrived with where its origin node learned it over moq-lite-06, encoded as that list: a count, then each Hop ID.
@@ -1549,6 +1558,7 @@ ANNOUNCE_UPDATE Message {
   Message Length (i)
   Announce ID (i),
   Announce Cost (i),
+  Above (i),
   [Lite-06 Chain (..)],
 }
 ~~~
@@ -1559,7 +1569,7 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 **Announce ID**:
 As defined for [ANNOUNCE_END](#announce-end).
 
-**Announce Cost** and **Lite-06 Chain**:
+**Announce Cost**, **Above**, and **Lite-06 Chain**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's; an absent chain replaces it with none.
 
 
@@ -1578,6 +1588,7 @@ ANNOUNCE_RESTART Message {
   Minted (8),
   Epoch (i),
   Announce Cost (i),
+  Above (i),
   [Lite-06 Chain (..)],
 }
 ~~~
@@ -1588,7 +1599,7 @@ Set to 0x3 to indicate an ANNOUNCE_RESTART message.
 **Announce ID**:
 As defined for [ANNOUNCE_END](#announce-end).
 
-**Instance**, **Minted**, **Epoch**, **Announce Cost**, and **Lite-06 Chain**:
+**Instance**, **Minted**, **Epoch**, **Announce Cost**, **Above**, and **Lite-06 Chain**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
 
 ## ANNOUNCE_FLOOR {#announce-floor}
@@ -2561,6 +2572,7 @@ An application-specific payload.
 - Added `Node ID` and `Route Depth` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected and the prefix of the route it follows, which every later hop follows.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
 - The Cost parameter must be at least 1.
+- Added `Above` to ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART: how many segments broader than the requested prefix a presented claim is. A claim presented at the requested prefix from above otherwise looked exactly like a claim at the prefix, so a broadcast nested under another's path could lose to the broader claim covering it, depending on the order a relay listed them in. Receivers rank the lowest Above first.
 - Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the route's drain and priority, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 - Added warm routes: WARM_START (0xC), WARM_UPDATE (0xD), and WARM_END (0xE) on the Announce Stream, and `Warm` on SUBSCRIBE and SUBSCRIBE_UPDATE. A relay MAY pull each broadcast through a neighbor that offers a copy of it, carrying the copy's Hops from its carrier, its Warm Cost, its drain, and its priority. A carrier offers its copy whatever it pulls and joins only a lower-ranked carrier's; a relay with no reader offers each neighbor its best source that avoids it, pulls it only while that is what it offered each relay it serves, and follows its route when a neighbor following its own pulls through it. The offers settle as a path vector does, and the pulls are then free of loops.

@@ -41,6 +41,30 @@ pub(crate) use rtt::LinkRtt;
 pub(crate) use view::ancestors;
 pub(crate) use view::{View, within};
 
+/// A claim's attributes as the router carries them down a stream.
+pub(crate) trait Item: Clone + Eq + fmt::Debug {
+	/// The claim as a stream answering a prefix `by` segments below the claim's own shows
+	/// it. A claim covering the prefix is presented at the prefix itself, which hides how
+	/// much broader it is, so the claim keeps that distance: a claim exactly at a prefix
+	/// outranks every broader one there. `lowered(0)` is the claim itself.
+	fn lowered(&self, by: u64) -> Self;
+}
+
+/// Opaque attributes that cover nothing broader than their own path.
+#[cfg(any(test, feature = "fuzz"))]
+macro_rules! opaque {
+	($($ty:ty),*) => {$(
+		impl Item for $ty {
+			fn lowered(&self, _: u64) -> Self {
+				self.clone()
+			}
+		}
+	)*};
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+opaque!((), u8, u32, u64);
+
 /// An opaque routing identity, declared by an origin or derived by [`Scope`].
 pub(crate) type Id = u64;
 

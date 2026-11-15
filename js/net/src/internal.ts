@@ -111,6 +111,8 @@ export function presented(
 	prefix: Path.Valid,
 	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
+	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
+	keepAbove = false,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
@@ -126,7 +128,13 @@ export function presented(
 			);
 			if (!snap) continue;
 			rootLen = covered.length;
-			out.set(Path.empty(), snap);
+			const above = BigInt(Path.parts(prefix).length - Path.parts(covered).length);
+			out.set(
+				Path.empty(),
+				keepAbove && above > 0n
+					? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
+					: snap,
+			);
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
@@ -1525,7 +1533,9 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
  * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const order = compareRoutes(a, b) || routeHops(a) - routeHops(b);
+	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
+	const above = (a.above ?? 0n) - (b.above ?? 0n);
+	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
 	const [a1, a2] = routeKey(path, a);
 	const [b1, b2] = routeKey(path, b);

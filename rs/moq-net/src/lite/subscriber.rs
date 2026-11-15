@@ -874,7 +874,7 @@ impl Subscriber {
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 				run.announced.withdraw(&path);
 			}
-			lite::AnnounceBroadcast::Update { id, hops, cost } => {
+			lite::AnnounceBroadcast::Update { id, hops, cost, .. } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
 				let suffix = run.decoder.get(id)?;
@@ -10045,6 +10045,7 @@ mod tests {
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
+			above: 0,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -10121,6 +10122,7 @@ mod tests {
 				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 				hops: crate::Hops::new(),
 				cost: crate::origin::Cost::default(),
+				above: 0,
 			}
 			.encode(w, version)
 			.unwrap()
@@ -10348,6 +10350,7 @@ mod tests {
 				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 				hops: crate::Hops::new(),
 				cost: crate::origin::Cost::default(),
+				above: 0,
 			}
 			.encode(w, Version::Lite07)
 			.unwrap()
@@ -10551,6 +10554,7 @@ mod tests {
 		w.bool(false);
 		w.varint(0).unwrap();
 		w.varint(0).unwrap();
+		w.varint(0).unwrap();
 		body
 	}
 
@@ -10586,7 +10590,7 @@ mod tests {
 		push(&[
 			&raw(ANNOUNCE_START, start_body(b"x//y", b"i")),
 			&raw(ANNOUNCE_START, start_body(b"d", b"")),
-			&raw(ANNOUNCE_UPDATE, vec![0, 0, 0]),
+			&raw(ANNOUNCE_UPDATE, vec![0, 0, 0, 0]),
 			&claim_on(0, "c"),
 			&floor(0, Some(1)),
 		]);
@@ -10605,11 +10609,12 @@ mod tests {
 				epoch: 1,
 				cost: Default::default(),
 				hops: Default::default(),
+				above: 0,
 			}
 			.encode(w, Version::Lite07)
 			.unwrap()
 		};
-		push(&[&raw(ANNOUNCE_UPDATE, vec![3, 5]), &floor(0, Some(2))]);
+		push(&[&raw(ANNOUNCE_UPDATE, vec![3, 5, 0]), &floor(0, Some(2))]);
 		poll(&mut prefix);
 		cursor.assert_next_wait();
 		push(&[&restart, &floor(0, Some(3))]);
@@ -10617,7 +10622,7 @@ mod tests {
 		cursor.assert_next_active("a");
 
 		// A restart to an empty instance is refused like the update was.
-		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0]), &floor(0, Some(4))]);
+		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0, 0]), &floor(0, Some(4))]);
 		poll(&mut prefix);
 		cursor.assert_next_offline("a");
 		assert_eq!(refusals(&registry), 4);
@@ -10686,7 +10691,11 @@ mod tests {
 				refused_offers(&[5])[0].1.clone(),
 				ROUTE_UPDATE,
 			),
-			("a refused change of an unknown claim", vec![9, 0, 0], ANNOUNCE_UPDATE),
+			(
+				"a refused change of an unknown claim",
+				vec![9, 0, 0, 0],
+				ANNOUNCE_UPDATE,
+			),
 			(
 				"a refused claim under an unknown route",
 				{
@@ -10794,6 +10803,7 @@ mod tests {
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
+			above: 0,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {

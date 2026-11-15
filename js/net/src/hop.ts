@@ -197,6 +197,12 @@ export interface WireRoute {
 	 * priority of a link no one set. Local, as `node` is.
 	 */
 	readonly priority?: number;
+	/**
+	 * How many segments broader the lite-07 claim is than the path it is presented at: a claim
+	 * exactly at a path outranks every broader one shown there, before anything else. Unset ranks
+	 * as 0. Local, as `node` is.
+	 */
+	readonly above?: bigint;
 	/** See {@link RouteInfo.rtt}. */
 	readonly rtt?: Duration;
 }
@@ -223,6 +229,7 @@ export const WireRoute = {
 			node: route.node,
 			depth: route.depth,
 			priority: route.priority,
+			above: route.above,
 			rtt: route.rtt,
 		};
 	},
@@ -259,6 +266,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.node === b.node &&
 		a.depth === b.depth &&
 		(a.priority ?? 0) === (b.priority ?? 0) &&
+		(a.above ?? 0n) === (b.above ?? 0n) &&
 		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
