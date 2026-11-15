@@ -12,8 +12,9 @@ transport implements for good.
   asks `poll_acked` at each stream's current offset instead.
 - `delivered()` and `poll_delivered()` are gone. Egress stats
   (`stats::Delivery`, driven from `coding::writer`) bill a frame's bytes once
-  `poll_acked` reports an offset past them as delivered. They bill the bytes the
-  stream took when it reports `Unsupported`, and stop billing once it errors.
+  `poll_acked` reports an offset past them as delivered. When it reports
+  `Unsupported`, they bill the bytes the stream accepted from the writer, as the
+  writer's fallback does today. They stop billing once it errors.
 - Egress over QUIC stays acknowledgment-based: moq-tokio's and moq-uring's
   `quic::web` adapters implement `poll_acked` over their drivers before the
   stats move, or QUIC egress silently falls back to bytes taken.
@@ -29,9 +30,11 @@ Found by the pre-cut feature review
 
 Decided 2026-11-15 (maintainer): qmux keeps reporting `Acked::Unsupported`
 (writing into TCP is not delivery, as decided 2026-10-22 in
-[quic-ack-hook](/quest/m3/quic-ack-hook.md)), so qmux egress bills the bytes
-the link took, the same number `delivered()` reports for it today. Rejected:
-giving the hook qmux's "the link took it" meaning.
+[quic-ack-hook](/quest/m3/quic-ack-hook.md)), so qmux egress falls back to the
+bytes taken. That is the count the stream accepted from the writer, not what
+qmux's `delivered()` reports today (what the link took). The two differ only
+while the link is blocked and holds accepted bytes. Rejected: giving the hook
+qmux's "the link took it" meaning.
 
 Guidance:
 
