@@ -162,8 +162,9 @@ impl Stream {
 	///
 	/// The lease owns the bytes and holds no lock, but they keep their connection flow control
 	/// credit until read through the lease as a [`Buf`] and then [`Lease::release`]d; bytes not
-	/// read are leased again next time. Stream credit still advances, so a stream window smaller
-	/// than a message keeps the message flowing.
+	/// read are leased again next time. Stream credit returns as bytes are read through a lease,
+	/// so a reader that stops reading holds at most its stream window of unread bytes, and one
+	/// waiting for a message larger than the window gets room for the message.
 	///
 	/// When the peer has spent the connection window and no reader can make progress, the
 	/// stream ranked lowest by [`Self::set_priority`] is evicted: its buffered bytes and their
