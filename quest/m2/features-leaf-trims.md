@@ -30,6 +30,9 @@ pass, 2026-11-14), against the `# Features` rules in `rs/AGENTS.md`: none of
 these is a vendor integration or a system dependency, so each only trims
 compile time or gates logic out of the default test run.
 
+Decided 2026-11-14 (maintainer, /quest-complete): ✅ keep this quest in m2
+(rejected: drop it).
+
 moq-video's `v4l2` stays a feature rather than always compiling, like `vaapi`
 and `nvidia`: each is one vendor's hardware path, and a consumer such as
 demo/carla's bridge builds one vendor alone. As a default, the moq-cli

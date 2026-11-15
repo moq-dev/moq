@@ -48,22 +48,16 @@ Breaking for anyone who names a removed feature in a manifest: Cargo errors on
 an unknown feature. The PR's Impact section says to delete those names from
 `features = [...]` and `--features`; nothing replaces them.
 
-Recommended: compile io_uring on Linux too (2026-11-14). It is pure Rust (the
-`io-uring` crate, no liburing), already selected at runtime by
+Decided 2026-11-14 (maintainer, /quest-complete): ✅ keep this quest in m2
+(rejected: drop it), and ✅ compile moq-relay's io_uring runtime into every
+Linux build (rejected: keep `io-uring` as an opt-in feature). It is pure Rust
+(the `io-uring` crate, no liburing), already selected at runtime by
 `--runtime-io-uring`, and moq-relay already carries most of what `_uring`
-adds. See Waiting.
+adds.
 
 Update `doc/bin/relay` and `doc/bin/cli.md` wherever they tell a source
 builder to pass one of these features, and `bench/run.sh`'s and
 `.oss-scanner/Dockerfile`'s `--features moq-relay/io-uring`.
-
-## Waiting
-
-- Maintainer: compile moq-relay's io_uring runtime into every Linux build
-  (recommended: yes, it is pure Rust and runtime-selected, and the feature only
-  trims build time), or keep `io-uring` as the one opt-in feature left in
-  moq-relay because the runtime is younger than the tokio path. Check: this
-  quest's Plan records the answer.
 
 ## Related
 

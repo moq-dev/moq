@@ -12,7 +12,10 @@ away.
 ## Plan
 
 Found by the [Cargo feature review](/quest/m3/release/feature-flags.md) (first
-pass, 2026-11-14). The features exist so "production builds do not pull in the
+pass, 2026-11-14). Decided 2026-11-14 (maintainer, /quest-complete): ✅ keep
+this quest in m2 (rejected: drop it).
+
+The features exist so "production builds do not pull in the
 qlog crate and its serde_json encoder". Measured with `cargo tree -e normal`,
 `qlog` adds one crate to moq-relay (`qlog` itself; serde, serde_json, and
 serde_with are already there) and 16 to moq-quic alone. It costs about 30 `cfg`
