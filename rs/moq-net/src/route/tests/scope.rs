@@ -11,7 +11,6 @@ fn offered(via: Id, session: u64) -> path::Reach {
 		priority: i8::MAX,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	})
 }
 
@@ -346,7 +345,6 @@ fn drain_news_is_linear_in_neighbours() {
 				priority: i8::MAX,
 				metric: 1,
 				down_only: false,
-				rtt: None,
 			};
 			router.route(up, 7, prefix.clone(), Some(path::Reach::Finite(offer)));
 			router.batch(up, 7, prefix, vec![(p(&format!("live/{i}/x")), Some(1))], Some(1));
@@ -377,7 +375,7 @@ fn drain_news_is_linear_in_neighbours() {
 			"a repeat visits each neighbour at most once: {repeated}"
 		);
 		let before = router.work();
-		router.rtt(idle, Some(Duration::from_millis(5)));
+		router.disconnect([idle], Instant::ZERO);
 		(drained, repeated, router.work() - before)
 	};
 	let costs: Vec<(usize, usize, usize)> = [8, 16, 32].into_iter().map(cost).collect();
@@ -1199,7 +1197,6 @@ fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		router.dead(
 			1,

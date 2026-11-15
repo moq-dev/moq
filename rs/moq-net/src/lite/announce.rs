@@ -276,10 +276,8 @@ fn decode_warm_start(r: &mut Decoder<'_>) -> Content<(Path, Instance, Warm)> {
 
 /// Route Offer flag: an upstream link is on the path, so the route is down-only.
 const DOWN_ONLY: u8 = 0x1;
-/// Route Offer flag: an RTT follows.
-const RTT: u8 = 0x2;
 /// Route Offer flag: a node on the path sent GOAWAY.
-const DRAINING: u8 = 0x4;
+const DRAINING: u8 = 0x2;
 
 /// News on DEAD about the routes the sender offered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,8 +310,7 @@ pub(crate) struct Unusable {
 	pub reason: Refusal,
 }
 
-/// Encode a Route Offer: the path, then flags, priority, metric, and RTT in
-/// milliseconds. No node offers an empty path or one past the hop limit, nor names Node
+/// Encode a Route Offer: the path, then flags, priority, and metric. No node offers an empty path or one past the hop limit, nor names Node
 /// ID 0 in one.
 fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 	if offer.path.is_empty() || offer.path.len() > route::MAX_HOPS || offer.path.iter().any(|hop| hop.node == 0) {
@@ -324,14 +321,9 @@ fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 		w.varint(hop.node)?;
 		w.varint(hop.session)?;
 	}
-	// A sum past the field's range, which only a peer's absurd value reaches, is unknown.
-	let rtt = offer.rtt.and_then(|rtt| u64::try_from(rtt.as_millis()).ok());
 	let mut flags = 0;
 	if offer.down_only {
 		flags |= DOWN_ONLY;
-	}
-	if rtt.is_some() {
-		flags |= RTT;
 	}
 	if offer.draining {
 		flags |= DRAINING;
@@ -339,9 +331,6 @@ fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 	w.u8(flags);
 	w.u8(super::priority::to_wire(offer.priority));
 	w.varint(offer.metric)?;
-	if let Some(rtt) = rtt {
-		w.varint(rtt)?;
-	}
 	Ok(())
 }
 
@@ -387,22 +376,17 @@ fn decode_offer(r: &mut Decoder<'_>) -> Result<Heard, DecodeError> {
 		return refuse(r, Refusal::Node);
 	}
 	let flags = r.u8()?;
-	if flags & !(DOWN_ONLY | RTT | DRAINING) != 0 {
+	if flags & !(DOWN_ONLY | DRAINING) != 0 {
 		return refuse(r, Refusal::Flags(flags));
 	}
 	let priority = super::priority::from_wire(r.u8()?);
 	let metric = r.varint()?;
-	let rtt = match flags & RTT {
-		0 => None,
-		_ => Some(std::time::Duration::from_millis(r.varint()?)),
-	};
 	Ok(Ok(Offer {
 		path,
 		draining: flags & DRAINING != 0,
 		priority,
 		metric,
 		down_only: flags & DOWN_ONLY != 0,
-		rtt,
 	}))
 }
 
@@ -2154,7 +2138,6 @@ mod tests {
 			priority: 0,
 			metric,
 			down_only,
-			rtt: None,
 		}
 	}
 
@@ -2202,17 +2185,13 @@ mod tests {
 				node: 0x7a40,
 				suffix: Path::empty(),
 				offer: Offer {
-					rtt: Some(std::time::Duration::ZERO),
 					priority: i8::MAX,
 					..offer(&[(5, 0), (route::MAX, 7), (9, 2)], 0, false)
 				},
 			},
 			AnnounceBroadcast::RouteUpdate {
 				id: 1,
-				offer: Offer {
-					rtt: Some(std::time::Duration::from_millis(u64::MAX)),
-					..offer(&long, 3, true)
-				},
+				offer: offer(&long, 3, true),
 			},
 			AnnounceBroadcast::RouteHold { id: 3 },
 			AnnounceBroadcast::RouteEnd { id: 0 },
@@ -2264,22 +2243,6 @@ mod tests {
 		// Type, length, Route ID, the one hop's count, node, and session, flags, then the
 		// priority byte.
 		assert_eq!(buf[7], 0x7f);
-	}
-
-	/// A peer's largest RTT plus a link goes past the field: it is forwarded as
-	/// unknown, never an error that would end the stream.
-	#[test]
-	fn an_rtt_past_the_field_is_unknown() {
-		let msg = |rtt| AnnounceBroadcast::RouteUpdate {
-			id: 1,
-			offer: Offer {
-				rtt,
-				..offer(&[(1, 0)], 3, false)
-			},
-		};
-		let past = std::time::Duration::from_millis(u64::MAX).checked_add(std::time::Duration::from_millis(1));
-		assert!(past.is_some());
-		assert_eq!(broadcast_round_trip(&msg(past), Version::Lite07), msg(None));
 	}
 
 	/// A floor is a marker: the Route ID and the revision plus one, 0 when it certifies
@@ -2510,11 +2473,7 @@ mod tests {
 			// No hops at all, and fewer than it counts.
 			start(1, Box::new(path(0, 0, 0, 1))),
 			start(1, Box::new(path(0, 3, 1, 1))),
-			// An RTT flag without its field, and a byte past a usable offer.
-			forge(ROUTE_UPDATE, |w| {
-				w.varint(0u64).unwrap();
-				path(RTT, 1, 1, 1)(w);
-			}),
+			// A byte past a usable offer.
 			forge(ROUTE_UPDATE, |w| {
 				w.varint(0u64).unwrap();
 				path(0, 1, 1, 1)(w);

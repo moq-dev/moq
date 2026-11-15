@@ -55,9 +55,8 @@ public typealias Datagram = MoqFFI.MoqDatagram
 /// Names one continuous stream at a path: `Instance.parse(text:)` names one, only a session mints
 /// one, and `==` also compares `isMinted()`, so pin a reported stream with the instance, not its text.
 public typealias Instance = MoqFFI.MoqInstance
-/// The read-only facts on a received route: the `Instance` of the stream it serves,
-/// relay hop ids (oldest first), its static production and link cost, lower wins, and its
-/// informational `rtt` to the origin node.
+/// The read-only facts on a received route: the `Instance` of the stream it serves, its static
+/// production and link cost, lower wins, and whether a usable path reaches it.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.

@@ -83,7 +83,6 @@ import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
-import { LinkRtt } from "./link_rtt.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -1093,55 +1092,6 @@ export class Subscriber {
 		let synced = false;
 		// Set once the stream lets go of its routes, which then show nothing anew.
 		let closing = false;
-		// This link's min RTT, read once a second while the peer has a route, as Rust's
-		// `Routed::sample`: no route, no timer, and a pause restarts the window.
-		let link = new LinkRtt();
-		let linkRtt: Duration | undefined;
-		let sampler: AbortController | undefined;
-		// The running sampler's first read, settled once it landed or the sampler stopped.
-		let firstRead = Promise.resolve();
-		// Returns whether it started a sampler.
-		const sample = (): boolean => {
-			if (routes.size === 0 && sampler) {
-				sampler.abort();
-				sampler = undefined;
-				link = new LinkRtt();
-				linkRtt = undefined;
-			} else if (routes.size > 0 && !sampler) {
-				const ctrl = new AbortController();
-				sampler = ctrl;
-				const first = Promise.withResolvers<void>();
-				firstRead = first.promise;
-				void readLink(ctrl.signal, link, first.resolve);
-				return true;
-			}
-			return false;
-		};
-		const readLink = async (signal: AbortSignal, window: LinkRtt, read: () => void) => {
-			try {
-				while (!signal.aborted && window.reading) {
-					const rtt = (await transportStats(this.#quic)).rtt;
-					if (signal.aborted || closing || announced.closed.peek() !== undefined) return;
-					// A transport reporting 0 has not measured one.
-					const now = window.read(rtt?.isZero() ? undefined : rtt);
-					if (now !== linkRtt) {
-						linkRtt = now;
-						// RTT never selects a route, so the consume cache keeps its picks: only the
-						// reported routes change, each path once.
-						const paths = new Set<Path.Valid>();
-						for (const wire of routes.values()) for (const path of wire.view.claims.keys()) paths.add(path);
-						for (const path of paths) refresh(path, false);
-					}
-					read();
-					await sleep(LinkRtt.INTERVAL, { signal });
-				}
-			} catch {
-				// Aborted: the routes went or the stream ended.
-			} finally {
-				read();
-			}
-		};
-
 		const route = (id: bigint): Route => {
 			const found = routes.get(id);
 			if (!found) throw new ProtocolViolation(`unknown route ${id}`);
@@ -1187,11 +1137,6 @@ export class Subscriber {
 					priority: Math.min(0, wire.offer.priority),
 					draining: wire.offer.draining || wire.drain || undefined,
 					available: !wire.held,
-					// The relay's sum plus this link's own, unknown while either is.
-					rtt:
-						wire.offer.rtt !== undefined && linkRtt !== undefined
-							? linkRtt.checkedAdd(Duration.millis(Number(wire.offer.rtt)))
-							: undefined,
 				}),
 			);
 
@@ -1286,7 +1231,7 @@ export class Subscriber {
 
 		// The peer started a route to `node` with the next Route ID, covering the requested prefix
 		// joined with `suffix`, along `offer`, or along `path` when this node refuses the offer.
-		const startRoute = async (
+		const startRoute = (
 			node: bigint,
 			suffix: Path.Valid | undefined,
 			offer: Offer | undefined,
@@ -1325,15 +1270,9 @@ export class Subscriber {
 				owner: {},
 			};
 			routes.set(id, wire);
-			const started = sample();
 			if (named_ !== undefined) named.set(named_, id);
 			// A refused route's floors stay its own, as Rust's node never holds the route.
 			if (joined(wire)) this.#floors.join(node, wire.carrier);
-			// The link's first read lands before the route's first claims show, as Rust
-			// reads the link before it serves them: a listing reports a path's route when
-			// it turns present and not again for an RTT, so a read landing after would
-			// never reach it.
-			if (started) await race([firstRead, announced.closed]);
 		};
 
 		// The peer let go of the route and every claim under it: offline, not withdrawn.
@@ -1343,7 +1282,6 @@ export class Subscriber {
 				claims.delete(id);
 			}
 			routes.delete(wire.id);
-			sample();
 			const named_ = key(wire.node, wire.prefix);
 			if (named_ !== undefined && named.get(named_) === wire.id) named.delete(named_);
 			// Unindexed first: leaving its floors reshows another carrier at once, which
@@ -1517,7 +1455,7 @@ export class Subscriber {
 
 				switch (msg.status) {
 					case "routeStart":
-						await startRoute(msg.node, msg.suffix, msg.offer, msg.offer.path);
+						startRoute(msg.node, msg.suffix, msg.offer, msg.offer.path);
 						break;
 					case "routeUpdate":
 						move(route(msg.id), msg.offer);
@@ -1635,7 +1573,6 @@ export class Subscriber {
 		} finally {
 			stopDrain?.();
 			closing = true;
-			sampler?.abort();
 			for (const wire of routes.values()) {
 				this.#floors.leave(wire.node, wire.carrier);
 				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);

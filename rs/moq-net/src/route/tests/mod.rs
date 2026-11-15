@@ -14,7 +14,6 @@ mod handoff;
 mod interest;
 mod residual;
 mod routing;
-mod rtt;
 mod scope;
 mod search;
 
@@ -115,7 +114,6 @@ pub(super) fn along(hops: &[(Id, u64)], metric: Metric) -> path::Offer {
 		priority: i8::MAX,
 		metric,
 		down_only: false,
-		rtt: None,
 	}
 }
 
@@ -515,13 +513,6 @@ impl Sim {
 
 	pub fn collect(&mut self, node: Node, id: Id) {
 		self.nodes[node].collect(id);
-		self.flush();
-	}
-
-	/// `node` measures its link to `peer` at `ms`, or nothing.
-	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
-		let rtt = ms.map(Duration::from_millis);
-		self.nodes[node].rtt(peer, rtt);
 		self.flush();
 	}
 
