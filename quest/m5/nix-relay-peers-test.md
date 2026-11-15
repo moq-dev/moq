@@ -21,8 +21,8 @@ Moved to m5 2026-11-12 (maintainer, /quest-audit): no consumer; parked rather th
 
 - Add an eval check beside `nix/runner/config-test.nix`, wired into
   `flake.nix`'s `checks` (`:750` at 4bf501b535): `null` sets no `MOQ_CLUSTER_CONNECT`, one
-  and two URLs join with commas, `[ ]` fails the type check, and a leaf
-  without peers trips the assertion at `:216`.
+  and two URLs join with commas, `[ ]` fails the type check, and a relay with
+  `rootUrl` but no `certFile` or `tokenFile` raises the missing-credential warning.
 - A VM test (root plus two leaves) only if it stays cheap in CI; otherwise
   leave it out and say so.
 

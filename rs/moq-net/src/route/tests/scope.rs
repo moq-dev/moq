@@ -11,7 +11,6 @@ fn offered(via: Id, session: u64) -> path::Reach {
 		priority: i8::MAX,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	})
 }
 
@@ -301,9 +300,9 @@ fn teardown_is_linear_in_prefixes_held() {
 
 /// A relay sends each of its downstream neighbours one route through a leaving
 /// node, each over its own session of that node. Hearing the node drain, hearing it
-/// again from another upstream, and any later update that changes no route each cost
-/// work linear in the neighbours: a scan of the node's sessions for each neighbour,
-/// or a repeat that revisits every route sent through the node, would be quadratic.
+/// again from another upstream, and then closing an idle session each cost work
+/// linear in the neighbours: a scan of the node's sessions for each neighbour, or a
+/// repeat that revisits every route sent through the node, would be quadratic.
 /// The `cost`s sweep both axes at once, since there is a session per neighbour.
 #[test]
 fn drain_news_is_linear_in_neighbours() {
@@ -346,7 +345,6 @@ fn drain_news_is_linear_in_neighbours() {
 				priority: i8::MAX,
 				metric: 1,
 				down_only: false,
-				rtt: None,
 			};
 			router.route(up, 7, prefix.clone(), Some(path::Reach::Finite(offer)));
 			router.batch(up, 7, prefix, vec![(p(&format!("live/{i}/x")), Some(1))], Some(1));
@@ -377,7 +375,7 @@ fn drain_news_is_linear_in_neighbours() {
 			"a repeat visits each neighbour at most once: {repeated}"
 		);
 		let before = router.work();
-		router.rtt(idle, Some(Duration::from_millis(5)));
+		router.disconnect([idle], Instant::ZERO);
 		(drained, repeated, router.work() - before)
 	};
 	let costs: Vec<(usize, usize, usize)> = [8, 16, 32].into_iter().map(cost).collect();
@@ -385,7 +383,7 @@ fn drain_news_is_linear_in_neighbours() {
 		// Quadratic work would quadruple.
 		assert!(pair[1].0 <= 5 * pair[0].0 / 2, "hearing the drain: {costs:?}");
 		assert!(pair[1].1 <= 5 * pair[0].1 / 2, "hearing it again: {costs:?}");
-		assert!(pair[1].2 <= 5 * pair[0].2 / 2, "an idle update: {costs:?}");
+		assert!(pair[1].2 <= 5 * pair[0].2 / 2, "closing an idle session: {costs:?}");
 	}
 }
 
@@ -1199,7 +1197,6 @@ fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		router.dead(
 			1,

@@ -107,16 +107,6 @@ in
     };
 
     cluster = {
-      mode = lib.mkOption {
-        type = lib.types.enum [
-          "root"
-          "leaf"
-          "none"
-        ];
-        default = "none";
-        description = "Cluster mode";
-      };
-
       rootUrl = lib.mkOption {
         type = lib.types.nullOr (lib.types.nonEmptyListOf lib.types.str);
         default = null;
@@ -124,7 +114,7 @@ in
           "https://root-a.example.com:4443"
           "https://root-b.example.com:4443"
         ];
-        description = "Cluster peer URLs to connect to (for leaf mode); full URLs, since a bare `host:port` is refused";
+        description = "Cluster peer URLs this relay dials; full URLs, since a bare `host:port` is refused";
       };
 
       nodeUrl = lib.mkOption {
@@ -223,10 +213,6 @@ in
         message = "services.moq-relay: set auth.enable or auth.publicPath; a relay admits nobody without one";
       }
       {
-        assertion = cfg.cluster.mode != "leaf" || cfg.cluster.rootUrl != null;
-        message = "services.moq-relay: cluster.mode = \"leaf\" needs cluster.rootUrl; a leaf without one runs standalone";
-      }
-      {
         assertion = cfg.cluster.ca == [ ] || cfg.auth.enable;
         message = "services.moq-relay: cluster.ca needs auth.enable; public rules alone cannot grant a certificate";
       }
@@ -243,12 +229,12 @@ in
     warnings =
       lib.optional
         (
-          cfg.cluster.mode == "leaf"
+          cfg.cluster.rootUrl != null
           && cfg.cluster.certFile == null
           && cfg.cluster.tokenFile == null
           && lib.any (url: builtins.match ".*[?&]jwt=[^&#].*" url == null) (lib.toList cfg.cluster.rootUrl)
         )
-        "services.moq-relay: this leaf dials cluster.rootUrl with no credential, so its root admits it at most as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
+        "services.moq-relay: this relay dials cluster.rootUrl with no credential, so its peer refuses it or admits it only as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
 
     # Create user and group
     users.users.${cfg.user} = {

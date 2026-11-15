@@ -922,7 +922,6 @@ export class Publisher {
 			priority: 127,
 			metric: 0n,
 			downOnly: false,
-			rtt: 0n,
 		});
 		// What the peer decodes for a claim: lite-07 carries its instance, epoch, and cost.
 		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });

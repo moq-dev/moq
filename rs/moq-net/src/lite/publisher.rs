@@ -3829,7 +3829,6 @@ mod announce_test {
 			priority: 0,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		let dead = |moved: std::ops::Range<u64>, more| lite::Dead::Closed {
 			hop: Hop { node: 7, session: 1 },

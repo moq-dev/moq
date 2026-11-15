@@ -10263,7 +10263,6 @@ mod tests {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			};
 			lite::AnnounceBroadcast::RouteStart {
 				node,
