@@ -15,6 +15,7 @@ import {
 	type Offer,
 	ROUTE_MAX,
 	ROUTE_MAX_HOPS,
+	requestFits,
 } from "./announce.ts";
 import { Version } from "./version.ts";
 
@@ -198,13 +199,42 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 	expect(with06.byteLength).toBeLessThan(with05.byteLength);
 });
 
-// Draft07 carries the hidden opt-in; every earlier version decodes as not opted in.
-test("AnnounceRequest carries hidden from draft-07", async () => {
-	for (const hidden of [false, true]) {
-		const msg = new AnnounceRequest(Path.from("room"), UNKNOWN_HOP, hidden);
-		expect((await requestRoundTrip(msg, Version.DRAFT_07)).hidden).toBe(hidden);
-		expect((await requestRoundTrip(msg, Version.DRAFT_06)).hidden).toBe(false);
-	}
+// Lite-07 asks on its Announce Stream: the Prefix IDs to remove, then each prefix to add with
+// its hidden opt-in. The stream-opening request is every earlier version's.
+test("ANNOUNCE_REQUEST edits the requested prefixes on lite-07", async () => {
+	const v = Version.DRAFT_07;
+	const msg: AnnounceBroadcast = {
+		status: "request",
+		remove: [1n, 2n],
+		add: [
+			{ prefix: Path.from("room"), hidden: true },
+			{ prefix: Path.empty(), hidden: false },
+		],
+	};
+	const wire = await bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
+	expect(wire).toEqual(new Uint8Array([16, 12, 2, 1, 2, 2, 4, 0x72, 0x6f, 0x6f, 0x6d, 1, 0, 0]));
+	expect(await roundTrip(msg, v)).toEqual(msg);
+	const empty: AnnounceBroadcast = { status: "request", remove: [], add: [] };
+	expect(await bytes((w) => encodeAnnounceBroadcast(w, empty, v), v)).toEqual(new Uint8Array([16, 2, 0, 0]));
+	await expect(roundTrip(msg, Version.DRAFT_06)).rejects.toThrow();
+	await expect(bytes((w) => new AnnounceRequest(Path.from("room"), UNKNOWN_HOP).encode(w, v), v)).rejects.toThrow();
+
+	// A count the body cannot hold, and a Hidden that is no boolean, are malformed.
+	const decode = (body: number[]) =>
+		decodeAnnounceBroadcast(new Reader(undefined, new Uint8Array([16, body.length, ...body]), v), v);
+	await expect(decode([3, 1, 0])).rejects.toThrow();
+	await expect(decode([0, 1, 0, 2])).rejects.toThrow();
+});
+
+// The requested set is its prefixes as an ANNOUNCE_REQUEST adding them all would carry them,
+// which fits one message.
+test("a requested set fits one message", () => {
+	const v = Version.DRAFT_07;
+	const long = (i: number) => Path.from(`${String(i).padStart(4, "0")}/${"x".repeat(1000)}`);
+	const fits = Array.from({ length: 64 }, (_, i) => long(i));
+	expect(requestFits(fits, v)).toBe(true);
+	expect(requestFits([...fits, long(64), long(65)], v)).toBe(false);
+	expect(requestFits([], v)).toBe(true);
 });
 
 // The draft reserves Hop ID 0 for a responder that was never assigned an id, or that
@@ -389,8 +419,8 @@ test("the route layer round-trips on draft-07", async () => {
 	const cases: [AnnounceBroadcast, number[]][] = [
 		// The path first, the publisher first, then flags, priority (offset by 128), and metric.
 		[
-			{ status: "routeStart", node: 0x1234n, suffix: Path.empty(), offer },
-			[6, 11, 0x92, 0x34, 0, 2, 7, 0, 9, 2, 1, 128, 5],
+			{ status: "routeStart", node: 0x1234n, prefix: 3n, suffix: Path.empty(), offer },
+			[6, 12, 0x92, 0x34, 3, 0, 2, 7, 0, 9, 2, 1, 128, 5],
 		],
 		// Flag 0x2: an RTT follows. Flag 0x4: a node on the path drains.
 		[
@@ -445,19 +475,19 @@ test("the route layer round-trips on draft-07", async () => {
 					hop: { node: 7n, session: 3n },
 					far: 9n,
 					gone: false,
-					more: false,
-					moved: [{ id: 1n, offer: one }],
+					moved: 1n,
 				},
 			},
-			[15, 15, 0, 7, 3, 9, 0, 0, 1, 1, 6, 1, 7, 0, 0, 128, 0],
+			[15, 6, 0, 7, 3, 9, 0, 1],
 		],
-		// More: the next DEAD continues this one's moved routes.
+		// The routes it counts follow as ROUTE_UPDATEs of their own.
+		[{ status: "routeUpdate", id: 1n, offer: one }, [7, 7, 1, 1, 7, 0, 0, 128, 0]],
 		[
 			{
 				status: "dead",
-				dead: { kind: "closed", hop: { node: 7n, session: 3n }, far: 9n, gone: true, more: true, moved: [] },
+				dead: { kind: "closed", hop: { node: 7n, session: 3n }, far: 9n, gone: true, moved: 0n },
 			},
-			[15, 7, 0, 7, 3, 9, 1, 1, 0],
+			[15, 6, 0, 7, 3, 9, 1, 0],
 		],
 		// Revision 4 travels as 5: 0 certifies nothing.
 		[{ status: "floor", id: 1n, revision: 4n }, [9, 2, 1, 5]],
@@ -492,7 +522,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	};
 	const encode = (msg: AnnounceBroadcast) => bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
 	// No node sends an offer it would refuse.
-	await expect(encode({ status: "routeStart", node: 0n, suffix: Path.empty(), offer })).rejects.toThrow();
+	await expect(encode({ status: "routeStart", node: 0n, prefix: 0n, suffix: Path.empty(), offer })).rejects.toThrow();
 	await expect(encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: [] } })).rejects.toThrow();
 	await expect(
 		encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: [{ node: 0n, session: 0n }] } }),
@@ -504,11 +534,10 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 			status: "dead",
 			dead: {
 				kind: "closed",
-				hop: { node: 1n, session: 0n },
+				hop: { node: 0n, session: 0n },
 				far: 2n,
 				gone: false,
-				more: false,
-				moved: [{ id: 0n, offer: { refused: "flags", path: offer.path } }],
+				moved: 0n,
 			},
 		}),
 	).rejects.toThrow();
@@ -526,6 +555,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	const start = (node: bigint, path: bigint[], flags: number) =>
 		forged(6, async (w) => {
 			await w.u62(node);
+			await w.u62(5n);
 			await w.u53(0);
 			await w.u62(BigInt(path.length));
 			for (const hop of path) {
@@ -542,14 +572,14 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	const path = [{ node: 1n, session: 0n }];
 	expect(await decode(await start(0n, [1n], 0))).toEqual({
 		status: "refused",
-		message: { kind: "routeStart", node: 0n, suffix: Path.empty(), path },
+		message: { kind: "routeStart", node: 0n, prefix: 5n, suffix: Path.empty(), path },
 		reason: "node",
 	});
 	expect(await decode(await start(1n, [0n], 0))).toMatchObject({ status: "refused", reason: "node" });
 	// A flag no version defines is refused, and the RTT flag without its field is malformed.
 	expect(await decode(await start(1n, [1n], 8))).toEqual({
 		status: "refused",
-		message: { kind: "routeStart", node: 1n, suffix: Path.empty(), path },
+		message: { kind: "routeStart", node: 1n, prefix: 5n, suffix: Path.empty(), path },
 		reason: "flags",
 	});
 	await expect(decode(await start(1n, [1n], 2))).rejects.toThrow();
@@ -565,43 +595,49 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	// An empty path is the sender's own error: it names itself last.
 	await expect(decode(await start(1n, [], 0))).rejects.toThrow(ProtocolViolation);
 
-	// A DEAD refuses each moved offer on its own, and still reads the next.
+	// A DEAD counts the ROUTE_UPDATEs that follow, each refused on its own.
 	const dead = await forged(15, async (w) => {
 		await w.u62(0n);
 		await w.u62(1n);
 		await w.u62(0n);
 		await w.u62(2n);
 		await w.u8(0);
-		await w.u8(0);
 		await w.u62(2n);
-		for (const flags of [8, 0]) {
-			await w.u62(flags === 8 ? 3n : 4n);
-			await w.u53(6);
+	});
+	expect(await decode(dead)).toEqual({
+		status: "dead",
+		dead: { kind: "closed", hop: { node: 1n, session: 0n }, far: 2n, gone: false, moved: 2n },
+	});
+	const update = (flags: number) =>
+		forged(7, async (w) => {
+			await w.u62(3n);
 			await w.u62(1n);
 			await w.u62(1n);
 			await w.u62(0n);
 			await w.u8(flags);
 			await w.u8(128);
 			await w.u62(0n);
-		}
+		});
+	expect(await decode(await update(8))).toEqual({
+		status: "refused",
+		message: { kind: "routeUpdate", id: 3n, path },
+		reason: "flags",
 	});
-	expect(await decode(dead)).toEqual({
-		status: "dead",
-		dead: {
-			kind: "closed",
-			hop: { node: 1n, session: 0n },
-			far: 2n,
-			gone: false,
-			more: false,
-			moved: [
-				{ id: 3n, offer: { refused: "flags", path } },
-				{
-					id: 4n,
-					offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false, rtt: undefined },
-				},
-			],
-		},
+	expect(await decode(await update(0))).toEqual({
+		status: "routeUpdate",
+		id: 3n,
+		offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false, rtt: undefined },
 	});
+	// A Gone that is no boolean is malformed.
+	const gone = await forged(15, async (w) => {
+		await w.u62(0n);
+		await w.u62(1n);
+		await w.u62(0n);
+		await w.u62(2n);
+		await w.u8(2);
+		await w.u62(0n);
+	});
+	await expect(decode(gone)).rejects.toThrow();
 });
 
 test("AnnounceHistory rejects a base that is not live", () => {
@@ -745,18 +781,23 @@ test("lite06 ignores a legacy cold price and writes its saturation ceiling", asy
 	expect(await r.u62()).toBe(2n ** 62n - 1n);
 });
 
-test("SYNCED is empty and belongs only to lite-07", async () => {
-	expect(
-		await bytes((w) => encodeAnnounceBroadcast(w, { status: "synced" }, Version.DRAFT_07), Version.DRAFT_07),
-	).toEqual(new Uint8Array([4, 0]));
-	expect(await roundTrip({ status: "synced" }, Version.DRAFT_07)).toEqual({ status: "synced" });
-	await expect(roundTrip({ status: "synced" }, Version.DRAFT_06)).rejects.toThrow();
+test("SYNCED names its Prefix ID and belongs only to lite-07", async () => {
+	const synced: AnnounceBroadcast = { status: "synced", prefix: 5n };
+	expect(await bytes((w) => encodeAnnounceBroadcast(w, synced, Version.DRAFT_07), Version.DRAFT_07)).toEqual(
+		new Uint8Array([4, 1, 5]),
+	);
+	expect(await roundTrip(synced, Version.DRAFT_07)).toEqual(synced);
+	await expect(roundTrip(synced, Version.DRAFT_06)).rejects.toThrow();
 });
 
-// Lite-07 drops both: the count for SYNCED, and the Hop ID for the route layer.
-test("ANNOUNCE_OK is empty on lite-07", async () => {
-	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-		const wire = await bytes((w) => new AnnounceOk(toHop(1n), 7).encode(w, version), version);
-		expect(wire).toEqual(new Uint8Array(version === Version.DRAFT_06 ? [2, 1, 7] : [0]));
-	}
+// Lite-07 answers an edit with an empty message on its Announce Stream: SYNCED carries the
+// count's role, and the route layer the Hop ID's.
+test("ANNOUNCE_OK is an empty Announce Stream message on lite-07", async () => {
+	const v = Version.DRAFT_07;
+	const wire = await bytes((w) => new AnnounceOk(toHop(1n), 7).encode(w, Version.DRAFT_06), Version.DRAFT_06);
+	expect(wire).toEqual(new Uint8Array([2, 1, 7]));
+	await expect(bytes((w) => new AnnounceOk(toHop(1n), 7).encode(w, v), v)).rejects.toThrow();
+	expect(await bytes((w) => encodeAnnounceBroadcast(w, { status: "ok" }, v), v)).toEqual(new Uint8Array([17, 0]));
+	expect(await roundTrip({ status: "ok" }, v)).toEqual({ status: "ok" });
+	await expect(roundTrip({ status: "ok" }, Version.DRAFT_06)).rejects.toThrow();
 });

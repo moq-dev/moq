@@ -7,7 +7,6 @@ import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
 import { toHop, WireRoute } from "../src/hop.ts";
 import * as Instance from "../src/instance.ts";
-import { AnnounceRequest } from "../src/lite/announce.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { Subscriber } from "../src/lite/subscriber.ts";
 import { TrackInfo } from "../src/lite/track.ts";
@@ -15,7 +14,7 @@ import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
-import { Stream, Writer } from "../src/stream.ts";
+import { Writer } from "../src/stream.ts";
 import { wireOf } from "../src/wire.ts";
 
 // Keep protocol diagnostics out of the measured CSV on stdout.
@@ -401,21 +400,25 @@ for (const routeCount of routeCounts) {
 		});
 		const senders = Array.from({ length: observerCount }, () => {
 			const pair = createMockTransportPair(ALPN_07_WIP);
-			const publisher = new Publisher(pair.server, Version.DRAFT_07, toHop(1n), origin.consume());
 			const entered = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
-			const stream = new Stream({
-				version: Version.DRAFT_07,
-				readable: new ReadableStream<Uint8Array>(),
-				writable: new WritableStream<Uint8Array>({
-					async write() {
+			// The session's Announce Stream, whose first write stalls.
+			const create = pair.server.createUnidirectionalStream.bind(pair.server);
+			pair.server.createUnidirectionalStream = async (options) => {
+				const writer = (await create(options)).getWriter();
+				return new WritableStream<Uint8Array>({
+					async write(chunk) {
 						entered.resolve();
 						await release.promise;
+						await writer.write(chunk);
 					},
-				}),
-			});
-			const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
-			return { pair, publisher, entered, release, running };
+					close: () => writer.close(),
+					abort: (reason) => writer.abort(reason),
+				}) as Awaited<ReturnType<typeof create>>;
+			};
+			const publisher = new Publisher(pair.server, Version.DRAFT_07, toHop(1n), origin.consume());
+			publisher.request([], [{ prefix: Path.empty(), hidden: false }]);
+			return { pair, publisher, entered, release };
 		});
 		await Promise.all(senders.map((sender) => sender.entered.promise));
 		const start = performance.now();
@@ -430,11 +433,10 @@ for (const routeCount of routeCounts) {
 			`stalled-announce,${routeCount},${observerCount},${(((performance.now() - start) * 1000) / updates).toFixed(1)}`,
 		);
 		await Promise.all(
-			senders.map(async ({ pair, publisher, release, running }) => {
+			senders.map(async ({ pair, publisher, release }) => {
 				const drained = publisher.drain();
 				release.resolve();
 				await drained;
-				await running;
 				publisher.close();
 				pair.client.close();
 				pair.server.close();

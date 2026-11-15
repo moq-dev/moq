@@ -7,7 +7,16 @@ import type { Drain } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
+import {
+	closeError,
+	error,
+	fromClose,
+	fromTransport,
+	ProtocolViolation,
+	StreamCode,
+	Stream as StreamError,
+	sessionCause,
+} from "../error.ts";
 import { type Hop, randomHop, toHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { hooks } from "../internal.ts";
@@ -15,11 +24,12 @@ import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import type { Own } from "../route.ts";
-import { type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { type Reader, Readers, Stream, UnexpectedEnd, Writer } from "../stream.ts";
+import { isDecodeError } from "../util/decode_error.ts";
 import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire, wireOf } from "../wire.ts";
-import { AnnounceRequest } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { LiteAuthWire } from "./auth.ts";
 import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
@@ -139,6 +149,8 @@ export class Connection implements Session {
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
 	#setupSeen = false;
+	// Lite-07: the peer opened its one Announce Stream.
+	#announceSeen = false;
 
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
@@ -265,6 +277,7 @@ export class Connection implements Session {
 		registerWire(this, {
 			consume: (path, instance) => this.#subscriber.consume(path, instance),
 			covers: (node, at, path) => this.#subscriber.covers(node, at, path),
+			coverage: this.#subscriber.coverage,
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,
@@ -305,6 +318,8 @@ export class Connection implements Session {
 		switch (this.#phase.kind) {
 			case "open":
 			case "leaving": {
+				// Leaving finishes our Announce Stream, which asks the peer for nothing more.
+				this.#subscriber.announceSilenced();
 				const done = withTimeout(
 					this.#publisher.drain(),
 					Duration.millis(1000),
@@ -478,7 +493,8 @@ export class Connection implements Session {
 		// opened without negotiating it: a plain error resets the stream and keeps the session.
 		if (typ === StreamId.Session) {
 			throw new ProtocolViolation("duplicate session stream");
-		} else if (typ === StreamId.Announce) {
+		} else if (typ === StreamId.Announce && !hasRoutes(this.#version)) {
+			// Lite-07 asks on its Announce Stream instead, and knows no such stream type.
 			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
@@ -566,6 +582,11 @@ export class Connection implements Session {
 			await this.#subscriber.runGroup(msg, stream);
 		} else if (typ === DataType.Padding && hasPadding(this.#version)) {
 			await stream.discard();
+		} else if (typ === DataType.Announce && hasRoutes(this.#version)) {
+			// Claim the stream before reading it, so two that say nothing yet are duplicates too.
+			if (this.#announceSeen) throw new ProtocolViolation("duplicate Announce Stream");
+			this.#announceSeen = true;
+			await this.#runAnnounce(stream);
 		} else if (typ === DataType.Setup) {
 			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
 			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");
@@ -587,6 +608,30 @@ export class Connection implements Session {
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
+	}
+
+	// Lite-07: everything the peer says about discovery and routing, in order, until it leaves.
+	// The peer may only finish the stream: a reset or a message cut short breaks the session.
+	async #runAnnounce(stream: Reader) {
+		for (;;) {
+			let msg: AnnounceBroadcast | undefined;
+			try {
+				msg = await decodeAnnounceBroadcastMaybe(stream, this.#version);
+			} catch (err: unknown) {
+				if (err instanceof ProtocolViolation) throw err;
+				if (isDecodeError(err) || err instanceof UnexpectedEnd)
+					throw new ProtocolViolation("invalid Announce Stream encoding", { cause: err });
+				if (fromTransport(err) instanceof StreamError)
+					throw new ProtocolViolation("Announce Stream reset", { cause: err });
+				// The session ended under the stream.
+				throw err;
+			}
+			if (!msg) break;
+			await this.#subscriber.announce(msg);
+			if (msg.status === "request") this.#publisher.request(msg.remove, msg.add);
+		}
+		// The peer is leaving: its routes end, and what it asked for is still answered.
+		this.#subscriber.announceFinished();
 	}
 
 	/** Snapshot the transport's counters; see {@link Session.stats}. */
