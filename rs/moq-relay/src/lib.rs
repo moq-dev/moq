@@ -32,6 +32,8 @@ mod relay;
 pub mod runtime;
 pub mod session;
 pub mod shutdown;
+#[cfg(feature = "test-support")]
+pub mod sim;
 pub mod stats;
 #[cfg(feature = "test-support")]
 mod test_support;

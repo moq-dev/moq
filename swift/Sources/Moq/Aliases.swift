@@ -103,7 +103,8 @@ public typealias ServerTls = MoqFFI.MoqServerTls
 /// QUIC transport tuning, such as the peer's inbound stream cap.
 public typealias QuicConfig = MoqFFI.MoqQuicConfig
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control family for a QUIC connection. Build one with `CongestionControl.delay()`,
+/// `.loss()`, or `.none()`; a new algorithm joins as a new constructor.
 public typealias CongestionControl = MoqFFI.MoqCongestionControl
 
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.

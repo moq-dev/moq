@@ -543,7 +543,8 @@ impl RouteInfo {
 
 /// Which of the lite-07 route layer's routes to a publisher a route follows: one per
 /// prefix covering the claim. Only the narrowest live one is primary, which a reader
-/// here follows; a request a peer forwards follows the one it names.
+/// here follows, falling back on a wider one only while none is; a request a peer
+/// forwards follows the one it names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Lane {
 	/// How many segments the route's prefix has, absolute.
@@ -834,10 +835,14 @@ impl<'a> Epochs<'a> {
 }
 
 /// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
-/// Lower wins: first a route that is neither draining (see [`RouteInfo::draining`]) nor
-/// unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
-/// route ranks below every other eligible route and serves only as a last resort. Then the higher link [`Preference`], so metrics from different operators
-/// are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// Lower wins: first the route layer's narrowest route covering the claim, so a wider
+/// lite-07 route ranks below every narrowest one, even a draining or unavailable one, and
+/// serves only while a closing session leaves no narrowest route. Then a route that is
+/// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
+/// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
+/// every other eligible route and serves only as a last resort. Then the route layer's
+/// selected route ahead of its alternates. Then the higher link [`Preference`], so
+/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
@@ -862,6 +867,10 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		None => (entry.is_anonymous(), entry.hops.len()),
 	};
 	(
+		// The route layer's narrowest route ahead of a wider one covering the claim. The
+		// wider one serves only between a closing session taking the narrowest away and the
+		// node promoting the next, so a reader fails over then rather than seeing an end.
+		!entry.lane.primary,
 		entry.draining || !entry.available,
 		// The route layer's selected route ahead of its alternates.
 		!entry.lane.selected,
@@ -889,6 +898,7 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (
+	bool,
 	bool,
 	bool,
 	Reverse<Preference>,
@@ -1559,7 +1569,8 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route, of the route layer's only the primary ones (see [`Lane`]).
+	/// Every route. Of the route layer's, the primary ones rank first (see [`Lane`]), so
+	/// a wider covering route serves only while no narrower one does.
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
@@ -1576,7 +1587,7 @@ pub(crate) enum NodeFilter {
 impl NodeFilter {
 	fn admits(self, node: Option<u64>, lane: &Lane) -> bool {
 		match self {
-			Self::Any => node.is_none() || lane.primary,
+			Self::Any => true,
 			Self::Own => node.is_none(),
 			Self::Route { node: id, depth } => node == Some(id) && lane.depth == depth,
 		}

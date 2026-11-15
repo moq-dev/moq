@@ -39,7 +39,7 @@ missing required CPU feature before starting transport cryptography.
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
-| [moq-crypto](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, and per-frame Ed25519 signatures, so relays forward content they cannot read, forge, retime, or relocate. |
+| [moq-crypto](https://github.com/moq-dev/moq/tree/main/rs/moq-crypto) | Experimental end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, so relays forward content they cannot read; the [e2ee draft](/draft/moq-e2ee) it implements is published. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [kio](/lib/rs/kio) | The async primitives everything polls through, and one clock for time and timers on tokio and a deterministic test simulator. |

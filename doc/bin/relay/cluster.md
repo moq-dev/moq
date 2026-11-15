@@ -355,7 +355,6 @@ services.moq-relay = {
   auth.enable = true;
   tls.certs = [ { chain = "/etc/moq/leaf.pem"; key = "/run/secrets/moq-leaf.key"; } ];
   cluster = {
-    mode = "leaf";
     rootUrl = [ "https://root.example.com:4443" ];
     certFile = "/run/secrets/moq-cluster.pem";
     keyFile = "/run/secrets/moq-cluster.key";

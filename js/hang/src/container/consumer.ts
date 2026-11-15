@@ -58,7 +58,7 @@ export interface ConsumerProps {
 	/**
 	 * How much further than the min delay the start reaches, in milliseconds (default: 0), so a
 	 * decoder that needs that much media before its output is clean starts early enough, such as an
-	 * Opus decoder or the max-delay decoder of an intra-refresh rendition. Pass the catalog
+	 * Opus decoder or an intra-refresh video decoder. Pass the catalog
 	 * rendition's `warmup`. Mirrors Rust's `container::Playout`.
 	 *
 	 * Put the max delay plus the warmup on the subscription, since the publisher skips what falls

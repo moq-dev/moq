@@ -1469,7 +1469,7 @@ impl Cluster {
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::default();
 		origin_config.route_key = Some(match &config.route_key {
-			Some(path) => (&moq_crypto::sign::SecretKey::load_or_generate(path)
+			Some(path) => (&moq_crypto::endpoint::SecretKey::load_or_generate(path)
 				.with_context(|| format!("--cluster-route-key {}", path.display()))?)
 				.into(),
 			None => origin::RouteKey::generate(),

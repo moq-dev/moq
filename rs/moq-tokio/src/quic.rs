@@ -88,8 +88,9 @@ impl std::fmt::Debug for Controller {
 
 /// The congestion control family for a QUIC connection.
 ///
-/// CUBIC is used for loss-based control and BBRv3 for delay-based control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
+/// CUBIC is used for loss-based control and BBR v3 for delay-based control, the default. A new
+/// algorithm joins as a variant named after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -97,7 +98,7 @@ pub enum CongestionControl {
 	/// Loss-based (CUBIC): grows until it drops packets, so the send rate sawtooths.
 	/// Throughput-oriented, and the default on most stacks.
 	Loss,
-	/// Delay-based (BBR): tracks the measured delivery rate and RTT instead of waiting
+	/// Delay-based (BBR v3): tracks the measured delivery rate and RTT instead of waiting
 	/// for loss, which keeps queues short and the send rate steady enough for an encoder
 	/// to track.
 	Delay,

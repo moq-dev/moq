@@ -6,7 +6,8 @@ description: Carry a transport stream through MoQ, demultiplexed or whole, and w
 # MPEG-TS
 
 `moq import ts` reads a transport stream on stdin and `moq export ts` writes one
-to stdout. [SRT](/bin/srt) carries the same import and export over the network.
+to stdout. [SRT](/bin/srt) carries the semantic import and export over the
+network; it has no passthrough mode.
 There are two modes, and they make different promises.
 
 ```bash
@@ -94,7 +95,7 @@ track and continues under a fresh name; the export announces each layout at its
 next PMT `version_number`. A PAT that moves the PMT is followed, and the export
 moves its own PMT behind a new PAT.
 
-The import republishes as a new instance when the source moves onto another
+The import, over stdin or SRT, republishes as a new instance when the source moves onto another
 timeline: the PCR and every stream stepping back, flagged or not, a step more
 than 10 s forward without `discontinuity_indicator`, or a PAT naming another
 `transport_stream_id` or program number. The new stream carries nothing over
@@ -150,11 +151,14 @@ track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 
 An importer joining a live feed waits for what it needs before publishing.
 
-- **Semantic:** the import waits for the PAT, PMT, and a PCR, and holds the
-  catalog until two seconds of PCR have measured a constant mux rate or shown
-  the input to be variable-rate. A subscriber joins at a keyframe, and the
-  export puts a PAT and PMT ahead of it. From there a late exporter writes the
-  same packets as a running one, but for continuity counters.
+- **Semantic:** the import waits for the PAT, PMT, and a PCR, and publishes the
+  catalog with the first media. A constant mux rate follows as a catalog update
+  once two seconds of PCR have measured it; a variable-rate source never records
+  one. An export without `--mux-rate` waits up to those two seconds for the rate
+  before it starts, so a variable-rate source costs it one wait. A subscriber
+  joins at a keyframe, and the export puts a PAT and PMT ahead of it. From
+  there a late exporter writes the same packets as a running one, but for
+  continuity counters.
 - **Passthrough:** nothing is published until the PAT, the clock program's
   PMT, a PCR, and a group start. Bytes before that, and bytes off the 188-byte
   grid, are dropped: the output equals the input over the *admitted interval*,

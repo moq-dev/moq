@@ -201,7 +201,7 @@ class SmokeTest {
         assertNotNull(defaults.timeout)
         assertNull(defaults.quic.congestionControl)
         assertTrue(versions().isNotEmpty())
-        val congestion: CongestionControl = CongestionControl.DELAY
+        val congestion: CongestionControl = CongestionControl.delay()
         assertEquals(congestion, QuicConfig(congestionControl = congestion).congestionControl)
         // Dialing with the reported defaults is the same as dialing with none.
         Client(defaults).close()
