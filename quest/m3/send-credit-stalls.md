@@ -25,9 +25,12 @@ Decided 2026-11-14 (maintainer, /quest-plan):
 Today, a received DATA_BLOCKED is only logged at trace
 (`rs/moq-quic/src/connection/mux/mod.rs`, and `connection/mod.rs` for QUIC).
 `moq-quic`'s `FrameStats.data_blocked` counts the DATA_BLOCKED frames we send,
-and none of it reaches `moq-net`. Count on the sending side, when data is
-queued but connection credit is zero. Don't count received DATA_BLOCKED frames,
-since a peer need not send them. `js/qmux` ignores the blocked frames, and
+and none of it reaches `moq-net`. Count on the sending side: an episode starts
+when a write is blocked and `data_sent` equals `max_data`, the condition that
+queues our DATA_BLOCKED in `connection/streams/send.rs`. A zero write limit from
+our own send window is not a credit stall, and accepting the last credited byte
+starts no episode until a later write blocks. Don't count received DATA_BLOCKED
+frames, since a peer need not send them. `js/qmux` ignores the blocked frames, and
 `js/net`'s WebSocket stats report nothing, so the JS side of this change starts
 from zero.
 
