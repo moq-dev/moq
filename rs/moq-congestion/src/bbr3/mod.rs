@@ -8058,7 +8058,7 @@ mod test {
         sim.ack(20 * MS, [11], false);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
         assert_eq!(sim.bbr.round_count, round);
-        assert_eq!(sim.bbr.ack_phase, AckPhase::ProbeStopping);
+        assert!(sim.bbr.is_bw_probe_stopping);
     }
 
     /// The ACK that reveals a round's first loss opens the loss round without ending it, so the
