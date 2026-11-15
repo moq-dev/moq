@@ -188,10 +188,21 @@ struct Outbox {
 	/// them.
 	withheld: HashMap<RouteId, (Held, Option<Rev>)>,
 	/// What the segments a DEAD closed hold unread: each DEAD, its moved routes, and the
-	/// routes it left the reader holding with changes queued ahead of it. A route the
-	/// DEAD ended is read once and gone, so its changes count against nothing. See
-	/// [`Self::overrun`].
+	/// changes queued ahead of it for routes the reader still holds once everything
+	/// queued is read. A route that ends is read once and gone, so from then on its
+	/// changes count against nothing, whichever DEAD sealed them. See [`Self::overrun`].
 	sealed: usize,
+	/// Each route's entries sealed while it counted in `sealed`, in the order they are read.
+	sealing: HashMap<RouteId, Sealing>,
+}
+
+/// One route's entries that count in [`Outbox::sealed`]: those sealed, those read, and
+/// how many of the first sealed no longer count, since the route ended after.
+#[derive(Default)]
+struct Sealing {
+	sealed: u64,
+	read: u64,
+	void: u64,
 }
 
 /// Route changes queued before the next DEAD.
@@ -223,10 +234,11 @@ struct Pending {
 	/// The claims `batch` starts that the reader did not hold when the entry began.
 	fresh: BTreeSet<Path>,
 	/// A DEAD sealed the entry while the reader still held its route: it counts in
-	/// [`Outbox::sealed`] until read.
+	/// [`Outbox::sealing`] until read.
 	sealed: bool,
 	/// A DEAD sealed the entry while claims of its route were held back, which go after
-	/// the DEAD once confirmed: its floor certifies nothing, since it cannot cover them.
+	/// the DEAD once confirmed: its floor certifies nothing, since it cannot cover them,
+	/// and closes their release instead.
 	uncertified: bool,
 }
 
@@ -416,6 +428,7 @@ impl Outbox {
 				// Its claims end with it.
 				entry.fresh.clear();
 				self.known.remove(&key);
+				self.unseal(&key);
 				self.claims.remove(&key);
 				self.prune(&key);
 			}
@@ -516,6 +529,7 @@ impl Outbox {
 					.collect();
 				for key in ended {
 					self.known.remove(&key);
+					self.unseal(&key);
 					self.claims.remove(&key);
 					self.unwithhold(stream, &key, waiting);
 				}
@@ -526,11 +540,30 @@ impl Outbox {
 		let mut sealed = 1 + moved(&dead);
 		for (key, (_, pending)) in &mut segment.pending {
 			pending.sealed = self.known.contains_key(key);
-			pending.uncertified = self.withheld.contains_key(key);
-			sealed += usize::from(pending.sealed);
+			if pending.sealed {
+				self.sealing.entry(key.clone()).or_default().sealed += 1;
+				sealed += 1;
+			}
+			// Claims held back go after the DEAD, so the floor waits for them: the release
+			// closes them with it.
+			if let Some((_, last)) = self.withheld.get_mut(key) {
+				pending.uncertified = true;
+				if let Some((_, floor)) = &pending.batch {
+					*last = *floor;
+				}
+			}
 		}
 		segment.dead = Some(dead);
 		self.sealed += sealed;
+	}
+
+	/// The reader stops holding the route `key` once everything queued is read, so what a
+	/// DEAD sealed for it no longer counts in [`Self::sealed`].
+	fn unseal(&mut self, key: &RouteId) {
+		if let Some(sealing) = self.sealing.get_mut(key) {
+			self.sealed -= (sealing.sealed - sealing.read.max(sealing.void)) as usize;
+			sealing.void = sealing.sealed;
+		}
 	}
 
 	/// Whether the reader fell behind repeated failures of the routes it holds. Each
@@ -555,7 +588,14 @@ impl Outbox {
 				Some((_, key)) => {
 					let (_, pending) = segment.pending.remove(&key).expect("every queued route is pending");
 					if pending.sealed {
-						self.sealed -= 1;
+						let sealing = self.sealing.get_mut(&key).expect("a sealed entry is counted");
+						sealing.read += 1;
+						if sealing.read > sealing.void {
+							self.sealed -= 1;
+						}
+						if sealing.read == sealing.sealed {
+							self.sealing.remove(&key);
+						}
 					}
 					self.take(key, pending);
 				}

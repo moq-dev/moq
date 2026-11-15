@@ -345,6 +345,20 @@ fn a_reader_behind_repeated_failures_overruns() {
 	let read = std::iter::from_fn(|| outbox.pop()).count() as u64;
 	assert_eq!(read, routes + 1, "each route's start, then the DEAD that ends it");
 	assert_eq!(outbox.sealed, 0, "everything read");
+
+	// The same routes sealed by an earlier DEAD, which leaves them up, then ended by a
+	// later one: what the first sealed stops counting once they end.
+	let mut outbox = Outbox::default();
+	for id in 1..=routes {
+		outbox.route(7, (id, Path::empty()), Some(Reach::Finite(offer(1))), &mut waiting);
+	}
+	outbox.dead(7, Dead::Draining { node: 9 }, &mut waiting);
+	outbox.dead(7, dead(1, true), &mut waiting);
+	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
+	let read = std::iter::from_fn(|| outbox.pop()).count() as u64;
+	assert_eq!(read, routes + 2, "each route's start, then both DEADs");
+	assert_eq!(outbox.sealed, 0, "everything read");
+	assert!(outbox.sealing.is_empty());
 }
 
 /// A claim started and withdrawn before the reader read it leaves nothing queued, so a
@@ -697,8 +711,8 @@ fn an_identity_travels_as_its_own_hop() {
 }
 
 /// A claim held back for confirmation when a DEAD seals its batch goes after the DEAD
-/// once confirmed, so the sealed batch's floor certifies nothing: it cannot cover a
-/// claim read only later.
+/// once confirmed, so the sealed batch's floor certifies nothing, since it cannot cover
+/// a claim read only later, and the release closes with that floor instead.
 #[test]
 fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
 	let offer = Offer {
@@ -735,5 +749,9 @@ fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
 		(vec![p("live/x")], None),
 		"sealed before live/y was confirmed"
 	);
-	assert_eq!(batches[1].0, [p("live/y")]);
+	assert_eq!(
+		batches[1],
+		(vec![p("live/y")], Some(5)),
+		"the release closes with the sealed floor"
+	);
 }
