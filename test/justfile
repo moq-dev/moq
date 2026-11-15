@@ -101,6 +101,12 @@ wire-compat *args:
 ietf-conformance *args:
     ./ietf-conformance/run.sh "$@"
 
+# moq-quic against pinned QUIC stacks through the QUIC Interop Runner, both roles.
+# Narrow it with e.g. `--peers quic-go --cases handshake --roles server`.
+[positional-arguments]
+quic-interop *args:
+    ./quic-interop/run.sh "$@"
+
 # Installs each client from its public registry, inside test/smoke's own Nix
 # shell rather than this repo's toolchain. The first argument picks a smoke
 # recipe and the rest pass through, e.g. `just test smoke full` or `just test
@@ -114,6 +120,10 @@ smoke *args:
 # Paint a short-side transcode rung from a coded portrait through moq-watch.
 portrait:
     ./portrait/run.sh
+
+# Import a VR180 MP4 with ambisonic Opus and check demo/vr lays it out by the catalog's VR fields.
+vr:
+    ./vr/run.sh
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
@@ -323,8 +333,3 @@ qmux:
     cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
     uv run --no-project python ../sh/js/install.py frozen
     cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test ./test/qmux/interop.test.ts
-
-# Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
-p2p:
-    uv run --no-project python ../sh/js/install.py frozen
-    cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts

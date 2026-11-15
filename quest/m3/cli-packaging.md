@@ -47,7 +47,7 @@ encoder (congestion control retunes through it) and 1080p, which codes as
 1088 rows and relies on the compose rectangle to crop back.
 
 `moq-cli.yml` already passes `linux-features: v4l2` to `release-binary.yml`,
-a no-op until `capture` is on; `release` replaces it there.
+a no-op until `capture` is on; `full` replaces it there.
 
 Add a board hardware note to `doc/bin/cli.md` next to the capture build
 instructions: Raspberry Pi 5 has no video encoder and Jetson Orin Nano ships

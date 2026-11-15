@@ -3,7 +3,7 @@
 ## Goal
 
 Mesh nodes on different networks that cannot dial each other's addresses
-connect directly through the [P2P](/quest/m4/p2p/README.md) line's native
+connect directly through the P2P line's native
 QUIC-over-ICE pairs, with the relay as rendezvous and fallback, and the
 direct link joins the [sparse overlay](/quest/m3/mesh/overlay.md) as an
 ordinary link.
@@ -18,5 +18,4 @@ carries the fallback route.
 
 ## Required
 
-- [Native pairs over ICE and QUIC](/quest/m4/p2p/native-quic.md) - the transport this reuses
 - [Sparse overlay](/quest/m3/mesh/overlay.md) - the overlay the direct link joins

@@ -23,7 +23,7 @@ fn max_message_size(config: &Config) -> usize {
 
 /// The socket settings for a session under `session`: messages and frames held to
 /// [`max_message_size`].
-fn capped(session: &Config) -> tungstenite::protocol::WebSocketConfig {
+pub(crate) fn capped(session: &Config) -> tungstenite::protocol::WebSocketConfig {
 	let max = max_message_size(session);
 	tungstenite::protocol::WebSocketConfig::default()
 		.max_message_size(Some(max))

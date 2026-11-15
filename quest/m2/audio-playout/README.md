@@ -1,4 +1,4 @@
-# Audio playout
+# [M] Audio playout
 
 ## Goal
 
@@ -94,10 +94,16 @@ shared vectors for both players.
 
 Order: the 200 ms snap both ways and the
 [lag rule](https://github.com/moq-dev/moq/pull/8722), a continuous stretch
-that replaced the NetEq controller and splices under it, are done, and the
-[clock step](/quest/m2/audio-playout/clock-step.md) builds on the lag rule.
-[Output latency](/quest/m2/audio-playout/output-latency.md) and the
-[join's hold](/quest/m2/audio-playout/join-hold.md) are independent.
+that replaced the NetEq controller and splices under it, are done, as is the
+shared clock following a lasting path-delay step
+([moq-dev/moq#8749](https://github.com/moq-dev/moq/pull/8749)).
+The estimator stops folding a join's intervals
+([moq-dev/moq#8730](https://github.com/moq-dev/moq/pull/8730)), including
+those behind a backlog the consumers skip unread
+([moq-dev/moq#8761](https://github.com/moq-dev/moq/pull/8761)). Output latency
+landed in [moq-dev/moq#8676](https://github.com/moq-dev/moq/pull/8676): both
+players place audio where it is heard and count the output latency in the
+target.
 The [calibration](/quest/m3/audio-calibrate.md) re-measures every ceiling
 after this epic.
 

@@ -259,16 +259,9 @@ sessions run, or use it as an async context manager. Its first dial announces
 `<prefix>/.client/<id>` and its first accept `<prefix>/.server/<id>`, so grants
 decide whether it may be a client, a server, or both; keep each session id private.
 
-- `await endpoint.dial_tcp(peer)` and `await endpoint.accept_tcp()` use the TCP queue.
-- `await endpoint.dial_track(peer, info=None)` and `await endpoint.accept_track()` use the track queue.
-- An incoming dial has `peer` and `session`; `await incoming.accept()` verifies
-  return routability, and `incoming.reject()` refuses it. Track accepts also take `info=`.
-- `TcpStream` exposes `producer: GroupProducer`, `consumer: GroupConsumer`, `peer`,
-  and `session`. Write frames, finish for FIN, and abort for RST. Await
-  `producer.ready(len(payload))` before each write so a slow reader slows the
-  writer, as TCP backpressure does. A writer that doesn't wait sheds the front
-  of its half, and a reader that falls behind fails with eviction rather than
-  skipping bytes.
+- `await endpoint.dial_track(peer, info=None)` dials a server, and `await endpoint.accept_track()` takes the next dial.
+- An incoming dial has `peer` and `session`; `await incoming.accept(info=None)` verifies
+  return routability, and `incoming.reject()` refuses it.
 - `TrackStream` exposes `producer: TrackProducer`, `consumer: TrackConsumer`, `peer`,
   and `session`. Its subscription starts reliable and ascending, and omitted
   `info` keeps messages without a publisher age limit. Hold or cancel the consumer

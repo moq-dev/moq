@@ -12,11 +12,12 @@
 mod cache;
 mod compare;
 mod handoff;
-mod paths;
+mod interest;
 mod residual;
 mod routing;
 mod rtt;
 mod scope;
+mod search;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -78,6 +79,7 @@ macro_rules! both {
 pub(super) use both;
 
 /// One node's router, under either rule.
+#[derive(Clone)]
 enum Relay {
 	Distance(Router<Node, Item>),
 	Path(path::Router<Node, Item>),
@@ -91,10 +93,11 @@ impl Relay {
 		}
 	}
 
+	/// The distance rule's interest generation.
 	fn interest(&self) -> u32 {
 		match self {
 			Self::Distance(router) => router.interest(),
-			Self::Path(router) => router.interest(),
+			Self::Path(_) => unreachable!("the path rule edits its interest in place"),
 		}
 	}
 
@@ -181,9 +184,37 @@ pub(super) struct Item {
 	pub since: Rev,
 }
 
+/// `peer` replaces everything it asks `router` for with `prefixes`, in one edit.
+pub(super) fn reask<A: Clone + Eq + std::fmt::Debug>(
+	router: &mut path::Router<Node, A>,
+	peer: Node,
+	prefixes: &[&str],
+) -> Result<(), Error> {
+	let new: BTreeSet<Path> = prefixes.iter().map(|prefix| p(prefix)).collect();
+	let old = router.answers(peer);
+	let remove = old.difference(&new).cloned().collect();
+	let add = new.difference(&old).cloned().collect();
+	router.edit(peer, path::Edit { remove, add })
+}
+
 /// A contract path: a trailing `/` (a wildcard in the contract) is dropped.
 pub(super) fn p(path: &str) -> Path {
 	Path::new(path.strip_suffix('/').unwrap_or(path)).expect("a valid path")
+}
+
+/// A path rule offer crossing `hops`, each a node and the session it learned the
+/// route on, the publisher first and the sender last.
+pub(super) fn along(hops: &[(Id, u64)], metric: Metric) -> path::Offer {
+	path::Offer {
+		path: (hops.iter())
+			.map(|&(node, session)| path::Hop { node, session })
+			.collect(),
+		draining: false,
+		priority: i8::MAX,
+		metric,
+		down_only: false,
+		rtt: None,
+	}
 }
 
 /// A scoped publish grant: the credential subject that qualifies identities,
@@ -265,12 +296,11 @@ enum Msg {
 		id: Id,
 		seqno: Seqno,
 	},
-	/// A [`path::Router`] route, on the stream answering interest generation `interest`.
+	/// A [`path::Router`] route.
 	Path {
 		id: Id,
 		prefix: Path,
 		reach: Option<path::Reach>,
-		interest: u32,
 	},
 	/// A [`path::Router`] route's claims.
 	Claims {
@@ -278,11 +308,14 @@ enum Msg {
 		prefix: Path,
 		changes: Vec<(Path, Option<Item>)>,
 		floor: Option<Rev>,
-		interest: u32,
 	},
 	Dead(path::Dead),
+	/// An edit of what the sender asks the receiver for.
+	Ask(path::Edit),
+	/// The marker where the receiver's oldest edit in flight takes effect.
+	Edited,
 	Synced {
-		interest: u32,
+		prefix: Path,
 	},
 }
 
@@ -332,18 +365,20 @@ pub(super) struct Stats {
 	pub delivered: usize,
 }
 
+#[derive(Clone, Debug)]
 struct Change {
 	rev: Rev,
 	claim: Path,
 	item: Option<Item>,
 }
 
+#[derive(Clone)]
 pub(super) struct Sim {
 	rule: Rule,
 	nodes: Vec<Relay>,
 	now: Instant,
 	leaf: Vec<bool>,
-	watch: Vec<Path>,
+	watch: Vec<BTreeSet<Path>>,
 	restarts: Vec<u32>,
 	/// The identity each origin node declared last, to spot a rotation.
 	declared: Vec<Option<Id>>,
@@ -382,7 +417,7 @@ impl Sim {
 				.collect(),
 			now: Instant::ZERO,
 			leaf: vec![false; nodes],
-			watch: vec![Path::empty(); nodes],
+			watch: vec![BTreeSet::from([Path::empty()]); nodes],
 			restarts: vec![0; nodes],
 			declared: vec![None; nodes],
 			links: vec![vec![None; nodes]; nodes],
@@ -471,7 +506,8 @@ impl Sim {
 		}
 	}
 
-	/// Open a session: each side opens a stream asking for its interest.
+	/// Open a session: each side asks for its interest, the path rule by an edit it
+	/// sends itself.
 	pub fn connect(&mut self, a: Node, b: Node) {
 		assert!(!self.connected(a, b), "{a}-{b} already up");
 		self.up.insert(Self::pair(a, b));
@@ -484,37 +520,19 @@ impl Sim {
 			}
 			.expect("a positive cost");
 		}
-		for (x, y) in [(a, b), (b, a)] {
-			self.ask(y, x);
+		if !self.paths() {
+			for (x, y) in [(a, b), (b, a)] {
+				self.ask(y, x);
+			}
 		}
 		self.flush();
 	}
 
-	/// `node` asks `peer` for announcements under its interest. Under the path rule a
-	/// node asks a neighbour publishing under a scoped grant for only what the scope
-	/// covers of it, and for nothing where they are disjoint.
+	/// Under the distance rule, `node` asks `peer` for announcements under its
+	/// interest on a new stream.
 	fn ask(&mut self, node: Node, peer: Node) {
-		let watch = self.watch[node].clone();
-		let scope = self.links[node][peer]
-			.and_then(|side| side.grant)
-			.map(|grant| p(grant.scope));
-		let ask = match scope {
-			None => Some(watch.clone()),
-			Some(scope) if within(&scope, &watch) => Some(scope),
-			Some(scope) if within(&watch, &scope) => Some(watch.clone()),
-			Some(_) => None,
-		};
-		let absent = ask.is_none();
-		match &mut self.nodes[peer] {
-			Relay::Distance(router) => router.peer_interest(node, watch),
-			Relay::Path(router) => router.peer_interest(node, ask),
-		}
-		.unwrap();
-		// No replacement stream will send SYNCED when the grant is disjoint.
-		// The receiver already knows it cancelled this part of its interest.
-		if absent && let Relay::Path(router) = &mut self.nodes[node] {
-			router.synced(peer, router.interest());
-		}
+		let watch = self.watching(node).clone();
+		self.babel_mut(peer).peer_interest(node, watch).unwrap();
 	}
 
 	pub fn connected(&self, a: Node, b: Node) -> bool {
@@ -574,8 +592,10 @@ impl Sim {
 		self.nodes[node] = Relay::new(self.rule, hop(node, restarts), seed);
 		let watch = self.watch[node].clone();
 		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.watch(watch),
-			Relay::Path(router) => router.watch(watch),
+			Relay::Distance(router) => {
+				router.watch(watch.into_iter().next().expect("one prefix"));
+			}
+			Relay::Path(router) => router.watch(watch).expect("no prefix inside another"),
 		};
 		self.flush();
 	}
@@ -676,23 +696,42 @@ impl Sim {
 		self.flush();
 	}
 
-	/// The prefix `node` asks its neighbors for announcements under; each
-	/// neighbor answers on a new stream with a complete snapshot.
+	/// The prefix `node` asks its neighbors for announcements under. Under the
+	/// distance rule each neighbor answers on a new stream with a complete snapshot;
+	/// under the path rule the node edits what it asks each neighbour for.
 	pub fn watch(&mut self, node: Node, prefix: &str) {
-		let prefix = p(prefix);
-		self.watch[node] = prefix.clone();
+		self.watch_all(node, &[prefix]);
+	}
+
+	/// `node`'s interest becomes `prefixes`, none inside another. The distance rule
+	/// takes one prefix.
+	pub fn watch_all(&mut self, node: Node, prefixes: &[&str]) {
+		let set: BTreeSet<Path> = prefixes.iter().map(|prefix| p(prefix)).collect();
+		self.watch[node] = set.clone();
 		match &mut self.nodes[node] {
-			Relay::Distance(router) => router.watch(prefix),
-			Relay::Path(router) => router.watch(prefix),
-		};
-		let peers: Vec<Node> = self.peers(node).collect();
-		for peer in peers {
-			self.ask(node, peer);
+			Relay::Distance(router) => {
+				assert_eq!(set.len(), 1, "the distance rule watches one prefix");
+				router.watch(set.into_iter().next().expect("one prefix"));
+				let peers: Vec<Node> = self.peers(node).collect();
+				for peer in peers {
+					self.ask(node, peer);
+				}
+			}
+			Relay::Path(router) => router.watch(set).expect("no prefix inside another"),
 		}
 		self.flush();
 	}
 
+	/// The one prefix `node` watches.
 	pub fn watching(&self, node: Node) -> &Path {
+		let mut prefixes = self.watch[node].iter();
+		let prefix = prefixes.next().expect("a watched prefix");
+		assert!(prefixes.next().is_none(), "node {node} watches several prefixes");
+		prefix
+	}
+
+	/// Every prefix `node` watches.
+	pub fn interest(&self, node: Node) -> &BTreeSet<Path> {
 		&self.watch[node]
 	}
 
@@ -762,15 +801,7 @@ impl Sim {
 				},
 			) => router.batch(from, id, changes, floor, interest),
 			(Relay::Distance(router), Msg::Request { id, seqno }) => router.request(from, id, seqno),
-			(
-				Relay::Path(router),
-				Msg::Path {
-					id,
-					prefix,
-					reach,
-					interest,
-				},
-			) => router.route(from, id, prefix, reach, interest),
+			(Relay::Path(router), Msg::Path { id, prefix, reach }) => router.route(from, id, prefix, reach),
 			(
 				Relay::Path(router),
 				Msg::Claims {
@@ -778,11 +809,13 @@ impl Sim {
 					prefix,
 					changes,
 					floor,
-					interest,
 				},
-			) => router.batch(from, id, prefix, changes, floor, interest),
+			) => router.batch(from, id, prefix, changes, floor),
 			(Relay::Path(router), Msg::Dead(dead)) => router.dead(from, dead, now),
-			(Relay::Path(router), Msg::Synced { interest }) => router.synced(from, interest),
+			// A router sends only edits it may: a refused one would close the session.
+			(Relay::Path(router), Msg::Ask(edit)) => router.edit(from, edit).expect("a valid edit"),
+			(Relay::Path(router), Msg::Edited) => router.edited(from),
+			(Relay::Path(router), Msg::Synced { prefix }) => router.synced(from, prefix),
 			(_, msg) => panic!("node {to} cannot read {msg:?}"),
 		}
 		self.stats.delivered += 1;
@@ -875,6 +908,10 @@ impl Sim {
 		false
 	}
 
+	pub fn now(&self) -> Instant {
+		self.now
+	}
+
 	/// The next doubt timer on any node.
 	pub fn deadline(&self) -> Option<Instant> {
 		self.nodes.iter().filter_map(Relay::deadline).min()
@@ -884,6 +921,18 @@ impl Sim {
 	pub fn wait(&mut self, elapsed: Duration) {
 		self.now = self.now.saturating_add(elapsed);
 		self.tick();
+	}
+
+	/// Move the clock to `node`'s next doubt or dead-hop timer, unless already past
+	/// it, and fire that node's timers due by then, leaving every other node's.
+	pub fn fire(&mut self, node: Node) {
+		let at = self.nodes[node].deadline().expect("a timer");
+		self.now = self.now.max(at);
+		let now = self.now;
+		if let Relay::Path(router) = &mut self.nodes[node] {
+			router.timeout(now);
+		}
+		self.flush();
 	}
 
 	/// Fire every doubt timer due by now.
@@ -1006,16 +1055,7 @@ impl Sim {
 					}
 					self.stats.route_msgs += 1;
 					self.stats.route_items += 1;
-					let interest = self.nodes[to].interest();
-					(
-						to,
-						Msg::Path {
-							id,
-							prefix,
-							reach,
-							interest,
-						},
-					)
+					(to, Msg::Path { id, prefix, reach })
 				}
 				path::Out::Batch {
 					to,
@@ -1026,7 +1066,6 @@ impl Sim {
 				} => {
 					self.stats.claim_msgs += 1;
 					self.stats.claim_items += changes.len();
-					let interest = self.nodes[to].interest();
 					(
 						to,
 						Msg::Claims {
@@ -1034,7 +1073,6 @@ impl Sim {
 							prefix,
 							changes,
 							floor,
-							interest,
 						},
 					)
 				}
@@ -1046,10 +1084,9 @@ impl Sim {
 					};
 					(to, Msg::Dead(dead))
 				}
-				path::Out::Synced { to } => {
-					let interest = self.nodes[to].interest();
-					(to, Msg::Synced { interest })
-				}
+				path::Out::Ask { to, edit } => (to, Msg::Ask(edit)),
+				path::Out::Edited { to } => (to, Msg::Edited),
+				path::Out::Synced { to, prefix } => (to, Msg::Synced { prefix }),
 			};
 			self.queues.entry((node, to)).or_default().push_back(msg);
 		}

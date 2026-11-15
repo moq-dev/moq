@@ -15,6 +15,21 @@ fn offered(via: Id, session: u64) -> path::Reach {
 	})
 }
 
+/// A path rule offer along `hops`, the publisher first and the sender last.
+fn reach(hops: &[(Id, u64)]) -> path::Reach {
+	path::Reach::Finite(along(hops, 1))
+}
+
+/// Whether `router` uses a live route for publisher 7 through `via`.
+fn live(router: &path::Router<usize, u8>, via: usize) -> bool {
+	matches!(router.route_for(7, &p("")), Some(path::Route::Live { next, .. }) if *next == via)
+}
+
+/// Whether `router` uses no live route for publisher 7.
+fn unrouted(router: &path::Router<usize, u8>) -> bool {
+	router.routes(7).all(|(_, route)| route.offer().is_none())
+}
+
 /// An interest edit keeps the newer withdrawal a narrow view already learned,
 /// even while a wider neighbour has not heard it and the new streams have not arrived.
 #[test]
@@ -22,15 +37,16 @@ fn narrowing_keeps_the_newest_covering_withdrawal() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
 	}
-	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
-	router.batch(1, 7, p(""), vec![(p("a/b/x"), Some(1))], Some(1), 0);
-	router.route(2, 7, p("a"), Some(offered(2, 0)), 0);
-	router.batch(2, 7, p("a"), Vec::new(), Some(3), 0);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/b/x"), Some(1))], Some(1));
+	router.route(2, 7, p("a"), Some(offered(2, 0)));
+	router.batch(2, 7, p("a"), Vec::new(), Some(3));
 	assert!(router.events().iter().any(|event| event.kind == Kind::End));
 	assert!(!router.shown().contains_key(&(7, p("a/b/x"))));
 
-	router.watch(p("a/b"));
+	router.watch(BTreeSet::from([p("a/b")])).unwrap();
 	assert!(!router.shown().contains_key(&(7, p("a/b/x"))));
 	assert!(router.events().iter().all(|event| event.kind != Kind::Start));
 }
@@ -43,6 +59,7 @@ fn repeating_an_expired_dead_hop_does_not_restart_its_timer() {
 	let hop = path::Hop { node: 4, session: 1 };
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
 		let path::Reach::Finite(mut offer) = offered(peer as Id, 0) else {
 			unreachable!()
 		};
@@ -56,7 +73,7 @@ fn repeating_an_expired_dead_hop_does_not_restart_its_timer() {
 			},
 		]
 		.into();
-		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)), 0);
+		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)));
 	}
 	let dead = path::Dead::Closed {
 		hop,
@@ -77,18 +94,19 @@ fn losing_a_wide_route_does_not_forget_a_kept_narrow_view() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
 	}
-	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
-	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
-	router.route(2, 7, p("a"), Some(offered(2, 0)), 0);
-	router.batch(2, 7, p("a"), Vec::new(), Some(3), 0);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	router.route(2, 7, p("a"), Some(offered(2, 0)));
+	router.batch(2, 7, p("a"), Vec::new(), Some(3));
 	let ended = router
 		.events()
 		.into_iter()
 		.find(|event| event.kind == Kind::End)
 		.unwrap();
-	router.route(1, 7, p(""), None, 0);
-	router.batch(2, 7, p("a"), vec![(p("a/x"), Some(2))], Some(4), 0);
+	router.route(1, 7, p(""), None);
+	router.batch(2, 7, p("a"), vec![(p("a/x"), Some(2))], Some(4));
 	let started = router
 		.events()
 		.into_iter()
@@ -101,6 +119,7 @@ fn losing_a_wide_route_does_not_forget_a_kept_narrow_view() {
 fn flapping_a_far_node_does_not_extend_older_dead_hops() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
 	let mut now = Instant::ZERO;
 	let retained = (Doubt::DEFAULT.timer.as_nanos() / HOP.as_nanos()) as usize + 1;
 	for session in 0..3 * retained {
@@ -116,7 +135,7 @@ fn flapping_a_far_node_does_not_extend_older_dead_hops() {
 			path::Hop { node: 1, session: 1 },
 		]
 		.into();
-		router.route(1, 7, p(""), Some(path::Reach::Finite(offer)), 0);
+		router.route(1, 7, p(""), Some(path::Reach::Finite(offer)));
 		router.dead(
 			1,
 			path::Dead::Closed {
@@ -144,6 +163,7 @@ fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	for peer in [1, 2, 3] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
 	}
 	let path::Reach::Finite(mut old) = offered(1, 0) else {
 		unreachable!()
@@ -156,10 +176,18 @@ fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
 	]
 	.into();
 	for prefix in ["", "a"] {
-		router.route(1, 7, p(prefix), Some(path::Reach::Finite(old.clone())), 0);
-		router.batch(1, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1), 0);
+		router.route(1, 7, p(prefix), Some(path::Reach::Finite(old.clone())));
+		router.batch(1, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1));
 	}
-	router.peer_interest(3, Some(p("a"))).unwrap();
+	router
+		.edit(
+			3,
+			path::Edit {
+				remove: Vec::new(),
+				add: vec![p("a")],
+			},
+		)
+		.unwrap();
 	// A child still names this relay, so its newer empty view is not believed yet.
 	let mut child = old;
 	child.path = [
@@ -170,8 +198,8 @@ fn a_dead_repath_withdraws_its_claims_before_ending_the_sent_route() {
 		path::Hop { node: 2, session: 1 },
 	]
 	.into();
-	router.route(2, 7, p("a"), Some(path::Reach::Finite(child)), 0);
-	router.batch(2, 7, p("a"), Vec::new(), Some(3), 0);
+	router.route(2, 7, p("a"), Some(path::Reach::Finite(child)));
+	router.batch(2, 7, p("a"), Vec::new(), Some(3));
 	router.drain();
 	let path::Reach::Finite(offer) = offered(2, 1) else {
 		unreachable!()
@@ -284,12 +312,23 @@ fn drain_news_is_linear_in_neighbours() {
 		let leaving: Id = 500;
 		let idle = 2 * peers;
 		router.connect(idle, 3000, Link::default()).unwrap();
+		router.edited(idle);
 		for i in 0..peers {
 			let (up, down) = (i, peers + i);
 			router.connect(up, 1000 + i as Id, Link::default()).unwrap();
+			router.edited(up);
 			router.connect(down, 2000 + i as Id, Link::default()).unwrap();
+			router.edited(down);
 			let prefix = p(&format!("live/{i}"));
-			router.peer_interest(down, Some(prefix.clone())).unwrap();
+			router
+				.edit(
+					down,
+					path::Edit {
+						remove: Vec::new(),
+						add: vec![prefix.clone()],
+					},
+				)
+				.unwrap();
 			let path = [
 				path::Hop { node: 7, session: 0 },
 				path::Hop {
@@ -309,8 +348,8 @@ fn drain_news_is_linear_in_neighbours() {
 				down_only: false,
 				rtt: None,
 			};
-			router.route(up, 7, prefix.clone(), Some(path::Reach::Finite(offer)), 0);
-			router.batch(up, 7, prefix, vec![(p(&format!("live/{i}/x")), Some(1))], Some(1), 0);
+			router.route(up, 7, prefix.clone(), Some(path::Reach::Finite(offer)));
+			router.batch(up, 7, prefix, vec![(p(&format!("live/{i}/x")), Some(1))], Some(1));
 		}
 		router.drain();
 		let before = router.work();
@@ -351,32 +390,71 @@ fn drain_news_is_linear_in_neighbours() {
 }
 
 /// Adding an unrelated scope visits the same number of routes and reader claims,
-/// regardless of how many sibling scopes this publisher already has.
+/// regardless of how many sibling scopes this publisher already has, even with a
+/// neighbour watching every scope.
 #[test]
 fn following_a_prefix_does_not_revisit_its_siblings() {
-	for claims in [1, 16] {
+	for (claims, watched) in [(1, false), (16, false), (1, true), (16, true)] {
 		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		if watched {
+			router.connect(1000, 1000, Link::default()).unwrap();
+			reask(&mut router, 1000, &[""]).unwrap();
+		}
 		let mut first = None;
 		for scope in 0..64 {
 			let before = router.work();
 			let prefix = p(&format!("live/{scope}"));
 			router.connect(scope, 1, Link::default()).unwrap();
-			router.route(scope, 7, prefix.clone(), Some(offered(1, 0)), 0);
+			router.edited(scope);
+			router.route(scope, 7, prefix.clone(), Some(offered(1, 0)));
 			let changes = (0..claims)
 				.map(|claim| (p(&format!("live/{scope}/{claim}")), Some(1)))
 				.collect();
-			router.batch(scope, 7, prefix, changes, Some(1), 0);
+			router.batch(scope, 7, prefix, changes, Some(1));
 			let work = router.work() - before;
 			let expected = *first.get_or_insert(work);
 			assert_eq!(
 				work, expected,
-				"scope {scope}, {claims} claims: sibling scopes were revisited"
+				"scope {scope}, {claims} claims, watched {watched}: sibling scopes were revisited"
 			);
 			router.events();
 			router.changed();
 			router.drain();
 		}
 	}
+}
+
+/// A driver learns which shown claims changed, by publisher, and each only once.
+#[test]
+fn a_batch_names_the_claims_it_changed() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	let prefix = p("live/");
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, prefix.clone(), Some(offered(1, 0)));
+	let changes = vec![(p("live/a"), Some(1)), (p("live/b"), Some(1))];
+	router.batch(1, 7, prefix, changes, Some(1));
+	assert_eq!(
+		router.changed(),
+		BTreeMap::from([(7, BTreeSet::from([p("live/a"), p("live/b")]))])
+	);
+	assert!(router.changed().is_empty(), "taken once");
+}
+
+/// A claim's own route at a newer floor than the wider route above it is shown from
+/// its own view: the wider one has not caught up with what it knows.
+#[test]
+fn a_narrow_route_at_a_newer_floor_shows_over_a_wider_one() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.connect(2, 2, Link::default()).unwrap();
+	router.edited(2);
+	router.route(1, 7, p("live/"), Some(offered(1, 0)));
+	router.route(2, 7, p("live/a"), Some(offered(2, 0)));
+	router.batch(1, 7, p("live/"), vec![(p("live/a"), Some(1))], Some(1));
+	router.batch(2, 7, p("live/a"), vec![(p("live/a"), Some(2))], Some(2));
+	assert_eq!(router.shown()[&(7, p("live/a"))].item, 2);
 }
 
 const CLAIMS: [&str; 6] = ["a/x", "a/y/", "a/", "b/x", "b/y/z", ""];
@@ -902,12 +980,104 @@ fn holds_never_close_a_cycle() {
 	}
 }
 
+/// An offer through a closed session is dead until its sender says what became of
+/// it, even once the doubt lifts, and a stale repeat of it stays dead: the hop is
+/// remembered while any heard route names it.
+#[test]
+fn an_offer_through_a_dead_hop_stays_dead() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	let through = |peer: usize| reach(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)]);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+		router.route(peer, 7, p(""), Some(through(peer)));
+	}
+	assert!(live(&router, 1));
+	let dead = path::Dead::Closed {
+		hop: path::Hop { node: 4, session: 1 },
+		far: 6,
+		moved: Vec::new(),
+		gone: true,
+	};
+	router.dead(1, dead, Instant::ZERO);
+	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+	assert!(unrouted(&router), "the second peer has not answered");
+	router.route(2, 7, p(""), Some(through(2)));
+	assert!(unrouted(&router), "a stale repeat revived the dead hop");
+}
+
+/// A closed session casts doubt on the node at its far end: no route moves onto a
+/// path through that node until the timer lifts the doubt.
+#[test]
+fn a_closed_sessions_far_node_is_doubted_until_its_timer() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.disconnect([3], Instant::ZERO);
+	router.route(2, 7, p(""), Some(reach(&[(7, 0), (3, 4), (2, 1)])));
+	assert!(unrouted(&router), "moved onto the doubted node");
+	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+	assert!(live(&router, 2));
+}
+
+/// A neighbour's GOAWAY casts doubt on it, so no route moves onto a path through it
+/// until the timer. Then such a path is used, ranked as draining though its sender
+/// never said so, and the drain is forgotten once no heard path names the node.
+#[test]
+fn a_draining_node_is_doubted_then_ranked_then_forgotten() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.goaway(1, Instant::ZERO);
+	router.route(2, 7, p(""), Some(reach(&[(7, 0), (1, 5), (2, 1)])));
+	assert!(unrouted(&router), "moved onto a stale offer through the draining node");
+	router.timeout(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+	assert!(live(&router, 2));
+	let route = router.route_for(7, &p("")).and_then(path::Route::offer);
+	assert!(route.is_some_and(|offer| offer.draining), "{route:?}");
+	router.route(2, 7, p(""), None);
+	assert_eq!(router.retained().draining, 0);
+}
+
+/// A drain from a peer none of whose routes crosses the node, or naming this node,
+/// is ignored: it allocates no drain or doubt.
+#[test]
+fn an_unrelated_drain_is_ignored() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	// A path naming this node, so the drain would be credited if it named another.
+	router.route(1, 7, p("a"), Some(reach(&[(7, 0), (99, 1), (1, 1)])));
+	for node in [5, 99] {
+		router.dead(1, path::Dead::Draining { node }, Instant::ZERO);
+	}
+	assert_eq!((router.retained().draining, router.retained().doubt), (0, 0));
+	assert!(live(&router, 1));
+}
+
+/// A route heard but unusable, such as one whose path names this node, is still held.
+#[test]
+fn an_unusable_heard_route_is_still_held() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p(""), Some(reach(&[(7, 0), (99, 1), (1, 1)])));
+	assert!(router.routes(7).next().is_none());
+	assert!(router.holds(7));
+}
+
 /// A DEAD needs a path from this peer naming both the hop and its far end.
 #[test]
 fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 	for peer in [1, 2] {
 		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
 	}
 	let now = Instant::ZERO;
 	for node in 100..1100 {
@@ -923,8 +1093,8 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 		);
 	}
 	assert_eq!((router.retained().dead, router.retained().doubt), (0, 0));
-	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
-	router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1), 0);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1));
 	let hop = path::Hop { node: 1, session: 1 };
 	// Another peer has no credit for this hop, even though this node heard it.
 	router.dead(
@@ -966,13 +1136,29 @@ fn unrelated_dead_messages_do_not_allocate_or_poison_routes() {
 	assert!(router.routes(7).next().is_none());
 }
 
+/// A route path with no room for this node's hop is refused, and ends the route it
+/// replaces, as a replacement path in a DEAD does.
+#[test]
+fn route_paths_obey_the_hop_limit() {
+	for length in [0, MAX_HOPS - 1, MAX_HOPS] {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		router.connect(1, 1, Link::default()).unwrap();
+		router.edited(1);
+		router.route(1, 7, p(""), Some(offered(1, 0)));
+		let hops: Vec<(Id, u64)> = (0..length).map(|i| (100 + i as Id, 1)).collect();
+		router.route(1, 7, p(""), Some(reach(&hops)));
+		assert_eq!(!unrouted(&router), length == MAX_HOPS - 1, "path length {length}");
+	}
+}
+
 #[test]
 fn dead_replacement_paths_obey_the_same_limit_as_route_paths() {
 	for length in [0, MAX_HOPS - 1, MAX_HOPS] {
 		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 		router.connect(1, 1, Link::default()).unwrap();
-		router.route(1, 7, p(""), Some(offered(1, 0)), 0);
-		router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1), 0);
+		router.edited(1);
+		router.route(1, 7, p(""), Some(offered(1, 0)));
+		router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1));
 		let offer = path::Offer {
 			path: (0..length)
 				.map(|i| path::Hop {
@@ -1025,28 +1211,46 @@ fn an_upstream_stream_uses_a_narrower_exportable_source() {
 				},
 			)
 			.unwrap();
+		router.edited(peer);
 	}
-	router.route(1, 7, p(""), Some(offered(1, 0)), 0);
-	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
 	let path::Reach::Finite(mut narrow) = offered(2, 0) else {
 		unreachable!()
 	};
 	narrow.metric = 2;
-	router.route(2, 7, p("a"), Some(path::Reach::Finite(narrow)), 0);
-	router.peer_interest(3, Some(p("a"))).unwrap();
+	router.route(2, 7, p("a"), Some(path::Reach::Finite(narrow)));
+	router
+		.edit(
+			3,
+			path::Edit {
+				remove: Vec::new(),
+				add: vec![p("a")],
+			},
+		)
+		.unwrap();
 	assert!(router.drain().iter().any(|msg| matches!(msg, path::Out::Route { to: 3, prefix, reach: Some(path::Reach::Finite(offer)), .. } if *prefix == p("a") && !offer.down_only && offer.path[1].node == 2)));
 }
 
 #[test]
 fn replacing_a_childs_interest_keeps_the_hold_until_its_answer() {
-	for interest in [None, Some(p("a"))] {
+	for add in [Vec::new(), vec![p("a")]] {
 		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
 		for peer in [1, 2] {
 			router.connect(peer, peer as Id, Link::default()).unwrap();
+			router.edited(peer);
 		}
-		router.route(1, 7, p(""), Some(offered(1, 0)), 0);
-		router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1), 0);
-		router.peer_interest(2, Some(p(""))).unwrap();
+		router.route(1, 7, p(""), Some(offered(1, 0)));
+		router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+		router
+			.edit(
+				2,
+				path::Edit {
+					remove: Vec::new(),
+					add: vec![p("")],
+				},
+			)
+			.unwrap();
 		let path::Reach::Finite(mut child) = offered(2, 0) else {
 			unreachable!()
 		};
@@ -1057,17 +1261,18 @@ fn replacing_a_childs_interest_keeps_the_hold_until_its_answer() {
 			path::Hop { node: 2, session: 1 },
 		]
 		.into();
-		router.route(2, 7, p(""), Some(path::Reach::Finite(child)), 0);
+		router.route(2, 7, p(""), Some(path::Reach::Finite(child)));
 		router.disconnect([1], Instant::ZERO);
 		assert!(!router.shown()[&(7, p("a/x"))].available);
 		router.events();
-		router.peer_interest(2, interest).unwrap();
+		let remove = vec![p("")];
+		router.edit(2, path::Edit { remove, add }).unwrap();
 		assert!(
 			!router.shown()[&(7, p("a/x"))].available,
 			"the child still owes an answer"
 		);
 		assert!(router.events().is_empty());
-		router.route(2, 7, p(""), Some(offered(2, 0)), 0);
+		router.route(2, 7, p(""), Some(offered(2, 0)));
 		assert!(router.shown()[&(7, p("a/x"))].available);
 		assert!(router.events().iter().all(|event| event.kind == Kind::Available));
 	}
@@ -1090,16 +1295,25 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 					},
 				)
 				.unwrap();
+			router.edited(peer);
 		}
-		router.route(1, 7, p(live), Some(offered(1, 0)), 0);
-		router.batch(1, 7, p(live), vec![(p("a/x"), Some(1))], Some(1), 0);
+		router.route(1, 7, p(live), Some(offered(1, 0)));
+		router.batch(1, 7, p(live), vec![(p("a/x"), Some(1))], Some(1));
 		let path::Reach::Finite(mut offer) = offered(2, 0) else {
 			unreachable!()
 		};
 		offer.metric = 2;
-		router.route(2, 7, p(held), Some(path::Reach::Finite(offer)), 0);
-		router.batch(2, 7, p(held), vec![(p("a/x"), Some(1))], Some(1), 0);
-		router.peer_interest(3, Some(p("a"))).unwrap();
+		router.route(2, 7, p(held), Some(path::Reach::Finite(offer)));
+		router.batch(2, 7, p(held), vec![(p("a/x"), Some(1))], Some(1));
+		router
+			.edit(
+				3,
+				path::Edit {
+					remove: Vec::new(),
+					add: vec![p("a")],
+				},
+			)
+			.unwrap();
 		let path::Reach::Finite(mut child) = offered(3, 0) else {
 			unreachable!()
 		};
@@ -1110,7 +1324,7 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 			path::Hop { node: 3, session: 1 },
 		]
 		.into();
-		router.route(3, 7, p("a"), Some(path::Reach::Finite(child)), 0);
+		router.route(3, 7, p("a"), Some(path::Reach::Finite(child)));
 		router.drain();
 		router.disconnect([2], Instant::ZERO);
 		let messages = router.drain();
@@ -1136,4 +1350,426 @@ fn an_upstream_stream_keeps_a_hold_over_an_unexportable_live_source() {
 				.any(|msg| matches!(msg, path::Out::Route { to: 3, reach: None, .. }))
 		);
 	}
+}
+
+/// A node qualifies every key a scoped neighbour sends, so a route it reflected
+/// comes back under another key. While doubt keeps that neighbour off another
+/// path, it holds the route under this node and keeps it live through a first
+/// DEAD, so this node files it live too.
+#[test]
+fn a_qualified_reflection_stays_live_through_a_first_dead() {
+	let (origin, relay, scoped, other, spare) = (0, 1, 2, 3, 4);
+	let mut sim = Sim::with(Rule::PATH, 5);
+	sim.join(origin, relay, 1);
+	sim.link(
+		relay,
+		scoped,
+		SimLink::cost(1).grant(Grant {
+			subject: "ga",
+			scope: "a",
+		}),
+		SimLink::cost(1),
+	);
+	sim.join(origin, other, 5);
+	sim.join(other, scoped, 5);
+	sim.join(origin, spare, 5);
+	sim.join(spare, relay, 5);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "a/x", 0, None);
+	assert!(sim.run());
+	let key = qualified("ga", 7);
+	let at = p("a");
+	assert_eq!(sim.path(scoped).sent_held(relay, 7, &at), Some(false));
+	sim.disconnect(origin, relay);
+	assert!(sim.flow());
+	// The neighbour holds under this node, waiting out its doubt of another path.
+	assert_eq!(sim.path(scoped).sent_held(relay, 7, &at), Some(false), "{}", mesh(&sim));
+	assert_eq!(
+		sim.path(relay).heard_held(key, &at, scoped),
+		Some(false),
+		"{}",
+		mesh(&sim)
+	);
+}
+
+/// A child that replaces its interest owes an answer about the route it learned on
+/// the old stream only until this node sends it the route again. Once it is sent a
+/// wider source instead, losing the narrow route waits on nothing.
+#[test]
+fn resending_a_replaced_stream_releases_its_wait() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	let narrow = along(&[(7, 0), (3, 1)], 2);
+	router.route(3, 7, p("a"), Some(path::Reach::Finite(narrow)));
+	router.batch(3, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1));
+	reask(&mut router, 2, &[""]).unwrap();
+	// The child extends the narrow route it was sent under "a".
+	let child = along(&[(7, 0), (3, 1), (99, 3), (2, 1)], 3);
+	router.route(2, 7, p("a"), Some(path::Reach::Finite(child)));
+	router.drain();
+	// Asking for "a" alone, the marker carries the cheaper covering route it was
+	// sent under "" there instead.
+	reask(&mut router, 2, &["a"]).unwrap();
+	let messages = router.drain();
+	assert!(
+		!messages.iter().any(|msg| matches!(msg, path::Out::Route { to: 2, .. })),
+		"{messages:?}"
+	);
+	router.route(3, 7, p("a"), None);
+	assert_eq!(router.route_for(7, &p("a")), None);
+	assert!(router.shown()[&(7, p("a/x"))].available);
+}
+
+/// A child that cancelled its stream owes an answer only until it gives one. Once it
+/// holds the route it learned there, offering that path again is no answer this node
+/// waits on, so losing the route lets it go.
+#[test]
+fn an_answered_wait_is_not_renewed() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	reask(&mut router, 2, &[""]).unwrap();
+	let child = along(&[(7, 0), (1, 1), (99, 1), (2, 1)], 2);
+	router.route(2, 7, p(""), Some(path::Reach::Finite(child.clone())));
+	reask(&mut router, 2, &[]).unwrap();
+	router.route(2, 7, p(""), Some(path::Reach::Held));
+	router.route(2, 7, p(""), Some(path::Reach::Finite(child)));
+	router.disconnect([1], Instant::ZERO);
+	assert_eq!(router.route_for(7, &p("")), None);
+	assert!(router.shown().is_empty());
+}
+
+/// With every covering route crossing the neighbour, a stream still reflects one so
+/// the neighbour can answer its loss: the best ranked, not merely the narrowest.
+#[test]
+fn without_a_usable_path_a_stream_reflects_the_best_ranked_route() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	// Both routes cross node 2, so neither is usable there.
+	for (peer, prefix, metric) in [(1, "", 1), (3, "a", 4)] {
+		let offer = along(&[(7, 0), (2, 1), (peer as Id, 1)], metric);
+		router.route(peer, 7, p(prefix), Some(path::Reach::Finite(offer)));
+		router.batch(peer, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1));
+	}
+	reask(&mut router, 2, &["a"]).unwrap();
+	let messages = router.drain();
+	assert!(
+		messages.iter().any(|msg| matches!(msg,
+			path::Out::Route { to: 2, prefix, reach: Some(path::Reach::Finite(offer)), .. }
+			if *prefix == p("a") && offer.path[2].node == 1
+		)),
+		"{messages:?}"
+	);
+}
+
+/// Routes that dead news left behind can move on together, each with the claims it
+/// learned meanwhile. A view takes the newest floor among them, wherever it is found.
+#[test]
+fn routes_moved_together_show_the_newest_floor() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	// Peers 2 and 3 learned their routes over the session node 6 opened to node 4.
+	let hop = path::Hop { node: 4, session: 1 };
+	let through = |peer: Id| along(&[(7, 0), (6, 1), (4, 1), (peer, 1)], 2);
+	for prefix in ["", "a"] {
+		router.route(2, 7, p(prefix), Some(path::Reach::Finite(through(2))));
+		router.batch(2, 7, p(prefix), vec![(p("a/x"), Some(1))], Some(1));
+	}
+	router.route(3, 7, p(""), Some(path::Reach::Finite(through(3))));
+	let closed = |moved| path::Dead::Closed {
+		hop,
+		far: 6,
+		moved,
+		gone: true,
+	};
+	router.dead(3, closed(Vec::new()), Instant::ZERO);
+	// Peer 2 has not heard, and passes on newer claims under each prefix.
+	router.batch(2, 7, p(""), vec![(p("a/x"), Some(2))], Some(2));
+	router.batch(2, 7, p("a"), vec![(p("a/x"), Some(3))], Some(3));
+	assert_eq!(router.shown()[&(7, p("a/x"))].item, 1);
+	let offer = along(&[(7, 0), (5, 1), (2, 1)], 2);
+	let moved = ["", "a"]
+		.map(|prefix| path::Moved {
+			id: 7,
+			prefix: p(prefix),
+			offer: offer.clone(),
+		})
+		.to_vec();
+	router.dead(2, closed(moved), Instant::ZERO);
+	assert_eq!(router.shown()[&(7, p("a/x"))].item, 3);
+}
+
+/// A batch that changes one claim revisits that claim, not every claim the route
+/// carries.
+#[test]
+fn a_batch_revisits_only_the_claims_it_changed() {
+	let work = |claims: usize| {
+		let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+		router.connect(1, 1, Link::default()).unwrap();
+		router.edited(1);
+		router.route(1, 7, p("live"), Some(offered(1, 0)));
+		let changes = (0..claims)
+			.map(|claim| (p(&format!("live/{claim}")), Some(1)))
+			.collect();
+		router.batch(1, 7, p("live"), changes, Some(1));
+		let before = router.work();
+		router.batch(1, 7, p("live"), vec![(p("live/0"), Some(2))], Some(2));
+		router.work() - before
+	};
+	assert_eq!(work(1), work(32));
+}
+
+/// Narrowing the interest forgets the claims it leaves, and keeps those it still
+/// watches.
+#[test]
+fn narrowing_forgets_only_the_claims_it_leaves() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	let changes = vec![(p("a/x"), Some(1)), (p("b/x"), Some(1))];
+	router.batch(1, 7, p(""), changes, Some(1));
+	router.events();
+	router.watch(BTreeSet::from([p("a")])).unwrap();
+	let left = router.events();
+	assert!(
+		left.iter()
+			.any(|event| event.claim == p("b/x") && event.kind == Kind::Unwatched && event.forgot == 1),
+		"{left:?}"
+	);
+	// The neighbour marks the narrower ask, then answers it with a newer claim.
+	router.edited(1);
+	router.route(1, 7, p("a"), Some(offered(1, 0)));
+	router.batch(1, 7, p("a"), vec![(p("a/x"), Some(2))], Some(2));
+	let kept = router.events();
+	assert!(
+		kept.iter()
+			.any(|event| event.claim == p("a/x") && event.kind == Kind::Update && event.forgot == 0),
+		"{kept:?}"
+	);
+}
+
+/// Losing the only route over a prefix forgets its claims, even while a sibling
+/// prefix is still known.
+#[test]
+fn losing_a_prefix_forgets_its_claims_beside_a_known_sibling() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for (peer, prefix) in [(1, "a"), (2, "b")] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+		router.route(peer, 7, p(prefix), Some(offered(peer as Id, 0)));
+		let claim = p(&format!("{prefix}/x"));
+		router.batch(peer, 7, p(prefix), vec![(claim, Some(1))], Some(1));
+	}
+	router.events();
+	router.route(1, 7, p("a"), None);
+	let events = router.events();
+	assert!(
+		events.iter().any(|event| event.claim == p("a/x") && event.forgot == 1),
+		"{events:?}"
+	);
+	assert!(events.iter().all(|event| event.claim != p("b/x")));
+}
+
+/// What `router` queued for `peer`, in order.
+fn sent_to(router: &mut path::Router<usize, u8>, peer: usize) -> Vec<path::Out<usize, u8>> {
+	(router.drain().into_iter())
+		.filter(|out| match out {
+			path::Out::Route { to, .. }
+			| path::Out::Batch { to, .. }
+			| path::Out::Dead { to, .. }
+			| path::Out::Ask { to, .. }
+			| path::Out::Edited { to }
+			| path::Out::Synced { to, .. } => *to == peer,
+		})
+		.collect()
+}
+
+/// News that the session from node 6 to node 4 closed.
+fn closed(moved: Vec<path::Moved>, gone: bool) -> path::Dead {
+	path::Dead::Closed {
+		hop: path::Hop { node: 4, session: 1 },
+		far: 6,
+		moved,
+		gone,
+	}
+}
+
+/// A path through the closed session, as `peer` sends it.
+fn through(peer: usize) -> path::Reach {
+	reach(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)])
+}
+
+/// A stream is told a route holds once: in the DEAD that first names the hop, and
+/// not again when another neighbour reports the same hop. Once the route moves, a
+/// stream already told of the hop hears the new path alone.
+#[test]
+fn a_stream_hears_a_hold_once_however_often_its_hop_is_reported() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	for peer in [1, 2] {
+		router.route(peer, 7, p(""), Some(through(peer)));
+		router.batch(peer, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	}
+	reask(&mut router, 3, &[""]).unwrap();
+	router.drain();
+
+	router.dead(1, closed(Vec::new(), false), Instant::ZERO);
+	let dead = path::Out::Dead {
+		to: 3,
+		dead: closed(Vec::new(), false),
+	};
+	assert_eq!(sent_to(&mut router, 3), [dead], "the DEAD alone says it holds");
+	router.dead(2, closed(Vec::new(), false), Instant::ZERO);
+	assert_eq!(sent_to(&mut router, 3), [], "it already holds");
+
+	let path::Reach::Finite(offer) = reach(&[(7, 0), (5, 1), (1, 1)]) else {
+		unreachable!()
+	};
+	let moved = path::Moved {
+		id: 7,
+		prefix: p(""),
+		offer,
+	};
+	router.dead(1, closed(vec![moved], false), Instant::ZERO);
+	let messages = sent_to(&mut router, 3);
+	assert!(
+		matches!(&messages[..], [path::Out::Route { reach: Some(path::Reach::Finite(offer)), .. }] if offer.path[1].node == 5),
+		"{messages:?}"
+	);
+}
+
+/// A later report of a hop already named ends each route it leaves with nothing,
+/// by itself, while another route through the hop still holds. A route ended
+/// under a wider route that still covers it sends no claims first.
+#[test]
+fn a_second_report_ends_a_route_by_itself_while_another_holds() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(1, 7, p(""), Some(through(1)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	router.route(2, 7, p("a"), Some(through(2)));
+	reask(&mut router, 3, &[""]).unwrap();
+	router.drain();
+
+	router.dead(1, closed(Vec::new(), false), Instant::ZERO);
+	let dead = path::Out::Dead {
+		to: 3,
+		dead: closed(Vec::new(), false),
+	};
+	assert_eq!(sent_to(&mut router, 3), [dead], "both routes hold");
+	router.dead(2, closed(Vec::new(), true), Instant::ZERO);
+	let end = path::Out::Route {
+		to: 3,
+		id: 7,
+		prefix: p("a"),
+		reach: None,
+	};
+	assert_eq!(sent_to(&mut router, 3), [end]);
+}
+
+/// A neighbour that learned a route and offers it back still owes an answer after
+/// the route ends to it for want of claims: losing the route holds it until then.
+#[test]
+fn a_child_still_owes_an_answer_after_its_route_ends_empty() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	reask(&mut router, 2, &[""]).unwrap();
+	router.route(2, 7, p(""), Some(reach(&[(7, 0), (1, 1), (99, 2), (2, 1)])));
+	router.batch(1, 7, p(""), vec![(p("a/x"), None)], Some(2));
+	let messages = sent_to(&mut router, 2);
+	assert!(
+		matches!(messages.last(), Some(path::Out::Route { reach: None, .. })),
+		"{messages:?}"
+	);
+
+	router.disconnect([1], Instant::ZERO);
+	assert!(
+		router
+			.routes(7)
+			.any(|(prefix, route)| *prefix == p("") && route.offer().is_none()),
+		"held for the child's answer"
+	);
+	router.route(2, 7, p(""), None);
+	assert!(router.routes(7).next().is_none(), "answered");
+}
+
+/// A child's answer is owed to the route its stream reflects when the stream ends.
+/// Here one DEAD moves both of a peer's routes, so the narrower one becomes the
+/// stream's best source just as its newer, empty view ends the stream: losing that
+/// narrower route then holds it until the child answers.
+#[test]
+fn an_ended_stream_waits_on_the_route_it_reflected_last() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.route(2, 7, p(""), Some(through(2)));
+	router.batch(2, 7, p(""), vec![(p("a/x"), Some(1))], Some(1));
+	// Unusable while its path names this node, so its newer floor is not believed yet.
+	router.route(2, 7, p("a"), Some(reach(&[(7, 0), (6, 1), (4, 1), (99, 1), (2, 1)])));
+	router.batch(2, 7, p("a"), Vec::new(), Some(2));
+	reask(&mut router, 3, &["a"]).unwrap();
+	let child = reach(&[(7, 0), (6, 1), (4, 1), (2, 1), (99, 2), (3, 1)]);
+	router.route(3, 7, p("a"), Some(child));
+	router.drain();
+
+	let path::Reach::Finite(offer) = reach(&[(7, 0), (5, 1), (2, 1)]) else {
+		unreachable!()
+	};
+	let moved = [p(""), p("a")].map(|prefix| path::Moved {
+		id: 7,
+		prefix,
+		offer: offer.clone(),
+	});
+	router.dead(2, closed(moved.into(), false), Instant::ZERO);
+	let messages = sent_to(&mut router, 3);
+	assert!(
+		matches!(
+			messages.last(),
+			Some(path::Out::Dead {
+				dead: path::Dead::Closed { gone: true, .. },
+				..
+			})
+		),
+		"the stream ended: {messages:?}"
+	);
+
+	router.route(2, 7, p("a"), None);
+	assert!(
+		router
+			.routes(7)
+			.any(|(prefix, route)| *prefix == p("a") && route.offer().is_none()),
+		"held for the child's answer: {}",
+		router.dump()
+	);
 }

@@ -85,16 +85,6 @@ impl Sdp {
 		candidates.into_iter()
 	}
 
-	/// Get the `a=sctp-init` value from the application m-line, if present.
-	///
-	/// Returns the base64-encoded SCTP INIT value.
-	pub(crate) fn sctp_init(&self) -> Option<&str> {
-		self.media_lines
-			.iter()
-			.find(|m| m.typ.is_channel())
-			.and_then(|m| m.sctp_init())
-	}
-
 	pub(crate) fn setup(&self) -> Option<Setup> {
 		self.session
 			.setup()
@@ -297,19 +287,6 @@ impl MediaLine {
 			// We should only use `mid()` once we're certain there is
 			// a mid line. This is checked by `check_consistent`.
 			.expect("missing a=mid")
-	}
-
-	/// Get the sctp-init attribute value (base64-encoded string).
-	///
-	/// Returns `None` if no `a=sctp-init` attribute is present.
-	pub fn sctp_init(&self) -> Option<&str> {
-		self.attrs.iter().find_map(|a| {
-			if let MediaAttribute::SctpInit(v) = a {
-				Some(v.as_str())
-			} else {
-				None
-			}
-		})
 	}
 
 	pub fn msid(&self) -> Option<Msid> {
@@ -696,17 +673,6 @@ impl MediaLine {
 		}
 
 		v
-	}
-
-	/// Get the max-message-size attribute value, if present
-	pub fn max_message_size(&self) -> Option<usize> {
-		self.attrs.iter().find_map(|a| {
-			if let MediaAttribute::MaxMessageSize(size) = a {
-				Some(*size)
-			} else {
-				None
-			}
-		})
 	}
 }
 

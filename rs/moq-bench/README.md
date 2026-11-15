@@ -4,7 +4,7 @@ A load generator for benchmarking a remote MoQ relay, plus `moq-bench host`, a
 sampler that records what that load costs on the relay's host.
 
 ```bash
-cargo install moq-bench
+cargo install --git https://github.com/moq-dev/moq moq-bench
 ```
 
 `moq-bench` opens many QUIC connections to a server and drives synthetic media

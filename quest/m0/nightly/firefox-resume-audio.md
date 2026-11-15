@@ -32,3 +32,5 @@ gap backfill (the fixture logs a fetch of audio group 1156 that the relay
 aborts), the WebSocket session's stream scheduling, or the consumer's hole
 wait from its pre-pause cursor (1165). Fix that hop; do not widen the test's
 window or agreement.
+
+Kept in m0 by the maintainer (2026-11-15): ✅ m0 (rejected: m1, drop).

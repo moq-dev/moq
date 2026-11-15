@@ -147,6 +147,7 @@ endif()
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
   target_link_libraries(obs-moq PRIVATE OBS::obs-frontend-api)
+  target_compile_definitions(obs-moq PRIVATE MOQ_FRONTEND_API)
 endif()
 
 if(ENABLE_QT)

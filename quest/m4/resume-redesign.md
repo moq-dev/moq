@@ -86,6 +86,10 @@ Land it in Rust first, then mirror `js/net` unless
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 
+Nightly mutates `resume.rs` (#8712): the rewrite kills or excludes, in
+`.cargo/mutants.toml`, every survivor of the code it adds, and drops the
+exclusions of the code it deletes.
+
 Public API: none. Wire: none.
 
 Decided 2026-11-05 (maintainer, follow-up from
@@ -99,7 +103,7 @@ serving copy's upstream closed, followed by a read.
 
 ## Waiting
 
-- Maintainer: whether this goes before [resume trace validation](/quest/m4/resume-trace-validation.md) and [mutation testing](/quest/m1/mutants.md), and whether it moves to m3 once the cut ships. Options: (a) redesign first, giving both of those `Required` on this quest (or limiting mutants to `route/`), and move this to m3 after the cut as the root fix for the resume path's recurring bugs in shipped code; (b) validate and mutate the current path first, keeping this in m4; (c) redesign first but keep it in m4. Recommended: (a), since the other two would spend their effort on the per-reader path this deletes.
+- Maintainer: whether this goes before [resume trace validation](/quest/m4/resume-trace-validation.md), and whether it moves to m3 once the cut ships. Mutation testing already covers the current `resume.rs` ([moq-dev/moq#8712](https://github.com/moq-dev/moq/pull/8712)). Options: (a) redesign first, giving trace validation `Required` on this quest, and move this to m3 after the cut as the root fix for the resume path's recurring bugs in shipped code; (b) validate the current path first, keeping this in m4; (c) redesign first but keep it in m4. Recommended: (a), since validation would spend its effort on the per-reader path this deletes.
 
 ## Required
 

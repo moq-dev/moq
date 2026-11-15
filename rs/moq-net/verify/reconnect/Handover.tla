@@ -28,7 +28,7 @@ CONSTANTS
     Endpoints,    \* where a dial can land
     Start,        \* the configured target
     Refused,      \* a GOAWAY URI `Redirect::target` refuses
-    Restart,      \* `Config::restart`: "redial" or "wait"
+    Restart,      \* `Config::restart`: "redial", "wait", or "handoff"
     MaxSessions   \* sessions that connect in one behaviour
 
 Sessions == 1..MaxSessions
@@ -68,10 +68,11 @@ vars == <<policyVars, callerVars>>
 \* "abort" for `Session::abort`, "drain" for a `start_close` that finished),
 \* whether a `start_close` began, the GOAWAY it got, its age, whether it
 \* carries no subscription or fetch, whether the policy acted on its GOAWAY,
-\* and whether we sent our own.
+\* whether we sent our own, and whether the policy watches its GOAWAY as the
+\* predecessor (`Predecessor::redirect`, set when a probe moved us off it).
 Fresh(e) == [ep |-> e, open |-> TRUE, by |-> "", closing |-> FALSE,
              goaway |-> NoGoaway, age |-> 0, idle |-> FALSE, heeded |-> FALSE,
-             sent |-> FALSE]
+             sent |-> FALSE, watched |-> FALSE]
 Unused == [Fresh(Start) EXCEPT !.open = FALSE]
 
 Timers == {"dial", "backoff", "probe", "handover"}
@@ -222,10 +223,40 @@ Misdial(e) ==
         /\ ~sess[s].heeded
         /\ sess[s].goaway # e
 
+\* `Reconnect::follow`, which runs before the phase while no replacement
+\* serves: the predecessor's peer sent a GOAWAY.
+PredGoaway ==
+    /\ phase \notin {"live", "done"}
+    /\ pred # None
+    /\ sess[pred].watched
+    /\ sess[pred].goaway # NoGoaway
+
+\* An accepted redirect becomes the target and drops a dial still headed for
+\* the leaving peer (`Action::Abandon`); anything else is only read.
+FollowPred ==
+    /\ queue = <<>>
+    /\ ~PredDue
+    /\ PredGoaway
+    /\ LET uri == sess[pred].goaway IN
+       IF uri \in Endpoints
+       THEN /\ sess' = [sess EXCEPT ![pred].watched = FALSE, ![pred].heeded = TRUE]
+            /\ target' = uri
+            /\ IF phase = "backoff"
+               THEN UNCHANGED <<phase, timer, dial, probing>>
+               ELSE /\ phase' = "start"
+                    /\ UNCHANGED timer
+                    /\ dial' = IF phase = "dialing" THEN "none" ELSE dial
+                    /\ probing' = IF phase = "dialing" THEN FALSE ELSE probing
+       ELSE /\ sess' = [sess EXCEPT ![pred].watched = FALSE]
+            /\ UNCHANGED <<phase, target, timer, dial, probing>>
+    /\ UNCHANGED <<live, watch, probe, pred, queue, used, dialTo, misdials,
+                   lc, lcSess, migrating, spred, started, ended>>
+
 \* `Phase::Next`: ask for a dial.
 Dial ==
     /\ queue = <<>>
     /\ ~PredDue
+    /\ ~PredGoaway
     /\ phase = "start"
     /\ phase' = "dialing"
     /\ timer' = [timer EXCEPT !["dial"] = FALSE]
@@ -241,6 +272,7 @@ Dial ==
 Abandon ==
     /\ queue = <<>>
     /\ ~PredDue
+    /\ ~PredGoaway
     /\ phase = "dialing"
     /\ timer["dial"]
     /\ dial' = "none"
@@ -261,6 +293,7 @@ Abandon ==
 BackoffEnds ==
     /\ queue = <<>>
     /\ ~PredDue
+    /\ ~PredGoaway
     /\ phase = "backoff"
     /\ timer["backoff"]
     /\ phase' = "start"
@@ -301,18 +334,26 @@ EndClosed ==
 \* `Phase::Live`: a GOAWAY is checked before the close.
 Goaway(s) == watch /\ sess[s].goaway # NoGoaway
 
+\* `Restart::Wait` serves out a restart in place; `Restart::Handoff` does so
+\* only on a session drained before it was healthy, and redials an older one
+\* once, as `Restart::Redial` does.
+WaitOut(s) ==
+    /\ sess[s].goaway = ""
+    /\ \/ Restart = "wait"
+       \/ Restart = "handoff" /\ sess[s].age = 0
+
 LiveEnds ==
     /\ queue = <<>>
     /\ ~PredDue
     /\ phase = "live"
     /\ \/ /\ Goaway(live)
-          /\ Restart = "wait" /\ sess[live].goaway = ""
-          \* `Restart::Wait`: drop the latch and serve until the peer closes.
+          /\ WaitOut(live)
+          \* Drop the latch and serve until the peer closes.
           /\ watch' = FALSE
           /\ UNCHANGED <<phase, live, probe, pred, target, queue, sess, timer>>
           /\ CallerSame
        \/ /\ Goaway(live)
-          /\ ~(Restart = "wait" /\ sess[live].goaway = "")
+          /\ ~WaitOut(live)
           /\ EndGoaway(live, sess[live].goaway)
        \/ /\ ~Goaway(live)
           /\ ~sess[live].open
@@ -348,7 +389,7 @@ ProbeAbandon ==
     /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, timer,
                    dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
 
-Policy == Pop \/ Retire \/ IdleClose \/ Dial \/ Abandon \/ BackoffEnds
+Policy == Pop \/ Retire \/ IdleClose \/ FollowPred \/ Dial \/ Abandon \/ BackoffEnds
           \/ LiveEnds \/ ProbeAsk \/ ProbeAbandon
 
 (***************************************************************************)
@@ -428,7 +469,8 @@ ProbeGetsThrough ==
        \/ /\ ~Goaway(live)
           /\ phase' = "dialing"
           /\ timer' = [timer EXCEPT !["dial"] = FALSE, !["handover"] = FALSE]
-          /\ sess' = [Abort(sess, pred) EXCEPT ![live].sent = TRUE]
+          \* Its watcher moves with it, unless `WaitOut` dropped it.
+          /\ sess' = [Abort(sess, pred) EXCEPT ![live].sent = TRUE, ![live].watched = watch]
           /\ pred' = live
           /\ live' = None
           /\ probe' = "none"

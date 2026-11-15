@@ -33,7 +33,8 @@ Chain, negotiated by its Setup Parameter, rides announcements until the lite-07
 to lite-08 migration. Only
 [Routes and announces](/quest/m2/cluster-routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
-owns the tier/partition correctness tests, so they run before the cut. Peer
+owns the tier/partition correctness tests, so they run before the cut.
+Reaffirmed 2026-11-14 (maintainer, the m2 triage, below). Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
@@ -88,7 +89,7 @@ only on lite-07. Lite-07 now defines the padding datagram type and both receiver
 discard it.
 The `Time(pts)` range end rides in the subscribe-ranges children already Required.
 
-Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m2/subscribe-ranges/README.md),
+Decided 2026-10-27 (maintainer): of Subscribe ranges,
 only the children that change the lite-07 wire gate the cut:
 Lite-07 ranges ([moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872)),
 JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), and
@@ -123,13 +124,47 @@ moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
 routing invariant gating too, which sits behind the mesh model). The signed
 transcript freezes at the cut and a flaw in it can only be fixed on the wire.
 
+Decided 2026-11-14 (the m2 triage before the cut, under /quest-afk; the
+maintainer picked these on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)), applying the maintainer's rule that m2 keeps only what
+would need a breaking release had it landed right after the cut:
+
+- ✅ [The request loop](/quest/m3/cluster-routing/request-loop.md) moved
+  to m3 and no longer gates this: a fixture and a fix with no wire change.
+- ✅ [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) stays
+  in [Routes and announces](/quest/m2/cluster-routes/README.md), so this
+  still waits on it (maintainer, /quest-complete on
+  [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768); rejected:
+  moving it to m3 and fixing late routing flaws in lite-08).
+- ✅ [The Playwright bump](/quest/m1/playwright-pin.md) moved to m1 and
+  gates [the release cut](/quest/m3/release/cut.md) instead of this: the cut
+  PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
+  which fails the route key lane on a Chromium below 158, so only the pinned
+  toolchain clears it. As an early signal, before the rename, run the route
+  key lane (`test/interop/clients/js/route-key.ts`) once with Playwright
+  1.65.0 or later from npm, which bundles Chromium 158, and put the result in
+  the PR. If the tab fails, stop and report it, since only the wire can fix
+  the signed transcript. Rejected: keeping the pin in m2, where the freeze
+  waits on nixpkgs as well as the cut; dropping the check, which would find a
+  transcript flaw only after the freeze.
+- ✅ The wire half of group drops split out as its own quest, which this
+  waited on in place of [the public drop signal](/quest/m2/group-drops.md),
+  an API change that doesn't touch the wire. It settled without a
+  wire-format change ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774)):
+  both publishers already name a Group Stream the subscriber stopped in
+  SUBSCRIBE_DROP, which the draft now states, even after a reliable reset.
+
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - rewrites lite-07's one-hop warm routes and `Serves` for routes that propagate
+- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - removes WARM_* and SUBSCRIBE's `Warm` byte from lite-07
+- [ROUTE's RTT](/quest/m2/route-rtt.md) - removes ROUTE's informational RTT
+- [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
+- [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
+- [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
+- [AUTH_ERROR retries](/quest/m2/auth-retry-codes.md) - writes down which refusal codes a presenter retries
 
 ## Related
 

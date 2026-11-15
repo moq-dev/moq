@@ -27,7 +27,7 @@ This README's own work, after the children:
   [audio playout](/quest/m2/audio-playout/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
-  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
+  a test flakes epic if it recurs, and the paired bench
   threshold is calibrated in [Paired comparison](/bench/README.md#paired-comparison). The moq-net benchmark
   fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
   The receive-windows benchmark's overcommitted cells, skipped since
@@ -56,7 +56,7 @@ audit ([moq-dev/moq#8648](https://github.com/moq-dev/moq/pull/8648)), the size
 report's output ([moq-dev/moq#8654](https://github.com/moq-dev/moq/pull/8654)),
 the firefox resume ([moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)),
 and the chromium `av_lag` rows
-([output latency](/quest/m2/audio-playout/output-latency.md)).
+([moq-dev/moq#8676](https://github.com/moq-dev/moq/pull/8676)).
 After #8635 landed, run
 [43601796176](https://github.com/moq-dev/moq/actions/runs/43601796176) still
 failed the firefox resume, now on audio arriving late rather than trailing:

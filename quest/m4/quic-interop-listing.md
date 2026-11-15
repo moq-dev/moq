@@ -13,15 +13,10 @@ listing; listing from day one). The registration is a PR outside the
 maintainer's orgs, so it needs their go-ahead, and the repository's AI policy
 is read before drafting it.
 
-- Publish the endpoint image [the runner quest](/quest/m1/quic-interop.md)
-  builds, from `main`, and add the entry to `implementations_quic.json`.
+- Publish the endpoint image `test/quic-interop` builds, from `main`, and add the entry to `implementations_quic.json`.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
 - Maintainer: approve registering on the public matrix once the nightly matrix is mostly green. An agent cannot decide when our failures become public or post to quic-interop unasked. Recommendation: approve when every supported case passes against at least two peers.
-
-## Required
-
-- [QUIC Interop Runner](/quest/m1/quic-interop.md) - the endpoint image and a matrix to judge

@@ -16,6 +16,7 @@ interface Case {
 	arrival: number[];
 	media: number[];
 	ends?: number[];
+	skipped?: number[];
 	target: [number, number][];
 }
 
@@ -40,10 +41,12 @@ describe("audio jitter conformance", () => {
 			"fixed",
 			"flush",
 			"idle",
+			"join",
 			"outage",
 			"paced",
 			"reorder",
 			"silence",
+			"skipped",
 			"spike",
 			"straggler",
 			"tunein",
@@ -55,10 +58,12 @@ describe("audio jitter conformance", () => {
 			const jitter = new Jitter();
 			const expected = new Map(c.target);
 			const ends = new Set(c.ends);
+			const skipped = new Set(c.skipped);
 			let current: number | undefined;
 			for (let i = 0; i < c.arrival.length; i++) {
 				if (ends.has(i)) jitter.end();
-				jitter.observe(c.arrival[i], c.media[i]);
+				if (skipped.has(i)) jitter.backlog(c.arrival[i]);
+				else jitter.observe(c.arrival[i], c.media[i]);
 				const value = target(jitter, c);
 				const listed = expected.get(i);
 				if (listed !== undefined) {
@@ -100,6 +105,22 @@ describe("Jitter", () => {
 		jitter.observe(50 + 500 * 20 + 30_000, 500 * 20 + 30_000);
 		jitter.observe(50 + 500 * 20 + 30_500, 500 * 20 + 30_500);
 		expect(jitter.measured).toBeGreaterThan(settled);
+	});
+
+	it("leaves the join where it ended once an interval measured the path", () => {
+		// Every frame of `outage` from its second interval on also reported as a skipped group's
+		// arrival once observed, as a consumer closing groups below its cursor would. Taken as
+		// backlog, each would make its interval fold nothing: the prior would linger, and the
+		// outages that raise the target would go unmeasured.
+		const outage = cases.find((c) => c.name === "outage") as Case;
+		const plain = new Jitter();
+		const reported = new Jitter();
+		for (let i = 0; i < outage.arrival.length; i++) {
+			plain.observe(outage.arrival[i], outage.media[i]);
+			reported.observe(outage.arrival[i], outage.media[i]);
+			if (outage.arrival[i] >= outage.arrival[0] + 500) reported.backlog(outage.arrival[i]);
+			expect(reported.measured).toBe(plain.measured);
+		}
 	});
 
 	it("does not follow the absolute delay", () => {
