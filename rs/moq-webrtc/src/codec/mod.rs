@@ -199,8 +199,9 @@ pub struct PacketizedFrame {
 	pub payload: Bytes,
 	/// The frame opens a group, so a peer can start decoding the rendition here.
 	pub keyframe: bool,
-	/// Counts its payload once it is written to the peer.
-	pub bill: moq_net::stats::Bill,
+	/// The payload as read and what counts it once written to the peer: the parameter sets
+	/// a conversion prepends are not the rendition's, as no other egress counts them.
+	pub charge: (moq_net::stats::Bill, u64),
 }
 
 /// A subscribed moq-mux track, normalized to the bitstream shape str0m's
@@ -276,6 +277,7 @@ impl Track {
 				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
 				None => return Ok(None),
 			};
+			let read = frame.payload.len() as u64;
 			let payload = match &self.convert {
 				TrackConvert::Passthrough => frame.payload,
 				TrackConvert::LengthPrefixed {
@@ -294,7 +296,7 @@ impl Track {
 				timestamp_us: frame.timestamp.as_micros() as u64,
 				payload,
 				keyframe: frame.keyframe,
-				bill: self.bill.clone(),
+				charge: (self.bill.clone(), read),
 			}));
 		}
 	}

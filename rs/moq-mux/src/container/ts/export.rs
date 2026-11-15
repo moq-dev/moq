@@ -3628,16 +3628,10 @@ where
 		// The tables lead the unit that carries this frame, behind whatever went before it.
 		if kind.placed() {
 			self.program.psi_due |= psi;
-			self.program.schedule.bill(charge);
-			return self.place(name, &frame, out);
+			return self.place(name, (&frame, charge), out);
 		}
 		match es_payload {
-			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
-			// carry the bytes verbatim.
-			None => {
-				self.program.psi_due |= psi;
-				self.write_section(&mut out, pid, &frame.payload)?;
-			}
+			None => unreachable!("only a placed track carries no elementary payload"),
 			Some(es_payload) => {
 				let unit = PesUnit {
 					pid,
@@ -3676,7 +3670,13 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
+	/// The frame's `charge` counts once the unit goes out, unless it was dropped as malformed.
+	fn place(
+		&mut self,
+		name: &str,
+		(frame, charge): (&Frame, schedule::Charge),
+		tables: Vec<u8>,
+	) -> anyhow::Result<()> {
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let pes = match track.kind {
 			Kind::PesPacket { stream_type } => Some(
@@ -3705,10 +3705,13 @@ where
 		let prefix = match pes {
 			Some(_) => {
 				self.write_pes_packet(&mut out, pid, &frame.payload)?;
+				self.program.schedule.bill(charge);
 				0
 			}
 			None => {
-				self.write_section(&mut out, pid, &frame.payload)?;
+				if self.write_section(&mut out, pid, &frame.payload)? {
+					self.program.schedule.bill(charge);
+				}
 				1
 			}
 		};
@@ -4102,18 +4105,20 @@ where
 		whole_pes_packets(out, pid, pes, flag)
 	}
 
-	/// Packetize a complete PSI or private section verbatim ([`section_packets`]).
-	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
+	/// Packetize a complete PSI or private section verbatim ([`section_packets`]), returning
+	/// whether it did rather than drop the section as malformed.
+	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<bool> {
 		// The verbatim track is public; a non-importer producer could publish a frame
 		// that isn't a complete section. Drop it (with a warning) rather than emit a
 		// malformed section a downstream demuxer would choke on. One bad section must
 		// not abort a live export, so this skips instead of erroring.
 		if !is_complete_section(section) {
 			tracing::warn!(pid, len = section.len(), "dropping malformed private section on export");
-			return Ok(());
+			return Ok(false);
 		}
 		let flag = self.breaks(pid);
-		section_packets(out, pid, section, flag)
+		section_packets(out, pid, section, flag)?;
+		Ok(true)
 	}
 }
 

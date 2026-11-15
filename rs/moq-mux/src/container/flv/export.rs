@@ -809,7 +809,6 @@ impl<S: Stream> Export<S> {
 			record,
 			bill,
 		} = tag;
-		bill.deliver(frame.payload.len() as u64);
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		let track = match is_video {
 			true => &self.video[index],
@@ -901,6 +900,8 @@ impl<S: Stream> Export<S> {
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_AUDIO, timestamp_ms, &body)?;
 		}
+		// Only once encoding can no longer fail, so a frame the export errors on counts nothing.
+		bill.deliver(frame.payload.len() as u64);
 		Ok(out.freeze())
 	}
 

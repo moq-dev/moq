@@ -40,8 +40,8 @@ pub struct WriteRequest {
 	pub time: MediaTime,
 	/// Complete encoded media frame.
 	pub payload: Bytes,
-	/// Counts the payload once str0m takes it.
-	pub bill: moq_net::stats::Bill,
+	/// Counts the frame's payload as read once str0m takes it ([`codec::PacketizedFrame::charge`]).
+	pub charge: (moq_net::stats::Bill, u64),
 }
 
 /// Maps the shared MoQ presentation timeline to str0m's wallclock.
@@ -516,7 +516,7 @@ impl Pump {
 			pt: format.pt,
 			time: MediaTime::new(ticks, format.clock_rate),
 			payload: frame.payload,
-			bill: frame.bill,
+			charge: frame.charge,
 		};
 		self.tx.send(request).await.is_ok()
 	}
@@ -596,11 +596,11 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 		pt,
 		time,
 		payload,
-		bill,
+		charge: (bill, bytes),
 		mid: _,
 	} = request;
 	match writer.write(pt, wallclock.into_std(), time, payload.to_vec()) {
-		Ok(()) => bill.deliver(payload.len() as u64),
+		Ok(()) => bill.deliver(bytes),
 		Err(err) => tracing::warn!(%err, "egress write rejected by str0m"),
 	}
 }
@@ -861,7 +861,8 @@ mod tests {
 			.await
 			.expect("a frame is written")
 			.expect("the pump is alive");
-		request.bill.deliver(request.payload.len() as u64);
+		let (bill, bytes) = &request.charge;
+		bill.deliver(*bytes);
 		request.payload
 	}
 
