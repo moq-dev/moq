@@ -24,8 +24,8 @@ for (const records of [64, 1024]) {
 					if (
 						record?.value.n !== n ||
 						record.value.text !== text ||
-						record.at.isBefore(at) ||
-						at.isBefore(record.at)
+						record.at.scale !== undefined ||
+						record.at.value !== at.value
 					) {
 						throw new Error("stream benchmark lost a record");
 					}
