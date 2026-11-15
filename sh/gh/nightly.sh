@@ -28,12 +28,7 @@ if [[ -n ${BENCH_BASE:-} ]]; then
         exit 2
     fi
     if [[ $BENCH_BASE == previous-nightly ]]; then
-        BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
-            --json databaseId,headSha --jq "map(select(.databaseId != ${GITHUB_RUN_ID:-0}))[0].headSha // empty")
-        if [[ -z $BENCH_BASE ]]; then
-            echo "nightly: no previous scheduled Nightly on main" >&2
-            exit 1
-        fi
+        BENCH_BASE=$(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh")
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
     # FETCH_HEAD, so the base is exported as the commit it resolved to.
@@ -109,7 +104,7 @@ case "$1" in
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
             -p moq-audio -p moq-mux -p moq-c -p moq-relay -p moq-cli -p moq-ffi \
             --features moq-audio/playback --lib --bin moq \
-            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stun_sources) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
+            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
         ;;
     # Measured Cargo bench targets, all in the bench profile. A paired run builds and
     # measures each group twice, so the groups split across jobs to fit an hour each.
@@ -169,7 +164,6 @@ case "$1" in
         javascript qmux-record just js qmux-record-bench
         javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
-        javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench

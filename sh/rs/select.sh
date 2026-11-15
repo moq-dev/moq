@@ -144,7 +144,7 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
+    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz)
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -203,8 +203,6 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
-        # The WebRTC data channel's hostile-input tests, such as mDNS backpressure.
-        if wants moq-webrtc; then features+=(moq-webrtc/p2p); fi
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
@@ -224,7 +222,7 @@ case "$action" in
                 | .targets[]
                 | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
                 | (.["required-features"] // [])[]
-                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+                | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
         )
         for feature in $required; do
             [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")

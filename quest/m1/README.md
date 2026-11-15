@@ -36,7 +36,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   staying first in m3). The 2026-11-03 reason to keep them out of m1 was that
   the cut would wait on them; since 2026-11-05 the cut waits on m2 alone, and
   a downstream application builds on them from `main` now. Superseded
-  2026-11-13, below.
+  2026-11-13, below, and 2026-11-14 (maintainer): byte streams moved to Kixel,
+  which builds its own on moq-net's public API, and sockets dropped their
+  `tcp` protocol.
 - ✅ Also moved here: the two reconnect fixes whose bugs came from PRs that
   are on `main` and not on `release`, so the cut would publish them; the Go
   module proxy, since the mirror repository nears 1 GB; and the ashpd bump.
@@ -53,12 +55,10 @@ after m2, which is when they can start.
 Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): tests
 that guard what production traffic reaches join m1 ahead of the questline's
 m4 default, so changes are proven before they ship: the
-[QUIC Interop Runner](/quest/m1/quic-interop.md),
-[sim rule checks](/quest/m1/quic-sim-rules.md),
-[relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
+[QUIC Interop Runner](/quest/m1/quic-interop.md), sim rule checks,
+relay parser fuzz targets (qmux, moq-auth), and from m4
 the relay on the sim (landed),
-[mutation testing](/quest/m1/mutants.md), and
-[peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md). OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
+mutation testing (#8712), and peer-reachable unsafe. OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
 google/oss-fuzz.
 Left in m4 without a pick: Kani, Miri seeds and TSan, the JS corpus, and
 bindings interop.

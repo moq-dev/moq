@@ -48,6 +48,15 @@ Update `drafts/draft-lcurley-moq-lite.md` (fields, the group-end rules, and the
 lite-07 changelog) and `doc/concept/moq-lite.md`, and run `just drafts check`
 and `just test interop --all`.
 
+Also reword `drafts/draft-lcurley-moq-e2ee.md`, which still calls the nonce's
+group input a sequence (its group-allocation rule, about line 268): it is the
+group's start, strictly increasing. The nonce bytes don't change, since both
+the Rust and JS cores already feed it the group's wire ID, which
+[the model](/quest/m2/time-addressing/model.md) makes the start. Folded in
+2026-11-14 from the removed E2EE nonce quest (the m2 triage before the cut,
+under /quest-afk, for the maintainer's review), since this PR's rename
+outdates that wording.
+
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
 Lite-07 FETCH is single-group only ([moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)),
 which rewrites the same lite-07 draft sections (`Range`, Positions,

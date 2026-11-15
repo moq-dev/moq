@@ -1,11 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Session as QmuxSession } from "@moq/qmux";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair, MockTransport } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
 import { canEstimate, estimates, type TransportStats, transportStats } from "./stats.ts";
@@ -120,11 +119,9 @@ const kinds: { name: string; estimates: boolean; shape: (quic: MockTransport) =>
 	{
 		name: "the WebSocket fallback",
 		estimates: false,
-		// A qmux session is what marks the fallback; the mock keeps its own behavior.
+		// A qmux session labels itself as the fallback; the mock keeps its own behavior.
 		shape: (quic) => {
-			const proto = Object.create(QmuxSession.prototype);
-			Object.defineProperties(proto, Object.getOwnPropertyDescriptors(MockTransport.prototype));
-			Object.setPrototypeOf(quic, proto);
+			Object.assign(quic, { transport: "websocket" });
 		},
 	},
 	{

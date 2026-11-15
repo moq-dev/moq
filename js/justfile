@@ -187,11 +187,6 @@ audio-warmup-bench:
     uv run --no-project python ../sh/js/install.py frozen
     bun watch/bench/warmup.ts
 
-# Sweep data-channel qmux stream count and payload size.
-p2p-bench:
-    uv run --no-project python ../sh/js/install.py frozen
-    bun p2p/bench/transport.ts
-
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
     uv run --no-project python ../sh/js/install.py frozen

@@ -59,7 +59,7 @@ function parse(jwks: string): KeySet {
 	}
 }
 
-/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half. */
+/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half, and on a key that cannot verify. */
 function toPublic(set: KeySet): PublicKeySet {
 	return { keys: set.keys.map(Key.public) };
 }
@@ -111,7 +111,7 @@ async function verify(set: KeySet, token: string): Promise<Claims> {
 export const KeySet = {
 	/** Parse a JWK Set from JSON. Throws when the JSON or any key in it is invalid. */
 	parse,
-	/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half. */
+	/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half, and on a key that cannot verify. */
 	public: toPublic,
 	/** The key with the given `kid`, or undefined when the set has no such key. */
 	find,

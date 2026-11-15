@@ -23,7 +23,7 @@ fn api_disconnect_and_is_alive() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -180,7 +180,7 @@ fn api_ice_state_change_events() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -226,7 +226,7 @@ fn api_connected_event() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 

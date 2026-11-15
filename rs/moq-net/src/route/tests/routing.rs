@@ -832,12 +832,15 @@ fn a_route_starved_at_the_last_seqno_requests_nothing() {
 }
 
 /// Each message recomputes only the identity it names, so the work a message
-/// costs does not grow with how many other origins a node routes to.
+/// costs does not grow with how many other origins a node routes to, on either rule.
 #[test]
 fn a_message_recomputes_only_its_identity() {
-	for origins in [1, 50] {
+	for (rule, origins) in [Rule::Distance, Rule::PATH]
+		.into_iter()
+		.flat_map(|rule| [(rule, 1), (rule, 50)])
+	{
 		let (a, b, client) = (0, 1, 2);
-		let mut sim = Sim::new(3 + origins);
+		let mut sim = Sim::with(rule, 3 + origins);
 		sim.join(a, b, 1);
 		sim.leaf(client);
 		sim.join(client, b, 1);
@@ -856,7 +859,7 @@ fn a_message_recomputes_only_its_identity() {
 		assert_eq!(
 			sim.touched() - touched,
 			sim.stats.delivered - delivered + 1,
-			"one identity per message, plus the origin's own change"
+			"{rule:?}: one identity per message, plus the origin's own change"
 		);
 	}
 }
@@ -1287,6 +1290,30 @@ fn a_scoped_copy_that_crossed_a_relay_is_not_waited_on() {
 	assert_eq!(sim.shows(near, 7, "local/x"), Some(true));
 }
 
+/// A relay files a scoped origin under a qualified key and sends that key on to a
+/// peer, which routes it through the relay and sends it back. The copy extends what
+/// the relay sent under the key, so once the relay's own route goes, it waits for
+/// the peer to hear and move off, as for any identity.
+#[test]
+fn a_scoped_key_sent_back_through_its_relay_is_waited_on() {
+	let (origin, relay, peer) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.link(origin, relay, SimLink::cost(1), SimLink::cost(1).grant(LOCAL));
+	sim.join(relay, peer, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "local/x", 0, None);
+	assert!(sim.run());
+	let key = qualified(LOCAL.subject, 7);
+	assert_eq!(next(&sim, relay, key), Some(origin));
+	assert_eq!(next(&sim, peer, key), Some(relay));
+	assert!(sim.holds(relay, key) && sim.holds(peer, key));
+
+	sim.disconnect(origin, relay);
+	assert!(sim.starved(relay, key), "the peer still routes through the relay");
+	assert!(sim.run());
+	assert!(!sim.holds(relay, key) && !sim.holds(peer, key));
+}
+
 /// The cost of the longest loop-free path from `from` through nodes not yet `seen`,
 /// each hop charged at the receiver's side of the link.
 fn longest(sim: &Sim, from: Node, seen: &mut Vec<Node>) -> Metric {
@@ -1473,4 +1500,553 @@ fn a_relay_restart_keeps_the_claim_unavailable() {
 			.collect();
 		assert_eq!(seen, [Kind::Unavailable, Kind::Available], "node {node}");
 	}
+}
+
+/// Every identity a rotation draws is fresh: never zero, never one still
+/// declared or just retired, and within the 53 bits a lite-06 hop carries as
+/// itself. The seed makes the first draw zero, and the high bits of every draw
+/// set, which a small seed never reaches.
+#[test]
+fn rotated_identities_are_fresh_and_in_range() {
+	// One xorshift64 draw, and its inverse to pick the seed before a chosen draw.
+	fn draw(mut x: u64) -> u64 {
+		x ^= x << 13;
+		x ^= x >> 7;
+		x ^ x << 17
+	}
+	fn undraw(y: u64) -> u64 {
+		let unshift = |y: u64, shift: &dyn Fn(u64) -> u64| (0..64).fold(y, |x, _| y ^ shift(x));
+		let x = unshift(y, &|x| x << 17);
+		let x = unshift(x, &|x| x >> 7);
+		unshift(x, &|x| x << 13)
+	}
+	// The router forces its seed odd, so take the first zero draw an odd seed reaches.
+	let seed = (1..)
+		.map(|high: u64| undraw(high << 53))
+		.find(|seed| seed & 1 == 1)
+		.expect("an odd seed");
+	assert_eq!(draw(seed) & GENERATED, 0);
+
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 0,
+	};
+	// Eight rotations, each from aging the declared identity to its last revision.
+	fn check(rule: &str, mut rotate: impl FnMut() -> Id) {
+		let mut seen = BTreeSet::from([7]);
+		for _ in 0..8 {
+			let fresh = rotate();
+			assert_ne!(fresh, 0, "{rule}");
+			assert!(fresh <= GENERATED, "{rule}: {fresh:#x} is beyond a generated hop id");
+			assert!(seen.insert(fresh), "{rule}: {fresh:#x} was drawn before");
+		}
+	}
+
+	let mut router: Router<Node, Item> = Router::new(hop(0, 0), seed);
+	router.originate(7, 0);
+	router.announce(p("live/x"), item).unwrap();
+	check("distance", || {
+		router.age(MAX - 1);
+		router.announce(p("live/x"), item).unwrap();
+		router.declared().expect("declared")
+	});
+	let mut router = path::Router::<Node, Item>::new(hop(0, 0), seed, Doubt::DEFAULT);
+	router.originate(7);
+	router.announce(p("live/x"), item).unwrap();
+	check("path", || {
+		router.age(MAX - 1);
+		router.announce(p("live/x"), item).unwrap();
+		router.declared().expect("declared")
+	});
+}
+
+/// One batch may withdraw a stream's only claim and start another: the stream
+/// moves to the new claim, and the route it rides on stays up throughout.
+#[test]
+fn a_batch_replacing_a_streams_only_claim_keeps_its_route() {
+	let (up, down) = (0, 1);
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	router.connect(down, Link::default()).unwrap();
+	router.peer_interest(down, Path::empty()).unwrap();
+	let interest = router.interest();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(0, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert)));
+	router.batch(up, 7, vec![(p("live/a"), Some(item(1)))], Some(1), interest);
+	assert!(
+		router
+			.drain()
+			.iter()
+			.any(|out| matches!(out, Out::Route { to, reach: Some(_), .. } if *to == down))
+	);
+
+	router.batch(
+		up,
+		7,
+		vec![(p("live/a"), None), (p("live/b"), Some(item(2)))],
+		Some(2),
+		interest,
+	);
+	let out = router.drain();
+	assert!(
+		!out.iter()
+			.any(|out| matches!(out, Out::Route { to, reach: None, .. } if *to == down)),
+		"{out:?}"
+	);
+	assert!(out.contains(&Out::Batch {
+		to: down,
+		id: 7,
+		changes: vec![(p("live/b"), Some(item(2))), (p("live/a"), None)],
+		floor: Some(2),
+	}));
+}
+
+/// A relay sends a route only to a stream whose interest one of its claims meets,
+/// and records a feasibility distance only for a route it sends. Here no stream's
+/// interest meets the claim, so the relay commits to nothing it never advertised.
+#[test]
+fn a_route_no_interest_meets_records_no_distance() {
+	let (origin, a, b) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.watch(origin, "other/");
+	sim.watch(b, "other/");
+	// The relay's own interest certifies nothing over theirs.
+	sim.watch(a, "live/");
+	sim.join(origin, a, 1);
+	sim.join(a, b, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/x", 0, None);
+	assert!(sim.run());
+	assert_eq!(next(&sim, a, 7), Some(origin));
+	assert_eq!(sim.sent(a, b, 7), None);
+	assert!(!sim.remembers(a, 7));
+}
+
+/// Two neighbors with feasible routes carry different uncertified attributes for one
+/// claim: the relay shows and forwards its selected next hop's, whichever neighbor
+/// sorts first.
+#[test]
+fn an_uncertified_claim_comes_from_the_selected_next_hop() {
+	let (near, far, down) = (5, 0, 1);
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	// Both routes stay feasible: each sender's metric is below any this relay advertises.
+	router
+		.connect(
+			far,
+			Link {
+				cost: 5,
+				..Link::default()
+			},
+		)
+		.unwrap();
+	router.connect(near, Link::default()).unwrap();
+	router.connect(down, Link::default()).unwrap();
+	router.peer_interest(down, Path::empty()).unwrap();
+	let interest = router.interest();
+	for (from, seed) in [(far, 1), (near, 2)] {
+		let advert = Advert {
+			seqno: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+			hops: Arc::from([hop(9, 0), hop(from, 0)]),
+		};
+		router.route(from, 7, Some(Reach::Finite(advert)));
+		// No floor: the claim lives only while the stream carries it.
+		router.batch(from, 7, vec![(p("live/x"), Some(item(seed)))], None, interest);
+	}
+	assert_eq!(router.selected(7).and_then(|route| route.next), Some(near));
+	assert_eq!(router.shown()[&(7, p("live/x"))].item, item(2));
+	// Echo any end the relay sent downstream meanwhile, so it starts the route again.
+	let mut out = router.drain();
+	router.echo(down, 7);
+	out.extend(router.drain());
+	let last = (out.into_iter())
+		.filter_map(|out| match out {
+			Out::Batch { to, changes, .. } if to == down => Some(changes),
+			_ => None,
+		})
+		.flatten()
+		.rfind(|(claim, _)| *claim == p("live/x"));
+	assert_eq!(last, Some((p("live/x"), Some(item(2)))));
+}
+
+/// A relay forwarding a neighbor's seqno request along its route. `close` names the
+/// session that then closes, and whatever it was, nothing is left to ask for: the
+/// relay keeps no request, though nothing else it knows names the identity.
+fn forwarded_request_closes(close: Node) -> usize {
+	let (up, requester) = (0, 1);
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	router.connect(requester, Link::default()).unwrap();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(9, 0), hop(up, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert)));
+	router.request(requester, 7, 1);
+	assert!(router.drain().contains(&Out::Request {
+		to: up,
+		id: 7,
+		seqno: 1
+	}));
+	assert_eq!(router.retained().pending, 1);
+	router.disconnect([close]);
+	router.retained().pending
+}
+
+#[test]
+fn a_forwarded_request_goes_with_its_requesters_session() {
+	assert_eq!(forwarded_request_closes(1), 0);
+}
+
+#[test]
+fn a_forwarded_request_goes_with_the_route_it_follows() {
+	assert_eq!(forwarded_request_closes(0), 0);
+}
+
+/// A relay keeps nothing for an identity once the only session that routed it
+/// closes: no state outlives what a peer told it.
+#[test]
+fn a_relay_keeps_nothing_once_its_only_route_closes() {
+	let up = 0;
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(9, 0), hop(up, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert)));
+	assert!(!router.keeps_nothing(7));
+	router.disconnect([up]);
+	assert!(router.keeps_nothing(7));
+}
+
+/// A claim only ever carried uncertified, as a stream's own, goes offline when the
+/// stream drops it: that proves only the stream left it, not that the origin
+/// withdrew it. That holds while another certifier has yet to answer, so which
+/// regions are certified is unknown.
+#[test]
+fn an_uncertified_claim_dropped_goes_offline_while_a_certifier_is_unanswered() {
+	let (answered, silent) = (0, 1);
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(answered, Link::default()).unwrap();
+	router.connect(silent, Link::default()).unwrap();
+	let interest = router.interest();
+	for from in [answered, silent] {
+		let advert = Advert {
+			seqno: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+			hops: Arc::from([hop(9, 0), hop(from, 0)]),
+		};
+		router.route(from, 7, Some(Reach::Finite(advert)));
+	}
+	router.batch(answered, 7, vec![(p("live/x"), Some(item))], None, interest);
+	assert_eq!(router.shows(7, &p("live/x")), Some(true));
+	router.events();
+
+	router.batch(answered, 7, vec![(p("live/x"), None)], None, interest);
+	let kinds: Vec<Kind> = router.events().into_iter().map(|event| event.kind).collect();
+	assert_eq!(kinds, [Kind::Offline]);
+}
+
+/// A finite route `from` sends, as its next hop toward an origin further on.
+fn relayed(from: Node, seqno: Seqno, metric: Metric) -> Option<Reach> {
+	Some(Reach::Finite(Advert {
+		seqno,
+		metric,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(9, 0), hop(from, 0)]),
+	}))
+}
+
+/// A claim only a held neighbor certifies is shown unavailable: a held route cannot
+/// serve it. Once the selected neighbor's floor covers the claim, it is available,
+/// though that batch names no claim at all.
+#[test]
+fn a_floor_naming_no_claim_makes_a_held_neighbors_claim_available() {
+	let (selected, held) = (0, 1);
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(selected, Link::default()).unwrap();
+	router.connect(held, Link::default()).unwrap();
+	let interest = router.interest();
+	for from in [selected, held] {
+		router.route(from, 7, relayed(from, 0, 1));
+	}
+	router.batch(held, 7, vec![(p("live/x"), Some(item))], Some(5), interest);
+	// The selected neighbor carries the claim, but certifies nothing yet.
+	router.batch(selected, 7, vec![(p("live/x"), Some(item))], None, interest);
+	router.route(held, 7, Some(Reach::Held));
+	assert_eq!(router.selected(7).and_then(|route| route.next), Some(selected));
+	assert_eq!(router.shows(7, &p("live/x")), Some(false));
+	router.events();
+
+	router.batch(selected, 7, Vec::new(), Some(5), interest);
+	assert_eq!(router.shows(7, &p("live/x")), Some(true));
+	let kinds: Vec<Kind> = router.events().into_iter().map(|event| event.kind).collect();
+	assert_eq!(kinds, [Kind::Available]);
+}
+
+/// A relay that narrows its interest keeps a floor outside it while that floor is
+/// newer than every floor inside, then lets it go, with its claims, once a floor
+/// inside catches up. A stream watching wider than the relay hears those claims
+/// end. The relay asked one neighbor for a sibling region, and that neighbor has
+/// yet to answer the narrowed interest, so no pruning lets the region go first.
+#[test]
+fn a_relay_lets_go_outside_its_interest_once_a_floor_inside_catches_up() {
+	let (live, other, down) = (0, 1, 3);
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	for neighbor in [live, other, down] {
+		router.connect(neighbor, Link::default()).unwrap();
+	}
+	router.asks(live, p("live")).unwrap();
+	router.asks(other, p("other")).unwrap();
+	router.peer_interest(down, Path::empty()).unwrap();
+	let interest = router.interest();
+	for from in [live, other] {
+		router.route(from, 7, relayed(from, 0, 1));
+	}
+	router.batch(other, 7, vec![(p("other/x"), Some(item(1)))], Some(10), interest);
+	router.batch(live, 7, vec![(p("live/x"), Some(item(2)))], Some(3), interest);
+
+	let interest = router.watch(p("live"));
+	router.batch(live, 7, vec![(p("live/x"), Some(item(2)))], Some(3), interest);
+	let view = router.view(7).expect("a view");
+	assert_eq!(view.floors, BTreeMap::from([(p("live"), 3), (p("other"), 10)]));
+	assert!(view.items.contains_key(&p("other/x")));
+	router.drain();
+
+	router.batch(live, 7, vec![(p("live/y"), Some(item(3)))], Some(11), interest);
+	let view = router.view(7).expect("a view");
+	assert_eq!(view.floors, BTreeMap::from([(p("live"), 11)]));
+	assert_eq!(
+		view.items.keys().cloned().collect::<Vec<_>>(),
+		[p("live/x"), p("live/y")]
+	);
+	let changes: Vec<(Path, Option<Item>)> = (router.drain().into_iter())
+		.filter_map(|out| match out {
+			Out::Batch { to, changes, .. } if to == down => Some(changes),
+			_ => None,
+		})
+		.flatten()
+		.collect();
+	assert_eq!(changes, [(p("live/y"), Some(item(3))), (p("other/x"), None)]);
+}
+
+/// A relay forwarding a request for a newer seqno than its own starvation needs
+/// keeps asking for the newer one: a route at the seqno it needs ends its
+/// starvation but answers nothing its requester asked for.
+#[test]
+fn a_starving_relay_keeps_forwarding_the_newer_seqno_its_requester_asked_for() {
+	let (up, requester) = (0, 1);
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	router.connect(requester, Link::default()).unwrap();
+	router.peer_interest(requester, Path::empty()).unwrap();
+	let interest = router.interest();
+	router.route(up, 7, relayed(up, 0, 1));
+	// A claim meets the requester's interest, so the relay sends it the route and
+	// records a feasibility distance of seqno 0.
+	router.batch(up, 7, vec![(p("live/x"), Some(item))], Some(1), interest);
+	assert!(router.remembers(7));
+	router.request(requester, 7, 5);
+	assert!(router.drain().contains(&Out::Request {
+		to: up,
+		id: 7,
+		seqno: 5
+	}));
+
+	// A longer route at the same seqno is infeasible: the relay starves, needing only seqno 1.
+	router.route(up, 7, relayed(up, 0, 5));
+	assert!(router.starved(7));
+	let requests: Vec<_> = (router.drain().into_iter())
+		.filter(|out| matches!(out, Out::Request { .. }))
+		.collect();
+	assert_eq!(requests, [], "the request for seqno 5 already covers it");
+
+	router.route(up, 7, relayed(up, 1, 5));
+	assert_eq!(router.selected(7).map(|route| route.seqno), Some(1));
+	assert_eq!(router.retained().pending, 1, "seqno 5 is still owed to the requester");
+	router.route(up, 7, relayed(up, 5, 5));
+	assert_eq!(router.retained().pending, 0);
+}
+
+/// A path route the next hop offers again at a cost that overflows with the link's
+/// is out of reach. With no neighbour left to answer, the node lets the route go
+/// rather than hold under a route it can never use.
+#[test]
+fn a_path_route_whose_cost_overflows_is_let_go() {
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	let hops = [(7, 0), (1, 1)];
+	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, 1))), 0);
+	router.batch(1, 7, p(""), vec![(p("live/x"), Some(1))], Some(1), 0);
+	assert!(router.shown()[&(7, p("live/x"))].available);
+	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, Metric::MAX))), 0);
+	assert_eq!(router.route_for(7, &p("")), None);
+	assert!(router.shown().is_empty());
+}
+
+/// A route this node qualified is another key than the one a scoped neighbour
+/// offered, so it never goes back to a neighbour its path crosses, even when the
+/// route came through a different next hop.
+#[test]
+fn a_qualified_route_is_not_returned_to_a_scoped_neighbour_it_crossed() {
+	let grant = || Link {
+		scope: Some(Scope {
+			regions: vec![p("a")],
+			qualify: Arc::new(|id| qualified("ga", id)),
+		}),
+		..Link::default()
+	};
+	let (near, far) = (2, 3);
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(near, near as Id, grant()).unwrap();
+	router.connect(far, far as Id, grant()).unwrap();
+	// The near neighbour offers the raw key from the publisher, and the far one a
+	// cheaper path through the near one.
+	let direct = along(&[(7, 0), (near as Id, 1)], 5);
+	router.route(near, 7, p("a"), Some(path::Reach::Finite(direct)), 0);
+	let through = along(&[(7, 0), (near as Id, 1), (far as Id, 1)], 1);
+	router.route(far, 7, p("a"), Some(path::Reach::Finite(through)), 0);
+	router.batch(far, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	let key = qualified("ga", 7);
+	assert_eq!(router.route_for(key, &p("a")).and_then(path::Route::next), Some(far));
+	router.peer_interest(near, Some(p("a"))).unwrap();
+	let messages = router.drain();
+	assert!(
+		!messages
+			.iter()
+			.any(|msg| matches!(msg, path::Out::Route { to, .. } if *to == near)),
+		"{messages:?}"
+	);
+}
+
+/// A down-only route never goes to an upstream link, including one a stream carries
+/// inside the upstream's interest rather than at it.
+#[test]
+fn a_down_only_route_inside_an_upstreams_interest_is_not_sent_there() {
+	let upstream = Link {
+		upstream: true,
+		..Link::default()
+	};
+	let (asker, source) = (1, 3);
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(asker, asker as Id, upstream.clone()).unwrap();
+	router.connect(source, source as Id, upstream).unwrap();
+	let offer = along(&[(7, 0), (source as Id, 1)], 1);
+	router.route(source, 7, p("a"), Some(path::Reach::Finite(offer)), 0);
+	router.batch(source, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	let route = router.route_for(7, &p("a")).and_then(path::Route::offer);
+	assert!(route.is_some_and(|offer| offer.down_only));
+	router.peer_interest(asker, Some(p(""))).unwrap();
+	let messages = router.drain();
+	assert!(
+		!messages
+			.iter()
+			.any(|msg| matches!(msg, path::Out::Route { to, .. } if *to == asker)),
+		"{messages:?}"
+	);
+}
+
+/// Doubt keeps a lost route held only while a neighbour still offers a live way back.
+/// A route the dead news already reached offers none, so once the next hop reports
+/// the loss the node lets the claims go.
+#[test]
+fn a_dead_alternative_does_not_keep_a_lost_route_held() {
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	// Both paths cross the session node 6 opened to node 4.
+	let hop = path::Hop { node: 4, session: 1 };
+	for (peer, metric) in [(1, 1), (2, 5)] {
+		let offer = along(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)], metric);
+		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)), 0);
+		router.batch(peer, 7, p(""), vec![(p("live/x"), Some(1))], Some(1), 0);
+	}
+	assert_eq!(router.route_for(7, &p("")).and_then(path::Route::next), Some(1));
+	let dead = path::Dead::Closed {
+		hop,
+		far: 6,
+		moved: Vec::new(),
+		gone: true,
+	};
+	router.dead(1, dead, Instant::ZERO);
+	assert_eq!(router.route_for(7, &p("")), None);
+	assert!(router.shown().is_empty());
+}
+
+/// A driver hears of every identity whose routes were recomputed, even when no shown
+/// claim changed, so it can serve those claims through the routes it has now.
+#[test]
+fn a_route_change_alone_names_its_identity() {
+	let up = 0;
+	let mut router: Router<Node, Item> = Router::new(hop(2, 0), 1);
+	router.connect(up, Link::default()).unwrap();
+	let interest = router.interest();
+	let advert = Advert {
+		seqno: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+		hops: Arc::from([hop(0, 0)]),
+	};
+	router.route(up, 7, Some(Reach::Finite(advert.clone())));
+	let item = Item {
+		seed: 1,
+		epoch: None,
+		since: 1,
+	};
+	router.batch(up, 7, vec![(p("live/a"), Some(item))], Some(1), interest);
+	assert!(router.changed()[&7].contains(&p("live/a")));
+	router.route(up, 7, Some(Reach::Finite(Advert { metric: 2, ..advert })));
+	assert_eq!(router.changed(), BTreeMap::from([(7, BTreeSet::new())]));
 }
