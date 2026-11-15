@@ -1055,8 +1055,8 @@ mod tests {
 		let audio_init = audio.latest_init().await.unwrap().expect("AAC init segment");
 		assert_eq!(
 			aac_avg_bitrate(&audio_init),
-			96_000,
-			"the muxer keeps the declared catalog bitrate"
+			128_000,
+			"the descriptor carries the AAC-LC default, never a catalog bitrate an estimate rewrites"
 		);
 		assert_eq!(video.bandwidth(), 2_000_000, "the catalog carries no video bitrate yet");
 		assert_eq!(audio.bandwidth(), 96_000);
@@ -1104,8 +1104,8 @@ mod tests {
 	}
 
 	// The estimator also measures the framerate and publishes it once it settles, so an
-	// imported source gains one about a second in. Rebuilding for it would re-time the fMP4
-	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
+	// imported source gains one about a second in. Rebuilding for it would churn every recording
+	// cursor mid-stream, and muxing with it would re-time the fMP4 under the same URLs.
 	#[tokio::test(start_paused = true)]
 	async fn estimated_framerate_keeps_the_rendition() {
 		let origin = produce_origin();
@@ -1131,40 +1131,9 @@ mod tests {
 				"the video rendition survives a framerate estimate of {framerate:?}"
 			);
 			assert!(next_event(&mut cursor).await.is_none(), "no rendition churn");
-			// Still muxed at the timescale the rendition was built with.
+			// Still muxed at the default timescale.
 			assert_eq!(video.muxer().unwrap().timescale().as_u64(), 90_000);
 		}
-	}
-
-	#[tokio::test]
-	async fn estimate_before_first_init_reaches_aac_descriptor() {
-		let origin = produce_origin();
-		let _broadcast = origin
-			.route("live", moq_net::origin::RouteOptions::default())
-			.expect("publish allowed");
-		settle().await;
-		let upstream = empty_upstream(&origin, "live").await;
-
-		let mut catalog = catalog_with_both();
-		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = None;
-		let renditions = renditions::Producer::spawned(Config::default().window);
-		renditions.sync(&upstream, &catalog);
-		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
-
-		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = Some(110_000);
-		renditions.sync(&upstream, &catalog);
-		assert!(
-			Arc::ptr_eq(&audio, &renditions.get(Kind::Audio, "audio0").unwrap()),
-			"the estimate updates the existing rendition"
-		);
-		let init = audio.latest_init().await.unwrap().expect("AAC init segment");
-
-		assert_eq!(audio.bandwidth(), 110_000);
-		assert_eq!(
-			aac_avg_bitrate(&init),
-			110_000,
-			"the latest estimate reaches an init that was not cached yet"
-		);
 	}
 
 	// The other half: a change that alters how the rendition decodes, or which track it
@@ -4467,7 +4436,9 @@ mod tests {
 		let snapshot = test.listed("video0", 2).await;
 		assert_eq!(numbers(&snapshot), [0, 1, 2], "no segment is lost to the hand-over");
 		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
-		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
+		// The predecessor's part is a cut, named by where it ends.
+		let cut = segments::cut(old.tag(), 6, Duration::from_secs(3));
+		assert_eq!(tags, [old.tag(), &cut, new.tag()]);
 		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
 		assert_eq!(
 			durations,
@@ -4476,7 +4447,7 @@ mod tests {
 		);
 		let id = segments::Id {
 			generation: None,
-			tag: old.tag().to_string(),
+			tag: cut,
 			at: segments::At::Sequence(1),
 		};
 		assert!(
@@ -4541,7 +4512,8 @@ mod tests {
 		let snapshot = test.listed("video0", 2).await;
 		assert_eq!(numbers(&snapshot), [0, 1, 2]);
 		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
-		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
+		let cut = segments::cut(old.tag(), 6, Duration::from_secs(3));
+		assert_eq!(tags, [old.tag(), &cut, new.tag()]);
 		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
 		assert_eq!(
 			durations,
@@ -4712,6 +4684,46 @@ mod tests {
 		assert_eq!(target(&test, "video1"), 6, "a returning rendition derives its own");
 	}
 
+	// A retired rendition cuts its last segment where its edge stopped reading, and edges that
+	// see the catalog update at different media points cut it at different groups. Each cut lists
+	// under a URL naming it, so no URL names one edge's cut on one edge and another's elsewhere.
+	#[tokio::test(start_paused = true)]
+	async fn edges_name_a_retired_cut_apart() {
+		let mut early = Groups::with(&["video0"], &[]);
+		let mut late = early.join();
+		let mut video0 = early.publish("video0");
+		// Two groups a segment: segment 3 opens at group 6.
+		for sequence in 0..7 {
+			video0.at(sequence, sequence * 1_000);
+			settle().await;
+		}
+		let retired = [&mut early, &mut late].map(|edge| edge.rendition("video0"));
+		early.catalog.video.renditions.remove("video0");
+		early.sync();
+		video0.at(7, 7_000);
+		settle().await;
+		late.catalog.video.renditions.remove("video0");
+		late.sync();
+		for sequence in 8..10 {
+			video0.at(sequence, sequence * 1_000);
+			settle().await;
+		}
+
+		let [early, late] = retired;
+		let [cut, other] = [&early, &late].map(|edge| {
+			let snapshot = edge.snapshot();
+			assert_eq!(numbers(&snapshot), [0, 1, 2, 3]);
+			let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.to_string()).collect();
+			assert_eq!(tags[..3], [edge.tag(); 3], "a whole segment keeps its URL");
+			tags[3].clone()
+		});
+		assert_ne!(cut, other, "cut at groups 7 and 8");
+		assert!(early.numbered(&cut, 3).await.unwrap().is_some());
+		for tag in [&other, early.tag()] {
+			assert!(early.numbered(tag, 3).await.unwrap().is_none(), "{tag} names other bytes");
+		}
+	}
+
 	// Two edges over one media track agree on the media sequence.
 	#[tokio::test(start_paused = true)]
 	async fn edges_agree_on_the_media_sequence() {
@@ -4726,5 +4738,61 @@ mod tests {
 		let followed = early.listed("video0", 19).await;
 		assert_eq!(joined.media_sequence, 12, "eight 2s segments cover the 16s window");
 		assert_eq!(numbers(&followed), numbers(&joined));
+	}
+
+	// A publisher's estimator republishes its framerate and bitrate as they settle, and each edge
+	// builds its renditions at its own moment. Edges on either side of an estimate still name
+	// every init and segment by one URL and serve the same bytes under it.
+	#[tokio::test(start_paused = true)]
+	async fn edges_mux_alike_across_live_estimates() {
+		let mut early = Groups::with(&[], &[]);
+		let mut video = video_config();
+		video.framerate = None;
+		let mut audio = catalog_with_both().audio.renditions.remove("audio0").unwrap();
+		audio.bitrate = None;
+		early.catalog.video.renditions.insert("video0".into(), video);
+		early.catalog.audio.renditions.insert("audio0".into(), audio);
+		early.sync();
+		let mut tracks = [early.publish("video0"), early.publish("audio0")];
+		for sequence in 0..4 {
+			tracks.iter_mut().for_each(|track| track.gop(sequence));
+			settle().await;
+		}
+		for name in ["video0", "audio0"] {
+			early.listed(name, 2).await;
+		}
+
+		// The estimates settle after this edge built its renditions, and before the next one does.
+		early.catalog.video.renditions.get_mut("video0").unwrap().framerate = Some(30.0);
+		early.catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = Some(110_000);
+		early.sync();
+		let late = early.join();
+		for sequence in 4..7 {
+			tracks.iter_mut().for_each(|track| track.gop(sequence));
+			settle().await;
+		}
+
+		for name in ["video0", "audio0"] {
+			let (followed, joined) = (early.listed(name, 5).await, late.listed(name, 5).await);
+			let (early, late) = (early.rendition(name), late.rendition(name));
+			assert_eq!(early.tag(), late.tag(), "{name}: one segment URL");
+			let shared: Vec<_> = numbers(&joined)
+				.into_iter()
+				.filter(|segment| numbers(&followed).contains(segment))
+				.collect();
+			assert!(shared.len() >= 2, "{name}: both list {shared:?}");
+			for segment in shared {
+				let bytes = early.listed_segment(segment).await.unwrap().expect("segment");
+				assert_eq!(
+					Some(bytes),
+					late.listed_segment(segment).await.unwrap(),
+					"{name}: segment {segment} names one byte sequence"
+				);
+			}
+			// An init URL names its bytes by hash, so the same bytes are what keep it valid on
+			// every edge.
+			let init = early.latest_init().await.unwrap().expect("init");
+			assert_eq!(Some(init), late.latest_init().await.unwrap(), "{name}: one init");
+		}
 	}
 }
