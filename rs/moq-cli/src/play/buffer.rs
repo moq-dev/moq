@@ -15,6 +15,13 @@ pub(super) struct Buffer {
 	/// The keyframe the buffer last resumed at. A picture presenting before it references
 	/// media the buffer never had, so it is neither decoded nor shown.
 	pub floor: Option<moq_net::Timestamp>,
+	/// Pictures presenting before this are still warming up after a join or a skip:
+	/// decoded for their references, never shown, and never aged out, since they
+	/// trail the live edge by the warmup on purpose.
+	pub present: Option<moq_net::Timestamp>,
+	/// Whether the next keyframe resumes after a join or a loss, so a catalog `warmup`
+	/// applies. Cleared for an encoder's first picture, which has nothing before it.
+	pub joined: bool,
 	waiting_keyframe: bool,
 	pub ended: bool,
 	/// Exclusive endpoint declared for this encoder segment.
@@ -30,6 +37,8 @@ impl Default for Buffer {
 			oldest: VecDeque::new(),
 			generation: 0,
 			floor: None,
+			present: None,
+			joined: true,
 			// A join resumes at its first keyframe, like any other break.
 			waiting_keyframe: true,
 			ended: false,
@@ -46,6 +55,7 @@ impl Buffer {
 		self.edge = None;
 		self.generation += 1;
 		self.waiting_keyframe = true;
+		self.joined = true;
 	}
 
 	/// The earliest presentation time still buffered, wherever it sits in
@@ -63,13 +73,19 @@ impl Buffer {
 		Some(frame)
 	}
 
-	pub fn push(&mut self, frame: Frame, max_delay: Duration) {
+	/// Append `frame`, aging out what trails the newest by more than `max_delay`. After a
+	/// join or a loss, the pictures before the resuming keyframe plus `warmup` are warming.
+	pub fn push(&mut self, frame: Frame, max_delay: Duration, warmup: Duration) {
 		let edge = *self.edge.get_or_insert(frame.timestamp);
 		// Timestamp has no `Ord`; one that doesn't compare keeps the edge.
 		self.edge = Some(if frame.timestamp > edge { frame.timestamp } else { edge });
 		if frame.keyframe {
 			if self.waiting_keyframe {
 				self.floor = Some(frame.timestamp);
+				self.present = self
+					.floor
+					.filter(|_| self.joined)
+					.and_then(|floor| warmed(floor, warmup));
 			}
 			self.waiting_keyframe = false;
 		}
@@ -78,8 +94,11 @@ impl Buffer {
 		}
 		self.index(frame);
 		let edge = self.edge.unwrap();
-		// An unscaled timestamp has no age, so it never goes stale.
+		let present = self.present;
+		// An unscaled timestamp has no age, so it never goes stale, and neither does a
+		// warming one.
 		let stale = |oldest: &moq_net::Timestamp| match (edge.as_micros(), oldest.as_micros()) {
+			_ if present.is_some_and(|present| *oldest < present) => false,
 			(Ok(edge), Ok(oldest)) => edge.saturating_sub(oldest) > max_delay.as_micros(),
 			_ => false,
 		};
@@ -93,6 +112,8 @@ impl Buffer {
 			self.generation += 1;
 			self.waiting_keyframe = self.frames.is_empty();
 			self.floor = self.frames.front().map(|frame| frame.timestamp);
+			// Resuming past a loss warms up again.
+			self.present = self.floor.and_then(|floor| warmed(floor, warmup));
 			// The retained keyframe's leading pictures referenced what was just dropped.
 			let mut frames = std::mem::take(&mut self.frames);
 			frames.retain(|frame| !self.below_floor(frame));
@@ -119,6 +140,18 @@ impl Buffer {
 	}
 }
 
+/// Where a `warmup` from `floor` ends, at its scale, or `None` when there is none.
+fn warmed(floor: moq_net::Timestamp, warmup: Duration) -> Option<moq_net::Timestamp> {
+	if warmup.is_zero() {
+		return None;
+	}
+	let warmup = moq_net::Timestamp::try_from(warmup)
+		.ok()?
+		.convert(floor.scale()?)
+		.ok()?;
+	floor.checked_add(warmup).ok()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -136,20 +169,20 @@ mod tests {
 	fn eviction_keeps_only_decodable_media_inside_the_age_window() {
 		let mut buffer = Buffer::default();
 		let age = Duration::from_millis(100);
-		buffer.push(frame(0, true), age);
-		buffer.push(frame(50, false), age);
-		buffer.push(frame(100, true), age);
-		buffer.push(frame(150, false), age);
+		buffer.push(frame(0, true), age, Duration::ZERO);
+		buffer.push(frame(50, false), age, Duration::ZERO);
+		buffer.push(frame(100, true), age, Duration::ZERO);
+		buffer.push(frame(150, false), age, Duration::ZERO);
 		assert_eq!(buffer.frames.front().unwrap().timestamp.as_millis().unwrap(), 100);
 		assert_eq!(buffer.bytes, 14);
 		buffer.pop();
 		assert_eq!(buffer.bytes, 7);
-		buffer.push(frame(260, false), age);
+		buffer.push(frame(260, false), age, Duration::ZERO);
 		assert!(buffer.frames.is_empty(), "no retained keyframe");
 		assert_eq!(buffer.bytes, 0);
-		buffer.push(frame(280, false), age);
+		buffer.push(frame(280, false), age, Duration::ZERO);
 		assert!(buffer.frames.is_empty(), "cannot resume on a dependent picture");
-		buffer.push(frame(300, true), age);
+		buffer.push(frame(300, true), age, Duration::ZERO);
 		assert_eq!(buffer.bytes, 7);
 	}
 
@@ -165,15 +198,15 @@ mod tests {
 			(90, false),
 			(110, false),
 		] {
-			buffer.push(frame(ms, keyframe), age);
+			buffer.push(frame(ms, keyframe), age, Duration::ZERO);
 		}
-		buffer.push(frame(95, false), age);
+		buffer.push(frame(95, false), age, Duration::ZERO);
 		let kept: Vec<_> = buffer.frames.iter().map(|f| f.timestamp.as_millis().unwrap()).collect();
 		assert_eq!(kept, [100, 110], "80, 90 and 95 reference the evicted group");
 		assert_eq!(buffer.bytes, 14);
 		assert_eq!(buffer.oldest().unwrap().as_millis().unwrap(), 100);
-		buffer.push(frame(200, true), age);
-		buffer.push(frame(180, false), age);
+		buffer.push(frame(200, true), age, Duration::ZERO);
+		buffer.push(frame(180, false), age, Duration::ZERO);
 		assert_eq!(buffer.frames.len(), 4, "a continuous group keeps its leading pictures");
 	}
 
@@ -181,7 +214,7 @@ mod tests {
 	fn reordered_timestamps_keep_decode_order_and_the_newest_edge() {
 		let mut buffer = Buffer::default();
 		for (ms, keyframe) in [(0, true), (99, false), (33, false), (66, false)] {
-			buffer.push(frame(ms, keyframe), Duration::from_millis(100));
+			buffer.push(frame(ms, keyframe), Duration::from_millis(100), Duration::ZERO);
 		}
 		assert_eq!(
 			buffer
@@ -195,7 +228,7 @@ mod tests {
 		buffer.clear();
 		assert_eq!(buffer.bytes, 0);
 		assert!(buffer.frames.is_empty());
-		buffer.push(frame(1, true), Duration::ZERO);
+		buffer.push(frame(1, true), Duration::ZERO, Duration::ZERO);
 		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 1);
 	}
 	#[test]
@@ -203,16 +236,51 @@ mod tests {
 		let mut buffer = Buffer::default();
 		let age = Duration::from_millis(100);
 		for (ms, keyframe) in [(0, true), (99, false), (33, false)] {
-			buffer.push(frame(ms, keyframe), age);
+			buffer.push(frame(ms, keyframe), age, Duration::ZERO);
 		}
 		buffer.pop();
-		buffer.push(frame(150, false), age);
+		buffer.push(frame(150, false), age, Duration::ZERO);
 		assert!(
 			buffer.frames.is_empty(),
 			"the 33ms picture expired behind the 99ms reference"
 		);
 		assert_eq!(buffer.bytes, 0);
-		buffer.push(frame(160, true), age);
+		buffer.push(frame(160, true), age, Duration::ZERO);
 		assert_eq!(buffer.frames.len(), 1);
+	}
+
+	/// After a join the warmup's pictures trail the live edge on purpose, so a zero age budget
+	/// keeps them, and an eviction past a loss warms up again from the keyframe it resumes at.
+	#[test]
+	fn a_join_warms_up_without_aging_out_the_warmup() {
+		let mut buffer = Buffer::default();
+		let warmup = Duration::from_millis(100);
+		for ms in [0, 50, 100, 150] {
+			buffer.push(frame(ms, ms % 100 == 0), Duration::ZERO, warmup);
+		}
+		let kept: Vec<_> = buffer.frames.iter().map(|f| f.timestamp.as_millis().unwrap()).collect();
+		assert_eq!(kept, [0, 50, 100, 150]);
+		assert_eq!(buffer.present.unwrap().as_millis().unwrap(), 100);
+
+		buffer.pop();
+		buffer.pop();
+		buffer.push(frame(200, true), Duration::ZERO, warmup);
+		let kept: Vec<_> = buffer.frames.iter().map(|f| f.timestamp.as_millis().unwrap()).collect();
+		assert_eq!(kept, [200], "the aged group was evicted");
+		assert_eq!(buffer.present.unwrap().as_millis().unwrap(), 300);
+	}
+
+	/// An encoder's first picture has nothing before it to warm up from.
+	#[test]
+	fn a_fresh_encoder_needs_no_warmup() {
+		let mut buffer = Buffer {
+			joined: false,
+			..Buffer::default()
+		};
+		buffer.push(frame(0, true), Duration::ZERO, Duration::from_millis(100));
+		assert!(buffer.present.is_none());
+		buffer.clear();
+		buffer.push(frame(500, true), Duration::ZERO, Duration::from_millis(100));
+		assert_eq!(buffer.present.unwrap().as_millis().unwrap(), 600, "a loss warms up");
 	}
 }

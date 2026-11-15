@@ -15,7 +15,7 @@ use super::args::{Args, REACH};
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
 use super::timeline::{AudioTimeline, Playhead};
-use super::video::{Refresh, Video};
+use super::video::Video;
 use super::window::Event;
 use moq_mux::sync::{Producer as Presentation, Transition};
 
@@ -274,9 +274,7 @@ impl<O: Output> Media<O> {
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_delay();
-					// A decoder and its subscription from `start`, and the live edge when `edge` asks
-					// to wait for it.
-					let open = async |delay: moq_net::track::Delay, start: moq_net::track::Anchor, edge: bool| {
+					let opened = async {
 						// The window's renderer refuses a GPU surface it cannot import, so
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
@@ -291,80 +289,57 @@ impl<O: Output> Media<O> {
 							decode.v4l2 = self.args.v4l2_decoder.clone();
 						}
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
-						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
-						let mut subscriber = track
-							.subscribe(
-								moq_net::track::Subscription::default()
-									.with_priority(hang::catalog::PRIORITY.video)
-									// The whole delay from the first request, so a cold join never
-									// states a zero minimum before the container's update.
-									.with_delay(delay)
-									.with_ranges([moq_net::track::Range { start, end: None }]),
-							)
-							.await?;
-						// The live edge is known only once the feed is live: a warm copy still
-						// waiting on its source reports nothing yet. The wait ends with the track,
-						// and holds up the rest of playback, so only a warmup lane asks for it.
-						let edge = match edge {
-							true => subscriber.largest().await.map(|largest| largest.group),
-							false => None,
-						};
-						let format = catalog::hang::Container::try_from(config)?;
-						// The playout delay is the target latency, and the max how late a group may be.
-						let track =
-							moq_mux::container::Playout::new(delay, Duration::ZERO).consumer(subscriber, format);
-						Ok::<_, anyhow::Error>((track, decoder, edge))
-					};
-					let opened = async {
 						let delay = moq_net::track::Delay {
 							min: Some(self.args.video_delay()),
 							max: Some(max_delay),
 						};
-						// An intra-refresh rendition also runs a decoder with one more sweep
-						// of budget, joining a group earlier so its pictures stay clean, as
-						// `moq_video::decode::Consumer` does. Both share one upstream request.
+						// An intra-refresh rendition decodes from a group earlier, presenting from
+						// its recovery point plus the warmup, as `moq_video::decode::Consumer` does.
 						let warmup = config.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
-						// The live edge, from the groups each hop holds from its live feed, never a warm
-						// copy's backlog, so it names no cached group for the shared publisher
-						// subscription to rewind to.
-						let (track, decoder, edge) =
-							open(delay, moq_net::track::Anchor::Relative(0), !warmup.is_zero()).await?;
-						let refresh = if warmup.is_zero() {
-							None
-						} else {
-							// The min-delay decoder's delay plus one sweep, as in
-							// `moq_video::decode::Consumer`.
-							let delay = moq_net::track::Delay {
-								min: delay.min.map(|min| min.saturating_add(warmup)),
-								max: Some(max_delay.saturating_add(warmup)),
-							};
-							// The group before the live edge: the one containing the key just below it, as
-							// starts are sparse. Every wire carries a time start, where a relative one
-							// past the edge is refused before lite-07; there it reaches the edge alone.
-							let start = edge.map_or(moq_net::track::Anchor::Relative(0), |edge| {
-								moq_net::track::Anchor::Time(edge.saturating_sub(1))
-							});
-							let (track, decoder, _) = open(delay, start, false).await?;
-							let interval = config
-								.framerate
-								.filter(|rate| rate.is_finite() && *rate > 0.0)
-								.and_then(|rate| Duration::try_from_secs_f64(rate.recip()).ok());
-							Some(Refresh {
-								track,
-								decoder,
-								interval,
-								warmup,
-							})
-						};
-						Ok::<_, anyhow::Error>((track, decoder, refresh))
+						let playout = moq_mux::container::Playout::new(delay, warmup);
+						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
+						// The whole delay from the first request, so a cold join never states a
+						// zero minimum before the container's update. The live edge, from the
+						// groups each hop holds from its live feed, never a warm copy's backlog,
+						// so it names no cached group for the shared publisher subscription to
+						// rewind to.
+						let mut subscriber = track
+							.subscribe(
+								playout.subscription(
+									moq_net::track::Subscription::default()
+										.with_priority(hang::catalog::PRIORITY.video)
+										.with_ranges([moq_net::track::Range::live()]),
+								),
+							)
+							.await?;
+						// A warmup widens the subscription to the group before the live edge, the
+						// one containing the key just below it, as starts are sparse. The live
+						// edge is known only once the feed is live: a warm copy still waiting on
+						// its source reports nothing yet. The wait ends with the track. Every wire
+						// carries a time start, where a relative one past the edge is refused
+						// before lite-07; there it reaches the edge alone.
+						if !warmup.is_zero()
+							&& let Some(edge) = subscriber.largest().await
+						{
+							let start = moq_net::track::Anchor::Time(edge.group.saturating_sub(1));
+							let subscription = subscriber
+								.subscription()
+								.with_ranges([moq_net::track::Range { start, end: None }]);
+							subscriber.update(subscription)?;
+						}
+						let format = catalog::hang::Container::try_from(config)?;
+						// The playout delay is the target latency, and the max how late a group may
+						// be; the start reaches the warmup further back.
+						let track = playout.consumer(subscriber, format);
+						Ok::<_, anyhow::Error>((track, decoder, warmup))
 					}
 					.await;
 					match opened {
-						Ok((track, decoder, refresh)) => {
+						Ok((track, decoder, warmup)) => {
 							tracing::info!(
 								track = name,
 								decoder = decoder.name(),
-								refresh = refresh.is_some(),
+								?warmup,
 								"playing video rendition"
 							);
 							let (delay, held) = tokio::sync::watch::channel(None);
@@ -376,6 +351,7 @@ impl<O: Output> Media<O> {
 								max_delay,
 								min_delay: self.args.video_delay(),
 								delay: held,
+								warmup,
 							};
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							let (retire, retired) = tokio::sync::oneshot::channel();
@@ -397,7 +373,7 @@ impl<O: Output> Media<O> {
 										Ok(()) = retired => {}
 									}
 								};
-								let result = until_stopped(video.run(track, decoder, refresh), stopped).await;
+								let result = until_stopped(video.run(track, decoder), stopped).await;
 								(Kind::Video, result.map(|(finished, _)| (finished, None)))
 							});
 							playback.started(Kind::Video, reference);
@@ -1679,6 +1655,7 @@ mod tests {
 			max_delay: delay,
 			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
+			warmup: Duration::ZERO,
 		};
 		let audio_task = tokio::spawn(async move {
 			play_audio(consumer, audio_play, std::future::pending()).await.unwrap();
@@ -1686,7 +1663,6 @@ mod tests {
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Passthrough(None),
-			None,
 		));
 		let mut shown = Vec::new();
 		for at in 0..1_400u64 {
@@ -1815,6 +1791,7 @@ mod tests {
 			max_delay: delay,
 			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
+			warmup: Duration::ZERO,
 		};
 		let audio_task = tokio::spawn(async move {
 			play_audio(consumer, audio_play, std::future::pending())
@@ -1826,7 +1803,6 @@ mod tests {
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Buffered(Vec::new(), Default::default()),
-			None,
 		));
 		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 20).unwrap(),
@@ -2189,11 +2165,11 @@ mod tests {
 			max_delay: delay,
 			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
+			warmup: Duration::ZERO,
 		};
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Passthrough(None),
-			None,
 		));
 		let picture = |millis: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
@@ -2948,8 +2924,9 @@ mod tests {
 				max_delay: delay,
 				min_delay: delay,
 				delay: tokio::sync::watch::channel(None).1,
+				warmup: Duration::ZERO,
 			}
-			.run(track, decoder, None),
+			.run(track, decoder),
 		);
 		loop {
 			tokio::task::yield_now().await;
