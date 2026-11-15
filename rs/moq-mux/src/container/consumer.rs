@@ -1900,7 +1900,7 @@ mod tests {
 
 	// ---- Basic Reading ----
 
-	#[tokio::test]
+	#[kio::test]
 	async fn read_single_group() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -2549,7 +2549,7 @@ mod tests {
 		assert_eq!(duration, Timestamp::new(0, scale).unwrap());
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn gaps_mark_holes_while_a_marker_reads_as_an_end() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
@@ -2637,7 +2637,7 @@ mod tests {
 		assert_eq!(items(&mut reader).await, ["0", "20000", "gap 40000+20000", "60000"]);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_latency_skip_is_a_gap() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
@@ -2665,7 +2665,7 @@ mod tests {
 	}
 
 	/// A video group's trailing duration marker is that frame's end, not a declared stop.
-	#[tokio::test]
+	#[kio::test]
 	async fn a_trailing_duration_marker_is_not_an_end() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = track.subscribe(
@@ -2696,7 +2696,7 @@ mod tests {
 	}
 
 	/// An audio terminal opens its group with the endpoint, then the codec's final packets.
-	#[tokio::test]
+	#[kio::test]
 	async fn an_audio_terminal_reads_its_end_before_the_final_packets() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
@@ -2722,7 +2722,7 @@ mod tests {
 		assert_eq!(items(&mut reader).await, ["0", "20000", "end 50000", "40000"]);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_marker_group_declares_an_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
@@ -2739,7 +2739,7 @@ mod tests {
 	}
 
 	/// Missing media reads as a gap; only the publisher can declare an end.
-	#[tokio::test]
+	#[kio::test]
 	async fn only_a_marker_declares_an_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
@@ -2760,7 +2760,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn empty_groups_mean_nothing() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
@@ -2782,7 +2782,7 @@ mod tests {
 
 	/// A live-edge reader positioned on the largest group while it is still empty does not
 	/// stall there: once a budget of newer media lands, it moves on like any stalled group.
-	#[tokio::test]
+	#[kio::test]
 	async fn a_live_edge_start_on_an_empty_group_moves_on() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		write_group(&mut track, 0, &[ts(0)]);
@@ -2805,7 +2805,7 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["1000000", "1600000"]);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn latency_skip_reports_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track = track.subscribe(
@@ -2835,7 +2835,7 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["gap 0+1000000", "1000000"]);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn read_multiple_frames_single_group() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -2855,7 +2855,7 @@ mod tests {
 		assert!(frames[0].keyframe);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn read_multiple_groups_within_latency() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3010,8 +3010,8 @@ mod tests {
 	/// not cut short while what it could still present (up to where the newer group
 	/// begins) is within the budget: the newer group races ahead on its own stream while
 	/// the older one is still arriving.
-	#[test]
-	fn a_long_group_blocked_behind_a_newer_one_is_not_cut_short() {
+	#[kio::test]
+	async fn a_long_group_blocked_behind_a_newer_one_is_not_cut_short() {
 		let waiter = kio::Waiter::noop();
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = container_max_delay_only(track.subscribe(None), Duration::from_secs(2));
@@ -3069,8 +3069,8 @@ mod tests {
 	/// groups of ten frames and a one-frame sixth at 5 s, with a 1.5 s budget, start at the 4 s
 	/// group, whether the sixth is open or finished. `js/hang`'s `consumer.skips.test.ts` pairs
 	/// this case.
-	#[test]
-	fn a_buffered_backlog_starts_within_the_budget() {
+	#[kio::test]
+	async fn a_buffered_backlog_starts_within_the_budget() {
 		for open in [true, false] {
 			let waiter = kio::Waiter::noop();
 			let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -3114,8 +3114,8 @@ mod tests {
 	/// budget, rather than skipping on to a later group with data and dropping it. Here the fifth
 	/// group (4.0 s) arrived with its frames still in flight, so the start keeps the fourth and
 	/// plays on into the fifth. `js/hang`'s `consumer.skips.test.ts` pairs this case.
-	#[test]
-	fn a_backlog_start_waits_on_a_successor_without_frames() {
+	#[kio::test]
+	async fn a_backlog_start_waits_on_a_successor_without_frames() {
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = container_max_delay_only(track.subscribe(None), Duration::from_millis(1500));
@@ -3160,7 +3160,7 @@ mod tests {
 
 	/// The track refuses a group whose first frame rewinds, but not a later frame that does,
 	/// so the consumer floors every frame against the previous group's start.
-	#[tokio::test]
+	#[kio::test]
 	async fn a_frame_below_the_previous_start_aborts() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
@@ -3186,7 +3186,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn b_frames_within_a_group_are_accepted() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
@@ -3201,7 +3201,7 @@ mod tests {
 
 	/// A keyframe one frame below the previous group's last frame, but above its start, is an
 	/// overlap rather than a rewind.
-	#[tokio::test]
+	#[kio::test]
 	async fn a_keyframe_overlapping_the_previous_group_is_accepted() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
@@ -3223,7 +3223,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn open_gop_leading_pictures_above_the_previous_group_are_accepted() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
@@ -3245,7 +3245,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_marker_group_and_forward_jump_reads_one_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = Consumer::new(
@@ -3306,7 +3306,7 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["60000000", "60060000"]);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_zero_budget_idle_resume_reports_the_shed_marker_as_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Audio));
@@ -3320,7 +3320,7 @@ mod tests {
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(1_000_000));
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_zero_budget_skip_reports_a_contiguous_shed_marker_as_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Audio));
@@ -3348,7 +3348,7 @@ mod tests {
 		group0.close().unwrap();
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_later_frame_below_the_previous_group_start_aborts() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
@@ -3388,7 +3388,7 @@ mod tests {
 	/// An empty payload carries no media, so it's skipped rather than surfaced as a
 	/// frame or raised as an error. It times the previous frame and never means the
 	/// track ended.
-	#[tokio::test]
+	#[kio::test]
 	async fn empty_payload_is_skipped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3420,7 +3420,7 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(33_000));
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn leading_marker_preserves_the_first_media_keyframe() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3452,7 +3452,7 @@ mod tests {
 	/// Reading a marker consumes its frame, so a run of them makes progress and the
 	/// consumer reaches the next group instead of spinning. `read_all` times out per
 	/// read, so a stall or an infinite loop fails this rather than hanging forever.
-	#[tokio::test]
+	#[kio::test]
 	async fn consecutive_markers_do_not_stall() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3485,7 +3485,7 @@ mod tests {
 	}
 
 	/// LOC video consumers skip an empty payload: it is the duration marker, not media.
-	#[tokio::test]
+	#[kio::test]
 	async fn loc_empty_payload_is_skipped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3563,7 +3563,7 @@ mod tests {
 		finisher.await.expect("finisher task panicked");
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn adjacent_group_flushed_immediately() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3634,7 +3634,7 @@ mod tests {
 
 	// ---- Gap Recovery ----
 
-	#[tokio::test]
+	#[kio::test]
 	async fn gap_in_group_sequence_recovery() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3654,7 +3654,7 @@ mod tests {
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn gap_at_start_of_sequence() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -3764,7 +3764,7 @@ mod tests {
 	/// the consumer skips the gap to the next live group even though the track is NOT
 	/// finished. This is the resume-from-pause path (the recorder stops reading, the
 	/// group + the sequences after it evict, then it resumes).
-	#[tokio::test]
+	#[kio::test]
 	async fn evicted_group_with_gap_skips_to_live() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -4775,7 +4775,7 @@ mod tests {
 
 	// ---- Frame Decoding ----
 
-	#[tokio::test]
+	#[kio::test]
 	async fn frame_payload_preserved() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -4863,7 +4863,7 @@ mod tests {
 
 	// ---- Edge Cases ----
 
-	#[tokio::test]
+	#[kio::test]
 	async fn large_timestamps() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -4881,7 +4881,7 @@ mod tests {
 		assert_eq!(frames[0].timestamp.as_micros().unwrap(), one_hour as u128);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn set_delay_changes_behavior() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -5277,7 +5277,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn startup_single_group_mid_stream() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -5453,7 +5453,7 @@ mod tests {
 		assert_eq!(frames.len(), 2, "Expected group 0's second frame + group 2 (1 frame)");
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn group_error_skips_to_next() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -5475,7 +5475,7 @@ mod tests {
 	/// keeps serving the frames it still holds: an abort only matters where a frame is
 	/// missing, so a reader that stopped short of the end drains the rest and moves on
 	/// to the next buffered group instead of ending the track.
-	#[tokio::test]
+	#[kio::test]
 	async fn finished_group_aborted_mid_read_drains_then_continues() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -5514,7 +5514,7 @@ mod tests {
 
 	/// A live group its upstream gave up as too large is aborted. A reader whose current
 	/// group died that way skips forward; the gap is not a decode error.
-	#[tokio::test]
+	#[kio::test]
 	async fn oversized_group_skips_to_next() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -5574,7 +5574,7 @@ mod tests {
 		finisher.await.unwrap();
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn empty_group_advances() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
@@ -5674,7 +5674,7 @@ mod tests {
 		drop(group0);
 	}
 
-	#[tokio::test]
+	#[kio::test]
 	async fn a_nonsequential_contiguous_jump_has_no_gap() {
 		let track = track_producer("test", timed());
 		let mut consumer = Consumer::new(
@@ -5742,7 +5742,7 @@ mod tests {
 		assert_eq!(frames[2].timestamp, ts(33_000));
 		finisher.await.unwrap();
 	}
-	#[tokio::test]
+	#[kio::test]
 	async fn live_duration_marker_follows_an_immediately_delivered_frame() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Video));
@@ -5876,8 +5876,8 @@ mod tests {
 
 	/// A successor holding only endpoint markers stops buffering at the max buffer like any other
 	/// lookahead, rather than reading past it in search of a media frame.
-	#[test]
-	fn an_endpoint_only_successor_stays_within_the_max_buffer() {
+	#[kio::test]
+	async fn an_endpoint_only_successor_stays_within_the_max_buffer() {
 		const MAX_BUFFER: usize = 1024;
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -5930,8 +5930,8 @@ mod tests {
 	/// view that leaves out most of its wire frame is copied out: what holds the frame after the reader,
 	/// such as an export's jitter buffer, retains only its payload. Here each is a 1 byte payload behind
 	/// a large LOC property block.
-	#[test]
-	fn a_small_view_of_a_large_wire_frame_is_copied_out() {
+	#[kio::test]
+	async fn a_small_view_of_a_large_wire_frame_is_copied_out() {
 		const PADDING: usize = 60_000;
 
 		// A QUIC varint, which is all LOC's framing needs.
@@ -5986,8 +5986,8 @@ mod tests {
 
 	/// A stalled successor does not hide a readable group behind it once group overhead alone fills the
 	/// max buffer: the cursor moves on group by group until one has something to read.
-	#[test]
-	fn a_stalled_successor_does_not_hide_a_readable_group() {
+	#[kio::test]
+	async fn a_stalled_successor_does_not_hide_a_readable_group() {
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = container_max_delay_only(track.subscribe(None), Duration::from_secs(5));
@@ -6046,8 +6046,8 @@ mod tests {
 
 	/// A malformed frame landing in the group the cursor moves on to under pressure fails the reader
 	/// rather than leaving it waiting on the group.
-	#[test]
-	fn a_malformed_frame_in_a_group_moved_to_under_pressure_fails_the_reader() {
+	#[kio::test]
+	async fn a_malformed_frame_in_a_group_moved_to_under_pressure_fails_the_reader() {
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = pressured_data_consumer(&mut track);
@@ -6065,8 +6065,8 @@ mod tests {
 
 	/// A data marker group that finished before the cursor moved on to it under pressure still reads
 	/// its end before the group after it.
-	#[test]
-	fn a_finished_marker_group_moved_to_under_pressure_reads_its_end() {
+	#[kio::test]
+	async fn a_finished_marker_group_moved_to_under_pressure_reads_its_end() {
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = pressured_data_consumer(&mut track);
@@ -6161,8 +6161,8 @@ mod tests {
 
 	/// No cap is too small to read through: the cursor's group and one successor are always pulled, so
 	/// a stalled group can be moved past even when one group's overhead fills the max buffer.
-	#[test]
-	fn a_zero_max_buffer_still_moves_past_a_stalled_group() {
+	#[kio::test]
+	async fn a_zero_max_buffer_still_moves_past_a_stalled_group() {
 		let waiter = kio::Waiter::noop();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = container_max_delay_only(track.subscribe(None), Duration::from_secs(5));
