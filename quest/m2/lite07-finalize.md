@@ -147,10 +147,12 @@ would need a breaking release had it landed right after the cut:
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
   waits on nixpkgs as well as the cut; dropping the check, which would find a
   transcript flaw only after the freeze.
-- ✅ The wire half of group drops split out as
-  [its own quest](/quest/m2/group-drops-wire.md), which this waits on in
-  place of [the public drop signal](/quest/m2/group-drops.md), an API change
-  that doesn't touch the wire.
+- ✅ The wire half of group drops split out as its own quest, which this
+  waited on in place of [the public drop signal](/quest/m2/group-drops.md),
+  an API change that doesn't touch the wire. It settled without a
+  wire-format change ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774)):
+  both publishers already name a Group Stream the subscriber stopped in
+  SUBSCRIBE_DROP, which the draft now states, even after a reliable reset.
 
 ## Required
 
@@ -163,7 +165,6 @@ would need a breaking release had it landed right after the cut:
 - [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
 - [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
 - [AUTH_ERROR retries](/quest/m2/auth-retry-codes.md) - writes down which refusal codes a presenter retries
-- [A moq-lite subscriber always learns which group it abandoned](/quest/m2/group-drops-wire.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 
 ## Related
 
