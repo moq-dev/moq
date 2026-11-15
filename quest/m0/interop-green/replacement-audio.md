@@ -29,7 +29,7 @@ Open: where those 600 ms go. The decoder resets the ring on a changed instance
 whether the ring waits for audio at the clock behind a backlog it must drop (then a join at the
 live edge is the fix), or the starved page just decodes late (then the bound needs a load term
 derived from the host, not a constant). Trace the ring's join and un-stall in the worklet on a
-failing run; the audio-playout epic's [largest replay](/quest/m2/audio-playout/replay-largest.md)
-may overlap.
+failing run; the largest-group replay at tune-in
+([moq-dev/moq#8844](https://github.com/moq-dev/moq/pull/8844)) may overlap.
 
 Public API: none. Wire: none.

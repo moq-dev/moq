@@ -1,9 +1,10 @@
 {
-	"version": 3,
-	"source": "https://cdn.moq.dev/demo bbb.hang, the public demo's MPEG-TS import, recorded 2026-09-29",
+	"version": 4,
+	"source": "https://cdn.moq.dev/demo bbb.hang, the public demo's MPEG-TS import, recorded 2026-09-29. Version 4 adds largest, the publisher's largest group as the subscription began. This recording predates it, so it is derived (2026-11-15): the newest group whose first frame's media timestamp plus the trace's lowest lag (the smallest at minus timestamp) falls at or before the first arrival, the live edge as the first frame arrived.",
 	"description": "The public relay's Big Buck Bunny: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured.",
 	"transport": "webtransport",
 	"rtt": null,
+	"largest": 10065,
 	"config": {
 		"codec": "mp4a.40.2",
 		"container": {

@@ -199,6 +199,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 				rate: config?.sampleRate,
 				jitter: config?.jitter,
 				config,
+				largest: recording?.largest(),
 				contextRate: audio.out.context.peek()?.sampleRate,
 			};
 		},
