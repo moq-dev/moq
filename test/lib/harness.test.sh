@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Independent shells must reserve different ports even with private temp roots,
-# and a relative HARNESS_RUNS must survive a harness changing directory.
+# a relative HARNESS_RUNS must survive a harness changing directory, and a run
+# defaults to the checkout's .tmp/ whatever TMPDIR and the working directory say.
 set -euo pipefail
 
 lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -59,4 +60,28 @@ HARNESS_PORT_ROOT="$scratch/ports-link" bash -euo pipefail -c '
         exit 1
     }
 ' bash "$lib" "$(cd "$scratch" && pwd)")
+# Without HARNESS_RUNS a run lives in the checkout, not TMPDIR, and stages a binary
+# from another filesystem as a real file there.
+checkout=$(git -C "$lib" rev-parse --show-toplevel)
+printf 'binary' >"$scratch/binary"
+# shellcheck disable=SC2016  # the script expands in the child shell
+(cd "$scratch" && env -u HARNESS_RUNS TMPDIR="$scratch/one" HARNESS_KEEP=1 bash -euo pipefail -c '
+    source "$1/harness.sh"
+    harness_begin default >&2
+    [[ "$HARNESS_RUN" == "$2"/.tmp/harness/default-* ]] || {
+        echo "FAIL: default run directory was $HARNESS_RUN, not under $2/.tmp/harness" >&2
+        exit 1
+    }
+    harness_stage bin/binary "$3"
+    [[ -f "$HARNESS_RUN/bin/binary" && "$(cat "$HARNESS_RUN/bin/binary")" == binary ]] || {
+        echo "FAIL: staged binary missing or wrong" >&2
+        exit 1
+    }
+    echo "$HARNESS_RUN" >"$3.run"
+' bash "$lib" "$checkout" "$scratch/binary" 2>/dev/null)
+rm -rf "$(cat "$scratch/binary.run")"
+[[ -z "$(ls -A "$scratch/one")" ]] || {
+    echo "FAIL: the default run wrote into TMPDIR" >&2
+    exit 1
+}
 echo "cross-shell port reservations passed"
