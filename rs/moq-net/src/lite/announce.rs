@@ -310,8 +310,8 @@ pub(crate) struct Unusable {
 	pub reason: Refusal,
 }
 
-/// Encode a Route Offer: the path, then flags, priority, and metric. No node offers an empty path or one past the hop limit, nor names Node
-/// ID 0 in one.
+/// Encode a Route Offer: the path, then flags, priority, and metric. No node offers an
+/// empty path or one past the hop limit, nor names Node ID 0 in one.
 fn encode_offer(w: &mut Encoder<'_>, offer: &Offer) -> Result<(), EncodeError> {
 	if offer.path.is_empty() || offer.path.len() > route::MAX_HOPS || offer.path.iter().any(|hop| hop.node == 0) {
 		return Err(EncodeError::InvalidState);

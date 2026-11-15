@@ -13,7 +13,12 @@ not reach a local origin's socket. Run alone, it fails about 1 run in 3 at line
 90: after `a.close()`, `server.consumer.read_frame()` raises
 `moq.Error.Protocol: unroutable` instead of `moq.Error.Closed`, so closing an
 endpoint races its route's withdrawal against its streams' ending. Fix the
-endpoint at the cause, as the epic's rules ask; it likely shares one with
-[the socket endpoint's ending](/quest/m1/socket-endpoint-end.md).
+endpoint at the cause, as the epic's rules ask.
+
+First check whether it still reproduces after
+[moq-dev/moq#8825](https://github.com/moq-dev/moq/pull/8825), which makes every
+ending of a socket endpoint run its cleanup and likely fixes it: run the test
+alone in a loop on a base that includes it. If it no longer fails, delete this
+quest; if it does, the cause lies elsewhere.
 
 Public API: none. Wire: none.

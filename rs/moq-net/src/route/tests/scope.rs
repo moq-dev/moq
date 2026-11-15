@@ -300,9 +300,9 @@ fn teardown_is_linear_in_prefixes_held() {
 
 /// A relay sends each of its downstream neighbours one route through a leaving
 /// node, each over its own session of that node. Hearing the node drain, hearing it
-/// again from another upstream, and any later update that changes no route each cost
-/// work linear in the neighbours: a scan of the node's sessions for each neighbour,
-/// or a repeat that revisits every route sent through the node, would be quadratic.
+/// again from another upstream, and then closing an idle session each cost work
+/// linear in the neighbours: a scan of the node's sessions for each neighbour, or a
+/// repeat that revisits every route sent through the node, would be quadratic.
 /// The `cost`s sweep both axes at once, since there is a session per neighbour.
 #[test]
 fn drain_news_is_linear_in_neighbours() {
@@ -383,7 +383,7 @@ fn drain_news_is_linear_in_neighbours() {
 		// Quadratic work would quadruple.
 		assert!(pair[1].0 <= 5 * pair[0].0 / 2, "hearing the drain: {costs:?}");
 		assert!(pair[1].1 <= 5 * pair[0].1 / 2, "hearing it again: {costs:?}");
-		assert!(pair[1].2 <= 5 * pair[0].2 / 2, "an idle update: {costs:?}");
+		assert!(pair[1].2 <= 5 * pair[0].2 / 2, "closing an idle session: {costs:?}");
 	}
 }
 
