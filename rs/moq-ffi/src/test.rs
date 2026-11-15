@@ -1246,6 +1246,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 				end: None,
 			}]),
 			order: None,
+			meta: false,
 		})
 		.unwrap();
 
@@ -2100,6 +2101,33 @@ fn raw_timed_writes_need_a_scale() {
 	assert!(refused(track.write_frame(untimed()).unwrap_err()));
 	let group = track.append_group().unwrap();
 	assert!(refused(group.write_frame(untimed()).unwrap_err()));
+}
+
+#[tokio::test]
+async fn group_read_info_maps_size_and_timestamp() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
+	let group = track.append_group().unwrap();
+	let consumer = group.consume().unwrap();
+	group
+		.write_frame(MoqFrame {
+			payload: b"ready".to_vec(),
+			timestamp: us(12_345),
+		})
+		.unwrap();
+	group.finish().unwrap();
+
+	// A local copy holds the payload, whose header a metadata read takes alone.
+	assert!(!consumer.is_meta());
+	let info = kio::clock::timeout(TIMEOUT, consumer.read_info())
+		.await
+		.expect("timed out waiting for the frame header")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(info.size, 5);
+	assert_eq!(micros(info.timestamp), 12_345);
+	assert!(consumer.read_info().await.unwrap().is_none());
+	assert!(!moq_subscription_defaults().meta);
 }
 
 #[tokio::test]
@@ -8694,6 +8722,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 			end: None,
 		}]),
 		order: Some(MoqOrder::Ascending),
+		meta: false,
 	};
 	let converted = moq_net::track::Subscription::try_from(subscription.clone()).unwrap();
 	assert_eq!(converted.order, moq_net::track::Order::Ascending);
@@ -9114,6 +9143,7 @@ async fn time_anchors_start_at_the_containing_group() {
 			end: None,
 		}]),
 		order: Some(MoqOrder::Ascending),
+		meta: false,
 	};
 	let scaled = MoqRange {
 		start: MoqAnchor::Time { timestamp: us(1_500) },

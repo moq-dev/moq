@@ -1839,12 +1839,6 @@ impl Producer {
 		self.write_stored(timestamp, Bytes::copy_from_slice(&size.to_le_bytes()))
 	}
 
-	/// Whether this copy holds frame headers without payload.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn is_meta(&self) -> bool {
-		self.handle.alive.meta
-	}
-
 	/// Write one whole frame as the group stores it.
 	fn write_stored(&mut self, timestamp: Timestamp, payload: Bytes) -> Result<()> {
 		let timestamp = self.handle.track.rescale_in(timestamp, self.handle.info.start)?;

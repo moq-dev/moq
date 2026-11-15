@@ -78,6 +78,11 @@ pub struct MoqSubscription {
 	/// Which pending group the publisher sends first, or null for newest first.
 	#[uniffi(default = None)]
 	pub order: Option<MoqOrder>,
+	/// Ask for each frame's size and timestamp without its payload: groups arrive as metadata,
+	/// read with [`MoqGroupConsumer::read_info`], unless another subscriber of the track wants
+	/// the payload. A peer whose version cannot carry the mode refuses it as unsupported.
+	#[uniffi(default = false)]
+	pub meta: bool,
 }
 
 /// A subscription with moq-net's defaults, which starts at the newest group and skips a
@@ -92,6 +97,7 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 		delay: defaults.delay.into(),
 		ranges: None,
 		order: None,
+		meta: defaults.meta,
 	}
 }
 
@@ -241,7 +247,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 		if let Some(order) = s.order {
 			subscription = subscription.with_order(order.into());
 		}
-		Ok(subscription)
+		Ok(subscription.with_meta(s.meta))
 	}
 }
 
@@ -676,14 +682,27 @@ impl MoqTrackConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqGroupConsumer {
 	sequence: u64,
+	/// The group arrived as metadata, without payload.
+	meta: bool,
 	reads: Polled<moq_net::group::Consumer>,
 	driver: Background,
+}
+
+/// A frame's size and timestamp, without its payload, as a metadata subscription reads it.
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct MoqFrameInfo {
+	/// The size of the frame's payload, once inflated.
+	pub size: u64,
+	/// Presentation timestamp, or the [unscaled](MoqTimestamp::unscaled) group key on a
+	/// scale-less track.
+	pub timestamp: MoqTimestamp,
 }
 
 impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_net::group::Consumer, driver: Background) -> Self {
 		Self {
 			sequence: group.start,
+			meta: group.is_meta(),
 			reads: Polled::new(group).supervised(driver.clone()),
 			driver,
 		}
@@ -721,6 +740,27 @@ impl MoqGroupConsumer {
 			.wait(|group, waiter| Poll::Ready(Ok(ready!(group.poll_read_frame(waiter))?)))
 			.await?;
 		Ok(frame.map(raw_frame))
+	}
+
+	/// Whether the group arrived as metadata, so [`Self::read_info`] reads it and
+	/// [`Self::read_frame`] fails as unsupported.
+	pub fn is_meta(&self) -> bool {
+		self.meta
+	}
+
+	/// Read the next frame's size and timestamp, without waiting for its payload. A group
+	/// that arrived as metadata has only these.
+	///
+	/// Returns `None` when the group ends.
+	pub async fn read_info(&self) -> Result<Option<MoqFrameInfo>, MoqError> {
+		let info = self
+			.reads
+			.wait(|group, waiter| Poll::Ready(Ok(ready!(group.poll_read_info(waiter))?)))
+			.await?;
+		Ok(info.map(|info| MoqFrameInfo {
+			size: info.size,
+			timestamp: info.timestamp.into(),
+		}))
 	}
 
 	/// Cancel all current and future `read_frame()` calls.
