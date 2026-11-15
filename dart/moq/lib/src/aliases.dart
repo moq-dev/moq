@@ -74,7 +74,7 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 typedef Following = MoqFollowing;
 
 /// The read-only facts on a received route: a static cost, the stream's instance, and
-/// its informational `rtt` to the origin node.
+/// whether a usable path reaches it.
 typedef RouteInfo = MoqRouteInfo;
 
 /// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.

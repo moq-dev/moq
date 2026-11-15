@@ -30,9 +30,6 @@
 //!   a route per session sent to each stream it answers. Swept over the leaving
 //!   node's sessions and the streams: both axes are expected to grow, since each
 //!   stream is re-sent each route ranked draining, and no faster than their product.
-//! - path/drained: after the drain, an RTT change on a session with no routes. Swept
-//!   over the same grid: the streams axis is expected to grow, since each stream's
-//!   DRAIN notice is kept; the sessions axis is not.
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
@@ -266,23 +263,6 @@ fn bench_path_drain(c: &mut Criterion) {
 	group.finish();
 }
 
-fn bench_path_drained(c: &mut Criterion) {
-	let mut group = c.benchmark_group("routes/path/drained");
-	for (sessions, streams) in DRAINING {
-		let id = BenchmarkId::from_parameter(format!("{sessions}n_{streams}s"));
-		let mut fixture = None;
-		group.bench_function(id, |b| {
-			let node = fixture.get_or_insert_with(|| {
-				let mut node = fuzz::PathRouteDrain::new(sessions, streams);
-				node.drain();
-				node
-			});
-			b.iter(|| node.idle());
-		});
-	}
-	group.finish();
-}
-
 criterion_group!(
 	benches,
 	bench_watched,
@@ -298,7 +278,6 @@ criterion_group!(
 	bench_path_received,
 	bench_path_teardown,
 	bench_path_refollow,
-	bench_path_drain,
-	bench_path_drained
+	bench_path_drain
 );
 criterion_main!(benches);

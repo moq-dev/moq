@@ -407,7 +407,7 @@ The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by the matching routes and claims and any future changes:
 
 - ROUTE_START: the publisher reaches an origin node for a prefix.
-- ROUTE_UPDATE: a route's path, drain, priority, metric, down-only bit, or RTT changed.
+- ROUTE_UPDATE: a route's path, drain, priority, metric, or down-only bit changed.
 - ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
 - ROUTE_END: the publisher let go of a route and every claim under it.
 - DEAD: a session on the path of routes the publisher sent closed, or a node on it sent a GOAWAY.
@@ -484,7 +484,7 @@ This specification marks each such value "refused"; the receiver skips the rest 
 - A refused ANNOUNCE_START still assigns its Announce ID, and a refused ANNOUNCE_UPDATE or ANNOUNCE_RESTART keeps it; the claim goes offline at its route's next floor, which is not an ANNOUNCE_END. A claim whose path was refused stays refused; any other comes back with a later ANNOUNCE_RESTART the receiver can use. Its origin withdrew nothing, so while a route has a live claim the receiver refused, the receiver takes the route's floors as certifying nothing, and a relay forwards no withdrawal for the claim.
 - A refused WARM_START still assigns its Warm ID.
 
-Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, such as an RTT flag without its RTT, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
+Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
 A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 hops is unusable, so the relay's own hop never takes one past 32.
 
 #### Hidden Paths {#hidden}
@@ -524,18 +524,6 @@ A node numbers each session it opens or accepts with a Session Number of its own
 An origin's own route has a Path of its own hop alone, with Session Number 0, and a node sending a route it learned appends its own hop, naming the session it learned the route on.
 A relay forwards the other hops unchanged and never qualifies them.
 A route that arrives with 32 hops is unusable, since the receiver's own hop would take it past 32.
-
-A route may also carry an RTT: the round trip to its origin node in milliseconds, summed link by link.
-It is informational: nothing ranks or selects a route by its RTT.
-An origin advertises its own route with an RTT of 0.
-A receiver adds its link min RTT for the session to the RTT of every route the peer sends; the sum is its RTT through that peer, which it advertises on the route it selects.
-A link min RTT is the lowest smoothed RTT [RFC9002] the connection measured over the last 30 seconds, read once a second, in milliseconds rounded up.
-A lifetime minimum never rises after a path change, so it is not a link min RTT.
-A node SHOULD keep the link min RTT it adds until the lowest reading differs from it by more than the larger of 5 ms and a quarter of it, so jitter and short queues send no ROUTE_UPDATE and a lasting change sends one per route.
-A node whose connection reports no RTT has no link min RTT, so it sends the routes it learned there without one, and a route without one stays without one past every later node.
-A sum too large to encode is sent without one too.
-An endpoint learns its round trip to an origin node by adding its own link min RTT to the RTT of the route it selected; without its own, the RTT alone covers every hop past its first.
-Like the Metric, an RTT is unverified: a peer can misstate only what crosses it.
 
 A route is draining when a node on its Path sent a GOAWAY, as the route's draining flag or a [DEAD](#dead) says, or when its session received one.
 Its priority is the lowest local priority of a session on its Path: a receiver takes the lower of the priority the route carries and its own local priority for the session, and an origin's own route carries the highest.
@@ -1290,7 +1278,6 @@ Route Offer {
   Flags (8),
   Priority (8),
   Metric (i),
-  [RTT (i),]
 }
 
 Hop {
@@ -1309,7 +1296,7 @@ A Hop ID of 0 is refused.
 The Path comes first, so a receiver that refuses the rest of the offer still learns the hops a later [DEAD](#dead) may name.
 
 **Flags**:
-A bit field: 0x1 when the route is down-only, 0x2 when an RTT follows, and 0x4 when the route is draining (see [Routing](#routing)).
+A bit field: 0x1 when the route is down-only and 0x2 when the route is draining (see [Routing](#routing)).
 Any other bit set is refused, rather than ignored: a later version may give a bit a meaning that changes the route, or a field ahead of the ones defined here.
 
 **Priority**:
@@ -1318,9 +1305,6 @@ The route's priority, the lowest local priority of a session on its Path, as a u
 **Metric**:
 The publisher's metric to the origin node, 0 when it is the origin.
 
-**RTT**:
-The publisher's RTT to the origin node in milliseconds (see [Routing](#routing)), 0 when it is the origin.
-Present only when Flags has 0x2 set, and absent when the publisher has none.
 
 
 ## ROUTE_UPDATE {#route-update}
@@ -2558,8 +2542,7 @@ An application-specific payload.
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, for the paths under a prefix, with an additive metric and a down-only bit. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin and prefix rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
-- ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
-- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x4) and priority, which rank before its metric.
+- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x2) and priority, which rank before its metric.
 - Added ROUTE_HOLD (0xB), which holds a route while it may recover, for at most 10 seconds; ROUTE_END lets it go. Neither withdraws the origin's claims.
 - Added DEAD (0xF): a node that loses a session names that hop once to each neighbour it sent a route through it, listing the routes that moved, and every node drops every route through the hop and doubts the node at the far end for a second, keeping nodes off routes through it but not off one it originates, except over a session to it opened since; a DRAIN names a node that sent a GOAWAY, whose routes rank draining. The path, the dead hop, holds, and the doubt keep routes free of stale copies, and of loops except briefly when an origin on three or more relays leaves them all at once, with no distance, sequence number, route request, or echo. On a scoped session a DEAD applies only to the routes heard there.
 - A node closes a session whose peer leaves an Announce Stream undrained for 10 seconds, and the subscriber sends nothing on the stream after ANNOUNCE_REQUEST.
