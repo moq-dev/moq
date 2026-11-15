@@ -276,8 +276,13 @@ impl Recv {
 	/// `false` the new window should only be transmitted if a previous transmission
 	/// had failed.
 	pub(super) fn max_stream_data(&mut self, stream_receive_window: u64) -> (u64, bool) {
+		// Credit runs from what the reader took, not what it leased: a reader that stops taking
+		// holds its window and no more. One waiting on a unit larger than the window gets room
+		// for the unit, which the connection window bounds.
+		let taken = self.assembler.bytes_read() - self.lease.untaken();
+		let window = stream_receive_window.max(self.lease.wanted());
 		// A window shrunk since the last announcement cannot take back credit already granted.
-		let max_stream_data = (self.assembler.bytes_read() + stream_receive_window).max(self.sent_max_stream_data);
+		let max_stream_data = (taken + window).max(self.sent_max_stream_data);
 
 		// Only announce a window update if it's significant enough
 		// to make it worthwhile sending a MAX_STREAM_DATA frame.
