@@ -9,8 +9,9 @@ export class Recovery {
 	#needed = true;
 	#floor?: Duration;
 	readonly #warmup: Duration;
-	// The pictures still warming up since the last join or gap: from its recovery point, for the warmup.
-	#warming?: { start: Duration; end: Duration };
+	// The pictures still warming up since the last join or gap: from its recovery point, for the
+	// warmup. `passed` once the codec output a picture past it, so none of it can still come out.
+	#warming?: { start: Duration; end: Duration; passed: boolean };
 
 	constructor(warmup: Duration = Duration.ZERO) {
 		this.#warmup = warmup;
@@ -21,8 +22,13 @@ export class Recovery {
 		this.#needed = true;
 	}
 
-	/** Forget the warmup once a fresh encoder starts another timeline, whose pictures need none. */
+	/**
+	 * A fresh encoder starts another timeline after a declared end. Its first picture references
+	 * nothing earlier and needs no warmup, even after a join or a gap.
+	 */
 	restart(): void {
+		this.#needed = false;
+		this.#floor = undefined;
 		this.#warming = undefined;
 	}
 
@@ -30,7 +36,11 @@ export class Recovery {
 	accept(frame: Container.ReceivedFrame): boolean {
 		if (frame.keyframe) {
 			if (this.#needed && !this.#warmup.isZero()) {
-				this.#warming = { start: frame.timestamp, end: frame.timestamp.add(this.#warmup) };
+				// The codec may still hold pictures of a warmup it has not output past, which stay
+				// hidden: the hidden span reaches back over them rather than growing a list.
+				const previous = this.#warming;
+				const start = previous && !previous.passed ? previous.start.min(frame.timestamp) : frame.timestamp;
+				this.#warming = { start, end: frame.timestamp.add(this.#warmup), passed: false };
 			}
 			this.#floor = this.#needed ? frame.timestamp : undefined;
 			this.#needed = false;
@@ -39,12 +49,17 @@ export class Recovery {
 	}
 
 	/**
-	 * Whether the picture at `timestamp` is still warming up after the last join or gap, so it is
-	 * decoded but neither shown nor placed on the clock. Pictures from before that recovery point
-	 * that the codec still holds are not.
+	 * Whether the decoded picture at `timestamp` is still warming up after the last join or gap,
+	 * so it is decoded but not shown. Called on each picture the codec outputs, in presentation
+	 * order.
 	 */
 	warming(timestamp: Duration): boolean {
 		const warming = this.#warming;
-		return warming !== undefined && timestamp.ge(warming.start) && timestamp.lt(warming.end);
+		if (warming === undefined) return false;
+		if (timestamp.ge(warming.end)) {
+			warming.passed = true;
+			return false;
+		}
+		return timestamp.ge(warming.start);
 	}
 }

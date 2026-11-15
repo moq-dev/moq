@@ -120,11 +120,7 @@ impl Options {
 /// before then would show refresh stripes, so they are decoded but dropped. The
 /// start reaches the warmup further back to make up for it, joining a group earlier.
 pub struct Consumer {
-	/// The decoder between reads, absent while `step` holds it.
-	reader: Option<Box<Reader>>,
-	/// A read in flight, kept across a cancelled [`read`](Self::read), since a
-	/// cancelled [`Sink`] call poisons the sink.
-	step: Option<Step>,
+	slot: Slot,
 	name: String,
 	/// When the access unit behind the latest picture returned arrived.
 	arrival: Option<Instant>,
@@ -139,6 +135,15 @@ pub struct Consumer {
 /// The cap bounds what a malformed stream strands, such as timestamps that run
 /// backwards within a group; the oldest go first.
 const ARRIVALS: usize = 32;
+
+/// The decoder, idle between reads or decoding.
+///
+/// A read in flight is kept across a cancelled [`Consumer::read`] and finished by
+/// the next one, since a cancelled [`Sink`] call poisons the sink.
+enum Slot {
+	Idle(Box<Reader>),
+	Busy(Step),
+}
 
 /// A [`Reader::read`] in flight, handing the reader back with its result.
 type Step = Pin<Box<dyn Future<Output = (Box<Reader>, Result<Option<Item>, Error>)> + Send>>;
@@ -192,8 +197,7 @@ impl Consumer {
 		let reader = Reader::open(broadcast, catalog, &name.into(), &options).await?;
 		Ok(Self {
 			name: reader.decoder.name().to_owned(),
-			reader: Some(Box::new(reader)),
-			step: None,
+			slot: Slot::Idle(Box::new(reader)),
 			arrival: None,
 		})
 	}
@@ -230,20 +234,26 @@ impl Consumer {
 	}
 
 	fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Read>, Error>> {
-		let reader = &mut self.reader;
-		let step = self.step.get_or_insert_with(|| {
-			let mut reader = reader.take().expect("the reader is idle while no read is in flight");
-			Box::pin(async move {
+		if matches!(self.slot, Slot::Idle(_)) {
+			// A pending placeholder holds the slot only while the reader moves into its step.
+			let Slot::Idle(mut reader) =
+				std::mem::replace(&mut self.slot, Slot::Busy(Box::pin(std::future::pending())))
+			else {
+				unreachable!("matched above");
+			};
+			self.slot = Slot::Busy(Box::pin(async move {
 				let result = reader.read().await;
 				(reader, result)
-			})
-		});
+			}));
+		}
+		let Slot::Busy(step) = &mut self.slot else {
+			unreachable!("started above");
+		};
 		let Poll::Ready((reader, result)) = step.as_mut().poll(cx) else {
 			return Poll::Pending;
 		};
-		self.step = None;
 		// Left idle after an error, so the next read asks it again and gets the same answer.
-		self.reader = Some(reader);
+		self.slot = Slot::Idle(reader);
 		let Some((read, arrival)) = result? else {
 			return Poll::Ready(Ok(None));
 		};
@@ -270,7 +280,10 @@ impl Consumer {
 
 	/// The decoder between reads.
 	fn reader(&mut self) -> &mut Reader {
-		self.reader.as_deref_mut().expect("the decoder is not idle")
+		let Slot::Idle(reader) = &mut self.slot else {
+			panic!("the decoder is not idle");
+		};
+		reader
 	}
 }
 
@@ -376,11 +389,12 @@ impl Reader {
 					self.recover = true;
 					continue;
 				}
-				// A fresh encoder has no preceding GOP to reference, so no recovery, and its
-				// timeline may start over below the warmup's.
+				// A fresh encoder has no preceding GOP to reference and nothing to warm up from,
+				// even after a join or a gap, and its timeline may start over below the warmup's.
 				Some(Encoded::End { end, .. }) => {
 					self.drain().await?;
 					self.pending.push_back((Read::End { end }, None));
+					self.recover = false;
 					self.present = None;
 					continue;
 				}

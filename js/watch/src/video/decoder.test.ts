@@ -1685,9 +1685,10 @@ describe("Decoder with a warmup rendition", () => {
 	const at = (group: bigint, ms: number, key = false) => sample(group, ms * 1000, key);
 
 	// A warmup rendition reading the container consumer's reads from a feed, presenting at once.
-	async function refresh(fields: Partial<Catalog.VideoConfig> = { warmup: WARMUP }) {
+	// `hold` keeps those timestamps in the codec until the next chunk.
+	async function refresh(fields: Partial<Catalog.VideoConfig> = { warmup: WARMUP }, hold: number[] = []) {
 		const feeds = new Feeds();
-		const playback = await guardedPlayback("legacy", [], [], false, 0, { fields, feeds });
+		const playback = await guardedPlayback("legacy", [], hold, false, 0, { fields, feeds });
 		// Every picture shown, in ms.
 		const shown: number[] = [];
 		const watch = new Effect();
@@ -1745,6 +1746,32 @@ describe("Decoder with a warmup rendition", () => {
 			await run.push(marker(14n, 2_500_000), at(15n, 0, true), at(15n, 100));
 			expect(run.shown).toEqual([1300, 1400, 1500, 2300, 2400, 0, 100]);
 			expect(run.playback.resets).toBe(1);
+		} finally {
+			await run.close();
+		}
+	});
+
+	it("keeps a warming picture the codec still holds hidden past a later gap", async () => {
+		const run = await refresh({ warmup: WARMUP }, [1_100_000]);
+		try {
+			// 1100 is still inside the codec when the skip moves the warmup to group 13.
+			await run.push(at(10n, 1000, true), at(10n, 1100), gap, at(13n, 2000, true), at(13n, 2300));
+			expect(run.playback.outputs).toContain(1_100_000);
+			expect(run.shown).toEqual([2300]);
+		} finally {
+			await run.close();
+		}
+	});
+
+	it("needs no warmup for a fresh encoder, even after a join or a gap", async () => {
+		const run = await refresh();
+		try {
+			// Joined on a declared end: the next group is a fresh encoder's first.
+			await run.push(marker(9n, 900_000), at(10n, 1000, true), at(10n, 1100));
+			expect(run.shown).toEqual([1000, 1100]);
+			// A skip, then a declared end before any recovery point: the fresh encoder is clean too.
+			await run.push(gap, marker(12n, 1_300_000), at(13n, 0, true), at(13n, 100));
+			expect(run.shown).toEqual([1000, 1100, 0, 100]);
 		} finally {
 			await run.close();
 		}
