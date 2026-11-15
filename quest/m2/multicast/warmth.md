@@ -39,8 +39,9 @@ Decided 2026-11-15 (maintainer, on
   - **One uplink per group of drones.** Drones meshed with each other, each
     with a costly uplink to the CDN. The first with demand reaches the CDN,
     and the rest join it over the mesh, because a warm drone costs less than
-    a cold uplink. Two that reach out at once end on one uplink, and when
-    the drone holding it loses it, another takes over.
+    a cold uplink. Two that reach out at once end on one uplink if the
+    tie-break below holds up, and when the drone holding the uplink loses
+    it, another takes over.
 
 The three:
 
@@ -68,11 +69,20 @@ What that constraint gives and what it leaves: with each relay's cost summed
 along the path its data takes, two relays can never each prefer the other,
 since one would need `b + link < a` and the other `a + link < b`. For the
 same reason two drones that reached out at once, each at the cost of its own
-warm uplink, never merge. Merging them needs a rule both compute alike, such
-as the lower rendezvous hash of Instance and Node ID keeping its uplink, and
-a move that completes only once the new copy delivers. Show that rule adds
-no cycle, or report that simultaneous starts stay on two uplinks and what
-that costs.
+warm uplink, never merge.
+
+Decided 2026-11-15 (maintainer, after
+[moq-dev/moq#8873](https://github.com/moq-dev/moq/pull/8873)): ✅ merge them
+with the tie-break routing already has, "the same hash based tiebreaker if
+possible and one drone renegs". Among relays that hold equal-cost copies of
+one Instance and can reach each other, the rendezvous hash that picks
+between equal next hops names the one that keeps its uplink. The others
+join it and drop their own uplink once the new copy delivers (rejected: a
+second ordering only for this case). If the sweep shows that rule adding a
+cycle, an unfed reader, or more messages than the second uplink costs, leave
+the race: "I'm also fine leaving it as an acceptable race". Simultaneous
+starts then stay on two uplinks until one drone's demand ends, and the PR
+reports how often and for how long.
 
 Joining the cheapest point of the tree that exists is the greedy online
 Steiner tree, which stays within a logarithmic factor of the cheapest tree

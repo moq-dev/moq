@@ -57,7 +57,8 @@ This README's own work, once its child lands:
   plus a skip link: a cold broadcast takes the skip, a reader on the skipped
   relay makes the far relay join it, and that reader leaving sends it back.
   Two LAN relays with their own uplinks and readers on both pull one copy
-  over one uplink, whether the readers arrive in turn or at once, and the
+  over one uplink when the readers arrive in turn, and when they arrive at
+  once if [warmth](/quest/m2/multicast/warmth.md) kept its tie-break. The
   other uplink takes over when that one is lost.
 - Docs: warm and cold costs in `doc/bin/relay/cluster.md`, and a section on
   the routing concept page once the
