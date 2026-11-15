@@ -1,47 +1,24 @@
 [page] negotiated protocol: moqt-22
-[page] announced: broadcast=moqtail/ch00_all active=true
-[page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=moqtail/ch04 active=true
-[page] announced: broadcast=moqtail/ch07_all active=true
-[page] announced: broadcast=moqtail/ch00 active=true
-[page] announced: broadcast=moqtail/ch06 active=true
-[page] announced: broadcast=ipc/device/IPC-001/media/live/0 active=true
-[page] announced: broadcast=moqtail/ch07 active=true
-[page] announced: broadcast=moqtail/ch05 active=true
-[page] announced: broadcast=ipc/device/IPC-001/telemetry active=true
-[page] announced: broadcast=ipc/device/IPC-001/rpc active=true
-[page] announced: broadcast=moqtail/ch02 active=true
-[page] announced: broadcast=moqtail/ch03 active=true
-[page] announced: broadcast=moqtail/testsrc active=true
-[page] announced: broadcast=ipc/device/IPC-001/media/live/1 active=true
-[page] announced: broadcast=moq-test-00 active=true
-[page] announced: broadcast=moqtail/ch07_vod active=true
 [page] announced: broadcast=moqtail/ch01 active=true
-[page] announced: broadcast=smoke-js-web-4253-27230.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4253-27230.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4253-27230.hang track=catalog.json
-[page] announced: broadcast=smoke-js-web-4253-27230.hang rerouted
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4253-27230.hang track=catalog.json
-[page] announced: broadcast=ping active=true
-[page] announced: broadcast=ping active=false
-[page] error processing bidi stream Stream: remote error: 0
-    at We (http://localhost:36829/assets/index-DuWorxF6.js:1:15514)
-    at http://localhost:36829/assets/index-DuWorxF6.js:1:98633
-    at async #s (http://localhost:36829/assets/index-DuWorxF6.js:1:98596)
-    at async ys.done (http://localhost:36829/assets/index-DuWorxF6.js:1:100697)
-    at async vf.runPublishNamespace (http://localhost:36829/assets/index-DuWorxF6.js:1:223334)
-    at async #p (http://localhost:36829/assets/index-DuWorxF6.js:1:229234)
-[page] announced: broadcast=moqtail/ch07 rerouted
-[page] announced: broadcast=moqtail/ch07_all rerouted
-[page] announced: broadcast=moqtail/ch07_all rerouted
-[page] announced: broadcast=moqtail/ch07_all rerouted
-[page] announced: broadcast=ping active=true
-[page] announced: broadcast=ping active=false
-[page] error processing bidi stream Stream: remote error: 0
-    at We (http://localhost:36829/assets/index-DuWorxF6.js:1:15514)
-    at http://localhost:36829/assets/index-DuWorxF6.js:1:98633
-    at async #s (http://localhost:36829/assets/index-DuWorxF6.js:1:98596)
-    at async ys.done (http://localhost:36829/assets/index-DuWorxF6.js:1:100697)
-    at async vf.runPublishNamespace (http://localhost:36829/assets/index-DuWorxF6.js:1:223334)
-    at async #p (http://localhost:36829/assets/index-DuWorxF6.js:1:229234)
-decoded 0 frames from smoke-js-web-4253-27230.hang (vite)
+[page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=ipc/device/IPC-001/telemetry active=true
+[page] announced: broadcast=moqtail/ch06 active=true
+[page] announced: broadcast=moqtail/ch07 active=true
+[page] announced: broadcast=moqtail/testsrc active=true
+[page] announced: broadcast=moqtail/ch00 active=true
+[page] announced: broadcast=moqtail/ch00_all active=true
+[page] announced: broadcast=moqtail/ch05 active=true
+[page] announced: broadcast=moqtail/ch02 active=true
+[page] announced: broadcast=ipc/device/IPC-001/media/live/0 active=true
+[page] announced: broadcast=ipc/device/IPC-001/rpc active=true
+[page] announced: broadcast=moqtail/ch07_all active=true
+[page] announced: broadcast=moqtail/ch07_vod active=true
+[page] announced: broadcast=moqtail/ch03 active=true
+[page] announced: broadcast=ipc/device/IPC-001/media/live/1 active=true
+[page] announced: broadcast=moqtail/ch04 active=true
+[page] announced: broadcast=smoke-js-web-4022-22156.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4022-22156.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4022-22156.hang track=catalog.json
+[page] announced: broadcast=smoke-js-web-4022-22156.hang rerouted
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4022-22156.hang track=catalog.json
+decoded 0 frames from smoke-js-web-4022-22156.hang (vite)

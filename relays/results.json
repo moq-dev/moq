@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-14T23:27:29Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/43652680613",
+  "generated": "2026-11-15T08:30:37Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/43694264811",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -99,32 +99,32 @@
       "url": "https://lminiero.it:9000",
       "transport": "WebTransport",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "https_lminiero.it_9000/rust-rust.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed",
           "sub_log": "https_lminiero.it_9000/rust-js-web.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "no SUBSCRIBE_OK for catalog.json: error: timed out waiting for data",
           "sub_log": "https_lminiero.it_9000/rust-js-bun.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
@@ -160,16 +160,16 @@
       "url": "moqt://lminiero.it:9000",
       "transport": "QUIC",
       "required": false,
-      "ok": false,
+      "ok": true,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
+          "reason": "",
           "sub_log": "moqt_lminiero.it_9000/rust-rust.log",
           "pub_log": "moqt_lminiero.it_9000/pub-rust.log"
         }
@@ -539,7 +539,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
+          "reason": "SUBSCRIBE for 0.avc3, no SUBSCRIBE_OK logged, no objects: track failed; ending the reader track=\"0.avc3\" error=Remote(18)",
           "sub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/rust-rust.log",
           "pub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         }
@@ -653,7 +653,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE_OK for catalog.json, no objects: error processing bidi stream Stream: remote error: 0",
+          "reason": "SUBSCRIBE_OK for catalog.json, no objects",
           "sub_log": "https_relay.moqtail.dev/js-web-js-web.log",
           "pub_log": "https_relay.moqtail.dev/pub-js-web.log"
         },
@@ -661,7 +661,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE_OK for catalog.json, no objects: error processing bidi stream WebTransportError {",
+          "reason": "SUBSCRIBE_OK for catalog.json, no objects: error: timed out waiting for data",
           "sub_log": "https_relay.moqtail.dev/js-web-js-bun.log",
           "pub_log": "https_relay.moqtail.dev/pub-js-web.log"
         }
