@@ -5,6 +5,14 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### The NixOS module drops `cluster.mode`
+
+Remove `services.moq-relay.cluster.mode`; the option is refused as unknown. It never changed
+how the relay dials: that follows `cluster.rootUrl` alone, so keep `rootUrl` on a relay that
+should dial peers and leave it unset on one that should not (`mode = "none"` with `rootUrl` set
+already dialed). The leaf assertion is gone, and the missing-credential warning now fires for
+any relay with `rootUrl` set and no `certFile` or `tokenFile`.
+
 ### `Lease::new` validates its grant
 
 `Lease::new` refuses a grant `Grant::validate` refuses, as an auth server's answer
