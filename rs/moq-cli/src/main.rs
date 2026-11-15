@@ -779,7 +779,7 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let config = ingest.catalog().with_spatial(import.spatial());
+		let config = ingest.catalog();
 		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..

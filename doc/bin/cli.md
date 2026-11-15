@@ -108,20 +108,6 @@ MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
 
-The stdin imports can mark the broadcast for VR when the source does not:
-`--projection equirectangular` for 360 video (`equirectangular:180` for VR180),
-`--stereo left-right` or `top-bottom` for a picture that packs both eyes, and
-`--audio-layout ambisonic` for AmbiX audio. fMP4 carrying Spherical Video V2
-boxes and Opus with channel mapping family 2 already say so, and win over the
-flags, which matters mostly for bare bitstreams like `avc3`. An ambisonic track
-without a square channel count of at least 4 is refused.
-
-```bash
-ffmpeg -re -i vr180.mp4 -an -c:v copy -bsf:v h264_mp4toannexb -f h264 - |
-    moq --connect https://relay.example.com/anon --broadcast vr.hang \
-    import --projection equirectangular:180 --stereo left-right avc3
-```
-
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
 and the camera needs no inbound port. Credentials go in the URL
