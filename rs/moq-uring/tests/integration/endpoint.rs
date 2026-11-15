@@ -486,9 +486,10 @@ fn an_unanswered_dial_times_out() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	// The dial ends at moq-quic's handshake idle timeout (10s), not the idle timeout.
+	// The dial ends at the handshake timeout, not the idle timeout.
 	let hole_addr = hole.local_addr().expect("addr");
-	let dial = dial_config();
+	let mut dial = dial_config();
+	dial.transport.handshake_timeout = Duration::from_secs(1);
 
 	let result = worker
 		.block_on(async move { quic::client::connect(client_sock, &dial, hole_addr, "localhost").await })
@@ -584,9 +585,9 @@ fn the_backlog_bounds_pending_handshakes() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	// The server never answers, so the dial ends at moq-quic's handshake idle
-	// timeout (10s).
-	let dial = dial_config();
+	// The server never answers, so the dial ends at the handshake timeout.
+	let mut dial = dial_config();
+	dial.transport.handshake_timeout = Duration::from_secs(1);
 
 	let result = worker
 		.block_on(async move { quic::client::connect(client_sock, &dial, server, "localhost").await })
@@ -622,7 +623,9 @@ fn the_backlog_bounds_queued_connections() {
 	let second_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("second client socket");
-	let second_config = dial_config();
+	// The server never answers, so the dial ends at the handshake timeout.
+	let mut second_config = dial_config();
+	second_config.transport.handshake_timeout = Duration::from_secs(1);
 	let second = worker
 		.block_on(async { quic::client::connect(second_sock, &second_config, server, "localhost").await })
 		.expect("worker");

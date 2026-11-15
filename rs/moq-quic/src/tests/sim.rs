@@ -105,7 +105,7 @@ fn handshake(seed: u64, latency: Duration, to_server: Link, to_client: Link) -> 
 
 	// When each side last processed a packet from the other, to tell a give-up from a dead
 	// network: an arrival it cannot decrypt yet is no sign of life
-	let mut heard = [vec![start], vec![]];
+	let mut heard = [start; 2];
 	let mut frames = [String::new(), String::new()];
 	let server_ch = loop {
 		let now = pair.time;
@@ -120,15 +120,15 @@ fn handshake(seed: u64, latency: Duration, to_server: Link, to_client: Link) -> 
 			let received = format!("{:?}", conn.stats().frame_rx);
 			if received != frames[index] {
 				frames[index] = received;
-				heard[index].push(now);
+				heard[index] = now;
 			}
 			let Some(error) = conn.error().cloned() else { continue };
 			prop_assert!(
 				matches!(error, ConnectionError::HandshakeTimeout),
 				"side {index} failed: {error}"
 			);
-			heard[index].push(now);
-			let silence = heard[index].windows(2).map(|w| w[1] - w[0]).max().unwrap_or_default();
+			// The silence right before it gave up, not any earlier one
+			let silence = now - heard[index];
 			prop_assert!(silence >= bound, "side {index} gave up after {silence:?} of silence");
 			return Ok(());
 		}
