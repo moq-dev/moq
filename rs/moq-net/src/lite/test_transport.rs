@@ -238,6 +238,8 @@ pub struct SinkSend {
 	finished: bool,
 	/// A finished stream still parks, like a peer that has not acknowledged the FIN.
 	unacked_fin: bool,
+	/// The peer stopped the stream (STOP_SENDING) with this code before reading it.
+	stopped: Option<u32>,
 	/// The send group the stream joined.
 	group: Option<usize>,
 }
@@ -288,6 +290,7 @@ impl SinkSend {
 			written: 0,
 			finished: false,
 			unacked_fin: false,
+			stopped: None,
 			group: None,
 		}
 	}
@@ -312,6 +315,7 @@ impl SinkSend {
 			written: 0,
 			finished: false,
 			unacked_fin: false,
+			stopped: None,
 			group: None,
 		}
 	}
@@ -320,6 +324,9 @@ impl SinkSend {
 impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 	type Group = SinkGroup;
+	type Offset = ();
+
+	fn offset(&self) -> Self::Offset {}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.log.writes_fail.load(Ordering::Relaxed) {
@@ -395,6 +402,12 @@ impl poll::SendStream for SinkSend {
 	}
 
 	fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+		if let Some(code) = self.stopped {
+			return Poll::Ready(Err(SinkError {
+				code,
+				stream: Some(code),
+			}));
+		}
 		match self.finished && !self.unacked_fin {
 			true => Poll::Ready(Ok(())),
 			// Nothing to acknowledge yet, so park like a peer that never answers.
@@ -635,6 +648,8 @@ pub struct SinkSession {
 	uni_open_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_stopped_unis`].
+	stopped_unis: Option<u32>,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 	/// Set by [`Self::with_datagrams`]; zero disables datagrams.
@@ -664,6 +679,13 @@ impl SinkSession {
 	/// finished group stays waiting on it.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Have the peer stop every unidirectional stream with `code` (STOP_SENDING), as a
+	/// subscriber that discarded it before reading its header does.
+	pub fn with_stopped_unis(mut self, code: u32) -> Self {
+		self.stopped_unis = Some(code);
 		self
 	}
 
@@ -822,6 +844,7 @@ impl poll::Session for SinkSession {
 			(None, None) => SinkSend::new(self.log.clone()),
 		};
 		send.unacked_fin = self.unacked_fin;
+		send.stopped = self.stopped_unis;
 		Poll::Ready(Ok(send.opened(options)))
 	}
 

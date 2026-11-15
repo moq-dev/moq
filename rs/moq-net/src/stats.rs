@@ -55,7 +55,8 @@
 //!   session's egress `bytes` / `frames` count only payload the transport
 //!   delivered (see [`SendStream::delivered`](crate::transport::poll::SendStream::delivered)),
 //!   never what a reset or a lost session discarded: a frame's bytes as they
-//!   land, and the frame with its last byte. An in-process reader counts on read.
+//!   land, and the frame with its last byte. An in-process reader counts on read,
+//!   unless it takes a [`Bill`] to count only what it delivers onward.
 //! * `datagrams`: cumulative datagrams of datagram tracks. A datagram belongs to
 //!   no group, so it bumps `bytes` but not `groups` or `frames`. A session counts
 //!   an egress datagram once the transport accepts it.
@@ -82,6 +83,9 @@
 //!   [`Registry::report`] and [`Registry::snapshot`] read each registered [`Wire`]
 //!   without polling the session. A retag flushes its old tier and label; dropping the guard flushes
 //!   its final nonnegative delta. Unsupported transports contribute zero.
+//! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
+//!   sessions under the label forwarded and this node refused, each withdrawn while
+//!   the session stays open.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
 //!   at once, to compare against what bounds them. A peak never
@@ -298,6 +302,7 @@ struct SessionCounters {
 	sessions_ended: AtomicU64,
 	announces_peak: AtomicU64,
 	subscriptions_peak: AtomicU64,
+	routes_refused: AtomicU64,
 	/// Payload bytes of the sessions recording here. One lock covers the folded totals
 	/// and the live sessions, so a readout never goes down when a session leaves.
 	bytes: Mutex<SessionBytes>,
@@ -339,6 +344,7 @@ impl SessionCounters {
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
+			routes_refused: self.routes_refused.load(Ordering::Relaxed),
 		};
 		(presence, activity, empty)
 	}
@@ -719,6 +725,9 @@ pub struct Presence {
 	pub wire_tx: u64,
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
+	/// Cumulative routes, warm routes, and claims a lite-07 session forwarded that this
+	/// node refused, withdrawing each and keeping the session.
+	pub routes_refused: u64,
 }
 
 #[derive(Serialize)]
@@ -736,6 +745,7 @@ struct PresenceSer {
 	subscriptions_peak: u64,
 	wire_tx: u64,
 	wire_rx: u64,
+	routes_refused: u64,
 }
 
 impl From<Presence> for PresenceSer {
@@ -754,6 +764,7 @@ impl From<Presence> for PresenceSer {
 			received_bytes: p.received_bytes,
 			announces_peak: p.announces_peak,
 			subscriptions_peak: p.subscriptions_peak,
+			routes_refused: p.routes_refused,
 		}
 	}
 }
@@ -776,6 +787,7 @@ struct PresenceDe {
 	wire_tx: u64,
 	#[serde(default)]
 	wire_rx: u64,
+	routes_refused: u64,
 }
 
 impl From<PresenceDe> for Presence {
@@ -792,6 +804,7 @@ impl From<PresenceDe> for Presence {
 			received_bytes: d.received_bytes,
 			announces_peak: d.announces_peak,
 			subscriptions_peak: d.subscriptions_peak,
+			routes_refused: d.routes_refused,
 		}
 	}
 }
@@ -822,6 +835,7 @@ impl Presence {
 		self.received_bytes += other.received_bytes;
 		self.announces_peak = self.announces_peak.max(other.announces_peak);
 		self.subscriptions_peak = self.subscriptions_peak.max(other.subscriptions_peak);
+		self.routes_refused += other.routes_refused;
 	}
 
 	/// Sessions currently connected.
@@ -1865,6 +1879,15 @@ impl Session {
 		presence.peak(cap).fetch_max(held, Ordering::Relaxed);
 	}
 
+	/// Count a route or claim the peer forwarded that this node refused.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse_route(&self) {
+		let Some(inner) = &self.inner else { return };
+		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
+		let Some(presence) = &current.presence else { return };
+		presence.routes_refused.fetch_add(1, Ordering::Relaxed);
+	}
+
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the
 	/// absolute broadcast name.
 	pub(crate) fn egress(&self, path: impl Into<Path>) -> Scope {
@@ -1887,6 +1910,7 @@ impl Session {
 			resolved: Some(Box::new(Mutex::new(resolved))),
 			side,
 			path,
+			billed: false,
 		}
 	}
 
@@ -2133,6 +2157,34 @@ impl Delivery {
 	}
 }
 
+/// The payload of a track a reader counts as it delivers it onward, rather than as it reads it.
+///
+/// For an in-process reader that drops some of what it reads, such as a gateway's jitter
+/// buffer: what it reads and drops counts nothing. Taken from
+/// [`track::Subscriber::bill`](crate::track::Subscriber::bill). Cheap to clone; the default
+/// counts nothing.
+#[derive(Clone, Default)]
+pub struct Bill(Option<Arc<Scope>>);
+
+impl std::fmt::Debug for Bill {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Bill")
+			.field("path", &self.0.as_ref().map(|scope| &scope.path))
+			.finish()
+	}
+}
+
+impl Bill {
+	/// Count one frame of `bytes` payload as delivered.
+	pub fn deliver(&self, bytes: u64) {
+		if let Some(scope) = &self.0 {
+			let meter = scope.meter();
+			meter.frames(1);
+			meter.bytes(bytes);
+		}
+	}
+}
+
 /// A per-`(broadcast, side)` scope, carried by the broadcast and track model
 /// handles. Created by a tagged origin at the broadcast handoff; hands out
 /// [`Meter`]s for the payload path and RAII guards for the subscription / announce
@@ -2150,6 +2202,8 @@ pub(crate) struct Scope {
 	/// Absolute broadcast path, used to key the viewer refcount and as the
 	/// `announced_bytes` length.
 	path: Path,
+	/// Whether a [`Bill`] counts the payload instead, so the meters handed out count none.
+	billed: bool,
 }
 
 /// A [`Scope`]'s counters and the session tier generation they belong to.
@@ -2170,6 +2224,7 @@ impl Clone for Scope {
 				.map(|r| Box::new(Mutex::new(r.lock().unwrap_or_else(PoisonError::into_inner).clone()))),
 			side: self.side,
 			path: self.path.clone(),
+			billed: self.billed,
 		}
 	}
 }
@@ -2206,8 +2261,21 @@ impl Scope {
 			counters,
 			traffic,
 			side: self.side,
-			delegated: false,
+			delegated: self.billed,
 		}
+	}
+
+	/// Hand the payload counts of the meters this scope hands out from now on to the returned
+	/// [`Bill`].
+	pub(crate) fn bill(&mut self) -> Bill {
+		let bill = Bill(self.is_tagged().then(|| {
+			Arc::new(Self {
+				billed: false,
+				..self.clone()
+			})
+		}));
+		self.billed = true;
+		bill
 	}
 
 	/// Open a track-subscription guard: bumps `subscriptions_started` now and

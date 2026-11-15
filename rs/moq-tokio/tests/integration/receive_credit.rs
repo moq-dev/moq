@@ -684,6 +684,49 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	}
 }
 
+/// A GROUP header still arriving when group streams overcommit the window outlasts them:
+/// it holds only the header's bytes, and stopping it would hide which group it carried.
+/// Once a group stream gives way, the header completes and its group is delivered.
+#[tokio::test]
+async fn a_header_still_arriving_outlasts_group_streams() {
+	let setup = reversed("moq-lite-07-wip").await;
+	let (_track, mut sub) = setup.subscribe("video", 0).await;
+
+	// Subscription 0's group 100, cut after the first byte of its header.
+	let whole = group_stream(0, 100, 16);
+	let (head, rest) = whole.split_at(3);
+	let mut header = setup.conn.open_uni(Default::default()).await.expect("open");
+	header.write_all(head).await.expect("header start");
+	header.flush().await.expect("flush");
+
+	// Partial frames, together more than the window: one group stream gives way.
+	let groups = (1..=3)
+		.map(|sequence| {
+			let mut bytes = group_stream(0, sequence, WINDOW / 2);
+			bytes.truncate(bytes.len() - WINDOW / 2 + WINDOW * 2 / 5);
+			bytes
+		})
+		.collect();
+	setup.raw(false, groups, 1).await;
+
+	header.write_all(rest).await.expect("the header stream was stopped");
+	// Held until the group is read: dropping it would reset the stream.
+	let _finished = header.finish();
+	loop {
+		let mut group = next_group(&mut sub).await;
+		if group.sequence != 100 {
+			continue;
+		}
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("frame timed out")
+			.expect("the header's group failed")
+			.expect("group ended");
+		assert_eq!(frame.payload.len(), 16);
+		break;
+	}
+}
+
 /// Control requests that never complete fill the window: one is stopped with its stream,
 /// and the session carries on.
 #[tokio::test]

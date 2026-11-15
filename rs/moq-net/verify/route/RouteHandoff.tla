@@ -5,8 +5,14 @@
 (* rs/moq-net/src/route/path.rs runs it, with a route per scope.            *)
 (*                                                                         *)
 (* A route is keyed by the prefix it covers: "root", or "a" inside it. A   *)
-(* relay in `Scoped` asks every neighbour for "a" alone, so a stream to it *)
-(* carries one route, keyed "a". A route names every relay it crossed,     *)
+(* relay watches a set of prefixes, none inside another, and asks every    *)
+(* neighbour for that set: a stream answering {"a"} carries one route,     *)
+(* keyed "a". A relay in `Editors` may change what it watches. Each change *)
+(* is an edit, sent on the FIFO as an ask; the neighbour answers it with a *)
+(* marker on its own FIFO, and both sides rekey the routes between them at *)
+(* that point alike (path.rs: `rekey`). A route heard is believed for a    *)
+(* prefix only while the node asked for it at the last marker and in every *)
+(* edit still in flight. A route names every relay it crossed,             *)
 (* each with the session that relay learned it on, and a relay uses the    *)
 (* best live route whose path does not name it: one crossing no draining   *)
 (* session, then the highest lowest link priority, then the cheapest. An   *)
@@ -20,8 +26,7 @@
 (*   neighbour that learned the route from it has answered.               *)
 (* - A closed session casts doubt on the node at its far end: no relay     *)
 (*   moves to a route through it until a timer lifts the doubt. The timer  *)
-(*   is the step `Lift`, which may fire at any moment. `Exempt` compares   *)
-(*   letting a relay move sooner onto some routes through a doubted node.  *)
+(*   is the step `Lift`, which may fire at any moment.                    *)
 (*                                                                         *)
 (* Each node's every entry point is one atomic step ending in `Update`,    *)
 (* as in the router. Messages travel on one FIFO per direction. A          *)
@@ -40,16 +45,14 @@ CONSTANTS
                   \* next costs 1 there and 2 at the next, overriding `Dear`
     Preferred,    \* the links both ends give priority 1; the rest have 0
     Leaving,      \* nodes that may send GOAWAY, once on each session
-    Scoped,       \* relays that ask every neighbour for prefix "a" alone
+    Scoped,       \* relays that start out watching prefix "a" alone
+    Editors,      \* relays that may change what they watch
     Claims,       \* claim paths
     Narrow,       \* the claims inside prefix "a"
     MaxRev,       \* the publisher's claim changes
     MaxFlaps,     \* session opens and closes
-    Patient,      \* TRUE: a doubt lifts only once no news about its node is in flight
-    Exempt        \* which routes doubt does not keep a relay off (`Exempted`):
-                  \* "none", the router's rule, or a comparison rule
-
-ASSUME Exempt \in {"none", "fresh", "own", "session"}
+    MaxEdits,     \* changes of what a relay watches
+    Patient       \* TRUE: a doubt lifts only once no news about its node is in flight
 
 Relays == Nodes \ {Origin}
 
@@ -76,10 +79,15 @@ KeySeq == <<"root", "a">>
 Covers(k, c) == k = "root" \/ c \in Narrow
 \* The key whose view a node shows `c` from: the narrowest that covers it.
 KeyOf(c) == IF c \in Narrow THEN "a" ELSE "root"
-\* What `n` asks its neighbours for.
-Ask(n) == IF n \in Scoped THEN "a" ELSE "root"
-\* The keys a stream to `p` carries.
-Streams(p) == IF p \in Scoped THEN {"a"} ELSE Keys
+
+\* The sets of prefixes a node may watch or ask for: none inside another.
+Sets == {{}, {"a"}, {"root"}}
+\* Whether key `k` lies within a prefix of the set `S`.
+Within(k, S) == "root" \in S \/ k \in S
+\* Whether the set `S` covers claim `c`.
+CoversSet(S, c) == \E k \in S : Covers(k, c)
+\* What node n watches at the start: the publisher watches nothing.
+Watch0(n) == IF n = Origin THEN {} ELSE IF n \in Scoped THEN {"a"} ELSE {"root"}
 
 NoItems == [c \in Claims |-> None]
 Restrict(items, k) == [c \in Claims |-> IF Covers(k, c) THEN items[c] ELSE None]
@@ -104,7 +112,7 @@ NotShown == [item |-> None, avail |-> FALSE]
 
 \* Messages: one record shape so TLC can compare them.
 Blank == [t |-> "", k |-> "root", path |-> <<>>, drain |-> FALSE, rev |-> None, items |-> NoItems,
-          hop |-> OHop, moved |-> {}, gone |-> FALSE, node |-> None]
+          hop |-> OHop, moved |-> {}, gone |-> FALSE, node |-> None, set |-> {}]
 OfferMsg(k, path, drain) == [Blank EXCEPT !.t = "offer", !.k = k, !.path = path, !.drain = drain]
 HoldMsg(k) == [Blank EXCEPT !.t = "hold", !.k = k]
 EndMsg(k) == [Blank EXCEPT !.t = "end", !.k = k]
@@ -113,6 +121,10 @@ DeadMsg(hop, moved, gone) ==
     [Blank EXCEPT !.t = "dead", !.hop = hop, !.moved = moved, !.gone = gone]
 \* The DEAD message's DRAIN entry: `node` sent GOAWAY.
 DrainMsg(node) == [Blank EXCEPT !.t = "drain", !.node = node]
+\* An edit of what the sender asks for, naming the set it asks for once applied.
+AskMsg(set) == [Blank EXCEPT !.t = "ask", !.set = set]
+\* The marker answering the oldest edit the receiver asked for.
+EditedMsg == [Blank EXCEPT !.t = "edited"]
 
 VARIABLES
     up,          \* open sessions
@@ -129,11 +141,12 @@ VARIABLES
     unstable,    \* claim changes a path change or a lifted doubt alone made
     learnt,      \* learnt[n]: every hop n was ever told is dead
     flaps,
+    edits,       \* changes of what a relay watches
     burst,       \* messages sent since the last quiet point
     churn        \* external changes since the last quiet point
 
 vars == <<up, gen, q, rev, own, hist, st, ended, revivals, falseEnds, regressions,
-          unstable, learnt, flaps, burst, churn>>
+          unstable, learnt, flaps, edits, burst, churn>>
 
 Dirs == {<<m, n>> \in Nodes \X Nodes : {m, n} \in Links}
 Peers(n, ups) == {m \in Nodes : {n, m} \in ups}
@@ -168,25 +181,6 @@ Live(r) == r.on /\ ~r.held
 (* Selection on node n's state s (path.rs: `select`, `pending`, `hopes`). *)
 
 Doubted(s, path) == \E i \in DOMAIN path : path[i][1] \in s.doubt
-
-\* The route neighbour m offered for key k is m's own: its path names m alone.
-\* Sessions authenticate their peer, so only m can offer it on m's session.
-Own(s, m, k) == Len(s.rx[m][k].path) = 1 /\ s.rx[m][k].path[1][1] = m
-
-\* Doubt does not keep this node off the route m offered for key k. "fresh":
-\* m's own route, on a session m opened while this node doubted it, so m was
-\* alive after the news that cast the doubt. The comparison rules each drop one
-\* of those conditions: "own" takes m's own route on any session, and "session"
-\* any route on a session opened while this node doubted any node.
-Exempted(s, m, k) ==
-    CASE Exempt = "fresh" -> Own(s, m, k) /\ m \in s.fresh
-      [] Exempt = "own" -> Own(s, m, k)
-      [] Exempt = "session" -> m \in s.fresh
-      [] OTHER -> FALSE
-
-\* Only doubt keeps this node off the route m offered for key k.
-Barred(s, m, k) == Doubted(s, s.rx[m][k].path) /\ ~Exempted(s, m, k)
-
 \* The path crosses a node this node knows sent GOAWAY.
 Drains(s, path) == \E i \in DOMAIN path : path[i][1] \in s.draining
 
@@ -195,8 +189,12 @@ Drains(s, path) == \E i \in DOMAIN path : path[i][1] \in s.draining
 Usable(n, s, m, k) ==
     s.rx[m][k].on /\ s.rx[m][k].state = "live" /\ ~Names(s.rx[m][k].path, n)
 
+\* The keys a stream answering p's asks carries (path.rs: `stream`): every key
+\* within them.
+Streams(s, p) == {k \in Keys : Within(k, s.ans[p])}
+
 \* The key of this node's own route an offer of key k to p reflects. A stream
-\* to a scoped relay carries one route, "a": the node's route for "a" where it
+\* answering {"a"} carries one route, "a": the node's route for "a" where it
 \* has a live one not naming the receiver, else its root route, which covers "a".
 \* A narrower path cannot outrank a better covering path: that preference can
 \* make neighbours oscillate between scopes. Equal ranks prefer the narrow key.
@@ -207,7 +205,7 @@ Cheapest(s, ks) ==
         \/ R(k) = R(j) /\ (k = "a" \/ j = "root")
 
 SrcKey(s, p, k) ==
-    IF p \notin Scoped THEN k
+    IF k # "a" \/ "a" \notin s.ans[p] THEN k
     ELSE LET live == {j \in Keys : Live(s.rt[j])}
              usable == {j \in live : ~Names(s.rt[j].path, p)}
          IN IF usable # {} THEN Cheapest(s, usable)
@@ -223,7 +221,7 @@ Pending(n, s, k) ==
         /\ s.tx[p][j].src = k
 
 \* A neighbour offers a route that only doubt keeps this node off.
-Hopes(n, s, k) == \E m \in Nodes : Usable(n, s, m, k) /\ Barred(s, m, k)
+Hopes(n, s, k) == \E m \in Nodes : Usable(n, s, m, k) /\ Doubted(s, s.rx[m][k].path)
 
 \* `select` for one key: the best-ranked usable route, staying on the next hop
 \* among equals, then the lowest key. Doubt keeps a node from moving to a route,
@@ -232,7 +230,7 @@ SelectKey(n, s, k, gens) ==
     LET was == s.rt[k]
         current == IF was.on THEN was.next ELSE None
         using == IF Live(was) THEN was.next ELSE None
-        C == {m \in Nodes : Usable(n, s, m, k) /\ (m = using \/ ~Barred(s, m, k))}
+        C == {m \in Nodes : Usable(n, s, m, k) /\ (m = using \/ ~Doubted(s, s.rx[m][k].path))}
         Path(m) == Append(s.rx[m][k].path, <<n, m, gens[{n, m}]>>)
         Drain(m) == s.rx[m][k].drain \/ m \in s.drain \/ Drains(s, s.rx[m][k].path)
         R(m) == Rank(Path(m), Drain(m))
@@ -280,17 +278,26 @@ Select(n, s, gens) ==
 (* route covering that key gave it, kept while it holds a covering route.   *)
 
 Presence(s, k) == s.rt[k].on \/ (k = "a" /\ s.rt["root"].on)
+\* The node keeps a view for key k (path.rs: `watched`): one within what it watches.
+Watched(s, k) == Within(k, s.watch)
 
-\* A route this node believes: live, and it did not cross this node.
-Believed(n, s, m, j) ==
-    s.rx[m][j].on /\ s.rx[m][j].state = "live" /\ ~Names(s.rx[m][j].path, n)
+\* This node asked m for key k at the last marker and in every edit still in
+\* flight (path.rs: `Session::asking`).
+Asking(s, m, k) ==
+    /\ Within(k, s.asked[m])
+    /\ \A i \in DOMAIN s.edits[m] : Within(k, s.edits[m][i])
+
+\* A route this node believes for its claims within key k: live, it did not
+\* cross this node, and no edit could drop k from what m answers.
+Believed(n, s, m, j, k) ==
+    s.rx[m][j].on /\ s.rx[m][j].state = "live" /\ ~Names(s.rx[m][j].path, n) /\ Asking(s, m, k)
 
 NewView(n, s, k) ==
-    IF ~Presence(s, k) THEN NoView
+    IF ~Presence(s, k) \/ ~Watched(s, k) THEN NoView
     ELSE LET base == IF s.view[k].floor = Absent THEN EmptyView ELSE s.view[k]
              src == {x \in Nodes \X Keys :
                         /\ x[2] = k \/ x[2] = "root"
-                        /\ Believed(n, s, x[1], x[2])
+                        /\ Believed(n, s, x[1], x[2], k)
                         /\ s.rx[x[1]][x[2]].rev > base.floor}
              best == CHOOSE x \in src : \A y \in src :
                         s.rx[x[1]][x[2]].rev >= s.rx[y[1]][y[2]].rev
@@ -316,8 +323,9 @@ ShownNow(s) ==
 
 \* What this node wants a neighbour p to hold for key k: a path, a hold, an
 \* end, or to keep what it was sent while the next hop this node holds under
-\* waits for those behind it.
-Want(n, s, k, p) ==
+\* waits for those behind it. A path or a hold goes only where this node keeps
+\* a view: one it does not watch ends (path.rs: `Want::Empty` with no covering view).
+Want0(n, s, k, p) ==
     LET src == SrcKey(s, p, k)
         r == s.rt[src]
     IN IF ~r.on THEN [kind |-> "end", path |-> <<>>, drain |-> FALSE, src |-> src]
@@ -330,12 +338,18 @@ Want(n, s, k, p) ==
             THEN [kind |-> "end", path |-> <<>>, drain |-> FALSE, src |-> src]
        ELSE [kind |-> "hold", path |-> <<>>, drain |-> FALSE, src |-> src]
 
+Want(n, s, k, p) ==
+    LET w == Want0(n, s, k, p)
+    IN IF w.kind \in {"path", "hold"} /\ s.view[k].floor = Absent
+       THEN [w EXCEPT !.kind = "end", !.path = <<>>, !.drain = FALSE]
+       ELSE w
+
 \* `advertise` for one key on the stream to p.
 Advertise1(n, s, p, k) ==
     LET t == s.tx[p][k]
         w == Want(n, s, k, p)
         v == IF s.view[k].floor = Absent THEN EmptyView ELSE s.view[k]
-    IN CASE k \notin Streams(p) \/ w.kind = "keep" -> [tx |-> t, out |-> <<>>]
+    IN CASE k \notin Streams(s, p) \/ w.kind = "keep" -> [tx |-> t, out |-> <<>>]
          [] w.kind = "hold" ->
               IF t.on /\ ~t.held THEN [tx |-> [t EXCEPT !.held = TRUE], out |-> <<HoldMsg(k)>>]
               ELSE [tx |-> t, out |-> <<>>]
@@ -384,6 +398,9 @@ Report1(n, s, p, hop) ==
                                                               !.held = FALSE, !.src = w[k].src]
                          [] w[k].kind = "hold" -> [t[k] EXCEPT !.held = TRUE]
                          [] w[k].kind = "end" -> NoSent(t[k].src)
+                         \* p takes a first DEAD to mean every route it did not
+                         \* send this node is held, so what was sent says so too.
+                         [] first /\ ~Child(t[k].path, p) -> [t[k] EXCEPT !.held = TRUE]
                          [] OTHER -> t[k]]
         out == IF first \/ (gone /\ ends # {})
                THEN <<DeadMsg(hop, moved, gone)>>
@@ -433,27 +450,28 @@ DeadReport(hop) == [NoReport EXCEPT !.on = TRUE, !.hop = hop]
 DrainReport(x) == [NoReport EXCEPT !.node = x]
 
 \* The reader's events: changes to `ended` and the counters. A claim leaving
-\* while the node still holds a covering route is an END, else it went offline.
-\* `quiet` marks a step that only changed a path or lifted a doubt: in one, a
-\* claim the reader sees changes only to what a newer floor says, or goes
-\* offline after it was held unavailable.
+\* while the node still holds a covering route and watches it is an END, else
+\* it went offline or is no longer watched, and the reader forgets it.
+\* `quiet` holds the claims a step leaves alone but for their paths: one that
+\* only changed a path, lifted a doubt, or applied an edit to what both its
+\* sets cover. A claim in it the reader sees changes only to what a newer floor
+\* says, or goes offline after it was held unavailable.
 Events(s0, s, old, now, ov, eb, quiet) ==
-    LET present(c) == Presence(s, KeyOf(c))
+    LET present(c) == Presence(s, KeyOf(c)) /\ Watched(s, KeyOf(c))
         isEnd(c) == old[c].item # None /\ now[c].item = None /\ present(c)
         isStart(c) == old[c].item = None /\ now[c].item # None
         isUpdate(c) == old[c].item # None /\ now[c].item # None /\ old[c].item # now[c].item
         \* Forgetting a claim clears what the reader saw end.
         eb1 == [c \in Claims |-> IF present(c) THEN eb[c] ELSE None]
         newer(c) == s.view[KeyOf(c)].floor > s0.view[KeyOf(c)].floor
-        before(c) == Presence(s0, KeyOf(c))
+        before(c) == Presence(s0, KeyOf(c)) /\ Watched(s0, KeyOf(c))
         \* Letting go of a claim it held unavailable ends a hold, not a path.
         release(c) == ~old[c].avail /\ ~present(c)
     IN [ended |-> [c \in Claims |-> IF isEnd(c) THEN old[c].item ELSE eb1[c]],
         revivals |-> Cardinality({c \in Claims : isStart(c) /\ eb[c] = now[c].item}),
         falseEnds |-> Cardinality({c \in Claims : isEnd(c) /\ ov.items[c] = old[c].item}),
         regressions |-> Cardinality({c \in Claims : isUpdate(c) /\ now[c].item < old[c].item}),
-        unstable |-> IF ~quiet THEN 0
-                     ELSE Cardinality({c \in Claims : old[c].item # now[c].item /\ before(c) /\ ~newer(c) /\ ~release(c)})]
+        unstable |-> Cardinality({c \in quiet : old[c].item # now[c].item /\ before(c) /\ ~newer(c) /\ ~release(c)})]
 
 Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
     LET s1 == Select(n, s0, gens)
@@ -471,8 +489,9 @@ Update(n, s0, ov, ups, gens, eb, rep, quiet) ==
         dead |-> a.s.dead]
 
 \* The publisher ignores every message it hears for its own route, so none is
-\* queued toward it. Dropping them changes no behaviour; `Budget` still counts them.
-Heeded(d, m) == d[2] # Origin
+\* queued toward it, but answers what it is asked for. Dropping them changes no
+\* behaviour; `Budget` still counts them. It watches nothing, so asks nothing.
+Heeded(d, m) == d[2] # Origin \/ m.t = "ask"
 
 \* The sum of f(x) for each x in the finite set S.
 \* FoldSet runs natively through the Community Modules' Java override; an
@@ -513,10 +532,15 @@ Internal(sent) ==
     /\ UNCHANGED churn
 
 -----------------------------------------------------------------------------
-(* Initial state: every session open, the publisher's route sent and no     *)
-(* claims yet.                                                              *)
+(* Initial state: every session open with its asks answered, the            *)
+(* publisher's route sent and no claims yet.                                *)
 
-InitNode == [
+\* Every session starts with its asks answered.
+InitNode(n) == [
+    watch |-> Watch0(n),
+    asked |-> [m \in Nodes |-> IF {n, m} \in Links THEN Watch0(n) ELSE {}],
+    edits |-> [m \in Nodes |-> <<>>],
+    ans |-> [m \in Nodes |-> IF {n, m} \in Links THEN Watch0(m) ELSE {}],
     rx |-> [m \in Nodes |-> [k \in Keys |-> NoHeard]],
     rt |-> [k \in Keys |-> NoRoute],
     view |-> [k \in Keys |-> NoView],
@@ -526,7 +550,6 @@ InitNode == [
     expiry |-> {}, \* Pending timers belong to individual dead hops.
     drain |-> {},  \* the neighbours that sent GOAWAY on the session open to them
     draining |-> {}, \* nodes known to have sent GOAWAY, while named or doubted
-    fresh |-> {},  \* neighbours whose session opened while this node doubted them
     tx |-> [m \in Nodes |-> [k \in Keys |-> NoSent(k)]],
     told |-> [m \in Nodes |-> {}],
     toldDrain |-> [m \in Nodes |-> {}],
@@ -535,8 +558,8 @@ InitNode == [
 
 OV0 == [rev |-> 0, items |-> NoItems]
 Gen0 == [l \in Links |-> 0]
-Start == Update(Origin, [InitNode EXCEPT !.rt = OwnRoutes], OV0, Links, Gen0,
-                [c \in Claims |-> None], NoReport, FALSE)
+Start == Update(Origin, [InitNode(Origin) EXCEPT !.rt = OwnRoutes], OV0, Links, Gen0,
+                [c \in Claims |-> None], NoReport, {})
 
 Init ==
     /\ up = Links
@@ -545,7 +568,7 @@ Init ==
     /\ rev = 0
     /\ own = NoItems
     /\ hist = <<NoItems>>
-    /\ st = [n \in Nodes |-> IF n = Origin THEN Start.s ELSE InitNode]
+    /\ st = [n \in Nodes |-> IF n = Origin THEN Start.s ELSE InitNode(n)]
     /\ ended = [n \in Nodes |-> [c \in Claims |-> None]]
     /\ revivals = 0
     /\ falseEnds = 0
@@ -553,6 +576,7 @@ Init ==
     /\ unstable = 0
     /\ learnt = [n \in Nodes |-> {}]
     /\ flaps = 0
+    /\ edits = 0
     /\ burst = 0
     /\ churn = 1
 
@@ -564,13 +588,13 @@ OV == [rev |-> rev, items |-> own]
 ChangeClaim(c, item) ==
     LET own1 == [own EXCEPT ![c] = item]
         ov1 == [rev |-> rev + 1, items |-> own1]
-        rs == [n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, gen, ended[Origin], NoReport, FALSE)]
+        rs == [n \in {Origin} |-> Update(Origin, st[Origin], ov1, up, gen, ended[Origin], NoReport, {})]
     IN /\ rev' = rev + 1
        /\ own' = own1
        /\ hist' = Append(hist, own1)
        /\ Commit(rs, q)
        /\ External(Sent(rs))
-       /\ UNCHANGED <<up, gen, flaps>>
+       /\ UNCHANGED <<up, gen, flaps, edits>>
 
 Announce(c) == rev < MaxRev /\ ChangeClaim(c, rev + 1)
 Unannounce(c) == rev < MaxRev /\ own[c] # None /\ ChangeClaim(c, None)
@@ -612,7 +636,8 @@ Credited(s, from, x) == \E k \in Keys : s.rx[from][k].on /\ Names(s.rx[from][k].
 Recv(n, s, from, msg) ==
     LET k == msg.k
         h == s.rx[from][k]
-    IN CASE msg.t = "offer" ->
+    IN CASE msg.t = "offer" /\ ~Within(k, s.asked[from]) -> s
+         [] msg.t = "offer" ->
               [s EXCEPT !.rx[from][k] =
                   [on |-> TRUE, path |-> msg.path, drain |-> msg.drain,
                    state |-> IF DeadIn(msg.path, s.dead) THEN "dead" ELSE "live",
@@ -625,6 +650,64 @@ Recv(n, s, from, msg) ==
          [] msg.t = "drain" -> IF Credited(s, from, msg.node) THEN MarkDrain(n, s, msg.node) ELSE s
          [] OTHER -> Fail(n, s, msg.hop, from, msg.moved, msg.gone)
 
+\* Whether the sender would reflect route `x` rather than `y` to node r under
+\* one key, as `SrcKey` picks: a live one first, then one not naming r, then
+\* the better rank. `Held(e)` says whether an entry is held. Both sides see the
+\* same offers and holds (`Mirrored`), so both agree.
+Reflects(x, y, r, Held(_)) ==
+    \/ ~Held(x) /\ Held(y)
+    \/ Held(x) = Held(y) /\ ~Names(x.path, r) /\ Names(y.path, r)
+    \/ Held(x) = Held(y) /\ Names(x.path, r) = Names(y.path, r)
+       /\ Below(Rank(x.path, x.drain), Rank(y.path, y.drain))
+
+\* The routes of one stream to node r once an edit of its prefixes from `O` to
+\* `N` takes effect at its marker (path.rs: `rekey`), with `Off(e)` what a gone
+\* entry becomes. Both sides apply it alike, to what was sent and what was
+\* heard. A key within N stays, unless it sits at a removed prefix. The route
+\* at a removed "a" moves to an added "root" with its offer and state, and
+\* without its floor, which certified only "a". The route at a removed "root"
+\* is carried, presented at "a", to an added "a", so its floor carries too,
+\* unless the route "a" already carries is the one the sender would reflect
+\* there. The rest go, with no ROUTE_END.
+Carries(O, N, R, r, Held(_)) ==
+    /\ "root" \in O /\ "a" \in N /\ R["root"].on
+    /\ ~R["a"].on \/ Reflects(R["root"], R["a"], r, Held)
+
+Rekey(O, N, R, Off(_), r, Held(_)) ==
+    [k \in Keys |->
+        IF k = "root"
+        THEN IF "root" \in O /\ "root" \in N THEN R["root"]
+             ELSE IF "a" \in O /\ "root" \in N /\ R["a"].on THEN [R["a"] EXCEPT !.rev = None]
+             ELSE Off(R["root"])
+        ELSE IF Carries(O, N, R, r, Held) THEN [R["root"] EXCEPT !.items = Restrict(@, "a")]
+             ELSE IF R["a"].on /\ (("root" \in O /\ N # {}) \/ ("a" \in O /\ "a" \in N)) THEN R["a"]
+             ELSE Off(R["a"])]
+
+\* The keys `Rekey` moved a route between, as <<from, to>>.
+Moved(O, N, R, r, Held(_)) ==
+    (IF "a" \in O /\ "root" \in N /\ R["a"].on THEN {<<"a", "root">>} ELSE {})
+    \cup (IF Carries(O, N, R, r, Held) THEN {<<"root", "a">>} ELSE {})
+
+\* `edit`: m now asks node n for `set`. It takes effect at once, behind the
+\* marker n sends first.
+Answer(s, m, set) ==
+    [s EXCEPT !.ans[m] = set,
+              !.tx[m] = Rekey(s.ans[m], set, s.tx[m], LAMBDA e : NoSent(e.src), m, LAMBDA e : e.held)]
+
+\* `edited`: m's marker for node n's oldest edit in flight. The routes m sent
+\* are rekeyed as m rekeyed them, and a route n used or held through m moves
+\* with the route it heard, so a hold carries over rather than letting go.
+Marker(n, s, m) ==
+    LET old == s.asked[m]
+        new == Head(s.edits[m])
+        mv == Moved(old, new, s.rx[m], n, LAMBDA e : e.state = "held")
+        carry(k) == {x \in mv : x[2] = k /\ s.rt[x[1]].on /\ s.rt[x[1]].next = m /\ ~s.rt[k].on}
+    IN [s EXCEPT !.asked[m] = new,
+                 !.edits[m] = Tail(@),
+                 !.rx[m] = Rekey(old, new, s.rx[m], LAMBDA e : NoHeard, n, LAMBDA e : e.state = "held"),
+                 !.rt = [k \in Keys |-> IF carry(k) # {} THEN s.rt[(CHOOSE x \in carry(k) : TRUE)[1]]
+                                       ELSE s.rt[k]]]
+
 Deliver(d) ==
     LET m == d[1]
         n == d[2]
@@ -633,14 +716,25 @@ Deliver(d) ==
         rep == CASE msg.t = "dead" -> DeadReport(msg.hop)
                  [] msg.t = "drain" /\ msg.node # n /\ Credited(st[n], m, msg.node) -> DrainReport(msg.node)
                  [] OTHER -> NoReport
-        \* Only the route's path, or how it ranks, changed.
-        quiet == \/ msg.t = "offer" /\ st[n].rx[m][msg.k].on
-                 \/ msg.t = "drain"
-        rs == [x \in {n} |-> Update(n, Recv(n, st[n], m, msg), OV, up, gen, ended[n], rep, quiet)]
+        \* Only the route's path, or how it ranks, changed; or an edit took effect,
+        \* which changes no claim both its sets cover.
+        quiet == CASE \/ msg.t = "offer" /\ st[n].rx[m][msg.k].on
+                      \/ msg.t \in {"drain", "ask"} -> Claims
+                   [] msg.t = "edited" ->
+                        {c \in Claims : CoversSet(st[n].asked[m], c) /\ CoversSet(Head(st[n].edits[m]), c)}
+                   [] OTHER -> {}
+        s1 == CASE msg.t = "ask" -> Answer(st[n], m, msg.set)
+                [] msg.t = "edited" -> Marker(n, st[n], m)
+                [] OTHER -> Recv(n, st[n], m, msg)
+        u == Update(n, s1, OV, up, gen, ended[n], rep, quiet)
+        \* The marker goes before anything the edit sends.
+        rs == [x \in {n} |-> IF msg.t = "ask"
+                             THEN [u EXCEPT !.out[m] = <<EditedMsg>> \o @]
+                             ELSE u]
     IN /\ q[d] # <<>>
        /\ Commit(rs, q0)
        /\ Internal(Sent(rs))
-       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
+       /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>
 
 \* The timer node n started on x fires: the doubt on x lifts, and the dead hops
 \* whose session ended at x may be forgotten. With `Patient`, only once no DEAD
@@ -648,27 +742,25 @@ Deliver(d) ==
 \* the news to cross the mesh.
 Lift(n, x) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x},
-                                     !.expiry = {h \in @ : h[2] # x},
-                                     \* A later doubt of x postdates its session.
-                                     !.fresh = IF Exempt = "fresh" THEN @ \ {x} ELSE @],
-                                     OV, up, gen, ended[n], NoReport, TRUE)]
+                                     !.expiry = {h \in @ : h[2] # x}],
+                                     OV, up, gen, ended[n], NoReport, Claims)]
     IN /\ x \in st[n].wait
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] :
                         ~(q[d][i].t = "dead" /\ q[d][i].hop[2] = x) /\ ~(q[d][i].t = "drain" /\ q[d][i].node = x)
        /\ Commit(rs, q)
        /\ Internal(Sent(rs))
-       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
+       /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>
 
 \* A hop's own timer can fire before a later failure's timer on the same far
 \* node. A new DEAD cannot extend every old hop's retention indefinitely.
 Expire(n, hop) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.expiry = @ \ {hop}],
-                                     OV, up, gen, ended[n], NoReport, TRUE)]
+                                     OV, up, gen, ended[n], NoReport, Claims)]
     IN /\ hop \in st[n].expiry
        /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "dead" /\ q[d][i].hop = hop)
        /\ Commit(rs, q)
        /\ Internal(Sent(rs))
-       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
+       /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>
 
 -----------------------------------------------------------------------------
 (* Sessions open, drain, and close.                                         *)
@@ -679,35 +771,38 @@ Expire(n, hop) ==
 \* neighbour it sent a route through m.
 GoAway(n, m) ==
     LET rs == [x \in {n} |-> Update(n, MarkDrain(n, [st[n] EXCEPT !.drain = @ \cup {m}], m),
-                                     OV, up, gen, ended[n], DrainReport(m), TRUE)]
+                                     OV, up, gen, ended[n], DrainReport(m), Claims)]
     IN /\ {n, m} \in up
        /\ m \notin st[n].drain
        /\ Commit(rs, q)
        /\ External(Sent(rs))
-       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
+       /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>
 
 \* A closed session: everything learned or sent on it goes.
 Closed(s, y) ==
-    [s EXCEPT !.rx[y] = [k \in Keys |-> NoHeard],
+    [s EXCEPT !.asked[y] = {},
+              !.edits[y] = <<>>,
+              !.ans[y] = {},
+              !.rx[y] = [k \in Keys |-> NoHeard],
               !.tx[y] = [k \in Keys |-> NoSent(k)],
               !.told[y] = {},
               !.toldDrain[y] = {},
-              !.drain = @ \ {y},
-              !.fresh = @ \ {y}]
+              !.drain = @ \ {y}]
 
-\* A session to y opens, fresh as `Exempted` says. Only a comparison rule tracks
-\* it, so the router's rule keeps the state space it had.
-Opened(s, y) ==
-    IF \/ Exempt = "fresh" /\ y \in s.doubt
-       \/ Exempt = "session" /\ s.doubt # {}
-    THEN [s EXCEPT !.fresh = @ \cup {y}] ELSE s
+\* `ask`: the edit bringing what node n asks m for to what it watches, if any.
+Asks(s, m) ==
+    LET requested == IF s.edits[m] = <<>> THEN s.asked[m] ELSE s.edits[m][Len(s.edits[m])]
+    IN IF requested = s.watch THEN [s |-> s, out |-> <<>>]
+       ELSE [s |-> [s EXCEPT !.edits[m] = Append(@, s.watch)], out |-> <<AskMsg(s.watch)>>]
 
 Connect(l) ==
     LET up1 == up \cup {l}
         gen1 == [gen EXCEPT ![l] = @ + 1]
         rs == [x \in l |->
                  LET y == CHOOSE y \in l : y # x
-                 IN Update(x, Opened(Closed(st[x], y), y), OV, up1, gen1, ended[x], NoReport, FALSE)]
+                     a == Asks(Closed(st[x], y), y)
+                     u == Update(x, a.s, OV, up1, gen1, ended[x], NoReport, {})
+                 IN [u EXCEPT !.out[y] = a.out \o @]]
     IN /\ l \notin up
        /\ flaps < MaxFlaps
        /\ up' = up1
@@ -715,7 +810,7 @@ Connect(l) ==
        /\ flaps' = flaps + 1
        /\ Commit(rs, q)
        /\ External(Sent(rs))
-       /\ UNCHANGED <<rev, own, hist>>
+       /\ UNCHANGED <<rev, own, hist, edits>>
 
 \* `disconnect`: each end names the hop it learned routes on there.
 Disconnect(l) ==
@@ -726,16 +821,34 @@ Disconnect(l) ==
                      hop == <<x, y, gen[l]>>
                      s == Closed(st[x], y)
                  IN IF x = Origin
-                    THEN Update(x, s, OV, up1, gen, ended[x], NoReport, FALSE)
+                    THEN Update(x, s, OV, up1, gen, ended[x], NoReport, {})
                     ELSE Update(x, Fail(x, s, hop, None, {}, FALSE), OV, up1, gen, ended[x],
-                                DeadReport(hop), FALSE)]
+                                DeadReport(hop), {})]
     IN /\ l \in up
        /\ flaps < MaxFlaps
        /\ up' = up1
        /\ flaps' = flaps + 1
        /\ Commit(rs, q0)
        /\ External(Sent(rs))
-       /\ UNCHANGED <<gen, rev, own, hist>>
+       /\ UNCHANGED <<gen, rev, own, hist, edits>>
+
+\* `watch`: relay n changes what it watches to `w`, forgets what it knew outside
+\* it, and edits what it asks each neighbour for.
+Watch(n, w) ==
+    LET s0 == [st[n] EXCEPT !.watch = w]
+        peers == Peers(n, up)
+        a == [p \in peers |-> Asks(s0, p)]
+        s1 == [s0 EXCEPT !.edits = [p \in Nodes |-> IF p \in peers THEN a[p].s.edits[p] ELSE @[p]]]
+        u == Update(n, s1, OV, up, gen, ended[n], NoReport, {})
+        rs == [x \in {n} |-> [u EXCEPT !.out = [p \in Nodes |->
+                                  IF p \in peers THEN a[p].out \o u.out[p] ELSE u.out[p]]]]
+    IN /\ n \in Editors
+       /\ edits < MaxEdits
+       /\ w # st[n].watch
+       /\ edits' = edits + 1
+       /\ Commit(rs, q)
+       /\ External(Sent(rs))
+       /\ UNCHANGED <<up, gen, rev, own, hist, flaps>>
 
 \* Nothing is in flight and no doubt is left: the run may stop here.
 Done ==
@@ -750,6 +863,7 @@ Next ==
     \/ \E n \in Relays : \E hop \in st[n].expiry : Expire(n, hop)
     \/ \E l \in Links : Connect(l) \/ Disconnect(l)
     \/ \E n \in Relays, m \in Leaving : GoAway(n, m)
+    \/ \E n \in Relays, w \in Sets : Watch(n, w)
     \/ Done
 
 Spec == Init /\ [][Next]_vars
@@ -767,6 +881,17 @@ Truthful ==
               st[n].rx[m][k].on /\ st[n].rx[m][k].rev >= 0 =>
                   st[n].rx[m][k].items = Restrict(hist[st[n].rx[m][k].rev + 1], k)
 
+\* With nothing in flight from m to n, what m sent n is what n heard from m,
+\* on the same path and held exactly when n holds it, so an edit rekeys both
+\* sides alike.
+Mirrored ==
+    \A d \in Dirs : d[2] # Origin /\ {d[1], d[2]} \in up /\ q[d] = <<>> =>
+        LET t == st[d[1]].tx[d[2]]
+            h == st[d[2]].rx[d[1]]
+        IN \A k \in Keys :
+            /\ t[k].on = h[k].on
+            /\ t[k].on => t[k].path = h[k].path /\ (t[k].held <=> h[k].state = "held")
+
 \* A reader never sees a broadcast start again after it saw it end.
 NoRevival == revivals = 0
 
@@ -781,16 +906,17 @@ NoRegression == regressions = 0
 Stable == unstable = 0
 
 \* Whether node n shows claim c (Seen): exactly while it holds a route that
-\* covers c, as the newest floor a covering route gave it says.
+\* covers c and watches c, as the newest floor a believed covering route gave
+\* it says.
 Seen ==
     \A n \in Relays, c \in Claims :
         LET v == st[n].view[KeyOf(c)] IN
         /\ st[n].shown[c].item # None <=> (Presence(st[n], KeyOf(c)) /\ v.floor >= 0 /\ v.items[c] # None)
         /\ st[n].shown[c].item # None => st[n].shown[c].item = v.items[c]
         \* No believed covering route has a newer floor than the view.
-        /\ Presence(st[n], KeyOf(c)) =>
+        /\ Presence(st[n], KeyOf(c)) /\ Watched(st[n], KeyOf(c)) =>
               \A m \in Nodes, j \in Keys :
-                  (j = KeyOf(c) \/ j = "root") /\ Believed(n, st[n], m, j) =>
+                  (j = KeyOf(c) \/ j = "root") /\ Believed(n, st[n], m, j, KeyOf(c)) =>
                       st[n].rx[m][j].rev <= v.floor
 
 \* The loop-free paths from the publisher over the configured links, as the
@@ -889,16 +1015,16 @@ StaleIsChased ==
         Usable(n, st[n], m, k) /\ Stale(st[n].rx[m][k].path) => Chased(n, m, k, Cardinality(Nodes))
 
 \* The nodes a path over open sessions from the publisher reaches, through
-\* nodes whose interest covers claim c.
+\* nodes that watch claim c.
 RECURSIVE Grow(_, _, _)
 Grow(R, c, i) == IF i = 0 THEN R
-                 ELSE Grow(R \cup {n \in Relays : Covers(Ask(n), c) /\ \E m \in R : {m, n} \in up}, c, i - 1)
+                 ELSE Grow(R \cup {n \in Relays : CoversSet(st[n].watch, c) /\ \E m \in R : {m, n} \in up}, c, i - 1)
 Carried(c) == Grow({Origin}, c, Cardinality(Nodes))
 
 \* Once nothing is in flight and no doubt is left: each relay shows exactly the
 \* publisher's claims that a path carries to it, available; a request for each
-\* reaches the publisher; no relay holds a route or keeps a stale one; and
-\* every dead hop is forgotten.
+\* reaches the publisher; no relay holds a route or keeps a stale one; every
+\* dead hop is forgotten; and each neighbour answers what the relay watches.
 Settled ==
     /\ \A n \in Relays :
           /\ \A c \in Claims :
@@ -908,6 +1034,9 @@ Settled ==
           /\ \A m \in Nodes, k \in Keys :
                 st[n].rx[m][k].on => st[n].rx[m][k].state = "live" /\ ~Stale(st[n].rx[m][k].path)
           /\ st[n].dead = {}
+          \* Every edit took effect, and both ends of a session agree on it.
+          /\ \A m \in Peers(n, up) :
+                st[n].asked[m] = st[n].watch /\ st[n].edits[m] = <<>> /\ st[m].ans[n] = st[n].watch
     /\ \A n \in Relays, c \in Claims : st[n].shown[c].avail => Request(n, c) = "origin"
 
 QuietIsSettled == Quiet /\ NoDoubt => Settled

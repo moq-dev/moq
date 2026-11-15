@@ -1,6 +1,10 @@
 //! Transcoder configuration: the rung ladder and catalog wiring.
 
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
 use moq_net::path::Relative;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::Ladder;
 
@@ -44,6 +48,12 @@ pub struct Config {
 	/// frames on the GPU from decode through encode; CPU output downloads at
 	/// the decoder and scales on the CPU.
 	pub resize: moq_video::resize::Config,
+
+	/// How many encoder sessions may be open at once, shared by every transcoder whose
+	/// config holds a clone. A hardware encoder refuses sessions past a device limit, which a
+	/// device shared with other work reaches sooner, so past the budget an encoder waits for
+	/// one to close instead. The default sets no budget.
+	pub sessions: Sessions,
 
 	/// The VA-API render node the decoder and encoders open; see
 	/// [`encode::Config::vaapi`](moq_video::encode::Config::vaapi).
@@ -92,5 +102,109 @@ impl Config {
 			encoder.v4l2 = self.v4l2_encoder.clone();
 		}
 		encoder
+	}
+}
+
+/// A budget of open encoder sessions, shared by its clones.
+///
+/// Encoders that serve, each rung's live encoder and each fetched group's, share the budget's
+/// serving sessions. One more session is kept for probing a new rung's catalog entry, so a
+/// catalog update never waits on serving encoders that only the new catalog would retire.
+#[derive(Clone, Debug, Default)]
+pub struct Sessions(Option<Budget>);
+
+#[derive(Clone, Debug)]
+struct Budget {
+	serving: Arc<Semaphore>,
+	/// One permit, so probes across every clone take turns on the kept session.
+	probe: Arc<Semaphore>,
+}
+
+impl Sessions {
+	/// At most `serving` serving encoders open at once across every clone, plus one probe:
+	/// leave room for `serving + 1` sessions on the device.
+	pub fn new(serving: NonZeroUsize) -> Self {
+		Self(Some(Budget {
+			serving: Arc::new(Semaphore::new(serving.get())),
+			probe: Arc::new(Semaphore::new(1)),
+		}))
+	}
+
+	/// Whether a budget is set.
+	pub(crate) fn is_set(&self) -> bool {
+		self.0.is_some()
+	}
+
+	/// Wait for a serving session, held until the permit drops; `None` without a budget.
+	pub(crate) async fn serve(&self) -> Option<OwnedSemaphorePermit> {
+		Some(acquire(self.0.as_ref()?.serving.clone()).await)
+	}
+
+	/// Wait for the probe's session, held until the permit drops; `None` without a budget.
+	pub(crate) async fn probe(&self) -> Option<OwnedSemaphorePermit> {
+		Some(acquire(self.0.as_ref()?.probe.clone()).await)
+	}
+
+	/// The serving sessions still free, for tests.
+	#[cfg(test)]
+	pub(crate) fn available(&self) -> usize {
+		self.0
+			.as_ref()
+			.map_or(usize::MAX, |budget| budget.serving.available_permits())
+	}
+}
+
+/// Run `open`, which opens a codec, holding `session`, and hand both back.
+///
+/// A codec keeps opening on its own thread after its open future drops, so under a budget the
+/// open runs as a task holding the session: a caller that leaves lets it finish, and the codec
+/// it opened closes, joining its thread, before the session returns to the budget.
+pub(crate) async fn opening<T: Send + 'static>(
+	session: Option<OwnedSemaphorePermit>,
+	open: impl Future<Output = T> + Send + 'static,
+) -> (T, Option<OwnedSemaphorePermit>) {
+	let Some(session) = session else {
+		return (open.await, None);
+	};
+	// The result drops before the session if nobody takes it.
+	let task = tokio::spawn(async move { (open.await, session) });
+	match task.await {
+		Ok((opened, session)) => (opened, Some(session)),
+		Err(err) => std::panic::resume_unwind(err.into_panic()),
+	}
+}
+
+async fn acquire(semaphore: Arc<Semaphore>) -> OwnedSemaphorePermit {
+	semaphore.acquire_owned().await.expect("the budget is never closed")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A caller that leaves while a codec opens returns its session only once the open ends,
+	/// as the codec's own thread keeps opening after the future drops.
+	#[tokio::test]
+	async fn an_abandoned_open_holds_its_session_until_it_ends() {
+		let sessions = Sessions::new(NonZeroUsize::MIN);
+		let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+		let mut open = Box::pin(opening(sessions.serve().await, async move {
+			let _ = finished.await;
+		}));
+		// Polled once, so the open is under way, then abandoned.
+		tokio::select! {
+			biased;
+			_ = &mut open => unreachable!("the open has not ended"),
+			() = std::future::ready(()) => {}
+		}
+		drop(open);
+		assert_eq!(
+			sessions.available(),
+			0,
+			"the abandoned open gave its session back early"
+		);
+
+		finish.send(()).unwrap();
+		let _ = sessions.serve().await;
 	}
 }

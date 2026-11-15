@@ -14,6 +14,13 @@ and lite-06 and older and moq-transport are untouched.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768), the m2 triage
+before the cut): ✅ stays in m2, gating lite-07's freeze (rejected: moving the route stream and the
+interest set to lite-08). Without it lite-07 would freeze with one router key per announce
+stream, which the route model doesn't check, and keep the reopen-and-hand-over
+machinery for its lifetime.
+
 Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing).
 
 Why: today a side's requests ride the streams it opened and its answers ride
@@ -46,8 +53,8 @@ Settled:
    client must open even when it wants nothing).
 2. ✅ **Its interest is a set of prefixes edited in place**, with a floor per
    prefix, SYNCED per prefix, and swaps that keep what both sets cover:
-   [the interest set](/quest/m2/cluster-routes/interest-set.md)
-   settles and proves those rules, and this puts them on the wire.
+   [the interest set](https://github.com/moq-dev/moq/pull/8728)
+   settled and proved those rules, and this puts them on the wire.
 3. ✅ **A token-scope change is an edit.** The subscriber's set is its local
    interests met with its scope's regions, one prefix per region, so a
    multi-region scope is certifiable. Plan items 16 and 17 of the
@@ -136,7 +143,6 @@ Public API: none expected. Wire: lite-07-wip only.
 
 ## Required
 
-- [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routes/interest-set.md) - the edit rule proven in the model and the router that implements it
 - [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the messages this moves onto one stream, with no echo or route request among them
 
 ## Related

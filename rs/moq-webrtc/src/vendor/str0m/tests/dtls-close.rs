@@ -46,8 +46,6 @@ fn direct_pair_with_config(configure: impl Fn(RtcConfig) -> RtcConfig) -> (TestR
 
 	l.direct_api().start_dtls(true).unwrap();
 	r.direct_api().start_dtls(false).unwrap();
-	l.direct_api().start_sctp(true);
-	r.direct_api().start_sctp(false);
 
 	progress_until(&mut l, &mut r, "DTLS handshake", |l, r| {
 		l.is_connected() && r.is_connected()

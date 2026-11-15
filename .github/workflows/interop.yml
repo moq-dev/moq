@@ -77,6 +77,12 @@ jobs:
         run: nix develop --command just test stream-limits
         shell: bash -leo pipefail {0}
 
+      - name: Stream credit in browsers
+        id: stream-credit
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test stream-credit
+        shell: bash -leo pipefail {0}
+
       - name: Relay fills
         id: relay-fill
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -102,12 +108,6 @@ jobs:
         id: bare-fin
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test bare-fin
-        shell: bash -leo pipefail {0}
-
-      - name: P2P data-channel transport
-        id: p2p
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test p2p
         shell: bash -leo pipefail {0}
 
       - name: Interop (full matrix)
@@ -155,6 +155,15 @@ jobs:
         id: portrait
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test portrait
+        shell: bash -leo pipefail {0}
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+
+      - name: VR catalog fields
+        id: vr
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test vr
         shell: bash -leo pipefail {0}
         env:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
@@ -227,15 +236,16 @@ jobs:
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
             "Datagram tracks": "${{ steps.datagram-tracks.outcome }}",
             "Stream limits over WebSocket": "${{ steps.stream-limits.outcome }}",
+            "Stream credit in browsers": "${{ steps.stream-credit.outcome }}",
             "Relay fills": "${{ steps.relay-fill.outcome }}",
             "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
             "Subscription termination interop": "${{ steps.bare-fin.outcome }}",
-            "P2P data-channel transport": "${{ steps.p2p.outcome }}",
             "Interop (full matrix)": "${{ steps.interop.outcome }}",
             "Interop (moq-transport)": "${{ steps.interop-ietf.outcome }}",
             "Released wire compatibility": "${{ steps.wire-compat.outcome }}",
             "Portrait transcode": "${{ steps.portrait.outcome }}",
+            "VR catalog fields": "${{ steps.vr.outcome }}",
             "Interop negative control": "${{ steps.negative.outcome }}",
             "Media output and lifecycle": "${{ steps.media.outcome }}",
             "Media track identity changes": "${{ steps.media-rename.outcome }}"

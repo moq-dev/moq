@@ -12,6 +12,13 @@ replace are retired.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)): ✅ stays in
+m2 and gates the cut, per lite07-finalize's 2026-10-13 rule that routes'
+tier and partition tests run before the cut (rejected: moving it to m3 and
+fixing late routing flaws in lite-08). A flaw found here is fixed on
+lite-07-wip before it freezes.
+
 Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
 Babel): acceptance is of the path rule
 ([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the
@@ -97,6 +104,14 @@ origin is an explicit case. Coordinate with Route wakes and Announce replay;
 benchmark smoke alone does not enforce complexity, so add operation-count
 regressions. Bound held routes, doubts, and remembered dead hops under
 same-clock churn.
+
+Decided 2026-11-12 (maintainer, /quest-audit; epic Plan item 30): three
+fixtures from routing prior art, as tests before any design change. A
+relay vanishes and its neighbours notice up to the 3 s keep-alive apart,
+which shows whether the doubt timer must follow the keep-alive or relay
+keep-alives must shorten. Three relays whose local priorities form a dispute
+wheel settle, or the test pins how they fail (RFC 4264). A primary route
+fails and returns, and every relay ends back on it.
 
 ## Required
 

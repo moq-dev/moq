@@ -255,6 +255,8 @@ struct Tally {
 	units: Vec<u16>,
 	/// The last program tables to finish in the frame.
 	tables: Option<Laid>,
+	/// The payload of the frames whose units finish in the frame, counted once it goes out.
+	charges: Vec<schedule::Charge>,
 }
 
 /// A video frame waiting on a decode clock, with the codec config it was read under.
@@ -291,6 +293,8 @@ struct Queued {
 	description: Option<Bytes>,
 	/// The PES it may share ([`Track::pack_start`]).
 	pes: Option<PesStart>,
+	/// Counts its payload once the unit carrying it goes out.
+	bill: moq_net::stats::Bill,
 }
 
 /// The PES an audio frame may share ([`Track::pack_start`]): the place of its first frame on
@@ -513,7 +517,7 @@ impl Track {
 			// exporter that kept it.
 			return match &mut self.declared {
 				Some(clock) => {
-					clock.push(None, to_ticks(pending.frame.timestamp))?;
+					clock.push(None, to_ticks(pending.frame.timestamp), pending.frame.timestamp)?;
 					self.release(name, jitter, false)
 				}
 				None => Ok(()),
@@ -533,11 +537,12 @@ impl Track {
 			}
 			self.declared = depth.map(DeclaredClock::new);
 		}
-		let pts = to_ticks(pending.frame.timestamp);
+		let source = pending.frame.timestamp;
+		let pts = to_ticks(source);
 		let (arrived, bytes) = (pending.arrived, pending.frame.payload.len());
 		let item = (pending, self.source.description().cloned());
 		match &mut self.declared {
-			Some(clock) => clock.push(Some(item), pts)?,
+			Some(clock) => clock.push(Some(item), pts, source)?,
 			None => self.clock.push(item, pts, arrived, bytes),
 		}
 		self.release(name, jitter, false)
@@ -808,10 +813,16 @@ impl Track {
 	) -> anyhow::Result<()> {
 		if let Some(mut clock) = self.declared.take() {
 			let released = (|| {
-				while let Some((item, dts)) = clock.pop(flush)? {
+				while let Some((item, dts, pts)) = clock.pop(flush)? {
 					let Some((mut pending, description)) = item else {
 						continue;
 					};
+					// A tie the clock moved presents on the tick it moved to: the least microsecond
+					// that `to_ticks` reads back as that tick.
+					if to_ticks(pending.frame.timestamp) != pts {
+						let micros = u64::try_from((u128::from(pts) * 100).div_ceil(9))?;
+						pending.frame.timestamp = Timestamp::from_micros(micros)?;
+					}
 					if self.read == Read::Live {
 						pending.arrived = pending.arrived.max(self.latest);
 					}
@@ -911,6 +922,7 @@ impl Track {
 				dts,
 				description,
 				pes,
+				bill: self.source.bill(),
 			},
 		};
 		if jitter.push(self.key.clone(), arrival)? == Push::Late {
@@ -1263,6 +1275,8 @@ struct Pack {
 	payload: Vec<u8>,
 	/// Each frame's decode nanoseconds and bytes, which leave the decoder buffer as it decodes.
 	frames: Vec<(u128, usize)>,
+	/// What each frame's payload counts once the PES goes out.
+	charges: Vec<schedule::Charge>,
 	/// The frames' samples so far, and their sample rate.
 	samples: u64,
 	rate: u32,
@@ -1569,6 +1583,8 @@ where
 {
 	fn new(mut source: crate::Source, catalog: S, delay: Duration) -> Self {
 		source.isolate();
+		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
+		source.bill();
 		let instance = source.broadcast().info().instance.clone();
 		Self {
 			id: 0,
@@ -2029,6 +2045,9 @@ where
 		self.program.liveness.written_pcr(pcr);
 		for pid in tally.units {
 			self.program.liveness.delivered(pid, 1);
+		}
+		for (bill, bytes) in tally.charges {
+			bill.deliver(bytes);
 		}
 		Some(out)
 	}
@@ -3543,8 +3562,10 @@ where
 			dts,
 			description,
 			pes,
+			bill,
 			..
 		} = queued;
+		let charge = (bill, frame.payload.len() as u64);
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
@@ -3607,15 +3628,10 @@ where
 		// The tables lead the unit that carries this frame, behind whatever went before it.
 		if kind.placed() {
 			self.program.psi_due |= psi;
-			return self.place(name, &frame, out);
+			return self.place(name, (&frame, charge), out);
 		}
 		match es_payload {
-			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
-			// carry the bytes verbatim.
-			None => {
-				self.program.psi_due |= psi;
-				self.write_section(&mut out, pid, &frame.payload)?;
-			}
+			None => unreachable!("only a placed track carries no elementary payload"),
 			Some(es_payload) => {
 				let unit = PesUnit {
 					pid,
@@ -3628,13 +3644,21 @@ where
 				// Only a delay leaves the frames time to wait for the ones after them.
 				let track = self.program.tracks.get(name).context("missing track")?;
 				if let Some((samples, rate)) = track.samples(&es_payload).filter(|_| !self.program.delay.is_zero()) {
-					return self.pack(name, unit, decode, (psi, out), es_payload, (samples, rate, pes));
+					return self.pack(
+						name,
+						unit,
+						decode,
+						(psi, out),
+						(es_payload, charge),
+						(samples, rate, pes),
+					);
 				}
 				self.flush(name)?;
 				self.program.psi_due |= psi;
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
+		self.program.schedule.bill(charge);
 		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
@@ -3646,7 +3670,13 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
+	/// The frame's `charge` counts once the unit goes out, unless it was dropped as malformed.
+	fn place(
+		&mut self,
+		name: &str,
+		(frame, charge): (&Frame, schedule::Charge),
+		tables: Vec<u8>,
+	) -> anyhow::Result<()> {
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let pes = match track.kind {
 			Kind::PesPacket { stream_type } => Some(
@@ -3675,10 +3705,13 @@ where
 		let prefix = match pes {
 			Some(_) => {
 				self.write_pes_packet(&mut out, pid, &frame.payload)?;
+				self.program.schedule.bill(charge);
 				0
 			}
 			None => {
-				self.write_section(&mut out, pid, &frame.payload)?;
+				if self.write_section(&mut out, pid, &frame.payload)? {
+					self.program.schedule.bill(charge);
+				}
 				1
 			}
 		};
@@ -3715,7 +3748,7 @@ where
 		unit: PesUnit,
 		decode: Timestamp,
 		(psi, tables): (bool, Vec<u8>),
-		payload: Vec<u8>,
+		(payload, charge): (Vec<u8>, schedule::Charge),
 		(samples, rate, start): (u64, u32, Option<PesStart>),
 	) -> anyhow::Result<()> {
 		let budget = self.budget().as_nanos();
@@ -3743,10 +3776,12 @@ where
 			start,
 			payload: Vec::new(),
 			frames: Vec::new(),
+			charges: Vec::new(),
 			samples: 0,
 			rate,
 		});
 		pack.frames.push((decode.as_nanos(), payload.len()));
+		pack.charges.push(charge);
 		pack.payload.extend_from_slice(&payload);
 		pack.samples += samples;
 		// The next frame starts a PES of its own anyway.
@@ -3766,10 +3801,14 @@ where
 			decode,
 			payload,
 			frames,
+			charges,
 			..
 		} = pack;
 		let mut out = Vec::new();
 		self.write_pes(&mut out, &unit, &payload)?;
+		for charge in charges {
+			self.program.schedule.bill(charge);
+		}
 		self.push_unit(name, unit.pid, decode, out, unit.keyframe, frames)
 	}
 
@@ -4021,6 +4060,7 @@ where
 				pcr: (slot.pcr, discontinuity),
 				units: slot.units,
 				tables,
+				charges: slot.charges,
 			};
 			self.program.queue.push_back((frame, tally));
 			if !spent.is_empty() {
@@ -4065,18 +4105,20 @@ where
 		whole_pes_packets(out, pid, pes, flag)
 	}
 
-	/// Packetize a complete PSI or private section verbatim ([`section_packets`]).
-	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
+	/// Packetize a complete PSI or private section verbatim ([`section_packets`]), returning
+	/// whether it did rather than drop the section as malformed.
+	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<bool> {
 		// The verbatim track is public; a non-importer producer could publish a frame
 		// that isn't a complete section. Drop it (with a warning) rather than emit a
 		// malformed section a downstream demuxer would choke on. One bad section must
 		// not abort a live export, so this skips instead of erroring.
 		if !is_complete_section(section) {
 			tracing::warn!(pid, len = section.len(), "dropping malformed private section on export");
-			return Ok(());
+			return Ok(false);
 		}
 		let flag = self.breaks(pid);
-		section_packets(out, pid, section, flag)
+		section_packets(out, pid, section, flag)?;
+		Ok(true)
 	}
 }
 
@@ -5233,7 +5275,7 @@ mod tests {
 			let pts = super::to_ticks(ms(at));
 			match &mut track.declared {
 				Some(clock) => {
-					clock.push(Some((pending, None)), pts).unwrap();
+					clock.push(Some((pending, None)), pts, ms(at)).unwrap();
 					while clock.pop(false).unwrap().is_some() {}
 				}
 				None => track.clock.push((pending, None), pts, arrived, 0),

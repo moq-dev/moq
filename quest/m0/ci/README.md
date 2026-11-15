@@ -76,7 +76,7 @@ a tested chain of squash commits ([land](https://github.com/moq-dev/moq/blob/17a
 2026-10-30 (maintainer): it runs as a daemon on the maintainer's host, not as
 a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
-[flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
+flake epic moved to m0 and
 `MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
 written per PR. The batched gate was superseded 2026-11-01, below.
 
@@ -148,7 +148,8 @@ gate drops `loom-check` and Nightly its loom job; a separate PR deletes the
 models. On Send-depth: "Move it to Nightly." It guards a real downstream
 breakage (moq-net futures not Send at the default recursion limit), so
 `just rs send-depth` keeps its pinned nightly and runs as its own Nightly job
-instead of in the land gate.
+instead of in the land gate. Superseded 2026-11-13 (maintainer): it gates
+moq-net changes again, since a Nightly-only check let a break land on `main`.
 
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
@@ -177,7 +178,12 @@ the spike measured that ~11% cheaper than crane cold and modeled it 49% cheaper
 over a week of `main`. Those builds run on free GitHub-hosted runners today,
 but many of these jobs are planned to move to self-hosted runners, where the
 saving lands on our own hosts. The generated file, and the release profile
-restated in `nix/crates.nix`, are accepted for that caching.
+restated in `nix/crates.nix`, are accepted for that caching. Measured
+2026-11-14 by the [feature review](/quest/m3/release/feature-review.md): the
+Cache job's Runtime step took a median 13.1 min over 32 crane builds and
+11.9 min over 21 crate2nix builds, so the wall-time saving waits on that move,
+which no quest plans yet; per-PR cost is small (`just rs cargo-nix --check`
+takes about 3 s, and `nix/Cargo.nix` changed in 2 of the next 57 commits).
 
 Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target

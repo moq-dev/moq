@@ -873,8 +873,11 @@ impl Driver {
 					let played_at = timestamp.playback.saturating_duration_since(epoch)
 						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
 					mixer.complete(now);
-					mixer.latency(timestamp.playback.checked_duration_since(timestamp.callback));
-					mixer.fill(data, played_at, crate::ring::host());
+					// Audio is placed on the clock where it is heard: the buffer's first
+					// frame sounds this long after the callback.
+					let delay = timestamp.playback.checked_duration_since(timestamp.callback);
+					mixer.latency(delay, data.len() / channels);
+					mixer.fill(data, played_at, crate::ring::host() + delay.unwrap_or_default());
 				},
 				move |error| {
 					failures.report(&error);

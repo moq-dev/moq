@@ -38,10 +38,10 @@ chased out (`StaleIsChased`) and that requests stay loop-free
 relay originates a route for a broadcast it carries
 ([cache-aware routing](/quest/m3/cache-routing/README.md)).
 
-`fresh-publisher.md`, added by #8622, exempts only a publisher's own new
-direct session from doubt, so it never helps a relay further away. If this
-rule holds, it covers that case too: fold that quest into this one or delete
-it, whichever has landed first.
+Exempting only a publisher's own new direct session from doubt was measured
+and declined ([moq-dev/moq#8735](https://github.com/moq-dev/moq/pull/8735),
+epic Plan item 27): it never helps a relay further away, which still doubts
+the publisher until its timer fires. This rule has to reach those relays.
 
 Work:
 
@@ -64,5 +64,4 @@ Work:
 
 ## Related
 
-- [A relay that refuses a forwarded route drops the route, not the session](/quest/m1/refuse-route.md) - another failure mode from the same BGP comparison
-- [A request loop heals once routes settle](/quest/m2/cluster-routes/request-loop.md) - another failure mode from the same BGP comparison
+- [A request loop heals once routes settle](/quest/m3/cluster-routing/request-loop.md) - another failure mode from the same BGP comparison

@@ -12,14 +12,18 @@ and how many moves warm routes caused.
 
 ## Plan
 
-- Implement what [Prove cache-aware routing](/quest/m2/cache-routing-proof.md)
-  settles for routes that propagate (the epic's item 13) and pass its
-  fixtures and sweep: the warm message as the proof shapes it, warm state
-  derived from each front's demand, and eligibility. Lite-07 today carries the
-  one-hop warm routes and `Serves` that `rs/moq-net/src/route/tests/cache.rs`
-  models, and `rs/moq-net/src/lite/` reads and ignores them; the proof
-  rewrites both first. Once every scenario settles, run the long sweep
-  nightly, which the merge gate skips as slow.
+- Implement the rule the [epic](/quest/m3/cache-routing/README.md)'s item 14
+  records ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)) by
+  moving `decide` and `offer_from` out of `rs/moq-net/src/route/tests/cache.rs`
+  into production code that the fixtures and sweep then drive, the way `Sim`
+  drives `path::Router`: today they test the rule against itself and pass
+  without touching the session. Add a check of the Goal's efficiency to
+  `steady()`, copies held against a cold-routing baseline, since a rule that
+  never offered a copy passes the sweep now. The rule covers the
+  warm messages and SUBSCRIBE's `Warm` byte (which return to the wire with
+  it, below), warm state derived from each front's demand, and the choice of
+  what to pull. The long sweep already runs nightly from
+  `test/route-sweep.sh`.
 - Extend today's selection rather than adding a second selector.
   `route_order` in `rs/moq-net/src/model/origin.rs` already hashes equal
   routes per path, and a front already moves to a better route of its own
@@ -28,10 +32,9 @@ and how many moves warm routes caused.
   only to a copy of its own instance.
 - Bound the warm state a peer can make a relay hold by design, as
   announcements are bounded.
-- Each pull states whom it serves, where Rust says unknown today: alone for
-  a local reader or a client session, which forwards nothing. `js/net`
-  already says alone and skips the warm types as unknown, so it needs
-  nothing.
+- Each pull sets SUBSCRIBE's `Warm` byte, which #8732 put in place of the
+  `Serves` field; `js/net`, which forwards nothing, sends 0 (follow the
+  route) and skips the warm types as unknown.
 - Export upstream copies held, warm routes sent and received, and moves by
   cause through the relay's existing metrics.
 - `rs/moq-net/AGENTS.md` says a relay behaves the same warm or cold. That
@@ -39,15 +42,19 @@ and how many moves warm routes caused.
   request goes to. If the rule's wording contradicts warm routes, bring a
   rewording to the maintainer.
 
-Public API: report any relay configuration added for warm routes. Wire: a
-change the implementation needs updates the draft's Warm Routes section in
-the same PR, in lite-07 while it is unpublished and in the next version
-after.
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)):
+✅ lite-07 freezes without the warm wire
+([warm routes on the wire](/quest/m2/warm-routes-wire.md)), so this quest
+re-adds WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's `Warm` byte in the
+then-current wip version, and first measures copies and relays crossed
+against plain path routing.
 
-## Required
-
-- [Prove cache-aware routing](/quest/m2/cache-routing-proof.md) - the rule for routes that propagate, its fixtures, and the wire this implements
+Public API: report any relay configuration added for warm routes. Wire: the
+warm messages and the `Warm` byte return in the then-current wip version,
+with the draft's Warm Routes section.
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer driving lite-07 sessions since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023), whose feasibility distances eligibility reads
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer driving lite-07 sessions since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023); its switch to path routes deletes the feasibility distances this rule once read
+- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - may strip the warm wire from lite-07 or move this epic downstream before this starts
+- [Transient cycles](/quest/m3/cache-routing/transient-cycles.md) - lowers the churn-time pull cycles the rule allows

@@ -172,7 +172,7 @@ impl Sink for FakeSink {
 	}
 
 	/// Playing onto the clock is the real ring's stretch, which this fake leaves out.
-	fn due(&mut self, _at: Instant, _stretch: Duration, _jumped: Duration) {}
+	fn due(&mut self, _at: Instant, _stretch: Duration) {}
 
 	async fn finish(mut self) {
 		// A finite short tail drains even when it cannot refill the target.
@@ -248,6 +248,11 @@ impl Sink for FakeSink {
 
 	fn next(&mut self) {
 		self.next = true;
+	}
+
+	/// A device that has not reported its latency, as before its first callback.
+	fn output_latency(&self) -> Option<Duration> {
+		None
 	}
 
 	fn buffered(&self) -> Duration {

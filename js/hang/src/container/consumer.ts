@@ -1,6 +1,6 @@
 import { Duration, Instant, now } from "@moq/clock";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
+import { Effect, type Getter, type GetterInit, getter, Once, race, Signal } from "@moq/signals";
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
@@ -240,7 +240,20 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	// The transport delivered every group up to the publisher's declared end.
+	#delivered = false;
+	#finished = new Signal(false);
+	/**
+	 * Whether the publisher finished the track and every group up to its end has arrived and ended,
+	 * so {@link buffered} holds all the media left to read. Unlike {@link next} returning undefined,
+	 * it does not wait for the reader to drain what is buffered. Never set by {@link close}.
+	 */
+	readonly finished: Getter<boolean> = this.#finished;
+
 	#jitter: Jitter;
+	// The publisher's largest group when the subscription began: one at or below it was produced
+	// before, so dropping it unread skips the join's backlog.
+	#joined?: bigint;
 	#spread: Signal<Duration>;
 	/**
 	 * How much buffer late arrivals need, measured as frames come off the transport.
@@ -257,6 +270,8 @@ export class Consumer {
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
+	// Set once the first group arrived, which establishes the subscription like its info.
+	#tuned = new Once<true>();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
@@ -270,6 +285,16 @@ export class Consumer {
 		this.#spread = new Signal(Duration.millis(this.#jitter.measured));
 		this.spread = this.#spread;
 
+		// Where the publisher stood as the subscription began, read as soon as its answer resolves the
+		// start: after it rather than from a cached group that raced it, and before live groups landing
+		// later raise the largest past it. The start says only once the info or a first group shows the
+		// subscription established. Off the delivery path: a range capped below the largest never
+		// reports one, which reports no backlog rather than stalling delivery.
+		this.#signals.spawn(async () => {
+			await race([this.#track.info().catch(() => undefined), this.#tuned]);
+			await this.#track.start();
+			this.#joined = (await this.#track.largest())?.group;
+		});
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
 			this.#track.close();
@@ -307,6 +332,7 @@ export class Consumer {
 				// newest first, so the first arrival is not the oldest served; without either it stands
 				// in. Mirrors Rust's `Consumer::poll_read`.
 				if (this.#active === undefined) {
+					this.#tuned.set(true);
 					const floor = this.#track.floor();
 					const served = await this.#track.start();
 					const start = served !== undefined && (floor === undefined || served > floor) ? served : floor;
@@ -317,6 +343,11 @@ export class Consumer {
 				// gap that moved the cursor, or was never read. Mirrors Rust's consumer. While the start
 				// still waits for a group covering its reach, it starts at the lowest that arrived.
 				if (!this.#starting && consumer.sequence < this.#active) {
+					// Its frames go unobserved, so the estimator learns when backlog arrived: a join's
+					// intervals count only once it has. One produced since, such as an outage's, is no backlog.
+					if (this.#joined !== undefined && consumer.sequence <= this.#joined) {
+						this.#jitter.backlog(consumer.arrived.since(Instant.ZERO).asMillis());
+					}
 					consumer.close();
 					continue;
 				}
@@ -352,6 +383,10 @@ export class Consumer {
 
 				this.#signals.spawn(this.#watch.bind(this, group));
 			}
+			if (!this.#signals.abort.aborted) {
+				this.#delivered = true;
+				this.#settle();
+			}
 			this.#finish(null);
 		} catch (err) {
 			this.#finish(err instanceof Error ? err : new Error(String(err)));
@@ -379,7 +414,15 @@ export class Consumer {
 			// However the watch ends, the reader looks at the group again: it may have ended or failed.
 			this.#notify?.();
 			this.#notify = undefined;
+			this.#settle();
 		}
+	}
+
+	// Mark the track finished once the transport delivered its last group and every buffered group ended.
+	#settle(): void {
+		// A closed consumer abandoned whatever was still arriving.
+		if (!this.#delivered || this.#finished.peek() || this.#signals.abort.aborted) return;
+		if (this.#groups.every((group) => group.fault !== undefined || group.consumer.done)) this.#finished.set(true);
 	}
 
 	// Take and decode every wire frame the transport already holds, oldest group first, each only while

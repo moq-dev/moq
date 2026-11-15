@@ -91,7 +91,7 @@ while true; do
         (
             "$cxx" -std=c++17 -fsyntax-only -Werror -Wno-unused-command-line-argument \
                 "${includes[@]}" $qt $ffmpeg \
-                -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "${sources[next]}"
+                -DMOQ_FRONTEND_API -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "${sources[next]}"
             exit
         ) </dev/null >"$logs/$next" 2>&1 &
         set +m

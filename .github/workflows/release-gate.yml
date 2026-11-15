@@ -122,11 +122,11 @@ jobs:
             # A backported change to the interop harness itself; nightly covers main.
             interop:
               - "test/lib/**"
-              - "test/p2p/**"
-              - "js/p2p/**"
               - "test/interop/**"
               - "test/max-age/**"
               - "test/portrait/**"
+              - "test/vr/**"
+              - "demo/vr/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
               - "test/datagram-tracks/**"
               - "rs/moq-tokio/tests/integration/datagram_tracks.rs"
@@ -196,6 +196,7 @@ jobs:
               - "go/ffi/**"
               - "sh/go/package-ffi.sh"
               - "sh/go/publish-ffi.sh"
+              - "sh/go/modzip/**"
               - "rs/moq-ffi/build.sh"
               - ".cargo/config.toml"
               # release-ffi.yml installs the Go generator through this action.

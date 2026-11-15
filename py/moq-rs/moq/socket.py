@@ -1,26 +1,24 @@
-"""Point-to-point TCP and track sessions between server and client endpoints."""
+"""Point-to-point track sessions between server and client endpoints."""
 
 from __future__ import annotations
 
 from moq_ffi import (
     MoqSocketEndpoint,
-    MoqSocketIncomingTcp,
     MoqSocketIncomingTrack,
-    MoqSocketTcpStream,
     MoqSocketTrackStream,
 )
 
 from ._records import _track_info
 from .origin import OriginProducer
-from .publish import GroupProducer, TrackProducer
-from .subscribe import GroupConsumer, TrackConsumer
+from .publish import TrackProducer
+from .subscribe import TrackConsumer
 from .types import TrackInfo
 
-__all__ = ["Endpoint", "IncomingTcp", "IncomingTrack", "TcpStream", "TrackStream"]
+__all__ = ["Endpoint", "IncomingTrack", "TrackStream"]
 
 
 class Endpoint:
-    """A server, a client, or both: dials or accepts independent sessions.
+    """A server, a client, or both: dials or accepts track sessions.
 
     Its first dial announces it as a client, and its first accept as a server.
     Hold it while sessions run. Closing it resets pending dials and sessions.
@@ -51,14 +49,6 @@ class Endpoint:
         """Retract the endpoint's broadcasts and reset its pending dials and sessions."""
         self._inner.close()
 
-    async def dial_tcp(self, peer: str) -> TcpStream:
-        """Dial the server peer in a new TCP session, waiting until it accepts."""
-        return TcpStream(await self._inner.dial_tcp(peer))
-
-    async def accept_tcp(self) -> IncomingTcp:
-        """Start listening for TCP and return the next incoming TCP dial."""
-        return IncomingTcp(await self._inner.accept_tcp())
-
     async def dial_track(self, peer: str, *, info: TrackInfo | None = None) -> TrackStream:
         """Dial a track session; omitted info keeps messages without an age limit."""
         return TrackStream(await self._inner.dial_track(peer, _track_info(info)))
@@ -66,61 +56,6 @@ class Endpoint:
     async def accept_track(self) -> IncomingTrack:
         """Start listening for tracks and return the next incoming track dial."""
         return IncomingTrack(await self._inner.accept_track())
-
-
-class IncomingTcp:
-    """An incoming tcp dial, consumed by accepting or rejecting it."""
-
-    def __init__(self, inner: MoqSocketIncomingTcp) -> None:
-        self._inner = inner
-
-    @property
-    def peer(self) -> str:
-        """The claimed peer id; accepting verifies return routability."""
-        return self._inner.peer()
-
-    @property
-    def session(self) -> str:
-        """The random session id, which must stay private to its endpoints."""
-        return self._inner.session()
-
-    async def accept(self) -> TcpStream:
-        """Accept after verifying that the peer really dialed this session."""
-        return TcpStream(await self._inner.accept())
-
-    def reject(self) -> None:
-        """Refuse this dial as not found."""
-        self._inner.reject()
-
-
-class TcpStream:
-    """A tcp session's two halves and its peer and session identities."""
-
-    def __init__(self, inner: MoqSocketTcpStream) -> None:
-        self._producer = GroupProducer(inner.producer())
-        self._consumer = GroupConsumer(inner.consumer())
-        self._peer = inner.peer()
-        self._session = inner.session()
-
-    @property
-    def producer(self) -> GroupProducer:
-        """This side's write half."""
-        return self._producer
-
-    @property
-    def consumer(self) -> GroupConsumer:
-        """The peer's read half, retaining its reliable ascending subscription."""
-        return self._consumer
-
-    @property
-    def peer(self) -> str:
-        """The peer endpoint's id."""
-        return self._peer
-
-    @property
-    def session(self) -> str:
-        """The random session id, which must stay private to its endpoints."""
-        return self._session
 
 
 class IncomingTrack:

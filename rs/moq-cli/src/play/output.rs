@@ -42,13 +42,15 @@ pub(super) trait Sink: Send + Sync + 'static {
 	fn set_latency(&mut self, latency: Duration) -> anyhow::Result<()>;
 
 	/// The audio written so far is due to finish sounding at `at`; trailing that
-	/// by more than `stretch` is skipped, and by as much as the clock's reference
-	/// `jumped` earlier since the last call. A zero `stretch` turns the time
-	/// stretch off.
-	fn due(&mut self, at: Instant, stretch: Duration, jumped: Duration);
+	/// by more than `stretch` is skipped. A zero `stretch` turns the time stretch
+	/// off.
+	fn due(&mut self, at: Instant, stretch: Duration);
 
 	/// How much audio is queued ahead of the speaker.
 	fn buffered(&self) -> Duration;
+
+	/// How long the device takes to sound what it reads, once it has reported it.
+	fn output_latency(&self) -> Option<Duration>;
 
 	/// Play every queued sample before releasing the sink.
 	fn finish(self) -> impl Future<Output = ()> + Send;
@@ -73,8 +75,8 @@ impl Sink for moq_audio::playback::Sink {
 		Ok(moq_audio::playback::Sink::set_latency(self, latency)?)
 	}
 
-	fn due(&mut self, at: Instant, stretch: Duration, jumped: Duration) {
-		moq_audio::playback::Sink::due(self, at, stretch, jumped);
+	fn due(&mut self, at: Instant, stretch: Duration) {
+		moq_audio::playback::Sink::due(self, at, stretch);
 	}
 
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<moq_audio::playback::Write> {
@@ -87,6 +89,10 @@ impl Sink for moq_audio::playback::Sink {
 
 	fn buffered(&self) -> Duration {
 		moq_audio::playback::Sink::buffered(self)
+	}
+
+	fn output_latency(&self) -> Option<Duration> {
+		moq_audio::playback::Sink::output_latency(self)
 	}
 
 	fn end(&mut self) {

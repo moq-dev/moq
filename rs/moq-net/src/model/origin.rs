@@ -2225,12 +2225,6 @@ pub struct Producer {
 }
 
 impl Producer {
-	/// A handle that queues work on this origin's [`Driver`] without keeping the origin
-	/// alive: work queued once the driver is gone is dropped.
-	pub(super) fn tasks(&self) -> crate::util::TasksWeak {
-		self.tasks.downgrade()
-	}
-
 	/// Build a producer from a [`Config`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
@@ -8692,20 +8686,26 @@ impl Routes {
 
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		self.assert_next_gone(RouteKind::End, expected);
+	}
+
+	/// The next update must be `expected` let go of here, not retracted by its origin.
+	pub fn assert_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
+		self.assert_next_gone(RouteKind::Offline, expected);
+	}
+
+	fn assert_next_gone(&mut self, kind: RouteKind, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
 		match kio::wait(|waiter| self.poll_next(waiter))
 			.now_or_never()
 			.expect("next blocked")
 			.expect("no next")
 		{
-			RouteEvent {
-				kind: RouteKind::End,
-				announce,
-			} => assert_eq!(
+			RouteEvent { kind: got, announce } if got == kind => assert_eq!(
 				announce.prefix,
 				expected.try_into().expect("expected path"),
 				"wrong prefix"
 			),
-			other => panic!("should be a retraction: got {other:?}"),
+			other => panic!("should be {kind:?}: got {other:?}"),
 		}
 	}
 
@@ -9698,6 +9698,62 @@ mod tests {
 			b"frame"
 		);
 		assert_eq!(bytes(), 5, "the metered handle still counts");
+	}
+
+	/// A billed subscriber counts nothing it reads, whether read whole or in chunks, and
+	/// counts each frame its reader delivers.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_billed_track_counts_only_what_its_reader_delivers() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let producer = origin(1).produce();
+		let route = producer.route("room/alice", RouteOptions::default()).unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", crate::track::Info::timed())
+			.unwrap();
+		let consumer = producer.consume().with_stats(
+			registry
+				.tier(stats::Tier::default())
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("viewer"))),
+		);
+		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
+		let counted = || -> (u64, u64) {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.fold((0, 0), |(frames, bytes), (_, _, traffic)| {
+					(frames + traffic.frames, bytes + traffic.bytes)
+				})
+		};
+
+		let mut subscriber = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		let bill = subscriber.bill();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"dropped".as_ref()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"sent".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut read = subscriber.recv_group().await.unwrap().expect("a group");
+		let mut chunked = read.clone();
+		assert_eq!(
+			read.read_frame().await.unwrap().expect("a frame").payload.as_ref(),
+			b"dropped"
+		);
+		let sent = read.read_frame().await.unwrap().expect("a frame").payload;
+		chunked
+			.next_frame()
+			.await
+			.unwrap()
+			.expect("a frame")
+			.read_all()
+			.await
+			.unwrap();
+		assert_eq!(counted(), (0, 0), "a read counts nothing");
+
+		bill.deliver(sent.len() as u64);
+		assert_eq!(counted(), (1, 4), "a delivered frame counts");
 	}
 
 	/// A group a fill answers is ingress like a group the publisher writes live: a relay

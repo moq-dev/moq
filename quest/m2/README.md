@@ -3,9 +3,8 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`, plus the cut
-gate, which the [release cut](/quest/m3/release/cut.md) re-creates here each
-cycle. The cut waits on this milestone alone;
+after the next cut of `main` into `release`. The
+[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
 complete it before cutting main into release.
 
 ## Plan
@@ -27,10 +26,28 @@ fixes, and moq-c parity) live under the recurring
 cut gate, decided the same day; the [release cut](/quest/m3/release/cut.md)
 holds its template.
 
-Held by open claims: the [probe epic](/quest/m2/probe/README.md)
-stays here while its open claims last, so the cut waits on it until the
-[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3. Its padding and JS
-rung disable quests already moved to m3 on 2026-11-06.
+Decided 2026-11-12 (maintainer, /quest-audit before the cut):
+
+- ✅ Left m2, so the cut stops waiting on them: the
+  [probe epic](/quest/m3/probe/README.md) to m3 and the routes
+  [browser proof](/quest/m5/routes-browser-proof.md) to m5 (each waits on a
+  browser release and breaks nothing); the docs-only and additive quests and
+  outbound federation to [m1](/quest/m1/README.md); and
+  [unbounded groups](/quest/m3/unbounded-groups/README.md) to m3, whose byte
+  offset goes on the wire version after lite-07 (rejected for each: staying
+  in m2). The padding and JS rung disable quests are parked in m5.
+- ✅ Joined m2, each a small break the cut would otherwise freeze: the mesh
+  [grant shape](/quest/m2/mesh-grant-shape.md) and
+  [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
+  publishes for the first time at this cut;
+  auth key validation; the
+  RTMPS connect signature;
+  usage's derived settings; and two
+  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md) and
+  the capture selections. None
+  is on the routes chain, which stays the critical path.
+- ✅ Under the path rule a route keeps one sticky down-only flag beside its
+  path; see the [routes epic](/quest/m2/cluster-routes/README.md).
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -85,7 +102,7 @@ warmup rule for the shipping dual decoder, the binding migration guide fixes,
 and the API-diff tooling. Public routes now wait on cluster routing.
 
 Added 2026-10-20 (maintainer): the probe target, native probing, and the
-native rung disable moved up from the [m2 probe epic](/quest/m2/probe/README.md),
+native rung disable moved up from the [m2 probe epic](/quest/m3/probe/README.md),
 so Rust, FFI, and OBS publishers recover a stopped rendition in this release;
 padding and the browser's rung disable stayed in m2, with only padding's
 lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,
@@ -199,3 +216,39 @@ rule here). Its lag rule reshapes `main`-only API the cut would publish (the
 `stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the
 cut should not ship the 2026-11-09 stretch model, which lets audio trail
 video by up to 2 s.
+
+Decided 2026-11-14 (m2 triage before the cut, under /quest-afk; the
+maintainer asked that what remains be unblocked or punted, and picked these on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)). m2 keeps only
+what would need a breaking release had it landed right after the cut:
+
+- ✅ Left m2: [the request loop](/quest/m3/cluster-routing/request-loop.md)
+  to m3's cluster-routing epic (a fixture and a fix, no wire);
+  [media consumers](/quest/m3/time-addressing-consumers.md) to m3 (its API
+  breaks ride the model; dropping hang's markers is tolerated by readers);
+  [moq-transport time addressing](/quest/m4/ietf-time-addressing.md) to m4
+  (low-priority compatibility, no named consumer); and the
+  [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release
+  cut requires in place of lite07-finalize (its strict interop lane needs
+  Chromium 158), with lite07-finalize checking Chromium 158 once by hand. The E2EE nonce
+  quest was removed: the nonce already binds the wire ID, which becomes the
+  start, and lite-07 by start rewords the draft. Rejected for each: staying
+  in m2.
+- ✅ Stayed in m2 though not breaking itself:
+  [the interest set](https://github.com/moq-dev/moq/pull/8728), because
+  [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
+  The route stream stays because lite-07 would otherwise freeze with one
+  router key per announce stream, which the route model doesn't check, and
+  keep the reopen-and-hand-over machinery for its lifetime (rejected: moving
+  both to lite-08).
+- ✅ [Route acceptance](/quest/m2/cluster-routes/acceptance.md) stays in
+  the routes epic and gates the cut, per the 2026-10-13 rule that routes'
+  tier and partition tests run before it (maintainer; rejected: moving it to
+  m3 and fixing late routing flaws in lite-08).
+- ✅ [Group drops](/quest/m2/group-drops.md) split: its lite-07 wire question
+  was its own quest, settled without a wire-format change in
+  [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
+  `Ordered` API waits for the model.
+  [Catalog at timestamp](/quest/m2/catalog-at-timestamp.md) no longer waits
+  for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
+  shrink to a rename, since the model already fills each field with the start.

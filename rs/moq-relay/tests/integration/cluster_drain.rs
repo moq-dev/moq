@@ -1,5 +1,6 @@
-//! A draining relay's cluster peers stay on the session it drains instead of
-//! redialing it, and reconnect once its replacement is up.
+//! A draining relay's cluster peers redial it once, which reaches a relay serving
+//! beside it when one took over, and otherwise stay on the redialed session until
+//! it closes and reconnect once its replacement is up.
 //!
 //! Three relays on kio's simulator: B drains while A and C peer with it. Each peer
 //! dials B through a [`Net`], which counts the sessions B accepts, and
@@ -38,18 +39,39 @@ async fn learns(step: &str, origin: &moq_net::origin::Producer, name: &str) {
 	.expect("resolves");
 }
 
+/// Past the healthy bar a peer's session must clear for a GOAWAY to read as a
+/// restart's, which the peer redials at once.
+const HEALTHY: Duration = Duration::from_secs(2);
+
 /// A relay serving as `b`, publishing `b`, that drains over [`DRAIN`] once `trigger`
-/// fires. `exited` resolves once its drain ends and the host is down, as
-/// [`moq_relay::Relay::run`] returns and drops its listener.
+/// fires. `exited` resolves once its drain ends, as [`moq_relay::Relay::run`]
+/// returns.
 struct Relay {
 	cluster: cluster::Cluster,
 	trigger: shutdown::Trigger,
 	exited: kio::clock::sim::JoinHandle<()>,
+	/// Whether `b` is still this relay's listener, to take down as it exits.
+	owned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	_route: moq_net::origin::Route,
 }
 
 impl Relay {
+	/// The relay serving `b`, which takes the host down as it exits and drops its
+	/// listener.
 	fn up(net: &Net) -> Self {
+		Self::serve(net)
+	}
+
+	/// A relay taking over `b` from `old`, as a handoff does: new dials reach it, the
+	/// sessions `old` holds stay there, and the listener is this relay's to drop.
+	fn beside(net: &Net, old: &Self) -> Self {
+		old.owned.store(false, std::sync::atomic::Ordering::SeqCst);
+		net.down("b");
+		Self::serve(net)
+	}
+
+	fn serve(net: &Net) -> Self {
+		let owned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 		let cluster = memory::spawn_cluster(net.options(&[]));
 		let route = cluster
 			.origin
@@ -58,14 +80,18 @@ impl Relay {
 		let (trigger, observer) = shutdown::Observer::new(DRAIN);
 		let _accepts = net.relay("b", &cluster, &memory::public(&["**"], &[], &[]), &observer);
 		let net = net.clone();
+		let exits = owned.clone();
 		let exited = kio::clock::sim::spawn(async move {
 			observer.drained().await;
-			net.down("b");
+			if exits.load(std::sync::atomic::Ordering::SeqCst) {
+				net.down("b");
+			}
 		});
 		Self {
 			cluster,
 			trigger,
 			exited,
+			owned,
 			_route: route,
 		}
 	}
@@ -81,16 +107,11 @@ async fn peer(net: &Net, name: &str) -> (cluster::Cluster, moq_net::origin::Rout
 	(cluster, route)
 }
 
-#[test]
-fn draining_relay_keeps_its_peers_until_it_restarts() {
-	memory::run(draining_relay_keeps_its_peers_until_it_restarts_inner);
-}
-
-async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
-	let net = Net::new();
-	let b = Relay::up(&net);
-	let (a, _a_route) = peer(&net, "a").await;
-	let (c, _c_route) = peer(&net, "c").await;
+/// B with A and C peered to it, each over one session, past the healthy bar.
+async fn mesh(net: &Net) -> (Relay, [(cluster::Cluster, moq_net::origin::Route); 2]) {
+	let b = Relay::up(net);
+	let (a, a_route) = peer(net, "a").await;
+	let (c, c_route) = peer(net, "c").await;
 
 	// The mesh converges: each side learns the other's broadcasts, over one session each.
 	learns("A learns b", &a.origin, "b").await;
@@ -99,13 +120,30 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	learns("B learns c", &b.cluster.origin, "c").await;
 	kio::clock::sim::idle().await;
 	assert_eq!(net.accepted("b"), 2);
+	kio::clock::sleep(HEALTHY).await;
+	(b, [(a, a_route), (c, c_route)])
+}
 
-	// B drains for its whole window: its peers hold their sessions to the end.
+#[test]
+fn draining_relay_keeps_its_peers_until_it_restarts() {
+	memory::run(draining_relay_keeps_its_peers_until_it_restarts_inner);
+}
+
+async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
+	let net = Net::new();
+	let (b, _peers) = mesh(&net).await;
+
+	// B drains for its whole window. Each peer redials once, which reaches B again
+	// with nothing beside it, and holds that session to the end.
 	b.trigger.start();
 	within("B exits after its drain", DRAIN * 2, b.exited)
 		.await
 		.expect("relay task");
-	assert_eq!(net.accepted("b"), 2, "a peer redialed the draining relay");
+	assert_eq!(
+		net.accepted("b"),
+		4,
+		"a peer redialed the draining relay other than once"
+	);
 
 	// Nothing answers while B is down. Then its replacement comes up.
 	kio::clock::sleep(Duration::from_secs(5)).await;
@@ -116,5 +154,40 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	learns("B' learns a", &b2.cluster.origin, "a").await;
 	learns("B' learns c", &b2.cluster.origin, "c").await;
 	kio::clock::sim::idle().await;
-	assert_eq!(net.accepted("b"), 4, "a peer dialed the replacement other than once");
+	assert_eq!(net.accepted("b"), 6, "a peer dialed the replacement other than once");
+}
+
+#[test]
+fn a_relay_beside_the_draining_one_takes_its_peers() {
+	memory::run(a_relay_beside_the_draining_one_takes_its_peers_inner);
+}
+
+/// The upgrade a handoff makes: B' takes over B's address while B drains. Each peer
+/// redials once and reaches B', so B exits as soon as they leave rather than holding
+/// its drain open to the deadline.
+async fn a_relay_beside_the_draining_one_takes_its_peers_inner() {
+	let net = Net::new();
+	let (b, _peers) = mesh(&net).await;
+
+	let b2 = Relay::beside(&net, &b);
+	let started = kio::clock::now();
+	b.trigger.start();
+	within("B exits once its peers leave", DRAIN, b.exited)
+		.await
+		.expect("relay task");
+	assert!(
+		started.elapsed() < DRAIN / 2,
+		"B held its drain open for {:?}",
+		started.elapsed()
+	);
+
+	learns("B' learns a", &b2.cluster.origin, "a").await;
+	learns("B' learns c", &b2.cluster.origin, "c").await;
+	kio::clock::sim::idle().await;
+	assert_eq!(net.accepted("b"), 4, "a peer dialed B' other than once");
+
+	// B's exit left the address to B': a fresh peer still reaches it.
+	let (_d, _d_route) = peer(&net, "d").await;
+	learns("B' learns d", &b2.cluster.origin, "d").await;
+	assert_eq!(net.accepted("b"), 5, "the fresh peer did not reach B'");
 }

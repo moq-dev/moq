@@ -405,7 +405,12 @@ impl kio::Task for Control {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			let err = lite::error::control(&mut self.shared.session.clone(), err);
-			tracing::warn!(%err, "control stream error");
+			// A requester may give up before its request is even read: routine, like a
+			// request cancelled later (`RequestServe::poll`).
+			match is_cancel(&err) {
+				true => tracing::debug!(%err, "control stream cancelled"),
+				false => tracing::warn!(%err, "control stream error"),
+			}
 		}
 		Poll::Ready(())
 	}
@@ -3176,6 +3181,9 @@ enum FetchServe {
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
 		records: Option<lite::ietf::Records>,
+		/// The byte the first frame is served from, until it is: the response states that
+		/// frame's full size and carries only its bytes from here.
+		lead: Option<usize>,
 	},
 }
 
@@ -3226,6 +3234,7 @@ impl Request for FetchServe {
 						priority: msg.priority,
 						max_delay: msg.max_delay,
 						frame_start: msg.start_frame,
+						byte_start: msg.start_byte,
 					},
 					end: msg.end_frame.and_then(|end| end.checked_add(1)),
 				},
@@ -3249,15 +3258,24 @@ impl Request for FetchServe {
 				Self::Fetch { msg, fetching } => {
 					// Before the group: a fetched group polled while this waited would be lost.
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let group = ready!(kio::Task::poll(fetching, waiter))?.with_range(msg.start_frame..);
-
 					// The response carries no header, so a short run is indistinguishable
 					// from one that started elsewhere: only serve a range we can cover
 					// exactly. `fetch_group` already positions the consumer, so this is a
 					// belt-and-braces check on a promise the wire can't restate.
-					if group.index() != msg.start_frame {
+					let Some(group) = ready!(kio::Task::poll(fetching, waiter))?.at(msg.start_frame, msg.start_byte)
+					else {
 						return Poll::Ready(Err(Error::Lagged));
-					}
+					};
+					// A compressed frame inflates only from its first byte, and an object record
+					// names a whole object, so neither is served from a later byte; this side
+					// never asks for it.
+					let lead = match msg.start_byte {
+						0 => None,
+						_ if group.is_compressed() || (ietf && group.ietf().is_some()) => {
+							return Poll::Ready(Err(Error::ProtocolViolation));
+						}
+						byte => Some(usize::try_from(byte).map_err(|_| Error::WrongSize)?),
+					};
 					// The end is a serving cap only: the cached group runs to the end of
 					// the group so it stays usable for anyone else (see
 					// `group::Fetch::frame_start`). Only the end, so the start stays where
@@ -3284,6 +3302,7 @@ impl Request for FetchServe {
 						batch: Box::default(),
 						batch_pos: 0,
 						records,
+						lead,
 					};
 				}
 				Self::Serve {
@@ -3295,10 +3314,35 @@ impl Request for FetchServe {
 					batch,
 					batch_pos,
 					records,
+					lead,
 				} => loop {
 					ready!(writer.poll_flush(waiter))?;
 					if let Some(records) = records {
 						ready!(records.poll_state(writer, group, waiter))?;
+					}
+					if let Some(byte) = *lead {
+						let Some(next) = ready!(group.poll_next_frame_at(byte, waiter))? else {
+							// The group ends before the frame the request starts in.
+							return Poll::Ready(Err(Error::WrongSize));
+						};
+						*lead = None;
+						if let Some(records) = records {
+							records.frame(writer, group.index() - 1, next.fields.as_deref())?;
+						}
+						// The frame's full size: the subscriber knows it asked for the rest.
+						buffer_frame_info(
+							writer,
+							shared.version,
+							next.timestamp,
+							next.inflated,
+							next.size,
+							*stamp,
+							prev_ts,
+							&shared.runtime,
+							next.size - byte as u64,
+						)?;
+						*frame = Some(next);
+						continue;
 					}
 					if let Some(pending) = chunk {
 						ready!(writer.poll_write(waiter, pending))?;
@@ -3325,6 +3369,7 @@ impl Request for FetchServe {
 							*stamp,
 							prev_ts,
 							&shared.runtime,
+							batched.frame.payload.len() as u64,
 						)?;
 						let payload = std::mem::take(&mut batched.frame.payload);
 						if !payload.is_empty() {
@@ -3361,6 +3406,7 @@ impl Request for FetchServe {
 									*stamp,
 									prev_ts,
 									&shared.runtime,
+									next.size,
 								)?;
 								*frame = Some(next);
 								return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -4623,6 +4669,8 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	stamp: Option<Stamp>,
 	prev_ts: &mut u64,
 	runtime: &crate::time::Deadlines,
+	// Payload bytes that follow: fewer than `size` only for a frame served from a byte.
+	sent: u64,
 ) -> Result<(), Error> {
 	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
 	let length_first = version.has_length_first();
@@ -4642,7 +4690,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if !length_first {
 		writer.buffer_varint(size)?;
 	}
-	writer.frame(size);
+	writer.frame(sent);
 	Ok(())
 }
 
@@ -6739,6 +6787,7 @@ impl GroupServe {
 											self.ctx.stamp,
 											&mut self.prev_ts,
 											&self.ctx.runtime,
+											batched.frame.payload.len() as u64,
 										)
 									});
 								if let Err(err) = buffered {
@@ -6794,6 +6843,7 @@ impl GroupServe {
 													self.ctx.stamp,
 													&mut self.prev_ts,
 													&self.ctx.runtime,
+													next.size,
 												)
 											});
 										if let Err(err) = buffered {
@@ -9299,6 +9349,44 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 	}
 
+	/// A group stream the subscriber stopped is named in SUBSCRIBE_DROP, with the stop's code
+	/// where the wire carries one: a stream stopped before its header was read leaves the
+	/// subscriber no other way to learn which group it carried.
+	#[kio::test]
+	async fn a_stopped_group_stream_is_dropped_with_its_stop_code() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(None);
+			let evicted = version.encode_stream_code(&crate::StreamError::Evicted);
+			let session = SinkSession::new(Log::default()).with_stopped_unis(evicted);
+			let (mut run, mut writer, log) = lite_run(version, session, subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+			let writes = log.writes.lock().unwrap().clone();
+			let mut buf = writes.as_slice();
+			let mut dropped = Vec::new();
+			while !buf.is_empty() {
+				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
+				buf = &buf[size..];
+				if let lite::SubscribeResponse::Drop(drop) = msg {
+					dropped.push((drop.groups.clone(), drop.error(version)));
+				}
+			}
+			let error = match version.has_drop_code() {
+				true => crate::StreamError::Evicted,
+				// An application code, which this side reads as stale.
+				false => crate::StreamError::Old,
+			};
+			assert_eq!(dropped, [(0..1, error)], "{version:?}");
+		}
+	}
+
 	/// A wide upstream DROP is held and forwarded as a range, never one entry per sequence,
 	/// and a wider one later forwards only what is new.
 	#[kio::test]
@@ -11078,6 +11166,7 @@ mod tests {
 						max_delay: None,
 						group: 0,
 						start_frame: 0,
+						start_byte: 0,
 						end_frame: None,
 					};
 					leave_request::<FetchServe>(version, &fetch, wait, close).await;
@@ -12136,6 +12225,7 @@ mod tests {
 				max_delay: None,
 				group: 0,
 				start_frame: 2,
+				start_byte: 0,
 				end_frame: Some(3),
 			},
 			"video",
@@ -12206,6 +12296,7 @@ mod tests {
 			max_delay: None,
 			group: 0,
 			start_frame: 0,
+			start_byte: 0,
 			end_frame: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
@@ -12282,6 +12373,7 @@ mod tests {
 			max_delay: Some(Duration::from_millis(500)),
 			group: 0,
 			start_frame: 0,
+			start_byte: 0,
 			end_frame: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
@@ -12309,6 +12401,89 @@ mod tests {
 		}
 		assert!(drive(&mut serve).await, "the budget ends the response");
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// A FETCH from partway into a frame of a moq-transport track, whose object records name
+	/// whole objects, is refused once the `ietf` extension carries those records; a moq-lite
+	/// track on the same session is served from the byte.
+	#[kio::test]
+	async fn a_start_byte_is_refused_on_a_track_with_object_records() {
+		const VERSION: Version = Version::Lite07;
+		for transport in [false, true] {
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+			let mut info = track::Info::timed();
+			if transport {
+				info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+					version: crate::ietf::Version::Draft18,
+					values: Vec::new(),
+				}));
+			}
+			let track = broadcast.broadcast().create_track("video", info).unwrap();
+			broadcast.announce().unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"abcd".to_vec()).unwrap();
+			group.finish().unwrap();
+
+			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(true);
+			peer_setup
+				.set(crate::lite::Setup {
+					ietf: true,
+					..Default::default()
+				})
+				.unwrap();
+			let (_, goaway) = crate::goaway::Handle::new(true);
+			let publisher = Publisher::new(PublisherConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+				origin: origin.consume(),
+				version: VERSION,
+				peer_setup,
+				goaway,
+				peer_hop: None,
+				auth: crate::auth::Link::new(false),
+				peer_grant: Default::default(),
+				client: false,
+				subscriptions: Default::default(),
+				estimate: kio::Producer::default().weak(),
+			});
+			let mut script = Vec::new();
+			lite::Fetch {
+				instance: None,
+				node: 0,
+				broadcast: crate::Path::from_static("room"),
+				track: "video".into(),
+				priority: 0,
+				max_delay: None,
+				group: 0,
+				start_frame: 0,
+				start_byte: 2,
+				end_frame: None,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+			.unwrap();
+			let session = ScriptedSession::new(script);
+			let (send, recv) = kio::wait(|waiter| {
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
+			})
+			.await
+			.unwrap();
+			let stream = Stream::<Transport, Version> {
+				writer: Writer::new(crate::transport::boxed::SendStream::new(send), VERSION),
+				reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION),
+			};
+			let mut serve = RequestServe::<FetchServe>::new(publisher.shared.clone(), stream);
+			assert!(drive(&mut serve).await, "the fetch ended");
+			let refused = crate::StreamError::Session(SessionError::ProtocolViolation).to_code();
+			match transport {
+				true => assert_eq!(session.log.resets(), vec![refused]),
+				false => {
+					assert!(session.log.resets().is_empty(), "a moq-lite track serves from the byte");
+					let written = session.log.writes.lock().unwrap();
+					assert!(written.ends_with(b"cd") && !written.ends_with(b"abcd"));
+				}
+			}
+		}
 	}
 
 	#[kio::test]

@@ -89,9 +89,11 @@ and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a
 route serving the name is announced, goes `offline` when none is left, and
-waits for one to return for as long as it is mounted. A catalog track that
-ends cleanly keeps playing until the broadcast ends, so a viewer drains a
-finished broadcast's tail. When the exact route
+waits for one to return for as long as it is mounted. A publisher that stops
+cleanly finishes its catalog and media tracks: the player plays the tail it
+received, holding the last picture without a buffering spinner, then reads
+`offline` (`el.video.out.ended` and `el.audio.out.ended` turn true) even while the
+relay still serves the finished broadcast to late subscribers. When the exact route
 ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
@@ -224,15 +226,15 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 After a stall, video shows each late frame as it arrives and is live again at
 once. Audio cannot skip without losing what arrives late, so it slows down
 slightly when the audio received ahead of it runs low, falls behind the clock,
-and speeds back up once it recovers until it is back on it. Audio that trails
+and speeds back up once it recovers until it is back on it, never more than 10%
+off real time, whatever the content. Audio that trails
 by more than `stretch`, 200 ms by default, skips onto the clock as video does,
 so a long stall costs one skip instead of seconds of lag, and audio that leads
 it by as much, as when the delay rises, waits for it in silence.
 
-`stretch="0"` turns the time stretch off, for content where a pitch-period
-splice is audible, such as music: received audio plays unaltered, late audio
-is skipped, an underrun is silence, and drift between the publisher's clock
-and the device's is corrected by a small skip or pad.
+`stretch="0"` turns the time stretch off: received audio plays unaltered, late
+audio is skipped, an underrun is silence, and drift between the publisher's
+clock and the device's is corrected by a small skip or pad.
 
 ## Buffered playback
 

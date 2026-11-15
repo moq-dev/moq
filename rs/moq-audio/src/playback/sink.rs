@@ -54,8 +54,10 @@ pub struct Input {
 	/// absorb without a dropout, and it is also delay: the sample handed over now
 	/// sounds this much later. A player that presents video against a playout
 	/// delay sets this to match, so the sink is where that delay lives rather
-	/// than something the picture has to be held back for separately. Must be
-	/// non-zero: a ring with no depth can never be read from.
+	/// than something the picture has to be held back for separately. Once a
+	/// clock is [`due`](Sink::due), the device's own delay counts toward it and
+	/// the sink holds the rest. Must be non-zero: a ring with no depth can never
+	/// be read from.
 	pub latency: Duration,
 }
 
@@ -238,21 +240,30 @@ impl Sink {
 	}
 
 	/// How much audio is queued between the last [`write`](Self::write) and the
-	/// speaker.
+	/// speaker, the device's own delay included.
 	///
-	/// The pacing signal for A/V sync: the sample playing right now was written
+	/// The pacing signal for A/V sync: the sample sounding right now was written
 	/// at roughly `last_timestamp - buffered()`, so a video clock can steer
 	/// against it. It settles near [`Input::latency`] once playback is running,
-	/// climbs when the writer runs ahead, and falls toward zero when it falls
-	/// behind.
+	/// climbs when the writer runs ahead, and falls toward the device's delay
+	/// when it falls behind.
 	pub fn buffered(&self) -> Duration {
-		self.channel.lock().unwrap().prod.buffered()
+		self.channel.lock().unwrap().prod.heard_in(crate::ring::host())
+	}
+
+	/// How long the device takes to sound what it reads: the delay its host
+	/// reports plus one device period. `None` until the device has called back.
+	///
+	/// A player holding a playout delay counts this in it, since the sink places
+	/// audio on [`due`](Self::due)'s clock where it is heard.
+	pub fn output_latency(&self) -> Option<Duration> {
+		self.shared.observe.output()
 	}
 
 	/// Set the playout target, converging by stretching received PCM.
 	///
-	/// This is the buffer the sink keeps against jitter: it slows down while
-	/// what it holds runs short of it, and speeds up past it only to catch up
+	/// This is the buffer the sink keeps against jitter, counting the device's
+	/// own delay: it slows down while what it holds runs short of it, and speeds up past it only to catch up
 	/// with the clock [`due`](Self::due) anchors it to.
 	///
 	/// Must be non-zero, at most [`moq_mux::container::DELAY_MAX`], and fit in the current
@@ -274,23 +285,20 @@ impl Sink {
 	}
 
 	/// Anchor the audio written so far to the caller's clock: its end is due to
-	/// sound at `at`.
+	/// sound at `at`, as heard after the device's own delay.
 	///
-	/// The sink then plays onto that clock rather than at its latency alone.
-	/// Behind it, it speeds up once it holds more than its latency; ahead of
-	/// it, it slows down. Its buffer running low slows it down too, falling
-	/// behind the clock by at most `stretch`. Audio trailing the clock by more
-	/// than `stretch` skips onto it, and audio leading it by as much waits in
-	/// silence for it. A zero `stretch`
-	/// turns the time stretch off: written audio plays unaltered, and a sink
-	/// more than a window off the clock skips onto it or pads silence until
-	/// the clock reaches it. `jumped` is how far the
-	/// clock's reference moved earlier since the last call, which skips as much
-	/// audio as trails the clock, where a lower latency moves the clock ahead
-	/// by speeding up. Call it after each write and whenever the clock moves;
-	/// until the first call, or after the device changes, the latency alone is
-	/// the clock.
-	pub fn due(&mut self, at: Instant, stretch: Duration, jumped: Duration) {
+	/// The sink then plays onto that clock rather than at its latency alone:
+	/// behind it, it speeds up, and ahead of it, it slows down, at a rate
+	/// proportional to how far it is off, up to 10%. Audio about to run out
+	/// slows down too, falling behind the clock by at most `stretch`. Audio
+	/// trailing the clock by more than `stretch` skips onto it, and audio
+	/// leading it by as much waits in silence for it, however the clock moved.
+	/// A zero `stretch` turns the time stretch off: written audio plays
+	/// unaltered, and a sink more than a window off the clock skips onto it or
+	/// pads silence until the clock reaches it. Call it after each write and
+	/// whenever the clock moves; until the first call, or after the device
+	/// changes, the latency alone is the clock.
+	pub fn due(&mut self, at: Instant, stretch: Duration) {
 		// The device thread reads std's clock, so carry the distance from now
 		// over to it rather than the instant.
 		let (now, host) = (Instant::now(), crate::ring::host());
@@ -298,7 +306,7 @@ impl Sink {
 			Some(ahead) => host + ahead,
 			None => host.checked_sub(now.duration_since(at)).unwrap_or(host),
 		};
-		self.channel.lock().unwrap().prod.due(at, stretch, jumped);
+		self.channel.lock().unwrap().prod.due(at, stretch);
 	}
 
 	/// The PCM layout this sink was built with.
@@ -532,21 +540,17 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ring::Consumer) {
 	let remix =
 		(input.layout != bus).then(|| Remix::new(input.layout, bus).expect("sink and bus layouts name their speakers"));
 
-	let (prod, mut cons) = ring::channel(
+	let (prod, cons) = ring::channel(
 		bus.channels() as usize,
 		input.sample_rate,
 		rate,
 		ring::Config {
 			latency: input.latency,
 			capacity: input.latency + HEADROOM,
-			// Stretch handles ordinary drift; only a dry or nearly full ring
-			// pays for emergency silence or trimming.
-			pad: true,
-			trim: true,
+			correction: ring::Correction::Stretch,
 			comfort: true,
 		},
 	);
-	cons.stretch(rate);
 	(Channel { prod, remix }, cons)
 }
 

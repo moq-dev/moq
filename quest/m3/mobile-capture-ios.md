@@ -30,7 +30,7 @@ same everywhere.
 Capture sets the catalog `rotation` from the device orientation, like browser
 capture, so a phone held in portrait plays upright.
 
-Deferred to m2; mobile capture does not gate the next breaking cut.
+Mobile capture does not gate the next breaking cut.
 
 ## Related
 

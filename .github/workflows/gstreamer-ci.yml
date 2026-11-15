@@ -1,0 +1,224 @@
+name: GStreamer CI image
+
+# Publishes .github/docker/gstreamer as ghcr.io/moq-dev/gstreamer-ci, so
+# moq-gst's Linux jobs get Ubuntu's GStreamer without reaching an apt mirror,
+# and proposes the new digest for the pin file they read. Dependabot can't bump
+# a `docker run` reference in a workflow
+# (https://github.com/dependabot/dependabot-core/issues/5819), so the pin is a
+# plain file and this workflow proposes its bump through moq-bot.
+#
+# A scheduled run publishes only when Ubuntu updated a package, so a quiet week
+# opens no PR. A push or dispatch on main always publishes, so a Dockerfile
+# change that installs the same packages still ships. A dispatch on any other
+# branch builds and compares only.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/docker/gstreamer/Dockerfile
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/moq-dev/gstreamer-ci
+  PIN: .github/docker/gstreamer/image
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    # Read-only: the image leaves as an artifact and only `publish` pushes it,
+    # once both architectures are built and compared, so nothing is pushed
+    # unless the whole manifest list is.
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: docker build --pull -t gstreamer-ci .github/docker/gstreamer
+
+      # The pinned image may be private, so pulling it needs the token.
+      - name: Log in to ghcr.io
+        if: hashFiles('.github/docker/gstreamer/image') != ''
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: docker login ghcr.io -u "$ACTOR" --password-stdin <<<"$TOKEN"
+
+      # Compare the installed packages with the pinned image's for this
+      # architecture. With no pin yet, everything is new.
+      - name: Compare with the pin
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p out
+          docker run --rm gstreamer-ci dpkg-query -W > "out/$ARCH.packages"
+          if [[ -s "$PIN" ]]; then
+            docker run --rm --platform "linux/$ARCH" "$(<"$PIN")" dpkg-query -W > pinned.packages
+          else
+            : > pinned.packages
+          fi
+          diff -U0 --label pinned --label built pinned.packages "out/$ARCH.packages" > "out/$ARCH.diff" || [[ $? == 1 ]]
+          cat "out/$ARCH.diff"
+          docker save -o "out/$ARCH.tar" gstreamer-ci
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gstreamer-ci-${{ matrix.arch }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish and propose the pin
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The `bot` Environment holds the moq-bot key and deploys only from `main`,
+    # `release` and moq-ffi tags; the `if` above keeps this to `main`. It, not
+    # `publish`, because `publish` admits only release refs and its release
+    # credentials have no business on `main`.
+    environment: bot
+    # Serialize publishing without dropping a run: by default a newly queued
+    # run replaces the pending one, so a schedule could cancel a Dockerfile
+    # push that must ship. Only this job holds the group, so builds and other
+    # branches' dispatches never queue behind it.
+    concurrency:
+      group: gstreamer-ci-publish
+      queue: max
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Untracked in the checkout; the pin PR adds only the pin file.
+      OUT: out
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gstreamer-ci-*
+          merge-multiple: true
+          path: out
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          {
+            echo '## Package changes'
+            for arch in amd64 arm64; do
+              echo
+              echo "### $arch"
+              echo
+              if [[ -s "$OUT/$arch.diff" ]]; then
+                echo '```diff'
+                cat "$OUT/$arch.diff"
+                echo '```'
+              else
+                echo 'None.'
+              fi
+            done
+          } > "$OUT/changes.md"
+          cat "$OUT/changes.md" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$EVENT" == schedule && ! -s "$OUT/amd64.diff" && ! -s "$OUT/arm64.diff" ]]; then
+            echo "No package changed since the pinned image; publishing nothing."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Assemble the manifest list from both archives and push it whole, so no
+      # half-published image exists. The date tag is for people; the pin is the
+      # digest.
+      - name: Push
+        id: push
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          podman login ghcr.io -u "$ACTOR" --password-stdin <<<"$TOKEN"
+          podman manifest create gstreamer-ci
+          for arch in amd64 arm64; do
+            podman manifest add gstreamer-ci "docker-archive:$OUT/$arch.tar"
+          done
+          podman manifest push --all --format oci --digestfile "$OUT/digest" gstreamer-ci "docker://$IMAGE:latest"
+          podman manifest push --all --format oci gstreamer-ci "docker://$IMAGE:$(date -u +%Y-%m-%d)"
+          echo "image=$IMAGE@$(<"$OUT/digest")" >> "$GITHUB_OUTPUT"
+
+      - name: Write the pin
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          NEW: ${{ steps.push.outputs.image }}
+        run: |
+          echo "$NEW" > "$PIN"
+          {
+            cat <<'MD'
+          ## Problem
+
+          `.github/docker/gstreamer/image` pins the GStreamer image moq-gst's Linux CI uses, and a newer one was published.
+
+          ## Approach
+
+          Pin the image this run published.
+
+          MD
+            echo "- Image: \`$NEW\`"
+            echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            cat "$OUT/changes.md"
+            cat <<'MD'
+
+          ## Impact
+
+          - Public API and wire: none. Only CI's GStreamer image changes.
+          MD
+          } > "$OUT/body.md"
+
+      # Mint the token after the push so nothing before it holds the bot's key.
+      - name: Generate moq-bot token
+        if: steps.decide.outputs.publish == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Propose the pin
+        if: steps.decide.outputs.publish == 'true'
+        uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
+        with:
+          token: ${{ steps.token.outputs.token }}
+          branch: gstreamer-ci/pin
+          base: main
+          add-paths: .github/docker/gstreamer/image
+          commit-message: "chore(ci): pin the newest GStreamer CI image"
+          title: "chore(ci): pin the newest GStreamer CI image"
+          body-path: out/body.md

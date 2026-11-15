@@ -602,29 +602,21 @@ export * as Signals from "@moq/signals";
 export namespace Socket {
 	export class Endpoint {
 		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
-		acceptTcp(options?: Socket.Options): Promise<Socket.Incoming<Socket.TcpStream>>;
-		acceptTrack(options?: Socket.Options): Promise<Socket.Incoming<Socket.TrackStream>>;
+		acceptTrack(options?: Socket.Options): Promise<Socket.Incoming>;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		dialTcp(peer: string, options?: Socket.Options): Promise<Socket.TcpStream>;
 		dialTrack(peer: string, info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
 		readonly id: string;
 		readonly prefix: Path.Valid;
 	}
-	export class Incoming<S extends Socket.TcpStream | Socket.TrackStream> {
-		accept(...args: S extends Socket.TcpStream ? [options?: Socket.Options] : [info?: Track.InfoInit, options?: Socket.Options]): Promise<S>;
+	export class Incoming {
+		accept(info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
 		readonly peer: string;
 		reject(): void;
 		readonly session: string;
 	}
 	export interface Options {
 		signal?: AbortSignal;
-	}
-	export class TcpStream {
-		readonly consumer: Group.Consumer;
-		readonly peer: string;
-		readonly producer: Group.Producer;
-		readonly session: string;
 	}
 	export class TrackStream {
 		readonly consumer: Track.Subscriber;
@@ -742,6 +734,7 @@ export namespace Track {
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
+		readonly time?: Time.Timestamp;
 		unwanted(sequence: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;

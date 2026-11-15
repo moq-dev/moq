@@ -117,7 +117,8 @@ const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
 const UNWATCHED = new Set(["pull_request", "pull_request_target", "merge_group", "workflow_call"]);
 // These workflows validate branches or run an agent on request; none publishes.
 // A Queue dispatch only reports the skipped merge queue context on a branch head.
-const CI_ONLY = new Set(["OBS", "Platform", "Pullfrog", "Quest", "Queue", "Runner VM"]);
+// QUIC interop runs on a schedule only as a call from Nightly, which alerts as Nightly.
+const CI_ONLY = new Set(["OBS", "Platform", "Pullfrog", "QUIC interop", "Quest", "Queue", "Runner VM"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());

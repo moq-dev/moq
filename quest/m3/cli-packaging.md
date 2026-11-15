@@ -47,7 +47,7 @@ encoder (congestion control retunes through it) and 1080p, which codes as
 1088 rows and relies on the compose rectangle to crop back.
 
 `moq-cli.yml` already passes `linux-features: v4l2` to `release-binary.yml`,
-a no-op until `capture` is on; `release` replaces it there.
+a no-op until `capture` is on; `full` replaces it there.
 
 Add a board hardware note to `doc/bin/cli.md` next to the capture build
 instructions: Raspberry Pi 5 has no video encoder and Jetson Orin Nano ships
@@ -67,6 +67,10 @@ Decided in the 2026-10-06 audit: this does not wait on the library
 and `moq-audio/capture` explicitly, and `full` enables `capture`.
 
 Renamed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the moq-cli feature that enables everything is named `full`, not `release`, so this quest and its followers say `full`.
+
+## Waiting
+
+- Maintainer: what ships while cpal has no release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last release is 0.18.2). (A) Wait: this quest stays blocked on [ALSA without a load-time link](/quest/m3/capture-alsa-link.md) until the cpal release ships. (B) Split: ship `full` now on macOS and Windows, which link no system audio library, and leave only Linux waiting on the cpal release. (C) Linux release binaries take libasound as a load-time requirement. (D) Fork cpal, alsa, and alsa-sys. I recommend B.
 
 ## Required
 

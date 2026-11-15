@@ -20,8 +20,7 @@ a blocker for this line.
 
 ## Plan
 
-Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, and
-STUN's only consumer is P2P, deferred to m2. SRT is not blocked upstream:
+Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge. SRT is not blocked upstream:
 [SRT demux](/quest/m3/one-port/srt-demux.md) decided on 2026-09-30 to drive
 sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
 srt-tokio.
@@ -35,8 +34,7 @@ them.
 The UDP demux has landed: `moq_sock::demux` classifies, and the tokio QUIC
 listener's socket diverts the WebRTC media path inline in its receive to a
 `moq_tokio::quic::demux::WebRtc` feed, which `moq_relay::Relay::webrtc`
-hands an embedder. [Native pairs](/quest/m4/p2p/native-quic.md) reuse the
-classifier. QUIC shard steering landed in #5638; reuse its filter rather than
+hands an embedder. QUIC shard steering landed in #5638; reuse its filter rather than
 recreating that completed work.
 
 Decided 2026-10-31 by the maintainer, in
@@ -85,15 +83,14 @@ decided.
 
 ### STUN
 
-Decided 2026-10-08: the public STUN responder is left to P2P (m4), its
-only consumer. Here, a Binding request carrying USERNAME is an ICE check
-and goes to WebRTC, as does every Binding response, since the WebRTC agent
-runs full ICE and only it sends requests from this port. Any other STUN is
-dropped and counted. Decided 2026-10-13:
-the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
-so the shared port never answers public Binding requests.
+A Binding request carrying USERNAME is an ICE check and goes to WebRTC, as
+does every Binding response, since the WebRTC agent runs full ICE and only it
+sends requests from this port. Any other STUN is dropped and counted: the
+shared port never answers public Binding requests. Decided 2026-11-14
+(maintainer): the relay serves no public STUN responder, since peer-to-peer
+routing, its only consumer, left the repository.
 
 ## Related
 
 - [One port on the io_uring workers](/quest/m3/uring-demux.md) - the io_uring workers host the UDP demux
-- [Stream transports](/quest/m4/stream-transports/README.md) - the io_uring workers that would host the TCP acceptor later
+- [Stream transports](/quest/m9/stream-transports/README.md) - the io_uring workers that would host the TCP acceptor later

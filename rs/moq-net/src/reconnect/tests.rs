@@ -792,6 +792,106 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 	assert_eq!(run.events, ["offline"]);
 }
 
+/// A one-shot policy ends cleanly on a GOAWAY naming no URI, as on any other, under
+/// every restart policy and whether or not the session was healthy.
+#[kio::test]
+async fn a_one_shot_policy_ends_on_a_restart() {
+	for restart in [Restart::Redial, Restart::Wait, Restart::Handoff] {
+		let peer = url("tcp://peer:1/");
+		let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+		config.restart = restart;
+		config.once = true;
+		let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+		let mut run = Run::default();
+		let end = drive(&mut machine, &[(peer, Peer::Goaway(String::new()))], &mut run, |_| {
+			false
+		})
+		.await;
+		assert!(matches!(end, Some(Ok(()))), "{restart:?}: {end:?}");
+		assert_eq!(run.dials.len(), 1, "{restart:?} redialed");
+	}
+}
+
+/// The actions a policy asks for until it only waits, by name.
+async fn settle(machine: &mut Reconnect<Url, TestError>) -> Vec<&'static str> {
+	let mut events = Vec::new();
+	while let Ok(action) = kio::clock::timeout(Duration::from_secs(60), next(machine)).await {
+		events.push(match action {
+			Action::Migrating => "migrating",
+			Action::Retired => "retired",
+			Action::Offline(_) => "offline",
+			other => panic!("expected the policy to wait, got {other:?}"),
+		});
+	}
+	events
+}
+
+/// Under [`Restart::Handoff`] a healthy session's empty-URI GOAWAY redials the same address once
+/// while the drained session serves, so a replacement already serving beside the draining
+/// process takes over and the drained session retires once it carries nothing.
+#[kio::test]
+async fn a_handoff_restart_moves_to_a_replacement() {
+	let peer = url("tcp://peer:1/");
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+	config.restart = Restart::Handoff;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	let goaway = kio::clock::now();
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 2
+	})
+	.await;
+	assert_eq!(run.accepts[1].1, goaway, "the redial waited");
+	assert_eq!(run.events, ["migrating"]);
+	assert_eq!(settle(&mut machine).await, ["retired"]);
+	assert!(machine.session().is_some(), "the replacement serves");
+	assert_eq!(run.dials.len(), 2);
+}
+
+/// Under [`Restart::Handoff`] a redial that reaches the draining process again, drained before
+/// it is healthy, changes nothing while the peer keeps it: no further redial. Its close then
+/// reconnects like any drop.
+#[kio::test]
+async fn a_handoff_restart_redials_once_until_the_session_closes() {
+	let peer = url("tcp://peer:1/");
+	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+	config.restart = Restart::Handoff;
+	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Duration::from_secs(2)).await;
+	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	drive(
+		&mut machine,
+		&[(peer.clone(), Peer::Goaway(String::new()))],
+		&mut run,
+		|run| run.accepts.len() == 2,
+	)
+	.await;
+	assert_eq!(run.events, ["migrating"]);
+	assert_eq!(settle(&mut machine).await, ["retired"], "the policy left the session");
+	assert_eq!(run.dials.len(), 2, "redialed the draining process again");
+
+	run.servers.remove(1).abort(Error::GoawayTimeout);
+	run.events.clear();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 3
+	})
+	.await;
+	assert_eq!(run.events, ["offline"]);
+}
+
 /// A session closed for a protocol violation or a refused credential reconnects like any
 /// other close: the policy does not judge the error's kind.
 #[kio::test]
@@ -912,12 +1012,11 @@ async fn a_peer_goaway_wins_over_a_probe() {
 	);
 }
 
-/// Pins an open finding (`verify-reconnect`, `RedirectFollowed`): once a probe got
-/// through, the fallback session drains as the predecessor and nothing watches its peer's
-/// GOAWAY anymore, so a redirect the peer sends while the handshake runs is never read and
-/// the redial goes back to the node that is leaving.
+/// Once a probe got through, the fallback session drains as the predecessor, and a
+/// redirect its peer sends while the handshake runs still decides where we go: the
+/// handshake to the leaving node is dropped and the dial goes where the peer named.
 #[kio::test]
-async fn residual_a_redirect_after_a_probe_got_through_is_lost() {
+async fn a_redirect_after_a_probe_got_through_is_followed() {
 	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
 	probe(&mut machine).await;
 	assert!(machine.probed(kio::clock::now(), Ok(())));
@@ -928,19 +1027,34 @@ async fn residual_a_redirect_after_a_probe_got_through_is_lost() {
 		.drain()
 		.send(goaway::Goaway::redirect(elsewhere.to_string()))
 		.expect("the fallback peer sends a GOAWAY");
-	kio::clock::sim::idle().await;
-	// The handshake over the preferred transport fails, so the policy dials again.
+	assert!(matches!(next(&mut machine).await, Action::Abandon));
+	let Action::Dial(attempt) = next(&mut machine).await else {
+		panic!("expected a dial");
+	};
+	assert_eq!(attempt.target(), &elsewhere);
+	assert!(machine.predecessor().is_some(), "the redirected session still drains");
+}
+
+/// A redirect from the draining fallback's peer during the backoff after a failed
+/// handshake keeps the wait, and the redial goes where the peer named.
+#[kio::test]
+async fn a_redirect_during_the_backoff_after_a_probe_is_followed() {
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+	probe(&mut machine).await;
+	assert!(machine.probed(kio::clock::now(), Ok(())));
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
 	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Retry);
 	assert!(matches!(next(&mut machine).await, Action::Retrying(_)));
+
+	let elsewhere = url("https://peer:2/");
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::redirect(elsewhere.to_string()))
+		.expect("the fallback peer sends a GOAWAY");
 	let Action::Dial(attempt) = next(&mut machine).await else {
 		panic!("expected a redial");
 	};
-	assert_eq!(
-		attempt.target(),
-		&url("https://peer:1/"),
-		"the redial followed the redirect: flip this test"
-	);
-	assert!(machine.predecessor().is_some(), "the redirected session still drains");
+	assert_eq!(attempt.target(), &elsewhere);
 }
 
 /// A client and server session where the client holds a subscription the server serves,

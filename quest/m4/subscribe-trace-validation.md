@@ -12,10 +12,10 @@ remembering to resync the model.
 
 Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
 moq-net): every TLA+ model gets trace validation, not route alone. Milestone
-m4, behind route's.
+m4, behind resume's.
 
 - Reuse the trace format and the TLC recipe
-  [route trace validation](/quest/m1/route-trace-validation.md) builds, with
+  [resume trace validation](/quest/m4/resume-trace-validation.md) builds, with
   the `verify-subscribe` skill's Coverage table as the mapping from code to
   model actions.
 - The model's steps are spread over `lite/publisher.rs` (`TrackRun`,
@@ -34,7 +34,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Route sweeps are checked against the TLA+ model](/quest/m1/route-trace-validation.md) - the trace format and TLC recipe this reuses
+- [Resume sweeps are checked against the TLA+ model](/quest/m4/resume-trace-validation.md) - builds the trace format and TLC recipe this reuses
 
 ## Related
 
