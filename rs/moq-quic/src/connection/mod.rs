@@ -3308,10 +3308,15 @@ impl Connection {
 						}
 					};
 
-					if self.side.is_server() && self.rem_cids.active_seq() == 0 {
-						// We're a server still using the initial remote CID for the client, so
-						// let's switch immediately to enable clientside stateless resets.
-						self.update_rem_cid();
+					// A server still on the client's initial CID switches at once, to enable
+					// client-side stateless resets, but only to sequence 1: jumping to a later
+					// one would retire the CIDs before it, still in flight, without using them.
+					if self.side.is_server()
+						&& self.rem_cids.active_seq() == 0
+						&& let Some((reset_token, retired)) = self.rem_cids.next_in_order()
+					{
+						self.spaces[SpaceId::Data].pending.retire_cids.extend(retired);
+						self.set_reset_token(reset_token);
 					}
 				}
 				Frame::NewToken(NewToken { token }) => {
