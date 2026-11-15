@@ -8,6 +8,10 @@ remembered for sessions nothing was learned on.
 
 ## Plan
 
+Kept 2026-11-15 (maintainer, /quest-complete on
+[moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
+m2 (rejected: drop; moving it to m3).
+
 Found by [acceptance](/quest/m2/cluster-routes/acceptance.md)'s
 operation-count regressions, each pinned by a `residual_*` test that fails
 once fixed:

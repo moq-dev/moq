@@ -33,6 +33,16 @@ Decided 2026-11-13 (maintainer, /quest-plan on the BGP failure modes):
   error the subscriber sees). Epic Plan item 27 already rejected keeping a
   request from going back through the relay that sent it.
 
+Found again by [acceptance](/quest/m2/cluster-routes/acceptance.md) once
+[moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734) merged:
+`route_failover::live_mesh_link_failure_keeps_presence` cuts all but one of a
+publishing relay's links on a 34-relay mesh, and 3 readers on relays that
+stayed available end with `Unroutable` instead of hanging, all for one
+publisher. Each such relay moved onto a neighbour's direct route that the
+neighbour's own close made stale; the replaced doubt rule held them and
+ended none. The test pins those readers: flip it once a pending request
+follows its route and they read on.
+
 The fixture runs real lite-07 relays with mocked time. Form the loop the
 churn sweeps found (two unrelated failures at once, so two relays briefly
 route a publisher through each other), subscribe at both while it lasts,

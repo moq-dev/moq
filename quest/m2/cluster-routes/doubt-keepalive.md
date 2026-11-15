@@ -7,6 +7,10 @@ apart its neighbours notice the death within the keep-alive.
 
 ## Plan
 
+Kept 2026-11-15 (maintainer, /quest-complete on
+[moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
+m2 (rejected: drop; moving it to m3).
+
 Found by [acceptance](/quest/m2/cluster-routes/acceptance.md) (epic Plan
 item 30's first prior-art fixture):
 `route_acceptance::a_vanished_relay_is_noticed_a_keep_alive_apart` kills
@@ -24,7 +28,9 @@ that window goes to a dead relay. A 1 s doubt does not cover a 3 s spread.
   recommendation: no wire change, and a relay already knows its idle
   timeout); (b) relay keep-alives shorten below the doubt, which costs
   traffic on every relay link; (c) accept the window and keep the test
-  pinning it. Check with `/quest-grill` or the PR that picks it up.
+  pinning it. Check with `/quest-grill` or the PR that picks it up. The
+  maintainer deferred this decision on 2026-11-15, not yet sure about the
+  doubt design.
 
 ## Related
 

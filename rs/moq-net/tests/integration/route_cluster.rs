@@ -11,6 +11,7 @@
 //! overlapping claims, restarts, and a grant union crossing a scoped boundary. Last, a
 //! client listing one prefix of a relay holds routes only to the origins meeting it.
 
+use crate::path_routes::{DOUBT, HOLD, land, lite07, quiesce};
 use crate::route_change::{Delivery, produce_origin, read, timed};
 use crate::support;
 
@@ -18,32 +19,12 @@ use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
 use moq_net::stats::{Message, Registry, SessionInfo, Tier};
-use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, Version, auth, origin, track};
+use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
-/// How long a relay holds a route no neighbour answers for.
-const HOLD: Duration = Duration::from_secs(10);
-
-/// How long a closed session's far end is doubted.
-const DOUBT: Duration = Duration::from_secs(1);
-
 /// Frames per group.
 const FRAMES: u64 = 4;
-
-fn lite07() -> Version {
-	"moq-lite-07-wip".parse().unwrap()
-}
-
-/// Let every route settle, doubts and holds included.
-async fn quiesce() {
-	kio::clock::sleep(HOLD + DOUBT).await;
-}
-
-/// Wait long enough for messages in flight to land, without reaching the doubt.
-async fn land() {
-	kio::clock::sleep(Duration::from_millis(100)).await;
-}
 
 /// Close a session at both ends, as a dropped connection does.
 fn cut(pair: &MockPair) {

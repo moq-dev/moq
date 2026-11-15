@@ -8,25 +8,31 @@ go while its neighbours answer that they have nothing.
 
 ## Plan
 
+Kept 2026-11-15 (maintainer, /quest-complete on
+[moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
+m2 (rejected: drop; moving it to m3).
+
 Found by [acceptance](/quest/m2/cluster-routes/acceptance.md):
-`route_failover::live_mesh_link_failure_keeps_presence` pins it on a
-34-relay mesh, and the router alone does the same. Cutting every link of the
-publisher's relay but its slowest leaves only routes through that relay,
-which every relay that heard a link die doubts for the timer. A relay with
-no usable route holds, its neighbours are in the same state and answer that
-they have nothing, and it lets go before the doubt lifts: the broadcast goes
-Unavailable, Offline, then Start. Over 5 publishers, 132 relays went
-unavailable, 52 retracted and announced again, 98 readers lost their
-subscription, and the longest gap was 2.0 s (the doubt plus the retraction
-quarantine).
+`route::tests::flap::residual_a_relay_kept_off_by_doubt_lets_go_before_it_lifts`
+pins it on the router. The publisher sits behind a transit relay that loses
+most of its links, leaving only routes through it, which every relay that
+heard a link die doubts for the timer. A relay with no usable route holds,
+its neighbours are in the same state and answer that they have nothing, and
+it lets go a hop after the cut: the claim goes Unavailable, then gone, then
+back once the doubt lifts.
+
+`route_failover::live_mesh_link_failure_keeps_presence` measured it on a
+34-relay mesh before [moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734):
+over 5 publishers, 98 readers lost their subscription. That fixture publishes
+on the relay itself, so since #8734 doubt no longer blocks its routes, and it
+loses 6. A real-session fixture for this quest needs the publisher behind the
+relay whose links close.
 
 The contract already says a node holds "while a neighbour offers a route that
 only the doubt keeps it off". Find why the answers end the hold first: a
 neighbour that holds only because of doubt should answer with ROUTE_HOLD, not
 nothing. Check the rule in `RouteHandoff.tla` with the `verify-route` skill
-before changing `rs/moq-net/src/route/path.rs`, and build on
-[moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734), which changes
-which routes doubt blocks.
+before changing `rs/moq-net/src/route/path.rs`.
 
 ## Related
 

@@ -282,10 +282,11 @@ async fn a_ring_waits_out_the_doubt_for_a_backup_through_the_far_end() {
 }
 
 /// `A` and `B` each reach `P` directly and peer with each other, over a link lagging by
-/// [`LAG`]. `P` dies: each relay's only route left runs through the other, which lost `P`
-/// too. Each holds for the other, which learned its route, and the other's DEAD answers
-/// it: both let go one lag after the cut, long before a hold's deadline, neither waiting
-/// on the other.
+/// [`LAG`]. `P` dies: each relay's only route left is the other's direct route, which
+/// begins at `P` and so is not doubted, and which the other's own close made stale. Each
+/// moves onto it until the other's DEAD retracts it one lag after the cut, then holds for
+/// the other's answer, a lag later: both let go two lags after the cut, long before a
+/// hold's deadline. The router alone does the same.
 #[kio::test]
 async fn two_relays_routing_through_each_other_both_let_go() {
 	const LAG: Duration = Duration::from_millis(200);
@@ -311,7 +312,7 @@ async fn two_relays_routing_through_each_other_both_let_go() {
 		let ended = seen.last().unwrap();
 		assert!(withdrawn(ended), "{name}: {seen:?}");
 		assert!(
-			ended.at >= LAG && ended.at < 2 * LAG,
+			ended.at >= 2 * LAG && ended.at < 3 * LAG,
 			"{name}: let go at {:?}: {seen:?}",
 			ended.at
 		);
@@ -476,12 +477,14 @@ async fn a_dispute_wheel_settles() {
 
 /// Prior art (the epic's Plan item 30): `P` reaches `A` over a primary link of cost 1 and
 /// `B` over a backup of cost 4, and `A`, `B` and `C` mesh. The primary fails and returns,
-/// either within the doubt of `P` or after every relay moved onto the backup: every relay
-/// ends back on the primary, at the cost it had before.
+/// either within the doubt of `P` or after it lifted: every relay ends back on the
+/// primary, at the cost it had before.
 ///
-/// `A`'s DEAD names `P`, the far end, so `B` and `C` doubt the publisher itself and hold
-/// for [`DOUBT`], unavailable, though `B`'s own session to `P` is healthy: every backup runs
-/// through `P`. Returning within the doubt, the primary is back before anyone moves.
+/// `A`'s DEAD names `P`, the far end, so `B` and `C` doubt the publisher. The backup begins
+/// at `P`, so the doubt does not keep them off it: both move onto it at once, staying
+/// available, as soon as the cut's news arrives. The returning primary is a session to `P`
+/// opened since the doubt began, so it waits out [`DOUBT`], which damps a flapping link:
+/// no relay moves back before the doubt lifts, however soon the primary returns.
 ///
 /// Pinned, against the contract (see
 /// [`a_ring_waits_out_the_doubt_for_a_backup_through_the_far_end`]): `A`, left with no
@@ -526,17 +529,20 @@ async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
 				"{name} after {back:?}: back on the primary: {seen:?}"
 			);
 		}
-		for (name, seen) in ["B", "C"].into_iter().zip(&seen[1..]) {
-			assert!(!seen.iter().any(withdrawn), "{name} after {back:?}: {seen:?}");
-			let held = seen.iter().position(|seen| !seen.available).expect("held");
-			let usable = seen.iter().position(|seen| seen.available).expect("usable");
+		for ((name, backup), seen) in [("B", 4), ("C", 5)].into_iter().zip(&seen[1..]) {
 			assert!(
-				held < usable && seen[usable].at >= DOUBT,
+				seen.iter().all(|seen| seen.available && !withdrawn(seen)),
 				"{name} after {back:?}: {seen:?}"
 			);
-			// Within the doubt, the primary returns before anyone moves onto the backup.
-			let moved = seen.iter().any(|seen| seen.available && seen.cost != 2);
-			assert_eq!(moved, back > DOUBT, "{name} after {back:?}: {seen:?}");
+			assert!(
+				seen[0].cost == backup && seen[0].at < DOUBT,
+				"{name} after {back:?}: onto the backup before the doubt lifts: {seen:?}"
+			);
+			let returned = seen.iter().position(|seen| seen.cost == 2).expect("returned");
+			assert!(
+				seen[returned].at >= back.max(DOUBT),
+				"{name} after {back:?}: not back before the doubt lifts: {seen:?}"
+			);
 		}
 		let kinds: Vec<_> = seen[0].iter().map(|seen| seen.kind).collect();
 		assert_eq!(

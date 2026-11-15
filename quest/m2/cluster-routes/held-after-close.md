@@ -9,6 +9,10 @@ route recovers.
 
 ## Plan
 
+Kept 2026-11-15 (maintainer, /quest-complete on
+[moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
+m2 (rejected: drop; moving it to m3).
+
 Found by [acceptance](/quest/m2/cluster-routes/acceptance.md) on real
 lite-07 sessions, three times over:
 `route_acceptance::a_ring_waits_out_the_doubt_for_a_backup_through_the_far_end`,

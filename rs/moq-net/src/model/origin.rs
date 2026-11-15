@@ -858,10 +858,14 @@ impl<'a> Epochs<'a> {
 }
 
 /// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
-/// Lower wins: first a route that is neither draining (see [`RouteInfo::draining`]) nor
-/// unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
-/// route ranks below every other eligible route and serves only as a last resort. Then the higher link [`Preference`], so metrics from different operators
-/// are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// Lower wins: first the route layer's narrowest route covering the claim, so a wider
+/// lite-07 route ranks below every narrowest one, even a draining or unavailable one, and
+/// serves only while a closing session leaves no narrowest route. Then a route that is
+/// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
+/// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
+/// every other eligible route and serves only as a last resort. Then the route layer's
+/// selected route ahead of its alternates. Then the higher link [`Preference`], so
+/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
