@@ -806,3 +806,124 @@ fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
 	});
 	assert_eq!(last, Some((vec![p("live/y")], Some(6))));
 }
+
+/// What one route update makes a relay do, behind an origin with `claims` claims beside
+/// another origin with `others`: the serve commands its session applies to the origin,
+/// for a repath and then for an RTT change, and the ROUTE and other messages a stream
+/// watching the root is sent for both.
+fn reserved(claims: usize, others: usize) -> (usize, usize, usize, usize) {
+	let instance = Instance::random();
+	let relay = Node::new(2, 2, clock());
+	let edge = relay.answer(peer(3, 3), Link::default(), Path::empty()).unwrap();
+	let up = relay.receive(peer(1, 10), Link::default()).unwrap();
+	let offer = |id: Id, far: Id| {
+		let path = [
+			Hop { node: id, session: 0 },
+			Hop { node: far, session: 1 },
+			Hop { node: 10, session: 1 },
+		];
+		let offer = Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+			rtt: Some(Duration::ZERO),
+		};
+		Some(Reach::Finite(offer))
+	};
+	let live = claim(&instance, 0);
+	for (id, count) in [(5, claims), (6, others)] {
+		let prefix = Path::new(&format!("o{id}")).unwrap();
+		up.route(id, prefix.clone(), offer(id, 500));
+		let changes = (0..count)
+			.map(|i| (Path::new(&format!("o{id}/{i}")).unwrap(), Some(live.clone())))
+			.collect();
+		up.batch(id, prefix, changes, Some(1));
+	}
+	serve_all(&up);
+	outputs(&edge);
+	// Read after each update, since a route's unread changes coalesce.
+	let mut sent = Vec::new();
+	up.route(5, p("o5"), offer(5, 501));
+	let repath = served(outputs(&up)).len();
+	sent.extend(wire(outputs(&edge)));
+	up.rtt(Some(Duration::from_millis(40)));
+	let rtt = served(outputs(&up)).len();
+	sent.extend(wire(outputs(&edge)));
+	let routes = (sent.iter()).filter(|out| matches!(out, Output::Route { .. })).count();
+	(repath, rtt, routes, sent.len() - routes)
+}
+
+/// A route update re-serves every claim behind it: the session rewrites the origin's
+/// route table once per broadcast, each a `sync_route` that wakes the fronts and cursors
+/// below it, though no claim changed. The wire stays flat: a stream watching the route
+/// is sent one ROUTE per update and no claim, and a repath leaves other origins alone.
+/// This should be one write per route, which its broadcasts refer to.
+#[test]
+fn residual_a_route_update_reserves_every_claim() {
+	for claims in [1, 8, 64] {
+		for others in [0, 64] {
+			let (repath, rtt, routes, other) = reserved(claims, others);
+			// The RTT change moves both origins' routes, which share the link.
+			assert_eq!(
+				(repath, rtt),
+				(claims, claims + others),
+				"{claims} claims, {others} beside"
+			);
+			let changed = 2 + usize::from(others > 0);
+			assert_eq!((routes, other), (changed, 0), "a ROUTE per route changed, and no claim");
+		}
+	}
+}
+
+/// Each closed session is remembered until the doubt timer, even one that sent this node
+/// no route, as a viewer's does: a dead hop for its session, and a doubt on its node when
+/// it declared one. Viewer churn grows both by the sessions closed inside one timer. A
+/// session no route was learned on has no hop any path can name, so it need not be
+/// remembered.
+#[test]
+fn residual_each_closed_session_is_remembered_until_the_doubt_timer() {
+	const CLOSED: u64 = 64;
+	for declared in [false, true] {
+		let instance = Instance::random();
+		let clock = clock();
+		let relay = Node::new(2, 2, clock.clone());
+		let up = relay.receive(peer(1, 10), Link::default()).unwrap();
+		let offer = Offer {
+			path: [Hop { node: 5, session: 0 }, Hop { node: 10, session: 1 }].into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+		};
+		up.route(5, Path::empty(), Some(Reach::Finite(offer)));
+		up.batch(
+			5,
+			Path::empty(),
+			vec![(p("live/x"), Some(claim(&instance, 0)))],
+			Some(1),
+		);
+		serve_all(&up);
+		for viewer in 0..CLOSED {
+			let node = if declared { 1000 + viewer } else { 0 };
+			let stream = (relay.answer(peer(100 + viewer, node), Link::default(), Path::empty())).unwrap();
+			outputs(&stream);
+			let closing = relay.closing(100 + viewer);
+			drop(stream);
+			drop(closing);
+		}
+		let kept = relay.lock().router.retained();
+		let doubts = if declared { CLOSED as usize } else { 1 };
+		assert_eq!(
+			(kept.dead, kept.doubt),
+			(CLOSED as usize, doubts),
+			"declared {declared}"
+		);
+		clock.advance(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+		relay.timeout();
+		let kept = relay.lock().router.retained();
+		assert_eq!((kept.dead, kept.doubt), (0, 0), "declared {declared}");
+	}
+}

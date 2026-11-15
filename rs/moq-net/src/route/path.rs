@@ -1322,14 +1322,12 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			}
 		}
 		let key = (id, prefix);
-		let entry = self.rx.get(&key).and_then(|routes| routes.get(&from));
 		match reach {
 			// A path a node could not extend is refused, as if ended.
 			Some(Reach::Finite(offer)) if offer.extendable() => {
-				let (view, batched) = entry.map_or_else(Default::default, |entry| (entry.view.clone(), entry.batched));
-				if entry.is_some() {
-					self.forget_heard(&key, from);
-				}
+				// A new path keeps the claims the route carries.
+				let (view, batched) =
+					(self.forget_heard(&key, from)).map_or_else(Default::default, |heard| (heard.view, heard.batched));
 				let state = match self.dead_in(&offer.path) {
 					true => State::Dead,
 					false => State::Live,
@@ -1353,10 +1351,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				heard.state = State::Held;
 			}
 			Some(Reach::Finite(_)) | None => {
-				if entry.is_none() {
+				if self.forget_heard(&key, from).is_none() {
 					return;
 				}
-				self.forget_heard(&key, from);
 			}
 		}
 		self.update_route(key);
@@ -1951,13 +1948,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.rx.entry(key).or_default().insert(from, heard);
 	}
 
-	fn forget_heard(&mut self, key: &RouteId, from: N) {
-		let Some(routes) = self.rx.get_mut(key) else {
-			return;
-		};
-		let Some(heard) = routes.remove(&from) else {
-			return;
-		};
+	/// Forget the route `from` sent under `key`, returning it, so a caller keeping its
+	/// claims moves them rather than copying every one.
+	fn forget_heard(&mut self, key: &RouteId, from: N) -> Option<Heard<A>> {
+		let routes = self.rx.get_mut(key)?;
+		let heard = routes.remove(&from)?;
 		if routes.is_empty() {
 			self.rx.remove(key);
 		}
@@ -1985,13 +1980,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				self.filed.remove(&(key.0, from));
 			}
 		}
+		Some(heard)
 	}
 
 	/// Re-path a heard route in place, keeping its claims.
 	fn repath(&mut self, key: &RouteId, from: N, offer: Offer) {
 		let named = self.name(from, key.0);
-		let mut heard = self.rx[key][&from].clone();
-		self.forget_heard(key, from);
+		let mut heard = self.forget_heard(key, from).expect("heard");
 		heard.state = match self.dead_in(&offer.path) {
 			true => State::Dead,
 			false => State::Live,
@@ -2093,7 +2088,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if let Some(offer) = moved {
 			match offer.extendable() {
 				true => self.repath(key, peer, offer.clone()),
-				false => self.forget_heard(key, peer),
+				false => drop(self.forget_heard(key, peer)),
 			}
 			return;
 		}
@@ -2699,7 +2694,11 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Tell each neighbour that was sent a route through `hop` what became of those
 	/// routes, in one [`Dead`] where it is the first word on that hop.
 	fn report(&mut self, hop: Hop) {
-		let peers: Vec<N> = self.sessions.keys().copied().collect();
+		// Only the neighbours sent a route through the hop are told, so only they are visited,
+		// not every session.
+		let peers: BTreeSet<N> = (self.tx_hops.get(&hop).into_iter().flatten())
+			.map(|(peer, _)| *peer)
+			.collect();
 		for peer in peers {
 			let lo = (peer, (0, Path::empty()));
 			let through: Vec<RouteId> = (self.tx_hops.get(&hop).into_iter())
@@ -2707,9 +2706,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.take_while(|(to, _)| *to == peer)
 				.map(|(_, key)| key.clone())
 				.collect();
-			if through.is_empty() {
-				continue;
-			}
 			let Some(answer) = self.answering.get(&peer) else {
 				continue;
 			};
@@ -2910,29 +2906,26 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// Bring what each watching neighbour was sent for `id` up to date, with the `dirty`
 	/// claims changed since.
 	fn advertise(&mut self, id: Id, dirty: &Dirty, region: Option<&Path>) {
-		let peers: Vec<(N, BTreeSet<Path>)> = self
-			.answering
-			.iter()
-			.map(|(peer, answer)| (*peer, answer.prefixes.clone()))
-			.collect();
 		// Plan every stream against the state as it stands, then send.
 		let mut plans = Vec::new();
 		let mut planned: BTreeMap<N, BTreeSet<Path>> = BTreeMap::new();
-		for (peer, prefixes) in &peers {
-			for prefix in self.stream(id, *peer, prefixes, region) {
-				planned.entry(*peer).or_default().insert(prefix.clone());
+		for (&peer, answer) in &self.answering {
+			// Every stream is visited, whether or not the change meets it.
+			self.step();
+			let prefixes = &answer.prefixes;
+			for prefix in self.stream(id, peer, prefixes, region) {
+				planned.entry(peer).or_default().insert(prefix.clone());
 				self.step();
-				let want = self.want(id, &prefix, *peer, prefixes);
-				let on =
-					(self.answering[peer].tx.get(&(id, prefix.clone()))).is_some_and(|sent| sent.offer().is_some());
+				let want = self.want(id, &prefix, peer, prefixes);
+				let on = (answer.tx.get(&(id, prefix.clone()))).is_some_and(|sent| sent.offer().is_some());
 				let batch = match &want {
-					Want::Path(..) => Some(self.present(id, *peer, &prefix, dirty)),
+					Want::Path(..) => Some(self.present(id, peer, &prefix, dirty)),
 					Want::Empty if on && self.covering_view(id, &prefix).is_some() => {
-						Some(self.present(id, *peer, &prefix, dirty))
+						Some(self.present(id, peer, &prefix, dirty))
 					}
 					_ => None,
 				};
-				plans.push((*peer, prefix, want, batch));
+				plans.push((peer, prefix, want, batch));
 			}
 		}
 		for (peer, prefix, want, batch) in plans {
@@ -3224,6 +3217,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		// Reflected sources must move before old holds ask whether a child answered.
 		let mut sources = Vec::new();
 		for (&peer, answer) in self.answering.iter().filter(|_| route_changed) {
+			self.step();
 			let prefixes = &answer.prefixes;
 			for &id in &ids {
 				let region = scope.as_ref().filter(|(key, _)| *key == id).map(|(_, prefix)| prefix);
