@@ -48,7 +48,7 @@ runner-userns:
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
-# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
+# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, that every opt-in test has a caller, and that every benchmark test Nightly filters on still exists in the Rust sources.
 check:
     python3 sh/version.py
     actionlint
@@ -58,8 +58,9 @@ check:
     bun sh/gh/check-runs.ts
     python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
+    python3 sh/gh/nightly.test.py NightlyTest.test_every_nightly_benchmark_test_exists
 
-# Repository tooling tests; run every ordinary test file whole in the merge gate.
+# Repository tooling tests; the merge gate runs every ordinary test file whole when tooling changes.
 test:
     python3 sh/version.test.py
     python3 sh/local.test.py
@@ -81,6 +82,7 @@ test:
     python3 sh/text.test.py
     python3 sh/coverage-tables.test.py
     python3 sh/tlc.test.py
+    python3 sh/tla.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/gh/test-inventory.test.py
     bun test ./sh/gh/remeasure.test.ts
