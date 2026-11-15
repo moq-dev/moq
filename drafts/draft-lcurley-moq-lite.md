@@ -2430,6 +2430,11 @@ AUTH_ERROR Message {
 A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
 A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
 
+INTERNAL_ERROR, TOO_MANY_REQUESTS, and CONTROL_MESSAGE_TIMEOUT mean the acceptor failed to decide, such as when its authorization service is unreachable or its verification queue is full.
+A presenter that receives one of them SHOULD present the same token again on a new Auth Stream after a backoff that grows with each consecutive such refusal, and treats the token as unanswered until then.
+Any other code is the acceptor's decision on the token: the presenter does not present that token again.
+An acceptor that cannot decide SHOULD send one of the first three codes rather than UNAUTHORIZED, which ends the token.
+
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
 Invalid UTF-8 or a reason longer than 8,192 bytes is a PROTOCOL_VIOLATION that closes the session.
@@ -2536,6 +2541,7 @@ An application-specific payload.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Scope widens before AUTH_OK. A presenter waits for unanswered non-empty tokens before sending an uncovered request or rejecting a publication, and renewal waits for AUTH_OK before withdrawing the old token.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION, as do invalid UTF-8 or an oversized AUTH_ERROR reason.
+- An AUTH_ERROR with INTERNAL_ERROR, TOO_MANY_REQUESTS, or CONTROL_MESSAGE_TIMEOUT leaves the token undecided, and the presenter presents it again after a growing backoff; any other code ends the token.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 
 ### Paths and Routing {#changelog-07-routing}
