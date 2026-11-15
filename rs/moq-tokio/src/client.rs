@@ -72,7 +72,7 @@ pub struct Client {
 	tls_host_name: Option<String>,
 	/// Only the TLS-based dials read this; the plaintext qmux transports have none.
 	tls: rustls::ClientConfig,
-	quic: Option<crate::quic::Client>,
+	quic: crate::quic::Client,
 	/// The settings each qmux dial starts from: the `[quic]` windows and stream count, so a
 	/// qmux session takes the same per-session numbers as a QUIC one.
 	qmux: qmux::Config,
@@ -134,7 +134,7 @@ impl Client {
 			Some(host) => crate::quic::Client::simulated(&config, &quic, host),
 			None => crate::quic::Client::new(&config, &quic),
 		};
-		let quic = Some(quic?);
+		let quic = quic?;
 
 		let versions = config.versions();
 		// Read before the struct literal below moves fields out of `config`.
@@ -299,7 +299,7 @@ impl Client {
 			return false;
 		}
 		// An explicitly closed QUIC endpoint cannot open another socket.
-		let quic = self.quic.as_ref().is_some_and(|quic| !quic.is_closed());
+		let quic = !self.quic.is_closed();
 		#[cfg(feature = "sim")]
 		if self.simulated() {
 			return quic && simulated_scheme(scheme);
@@ -318,13 +318,11 @@ impl Client {
 	/// Whether QUIC binds on a simulated host, where no other transport can dial.
 	#[cfg(feature = "sim")]
 	fn simulated(&self) -> bool {
-		self.quic.as_ref().is_some_and(crate::quic::Client::is_simulated)
+		self.quic.is_simulated()
 	}
 
 	pub(crate) fn fresh_port(&mut self) -> crate::Result<()> {
-		if let Some(quic) = &mut self.quic {
-			quic.fresh_port()?;
-		}
+		self.quic.fresh_port()?;
 		Ok(())
 	}
 
@@ -342,9 +340,7 @@ impl Client {
 	/// Only the QUIC endpoint is closed. WebSocket, TCP, and UDS sessions end when their
 	/// [`Connection`] is dropped (the kernel closes the socket on exit).
 	pub async fn close(self) {
-		if let Some(quic) = self.quic {
-			quic.close().await;
-		}
+		self.quic.close().await;
 	}
 
 	/// Connect to the configured [`connect.url`](crate::connect::Config::url) URL, publishing
@@ -445,7 +441,7 @@ impl Client {
 	/// Whether a session dialed at `url` over `transport` sits on the WebSocket fallback of
 	/// a race QUIC could win, so it should probe QUIC.
 	pub(crate) fn on_fallback(&self, url: &Url, transport: crate::Transport) -> bool {
-		transport == crate::Transport::WebSocket && self.quic.is_some() && matches!(url.scheme(), "http" | "https")
+		transport == crate::Transport::WebSocket && matches!(url.scheme(), "http" | "https")
 	}
 
 	/// Reach one probe of a [`Connection`]'s policy over QUIC alone, with no WebSocket
@@ -468,11 +464,7 @@ impl Client {
 				Ok(Dialed::new(connect_session(&moq, session).await?, transport))
 			}));
 		}
-		let quic = self
-			.quic
-			.as_ref()
-			.ok_or(Error::NoBackend("a probe needs the QUIC backend"))?;
-		let session = quic.connect(&client.tls, addr, &client.versions).await?;
+		let session = self.quic.connect(&client.tls, addr, &client.versions).await?;
 		Ok(Box::pin(async move {
 			Ok(Dialed::new(connect_session(&moq, session).await?, transport))
 		}))
@@ -529,25 +521,22 @@ impl Client {
 			return self.connect_websocket(&moq, addr).await;
 		}
 
-		if let Some(quic) = self.quic.as_ref() {
-			let quic_addr = addr.clone();
-			let quic_handle = async {
-				quic.connect(&self.tls, quic_addr, &self.versions)
-					.await
-					.map_err(Error::from)
-			};
+		let quic_addr = addr.clone();
+		let quic_handle = async {
+			self.quic
+				.connect(&self.tls, quic_addr, &self.versions)
+				.await
+				.map_err(Error::from)
+		};
 
-			// A simulated host has no TCP for the fallback to race.
-			if !quic.is_simulated() {
-				return self.race_moq_connect(&moq, addr, quic_handle).await;
-			}
-
-			let session = quic_handle.await?;
-			let session = connect_session(&moq, session).await?;
-			return Ok(Dialed::new(session, quic_transport(&url)));
+		// A simulated host has no TCP for the fallback to race.
+		if !self.quic.is_simulated() {
+			return self.race_moq_connect(&moq, addr, quic_handle).await;
 		}
 
-		return self.connect_websocket(&moq, addr).await;
+		let session = quic_handle.await?;
+		let session = connect_session(&moq, session).await?;
+		Ok(Dialed::new(session, quic_transport(&url)))
 	}
 
 	/// Connect over WebSocket alone.
@@ -1178,7 +1167,7 @@ mod tests {
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
 		// as plain ws:// so the listener above can answer without TLS.
-		let quic = client.quic.clone().unwrap();
+		let quic = client.quic.clone();
 		let (tls, versions) = (client.tls.clone(), client.versions.clone());
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
 		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
@@ -1275,7 +1264,7 @@ mod tests {
 		let client = client.with_subscriber(sub_origin);
 		let dialer = client.clone();
 		let quic = Box::pin(async move {
-			let quic = dialer.quic.as_ref().expect("QUIC backend");
+			let quic = &dialer.quic;
 			let session = quic.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
 			Ok::<_, crate::Error>(session)
