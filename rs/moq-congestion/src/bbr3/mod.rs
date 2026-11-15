@@ -1395,6 +1395,9 @@ impl Bbr3 {
     fn handle_restart_from_idle(&mut self, now: Instant) {
         if self.inflight == 0 && self.rate.is_app_limited() {
             self.idle_restart = true;
+            // A new epoch: bytes delivered before the idle gap are not aggregation of the burst
+            // after it, and the window they lift would feed them back.
+            self.extra_acked_delivered = 0;
             self.extra_acked_interval_start = Some(now);
             match self.state {
                 BbrState::ProbeBw(_) => {
@@ -7283,6 +7286,34 @@ mod test {
         let rs = sim.bbr.rs.unwrap();
         assert!(rs.is_app_limited);
         assert_eq!(sim.bbr.max_bw, 1_200_000.0);
+    }
+
+    /// Media sends a frame as a burst every frame interval, idle in between and acknowledged
+    /// whole. Each burst is all the aggregation there is: bytes of earlier bursts never count
+    /// toward `extra_acked`, or the window it lifts feeds back into it.
+    #[test]
+    fn idle_gaps_keep_extra_acked_bounded() {
+        let mut sim = Sim::new(Config::default(), 1200, 1.25e6, 20 * MS);
+        let burst = 28u64;
+        let burst_bytes = burst * 1200;
+        for frame in 0..600u64 {
+            let sent_ns = frame * 33 * MS;
+            let first = sim.pn;
+            sim.send(sent_ns, burst);
+            sim.starve();
+            // The bottleneck serializes the burst, so its ACKs arrive spread out.
+            for i in 0..burst {
+                let ack_ns = sent_ns + 20 * MS + i * 960_000;
+                sim.ack(ack_ns, [first + i], i + 1 == burst);
+            }
+            sim.starve();
+            assert!(
+                sim.bbr.extra_acked <= burst_bytes,
+                "frame {frame}: extra_acked {} exceeds one burst {burst_bytes}",
+                sim.bbr.extra_acked
+            );
+        }
+        assert!(sim.bbr.cwnd <= 4 * burst_bytes, "cwnd {}", sim.bbr.cwnd);
     }
 
     /// An application sending one packet per burst, idle in between. The transport polls after
