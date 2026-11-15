@@ -765,6 +765,7 @@ esac
             ("go/wrapper/VERSION", True),
             ("rs/moq-net/Cargo.toml", True),
             ("rs/moq-net/verify/route/Early.cfg", True),
+            ("rs/moq-net/verify/route/RouteHandoff.tla", False),
             ("js/net/bench/fills.ts", True),
             ("js/justfile", True),
             ("flake.lock", True),

@@ -211,7 +211,7 @@ module gh '' \
 # `just gh test`, the repository tooling tests, follow what they run and read,
 # including the selectors under sh/, and the flake that pins their tools, such
 # as release-plz. Nightly's full gate runs them whatever changed.
-module tooling '^(sh/|bench/|test/smoke/|\.github/|\.cargo/|go/wrapper/|rs/[^/]+/(Cargo\.toml$|verify/)|js/[^/]+/bench/|flake\.(nix|lock)$)|(^|/)justfile$' \
+module tooling '^(sh/|bench/|test/smoke/|\.github/|\.cargo/|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/bench/|flake\.(nix|lock)$)|(^|/)justfile$' \
     tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
