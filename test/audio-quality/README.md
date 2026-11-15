@@ -125,7 +125,8 @@ Chromium GC timeline in `<tag>.trace.json` and sampled CPU profile in `<tag>.pro
 Tracing can perturb playback; compare it with a separate
 untraced control and never use traced rows to calibrate quality budgets.
 
-To replay a capture, put its arrivals and final environment configuration into the version 3
+To replay a capture, put its arrivals, final environment configuration, and `largest` (the
+observer's join, `environment.largest` in `<tag>.page.json`) into the version 4
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
 `at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
 target from the arrivals and holds the configuration constant; compare the raw samples when it
@@ -215,7 +216,7 @@ them, each graded as a `replay` row whose profile is the file's name:
 | `relay-mic-stall` | `relay-mic` with nothing arriving from 15 s to 16.5 s, then the held frames trickling in oldest first at twice real time until they meet live arrivals at 18 s: the stall a congested path causes, longer than the target, with its backlog arriving late |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
-PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group, duration]`,
+PROBE round trip the session saw, the publisher's largest group at tune-in, how long it observed, and every frame's `[at, timestamp, group, duration]`,
 with `at` on the viewer's clock and `duration` in ms. Duration comes from the container's sample
 metadata, the Opus packet TOC, or the codec's fixed sample count. Capture refuses a frame whose
 duration cannot be determined; timestamp gaps never stand in for missing packet payloads.
@@ -224,7 +225,8 @@ receives it, with the same transport, container, and codec-duration readers over
 on the delay, so the replay decides those again.
 
 `replay.ts` plays a trace through the player's own `Container.Consumer` and ring on a simulated
-clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
+clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), whose consumer is told
+the trace's `largest` as a wire subscriber is told by the publisher, at the "auto" delay a
 real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
 the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
 discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
@@ -251,6 +253,18 @@ just test audio-quality-record --lanes relay-mic --mic-broadcast <name>
 `anon` path, such as the demo's publish page pointed at `https://cdn.moq.dev/anon` with a real
 microphone, instead of publishing Chromium's fake capture device. Name the browser and device in
 the trace's `source` before checking it in.
+
+Version 4 adds `largest`, the publisher's largest group as the subscription began, which a wire
+subscriber learns from the publisher's answer and the replay's consumer needs to tell a group it
+skips unread as the join's backlog. The recorder and the `--capture` observer read it the way
+`js/hang`'s consumer does: once the track's info or first group shows the subscription established
+and its start resolved, so a cached group racing the answer, or live groups landing after it, do not
+set it. No earlier recording kept the answer, and re-recording needs a person at the microphone and
+would move every other column of the baseline, so each checked-in trace derives it: the newest group
+whose first frame's media timestamp plus the trace's lowest lag (the smallest `at - timestamp`) falls
+at or before the first arrival, the live edge as the first frame arrived. Its `source` says so. For
+`relay-mic-rtt40` that is group 8994, where its first arrival is the stale group 7499 and the relay's
+backlog reaches about 9047.
 
 Version 3 adds per-frame durations. The AAC-LC recordings made before that field existed retain
 their arrival clocks and use the codec's fixed 1024 samples per frame. The Opus `relay-mic` recording

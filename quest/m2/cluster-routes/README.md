@@ -82,6 +82,8 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
 
 30. ✅ Decided 2026-11-12 (maintainer, /quest-audit before the cut), after a survey of BGP, EIGRP, and their successors against item 27: most of the path rule already matches that prior art (AS_PATH loop detection, root-cause withdrawal, graceful restart, End-of-RIB, outbound route filtering, and item 29's Only-To-Customer flag). Three gaps are taken, all in [the switch](https://github.com/moq-dev/moq/pull/8731) and [acceptance](/quest/m2/cluster-routes/acceptance.md): **a dead-hop message on a scoped session applies only to the routes heard on that session and casts no doubt**, since in BGP a neighbour withdraws only what it sent, and a scoped peer (a federated relay, later a browser) could otherwise name a core hop it only read in a path and drop healthy routes outside its scope; **holds are bounded in time**, a neighbour's missing answer counting as nothing after a deadline, and a session whose announce stream has stopped draining is closed, which avoids EIGRP's stuck-in-active and BGP's zombie routes (RFC 9687), and is safe because a hold protects presence, not loop freedom; and **three tests before any design change**: neighbours noticing a dead relay up to the 3 s keep-alive apart (to size the doubt timer, measured in hops of delay today), a three-relay priority dispute wheel (RFC 4264's wedgies, since priority ranks above cost), and a primary that fails and returns. No wire bytes change; the first defines what the dead-hop message means. Rejected: declaring the link relation in SETUP and refusing leaked routes on receipt (RFC 9234), since the accepting side already knows the relation from its grant and it adds wire for a misconfiguration; MRAI and route-flap damping, which exist because BGP delays announcements; link state; per-hop signatures.
 
+31. Reopened 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅ **this rule is the baseline, and [cache-aware multicast](/quest/m2/multicast/README.md) replaces it on lite-07-wip before the cut.** An audit of what is built found requirements the path rule does not meet: its exhaustive checking stops at 3 relays and rests on a timer that outlasts every stale offer, route state follows publishers, nothing prefers a warm copy, and a stalled route is never left. Superseded there: item 18 (every publisher an origin node), item 19 (ROUTE_HOLD), item 26's route per scope, item 27's doubt and remembered dead hops, the Route Key and qualified Node IDs of the contract below, and item 14. Standing: the path with its self-naming rule and the withdrawal that names a dead hop (item 27), revisions and floors, one announce stream per side with its interest set (items 21 to 24), the sticky down-only flag (item 29), and drain, then priority, then cost. This epic's children still land: they are what the [bake-off](/quest/m2/multicast/bakeoff.md) measures against. Rejected: repairing this rule in place; freezing lite-07 with it and redesigning in lite-08.
+
 The route layer's core landed in
 [moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676): a
 crate-private, sans-IO `Router` in `rs/moq-net/src/route/`, generic over the
@@ -93,10 +95,11 @@ lite-07 session in Rust and `js/net` drives the path router
 deleted with its distance, seqno requests, and echo. The handoff fixtures,
 both sweeps, and the route-layer fixtures of the contract run against it in
 `route/tests/`, and real sessions with mocked time in
-`tests/integration/path_routes.rs`; the forwarding and first-hop selection
-fixtures still run only on the Babel-era reference model in
-`rs/moq-net/tests/integration/routing_contracts/`, which
-[acceptance](/quest/m2/cluster-routes/acceptance.md) deletes. The children below carry the rest, in order, and land in
+`tests/integration/path_routes.rs`. The forwarding fixtures run on the router
+in `route/tests/forward.rs`, and the topology, failover, and cluster
+acceptance fixtures on real sessions in `tests/integration/route_acceptance.rs`,
+`route_failover.rs`, and `route_cluster.rs`; the Babel-era reference model is
+deleted. The children below carry the rest, in order, and land in
 one release: lite-07 carries the route layer as a whole
 ([lite-07 finalize](/quest/m2/lite07-finalize.md) waits on this epic). This
 README holds the routing contract every child implements.
@@ -123,10 +126,7 @@ Settled by the core, for review:
 
 Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 2026-10-13 [decisions](/quest/m3/cluster-routing/README.md) and the routing
-contract below. The routing contract's remaining model fixtures live in
-`rs/moq-net/tests/integration/routing_contracts/` and run against a small reference model;
-port each topology to the implementation as acceptance, then delete the model.
-The handoff contract below, decided 2026-10-16, settles claim freshness:
+contract below. The handoff contract below, decided 2026-10-16, settles claim freshness:
 
 The lite-07 wire is specified in `drafts/draft-lcurley-moq-lite.md` (Announce,
 Floors, and Routing), and `rs/moq-net/src/lite/announce.rs` encodes and decodes
@@ -196,9 +196,8 @@ the bullets below are the contract it carries.
   id, when the connection's publish grant is scoped, and bare when it is
   unscoped (publish `**` at the root). Its own identity is no exception
   (2026-10-26): the bare exemption relied on the dropped proof, so an
-  unproven own identity could otherwise claim a victim's. Extend the fixture
-  below to a forger declaring the victim's id as its own, and drop the
-  reference model's `proved` exemption. The key has its own hash domain, so
+  unproven own identity could otherwise claim a victim's, as the fixture
+  below's forger does. The key has its own hash domain, so
   it cannot collide with a key-derived identity, and is collision-resistant
   at the identity width, since the forwarder picks `id` and could otherwise
   grind another peer's key. The relay that files it translates it back when
@@ -206,7 +205,7 @@ the bullets below are the contract it carries.
   outside the grant's scope. Routes are shared by all of an identity's
   claims, so otherwise a scoped peer forging an identity, or declaring a
   victim's id as its own, captures claims outside its namespace
-  (`forged_identity_hijacks_claims_outside_the_forgers_scope`); with it, a
+  (`a_forged_identity_is_contained_by_a_scoped_admission`); with it, a
   forger or a misconfigured uplink only affects its own scope. The `peer`
   claim no longer decides transit trust. Legitimate scoped delivery survives
   losing one of two uplinks under one key
@@ -221,7 +220,7 @@ the bullets below are the contract it carries.
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a
   misconfigured uplink comes back and is filed again as a new identity on
-  every lap (`scoped_connections_cannot_requalify_a_qualified_identity`).
+  every lap (`a_qualified_identity_is_never_qualified_again`).
   Nested scoped federation is therefore out: the inner level must be
   unscoped. Revisit with a wire change if a use case appears. Rejected:
   keying a forwarded identity by its bare id and the narrowest scope it
@@ -282,13 +281,14 @@ the bullets below are the contract it carries.
   when its selected route turns down-only, and the first hop re-resolves; no
   request bit goes on the wire. One selection hides a cheaper exportable
   route whenever the preferred route is down-only
-  (`preferred_down_only_route_hides_the_exportable_alternative`); this is
-  accepted, and ranking local peers above a backup uplink avoids it. The
-  two-view model it replaces lost its export restriction one LAN hop after an
-  upstream ingress, and identity-only aggregation deadlocked across views
-  (`cdn_never_reaches_its_own_relay_through_the_lan`,
-  `upstream_ingress_ends_a_request_whose_route_turns_down_only`,
-  `dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
+  (`a_preferred_down_only_route_hides_the_exportable_alternative`); this is
+  accepted, and ranking local peers above a backup uplink avoids it, though a
+  route's priority is the lowest on its path, so it must outrank the whole
+  path. The two-view model it replaces lost its export restriction one LAN hop
+  after an upstream ingress, and identity-only aggregation deadlocked across
+  views (`the_cdn_never_reaches_itself_through_the_lan`,
+  `an_upstream_request_stops_once_the_route_turns_down_only`,
+  `a_dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
   misconfigured uplink that leaks CDN routes back is contained by
   qualified identities rather than a downstream mark
   (`misconfigured_uplink_is_contained_by_qualified_identities`).

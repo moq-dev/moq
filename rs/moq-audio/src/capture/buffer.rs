@@ -28,7 +28,7 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) fn channel(
 	channels: usize,
 	sample_rate: u32,
-	#[cfg(feature = "aec")] aec: Option<crate::aec::Attachment>,
+	#[cfg(all(feature = "capture", feature = "playback"))] aec: Option<crate::aec::Attachment>,
 ) -> (Writer, Reader) {
 	let samples = CHUNK_FRAMES * channels;
 	let (filled, pending) = HeapRb::<Filled>::new(DEPTH).split();
@@ -63,7 +63,7 @@ pub(super) fn channel(
 		channels,
 		sample_rate,
 		capture: None,
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		aec,
 	};
 	let reader = Reader {
@@ -129,7 +129,7 @@ pub(super) struct Writer {
 	sample_rate: u32,
 	/// Capture instant of the next chunk's first sample. `None` stamps arrival.
 	capture: Option<Instant>,
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	aec: Option<crate::aec::Attachment>,
 }
 
@@ -171,7 +171,7 @@ impl Writer {
 			debug_assert!(output.data.capacity() >= input.len());
 			output.data.extend(input.iter().copied().map(&convert));
 
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			if let Some(aec) = &self.aec {
 				aec.process(&mut output.data);
 			}
@@ -252,7 +252,7 @@ impl Writer {
 
 	fn drop_one(&mut self) {
 		self.pending_gap = true;
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		if let Some(aec) = &self.aec {
 			aec.mark_discontinuous();
 		}
@@ -317,12 +317,12 @@ mod tests {
 		channel(
 			channels,
 			48_000,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			None,
 		)
 	}
 
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	fn create_with_aec(channels: usize) -> (Writer, Reader, crate::aec::Control) {
 		let aec = crate::aec::Control::new(
 			Arc::new(crate::playback::Shared::default()),
@@ -416,7 +416,7 @@ mod tests {
 		assert_eq!(recovered.data[0], 1.0);
 	}
 
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[tokio::test]
 	async fn overflow_discards_partial_aec_frames() {
 		let (mut writer, mut reader, aec) = create_with_aec(1);

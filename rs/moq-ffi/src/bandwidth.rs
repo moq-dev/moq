@@ -21,7 +21,6 @@ impl MoqAllocator {
 		Self { allocator }
 	}
 
-	#[cfg(feature = "audio")]
 	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
@@ -63,7 +62,6 @@ impl MoqReservation {
 		Self { inner }
 	}
 
-	#[cfg(feature = "video")]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
 		self.inner.consume()
 	}
@@ -443,7 +441,6 @@ mod tests {
 		assert_eq!(control.target(), MoqRateTarget::Enabled { bitrate_bps: 3_000_000 });
 	}
 
-	#[cfg(feature = "video")]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
 		let estimate = moq_net::bandwidth::Producer::new();

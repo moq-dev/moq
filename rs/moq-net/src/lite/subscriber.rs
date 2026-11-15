@@ -927,9 +927,6 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteEnd { .. }
 			| lite::AnnounceBroadcast::Dead(_)
 			| lite::AnnounceBroadcast::Floor { .. }
-			| lite::AnnounceBroadcast::WarmStart { .. }
-			| lite::AnnounceBroadcast::WarmUpdate { .. }
-			| lite::AnnounceBroadcast::WarmEnd { .. }
 			| lite::AnnounceBroadcast::Refused { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
@@ -10849,6 +10846,63 @@ mod tests {
 			);
 			let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{what}: {err}");
+		}
+	}
+
+	/// Every well-formed message naming a Route ID closes the session when the neighbour
+	/// never assigned it (5, past its two routes) or already retired it (0, after its
+	/// ROUTE_END), as the draft requires: a route's state is the neighbour's to keep in
+	/// step, so a stray ID means the two ends disagree on which routes live.
+	#[kio::test]
+	async fn an_unassigned_or_retired_route_id_closes_the_session() {
+		type Encode = Box<dyn Fn(&mut crate::coding::Encoder<'_>)>;
+		let encode = |message: lite::AnnounceBroadcast| -> Encode {
+			Box::new(move |w| message.encode(w, Version::Lite07).unwrap())
+		};
+		let naming = |id: u64| -> [(&str, Encode); 6] {
+			[
+				(
+					"ROUTE_UPDATE",
+					Box::new(raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))),
+				),
+				("ROUTE_HOLD", encode(lite::AnnounceBroadcast::RouteHold { id })),
+				("ROUTE_END", encode(lite::AnnounceBroadcast::RouteEnd { id })),
+				("ANNOUNCE_FLOOR", Box::new(floor(id, Some(1)))),
+				("ANNOUNCE_START", Box::new(claim_on(id, "x"))),
+				(
+					"DEAD",
+					// A DEAD counts the ROUTE_UPDATEs moving routes off the hop that follow it.
+					Box::new(move |w| {
+						lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
+							hop: crate::route::path::Hop { node: 7, session: 0 },
+							far: 7,
+							gone: false,
+							moved: 1,
+						})
+						.encode(w, Version::Lite07)
+						.unwrap();
+						raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))(w);
+					}),
+				),
+			]
+		};
+		let end = encode(lite::AnnounceBroadcast::RouteEnd { id: 0 });
+		for (id, before, what) in [(5, None, "unassigned"), (0, Some(&end), "retired")] {
+			for (message, naming) in naming(id) {
+				let mut script = two_routes();
+				let messages: Vec<&dyn Fn(&mut crate::coding::Encoder<'_>)> =
+					before.into_iter().map(|end| &**end).chain([&*naming]).collect();
+				script.extend(announce_script(Version::Lite07, &messages));
+				let (mut prefix, _consumer) = root_prefix(
+					Version::Lite07,
+					crate::lite::test_transport::ScriptedSession::new(script),
+				);
+				let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+				assert!(
+					matches!(err, Error::ProtocolViolation),
+					"{message} of a {what} route: {err}"
+				);
+			}
 		}
 	}
 

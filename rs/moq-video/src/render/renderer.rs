@@ -84,7 +84,7 @@ impl Config {
 pub struct Renderer {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	completion: Completion,
 	config: Config,
 
@@ -104,23 +104,23 @@ struct Pipelines {
 	/// Paired with [`Layout::Nv12`], so it exists only where an importer can
 	/// hand back that layout. The shader still declares the entry point
 	/// everywhere, so it stays validated on every platform either way.
-	#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
+	#[cfg(any(apple, target_os = "linux"))]
 	nv12: wgpu::RenderPipeline,
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	/// Packed RGB or BGR imported from a Linux DMA-BUF.
 	rgba: wgpu::RenderPipeline,
 	i420: wgpu::RenderPipeline,
 }
 
 /// Waits for submitted GPU work before releasing its producer-owned surfaces.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 struct Completion {
 	device: wgpu::Device,
 	tx: Option<std::sync::mpsc::Sender<(wgpu::SubmissionIndex, Box<dyn Send + Sync>)>>,
 	thread: Option<std::thread::JoinHandle<()>>,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl Completion {
 	fn new(device: &wgpu::Device) -> Result<Self, Error> {
 		let (tx, rx) = std::sync::mpsc::channel();
@@ -160,7 +160,7 @@ impl Completion {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl Drop for Completion {
 	fn drop(&mut self) {
 		drop(self.tx.take());
@@ -194,7 +194,7 @@ impl Renderer {
 		Ok(Self {
 			device: device.clone(),
 			queue: queue.clone(),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			completion: Completion::new(device)?,
 			config,
 			shader,
@@ -257,9 +257,9 @@ impl Renderer {
 		});
 
 		let pipeline = match source.layout {
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Layout::Rgba => &self.shader.rgba,
-			#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
+			#[cfg(any(apple, target_os = "linux"))]
 			Layout::Nv12 => &self.shader.nv12,
 			Layout::I420 => &self.shader.i420,
 		};
@@ -291,9 +291,9 @@ impl Renderer {
 		}
 		let submission = self.queue.submit([encoder.finish()]);
 		if let Some(keepalive) = source.keepalive.take() {
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			self.completion.submit(submission, keepalive);
-			#[cfg(not(all(target_os = "linux", feature = "dmabuf")))]
+			#[cfg(not(target_os = "linux"))]
 			drop((submission, keepalive));
 		}
 
@@ -447,9 +447,9 @@ impl Pipelines {
 		});
 
 		Ok(Self {
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			rgba: pipeline("rgba"),
-			#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
+			#[cfg(any(apple, target_os = "linux"))]
 			nv12: pipeline("nv12"),
 			i420: pipeline("i420"),
 			layout,
@@ -467,7 +467,7 @@ mod tests {
 	/// A GPU frame the renderer cannot import is an error that names the fix,
 	/// never a download. A DMA-BUF on a device opened without the import feature
 	/// is the case every Linux device can stage.
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn an_unimportable_gpu_frame_is_refused() {
@@ -509,7 +509,7 @@ mod tests {
 	/// Mesa's software driver cannot import DMA-BUFs, so the supported half
 	/// asks for the device's answer with the feature present instead of
 	/// opening a second device that has it.
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_output_follows_the_device() {

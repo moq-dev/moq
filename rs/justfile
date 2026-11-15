@@ -485,7 +485,7 @@ audio-devices:
     dir=$(mktemp -d)
     trap 'rm -rf "$dir"' EXIT
     python3 test/lib/pulse.py --dir "$dir/run" -- \
-        just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
+        just rs test -p moq-audio --features capture,playback,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
 
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See the README in each rs/<crate>/fuzz/.
@@ -600,7 +600,7 @@ codspeed shard:
         ;;
     rest)
         build -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
-            --features moq-audio/bus,moq-json/bench,moq-quic/fuzz \
+            --features moq-json/bench,moq-quic/fuzz \
             --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
             --bench matching --bench endpoint --bench receive --bench sent_packets --bench streams \
             --bench chunk_interleaving

@@ -7,9 +7,10 @@
 
 use std::time::Duration;
 
+use moq_relay::sim::{self, Net};
 use moq_relay::{auth, cluster, shutdown};
 
-use crate::memory::{self, Net};
+use crate::memory;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -37,7 +38,7 @@ impl Mesh {
 		let auth = memory::public(&["**"], &[], &[]);
 		let mut relays = Vec::new();
 		for (name, peers) in [("a", &[][..]), ("b", &["a"]), ("c", &["a", "b"]), ("d", &["c"])] {
-			let cluster = memory::spawn_cluster(net.options(peers));
+			let cluster = memory::spawn_cluster(net.options(name, peers));
 			net.relay(name, &cluster, &auth, &shutdown::Observer::disabled());
 			let mut connect = moq_tokio::connect::Config::default();
 			connect.version.extend(cluster_version);
@@ -78,7 +79,7 @@ impl Publisher {
 }
 
 async fn publish_version(relay: &cluster::Cluster, auth: &auth::Auth, version: &str) -> Publisher {
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let broadcast = origin
 		.route(PATH, moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -138,7 +139,7 @@ async fn publish_unknown(relay: &cluster::Cluster, auth: &auth::Auth) -> Publish
 
 /// A viewer of `relay` speaking the newest version, and the origin it reads into.
 async fn viewer(relay: &cluster::Cluster, auth: &auth::Auth) -> (moq_net::Session, moq_net::origin::Producer) {
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let session = kio::clock::timeout(
 		TIMEOUT,
 		memory::connect(

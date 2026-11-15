@@ -1,9 +1,10 @@
 {
-	"version": 3,
-	"source": "the audio-quality-run artifact of Nightly run 39124936449 on main, 2026-10-18: row chromium-aac-44100-bursty-isolated (ubuntu-24.04-arm, headless Chromium, shaper seed 7), its --capture arrivals",
+	"version": 4,
+	"source": "the audio-quality-run artifact of Nightly run 39124936449 on main, 2026-10-18: row chromium-aac-44100-bursty-isolated (ubuntu-24.04-arm, headless Chromium, shaper seed 7), its --capture arrivals. Version 4 adds largest, the publisher's largest group as the subscription began. This recording predates it, so it is derived (2026-11-15): the newest group whose first frame's media timestamp plus the trace's lowest lag (the smallest at minus timestamp) falls at or before the first arrival, the live edge as the first frame arrived.",
 	"description": "This harness's AAC publisher through the shaper's bursty profile. Each seven-frame PES flush is one group per frame, delivered newest first, so most frames arrive after a newer one and the oldest of a flush is the latest. Recorded with the observer subscribed at the decoder's 2 s budget, so every group the player saw is here. No PROBE round trip was recorded: an audio-only page never observes the connection's probe.",
 	"transport": "webtransport",
 	"rtt": null,
+	"largest": 37665,
 	"config": {
 		"codec": "mp4a.40.2",
 		"container": {
