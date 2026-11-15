@@ -9,6 +9,11 @@ complete it before cutting main into release.
 
 ## Plan
 
+Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅ the
+cut waits on [cache-aware multicast](/quest/m2/multicast/README.md), which
+replaces lite-07's route layer before it freezes (rejected: lite-08). The
+routes chain stays the critical path, now through that epic.
+
 Decided 2026-11-05 (maintainer, milestone re-cut): m2 holds the breaking half
 of what was "everything before the cut" (2026-10-20). Breaking covers every
 published surface, as the root [questline](/quest/README.md) defines: the
@@ -222,10 +227,11 @@ maintainer asked that what remains be unblocked or punted, and picked these on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)). m2 keeps only
 what would need a breaking release had it landed right after the cut:
 
-- ✅ Left m2: [the request loop](/quest/m2/cluster-routes/request-loop.md)
+- ✅ Left m2: [the request loop](/quest/m2/multicast/requests.md)
   to m3's cluster-routing epic (a fixture and a fix, no wire), until it
-  returned to m2's cluster-routes epic on 2026-11-15 (maintainer, on
-  [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832));
+  returned to m2 on 2026-11-15 (maintainer, on
+  [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
+  the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
   [media consumers](/quest/m3/time-addressing-consumers.md) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers);
   [moq-transport time addressing](/quest/m4/ietf-time-addressing.md) to m4

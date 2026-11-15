@@ -8,6 +8,13 @@ go while its neighbours answer that they have nothing.
 
 ## Plan
 
+Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
+multicast](/quest/m2/multicast/README.md)): this waits on the
+[bake-off](/quest/m2/multicast/bakeoff.md). The new rule has neither holds nor
+doubt, so nothing would be left for this to fix. If the new rule goes ahead,
+[the switch](/quest/m2/multicast/switch.md) deletes this quest with the
+fixtures that pin it; if it does not, this starts as written.
+
 Kept 2026-11-15 (maintainer, /quest-complete on
 [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
 m2 (rejected: drop; moving it to m3).
@@ -33,6 +40,10 @@ only the doubt keeps it off". Find why the answers end the hold first: a
 neighbour that holds only because of doubt should answer with ROUTE_HOLD, not
 nothing. Check the rule in `RouteHandoff.tla` with the `verify-route` skill
 before changing `rs/moq-net/src/route/path.rs`.
+
+## Required
+
+- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the hold and the doubt this fixes remain
 
 ## Related
 
