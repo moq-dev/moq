@@ -482,6 +482,8 @@ pub(crate) struct Bbr3 {
     undo_prev_probe_precautionary: bool,
     /// equivalent to BBR.loss_round_delivered: C.delivered during the first loss of the round
     loss_round_delivered: u64,
+    /// The round marks the last losses set, until the next ACK.
+    loss_marks: Option<LossMarks>,
     /// equivalent to BBR.loss_in_round: flag set to true when loss occurs during the round
     loss_in_round: bool,
     /// equivalent to Linux BBRv3's `ecn_in_round`: set when CE marks are reported during the
@@ -497,8 +499,9 @@ pub(crate) struct Bbr3 {
     /// losses of packets sent at or before it belong to the episode already underway.
     /// <https://datatracker.ietf.org/doc/html/rfc9002#section-7.3.2>
     recovery_start_time: Option<Instant>,
-    /// `round_count` when `recovery_start_time` was last set, used for the "in fast recovery for
-    /// at least one full packet-timed round trip" criterion of the STARTUP high-loss exit
+    /// `round_count` when the connection entered fast recovery, used for the "in fast recovery
+    /// for at least one full packet-timed round trip" criterion of the STARTUP high-loss exit.
+    /// An episode that follows on from the last, without leaving recovery, keeps it.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.3>
     recovery_start_round: u64,
     /// Whether the connection is currently in fast recovery, the first criterion of the STARTUP
@@ -665,6 +668,7 @@ impl Bbr3 {
             ce_in_recovery: false,
             reno_rounds_bound: RENO_ROUNDS_BOUNDS[0],
             loss_round_delivered: 0,
+            loss_marks: None,
             loss_in_round: false,
             ce_in_round: false,
             probe_rtt_done_stamp: None,
@@ -938,11 +942,16 @@ impl Bbr3 {
         if self.recovery_start_time.is_some_and(|start| sent <= start) {
             return;
         }
+        // An episode that begins before the last one ends, as one does on the ACK that would
+        // have ended it, its losses reported first, continues the recovery without restoring the
+        // window, as Linux stays in Recovery.
+        if !self.in_recovery {
+            self.recovery_start_round = self.round_count;
+        }
         // Not also per loss round, as draft-06's NoteLoss does: that contradicts its own prose
         // and Linux's bbr_ssthresh, and would save a model this episode already cut.
         self.save_state_upon_loss();
         self.recovery_start_time = Some(now);
-        self.recovery_start_round = self.round_count;
         self.in_recovery = true;
         self.ce_in_recovery = false;
     }
@@ -1641,6 +1650,9 @@ impl Bbr3 {
     fn start_congestion_round(&mut self) {
         if !self.loss_in_round && !self.ce_in_round {
             self.loss_round_delivered = self.rate.delivered();
+            if let Some(marks) = &mut self.loss_marks {
+                marks.loss_round = true;
+            }
         }
         self.probe_rtt_skip_congested = true;
     }
@@ -1789,6 +1801,9 @@ impl Bbr3 {
     /// equivalent to BBRStartRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>
     fn start_round(&mut self) {
         self.next_round_delivered = self.rate.delivered();
+        if let Some(marks) = &mut self.loss_marks {
+            marks.round = true;
+        }
     }
 
     /// The inflight an application-limited sender may fill with redundant data, so the probe's
@@ -1947,6 +1962,19 @@ impl Controller for Bbr3 {
         // An ACK that delivered no packet has no sample, and a finished one is never folded
         // twice.
         self.ack_rs = self.rate.on_ack(&ack, self.min_rtt);
+        // Linux marks an ACK's losses after counting its deliveries, so the rounds they start
+        // count those too: the ACK that revealed them never also ends them.
+        if let Some(marks) = self.loss_marks.take()
+            && marks.at == ack.now
+        {
+            let delivered = self.rate.delivered();
+            if marks.round {
+                self.next_round_delivered = delivered;
+            }
+            if marks.loss_round {
+                self.loss_round_delivered = delivered;
+            }
+        }
         // The sampler marks C.app_limited from the transport's report, which a skip needs
         if ack.app_limited && self.rate.is_app_limited() {
             self.probe_rtt_skip_app_limited = true;
@@ -1982,9 +2010,16 @@ impl Controller for Bbr3 {
     fn on_loss(&mut self, loss: Loss<'_>) {
         // C.inflight excludes lost bytes, and the next ACK may come after the next send.
         self.inflight = loss.in_flight;
+        self.loss_marks = Some(LossMarks {
+            at: loss.now,
+            round: false,
+            loss_round: false,
+        });
         for lost in loss.packets {
             self.process_lost_packet(lost, loss.now);
         }
+        // No ACK may follow a loss timer, and a loss that ends ProbeBW_UP drops its gains.
+        self.update_control_parameters(0);
         if loss.persistent {
             self.cwnd = self.min_pipe_cwnd;
         }
@@ -2107,6 +2142,18 @@ impl Controller for Bbr3 {
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }
+}
+
+/// Which rounds losses started, so the ACK that revealed them, reported next with the same `now`,
+/// restarts them from its own deliveries.
+#[derive(Debug, Clone, Copy)]
+struct LossMarks {
+    /// When the losses were declared.
+    at: Instant,
+    /// Whether they started a packet-timed round, as ending ProbeBW_UP does.
+    round: bool,
+    /// Whether they opened a loss round.
+    loss_round: bool,
 }
 
 /// Configuration for the BBRv3 congestion controller
@@ -7929,6 +7976,81 @@ mod test {
         assert!(sim.bbr.inflight_longterm < 100_000);
     }
 
+    /// A loss timer that ends ProbeBW_UP, with no ACK after it, leaves UP's pacing gain and bounds
+    /// the window at once.
+    #[test]
+    fn loss_ending_probe_up_takes_effect_at_once() {
+        let mut sim = probing_up();
+        sim.lose(15 * MS, 10);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        let down = PROBE_BW_DOWN_PACING_GAIN * sim.bbr.bw * (100.0 - PACING_MARGIN_PERCENT) / 100.0;
+        assert_eq!(sim.bbr.pacing_rate, down);
+        assert!(sim.bbr.cwnd <= sim.bbr.inflight_longterm);
+    }
+
+    /// Losses that end ProbeBW_UP on the ACK revealing them start DOWN's round after that ACK's
+    /// deliveries, as Linux marks losses after counting them, so the same ACK neither ends the
+    /// round nor the probe's feedback.
+    #[test]
+    fn probe_up_ended_by_an_ack_starts_its_round_after_it() {
+        let mut sim = probing_up();
+        let round = sim.bbr.round_count;
+        // Packets 10..20 left after the last ACK, so packet 11 was sent with everything before
+        // this ACK already delivered.
+        sim.lose(20 * MS, 10);
+        sim.ack(20 * MS, [11], false);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        assert_eq!(sim.bbr.round_count, round);
+        assert_eq!(sim.bbr.ack_phase, AckPhase::ProbeStopping);
+    }
+
+    /// The ACK that reveals a round's first loss opens the loss round without ending it, so the
+    /// short-term model is cut a round later. Losses the closing ACK reveals belong to the round
+    /// it closes, so the model is cut only once.
+    #[test]
+    fn loss_round_found_by_an_ack_ends_after_it() {
+        let mut sim = cruising();
+        // Both leave after the last ACK, so the second was sent with everything before this ACK
+        // already delivered.
+        let first = sim.pn;
+        sim.send(110 * MS, 2);
+        sim.lose(130 * MS, first);
+        sim.ack(130 * MS, [first + 1], false);
+        assert!(sim.bbr.loss_in_round);
+        assert_eq!(sim.bbr.inflight_shortterm, u64::MAX);
+
+        let first = sim.pn;
+        sim.send(130 * MS, 100);
+        sim.lose(150 * MS, first);
+        sim.ack(150 * MS, first + 1..sim.pn, false);
+        assert!(!sim.bbr.loss_in_round);
+        let cut = sim.bbr.inflight_shortterm;
+        assert!(cut < u64::MAX);
+        sim.round(150 * MS, 100, 20 * MS);
+        sim.round(170 * MS, 100, 20 * MS);
+        assert_eq!(sim.bbr.inflight_shortterm, cut);
+    }
+
+    /// An episode that begins on the ACK that would end the last, its losses reported first,
+    /// continues the recovery, so Startup's high-loss exit counts the rounds spent in it.
+    #[test]
+    fn back_to_back_episodes_continue_the_recovery() {
+        let mut sim = scripted();
+        sim.round(0, 10, 10 * MS);
+        sim.send(10 * MS, 10);
+        sim.lose(15 * MS, 10);
+        let start = sim.bbr.recovery_start_round;
+        sim.ack(20 * MS, 11..20, false);
+        assert!(sim.bbr.in_recovery_for_a_full_round());
+        // Packet 20 was sent after the episode began, so its loss starts another.
+        sim.send(20 * MS, 10);
+        sim.lose(30 * MS, 20);
+        sim.ack(30 * MS, 21..30, false);
+        assert!(sim.bbr.in_recovery);
+        assert_eq!(sim.bbr.recovery_start_round, start);
+        assert!(sim.bbr.in_recovery_for_a_full_round());
+    }
+
     /// A loss of a packet sent after the episode began starts a new episode with a new snapshot,
     /// so undoing it keeps the earlier episode's real reduction. Snapshotting on every loss also
     /// passes this; it guards against keeping one snapshot for too long.
@@ -8149,17 +8271,17 @@ mod test {
         assert_eq!(sim.bbr.inflight_longterm, 100_000);
     }
 
-    /// The transport detects losses between an ACK and its CE event. A loss too small to show
-    /// inflight too high leaves the probe running, and CE bounds it by the marked ACK's own
-    /// sample rather than the lost packet's flight.
+    /// The transport reports an ACK's losses before the ACK and its CE marks after it. A loss
+    /// too small to show inflight too high leaves the probe running, and CE bounds it by the
+    /// marked ACK's own sample rather than the lost packet's flight.
     #[test]
     fn ce_after_loss_detection_bounds_by_the_ack_sample() {
         let mut sim = probing_up();
         // Packet 109 is sent with 100 packets in flight, so losing it alone stays under
         // LOSS_THRESH.
         sim.send(10 * MS, 90);
-        sim.ack(20 * MS, 10..20, false);
         sim.lose(20 * MS, 109);
+        sim.ack(20 * MS, 10..20, false);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
         let now = sim.at(20 * MS);
         sim.bbr.bbr.on_ce(Ce {

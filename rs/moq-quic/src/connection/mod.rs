@@ -1869,7 +1869,11 @@ impl Connection {
 			}
 		}
 
-		// After the RTT update, as RFC 9002's OnAckReceived orders it.
+		// Must be called before crypto/pto_count are clobbered. The losses this ACK reveals reach
+		// the controller before the ACK itself, as RFC 9002's OnAckReceived orders them.
+		self.detect_lost_packets(now, space, true);
+
+		// After the RTT update and loss detection, as RFC 9002's OnAckReceived orders it.
 		self.path.congestion.on_ack(congestion::Ack {
 			now,
 			packets: &acked,
@@ -1878,9 +1882,6 @@ impl Connection {
 			rtt: self.path.rtt.get(),
 		});
 		self.acked = acked;
-
-		// Must be called before crypto/pto_count are clobbered
-		self.detect_lost_packets(now, space, true);
 
 		if self.peer_completed_address_validation() {
 			self.pto_count = 0;
