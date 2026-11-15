@@ -462,6 +462,10 @@ impl<N: Copy> Route<N> {
 struct Session<N> {
 	/// How this node names the session in the hops of the routes it learns there.
 	number: u64,
+	/// The `number` of the first stream of the neighbour's session still registered,
+	/// which its later streams share: doubt asks whether the session, not the stream,
+	/// opened since it began.
+	generation: u64,
 	/// How the neighbour names itself in a path.
 	hop: Id,
 	link: Link,
@@ -911,8 +915,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			return Err(Error::ZeroCost);
 		}
 		self.opened += 1;
+		// A later stream of a session already open, such as one a new permit files, is
+		// no returning link. The tests' `Sim` leaves `link.session` 0: a session per stream.
+		let generation = (self.sessions.values())
+			.find(|other| link.session != 0 && other.link.session == link.session)
+			.map_or(self.opened, |other| other.generation);
 		let session = Session {
 			number: self.opened,
+			generation,
 			hop,
 			link,
 			rtt: None,
@@ -1987,7 +1997,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			AtOrigin::Spared => return false,
 			AtOrigin::Own => {}
 		}
-		rest.is_empty() && self.sessions[&peer].number > *since
+		rest.is_empty() && self.sessions[&peer].generation > *since
 	}
 
 	/// Doubt `node` until `at`, or later if it already is. A doubt that begins notes
