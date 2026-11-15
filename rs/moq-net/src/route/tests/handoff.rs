@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 
+use super::path::meet;
 use super::*;
 
 fixtures!(
@@ -110,7 +111,10 @@ fn trailing_announcements_report_no_false_absence(rule: Rule) {
 	sim.connect(node, b);
 	assert!(sim.run());
 	assert!(sim.queued(b, node) >= 2, "a ROUTE then its announcements");
-	assert!(sim.deliver(b, node), "only the ROUTE");
+	// The stream opens with b's own ask and the marker answering node's.
+	for _ in 0..3 {
+		assert!(sim.deliver(b, node), "only the ROUTE");
+	}
 	sim.disconnect(node, a);
 	assert!(sim.run());
 	assert_eq!(sim.next_hop(node, 7), Some(b));
@@ -784,9 +788,9 @@ fn stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it(rule:
 		if collect {
 			sim.collect(b, 7);
 		}
-		// SYNCED, which the stream opens with, the held ROUTE, then the snapshot
-		// carrying `live/x`.
-		for _ in 0..3 {
+		// a's own ask, the marker answering b's, and SYNCED, which open its stream, then
+		// the held ROUTE and the snapshot carrying `live/x`.
+		for _ in 0..5 {
 			assert!(sim.deliver(a, b));
 		}
 		assert!(sim.shows(b, 7, "live/x").is_some());
@@ -1070,10 +1074,21 @@ fn announcement_cost_follows_sessions_and_live_claims(rule: Rule) {
 /// grant under one subject, so both feed one qualified view. Under churn every
 /// view stays some revision of the origin's truth, the widening guard stays
 /// bounded, no claim ends while the origin still has it, and once churn stops
-/// the client shows exactly the claims its interest and the scopes admit.
+/// the client shows exactly the claims its interest and the scopes admit. Under
+/// the path rule the client's interest is a set, edited in place.
 fn sweep_scoped_handoff(rule: Rule) {
 	const CLAIMS: [&str; 5] = ["live/a/x", "live/a/y/", "live/b/z", "live/c", "live/"];
-	const WATCHES: [&str; 5] = ["", "live/", "live/a/", "live/b/z", "live/c"];
+	const SETS: [&[&str]; 8] = [
+		&[""],
+		&["live/"],
+		&["live/a/"],
+		&["live/b/z"],
+		&["live/c"],
+		&["live/a/", "live/b/z"],
+		&["live/a/x", "live/a/y", "live/c"],
+		&["live/a/", "live/b/", "live/c"],
+	];
+	let watches: &[&[&str]] = &SETS;
 	const SCOPES: [&str; 2] = ["live/a/", "live/b/"];
 	let (origin, r1, r2, client) = (0, 1, 2, 3);
 	let mut rng = XorShift(0x5c0b_ed00);
@@ -1105,7 +1120,7 @@ fn sweep_scoped_handoff(rule: Rule) {
 						sim.unannounce(origin, claim);
 					}
 				}
-				3 => sim.watch(client, WATCHES[rng.next(WATCHES.len() as u64) as usize]),
+				3 => sim.watch_all(client, watches[rng.next(watches.len() as u64) as usize]),
 				4 => {
 					let (a, b) = links[rng.next(links.len() as u64) as usize];
 					if sim.connected(a, b) {
@@ -1143,21 +1158,13 @@ fn sweep_scoped_handoff(rule: Rule) {
 		}
 		assert!(sim.run());
 		sim.check().unwrap_or_else(|err| panic!("scenario {scenario}: {err}"));
-		let watch = sim.watching(client).clone();
+		let watch = sim.interest(client).clone();
 		let rev = sim.revision(7);
-		// Each relay presents its scope to the client's interest.
+		// Each relay presents its scope to each prefix of the client's interest.
 		let expected: BTreeSet<Path> = SCOPES
 			.iter()
 			.map(|scope| p(scope))
-			.filter_map(|scope| {
-				if within(&scope, &watch) {
-					Some(scope)
-				} else if within(&watch, &scope) {
-					Some(watch.clone())
-				} else {
-					None
-				}
-			})
+			.flat_map(|scope| watch.iter().filter_map(move |watch| meet(&scope, watch)))
 			.flat_map(|region| sim.presented(7, &region, rev).into_keys())
 			.collect();
 		let id = qualified("local", 7);
@@ -1190,7 +1197,7 @@ const CLAIMS: [&str; 4] = ["live/", "live/a/", "live/a/x", "live/b"];
 /// shows every live origin's current claims and holds nothing for a dead one.
 fn sweep_handoff(rule: Rule) {
 	for scenario in 0..scenarios() {
-		let mut sim = churn(rule, scenario);
+		let mut sim = churn(rule, scenario, true);
 		let label = format!("scenario {scenario}");
 		assert_eq!(revivals(&sim.events), 0, "{label}");
 		assert_eq!(false_ends(&sim.events), 0, "{label}");
@@ -1230,9 +1237,18 @@ fn an_unchanged_snapshot_advances_the_floor_others_need() {
 }
 
 /// Origins sit at `RELAYS` and `RELAYS + 1`, the client at `RELAYS + 2`. The script,
-/// every change made from outside, depends on `scenario` alone; which queued
-/// message arrives next is drawn apart from it.
-fn churn(rule: Rule, scenario: usize) -> Sim {
+/// every change made from outside, depends on `scenario` alone; which queued message
+/// arrives next is drawn apart from it. With `sets`, the client watches sets of
+/// prefixes.
+fn churn(rule: Rule, scenario: usize, sets: bool) -> Sim {
+	const SETS: [&[&str]; 6] = [
+		&[""],
+		&["live/a/"],
+		&["live/b"],
+		&["live/a/", "live/b"],
+		&["live/a/x", "live/b"],
+		&["live/a/x", "other"],
+	];
 	let rng = &mut XorShift(0x4a4d_0ff5 ^ (scenario as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
 	let mut pick = XorShift(0x5eed_0003 + scenario as u64);
 	let (first, client) = (RELAYS, RELAYS + 2);
@@ -1289,9 +1305,8 @@ fn churn(rule: Rule, scenario: usize) -> Sim {
 					sim.release(from, to);
 				}
 			}
-			6 => {
-				sim.watch(client, ["", "live/a/", "live/b"][rng.next(3) as usize]);
-			}
+			6 if sets => sim.watch_all(client, SETS[rng.next(SETS.len() as u64) as usize]),
+			6 => sim.watch(client, ["", "live/a/", "live/b"][rng.next(3) as usize]),
 			7 if rng.chance(50) => {
 				// Collection is allowed once a node holds no route to an identity.
 				let node = rng.next(RELAYS as u64 + 3) as usize;
@@ -1344,7 +1359,9 @@ fn settled(sim: &mut Sim, label: &str) {
 	for node in 0..RELAYS + 3 {
 		let mut expected = BTreeMap::new();
 		for (origin, &id) in (RELAYS..).zip(&live) {
-			let presented = sim.presented(id, sim.watching(node), sim.revision(id));
+			let presented: BTreeMap<Path, Item> = (sim.interest(node).iter())
+				.flat_map(|watch| sim.presented(id, watch, sim.revision(id)))
+				.collect();
 			// A route reaches a node only while a claim meets its interest.
 			assert_eq!(
 				sim.routed(node, id),

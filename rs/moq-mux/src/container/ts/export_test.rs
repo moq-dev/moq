@@ -12548,3 +12548,68 @@ async fn fixed_delay_keeps_buffered_pes_ahead_of_the_clock() {
 	assert_eq!(pes_count(&all), 76);
 	assert_skip_discontinuity(&all, 0);
 }
+
+/// A viewer joining partway into a group counts only the payload it is sent: not the retained
+/// frames the join trims, the frames before the next keyframe, nor what the delay and the
+/// schedule still hold.
+#[tokio::test(start_paused = true)]
+async fn a_joiner_counts_only_the_payload_it_is_sent() {
+	use crate::container::test_util::{Metered, video_frame};
+	const PAD: usize = 1000;
+	let frame = |index: u64| {
+		let mut frame = video_frame(index * 33_333, index.is_multiple_of(60));
+		let mut payload = BytesMut::from(frame.payload.as_ref());
+		payload.extend_from_slice(&[0x55; PAD]);
+		frame.payload = payload.freeze();
+		frame
+	};
+	let mut metered = Metered::avc3();
+	for index in 0..45 {
+		metered.live.track.write(frame(index)).unwrap();
+		tokio::time::advance(Duration::from_micros(33_333)).await;
+	}
+	let mut export = open_export(metered.source().await, Duration::from_millis(500))
+		.await
+		.unwrap();
+	// The first poll reads the catalog and holds what it reads of the media for the delay.
+	assert!(export.poll_next(&kio::Waiter::noop()).is_pending());
+	let catalog = metered.billed();
+
+	let mut out = Vec::new();
+	let mut tick = kio::clock::interval(Duration::from_micros(33_333));
+	tick.tick().await;
+	let mut index = 45;
+	while index < 165 {
+		tokio::select! {
+			chunk = export.next() => out.extend_from_slice(&chunk.unwrap().unwrap().payload),
+			_ = tick.tick() => {
+				metered.live.track.write(frame(index)).unwrap();
+				index += 1;
+			}
+		}
+	}
+
+	// The video elementary stream that went out, and how many pictures it carries.
+	let (mut sent, mut pictures) = (0, 0);
+	let mut reader = TsPacketReader::new(Cursor::new(&out));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		match packet.payload {
+			Some(TsPayload::PesStart(pes)) => {
+				pictures += 1;
+				sent += pes.data.len();
+			}
+			Some(TsPayload::PesContinuation(bytes)) => sent += bytes.len(),
+			_ => {}
+		}
+	}
+	assert!(
+		pictures > 60,
+		"the pictures from the second keyframe on go out: {pictures}"
+	);
+	let billed = metered.billed() - catalog;
+	assert!(
+		billed >= (pictures * PAD) as u64,
+		"{billed} bytes billed for {pictures} pictures"
+	);
+	assert!(billed <= sent as u64, "{billed} bytes billed, {sent} sent");
+}

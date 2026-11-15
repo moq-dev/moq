@@ -294,6 +294,11 @@ instance at the same output path. A clean end waits for the source to return;
 stop the command to finish following. A refused source request or an encoding
 failure ends the command.
 
+Hardware encoders cap open sessions per device, and a device shared with other work
+refuses one sooner. `--encoder-sessions N` lets at most N encoders serve at once, across
+live rungs and fetched groups, plus one that opens briefly to probe a new rung; past N, an
+encoder waits for one to close. Without it, every rung and fetch opens its own.
+
 ## Announced
 
 ```bash

@@ -904,7 +904,16 @@ impl PathRouteNode {
 		}
 		for (peer, prefix) in interests.iter().enumerate() {
 			node.0.connect(peer, peer as u64 + 2, Default::default()).unwrap();
-			node.0.peer_interest(peer, Some(Path::new(prefix).unwrap())).unwrap();
+			let add = vec![Path::new(prefix).unwrap().to_owned()];
+			node.0
+				.edit(
+					peer,
+					crate::route::path::Edit {
+						remove: Vec::new(),
+						add,
+					},
+				)
+				.unwrap();
 		}
 		node.drain();
 		node
@@ -944,6 +953,7 @@ impl PathRouteRelay {
 			revision: 1,
 		};
 		relay.router.connect(0, 1, Default::default()).unwrap();
+		relay.router.edited(0);
 		relay.router.route(
 			0,
 			1,
@@ -956,14 +966,23 @@ impl PathRouteRelay {
 				down_only: false,
 				rtt: None,
 			})),
-			0,
 		);
 		let snapshot = (0..claims)
 			.map(|i| (Path::new(&format!("live/{i}")).unwrap(), Some(1)))
 			.collect();
-		relay.router.batch(0, 1, Path::empty(), snapshot, Some(1), 0);
+		relay.router.batch(0, 1, Path::empty(), snapshot, Some(1));
 		relay.router.connect(1, 3, Default::default()).unwrap();
-		relay.router.peer_interest(1, Some(Path::empty())).unwrap();
+		let add = vec![Path::empty()];
+		relay
+			.router
+			.edit(
+				1,
+				crate::route::path::Edit {
+					remove: Vec::new(),
+					add,
+				},
+			)
+			.unwrap();
 		relay.drain();
 		relay
 	}
@@ -974,7 +993,7 @@ impl PathRouteRelay {
 		let changes = (0..claims)
 			.map(|i| (Path::new(&format!("live/{i}")).unwrap(), Some(self.revision)))
 			.collect();
-		self.router.batch(0, 1, Path::empty(), changes, Some(self.revision), 0);
+		self.router.batch(0, 1, Path::empty(), changes, Some(self.revision));
 		self.drain()
 	}
 
@@ -1019,6 +1038,7 @@ impl PathRouteFollower {
 		use crate::route::path::{Hop, Offer, Reach};
 		let prefix = self.prefixes[k].clone();
 		self.router.connect(k, 1, crate::route::Link::default()).unwrap();
+		self.router.edited(k);
 		self.router.route(
 			k,
 			1,
@@ -1031,12 +1051,11 @@ impl PathRouteFollower {
 				down_only: false,
 				rtt: None,
 			})),
-			0,
 		);
 		let changes = (0..self.claims)
 			.map(|j| (Path::new(&format!("live/{k}/{j}")).unwrap(), Some(())))
 			.collect();
-		self.router.batch(k, 1, prefix, changes, Some(1), 0);
+		self.router.batch(k, 1, prefix, changes, Some(1));
 	}
 
 	/// Close every session in one call, including the resulting timer work.
@@ -1093,6 +1112,7 @@ impl PathRouteDrain {
 			let prefix = Path::new(&format!("live/{i}")).unwrap();
 			let via = 1_000 + i as u64;
 			router.connect(i, via, crate::route::Link::default()).unwrap();
+			router.edited(i);
 			let path = [
 				Hop { node: 1, session: 0 },
 				Hop {
@@ -1113,17 +1133,25 @@ impl PathRouteDrain {
 					down_only: false,
 					rtt: None,
 				})),
-				0,
 			);
 			let claim = Path::new(&format!("live/{i}/x")).unwrap();
-			router.batch(i, 1, prefix, vec![(claim, Some(()))], Some(1), 0);
+			router.batch(i, 1, prefix, vec![(claim, Some(()))], Some(1));
 		}
 		for r in 0..recipients {
 			let peer = sessions + r;
 			router
 				.connect(peer, 5_000 + r as u64, crate::route::Link::default())
 				.unwrap();
-			router.peer_interest(peer, Some(Path::empty())).unwrap();
+			let add = vec![Path::empty()];
+			router
+				.edit(
+					peer,
+					crate::route::path::Edit {
+						remove: Vec::new(),
+						add,
+					},
+				)
+				.unwrap();
 		}
 		let idle = sessions + recipients;
 		router.connect(idle, 9_000, crate::route::Link::default()).unwrap();

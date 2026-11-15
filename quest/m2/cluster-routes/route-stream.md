@@ -53,8 +53,8 @@ Settled:
    client must open even when it wants nothing).
 2. ✅ **Its interest is a set of prefixes edited in place**, with a floor per
    prefix, SYNCED per prefix, and swaps that keep what both sets cover:
-   [the interest set](/quest/m2/cluster-routes/interest-set.md)
-   settles and proves those rules, and this puts them on the wire.
+   [the interest set](https://github.com/moq-dev/moq/pull/8728)
+   settled and proved those rules, and this puts them on the wire.
 3. ✅ **A token-scope change is an edit.** The subscriber's set is its local
    interests met with its scope's regions, one prefix per region, so a
    multi-region scope is certifiable. Plan items 16 and 17 of the
@@ -172,7 +172,15 @@ Code this replaces, for lite-07 only:
   review flagged as resting on poll order. A guard taken on every poll
   would lock the node on each session wake, so the stream's lifetime is
   the fix.
-- `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
+- `route::Node` registers one neighbour per session for both directions,
+  carrying [the interest set](https://github.com/moq-dev/moq/pull/8728)'s
+  edits on it: `Out::Ask`, `Out::Edited` and `edited`, and SYNCED per
+  prefix. Today `receive` and `answer` each take a fresh key
+  (`route/node.rs`), so one session is two neighbours in the router, and
+  each key's one edit is the prefix its stream opened with:
+  `State::register` applies it at once and `flush` drops the router's asks
+  and markers. A scoped peer's route wider than its regions is filed at each
+  region inside it (`path::Router::admit`) rather than asked for per region.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic
   `Discovery` has. Its route layer keeps per-stream state, so this PR changes `js/net`
@@ -208,10 +216,6 @@ by misparse, not by version. Relays pinned to `main` roll together, as each
 earlier lite-07 wire change did.
 
 Public API: none expected. Wire: lite-07-wip only.
-
-## Required
-
-- [The route model and router take an interest as an edited set of prefixes](/quest/m2/cluster-routes/interest-set.md) - the edit rule proven in the model and the router that implements it
 
 ## Related
 

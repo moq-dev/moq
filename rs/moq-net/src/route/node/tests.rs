@@ -511,13 +511,14 @@ fn the_doubt_timer_fires_on_the_origins_clock() {
 	assert_eq!(relay.poll_deadline(Some(at), &waiter), Poll::Ready(None));
 }
 
-/// A route that already crossed as many nodes as one may is not forwarded, since this
-/// node's hop would take it past what any peer can decode, so a session never fails to
-/// encode one. One hop fewer forwards at exactly the limit.
+/// A route the peer could not extend is not forwarded: with this node's hop it leaves
+/// no room for the peer's, which would refuse it, and one already at the limit would
+/// take it past what any peer can decode, so a session never fails to encode one. One
+/// hop fewer forwards, a hop short of the limit.
 #[test]
 fn a_route_at_the_hop_limit_is_not_forwarded() {
 	use crate::route::MAX_HOPS;
-	for (hops, forwarded) in [(MAX_HOPS - 1, Some(MAX_HOPS)), (MAX_HOPS, None)] {
+	for (hops, forwarded) in [(MAX_HOPS - 2, Some(MAX_HOPS - 1)), (MAX_HOPS - 1, None), (MAX_HOPS, None)] {
 		let relay = Node::new(2, 2, clock());
 		let from_a = relay.receive(peer(1, 100 + hops as Id - 1), Link::default()).unwrap();
 		let to_b = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();

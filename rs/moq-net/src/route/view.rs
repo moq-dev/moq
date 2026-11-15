@@ -229,6 +229,11 @@ pub(crate) fn above<'a, V>(map: &'a BTreeMap<Path, V>, path: &'a Path) -> impl I
 	heads(path).filter_map(|head| map.get_key_value(head))
 }
 
+/// Whether `path` lies within any of `regions`: one lookup per segment.
+pub(crate) fn within_any(path: &Path, regions: &BTreeSet<Path>) -> bool {
+	heads(path).any(|head| regions.contains(head))
+}
+
 /// `path` and every prefix above it, the root first, as the strings a `Path`-keyed
 /// map is looked up by.
 fn heads(path: &Path) -> impl Iterator<Item = &str> {

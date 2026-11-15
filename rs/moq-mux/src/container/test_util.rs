@@ -16,7 +16,15 @@ pub(crate) struct Live {
 impl Live {
 	/// One track named `name`, with `insert` registering its catalog rendition.
 	pub(crate) fn new(name: &str, insert: impl FnOnce(&mut crate::catalog::Producer, String)) -> Self {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		Self::on(moq_net::broadcast::Info::new().produce(), name, insert)
+	}
+
+	/// One track named `name` on `broadcast`, as [`Self::new`].
+	fn on(
+		mut broadcast: moq_net::broadcast::Producer,
+		name: &str,
+		insert: impl FnOnce(&mut crate::catalog::Producer, String),
+	) -> Self {
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let track = broadcast
@@ -61,19 +69,21 @@ impl Live {
 
 	/// One Avc3-shape H.264 rendition (320x240 at 30 fps).
 	pub(crate) fn avc3() -> Self {
-		Self::new(".avc3", |catalog, name| {
-			let mut config = VideoConfig::new(H264 {
-				profile: 0x42,
-				constraints: 0xc0,
-				level: 0x1f,
-				inline: true,
-			});
-			config.coded_width = Some(320);
-			config.coded_height = Some(240);
-			config.framerate = Some(30.0);
-			config.container = Container::Legacy;
-			catalog.modify().unwrap().video.renditions.insert(name, config);
-		})
+		Self::new(".avc3", Self::insert_avc3)
+	}
+
+	fn insert_avc3(catalog: &mut crate::catalog::Producer, name: String) {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		config.container = Container::Legacy;
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	}
 
 	/// One Legacy audio rendition.
@@ -94,6 +104,46 @@ impl Live {
 			.catalog::<()>(crate::catalog::CatalogFormat::Hang)
 			.await
 			.expect("catalog consumer")
+	}
+}
+
+/// A [`Live::avc3`] broadcast read through an origin that counts its reads, as a gateway's does.
+pub(crate) struct Metered {
+	pub(crate) live: Live,
+	registry: moq_net::stats::Registry,
+	origin: moq_net::origin::Producer,
+	_route: moq_net::origin::Route,
+}
+
+impl Metered {
+	pub(crate) fn avc3() -> Self {
+		let origin = crate::source::produce_origin();
+		let route = origin.route("live", Default::default()).unwrap();
+		let live = Live::on(route.broadcast().clone(), ".avc3", Live::insert_avc3);
+		Self {
+			live,
+			registry: moq_net::stats::Registry::new(moq_net::stats::Config::new()),
+			origin,
+			_route: route,
+		}
+	}
+
+	/// A source whose reads count toward the registry.
+	pub(crate) async fn source(&self) -> crate::Source {
+		let session = (self.registry)
+			.tier(moq_net::stats::Tier::default())
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer")));
+		let consumer = self.origin.consume().with_stats(session);
+		let broadcast = consumer.request("live", None).await.expect("the broadcast resolves");
+		crate::Source::new(consumer, broadcast)
+	}
+
+	/// The payload bytes its reads counted, the catalog's included.
+	pub(crate) fn billed(&self) -> u64 {
+		(self.registry.snapshot().traffic().into_iter())
+			.filter(|(_, role, _)| *role == moq_net::stats::Role::Publisher)
+			.map(|(_, _, traffic)| traffic.bytes)
+			.sum()
 	}
 }
 

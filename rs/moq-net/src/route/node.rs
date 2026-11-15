@@ -974,7 +974,11 @@ impl Node {
 		if let Some(receive) = session.receive {
 			state.router.pair(key, receive);
 		}
-		if let Err(err) = state.router.peer_interest(key, Some(prefix)) {
+		let edit = super::path::Edit {
+			remove: Vec::new(),
+			add: vec![prefix],
+		};
+		if let Err(err) = state.router.edit(key, edit) {
 			state.unregister(key);
 			state.router.retire(key);
 			return Err(err);
@@ -1130,19 +1134,13 @@ impl Stream {
 	/// ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD (`Held`), or ROUTE_END (`None`) for the
 	/// route the peer names `named` covering `prefix`, as the peer names it.
 	pub fn route(&self, named: Id, prefix: Path, reach: Option<Reach>) {
-		self.with(|router, key, _| {
-			let interest = router.interest();
-			router.route(key, named, prefix, reach, interest)
-		});
+		self.with(|router, key, _| router.route(key, named, prefix, reach));
 	}
 
 	/// A batch of claim changes for the route the peer names `named` covering `prefix`,
 	/// closed by its floor.
 	pub fn batch(&self, named: Id, prefix: Path, changes: Vec<(Path, Option<Claim>)>, floor: Option<Rev>) {
-		self.with(|router, key, _| {
-			let interest = router.interest();
-			router.batch(key, named, prefix, changes, floor, interest)
-		});
+		self.with(|router, key, _| router.batch(key, named, prefix, changes, floor));
 	}
 
 	/// How the peer names itself in a path, or 0 while the node has not learned it.
@@ -1255,6 +1253,9 @@ impl State {
 			..link
 		};
 		self.router.connect(key, peer.node, link)?;
+		// Lite-07 asks for one prefix per stream, on opening it: what the router asks the
+		// peer for takes effect at once, and no later edit comes.
+		self.router.edited(key);
 		self.queues.insert(key, kio::Shared::default());
 		self.streams.insert(key, peer.tag);
 		self.sessions.entry(peer.tag).or_default().open += 1;
@@ -1353,6 +1354,9 @@ impl State {
 				}
 				// The stream answering the peer sends its own once its initial set is out.
 				super::path::Out::Synced { .. } => {}
+				// Each stream's request is its only edit, sent as the session opens it, and
+				// takes effect as the stream starts: lite-07 has no marker to send.
+				super::path::Out::Ask { .. } | super::path::Out::Edited { .. } => {}
 			}
 		}
 	}

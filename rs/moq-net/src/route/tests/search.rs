@@ -16,6 +16,7 @@ use std::{
 	panic::{AssertUnwindSafe, catch_unwind},
 };
 
+use super::super::view::within_any;
 use super::*;
 
 /// How far the search may go, as `RouteHandoff.cfg` bounds the model.
@@ -489,7 +490,7 @@ impl Search<'_> {
 	/// The prefixes the nodes ask for, the root included: the routes per publisher.
 	fn prefixes(&self, sim: &Sim) -> usize {
 		let root = Path::empty();
-		sim.watch.iter().chain([&root]).collect::<BTreeSet<_>>().len()
+		sim.watch.iter().flatten().chain([&root]).collect::<BTreeSet<_>>().len()
 	}
 
 	/// The keys a node may file the origin's claims under: its own, and one per grant.
@@ -536,7 +537,7 @@ impl Search<'_> {
 				for next in sim.peers(at).collect::<Vec<_>>() {
 					let granted = (sim.links[next][at].and_then(|side| side.grant))
 						.is_none_or(|grant| within(&claim, &p(grant.scope)));
-					if granted && within(&claim, &sim.watch[next]) && carried.insert(next) {
+					if granted && within_any(&claim, &sim.watch[next]) && carried.insert(next) {
 						grow.push(next);
 					}
 				}
@@ -617,13 +618,22 @@ impl Sim {
 /// route sent, as `RouteHandoff.tla` starts. `dear` is the cost of the origin's
 /// link to relay 2; `watch` what relay 2 asks for.
 fn triangle(dear: Metric, watch: &str, grant: Option<Grant>) -> Mesh {
+	let mut mesh = unanswered(dear, watch, grant);
+	// The model starts with every interest applied, so the sessions' asks are
+	// answered before there is anything to route.
+	assert!(mesh.sim.run());
+	mesh.sim.originate(mesh.origin, mesh.id);
+	mesh
+}
+
+/// The triangle with each session's ask still in flight and nothing originated.
+fn unanswered(dear: Metric, watch: &str, grant: Option<Grant>) -> Mesh {
 	let mut sim = Sim::with(Rule::PATH, 3);
 	sim.watch(2, watch);
 	sim.join(0, 1, 1);
 	sim.join(0, 2, dear);
 	let side = SimLink::cost(1);
 	sim.link(1, 2, grant.map_or(side, |grant| side.grant(grant)), side);
-	sim.originate(0, 7);
 	Mesh { sim, origin: 0, id: 7 }
 }
 
@@ -658,6 +668,16 @@ const TWO: Bounds = Bounds {
 // minute in release: `RouteHandoff.cfg`'s own mesh, and on the triangle what the
 // model leaves out or bounds tighter.
 
+/// The triangle from its sessions' first asks, which the model takes as applied:
+/// every order of those asks, their markers, and the origin's first routes.
+#[test]
+#[ignore = "Nightly: about ten seconds in release"]
+fn every_order_from_the_first_asks_keeps_the_rules() {
+	let mut mesh = unanswered(1, "", None);
+	mesh.sim.originate(mesh.origin, mesh.id);
+	run(mesh, &ONE);
+}
+
 /// `RouteHandoff.cfg`'s mesh: the origin behind relay 1, in a triangle with relays 2 and 3.
 #[test]
 #[ignore = "Nightly: about half a minute in release"]
@@ -667,6 +687,9 @@ fn every_order_behind_a_relay_keeps_the_rules() {
 	sim.join(1, 2, 1);
 	sim.join(1, 3, 1);
 	sim.join(2, 3, 1);
+	// The model starts with every interest applied, so the sessions' asks are
+	// answered before there is anything to route.
+	assert!(sim.run());
 	sim.originate(0, 7);
 	run(Mesh { sim, origin: 0, id: 7 }, &ONE);
 }

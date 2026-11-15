@@ -14,8 +14,9 @@ pub enum Bind {
 }
 
 impl Bind {
+	/// The socket address this names, resolving a host now.
 	#[cfg(feature = "quic")]
-	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
+	pub fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
 			Self::Host(host, port) => crate::util::resolve(Some(&format!("{host}:{port}")), ""),
@@ -178,8 +179,8 @@ pub struct Config {
 
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
-	/// Supporting clients (Chrome M131+, this crate) migrate to this address
-	/// shortly after the handshake completes. Typical use: handshake on an
+	/// Supporting clients (Chrome M131+) migrate to this address shortly after
+	/// the handshake completes; moq-quic's own client stays on the first. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
 	/// Honored by the QUIC backend. Accept-only, which is why it lives
@@ -243,7 +244,8 @@ pub struct Reset {
 	/// A server restarted with the same secret resets its predecessor's connections,
 	/// so peers reconnect at once instead of waiting out their idle timeout. Every
 	/// holder can reset every other holder's connections, so share it between live
-	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// servers only behind one address that routes by connection ID, as QUIC-LB or a
+	/// handoff's reuseport group does.
 	/// Unset draws a random key per process.
 	#[usage(
 		name = "listen-reset-secret",

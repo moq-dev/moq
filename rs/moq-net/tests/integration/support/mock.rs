@@ -214,6 +214,9 @@ impl MockSendStream {
 impl poll::SendStream for MockSendStream {
 	type Error = memory::Error;
 	type Group = poll::Ungrouped;
+	type Offset = ();
+
+	fn offset(&self) -> Self::Offset {}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.conn.hold_writes.load(Ordering::Relaxed) {

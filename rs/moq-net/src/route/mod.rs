@@ -208,4 +208,8 @@ pub(crate) enum Error {
 	UnknownNeighbor,
 	#[error("no declared identity")]
 	NoIdentity,
+	#[error("one interest prefix inside another")]
+	Nested,
+	#[error("no such interest prefix")]
+	UnknownPrefix,
 }
