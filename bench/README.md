@@ -848,7 +848,7 @@ The table includes these measurements:
   `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`. A test with no runnable
   path prints only `# benchmark skipped: REASON`; the report omits that capability
   skip while rejecting an empty table or missing measurements.
-- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+- Shipping sizes, in bytes: the release artifacts and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
 - The merge gate's own cost (`bench-gate-cost`), described below.

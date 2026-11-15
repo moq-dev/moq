@@ -57,7 +57,6 @@ use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
 mod mtud;
-#[cfg(feature = "mux")]
 pub mod mux;
 
 mod packet_builder;

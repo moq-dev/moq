@@ -4613,7 +4613,6 @@ dependencies = [
  "lru-slab",
  "moq-congestion",
  "moq-crypto",
- "moq-quic",
  "proptest",
  "qlog",
  "rand 0.10.3",
