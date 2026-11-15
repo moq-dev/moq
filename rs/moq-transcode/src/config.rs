@@ -154,6 +154,57 @@ impl Sessions {
 	}
 }
 
+/// Run `open`, which opens a codec, holding `session`, and hand both back.
+///
+/// A codec keeps opening on its own thread after its open future drops, so under a budget the
+/// open runs as a task holding the session: a caller that leaves lets it finish, and the codec
+/// it opened closes, joining its thread, before the session returns to the budget.
+pub(crate) async fn opening<T: Send + 'static>(
+	session: Option<OwnedSemaphorePermit>,
+	open: impl Future<Output = T> + Send + 'static,
+) -> (T, Option<OwnedSemaphorePermit>) {
+	let Some(session) = session else {
+		return (open.await, None);
+	};
+	// The result drops before the session if nobody takes it.
+	let task = tokio::spawn(async move { (open.await, session) });
+	match task.await {
+		Ok((opened, session)) => (opened, Some(session)),
+		Err(err) => std::panic::resume_unwind(err.into_panic()),
+	}
+}
+
 async fn acquire(semaphore: Arc<Semaphore>) -> OwnedSemaphorePermit {
 	semaphore.acquire_owned().await.expect("the budget is never closed")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A caller that leaves while a codec opens returns its session only once the open ends,
+	/// as the codec's own thread keeps opening after the future drops.
+	#[tokio::test]
+	async fn an_abandoned_open_holds_its_session_until_it_ends() {
+		let sessions = Sessions::new(NonZeroUsize::MIN);
+		let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+		let mut open = Box::pin(opening(sessions.serve().await, async move {
+			let _ = finished.await;
+		}));
+		// Polled once, so the open is under way, then abandoned.
+		tokio::select! {
+			biased;
+			_ = &mut open => unreachable!("the open has not ended"),
+			() = std::future::ready(()) => {}
+		}
+		drop(open);
+		assert_eq!(
+			sessions.available(),
+			0,
+			"the abandoned open gave its session back early"
+		);
+
+		finish.send(()).unwrap();
+		let _ = sessions.serve().await;
+	}
 }

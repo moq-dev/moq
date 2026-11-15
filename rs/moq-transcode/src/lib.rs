@@ -876,16 +876,16 @@ mod tests {
 	}
 
 	/// Under a budget, a subscription over past groups only, as a lite-07 relay sends for a
-	/// run of fills, keeps no live encode once the rung has a newer group, so the fills of
-	/// those groups get the only session rather than waiting behind a live encode it started.
+	/// run of fills, leaves the live path at the first newer source group without opening it,
+	/// so the fills of its groups get the only session.
 	#[tokio::test]
 	async fn a_subscriber_over_past_groups_leaves_the_session_to_its_fills() {
 		let source = source_catalog(320, 240);
 		let source_fetches = source._track.requests();
-		// The live edge, which the live path the subscription starts encodes first.
+		// The live edge, left open: a live encode that opened its copy would hold the session
+		// until it ends, which it never does here.
 		let mut live = source._track.create_group(9u64.into()).unwrap();
 		write_keyframe(&mut live);
-		live.finish().unwrap();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -937,6 +937,7 @@ mod tests {
 			"the subscription kept a live encode"
 		);
 
+		drop(live);
 		transcoder.abort();
 	}
 
