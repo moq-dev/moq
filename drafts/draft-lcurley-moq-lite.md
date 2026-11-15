@@ -415,9 +415,6 @@ The publisher replies with a single ANNOUNCE_OK message followed by the matching
 - ANNOUNCE_UPDATE: a claim's cost changed.
 - ANNOUNCE_RESTART: a claim now serves another Instance, or a higher Epoch of the same one.
 - ANNOUNCE_FLOOR: a batch of a route's claims is complete.
-- WARM_START: the publisher offers the copy of a broadcast the subscriber gets by pulling through it (see [Warm Routes](#warm-routes)).
-- WARM_UPDATE: a warm route's Warm Cost, drain, priority, or Hops changed.
-- WARM_END: the publisher withdrew a warm route.
 - SYNCED: the initial set is complete.
 
 The subscriber sends nothing on the stream after its ANNOUNCE_REQUEST.
@@ -428,10 +425,10 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
 A retraction of a claim or route already sent MAY precede SYNCED.
 
-Each ROUTE_START implicitly assigns the next Route ID on the stream, each ANNOUNCE_START the next Announce ID, and each WARM_START the next Warm ID: three counters starting at 0 that increment by 1 per assignment.
-No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node and the route's prefix, the claim's prefix, or the warm route's path.
+Each ROUTE_START implicitly assigns the next Route ID on the stream and each ANNOUNCE_START the next Announce ID: two counters starting at 0 that increment by 1 per assignment.
+No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node and the route's prefix, or the claim's prefix.
 Ids are never reused within a stream.
-A ROUTE_END retires its Route ID, the Announce ID of every claim under the route, and the Warm ID of every warm route under it; an ANNOUNCE_END retires one Announce ID, and a WARM_END one Warm ID.
+A ROUTE_END retires its Route ID and the Announce ID of every claim under the route; an ANNOUNCE_END retires one Announce ID.
 
 A stream has at most one live route per origin node and prefix, and each route at most one live claim per prefix, at or below the route's prefix.
 Another origin claiming the same prefix is another claim, under its own route.
@@ -475,13 +472,12 @@ The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `P
 A resolved path that breaks its own rules, or a base whose path the subscriber refused, refuses the claim (see [Refused Content](#refused-content)).
 
 #### Refused Content {#refused-content}
-Route messages carry content the publisher may only have forwarded: a route's Node ID, Route Suffix, and [Route Offer](#route-offer), a claim's path, Instance, and Lite-06 Chain, and a warm route's path, Instance, Flags, and Hops.
+Route messages carry content the publisher may only have forwarded: a route's Node ID, Route Suffix, and [Route Offer](#route-offer), and a claim's path, Instance, and Lite-06 Chain.
 A newer version or release may send such content that an older receiver cannot use, so a receiver that refuses it withdraws only the route or claim it describes and keeps the session, as BGP treats a malformed attribute as a withdrawal ({{?RFC7606}}).
 This specification marks each such value "refused"; the receiver skips the rest of the message's body, and SHOULD log and count each refusal so a refused route is never silently missing.
 
 - A refused ROUTE_START still assigns its Route ID, and a refused ROUTE_UPDATE, or a refused Route Offer among a [DEAD](#dead)'s moved routes, keeps it; each leaves the receiver no route, so its claims go offline as on ROUTE_END. The messages naming the Route ID stay valid, and a later ROUTE_UPDATE the receiver can use makes the route usable again, with the claims its last floor certified. A route to Node ID 0, or whose Route Suffix was refused, stays refused. A refused Route Offer's Path still counts, so a later DEAD naming a hop on it applies to the route as to any other.
 - A refused ANNOUNCE_START still assigns its Announce ID, and a refused ANNOUNCE_UPDATE or ANNOUNCE_RESTART keeps it; the claim goes offline at its route's next floor, which is not an ANNOUNCE_END. A claim whose path was refused stays refused; any other comes back with a later ANNOUNCE_RESTART the receiver can use. Its origin withdrew nothing, so while a route has a live claim the receiver refused, the receiver takes the route's floors as certifying nothing, and a relay forwards no withdrawal for the claim.
-- A refused WARM_START still assigns its Warm ID.
 
 Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
 A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 hops is unusable, so the relay's own hop never takes one past 32.
@@ -540,7 +536,7 @@ An origin never advertises a Revision of 2^64-1: a change that would reach it in
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it, and the Route Depth of the route it follows: how many leading segments of its Broadcast Path make up the route's prefix.
 A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node and Route Depth of the route it selected or was given.
-A relay forwards a request naming an origin node only along the route it sent the requester to that node at that prefix, or a SUBSCRIBE through the neighbor [Warm Routes](#warm-routes) chooses for its broadcast, and resets it with UNROUTABLE when that route is no longer usable or its Path names the requester, so the request never reaches another origin, and loops only briefly after an origin on three or more relays leaves them all at once (see [Dead Hops](#dead-hops)).
+A relay forwards a request naming an origin node only along the route it sent the requester to that node at that prefix, and resets it with UNROUTABLE when that route is no longer usable or its Path names the requester, so the request never reaches another origin, and loops only briefly after an origin on three or more relays leaves them all at once (see [Dead Hops](#dead-hops)).
 
 Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
@@ -613,36 +609,6 @@ The advertiser MAY announce the path under the claim's Instance, so subscription
 An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
 Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
 An advertiser signals capacity through its claim alone, withdrawing or re-pricing it before it runs out.
-
-#### Warm Routes {#warm-routes}
-A relay MAY pull each broadcast through a neighbor of its choosing rather than along its selected route to the origin node, so a broadcast crosses fewer relays and neighboring relays share one copy.
-A warm route offers a neighbor a copy of one broadcast: the Hops it crossed, its `Warm Cost`, whether it drains, and its priority.
-An endpoint that does not choose per broadcast ignores every WARM_START, WARM_UPDATE, and WARM_END, sends none, pulls each broadcast along its selected route, and says so in each SUBSCRIBE.
-
-A relay's **source** for a broadcast is where it pulls it from: its next hop on its selected route to the origin node, or a neighbor whose warm route it joins.
-A source ranks as a route does (see [Routing](#routing)): one crossing no draining session first, then the one whose lowest link priority is highest, then the cheapest.
-The next hop ranks as the relay's selected route; a warm route ranks by its own drain, priority, and `Warm Cost`, combined with the link it arrives on as a route's are.
-Among sources of equal rank a relay prefers a warm route, then the one whose carrier has the lower Rendezvous Hash, then any fixed order.
-
-A relay with a local reader of a broadcast is that copy's **carrier**: it offers every neighbor its copy, with its own Hop ID as the only Hop, a `Warm Cost` of 0, no drain, and a priority of 127, whatever it pulls.
-A relay with no local reader offers each neighbor the best of its sources whose Hops name neither relay, when that is a warm route: its Hops with the relay's own Hop ID appended, and its rank as the relay sees it.
-What a relay offers so depends only on its readers, its route, and the warm routes offered to it, never on who pulls what, and a warm route ranks no better at each relay it crosses, so the warm routes of a broadcast settle once its readers and the routes do, as any path vector whose rank only worsens along a path does.
-A relay offers a warm route only while it has a selected route to the origin node and the Hops fit in 32, on the Announce Stream it answers whose request covers the broadcast's path, under that route.
-It sends a WARM_UPDATE when the copy it offers a neighbor changes, and a WARM_END once it offers none, so a broadcast no relay reads costs no message of its own.
-
-A carrier pulls through its best source, so what it pulls depends only on the warm routes offered to it and its route, never on who pulls from it.
-A relay with no local reader that has a neighbor's SUBSCRIBE pulls through its best source whose Hops name no neighbor whose subscription it serves.
-A carrier MUST NOT join a warm route whose carrier ranks above its own by the Rendezvous Hash of the broadcast's path and the carrier's Hop ID, as defined in [Resolution](#resolution), so two carriers never join each other.
-Each SUBSCRIBE says in `Warm` whether it joins the copy the publisher offered or follows the subscriber's route.
-A relay that serves a SUBSCRIBE from a relay following its route MUST pull along its own route, so a pull that follows routes reaches the origin node.
-A relay with no local reader gets the copy it pulls to each neighbor whose subscription it serves, so it MUST pull along its own route unless, for each of them it offered a warm route, what it pulls is that warm route or a copy whose carrier ranks below that warm route's carrier; a neighbor it offered none, such as one whose SUBSCRIBE crossed a WARM_END, bounds nothing.
-A relay MUST NOT join a copy of another Instance.
-
-Once the warm routes and subscriptions in flight are delivered, the pulls of a broadcast are free of loops.
-A relay following its route forwards along the routes' tree to the origin node.
-A relay that joins a warm route gets a copy whose carrier, then whose warm route, ranks strictly better than what it gives each relay joined to it: a carrier gives its own copy and joins only a lower-ranked carrier's, and a relay with no local reader joins either the warm route it offered, which ranks strictly better one hop closer to its carrier, or a lower-ranked carrier's copy.
-So no chain of joins returns to a relay already on it, and a join that reaches a relay following its route continues along the routes' tree.
-Two relays acting on each other's stale offers can still join each other until the WARM_END or WARM_UPDATE crossing their link arrives, and the pull then moves on.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -1240,7 +1206,7 @@ An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream
 
 ## ROUTE_START {#route-start}
 A publisher sends a ROUTE_START message when it reaches an origin node for a prefix (see [Routing](#routing)).
-Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, DEAD, ANNOUNCE_FLOOR, ANNOUNCE_START, and WARM_START (see [Announce](#announce)).
+Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, DEAD, ANNOUNCE_FLOOR, and ANNOUNCE_START (see [Announce](#announce)).
 
 ~~~
 ROUTE_START Message {
@@ -1599,108 +1565,6 @@ The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 The origin's Revision at which the floor certifies the stream's claims for the route, plus one, or 0 when it certifies nothing.
 
 
-## WARM_START {#warm-start}
-A publisher sends a WARM_START message to offer the subscriber its copy of a broadcast (see [Warm Routes](#warm-routes)).
-Each WARM_START implicitly assigns the next Warm ID on the stream, later referenced by WARM_UPDATE and WARM_END (see [Announce](#announce)).
-
-~~~
-WARM_START Message {
-  Type (i) = 0xC
-  Message Length (i)
-  Route ID (i),
-  Broadcast Path Suffix (s),
-  Instance (b),
-  Minted (8),
-  Warm Cost (i),
-  Flags (8),
-  Priority (8),
-  Hop Count (i),
-  Hop ID (i) ...,
-}
-~~~
-
-**Type**:
-Set to 0xC to indicate a WARM_START message.
-
-**Route ID**:
-The route to the broadcast's origin node: the ordinal implicitly assigned by a prior ROUTE_START on this stream.
-A warm route never changes its Route ID.
-
-**Broadcast Path Suffix**:
-Combined with the requested prefix to form the broadcast's path.
-
-**Instance** and **Minted**:
-The Instance of the copy the publisher carries, as defined for [ANNOUNCE_START](#announce-start).
-
-**Warm Cost**:
-What pulling the copy costs the publisher, 0 when it is the copy's carrier (see [Warm Routes](#warm-routes)), in the units of the route's Metric.
-
-**Flags**:
-A bit field: 0x1 when a session on the copy's Hops drains (see [Routing](#routing)).
-Any other bit set is refused (see [Refused Content](#refused-content)).
-
-**Priority**:
-The lowest local priority of a link on the copy's Hops as a signed 8-bit integer, 127 at its carrier (see [Routing](#routing)).
-
-**Hop Count**:
-The number of Hop IDs that follow.
-0, which names no carrier, or more than 32 is refused.
-
-**Hop ID**:
-The copy's Hops (see [Warm Routes](#warm-routes)), in order, its carrier first and the publisher's own last.
-
-A stream has at most one live warm route per route and Broadcast: a relay still pulling an Instance for readers pinned to it offers that copy beside the one of the Instance that replaced it.
-A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_START naming a Route ID that was never assigned or already retired, or a path and Instance its route already has a live warm route for.
-
-
-## WARM_UPDATE {#warm-update}
-A publisher sends a WARM_UPDATE message when the copy a warm route offers changes, referencing its Warm ID.
-The id stays live.
-
-~~~
-WARM_UPDATE Message {
-  Type (i) = 0xD
-  Message Length (i)
-  Warm ID (i),
-  Warm Cost (i),
-  Flags (8),
-  Priority (8),
-  Hop Count (i),
-  Hop ID (i) ...,
-}
-~~~
-
-**Type**:
-Set to 0xD to indicate a WARM_UPDATE message.
-
-**Warm ID**:
-The ordinal implicitly assigned by a prior WARM_START on this stream.
-
-**Warm Cost**, **Flags**, **Priority**, **Hop Count**, and **Hop ID**:
-As defined for [WARM_START](#warm-start), replacing the warm route's.
-
-
-## WARM_END {#warm-end}
-A publisher sends a WARM_END message when it withdraws a warm route, referencing its Warm ID.
-The id is retired and MUST NOT be referenced again.
-A ROUTE_END retires the warm routes under its route without a WARM_END.
-
-~~~
-WARM_END Message {
-  Type (i) = 0xE
-  Message Length (i)
-  Warm ID (i)
-}
-~~~
-
-**Type**:
-Set to 0xE to indicate a WARM_END message.
-
-**Warm ID**:
-As defined for [WARM_UPDATE](#warm-update).
-A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_UPDATE or WARM_END naming a Warm ID that was never assigned or already retired.
-
-
 ## SUBSCRIBE
 SUBSCRIBE is sent by a subscriber to start a subscription.
 
@@ -1721,7 +1585,6 @@ SUBSCRIBE Message {
   Range Count (i)
   Range (..) ...
   Update (i)
-  Warm (8)
 }
 
 Range {
@@ -1794,10 +1657,6 @@ A Range resolves once: an update that leaves it live does not resolve it again.
 The number of the subscription's terms this message sets: 0 on SUBSCRIBE, and on each SUBSCRIBE_UPDATE a larger value than the one before it.
 A [SUBSCRIBE_DROP](#subscribe-drop) echoes the number in effect when its groups were given up, so the subscriber can tell a stale verdict on its current terms from one an update has since replaced.
 
-**Warm**:
-1 when the subscriber joins the copy the publisher offered it in a warm route, and 0 when it follows the subscriber's selected route, as an endpoint that does not choose per broadcast always does (see [Warm Routes](#warm-routes)).
-Any other value is a PROTOCOL_VIOLATION.
-
 A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
 A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
@@ -1831,7 +1690,6 @@ SUBSCRIBE_UPDATE Message {
   Range (..) ...
   Update (i)
   Wanted Group (i)
-  Warm (8)
 }
 ~~~
 
@@ -2548,7 +2406,6 @@ An application-specific payload.
 - The Cost parameter must be at least 1.
 - Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the route's drain and priority, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
-- Added warm routes: WARM_START (0xC), WARM_UPDATE (0xD), and WARM_END (0xE) on the Announce Stream, and `Warm` on SUBSCRIBE and SUBSCRIBE_UPDATE. A relay MAY pull each broadcast through a neighbor that offers a copy of it, carrying the copy's Hops from its carrier, its Warm Cost, its drain, and its priority. A carrier offers its copy whatever it pulls and joins only a lower-ranked carrier's; a relay with no reader offers each neighbor its best source that avoids it, pulls it only while that is what it offered each relay it serves, and follows its route when a neighbor following its own pulls through it. The offers settle as a path vector does, and the pulls are then free of loops.
 - Added the temporary Lite-06 Chain Setup Parameter (0x9) and a trailing Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART: the moq-lite-06 Hop ID list of a claim learned over moq-lite-06, which a node drops when it names that node.
 
 ### Tracks {#changelog-07-tracks}
