@@ -757,7 +757,6 @@ async fn an_mtls_client_authenticates_without_a_token() {
 ///
 /// A real session keeps both trace writers active through worker shutdown, so
 /// the test covers capture on the io_uring data path and the final flush.
-#[cfg(feature = "qlog")]
 #[tokio::test]
 async fn uring_workers_write_qlog_traces() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();

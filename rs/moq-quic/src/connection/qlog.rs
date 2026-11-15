@@ -1,10 +1,6 @@
-#![allow(unused_variables, reason = "function bodies in this module are regularly cfg'd out")]
-
-#[cfg(feature = "qlog")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[cfg(feature = "qlog")]
 use qlog::{
 	events::{
 		Event, EventData,
@@ -12,7 +8,6 @@ use qlog::{
 	},
 	streamer::QlogStreamer,
 };
-#[cfg(feature = "qlog")]
 use tracing::warn;
 
 use crate::{
@@ -22,7 +17,6 @@ use crate::{
 };
 
 /// Shareable handle to a single qlog output stream
-#[cfg(feature = "qlog")]
 #[derive(Clone)]
 pub struct QlogStream {
 	pub(crate) streamer: Arc<Mutex<QlogStreamer>>,
@@ -31,7 +25,6 @@ pub struct QlogStream {
 	pub(crate) start: Instant,
 }
 
-#[cfg(feature = "qlog")]
 impl QlogStream {
 	fn emit_event(&self, orig_rem_cid: ConnectionId, event: EventData, now: Instant) {
 		// Milliseconds since the epoch, at the nanosecond precision the streamer is built with.
@@ -46,10 +39,9 @@ impl QlogStream {
 	}
 }
 
-/// A [`QlogStream`] that may be either dynamically disabled or compiled out entirely
+/// Where a connection sends qlog events, or nowhere when qlog is off
 #[derive(Clone, Default)]
 pub(crate) struct QlogSink {
-	#[cfg(feature = "qlog")]
 	stream: Option<QlogStream>,
 }
 
@@ -61,18 +53,15 @@ impl QlogSink {
 		now: Instant,
 		orig_rem_cid: ConnectionId,
 	) {
-		#[cfg(feature = "qlog")]
-		{
-			let Some(stream) = self.stream.as_ref() else {
-				return;
-			};
+		let Some(stream) = self.stream.as_ref() else {
+			return;
+		};
 
-			let Some(metrics) = path.qlog_recovery_metrics(pto_count) else {
-				return;
-			};
+		let Some(metrics) = path.qlog_recovery_metrics(pto_count) else {
+			return;
+		};
 
-			stream.emit_event(orig_rem_cid, EventData::QuicMetricsUpdated(metrics), now);
-		}
+		stream.emit_event(orig_rem_cid, EventData::QuicMetricsUpdated(metrics), now);
 	}
 
 	pub(super) fn emit_packet_lost(
@@ -84,29 +73,26 @@ impl QlogSink {
 		now: Instant,
 		orig_rem_cid: ConnectionId,
 	) {
-		#[cfg(feature = "qlog")]
-		{
-			let Some(stream) = self.stream.as_ref() else {
-				return;
-			};
+		let Some(stream) = self.stream.as_ref() else {
+			return;
+		};
 
-			let event = PacketLost {
-				header: Some(PacketHeader {
-					packet_number: Some(pn),
-					packet_type: packet_type(space),
-					length: Some(info.size),
-					..Default::default()
-				}),
-				frames: None,
-				is_mtu_probe_packet: None,
-				trigger: Some(match now.saturating_duration_since(info.time_sent) >= loss_delay {
-					true => PacketLostTrigger::TimeThreshold,
-					false => PacketLostTrigger::ReorderingThreshold,
-				}),
-			};
+		let event = PacketLost {
+			header: Some(PacketHeader {
+				packet_number: Some(pn),
+				packet_type: packet_type(space),
+				length: Some(info.size),
+				..Default::default()
+			}),
+			frames: None,
+			is_mtu_probe_packet: None,
+			trigger: Some(match now.saturating_duration_since(info.time_sent) >= loss_delay {
+				true => PacketLostTrigger::TimeThreshold,
+				false => PacketLostTrigger::ReorderingThreshold,
+			}),
+		};
 
-			stream.emit_event(orig_rem_cid, EventData::QuicPacketLost(event), now);
-		}
+		stream.emit_event(orig_rem_cid, EventData::QuicPacketLost(event), now);
 	}
 
 	pub(super) fn emit_packet_sent(
@@ -117,55 +103,47 @@ impl QlogSink {
 		now: Instant,
 		orig_rem_cid: ConnectionId,
 	) {
-		#[cfg(feature = "qlog")]
-		{
-			let Some(stream) = self.stream.as_ref() else {
-				return;
-			};
+		let Some(stream) = self.stream.as_ref() else {
+			return;
+		};
 
-			let event = PacketSent {
-				header: PacketHeader {
-					packet_number: Some(pn),
-					packet_type: packet_type(space),
-					length: Some(len as u16),
-					..Default::default()
-				},
+		let event = PacketSent {
+			header: PacketHeader {
+				packet_number: Some(pn),
+				packet_type: packet_type(space),
+				length: Some(len as u16),
 				..Default::default()
-			};
+			},
+			..Default::default()
+		};
 
-			stream.emit_event(orig_rem_cid, EventData::QuicPacketSent(event), now);
-		}
+		stream.emit_event(orig_rem_cid, EventData::QuicPacketSent(event), now);
 	}
 
 	pub(super) fn emit_packet_received(&self, pn: u64, space: SpaceId, now: Instant, orig_rem_cid: ConnectionId) {
-		#[cfg(feature = "qlog")]
-		{
-			let Some(stream) = self.stream.as_ref() else {
-				return;
-			};
+		let Some(stream) = self.stream.as_ref() else {
+			return;
+		};
 
-			let event = PacketReceived {
-				header: PacketHeader {
-					packet_number: Some(pn),
-					packet_type: packet_type(space),
-					..Default::default()
-				},
+		let event = PacketReceived {
+			header: PacketHeader {
+				packet_number: Some(pn),
+				packet_type: packet_type(space),
 				..Default::default()
-			};
+			},
+			..Default::default()
+		};
 
-			stream.emit_event(orig_rem_cid, EventData::QuicPacketReceived(event), now);
-		}
+		stream.emit_event(orig_rem_cid, EventData::QuicPacketReceived(event), now);
 	}
 }
 
-#[cfg(feature = "qlog")]
 impl From<Option<QlogStream>> for QlogSink {
 	fn from(stream: Option<QlogStream>) -> Self {
 		Self { stream }
 	}
 }
 
-#[cfg(feature = "qlog")]
 fn packet_type(space: SpaceId) -> PacketType {
 	match space {
 		SpaceId::Initial => PacketType::Initial,

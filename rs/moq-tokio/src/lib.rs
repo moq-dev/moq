@@ -123,11 +123,3 @@ pub use transport::Transport;
 
 #[cfg(feature = "mdns")]
 pub mod mdns;
-
-/// Whether this build can capture qlog traces, which the `qlog` feature gates.
-///
-/// Setting a qlog directory without it is an error at dial time, so a caller offering
-/// the knob should check here rather than surfacing an option that cannot work.
-pub fn qlog_supported() -> bool {
-	cfg!(feature = "qlog")
-}

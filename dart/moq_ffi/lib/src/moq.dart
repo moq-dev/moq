@@ -20237,14 +20237,6 @@ MoqClientConfig moqClientDefaults() {
   );
 }
 
-bool moqQlogSupported() {
-  return rustCallWithLifter(
-    (status) => uniffi_moq_ffi_fn_func_moq_qlog_supported(status),
-    FfiConverterBool.lift,
-    null,
-  );
-}
-
 List<String> moqVersions() {
   return rustCallWithLifter(
     (status) => uniffi_moq_ffi_fn_func_moq_versions(status),
@@ -23618,11 +23610,6 @@ external RustBuffer uniffi_moq_ffi_fn_func_moq_client_defaults(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Int8 Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_fn_func_moq_qlog_supported(
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
 @Native<RustBuffer Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
 external RustBuffer uniffi_moq_ffi_fn_func_moq_versions(
   Pointer<RustCallStatus> uniffiStatus,
@@ -23960,9 +23947,6 @@ external int uniffi_moq_ffi_checksum_func_moq_log_level();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_client_defaults();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_func_moq_qlog_supported();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_versions();
@@ -24844,9 +24828,6 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_client_defaults() != 15294) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_func_moq_qlog_supported() != 58291) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_versions() != 28954) {

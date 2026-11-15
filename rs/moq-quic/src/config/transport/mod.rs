@@ -13,7 +13,6 @@ use crate::{
 pub mod ack_frequency;
 pub mod datagram;
 pub mod mtu;
-#[cfg(feature = "qlog")]
 pub mod qlog;
 
 /// The expected round trip time the default windows are tuned for, in milliseconds
@@ -184,7 +183,6 @@ pub struct Config {
 	pub segmentation_offload: bool,
 
 	/// Where to write qlog traces, or `None` (the default) to write none
-	#[cfg(feature = "qlog")]
 	pub qlog: Option<qlog::Stream>,
 
 	/// Whether to advertise support for receiving RESET_STREAM_AT
@@ -254,10 +252,7 @@ impl Config {
 	}
 
 	pub(crate) fn qlog_sink(&self) -> QlogSink {
-		#[cfg(feature = "qlog")]
-		return self.qlog.clone().into();
-		#[cfg(not(feature = "qlog"))]
-		QlogSink::default()
+		self.qlog.clone().into()
 	}
 }
 
@@ -310,7 +305,6 @@ impl Default for Config {
 			crypto_buffer_size: 16 * 1024,
 			allow_spin: true,
 			segmentation_offload: true,
-			#[cfg(feature = "qlog")]
 			qlog: None,
 
 			reset_stream_at: true,
@@ -343,14 +337,13 @@ impl fmt::Debug for Config {
 			crypto_buffer_size,
 			allow_spin,
 			segmentation_offload,
-			#[cfg(feature = "qlog")]
 			qlog,
 			reset_stream_at,
 			#[cfg(test)]
 				deterministic_packet_numbers: _,
 		} = self;
-		let mut s = fmt.debug_struct("Config");
-		s.field("limits", limits)
+		fmt.debug_struct("Config")
+			.field("limits", limits)
 			.field("idle_timeout", idle_timeout)
 			.field("handshake_timeout", handshake_timeout)
 			.field("keep_alive", keep_alive)
@@ -370,9 +363,8 @@ impl fmt::Debug for Config {
 			.field("crypto_buffer_size", crypto_buffer_size)
 			.field("allow_spin", allow_spin)
 			.field("segmentation_offload", segmentation_offload)
-			.field("reset_stream_at", reset_stream_at);
-		#[cfg(feature = "qlog")]
-		s.field("qlog", &qlog.is_some());
-		s.finish_non_exhaustive()
+			.field("reset_stream_at", reset_stream_at)
+			.field("qlog", &qlog.is_some())
+			.finish_non_exhaustive()
 	}
 }

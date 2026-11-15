@@ -130,8 +130,7 @@ pub struct MoqQuicConfig {
 	/// The congestion control family.
 	#[uniffi(default = None)]
 	pub congestion_control: Option<MoqCongestionControl>,
-	/// Directory, which must exist, to write qlog traces into. Fails `new` unless
-	/// [`moq_qlog_supported`].
+	/// Directory, which must exist, to write qlog traces into.
 	#[uniffi(default = None)]
 	pub qlog: Option<String>,
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a
@@ -281,12 +280,6 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 #[uniffi::export]
 pub fn moq_versions() -> Vec<String> {
 	moq_net::Versions::all().iter().map(ToString::to_string).collect()
-}
-
-/// Whether this build can write qlog traces, so a UI can hide `MoqQuicConfig::qlog` otherwise.
-#[uniffi::export]
-pub fn moq_qlog_supported() -> bool {
-	moq_tokio::qlog_supported()
 }
 
 /// Parse protocol version names, as `MoqClientConfig::versions` and

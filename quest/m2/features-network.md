@@ -8,8 +8,7 @@ flag, or config instead of by Cargo feature. These features go away:
 
 - moq-tokio: `net`, `driver`, `quic`, `websocket`, `tcp`, `uds`, `qmux`,
   `watch`, `mdns`, and the private `_transport` and `_certs`. It keeps
-  `jemalloc` (a C build) and `sim` (test-only), and `qlog` until
-  [Always compile qlog](/quest/m2/features-qlog.md) decides it.
+  `jemalloc` (a C build) and `sim` (test-only).
 - moq-relay: `quic`, `_quic`, `websocket`, `uds`, `cluster-lan`, `stun`,
   `io-uring`, and `_uring`.
 - moq-cli: `quic`, `websocket`, and `cluster-lan`.

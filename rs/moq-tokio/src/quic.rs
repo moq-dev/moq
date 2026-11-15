@@ -307,8 +307,6 @@ pub struct Config {
 	/// Write qlog traces into this directory, which must already exist.
 	///
 	/// Each endpoint writes one file, shared by its connections.
-	///
-	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG", setting = "quic.qlog")]
 	#[usage(value_hint = usage_rs::ValueHint::DirPath)]
@@ -566,12 +564,6 @@ impl Config {
 		if self.keylog.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
 			return Err(crate::Error::KeylogUnset);
 		}
-		// Erroring beats silently ignoring the flag: the operator asked for traces and
-		// would otherwise go looking for files that were never going to appear.
-		match self.qlog.as_ref() {
-			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
-			_ => Ok(()),
-		}?;
 		self.validate_limits()
 	}
 
@@ -718,9 +710,6 @@ impl Resolved {
 	}
 
 	/// The directory to write qlog traces into, if any.
-	///
-	/// Only meaningful once [`Config::validate`] has passed; a build without the
-	/// `qlog` feature never gets here with a directory set.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
@@ -923,25 +912,6 @@ mod tests {
 		assert!(reported.contains("--quic-qlog / MOQ_QUIC_QLOG"), "{reported}");
 	}
 
-	/// A build that can't capture must reject the flag rather than ignore it, so an
-	/// operator isn't left waiting on trace files that will never appear.
-	#[cfg(feature = "_transport")]
-	#[test]
-	fn qlog_requires_the_feature() {
-		let unset = Config::default().validate();
-		assert!(unset.is_ok(), "no directory configured is always fine");
-
-		let set = Config {
-			qlog: Some("/tmp/qlog".into()),
-			..Default::default()
-		};
-
-		if cfg!(feature = "qlog") {
-			assert!(set.validate().is_ok());
-		} else {
-			assert!(matches!(set.validate(), Err(crate::Error::QlogUnsupported)));
-		}
-	}
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.

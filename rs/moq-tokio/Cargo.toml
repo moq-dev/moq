@@ -33,9 +33,6 @@ _certs = ["dep:rcgen", "dep:rind-rcgen", "dep:rustls-webpki"]
 _transport = ["net", "dep:moq-quic"]
 # Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
-# Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
-# builds do not pull in the qlog crate and its serde_json encoder.
-qlog = ["moq-quic?/qlog"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]

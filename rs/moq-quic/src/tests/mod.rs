@@ -6207,7 +6207,6 @@ fn application_close_in_initial_is_rejected() {
 	);
 }
 
-#[cfg(feature = "qlog")]
 #[test]
 fn qlog_packet_lost_trigger() {
 	use qlog::events::{EventData, quic::PacketLostTrigger};
@@ -6269,7 +6268,6 @@ fn qlog_packet_lost_trigger() {
 	);
 }
 
-#[cfg(feature = "qlog")]
 #[test]
 fn qlog_pacing_rate_is_bits_per_second() {
 	use qlog::events::EventData;

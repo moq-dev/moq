@@ -1468,16 +1468,6 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 	})
 }
 
-/// Whether this build can capture qlog traces.
-///
-/// Capture is compile-time optional. [moq_client_config]'s `quic_qlog` accepts a directory
-/// either way, but dialing fails when the support is absent, so a caller offering the
-/// knob should hide it rather than surface an option that cannot work.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_qlog_supported() -> bool {
-	moq_tokio::qlog_supported()
-}
-
 /// A [moq_subscription] with moq-net's defaults, whose zero `delay` starts at the newest
 /// group and skips a superseded one at once. A NULL subscription pointer or a zeroed struct
 /// means the same; start from this struct to change a field.
@@ -1636,8 +1626,7 @@ pub struct moq_client_config {
 	/// The length in bytes of `quic_congestion_control`.
 	pub quic_congestion_control_len: usize,
 
-	/// Directory to write qlog traces into, or NULL for none. Capture is
-	/// compile-time optional; see [moq_qlog_supported].
+	/// Directory, which must exist, to write qlog traces into, or NULL for none.
 	pub quic_qlog: *const c_char,
 	/// The length in bytes of `quic_qlog`.
 	pub quic_qlog_len: usize,
@@ -1971,7 +1960,7 @@ pub struct moq_server_config {
 	pub quic_congestion_control: *const c_char,
 	/// The length in bytes of `quic_congestion_control`.
 	pub quic_congestion_control_len: usize,
-	/// A directory to write qlog traces into, or NULL for none; see [moq_qlog_supported].
+	/// A directory, which must exist, to write qlog traces into, or NULL for none.
 	pub quic_qlog: *const c_char,
 	/// The length in bytes of `quic_qlog`.
 	pub quic_qlog_len: usize,

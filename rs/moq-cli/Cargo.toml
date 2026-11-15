@@ -43,10 +43,6 @@ default = ["cluster-lan", "quic", "websocket", "nvidia", "vaapi", "s3", "gcs", "
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
 quic = ["moq-tokio/quic"]
-# qlog trace capture (`--client-quic-qlog <DIR>`). Off by default: it compiles the
-# qlog machinery into the enabled backends and is only wanted for debugging or
-# congestion-control testing.
-qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`), signing through rind and connecting through reqwest. Local

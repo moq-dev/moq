@@ -185,11 +185,6 @@ func Versions() []string {
 	return ffi.MoqVersions()
 }
 
-// QlogSupported reports whether this build can write qlog traces for QUICConfig.Qlog.
-func QlogSupported() bool {
-	return ffi.MoqQlogSupported()
-}
-
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {
 	return ffi.MoqLogLevel(level)

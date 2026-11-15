@@ -97,10 +97,6 @@ pub enum Error {
 	#[error("{0}")]
 	NoBackend(&'static str),
 
-	/// A qlog directory was configured but this build can't capture traces.
-	#[error("qlog capture requires the 'qlog' feature")]
-	QlogUnsupported,
-
 	/// Key logging was enabled without a destination, including a boolean binding's missing env path.
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,

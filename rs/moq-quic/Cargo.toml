@@ -13,8 +13,6 @@ categories = ["network-programming", "asynchronous"]
 
 [features]
 default = []
-# Enable qlog support
-qlog = ["dep:qlog"]
 # The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
 # transport. Driven by the `qmux` crate.
 mux = []
@@ -39,7 +37,7 @@ lru-slab = "0.1.2"
 moq-congestion = { workspace = true }
 # rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
 moq-crypto = { workspace = true, features = ["provider"] }
-qlog = { version = "0.18", optional = true }
+qlog = "0.18"
 rand = { workspace = true }
 rind = { workspace = true }
 rustc-hash = { workspace = true }

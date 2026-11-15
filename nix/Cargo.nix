@@ -18515,7 +18515,6 @@ rec {
             "dep:winit"
           ];
           "pulseaudio" = [ "moq-audio?/pulseaudio" ];
-          "qlog" = [ "moq-tokio/qlog" ];
           "quic" = [ "moq-tokio/quic" ];
           "s3" = [
             "object_store/aws-base"
@@ -18549,7 +18548,6 @@ rec {
           "pipewire"
           "play"
           "pulseaudio"
-          "qlog"
           "quic"
           "s3"
           "transcode"
@@ -18924,7 +18922,6 @@ rec {
             "video"
           ];
           "openh264" = [ "moq-video?/openh264" ];
-          "qlog" = [ "moq-tokio/qlog" ];
           "testing" = [ "kio/manual" ];
           "video" = [
             "dep:moq-video"
@@ -18935,7 +18932,6 @@ rec {
           "audio"
           "default"
           "openh264"
-          "qlog"
           "testing"
           "video"
         ];
@@ -20112,7 +20108,6 @@ rec {
           {
             name = "qlog";
             packageId = "qlog";
-            optional = true;
           }
           {
             name = "rand";
@@ -20235,13 +20230,11 @@ rec {
             "dep:arbitrary"
             "sim"
           ];
-          "qlog" = [ "dep:qlog" ];
         };
         resolvedDefaultFeatures = [
           "default"
           "fuzz"
           "mux"
-          "qlog"
           "sim"
         ];
       };
@@ -20695,10 +20688,6 @@ rec {
             "moq-uring/quic"
           ];
           "jemalloc" = [ "moq-tokio/jemalloc" ];
-          "qlog" = [
-            "moq-tokio/qlog"
-            "moq-uring?/qlog"
-          ];
           "quic" = [
             "_quic"
             "moq-tokio/quic"
@@ -20719,7 +20708,6 @@ rec {
           "default"
           "io-uring"
           "jemalloc"
-          "qlog"
           "quic"
           "test-support"
           "uds"
@@ -21799,7 +21787,6 @@ rec {
             "moq-net/async"
             "_certs"
           ];
-          "qlog" = [ "moq-quic?/qlog" ];
           "qmux" = [
             "_transport"
             "dep:qmux"
@@ -21844,7 +21831,6 @@ rec {
           "jemalloc"
           "mdns"
           "net"
-          "qlog"
           "qmux"
           "quic"
           "sim"
@@ -22255,7 +22241,6 @@ rec {
           "_manual" = [ "kio/manual" ];
           "default" = [ "quic" ];
           "fuzz" = [ "moq-sock/fuzz" ];
-          "qlog" = [ "moq-quic?/qlog" ];
           "quic" = [
             "dep:moq-congestion"
             "dep:moq-crypto"
@@ -22268,7 +22253,6 @@ rec {
           "_probe"
           "default"
           "fuzz"
-          "qlog"
           "quic"
         ];
       };
