@@ -5315,12 +5315,10 @@ impl Requests {
 impl Clone for Requests {
 	fn clone(&self) -> Self {
 		// Count each live handle (mirrors `broadcast::Requests`).
-		let mut fills = self.fills.lock();
-		fills.add_handler();
-		if self.fetches_only {
-			fills.fetches_only();
+		match self.fetches_only {
+			true => self.fills.lock().add_fetcher(),
+			false => self.fills.lock().add_handler(),
 		}
-		drop(fills);
 		Self {
 			name: self.name.clone(),
 			state: self.state.clone(),
@@ -23759,6 +23757,32 @@ mod test {
 		assert!(drained_drops(&mut subscriber).is_empty());
 		elapse(&producer, Duration::from_secs(31));
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
+	}
+
+	/// A handler that takes only fetches leaves a reader's miss to settle as with none, and
+	/// still takes a fetch.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetch_only_handler_takes_fetches_alone() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let dynamic = dynamic.fetches_only();
+		let waiter = kio::Waiter::noop();
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+			read.push(group.start);
+		}
+		assert_eq!(read, [2, 3]);
+		elapse(&producer, Duration::from_secs(31));
+		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the miss asked nothing");
+
+		let mut fetch = producer.consume().fetch_group(1, None);
+		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.clone().poll_requested_fill(&waiter) else {
+			panic!("the fetch is taken");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 2));
+		assert!(fill.is_fetch());
 	}
 
 	/// A fill whose handler leaves before taking it settles by run: a peer that starts its

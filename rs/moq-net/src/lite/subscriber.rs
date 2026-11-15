@@ -6192,8 +6192,8 @@ mod tests {
 				datagrams: None,
 				finished: None,
 			};
-			// The finished copy lingers for its reader, serving fetches: the subscription is
-			// what ends.
+			// The finished copy stays for its reader, serving fetches: the subscription is what
+			// ends.
 			kio::wait(|waiter| {
 				let _ = poll_run(&mut running, waiter);
 				match running.state {
@@ -7017,14 +7017,14 @@ mod tests {
 			datagrams: None,
 			finished: None,
 		};
-		// A finished copy lingers for its reader, serving fetches; the subscription is what
+		// A finished copy stays for its reader, serving fetches; the subscription is what
 		// settles.
 		let run = poll_run(&mut running, &kio::Waiter::noop());
 		assert!(
 			matches!(running.state, TrackRunState::Done),
 			"{version:?}: FIN must settle immediately"
 		);
-		assert_eq!(run.is_ready(), !clean, "{version:?}: only a finished copy lingers");
+		assert_eq!(run.is_ready(), !clean, "{version:?}: only a finished copy stays");
 		if clean {
 			assert!(reader.recv_group().await.unwrap().is_none());
 		} else {
@@ -8786,7 +8786,7 @@ mod tests {
 				datagrams: None,
 				finished: None,
 			};
-			// A finished copy lingers for its reader, serving fetches; a reset one is gone.
+			// A finished copy stays for its reader, serving fetches; a reset one is gone.
 			let run = poll_run(&mut running, &kio::Waiter::noop());
 			assert!(matches!(running.state, TrackRunState::Done));
 			assert_eq!(run.is_ready(), reset);
@@ -12339,8 +12339,8 @@ struct TrackServeRun {
 /// A copy whose publisher finished the track, which still takes a group below its end that
 /// a reader fetches, as a local [`track::Finished`] does. Its subscription is over, but a
 /// group read partway, or never delivered, continues only through a FETCH upstream, so the
-/// copy lingers while anyone reads it or a fetch is in flight, like a live copy nobody reads.
-/// A reader's miss is no fetch: the subscription's tail already settled what it owed.
+/// copy stays while anyone reads it or a fetch is in flight. A reader's miss is no fetch:
+/// the subscription's tail already settled what it owed.
 struct FinishedServe {
 	serving: Option<track::Producer>,
 	demand: track::Demand,

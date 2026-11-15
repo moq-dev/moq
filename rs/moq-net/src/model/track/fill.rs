@@ -421,8 +421,12 @@ impl FillState {
 
 	/// Turn a handler into one that takes only fetches.
 	pub(super) fn fetches_only(&mut self) {
-		self.fetchers += 1;
+		self.add_fetcher();
 		self.remove_handler();
+	}
+
+	pub(super) fn add_fetcher(&mut self) {
+		self.fetchers += 1;
 	}
 
 	/// Count a fetch-only handler out; see [`Self::remove_handler`].
