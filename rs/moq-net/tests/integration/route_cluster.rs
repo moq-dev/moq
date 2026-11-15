@@ -13,9 +13,9 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Instance, Timestamp, Version, origin, track};
+use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, Version, auth, origin, track};
 use support::Kind;
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
 /// How long a relay holds a route no neighbour answers for.
 const HOLD: Duration = Duration::from_secs(10);
@@ -706,3 +706,156 @@ async fn an_epochless_replacement_restarts_everywhere() {
 	}
 	drop(second);
 }
+
+/// `dialer` dials `acceptor` as an uplink, the way [`join`] does, with the acceptor taking
+/// the tokens the dialer presents through the returned requests.
+async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) -> (MockPair, auth::Requests) {
+	let version = lite07();
+	let mut transport = moq_net::transport::memory::Config::default();
+	transport.protocol = Some(version.alpn().to_string());
+	let (client_transport, server_transport) = support::mock::create_mock_session_pair(transport);
+	let dialer = dialer.clone().with_link(origin::Link::Upstream);
+	let acceptor = acceptor.clone().with_link(origin::Link::Peer);
+	let client = moq_net::Client::new()
+		.with_versions(version.into())
+		.with_publisher(dialer.consume().with_hidden(true))
+		.with_subscriber(dialer.clone());
+	let server = moq_net::Server::new()
+		.with_versions(version.into())
+		.with_publisher(acceptor.consume().with_hidden(true))
+		.with_subscriber(acceptor);
+	let client_fut = async {
+		let (session, driver) = (client.connect(now(), client_transport.clone()).await).expect("client handshake");
+		spawn(driver);
+		session
+	};
+	let server_fut = async {
+		let mut handshake = (server.accept_request(now(), server_transport.clone()).await).expect("server handshake");
+		let requests = handshake.requests();
+		let (session, driver) = handshake.ok().await.expect("server accept");
+		spawn(driver);
+		(session, requests)
+	};
+	let (client, (server, requests)) = futures::join!(client_fut, server_fut);
+	let pair = MockPair {
+		client,
+		server,
+		client_transport,
+		server_transport,
+		client_discovery: Some(dialer.consume().routes()),
+	};
+	(pair, requests)
+}
+
+/// A grant of the `publish` subtrees, or of everything for `**`, subscribing to
+/// everything and lapsing at `expires`.
+fn grant(publish: &[&str], expires: Option<kio::clock::Instant>) -> auth::Grant {
+	let mut grant = auth::Grant::all();
+	grant.publish = (publish.iter())
+		.map(|prefix| match *prefix {
+			"**" => Pattern::all(),
+			prefix => Pattern::subtree(prefix).unwrap(),
+		})
+		.collect::<Patterns>();
+	grant.expires = expires;
+	grant
+}
+
+/// Whether a route only moved in place: each change an Update that keeps it available.
+/// Refiling it under another identity or route prefix is an Update, never a let go.
+fn moved(seen: &[Seen]) -> bool {
+	seen.iter().all(|seen| seen.kind == Kind::Update && seen.available)
+}
+
+/// A LAN relay `L` dials its uplink `C1`, which grants its connection credential publish
+/// rights to `local` alone, and `C1` peers with `C2`. A local publisher on `L` serves
+/// `local/x`, inside that scope, and `other/z`, outside it. `L` presents a second token
+/// that `C1` grants publish rights to `**`, until the token expires and `C1` revokes it.
+/// The union crosses the scoped boundary each way: `other/z` appears at both CDN relays
+/// once the wide token lands and goes Offline once it expires, as the narrowed floor
+/// cannot certify a withdrawal outside `local`. `local/x` only moves in place across both
+/// changes, refiled from a qualified identity to a bare one and back with no End or
+/// Offline, and still ends when its publisher withdraws it. Widening to the root once
+/// let `local/x` go at `C1` while its request reopened above `local`.
+#[kio::test]
+async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
+	let [c1, c2, l] = [30, 31, 32].map(produce_origin);
+	let mut links = Links::default();
+	links.join(&c1, origin::Link::Peer, &c2, CDN_INTERNAL, 0).await;
+	let (uplink, mut requests) = tokened_uplink(&l, &c1).await;
+	// The connection credential's grant, set the way a relay sets it: moq-net widens this
+	// scope by every grant the acceptor issues, and floors certify only inside it.
+	uplink.server.auth().authorize(&grant(&["local"], None));
+	let wide_expires = kio::clock::now().saturating_add(Duration::from_secs(30));
+	kio::clock::sim::spawn(async move {
+		let mut held = Vec::new();
+		while let Some(request) = requests.next().await {
+			match request.token().as_ref() {
+				b"wide" => {
+					let issued = request.accept(grant(&["**"], Some(wide_expires)));
+					// Revoking a token's grant once it expires is the acceptor's job.
+					kio::clock::sim::spawn(async move {
+						kio::clock::sleep_until(wide_expires).await;
+						issued.revoke(moq_net::SessionError::Expired, "expired");
+					});
+				}
+				_ => held.push(request.accept(grant(&["local"], None))),
+			}
+		}
+	});
+	let publisher = produce_origin(2);
+	let inside = publisher.route("local/x", origin::RouteOptions::hidden()).unwrap();
+	inside.announce().unwrap();
+	let _push = push(&publisher, &l, 1).await;
+	quiesce().await;
+
+	let mut watched = Vec::new();
+	for relay in [&c1, &c2] {
+		watched.push((Watch::new(relay, "local/x").await, Watch::new(relay, "other/z").await));
+	}
+	for (inside, outside) in &mut watched {
+		let (inside, outside) = (inside.seen(), outside.seen());
+		assert!(
+			matches!(inside.as_slice(), [Seen { kind: Kind::Start, available: true, .. }]) && outside.is_empty(),
+			"scoped: inside {inside:?} outside {outside:?}"
+		);
+	}
+
+	let wide = uplink.client.auth().add("wide").unwrap();
+	wide.answered().await.unwrap();
+	// A dialer announcing outside its union closes its session, so `other/z` waits on the
+	// wide grant.
+	let outside = publisher.route("other/z", origin::RouteOptions::hidden()).unwrap();
+	outside.announce().unwrap();
+	kio::clock::sleep(Duration::from_secs(5)).await;
+	for (inside, outside) in &mut watched {
+		let (inside, outside) = (inside.seen(), outside.seen());
+		assert!(
+			moved(&inside) && matches!(outside.as_slice(), [Seen { kind: Kind::Start, available: true, .. }]),
+			"widened: inside {inside:?} outside {outside:?}"
+		);
+	}
+
+	// The narrowed floor certifies nothing outside `local`, so `other/z` is let go
+	// (Offline), not ended: its publisher never withdrew it.
+	kio::clock::sleep_until(wide_expires).await;
+	quiesce().await;
+	for (inside, outside) in &mut watched {
+		let (inside, outside) = (inside.seen(), kinds(&outside.seen()));
+		assert!(
+			moved(&inside) && outside == [Kind::Offline],
+			"expired: inside {inside:?} outside {outside:?}"
+		);
+	}
+	assert_eq!(uplink.client_transport.close_reason(), None, "the session outlived the token");
+
+	// Inside the scope the floor still certifies a withdrawal.
+	inside.withdraw();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	for (inside, outside) in &mut watched {
+		let (inside, outside) = (kinds(&inside.seen()), outside.seen());
+		assert!(inside == [Kind::End] && outside.is_empty(), "withdrawn: {inside:?}");
+	}
+	drop((wide, uplink, inside, outside, links));
+}
+

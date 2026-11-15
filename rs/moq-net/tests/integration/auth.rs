@@ -863,6 +863,40 @@ async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
 	.expect("timed out");
 }
 
+/// Widening the limit to the root reopens the relay's request there and files the peer's
+/// claims under bare identities, along a route at another prefix. The new request takes
+/// `a/x` over in place, with no let go between the two.
+#[kio::test]
+async fn lite_07_a_scope_widened_to_the_root_reopens_without_letting_go() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(LITE_07),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let mut routes = relay.consume().routes();
+		let a = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
+
+		pair.server.auth().authorize(&grant(&[""], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			(kinds(&mut routes, "a/x").iter()).all(|kind| *kind == origin::RouteKind::Update),
+			"the widening let go of a/x"
+		);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A session holding all the announce slots it may has no room to hear its peer's claims
 /// twice, so the old request gives its slots to the new one during a scope change,
 /// rather than the handover running the peer past its cap.
