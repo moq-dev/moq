@@ -1188,7 +1188,9 @@ class OriginState {
 		// the best one.
 		const rivals = (this.routes.peek().get(path) ?? [])
 			.filter((candidate) => candidate.scope.matches(path) && !(skip?.(candidate) ?? false))
-			.map((candidate) => candidate.route.peek());
+			.map((candidate) => candidate.route.peek())
+			// A broader claim shown here competes with nothing the local broadcast competes with.
+			.filter((rival) => (rival.above ?? 0n) === 0n);
 		if (superseded(local, rivals)) return false;
 		if (superseded(remote, [local])) return true;
 		return compareRoutes(local, remote) <= 0;

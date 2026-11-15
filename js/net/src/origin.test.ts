@@ -1269,6 +1269,43 @@ test("an announced local broadcast shadows a broader claim shown at its path wha
 	origin.close();
 });
 
+test("a broader claim shown at a path never supersedes the local broadcast against an exact route", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const other = Instance.parse("01900000-0000-7000-8000-000000000002");
+	const exact = new BroadcastProducer();
+	const broad = new BroadcastProducer();
+	const disposeExact = serve(
+		origin,
+		path,
+		provider(exact),
+		WireRoute.normalize({ instance: other, hops: [PEER], cost: 5n }),
+	);
+	const disposeBroad = serve(
+		origin,
+		path,
+		provider(broad),
+		WireRoute.normalize({ instance: INSTANCE, epoch: 1n, hops: [PEER], cost: 1n, above: 1n }),
+	);
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 3n });
+	const local = localRoute.broadcast;
+
+	const request = consumer.request(path);
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+	expect(readsFrom(active as BroadcastConsumer, local)).toBe(true);
+
+	request.close();
+	local.close();
+	disposeExact();
+	disposeBroad();
+	exact.close();
+	broad.close();
+	origin.close();
+});
+
 test("an announced local broadcast shadows a cheaper broader claim shown at its path", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
