@@ -94,8 +94,6 @@ pub struct Relay {
 	driver: Option<cluster::Driver>,
 	internal: internal::Internal,
 	web: web::Web,
-	#[cfg(feature = "stun")]
-	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
 	shutdown_trigger: shutdown::Trigger,
@@ -352,15 +350,6 @@ impl Relay {
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
 
-		#[cfg(feature = "stun")]
-		let stun = {
-			let held = match config.stun.bind {
-				Some(addr) => sockets.udp(crate::handoff::Role::Stun, addr)?,
-				None => None,
-			};
-			crate::stun::Server::bind(config.stun, held).await?
-		};
-
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
 		// when unconfigured. Every listener that performs a real accept(2) reports here,
@@ -379,8 +368,6 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
-		#[cfg(feature = "stun")]
-		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
 		#[cfg(feature = "_quic")]
 		let internal = internal.with_demux(demux.as_ref().map(|demux| demux.counters().clone()));
 		// Bound but not yet serving: registering here (rather than after the
@@ -412,8 +399,6 @@ impl Relay {
 			driver: Some(driver),
 			internal,
 			web,
-			#[cfg(feature = "stun")]
-			stun,
 			addr,
 			shutdown,
 			shutdown_trigger,
@@ -637,8 +622,6 @@ impl Relay {
 			cluster,
 			internal,
 			web,
-			#[cfg(feature = "stun")]
-			stun,
 			shutdown,
 			shutdown_trigger,
 			signals,
@@ -837,16 +820,6 @@ impl Relay {
 			})
 		};
 
-		let stun = until_handed(handed.clone(), async move {
-			#[cfg(feature = "stun")]
-			match stun {
-				Some(stun) => stun.run().await,
-				None => std::future::pending().await,
-			}
-			#[cfg(not(feature = "stun"))]
-			std::future::pending::<anyhow::Result<()>>().await
-		});
-
 		let handoff = {
 			let drain = shutdown_trigger.clone();
 			let window = shutdown.drain_timeout;
@@ -873,7 +846,6 @@ impl Relay {
 		let result = tokio::select! {
 			Err(err) = Box::pin(started.run()) => Err(err).context("cluster failed"),
 			Err(err) = Box::pin(until_handed(handed.clone(), web.serve(web_routes))) => Err(err).context("web server failed"),
-			Err(err) = stun => Err(err).context("STUN server failed"),
 			Err(err) = until_handed(handed.clone(), internal.serve(internal_routes)) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = Box::pin(handoff) => Err(err).context("handoff failed"),
@@ -1019,35 +991,6 @@ fn spawn_connection(
 
 #[cfg(test)]
 mod tests {
-	#[cfg(feature = "stun")]
-	#[tokio::test]
-	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
-		use stun_types::message::{BINDING, Message, MessageWriteVec};
-		use stun_types::prelude::*;
-		let mut config = crate::Config::default();
-		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		config.stun.bind = Some("127.0.0.1:0".parse().unwrap());
-		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
-		let _admissions = relay.admissions().unwrap();
-		let addr = relay.stun.as_ref().unwrap().addr();
-		let ready = relay.ready();
-		let shutdown = relay.shutdown_trigger().clone();
-		let running = tokio::spawn(relay.run());
-		ready.wait().await.unwrap();
-		let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let request = Message::builder_request(BINDING, MessageWriteVec::new()).finish();
-		client.send_to(&request, addr).await.unwrap();
-		let mut reply = [0; 44];
-		let (len, sender) = kio::clock::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
-			.await
-			.unwrap()
-			.unwrap();
-		assert_eq!(sender, addr);
-		assert_eq!(len, 32);
-		shutdown.start();
-		running.await.unwrap().unwrap();
-	}
-
 	#[tokio::test(start_paused = true)]
 	async fn pending_handshake_cannot_extend_the_drain_deadline() {
 		use futures::FutureExt;

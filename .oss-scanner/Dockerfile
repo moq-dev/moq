@@ -26,10 +26,9 @@ ARG CRATES="kio hang moq-auth moq-crypto moq-hls moq-json moq-loc moq-msf moq-mu
 
 # Path specs, because the lockfile also has published copies of some workspace crates.
 # io-uring compiles the relay's io_uring QUIC workers (`--runtime-io-uring`), which the default features leave out.
-# p2p compiles moq-webrtc's data channel transport and its tests.
 RUN cargo fetch --locked \
     && specs=$(printf -- '-p path+file:///src/rs/%s ' $CRATES) \
-    && cargo build --locked $specs --features moq-relay/io-uring,moq-webrtc/p2p --bins \
-    && cargo test --locked --no-run $specs --features moq-relay/io-uring,moq-webrtc/p2p
+    && cargo build --locked $specs --features moq-relay/io-uring --bins \
+    && cargo test --locked --no-run $specs --features moq-relay/io-uring
 
 ENV CARGO_NET_OFFLINE=true

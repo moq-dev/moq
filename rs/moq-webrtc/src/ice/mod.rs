@@ -3,10 +3,7 @@
 //!
 //! str0m is sans-IO, so [`Agent::next`] alternates between feeding it datagrams
 //! and timeouts and draining what it produces (transmits, events, the next
-//! timeout), and runs a STUN Binding client on the same socket so the agent can
-//! offer server-reflexive candidates. Shared by the WHIP/WHEP gateway and the
-//! `p2p` data channel transport, which only differ in what they do with
-//! the events.
+//! timeout).
 //!
 //! str0m requires every mutation of an `Rtc` to be followed by draining its output
 //! to a timeout before the next one. The agent owns that cycle: [`Agent::rtc`] is
@@ -21,5 +18,5 @@
 mod agent;
 mod wire;
 
-pub(crate) use agent::{Agent, Error, Event, canonical};
+pub(crate) use agent::{Agent, Error, canonical};
 pub(crate) use wire::{INBOX, Inbound, Packet, Socket, reader};

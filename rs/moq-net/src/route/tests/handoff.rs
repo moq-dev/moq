@@ -263,6 +263,25 @@ fn cancelling_interest_retires_its_region(rule: Rule) {
 	sim.check().unwrap();
 }
 
+/// Narrowing to an interest no claim meets ends the route there with no batch
+/// first: the new interest was never sent a claim, so no withdrawal needs a floor.
+#[test]
+fn narrowing_past_every_claim_sends_only_the_routes_end() {
+	let (origin, client) = (0, 1);
+	let mut sim = Sim::new(2);
+	sim.join(origin, client, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/a/x", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live/a/x"), Some(true));
+
+	let stats = sim.stats;
+	sim.watch(client, "live/b/");
+	assert!(sim.run());
+	assert!(!sim.holds(client, 7));
+	assert_eq!(sim.stats.claim_msgs, stats.claim_msgs, "no batch");
+}
+
 /// A claim outside a narrowed interest ends unseen. On widening, what was
 /// kept there stays hidden until a floor covering it arrives, rather than
 /// showing a stale Start the next snapshot ends.
@@ -1277,6 +1296,18 @@ fn sweep_handoff(rule: Rule) {
 		assert_eq!(false_ends(&sim.events), 0, "{label}");
 		settled(&mut sim, &label);
 	}
+}
+
+/// Scenario 16108 of the distance rule's [`sweep_handoff`], past what a gate run
+/// reaches, pinned so every run has it: a batch that leaves its neighbor's floors
+/// alone still moves the merged view's, which changes how claims it did not name
+/// are presented, so every claim is checked again.
+#[test]
+fn a_batch_moving_the_merged_floors_rechecks_every_claim() {
+	let mut sim = churn(Rule::Distance, 16108);
+	assert_eq!(revivals(&sim.events), 0);
+	assert_eq!(false_ends(&sim.events), 0);
+	settled(&mut sim, "pinned churn");
 }
 
 /// A neighbour's unchanged claims at a newer floor must displace what another

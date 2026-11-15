@@ -39,8 +39,6 @@ doc = false
 # `cluster::Options::network`, which routes peer dials over in-memory links, and with
 # `quic`, `cluster::Options::sim`, which binds them on a simulated QUIC host.
 test-support = ["moq-tokio/sim"]
-# The optional public STUN Binding listener (`--stun-bind`).
-stun = ["dep:stun-types"]
 default = ["cluster-lan", "quic", "websocket", "uds"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -100,7 +98,6 @@ rustls = { version = "0.23", features = ["std"], default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-stun-types = { workspace = true, optional = true }
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -141,7 +138,6 @@ qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
 rind-rustls = { workspace = true }
-stun-types = { workspace = true }
 tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }

@@ -41,14 +41,14 @@ moq library, media included, can point at one.
 
 Decided 2026-10-25 with the maintainer (planning interview), still in force:
 
-- Traffic is app-level [byte streams](/quest/m1/stream/README.md) and named
+- Traffic is app-level byte streams and named
   tracks, never IP packets.
 - The coordinator contract is generic and lives here: enrollment issues a
   relay URL and a token, and self-hosters run it with `moq auth`. A hosted
   service implements the same contract with its own accounts and billing.
 - Direct paths only to addresses a node can already dial: `[cluster.lan]`
   mDNS, plus [address hints](/quest/m3/mesh/addr.md) published on mesh
-  tracks. No ICE, STUN, or hole punching; the [P2P](/quest/m4/p2p/README.md)
+  tracks. No ICE, STUN, or hole punching; the P2P
   line is separate.
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
   the [routing identity](/quest/m2/cluster-routes/README.md), which each
@@ -108,7 +108,7 @@ the third, and survives a relay restart.
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
-- ✅ (Superseded 2026-11-13: this epic is back in m3, above.) This epic and [byte streams](/quest/m1/stream/README.md) moved to m1
+- ✅ (Superseded 2026-11-13: this epic is back in m3, above.) This epic and byte streams moved to m1
   from the head of m3 (rejected: staying in m3). The cut no longer waits on
   m1, and a downstream application builds on them from `main` now.
 - ✅ The epic no longer lists federation and the stream epic under
@@ -131,7 +131,5 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 ## Related
 
 - [Outbound federation](/quest/m3/cluster-routing/federation.md) - the relay node requires it; the other children do not
-- [Rust byte streams](/quest/m1/stream/rust.md) - the Endpoint requires it; the other children do not
-- [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse

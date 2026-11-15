@@ -15,13 +15,12 @@ pub enum Error {
 }
 
 impl Error {
-	/// A failed ring setup or registration, naming the locked-memory limit when
-	/// that is what ran out.
+	/// A failed ring setup or registration, naming what an `ENOMEM` can mean.
 	///
-	/// Linux 6.14 up to the 7.3 fix (backported to stable) charges every ring
-	/// and provided-buffer ring to the user's `RLIMIT_MEMLOCK`, shared with
-	/// every other io_uring that user runs, so a bare `ENOMEM` points at the
-	/// wrong culprit. Other kernels charge them to the memory cgroup.
+	/// The kernel cannot tell which ran out, and a stable backport makes the
+	/// version no guide: the memory cgroup, physically contiguous pages on a
+	/// fragmented host, or, from Linux 6.14 until the 7.3 fix, the user's
+	/// `RLIMIT_MEMLOCK`, shared with every other io_uring that user runs.
 	pub(crate) fn ring(err: std::io::Error) -> Self {
 		if err.raw_os_error() != Some(libc::ENOMEM) {
 			return Self::Io(err);
@@ -38,9 +37,9 @@ impl Error {
 		Self::Io(std::io::Error::new(
 			err.kind(),
 			format!(
-				"{err}: Linux 6.14 until the 7.3 fix charges io_uring rings to RLIMIT_MEMLOCK ({limit}), shared by every \
-				 process of this user, so raise it with `ulimit -l` or systemd's `LimitMEMLOCK=`; other kernels charge \
-				 them to the memory cgroup"
+				"{err}: the kernel could not allocate the io_uring ring, from the memory cgroup or from contiguous pages \
+				 on a fragmented host; Linux 6.14 until the 7.3 fix also charges it to RLIMIT_MEMLOCK ({limit}), shared \
+				 by every process of this user, which `ulimit -l` or systemd's `LimitMEMLOCK=` raises"
 			),
 		))
 	}
@@ -51,9 +50,12 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn a_ring_enomem_names_the_memlock_limit() {
+	fn a_ring_enomem_names_each_cause() {
 		let err = anyhow::Error::new(Error::ring(std::io::Error::from_raw_os_error(libc::ENOMEM)));
-		assert!(format!("{err:#}").contains("RLIMIT_MEMLOCK"), "{err:#}");
+		let msg = format!("{err:#}");
+		for cause in ["memory cgroup", "fragmented", "RLIMIT_MEMLOCK"] {
+			assert!(msg.contains(cause), "{msg}");
+		}
 
 		let err = anyhow::Error::new(Error::ring(std::io::Error::from_raw_os_error(libc::EBADF)));
 		assert!(!format!("{err:#}").contains("RLIMIT_MEMLOCK"), "{err:#}");

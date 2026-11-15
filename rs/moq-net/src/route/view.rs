@@ -159,16 +159,18 @@ impl<A: Clone + Eq> View<A> {
 		self.merge_claims(other, &claims)
 	}
 
+	/// Every floor of `other` lies within a newer one here, so `other` knows no claim
+	/// at a newer revision and merging it changes nothing.
+	fn outdates(&self, other: &Self) -> bool {
+		(other.floors.iter()).all(|(region, &floor)| above(&self.floors, region).any(|(_, &newer)| newer > floor))
+	}
+
 	/// [`Self::merge`], considering only `claims`: the same once they include every
 	/// claim whose state differs between the two views, since a claim held alike is
 	/// never taken.
 	pub fn merge_claims<'a>(&mut self, other: &Self, claims: impl IntoIterator<Item = &'a Path>) -> Vec<Path> {
-		// Every floor of `other` lies within a newer one here, so it knows no claim at a
-		// newer revision and changes nothing: a lagging view costs nothing to merge,
-		// however far it lags.
-		let stale =
-			(other.floors.iter()).all(|(region, &floor)| above(&self.floors, region).any(|(_, &newer)| newer > floor));
-		if stale {
+		// A lagging view costs nothing to merge, however far it lags.
+		if self.outdates(other) {
 			return Vec::new();
 		}
 		let mut changed = Vec::new();
@@ -423,6 +425,18 @@ mod tests {
 		let mut a = view(&[("live/b/z", 5)], &[("live/b/z", 1)]);
 		a.merge(&view(&[("live/b", 5)], &[("live/b", 1)]));
 		assert_eq!(a, view(&[("live/b", 5)], &[("live/b", 1)]));
+	}
+
+	#[test]
+	fn retire_keeps_an_outside_floor_only_while_it_is_newer_than_every_floor_inside() {
+		let v = view(
+			&[("live", 3), ("other/a", 5), ("other/b", 3), ("other/c", 2)],
+			&[("live/x", 1), ("other/a/x", 2), ("other/b/x", 3), ("other/c/x", 4)],
+		);
+		assert_eq!(
+			v.retire(&p("live")),
+			view(&[("live", 3), ("other/a", 5)], &[("live/x", 1), ("other/a/x", 2)])
+		);
 	}
 
 	#[test]

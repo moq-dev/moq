@@ -118,8 +118,6 @@ pub(crate) enum Role {
 	WebHttps,
 	/// `internal.listen`.
 	Internal,
-	/// `stun.bind`.
-	Stun,
 	/// `handoff.socket` itself.
 	Control,
 }
@@ -436,28 +434,6 @@ mod imp {
 			};
 			self.export(entry, listener.as_fd())?;
 			Ok(Some(listener))
-		}
-
-		/// A UDP socket for `role` on `addr`: the predecessor's, or a fresh one.
-		#[cfg(feature = "stun")]
-		pub(crate) fn udp(&mut self, role: Role, addr: SocketAddr) -> anyhow::Result<Option<std::net::UdpSocket>> {
-			if !self.enabled() {
-				return Ok(None);
-			}
-			let socket = match self.take(role, |entry| entry.addr.is_some_and(|held| serves(held, addr))) {
-				Some((_, mut fds)) => std::net::UdpSocket::from(fds.pop().context("the predecessor sent no socket")?),
-				None => std::net::UdpSocket::bind(addr).with_context(|| format!("failed to bind {addr}"))?,
-			};
-			socket.set_nonblocking(true)?;
-			let entry = Entry {
-				role,
-				addr: Some(socket.local_addr()?),
-				path: None,
-				group: None,
-				fds: 1,
-			};
-			self.export(entry, socket.as_fd())?;
-			Ok(Some(socket))
 		}
 
 		/// A Unix listener for `role` at `path`: the predecessor's, or a fresh one.
@@ -962,15 +938,6 @@ mod imp {
 			_role: Role,
 			_addr: std::net::SocketAddr,
 		) -> anyhow::Result<Option<std::net::TcpListener>> {
-			Ok(None)
-		}
-
-		#[cfg(feature = "stun")]
-		pub(crate) fn udp(
-			&mut self,
-			_role: Role,
-			_addr: std::net::SocketAddr,
-		) -> anyhow::Result<Option<std::net::UdpSocket>> {
 			Ok(None)
 		}
 

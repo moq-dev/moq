@@ -2597,7 +2597,7 @@ run_hls_grid() {
 }
 
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
-# Both roles and protocols share this lane; Python acknowledges Rust's drain before teardown.
+# Both roles share this lane; Python acknowledges Rust's drain before teardown.
 # Lite only: moq-net endpoints speak moq-lite to each other, never moq-transport.
 run_sockets() {
     needs python || return 0
@@ -2611,7 +2611,7 @@ run_sockets() {
         overall=1
         return
     fi
-    echo "  PASS  Python/Rust sockets ($version), both roles and protocols"
+    echo "  PASS  Python/Rust sockets ($version), both roles"
     record pass case="Python Rust sockets" publisher=python subscriber=rust log="$log"
 }
 

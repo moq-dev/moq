@@ -430,7 +430,7 @@ async fn a_relay_no_successor_takes_over_from_drains() {
 	assert_eq!(relays.len(), 1, "the stand-in runs one relay: {relays:?}");
 	let mut left = Reap(Some(relays[0]));
 
-	let started = std::time::Instant::now();
+	let started = kio::clock::now();
 	// SAFETY: kill has no memory-safety preconditions.
 	assert_eq!(
 		unsafe { libc::kill(stand_in.id().unwrap() as libc::pid_t, libc::SIGUSR2) },

@@ -33,7 +33,11 @@ compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
 After publication, check Release remeasure and its pin-update PR, as
-RELEASE.md describes. The pipeline re-measures changed planned-break pins
+RELEASE.md describes. Also check that the first release-plz PR after the cut
+gets the regenerated `nix/Cargo.nix` commit
+([moq-dev/moq#8684](https://github.com/moq-dev/moq/pull/8684)) and passes
+Check: that step has never run (found by the
+[feature review](/quest/m3/release/feature-review.md), 2026-11-14). The pipeline re-measures changed planned-break pins
 and requests landing through the main merge queue.
 
 This cut carries stats epochs, so it drops
@@ -214,3 +218,4 @@ with the suites above.
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
+- [The Playwright bump](/quest/m1/playwright-pin.md) - the cut PR's interop lane runs with `CI_STRICT`, which fails the route key lane on a Chromium below 158

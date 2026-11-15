@@ -58,7 +58,7 @@ broadcast:
 
 ```rust
 let mut config = moq_video::capture::Config::default();
-config.source = moq_video::capture::Source::Display(None);
+config.source = moq_video::capture::Source::Display(moq_video::capture::DisplaySelection::default());
 
 let mut capture = moq_video::capture::open(&config).await?;
 while let Some(frame) = capture.read().await? {
