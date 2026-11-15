@@ -2,13 +2,16 @@
 //! session holds only the SETUP window until it is admitted, on the tokio listener and
 //! the io_uring workers alike.
 //!
-//! Over real sockets, so the caps are measured on the wall clock as lower bounds on
-//! how long a transfer takes: uncapped, the same transfer takes milliseconds.
+//! The tokio listener runs on kio's QUIC simulator, so a transfer's time is exact and
+//! asserted within a window: a cap that throttles far below its rate fails too. The
+//! io_uring workers serve real sockets, so there the caps are measured on the wall clock
+//! as lower bounds on how long a transfer takes: uncapped, the same transfer takes
+//! milliseconds.
 #![cfg(feature = "quic")]
 
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
-use moq_relay::{Config, Relay};
+use moq_relay::auth::Admissions;
 use moq_tokio::quic::driver;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,12 +24,6 @@ const FRAME: usize = 2 << 20;
 /// the SETUP window, at the rate, with some slack for the burst a cap starts with.
 const LEAST: Duration = Duration::from_millis(700);
 
-fn config(dir: &std::path::Path) -> Config {
-	let mut config = super::peer_limits::config(dir);
-	config.quic.max_streams = None;
-	config
-}
-
 /// A grant of everything, with `publish` and `subscribe` caps.
 fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
 	let all: moq_auth::Patterns = moq_auth::Pattern::all().into();
@@ -36,25 +33,91 @@ fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
 	grant
 }
 
-fn client() -> moq_tokio::Client {
-	let mut config = moq_tokio::connect::Config::default();
-	config.tls.insecure = Some(true);
-	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config
-		.init(Default::default())
-		.expect("client init")
-		.with_reconnect(false)
+/// Where a relay's QUIC listener is, and the clients and sockets that reach it.
+enum Dial {
+	/// Real sockets on loopback.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	Real(u16),
+	/// A simulated host serving at `addr`, trusting `fingerprints`.
+	#[cfg(feature = "test-support")]
+	Sim {
+		network: driver::sim::Network,
+		addr: SocketAddr,
+		fingerprints: Vec<String>,
+	},
+}
+
+impl Dial {
+	/// A client on the simulated host at `host`; a real one ignores it.
+	fn client(&self, host: std::net::IpAddr) -> moq_tokio::Client {
+		let _ = host;
+		match self {
+			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			Dial::Real(_) => {
+				let mut config = moq_tokio::connect::Config::default();
+				config.tls.insecure = Some(true);
+				config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+				config
+					.init(Default::default())
+					.expect("client init")
+					.with_reconnect(false)
+			}
+			#[cfg(feature = "test-support")]
+			Dial::Sim {
+				network, fingerprints, ..
+			} => {
+				let mut connect = moq_tokio::connect::Config::default();
+				connect.bind = Some(SocketAddr::new(host, 0));
+				connect.tls.fingerprint = fingerprints.clone();
+				let mut config = moq_tokio::client::Config::default();
+				config.connect = connect;
+				config.sim = Some(network.host(host));
+				config.init().expect("init client").with_reconnect(false)
+			}
+		}
+	}
+
+	fn addr(&self) -> SocketAddr {
+		match self {
+			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			Dial::Real(port) => ([127, 0, 0, 1], *port).into(),
+			#[cfg(feature = "test-support")]
+			Dial::Sim { addr, .. } => *addr,
+		}
+	}
+
+	fn url(&self) -> url::Url {
+		match self {
+			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			Dial::Real(port) => format!("https://localhost:{port}/room").parse().unwrap(),
+			#[cfg(feature = "test-support")]
+			Dial::Sim { addr, .. } => format!("moqt://{addr}/room").parse().unwrap(),
+		}
+	}
+
+	/// A raw QUIC endpoint on the simulated host at `host`, which a real one ignores.
+	fn endpoint(&self, host: std::net::IpAddr) -> driver::endpoint::Endpoint {
+		let _ = host;
+		let socket: driver::endpoint::Socket = match self {
+			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			Dial::Real(_) => std::net::UdpSocket::bind("127.0.0.1:0").unwrap().into(),
+			#[cfg(feature = "test-support")]
+			Dial::Sim { network, .. } => (Box::new(network.bind(SocketAddr::new(host, 4433)))
+				as Box<dyn driver::endpoint::AsyncUdpSocket>)
+				.into(),
+		};
+		driver::endpoint::Endpoint::new(Default::default(), socket).expect("endpoint")
+	}
 }
 
 /// Connect `client`, admitted on `grant`.
 async fn connect(
+	dial: &Dial,
 	client: moq_tokio::Client,
-	port: u16,
-	admissions: &mut moq_relay::auth::Admissions,
+	admissions: &mut Admissions,
 	grant: moq_auth::Grant,
 ) -> moq_tokio::Connection {
-	let url: url::Url = format!("https://localhost:{port}/room").parse().unwrap();
-	let connecting = client.connect(url).established();
+	let connecting = client.connect(dial.url()).established();
 	let admitting = async {
 		let admission = admissions.next().await.expect("admission");
 		admission.grant(moq_auth::lease::Consumer::fixed(grant));
@@ -65,10 +128,12 @@ async fn connect(
 	connection.expect("connect failed")
 }
 
-/// Publish one [`FRAME`] on `test/video`, and how long a subscriber takes to read it.
+/// Publish one [`FRAME`] on `test/video` from the host at `publisher`, and how long a
+/// subscriber on the host at `subscriber` takes to read it.
 async fn transfer(
-	port: u16,
-	admissions: &mut moq_relay::auth::Admissions,
+	dial: &Dial,
+	admissions: &mut Admissions,
+	hosts: [std::net::IpAddr; 2],
 	publisher: moq_auth::Grant,
 	subscriber: moq_auth::Grant,
 ) -> Duration {
@@ -83,11 +148,13 @@ async fn transfer(
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.expect("create track");
-	let _publishing = connect(client().with_publisher(&origin), port, admissions, publisher).await;
+	let client = dial.client(hosts[0]).with_publisher(&origin);
+	let _publishing = connect(dial, client, admissions, publisher).await;
 
 	let subscribing = moq_tokio::origin::spawn();
 	let consumer = subscribing.consume();
-	let _subscribed = connect(client().with_subscriber(subscribing), port, admissions, subscriber).await;
+	let client = dial.client(hosts[1]).with_subscriber(subscribing);
+	let _subscribed = connect(dial, client, admissions, subscriber).await;
 	let broadcast_consumer = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
@@ -121,41 +188,26 @@ async fn transfer(
 	kio::clock::now() - start
 }
 
-/// A capped publisher feeds the relay at its rate, and a capped subscriber is fed at its.
-async fn held_to_its_caps(mut relay: Relay, port: u16) {
-	let mut admissions = relay.admissions().expect("embedded auth");
-	let running = tokio::spawn(relay.run());
-
-	let elapsed = transfer(port, &mut admissions, grant(Some(RATE), None), grant(None, None)).await;
-	assert!(elapsed >= LEAST, "a capped publisher sent {FRAME} bytes in {elapsed:?}");
-
-	let elapsed = transfer(port, &mut admissions, grant(None, None), grant(None, Some(RATE))).await;
-	assert!(
-		elapsed >= LEAST,
-		"a capped subscriber received {FRAME} bytes in {elapsed:?}"
-	);
-
-	running.abort();
-	let _ = running.await;
+/// How long a capped publisher and then a capped subscriber each take to move [`FRAME`],
+/// between the simulated hosts `hosts`.
+async fn held_to_its_caps(dial: &Dial, admissions: &mut Admissions, hosts: [std::net::IpAddr; 2]) -> [Duration; 2] {
+	let published = transfer(dial, admissions, hosts, grant(Some(RATE), None), grant(None, None)).await;
+	let subscribed = transfer(dial, admissions, hosts, grant(None, None), grant(None, Some(RATE))).await;
+	[published, subscribed]
 }
 
 /// Before admission the relay credits only the SETUP window, so a client cannot bank
 /// the full one; once admitted, the window opens.
-async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
-	let mut admissions = relay.admissions().expect("embedded auth");
-	let running = tokio::spawn(relay.run());
-
+async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, host: std::net::IpAddr) {
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let endpoint =
-		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
-			.expect("endpoint");
+	let endpoint = dial.endpoint(host);
 	let conn = endpoint
 		.connect(
 			&driver::client::Config::new(std::sync::Arc::new(tls)),
-			([127, 0, 0, 1], port).into(),
+			dial.addr(),
 			"localhost",
 		)
 		.expect("connect")
@@ -172,20 +224,27 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 		.expect("admission");
 
 	// Unread until the session runs, so it holds its credit, and the write waits for more.
+	// The session later stops this stream, so how the write ends is not reported: it is
+	// polled alongside each wait below and never completes.
 	let banked = 1 << 20;
 	let mut stream = conn.open_uni(Default::default()).await.expect("open");
-	let writing = tokio::spawn(async move {
-		stream.write_all(&vec![0u8; banked][..]).await.expect("write");
-		stream
-	});
+	let writing = async {
+		let _ = stream.write_all(&vec![0u8; banked][..]).await;
+		std::future::pending::<()>().await
+	};
+	tokio::pin!(writing);
 	let blocked = async {
 		while conn.stats().frame_tx.data_blocked == 0 {
 			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	};
-	kio::clock::timeout(TIMEOUT, blocked)
-		.await
-		.expect("the client was never blocked on the SETUP window");
+	tokio::select! {
+		biased;
+		() = &mut writing => unreachable!("a write that never completes"),
+		blocked = kio::clock::timeout(TIMEOUT, blocked) => {
+			blocked.expect("the client was never blocked on the SETUP window");
+		}
+	}
 	let stats = conn.stats();
 	assert!(
 		stats.udp_tx.bytes < moq_net::transport::SETUP_RECEIVE_WINDOW + (64 << 10),
@@ -202,73 +261,128 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	};
-	kio::clock::timeout(TIMEOUT, opened)
-		.await
-		.expect("the window never opened once admitted");
-	writing.abort();
+	tokio::select! {
+		biased;
+		() = &mut writing => unreachable!("a write that never completes"),
+		opened = kio::clock::timeout(TIMEOUT, opened) => {
+			opened.expect("the window never opened once admitted");
+		}
+	}
 
 	conn.close(driver::VarInt::from_u32(0), "done");
 	endpoint.close(driver::VarInt::from_u32(0), "done").await;
-	running.abort();
-	let _ = running.await;
 }
 
-async fn tokio_relay() -> (Relay, u16, tempfile::TempDir) {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
-	let dir = tempfile::tempdir().expect("tempdir");
-	let relay = Relay::load(config(dir.path()))
-		.await
-		.expect("load relay")
-		.with_signals(false);
-	let port = relay.quic_addr().expect("quic listener bound").port();
-	(relay, port, dir)
-}
+/// The relay on kio's QUIC simulator, serving through an embedder that answers each admission.
+#[cfg(feature = "test-support")]
+mod sim {
+	use std::{net::SocketAddr, time::Duration};
 
-#[tokio::test]
-async fn tokio_session_is_held_to_its_caps() {
-	let (relay, port, _dir) = tokio_relay().await;
-	held_to_its_caps(relay, port).await;
-}
+	use moq_relay::auth;
+	use moq_tokio::quic::driver::sim::Network;
 
-#[tokio::test]
-async fn tokio_window_opens_once_admitted() {
-	let (relay, port, _dir) = tokio_relay().await;
-	window_opens_once_admitted(relay, port).await;
+	use super::{Admissions, Dial, FRAME, LEAST, RATE};
+	use crate::{
+		memory,
+		quic_sim::{PORT, PUBLISHER, SUBSCRIBER, ip, serve},
+	};
+
+	/// A relay at [`PORT`] on a fresh network.
+	async fn relay() -> (Dial, Admissions) {
+		let network = Network::new(0);
+		let (auth, admissions) = auth::Auth::embedded("test");
+		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
+		let addr = SocketAddr::new(ip(1), PORT);
+		let relay = serve(&network, addr, &cluster, &auth).await;
+		let dial = Dial::Sim {
+			network,
+			addr,
+			fingerprints: relay.fingerprints,
+		};
+		(dial, admissions)
+	}
+
+	/// A capped session moves [`FRAME`] no faster than its cap, and no slower than the cap
+	/// alone allows: the burst a fresh cap starts with is only ever extra.
+	#[test]
+	fn session_is_held_to_its_caps() {
+		memory::run(|| async {
+			let (dial, mut admissions) = relay().await;
+			let most = Duration::from_secs_f64(FRAME as f64 * 8.0 / RATE as f64);
+			for elapsed in super::held_to_its_caps(&dial, &mut admissions, [PUBLISHER, SUBSCRIBER]).await {
+				assert!(
+					(LEAST..=most).contains(&elapsed),
+					"{FRAME} bytes took {elapsed:?}, not within {LEAST:?}..={most:?}"
+				);
+			}
+		});
+	}
+
+	#[test]
+	fn window_opens_once_admitted() {
+		memory::run(|| async {
+			let (dial, mut admissions) = relay().await;
+			super::window_opens_once_admitted(&dial, &mut admissions, PUBLISHER).await;
+		});
+	}
 }
 
 #[cfg(all(target_os = "linux", feature = "_uring"))]
-async fn uring_relay() -> Option<(Relay, u16, tempfile::TempDir)> {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
-	match moq_uring::Worker::new(Default::default()) {
-		Ok(_) => {}
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
-			eprintln!("skipping io_uring relay test: {reason}");
-			return None;
+mod uring {
+	use std::net::{IpAddr, Ipv4Addr};
+
+	use moq_relay::{Config, Relay};
+
+	use super::{Dial, FRAME, LEAST};
+
+	/// Real sockets have no simulated hosts to name.
+	const HOST: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+	async fn relay() -> Option<(Relay, u16, tempfile::TempDir)> {
+		let _ = rind_rustls::default_provider().unwrap().install_default();
+		match moq_uring::Worker::new(Default::default()) {
+			Ok(_) => {}
+			Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
+				eprintln!("skipping io_uring relay test: {reason}");
+				return None;
+			}
+			Err(err) => panic!("io_uring worker setup failed: {err}"),
 		}
-		Err(err) => panic!("io_uring worker setup failed: {err}"),
+		let dir = tempfile::tempdir().expect("tempdir");
+		let mut config: Config = crate::peer_limits::config(dir.path());
+		config.quic.max_streams = None;
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+		let port = relay.addr().expect("workers bound an address").port();
+		Some((relay, port, dir))
 	}
-	let dir = tempfile::tempdir().expect("tempdir");
-	let mut config = config(dir.path());
-	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
-	config.runtime.pin = false;
-	config.runtime.io_uring = true;
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
-	let port = relay.addr().expect("workers bound an address").port();
-	Some((relay, port, dir))
-}
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
-#[tokio::test]
-async fn uring_session_is_held_to_its_caps() {
-	if let Some((relay, port, _dir)) = uring_relay().await {
-		held_to_its_caps(relay, port).await;
+	/// A capped session takes at least as long as its cap allows.
+	#[tokio::test]
+	async fn session_is_held_to_its_caps() {
+		let Some((mut relay, port, _dir)) = relay().await else {
+			return;
+		};
+		let mut admissions = relay.admissions().expect("embedded auth");
+		let running = tokio::spawn(relay.run());
+		for elapsed in super::held_to_its_caps(&Dial::Real(port), &mut admissions, [HOST; 2]).await {
+			assert!(elapsed >= LEAST, "{FRAME} bytes took only {elapsed:?}");
+		}
+		running.abort();
+		let _ = running.await;
 	}
-}
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
-#[tokio::test]
-async fn uring_window_opens_once_admitted() {
-	if let Some((relay, port, _dir)) = uring_relay().await {
-		window_opens_once_admitted(relay, port).await;
+	#[tokio::test]
+	async fn window_opens_once_admitted() {
+		let Some((mut relay, port, _dir)) = relay().await else {
+			return;
+		};
+		let mut admissions = relay.admissions().expect("embedded auth");
+		let running = tokio::spawn(relay.run());
+		super::window_opens_once_admitted(&Dial::Real(port), &mut admissions, HOST).await;
+		running.abort();
+		let _ = running.await;
 	}
 }
