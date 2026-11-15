@@ -24,8 +24,6 @@ pub(super) struct Buffer {
 	pub joined: bool,
 	waiting_keyframe: bool,
 	pub ended: bool,
-	/// Exclusive endpoint declared for this encoder segment.
-	pub end: Option<moq_net::Timestamp>,
 }
 
 impl Default for Buffer {
@@ -42,20 +40,17 @@ impl Default for Buffer {
 			// A join resumes at its first keyframe, like any other break.
 			waiting_keyframe: true,
 			ended: false,
-			end: None,
 		}
 	}
 }
 
 impl Buffer {
-	pub fn clear(&mut self) {
-		self.frames.clear();
-		self.oldest.clear();
-		self.bytes = 0;
-		self.edge = None;
-		self.generation += 1;
-		self.waiting_keyframe = true;
-		self.joined = true;
+	/// A buffer for a fresh encoder, whose first keyframe has nothing before it to warm up from.
+	pub fn fresh() -> Self {
+		Self {
+			joined: false,
+			..Self::default()
+		}
 	}
 
 	/// The earliest presentation time still buffered, wherever it sits in
@@ -235,11 +230,6 @@ mod tests {
 			[0, 99, 33, 66]
 		);
 		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 99);
-		buffer.clear();
-		assert_eq!(buffer.bytes, 0);
-		assert!(buffer.frames.is_empty());
-		buffer.push(frame(1, true), Duration::ZERO, Duration::ZERO);
-		assert_eq!(buffer.edge.unwrap().as_millis().unwrap(), 1);
 	}
 	#[test]
 	fn age_expiry_finds_a_reordered_picture_behind_the_front() {
@@ -295,10 +285,7 @@ mod tests {
 	/// warms up.
 	#[test]
 	fn an_emptied_fresh_segment_warms_up_at_its_next_keyframe() {
-		let mut buffer = Buffer {
-			joined: false,
-			..Buffer::default()
-		};
+		let mut buffer = Buffer::fresh();
 		let warmup = Duration::from_millis(100);
 		buffer.push(frame(0, true), Duration::ZERO, warmup);
 		assert!(buffer.present.is_none());
@@ -322,13 +309,11 @@ mod tests {
 	/// An encoder's first picture has nothing before it to warm up from.
 	#[test]
 	fn a_fresh_encoder_needs_no_warmup() {
-		let mut buffer = Buffer {
-			joined: false,
-			..Buffer::default()
-		};
+		let mut buffer = Buffer::fresh();
 		buffer.push(frame(0, true), Duration::ZERO, Duration::from_millis(100));
 		assert!(buffer.present.is_none());
-		buffer.clear();
+		// A gap starts a fresh buffer, which resumes after a loss.
+		let mut buffer = Buffer::default();
 		buffer.push(frame(500, true), Duration::ZERO, Duration::from_millis(100));
 		assert_eq!(buffer.present.unwrap().as_millis().unwrap(), 600, "a loss warms up");
 	}

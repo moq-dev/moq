@@ -17,7 +17,7 @@ use moq_net::{Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 use support::{Kind, Rng, drain, watch};
 
-fn produce_origin(hop: u64) -> origin::Producer {
+pub(super) fn produce_origin(hop: u64) -> origin::Producer {
 	produce(hop, origin::Config::default().update_hold)
 }
 
@@ -138,7 +138,7 @@ async fn partial_mesh_withdraw_then_republish() {
 /// relays in neighboring PoPs peer and most reach a publisher's relay through
 /// others.
 #[rustfmt::skip]
-const PRODUCTION: &[(usize, usize)] = &[
+pub(super) const PRODUCTION: &[(usize, usize)] = &[
 	(0, 20), (0, 22), (0, 29), (1, 3), (1, 12), (1, 14), (1, 21), (2, 20), (2, 26), (2, 32), (3, 8),
 	(3, 11), (3, 15), (3, 16), (3, 17), (3, 18), (3, 21), (3, 22), (3, 23), (3, 24), (3, 29), (3, 30),
 	(3, 31), (4, 7), (4, 20), (4, 22), (4, 25), (4, 29), (5, 20), (5, 27), (5, 33), (6, 23), (6, 24),
@@ -159,7 +159,7 @@ const PRODUCTION: &[(usize, usize)] = &[
 /// One-way latency in ms for each [`PRODUCTION`] link, from the great-circle
 /// distance between its PoPs at 200 km/ms over a path 1.5 times as long, plus 1 ms.
 #[rustfmt::skip]
-const PRODUCTION_LATENCY_MS: &[u64] = &[
+pub(super) const PRODUCTION_LATENCY_MS: &[u64] = &[
 	10, 7, 7, 50, 30, 51, 50, 9, 13, 13, 5, 4, 6, 8, 3, 4, 1, 50, 6, 4, 50, 6, 4, 50, 63, 58, 50, 58,
 	16, 5, 5, 10, 10, 10, 10, 12, 1, 12, 6, 3, 5, 8, 8, 5, 4, 43, 5, 4, 43, 6, 11, 8, 49, 22, 23, 6,
 	8, 49, 22, 23, 3, 5, 4, 41, 103, 103, 60, 91, 91, 59, 64, 59, 64, 6, 9, 8, 3, 6, 6, 4, 48, 4, 3,

@@ -191,3 +191,48 @@ fn a_link_opened_before_the_doubt_is_taken_at_once() {
 		);
 	}
 }
+
+/// The publisher behind relay 1, which reaches relays 2 and 3 cheaply and relay 4
+/// dearly, and 2, 3 and 4 mesh. Relay 1 loses 2 and 3: every route left runs through
+/// 1, which both doubt, while 4 still reaches it. Relay 3 should hold the claim,
+/// unavailable, until the doubt lifts and it moves onto 4's route, but 2 answers that
+/// it has nothing, so 3 lets go a hop after the cut and shows the claim afresh once the
+/// doubt lifts. Either rule does this, since 1 is not the publisher. Pins the
+/// doubt-holds quest's flaw: flip it to a hold once fixed.
+#[test]
+fn residual_a_relay_kept_off_by_doubt_lets_go_before_it_lifts() {
+	let (origin, x, r2, r3, r4) = (0, 1, 2, 3, 4);
+	for rule in [Rule::ORIGIN, Rule::PATH] {
+		let mut sim = Sim::with(rule, 5);
+		sim.leaf(origin);
+		sim.join(origin, x, 1);
+		sim.join(x, r2, 1);
+		sim.join(x, r3, 1);
+		sim.join(x, r4, 5);
+		sim.join(r2, r3, 1);
+		sim.join(r3, r4, 1);
+		sim.join(r2, r4, 1);
+		sim.originate(origin, 7);
+		sim.announce(origin, "live/x", 0, None);
+		assert!(sim.run());
+		let cut = sim.now();
+		sim.disconnect(x, r2);
+		sim.disconnect(x, r3);
+		assert_eq!(
+			sim.shows(r3, 7, "live/x"),
+			Some(false),
+			"{}: held at the cut",
+			rule.as_str()
+		);
+		assert!(sim.flow());
+		assert!(
+			sim.now() < cut.saturating_add(Doubt::DEFAULT.timer),
+			"{}",
+			rule.as_str()
+		);
+		assert_eq!(sim.shows(r3, 7, "live/x"), None, "{}: let go in doubt", rule.as_str());
+		assert!(sim.run());
+		assert_eq!(sim.toward(r3, 7), Some(Some(r4)), "{}: after the doubt", rule.as_str());
+		assert_eq!(sim.shows(r3, 7, "live/x"), Some(true), "{}", rule.as_str());
+	}
+}
