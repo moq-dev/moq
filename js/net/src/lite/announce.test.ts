@@ -13,7 +13,6 @@ import {
 	decodeAnnounceBroadcastMaybe,
 	encodeAnnounceBroadcast,
 	type Offer,
-	ROUTE_MAX,
 	ROUTE_MAX_HOPS,
 	requestFits,
 } from "./announce.ts";
@@ -413,7 +412,6 @@ test("the route layer round-trips on draft-07", async () => {
 		priority: 0,
 		metric: 5n,
 		downOnly: true,
-		rtt: undefined,
 	};
 	const one: Offer = { ...offer, path: [{ node: 7n, session: 0n }], downOnly: false, metric: 0n };
 	const cases: [AnnounceBroadcast, number[]][] = [
@@ -422,7 +420,7 @@ test("the route layer round-trips on draft-07", async () => {
 			{ status: "routeStart", node: 0x1234n, prefix: 3n, suffix: Path.empty(), offer },
 			[6, 12, 0x92, 0x34, 3, 0, 2, 7, 0, 9, 2, 1, 128, 5],
 		],
-		// Flag 0x2: an RTT follows. Flag 0x4: a node on the path drains.
+		// Flag 0x2: a node on the path drains.
 		[
 			{
 				status: "routeUpdate",
@@ -433,14 +431,9 @@ test("the route layer round-trips on draft-07", async () => {
 					draining: true,
 					priority: -3,
 					downOnly: false,
-					rtt: 25n,
 				},
 			},
-			[7, 8, 1, 1, 7, 0, 6, 125, 5, 25],
-		],
-		[
-			{ status: "routeUpdate", id: 1n, offer: { ...offer, rtt: ROUTE_MAX } },
-			[7, 18, 1, 2, 7, 0, 9, 2, 3, 128, 5, ...Array(9).fill(0xff)],
+			[7, 7, 1, 1, 7, 0, 2, 125, 5],
 		],
 		// As many hops as a route may carry.
 		[
@@ -518,7 +511,6 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 		priority: 0,
 		metric: 0n,
 		downOnly: false,
-		rtt: undefined,
 	};
 	const encode = (msg: AnnounceBroadcast) => bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
 	// No node sends an offer it would refuse.
@@ -576,13 +568,14 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 		reason: "node",
 	});
 	expect(await decode(await start(1n, [0n], 0))).toMatchObject({ status: "refused", reason: "node" });
-	// A flag no version defines is refused, and the RTT flag without its field is malformed.
-	expect(await decode(await start(1n, [1n], 8))).toEqual({
-		status: "refused",
-		message: { kind: "routeStart", node: 1n, prefix: 5n, suffix: Path.empty(), path },
-		reason: "flags",
-	});
-	await expect(decode(await start(1n, [1n], 2))).rejects.toThrow();
+	// A flag no version defines is refused.
+	for (const flags of [4, 8]) {
+		expect(await decode(await start(1n, [1n], flags))).toEqual({
+			status: "refused",
+			message: { kind: "routeStart", node: 1n, prefix: 5n, suffix: Path.empty(), path },
+			reason: "flags",
+		});
+	}
 	// More hops than a route may carry.
 	const over = Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n);
 	expect(await decode(await start(1n, over, 0))).toMatchObject({ status: "refused", reason: "hops" });
@@ -626,7 +619,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	expect(await decode(await update(0))).toEqual({
 		status: "routeUpdate",
 		id: 3n,
-		offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false, rtt: undefined },
+		offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false },
 	});
 	// A Gone that is no boolean is malformed.
 	const gone = await forged(15, async (w) => {

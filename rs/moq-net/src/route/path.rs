@@ -96,8 +96,6 @@ pub(crate) struct Offer {
 	pub metric: Metric,
 	/// An upstream link is on its path, so it is never sent to one.
 	pub down_only: bool,
-	/// The round trip to the publisher: informational, never read to rank a route.
-	pub rtt: Option<Duration>,
 }
 
 impl Offer {
@@ -348,7 +346,8 @@ impl Suspicion {
 }
 
 /// What this node last sent a neighbour for a route. `src` remains after END
-/// while a child may still answer, but an ended route holds no offer or claims.
+/// while this node has that route, since the neighbour may still offer it back
+/// and answer its loss, but an ended route holds no offer or claims.
 #[derive(Clone, Debug)]
 struct Sent<A> {
 	src: Path,
@@ -484,7 +483,6 @@ struct Session<N> {
 	/// How the neighbour names itself in a path.
 	hop: Id,
 	link: Link,
-	rtt: Option<Duration>,
 	draining: bool,
 	/// What this node asks the neighbour for as of the last marker, each prefix with
 	/// whether its initial set arrived (SYNCED).
@@ -1012,7 +1010,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			generation,
 			hop,
 			link,
-			rtt: None,
 			draining: false,
 			asked: BTreeMap::new(),
 			edits: VecDeque::new(),
@@ -1334,19 +1331,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.update(ids, vec![Report::Draining(node)], None);
 	}
 
-	/// The link to `neighbor` has `rtt`, or `None` unmeasured.
-	pub fn rtt(&mut self, neighbor: N, rtt: Option<Duration>) {
-		let Some(session) = self.sessions.get_mut(&neighbor) else {
-			return;
-		};
-		if session.rtt == rtt {
-			return;
-		}
-		session.rtt = rtt;
-		let ids = self.through(neighbor);
-		self.update(ids, Vec::new(), None);
-	}
-
 	/// The identities `neighbor` offered a route for.
 	fn through(&self, neighbor: N) -> BTreeSet<Id> {
 		(self.sessions.get(&neighbor).into_iter())
@@ -1421,7 +1405,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			priority: i8::MAX,
 			metric: 0,
 			down_only: false,
-			rtt: Some(Duration::ZERO),
 		});
 		self.routes.insert((id, Path::empty()), route);
 		self.scopes.entry(id).or_default().insert(Path::empty());
@@ -2433,7 +2416,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			priority: session.link.priority.min(heard.offer.priority),
 			metric,
 			down_only: session.link.upstream || heard.offer.down_only,
-			rtt: heard.offer.rtt.zip(session.rtt).and_then(|(a, b)| a.checked_add(b)),
 		})
 	}
 
@@ -3233,14 +3215,17 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 			}
 		}
-		// Only entries visited above can have ended in this update.
+		// Only entries visited above can have ended in this update. An ended entry keeps
+		// its source while this node has the route it reflected: the neighbour may offer
+		// that route back, sent before it heard the END, and losing it waits for the
+		// answer. With no such route, nothing asks, so the entry goes.
 		for (peer, prefixes) in planned {
 			for prefix in prefixes {
 				let key = (id, prefix);
 				let Some(sent) = self.answering[&peer].tx.get(&key) else {
 					continue;
 				};
-				if sent.offer().is_some() || self.child_pending(id, peer, &key.1) {
+				if sent.offer().is_some() || self.routes.contains_key(&(id, sent.src.clone())) {
 					continue;
 				}
 				let src = sent.src.clone();

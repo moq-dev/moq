@@ -2308,8 +2308,8 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 	.expect("timed out");
 }
 
-/// A refusal that may pass, such as an overloaded verifier, presents the token again
-/// after a backoff rather than ending it.
+/// Each refusal that leaves the token undecided, such as an overloaded verifier, presents
+/// the token again after a backoff rather than ending it.
 async fn a_transient_refusal_is_presented_again(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
@@ -2322,13 +2322,18 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 		let mut requests = pair.requests.take().unwrap();
 		let (tx, mut issued) = futures::channel::mpsc::unbounded();
 		kio::clock::sim::spawn(async move {
-			let mut refused = false;
+			let mut undecided = vec![
+				SessionError::Internal,
+				SessionError::TooManyRequests,
+				SessionError::Timeout,
+			];
 			while let Some(request) = requests.next().await {
-				if request.token().is_empty() || refused {
-					let _ = tx.unbounded_send(request.accept(Grant::default()));
-				} else {
-					refused = true;
-					request.reject(SessionError::TooManyRequests, "busy");
+				let code = (!request.token().is_empty()).then(|| undecided.pop()).flatten();
+				match code {
+					Some(code) => request.reject(code, "undecided"),
+					None => {
+						let _ = tx.unbounded_send(request.accept(Grant::default()));
+					}
 				}
 			}
 		});

@@ -39,7 +39,6 @@ fn offer(hops: impl IntoIterator<Item = Id>, metric: Metric) -> Option<path::Rea
 		priority: 0,
 		metric,
 		down_only: false,
-		rtt: None,
 	}))
 }
 

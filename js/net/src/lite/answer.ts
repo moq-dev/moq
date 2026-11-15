@@ -241,7 +241,6 @@ export class Answer {
 			priority: 127,
 			metric: 0n,
 			downOnly: false,
-			rtt: 0n,
 		};
 	}
 

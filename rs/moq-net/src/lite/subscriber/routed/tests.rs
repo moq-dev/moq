@@ -13,7 +13,6 @@ fn offer() -> Offer {
 		priority: i8::MAX,
 		metric: 0,
 		down_only: false,
-		rtt: None,
 	}
 }
 
@@ -240,106 +239,6 @@ async fn a_claim_is_served_only_where_the_limit_admits_it() {
 	narrow.outputs(&subscriber);
 	assert_eq!(served(&wide), ["live/a/private/y", "live/a/public/x"]);
 	assert_eq!(served(&narrow), ["live/a/public/x"]);
-}
-
-/// The route and claims a peer sends, its Route ID 0.
-fn feed(routed: &mut super::Routed, paths: &[&'static str]) -> Result<(), crate::Error> {
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		offer: offer(),
-	};
-	routed.receive(route)?;
-	for path in paths {
-		routed.receive(start(path))?;
-	}
-	Ok(())
-}
-
-/// A transport that reports its first RTT only after the stream opened, such as
-/// qmux before its first ping returns, still gets its link measured.
-#[kio::test]
-async fn a_late_rtt_is_still_read() {
-	let session = SinkSession::new(Default::default());
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	feed(&mut routed, &[]).unwrap();
-	let waiter = kio::Waiter::noop();
-	routed.poll(&subscriber, &waiter);
-	kio::clock::sim::advance(crate::route::LinkRtt::INTERVAL).await;
-	routed.poll(&subscriber, &waiter);
-	assert_eq!(routed.rtt.reported(), None);
-
-	let rtt = std::time::Duration::from_millis(20);
-	session.set_stats(crate::lite::test_transport::SinkStats::default().with_rtt(rtt));
-	kio::clock::sim::advance(crate::route::LinkRtt::INTERVAL).await;
-	routed.poll(&subscriber, &waiter);
-	assert_eq!(routed.rtt.reported(), Some(rtt));
-}
-
-/// Claims served when the peer reports Synced, before the stream is first polled,
-/// already carry the link's RTT.
-#[kio::test]
-async fn the_first_claims_served_carry_the_rtt() {
-	use crate::lite::test_transport::SinkStats;
-	let ms = std::time::Duration::from_millis;
-	let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session);
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		offer: Offer {
-			rtt: Some(ms(5)),
-			..offer()
-		},
-	};
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	for msg in [route, start("live"), floor] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	let rtts: Vec<_> = routed.served.values().map(|entry| entry.route.route.rtt()).collect();
-	assert_eq!(rtts, [Some(ms(15))]);
-}
-
-/// A stream whose peer ends every route stops reading, and starts a fresh window
-/// once one returns, so a reading from before the pause never stays reported.
-#[kio::test]
-async fn a_pause_restarts_the_window() {
-	use crate::lite::test_transport::SinkStats;
-	let ms = std::time::Duration::from_millis;
-	let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let waiter = kio::Waiter::noop();
-	feed(&mut routed, &[]).unwrap();
-	routed.poll(&subscriber, &waiter);
-	assert_eq!(routed.rtt.reported(), Some(ms(10)));
-
-	routed.receive(Msg::RouteEnd { id: 0 }).unwrap();
-	routed.poll(&subscriber, &waiter);
-	assert!(routed.read_rtt.is_none(), "no route, no timer");
-	session.set_stats(SinkStats::default().with_rtt(ms(100)));
-	kio::clock::sim::advance(std::time::Duration::from_secs(60)).await;
-
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		offer: offer(),
-	};
-	routed.receive(route).unwrap();
-	routed.poll(&subscriber, &waiter);
-	assert_eq!(routed.rtt.reported(), Some(ms(100)));
 }
 
 /// What the stream keeps between floors is the net change to its committed claims,

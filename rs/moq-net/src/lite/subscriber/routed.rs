@@ -21,7 +21,6 @@ use crate::{
 		self, node,
 		path::{Dead, Hop, Moved, Offer, Reach},
 	},
-	transport::{Metrics as _, poll::Session as _},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -184,12 +183,6 @@ pub(in crate::lite) struct Routed {
 	/// The peer sent a GOAWAY: every claim served here ranks last.
 	drained: bool,
 	moving: Option<Moving>,
-	/// The link's min RTT, which the peer's routes add.
-	rtt: route::LinkRtt,
-	/// When to read the link's RTT next, or `None` once it stopped reading.
-	read_rtt: Option<crate::time::Deadline>,
-	/// Whether the peer has a route here, so the link's RTT is read.
-	sampling: bool,
 	/// Counts what this node refuses of the peer's routes and claims.
 	stats: crate::stats::Session,
 }
@@ -259,9 +252,6 @@ impl Routed {
 			ready: Default::default(),
 			drained: false,
 			moving: None,
-			rtt: Default::default(),
-			read_rtt: None,
-			sampling: false,
 			stats: subscriber.origin.stats().clone(),
 		})
 	}
@@ -1086,7 +1076,6 @@ impl Routed {
 		subscriber: &Subscriber,
 		output: node::Output,
 	) -> Option<lite::AnnounceBroadcast> {
-		self.sample(subscriber);
 		match output {
 			node::Output::Ask(edit) => self.ask(edit),
 			output => {
@@ -1181,8 +1170,7 @@ impl Routed {
 			.with_node(Some(*id))
 			.with_lane(lane)
 			.with_draining(self.drained || served.draining)
-			.with_available(served.available)
-			.with_rtt(served.rtt);
+			.with_available(served.available);
 		if let Some(entry) = self.served.get_mut(&key) {
 			let same = entry.route.route.instance == route.instance && entry.route.route.epoch == route.epoch;
 			if same {
@@ -1215,46 +1203,8 @@ impl Routed {
 		}
 	}
 
-	/// Start or stop reading the link's min RTT as the peer's routes come and go.
-	///
-	/// Only a route the peer sent adds the link's min RTT, so a peer sending none costs
-	/// no timer. Starting reads at once, so the first claims served already carry it,
-	/// and in a fresh window, so a pause never keeps a reading older than the window.
-	fn sample(&mut self, subscriber: &Subscriber) {
-		match (self.routes.is_empty(), self.sampling) {
-			(true, true) => {
-				self.sampling = false;
-				self.rtt = Default::default();
-				self.read_rtt = None;
-				self.stream.rtt(None);
-			}
-			(false, false) => {
-				self.sampling = true;
-				self.read_link(subscriber);
-			}
-			_ => {}
-		}
-	}
-
-	/// Read the link's smoothed RTT once and schedule the next read.
-	fn read_link(&mut self, subscriber: &Subscriber) {
-		let last = self.rtt.reported();
-		let now = self.rtt.read(subscriber.session.metrics().rtt());
-		if now != last {
-			self.stream.rtt(now);
-		}
-		self.read_rtt =
-			(self.rtt.reading()).then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
-	}
-
 	/// Serve requests on every claim whose queue woke.
 	pub(in crate::lite) fn poll(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) {
-		self.sample(subscriber);
-		while let Some(read_rtt) = &mut self.read_rtt
-			&& read_rtt.poll(waiter).is_ready()
-		{
-			self.read_link(subscriber);
-		}
 		while let Poll::Ready(Ok(key)) = self.ready.poll_pop(waiter) {
 			let Some(entry) = self.served.get_mut(&key) else {
 				continue;

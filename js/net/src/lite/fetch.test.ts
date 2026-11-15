@@ -89,7 +89,6 @@ test("Fetch decodes the optional delay offset before converting to milliseconds"
 				await w.u62(delay + 1n);
 				await w.u62(42n);
 				await w.u53(0); // start frame
-				await w.u53(0); // start byte
 				await w.u53(0); // through the end
 			}),
 		);
@@ -100,21 +99,4 @@ test("Fetch decodes the optional delay offset before converting to milliseconds"
 	const unsafe = sample();
 	unsafe.maxDelay = Number.MAX_SAFE_INTEGER + 1;
 	await expect(encode(version, unsafe)).rejects.toThrow(RangeError);
-});
-
-test("Fetch carries a start byte only on draft-07, beside its start frame", async () => {
-	const partway = () =>
-		new Fetch({
-			broadcast: Path.from("room/1"),
-			track: "video",
-			priority: 3,
-			group: 42n,
-			startFrame: 2,
-			startByte: 1 << 20,
-			endFrame: 5,
-		});
-	const got = await roundtrip(Version.DRAFT_07, partway());
-	expect([got.startFrame, got.startByte, got.endFrame]).toEqual([2, 1 << 20, 5]);
-	await expect(encode(Version.DRAFT_06, partway())).rejects.toThrow("start byte");
-	expect((await roundtrip(Version.DRAFT_06, sample())).startByte).toBe(0);
 });

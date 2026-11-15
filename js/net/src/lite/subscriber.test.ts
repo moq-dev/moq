@@ -230,7 +230,6 @@ function offer(node: bigint, extra: Partial<Offer> = {}): Offer {
 		priority: 0,
 		metric: 0n,
 		downOnly: false,
-		rtt: 20n,
 		...extra,
 	};
 }
@@ -3504,18 +3503,6 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 		await send(old(2n, 2n));
 		await update();
 		expect(entry.tail.covers(2n, 3n)).toBe(false);
-
-		// Under the pool's debt the tail folds what finished, gaps and all. A group in the span whose
-		// stream arrived before its stale drop still wins over it, as does a gap the grace gave up
-		// on; a gap there the drop accounted first is owed again.
-		for (const sequence of [3n, 5n]) await arrive(sequence);
-		await evict();
-		for (const sequence of [11n, 13n, 15n]) await arrive(sequence);
-		expect(entry.tail.fold()).toBe(true);
-		await send(old(3n, 3n), old(4n, 3n), old(12n, 3n));
-		await update();
-		expect(entry.tail.covers(3n, 5n)).toBe(true);
-		expect(entry.tail.covers(12n, 13n)).toBe(false);
 	} finally {
 		responses.mockRestore();
 		track.close();
@@ -4333,7 +4320,7 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 // A lite-07 session whose peer the test plays: what the peer sends on its Announce Stream reaches
 // the subscriber in order, as the session delivers it, and each edit the subscriber sends on its
 // own is answered at once. `another` adds a reader, which shares the stream.
-async function routedStream(options?: RouteOptions, getStats?: () => Promise<unknown>, scope?: Path.Pattern) {
+async function routedStream(options?: RouteOptions, scope?: Path.Pattern) {
 	const version = Version.DRAFT_07;
 	const { quic, opened, closes } = fakeSession();
 	let sent!: ReadableStreamDefaultController<Uint8Array>;
@@ -4345,7 +4332,6 @@ async function routedStream(options?: RouteOptions, getStats?: () => Promise<unk
 				close: () => sent.close(),
 			}),
 	});
-	if (getStats) Object.assign(quic, { getStats });
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 
 	// One message at a time, in the order the peer wrote them. A violation ends the session, as
@@ -5220,38 +5206,6 @@ test("a lite-07 consume pinned to an instance names its route's node", async () 
 	await info;
 });
 
-// A route's RTT is the relay's sum plus this link's own min RTT, unknown while either is, and it
-// moves no pick: it only updates the route reported.
-test("a lite-07 route reports its rtt as the relay's sum plus this link's", async () => {
-	// The link's first read answers only after the route's first batch is on the stream.
-	const stats = Promise.withResolvers<{ smoothedRtt: number }>();
-	const { subscriber, announced, send } = await routedStream(undefined, () => stats.promise);
-	const x = Path.from("x");
-	// The session reads no further message until the route's first read of the link is in.
-	const batch = [
-		send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) }),
-		send({ status: "active", suffix: x, route: 0n, instance: Instance.parse("a") }),
-		send({ status: "floor", id: 0n, revision: 0n }),
-	];
-	const first = announced.next();
-	stats.resolve({ smoothedRtt: 10.2 });
-	await Promise.all(batch);
-	// The claim waits for that read, so the path is first reported with the sum: a listing shows
-	// a route when its path turns present, and not again for an RTT.
-	let next = (await first) as { kind: string; route: WireRoute };
-	expect(next).toMatchObject({ kind: "start", route: { node: NODE_A } });
-	expect(next.route.rtt?.asMillis()).toBe(31);
-
-	// The relay could not measure a link on the path: the sum is unknown.
-	await send({ status: "routeUpdate", id: 0n, offer: offer(NODE_A, { rtt: undefined }) });
-	next = (await announced.next()) as { kind: string; route: WireRoute };
-	expect(next).toMatchObject({ kind: "update", route: { node: NODE_A } });
-	expect(next.route.rtt).toBeUndefined();
-
-	announced.close();
-	subscriber.close();
-});
-
 // Forwarding code asks for each origin node's claim at a path as its own route.
 test("a lite-07 stream reports each node's claim with claims", async () => {
 	const { subscriber, announced, send } = await routedStream({ claims: true });
@@ -5303,10 +5257,8 @@ test("a lite-07 batch applies at its floor, and a held route turns unavailable",
 		kind: "update",
 		route: { available: true, cost: 8n },
 	});
-	// Nothing ranks by RTT, so a change to it alone reports nothing.
-	await send({ status: "routeUpdate", id: 0n, offer: offer(NODE_A, { metric: 5n, rtt: 90n }) });
-	// Nor by its path, until the route crossed as many nodes as one may, or crossed us: then it is
-	// no route at all, until it is usable again.
+	// Nothing ranks by its path, so a change to it alone reports nothing, until the route crossed
+	// as many nodes as one may, or crossed us: then it is no route at all, until it is usable again.
 	const longer = [{ node: NODE_A, session: 0n }, { node: 3n, session: 1n }, ...offer(NODE_A).path.slice(1)];
 	await send({ status: "routeUpdate", id: 0n, offer: offer(NODE_A, { metric: 5n, path: longer }) });
 	const full = Array.from({ length: ROUTE_MAX_HOPS }, (_, i) => ({ node: BigInt(i + 1), session: 0n }));
@@ -5530,11 +5482,7 @@ test("a lite-07 DEAD and its ROUTE_UPDATEs apply as one", async () => {
 // both readers, and only what the wider prefix adds arrives.
 test("a lite-07 edit to a wider prefix keeps the claims the route carried", async () => {
 	const half = Path.from("a");
-	const { subscriber, announced, send, edits, settled, another } = await routedStream(
-		undefined,
-		undefined,
-		Path.Pattern.subtree(half),
-	);
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(undefined, Path.Pattern.subtree(half));
 	const [x, y] = [Path.from("a/x"), Path.from("b/y")];
 	const instance = Instance.parse("i");
 	expect(edits).toMatchObject([{ remove: [], add: [{ prefix: half }] }]);

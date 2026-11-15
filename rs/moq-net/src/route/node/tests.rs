@@ -66,7 +66,6 @@ fn served_at(claim: Claim, metric: Metric, primary: bool) -> Served {
 	Served {
 		claim,
 		metric,
-		rtt: None,
 		available: true,
 		draining: false,
 		priority: 0,
@@ -336,7 +335,6 @@ fn nothing_moves_across_a_dead() {
 		priority: 0,
 		metric,
 		down_only: false,
-		rtt: None,
 	};
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
@@ -366,7 +364,6 @@ fn a_reader_behind_repeated_failures_overruns() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let dead = |session, gone| Dead::Closed {
 		hop: Hop { node: 2, session },
@@ -443,7 +440,6 @@ fn a_claim_started_and_withdrawn_unread_leaves_nothing() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -497,7 +493,6 @@ fn a_read_route_ends_alone() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
@@ -605,7 +600,6 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		from_a.route(100, Path::empty(), Some(Reach::Finite(offer)));
 		// A route goes on the wire only with a claim it shows, once that is served.
@@ -706,7 +700,6 @@ fn a_goaway_moves_the_forwarded_route_to_another_stream() {
 			priority: i8::MAX,
 			metric,
 			down_only: false,
-			rtt: None,
 		};
 		let live = claim(&instance, 0);
 		stream.route(5, Path::empty(), Some(Reach::Finite(offer)));
@@ -790,7 +783,6 @@ fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -836,7 +828,6 @@ fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();

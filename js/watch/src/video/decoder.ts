@@ -725,6 +725,9 @@ class DecoderTrack {
 			format,
 			delay: this.#delay,
 			predecessor: this.consumer ?? this.#predecessor,
+			// The max-delay decoder reads older groups on purpose, to rebuild references for the clock's
+			// lane, so only the lane driving the clock skips what the clock passed.
+			playhead: this.#drives ? this.sync : undefined,
 		});
 		effect.cleanup(() => consumer.close());
 		this.consumer = consumer;

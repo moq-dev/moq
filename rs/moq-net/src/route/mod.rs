@@ -20,7 +20,6 @@ pub(crate) mod node;
 pub(crate) mod path;
 mod proof;
 mod reader;
-mod rtt;
 mod view;
 
 #[cfg(test)]
@@ -35,8 +34,6 @@ pub(crate) use node::Node;
 pub(crate) use proof::EXPORTER_LABEL;
 pub use proof::RouteKey;
 pub(crate) use proof::{Proof, Transcript};
-#[cfg(feature = "async")]
-pub(crate) use rtt::LinkRtt;
 #[cfg(feature = "async")]
 pub(crate) use view::ancestors;
 pub(crate) use view::{View, within};

@@ -217,9 +217,15 @@ impl MockSendStream {
 impl poll::SendStream for MockSendStream {
 	type Error = memory::Error;
 	type Group = poll::Ungrouped;
-	type Offset = ();
+	type Offset = u64;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> u64 {
+		self.inner.offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+		self.inner.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.conn.hold_writes.load(Ordering::Relaxed) {
@@ -295,14 +301,6 @@ impl poll::SendStream for MockSendStream {
 			return Poll::Ready(Ok(()));
 		}
 		self.inner.poll_closed(waiter)
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.inner.delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.poll_delivered(waiter)
 	}
 }
 

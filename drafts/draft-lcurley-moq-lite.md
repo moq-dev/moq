@@ -215,7 +215,6 @@ A subscriber that has received frames 0 through `N-1` of group `G` and wants the
 
 This is what lets a subscriber move a Track to a different publisher partway through a Group instead of waiting for the next Group to start, which matters for Tracks whose current Group may stay open indefinitely.
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
-A subscriber that has received the first `B` bytes of frame `N` FETCHes `G` from frame `N` with a `Start Byte` of `B`, so a frame read partway on one publisher continues on another without sending its first bytes again.
 
 A partial Group is only ever delivered to a subscriber that asked for one with FETCH, or as the [continuation](#yield) of a paused Group.
 A publisher that holds only part of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
@@ -392,7 +391,7 @@ A publisher answers each ANNOUNCE_REQUEST with one ANNOUNCE_OK, where the edit t
 
 - ANNOUNCE_OK: the peer's last ANNOUNCE_REQUEST takes effect here.
 - ROUTE_START: the publisher reaches an origin node for a prefix.
-- ROUTE_UPDATE: a route's path, drain, priority, metric, down-only bit, or RTT changed.
+- ROUTE_UPDATE: a route's path, drain, priority, metric, or down-only bit changed.
 - ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
 - ROUTE_END: the publisher let go of a route and every claim under it.
 - DEAD: a session on the path of routes the publisher sent closed, or a node on it sent a GOAWAY.
@@ -499,7 +498,7 @@ This specification marks each such value "refused"; the receiver skips the rest 
 - A refused ANNOUNCE_START still assigns its Announce ID, and a refused ANNOUNCE_UPDATE or ANNOUNCE_RESTART keeps it; the claim goes offline at its route's next floor, which is not an ANNOUNCE_END. A claim whose path was refused stays refused; any other comes back with a later ANNOUNCE_RESTART the receiver can use. Its origin withdrew nothing, so while a route has a live claim the receiver refused, the receiver takes the route's floors as certifying nothing, and a relay forwards no withdrawal for the claim.
 - A refused WARM_START still assigns its Warm ID.
 
-Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, such as an RTT flag without its RTT, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
+Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
 A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 hops is unusable, so the relay's own hop never takes one past 32.
 
 ### Hidden Paths {#hidden}
@@ -539,18 +538,6 @@ A node numbers each session it opens or accepts with a Session Number of its own
 An origin's own route has a Path of its own hop alone, with Session Number 0, and a node sending a route it learned appends its own hop, naming the session it learned the route on.
 A relay forwards the other hops unchanged and never qualifies them.
 A route that arrives with 32 hops is unusable, since the receiver's own hop would take it past 32.
-
-A route may also carry an RTT: the round trip to its origin node in milliseconds, summed link by link.
-It is informational: nothing ranks or selects a route by its RTT.
-An origin advertises its own route with an RTT of 0.
-A receiver adds its link min RTT for the session to the RTT of every route the peer sends; the sum is its RTT through that peer, which it advertises on the route it selects.
-A link min RTT is the lowest smoothed RTT [RFC9002] the connection measured over the last 30 seconds, read once a second, in milliseconds rounded up.
-A lifetime minimum never rises after a path change, so it is not a link min RTT.
-A node SHOULD keep the link min RTT it adds until the lowest reading differs from it by more than the larger of 5 ms and a quarter of it, so jitter and short queues send no ROUTE_UPDATE and a lasting change sends one per route.
-A node whose connection reports no RTT has no link min RTT, so it sends the routes it learned there without one, and a route without one stays without one past every later node.
-A sum too large to encode is sent without one too.
-An endpoint learns its round trip to an origin node by adding its own link min RTT to the RTT of the route it selected; without its own, the RTT alone covers every hop past its first.
-Like the Metric, an RTT is unverified: a peer can misstate only what crosses it.
 
 A route is draining when a node on its Path sent a GOAWAY, as the route's draining flag or a [DEAD](#dead) says, or when its session received one.
 Its priority is the lowest local priority of a session on its Path: a receiver takes the lower of the priority the route carries and its own local priority for the session, and an origin's own route carries the highest.
@@ -992,7 +979,8 @@ The subscriber MAY cache the error and potentially retry later.
 
 #### Yield {#yield}
 A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with YIELDED to make room for a higher-priority one.
-A Group Stream carrying the `ietf` extension's object records is never reset with YIELDED.
+A Group Stream of a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects, is never reset with YIELDED.
+Any other Group Stream may be, including one on a session with the extension: a continuation's records start at its `Frame Start`.
 
 A Group whose stream was reset with YIELDED is paused, not given up: the subscriber keeps the frames it received, and the publisher MUST later continue the Group on another Group Stream or name it in [SUBSCRIBE_DROP](#subscribe-drop).
 A continuation is a Group Stream for the paused Group whose `Frame Start` is the reset stream's own `Frame Start`, since a reset can discard frames the transport acknowledged.
@@ -1364,7 +1352,6 @@ Route Offer {
   Flags (8),
   Priority (8),
   Metric (i),
-  [RTT (i),]
 }
 
 Hop {
@@ -1383,7 +1370,7 @@ A Hop ID of 0 is refused.
 The Path comes first, so a receiver that refuses the rest of the offer still learns the hops a later [DEAD](#dead) may name.
 
 **Flags**:
-A bit field: 0x1 when the route is down-only, 0x2 when an RTT follows, and 0x4 when the route is draining (see [Routing](#routing)).
+A bit field: 0x1 when the route is down-only and 0x2 when the route is draining (see [Routing](#routing)).
 Any other bit set is refused, rather than ignored: a later version may give a bit a meaning that changes the route, or a field ahead of the ones defined here.
 
 **Priority**:
@@ -1392,9 +1379,6 @@ The route's priority, the lowest local priority of a session on its Path, as a u
 **Metric**:
 The publisher's metric to the origin node, 0 when it is the origin.
 
-**RTT**:
-The publisher's RTT to the origin node in milliseconds (see [Routing](#routing)), 0 when it is the origin.
-Present only when Flags has 0x2 set, and absent when the publisher has none.
 
 
 ## ROUTE_UPDATE {#route-update}
@@ -2316,7 +2300,6 @@ FETCH Message {
   Subscriber Max Age (i)
   Group Sequence (i)
   Frame Start (i)
-  Start Byte (i)
   Frame End (i)
 }
 ~~~
@@ -2344,11 +2327,6 @@ The sequence number of the group to fetch.
 **Frame Start**:
 The index of the first frame to return within the group (see [Positions](#positions)).
 A plain absolute index; 0 means the start of the group (default).
-
-**Start Byte**:
-The offset of the first payload byte to return within the frame at `Frame Start`; 0 means the whole frame (default).
-The first FRAME of the response still states that frame's full size, and carries only its payload from `Start Byte` on; later frames are whole.
-A non-zero `Start Byte` at or past the frame's size is a protocol violation, since the rest of a frame is never empty, and so is a non-zero `Start Byte` on a Track whose `Compression` is not none, since a compressed frame inflates only from its first byte, or on a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects.
 
 **Frame End**:
 The last frame to return (inclusive), encoded as the absolute frame index + 1.
@@ -2491,6 +2469,11 @@ AUTH_ERROR Message {
 A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
 A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
 
+INTERNAL_ERROR, TOO_MANY_REQUESTS, and CONTROL_MESSAGE_TIMEOUT mean the acceptor failed to decide, such as when its authorization service is unreachable or its verification queue is full.
+A presenter that receives one of them SHOULD present the same token again on a new Auth Stream after a backoff that grows with each consecutive such refusal, and treats the token as unanswered until then.
+Any other code is the acceptor's decision on the token: the presenter does not present that token again.
+An acceptor that cannot decide SHOULD send one of the first three codes rather than UNAUTHORIZED, which ends the token.
+
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
 Invalid UTF-8 or a reason longer than 8,192 bytes is a PROTOCOL_VIOLATION that closes the session.
@@ -2597,6 +2580,7 @@ An application-specific payload.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Scope widens before AUTH_OK. A presenter waits for unanswered non-empty tokens before sending an uncovered request or rejecting a publication, and renewal waits for AUTH_OK before withdrawing the old token.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION, as do invalid UTF-8 or an oversized AUTH_ERROR reason.
+- An AUTH_ERROR with INTERNAL_ERROR, TOO_MANY_REQUESTS, or CONTROL_MESSAGE_TIMEOUT leaves the token undecided, and the presenter presents it again after a growing backoff; any other code ends the token.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 
 ### Paths and Routing {#changelog-07-routing}
@@ -2614,8 +2598,7 @@ An application-specific payload.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session.
 - ANNOUNCE_REQUEST (0x10) edits a set of prefixes, none at or below another, one edit at a time, and ANNOUNCE_OK (0x11) marks where each edit takes effect. Both endpoints carry the routes and claims that both sets cover over to the new set, so none is sent again. ROUTE_START and SYNCED name the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix. A finished Announce Stream means its endpoint is leaving.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, for the paths under a prefix, with an additive metric and a down-only bit. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin and prefix rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
-- ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
-- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x4) and priority, which rank before its metric.
+- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x2) and priority, which rank before its metric.
 - Added ROUTE_HOLD (0xB), which holds a route while it may recover, for at most 10 seconds; ROUTE_END lets it go. Neither withdraws the origin's claims.
 - Added DEAD (0xF): a node that loses a session names that hop once to each neighbour it sent a route through it, counting the routes that moved, each a ROUTE_UPDATE right behind it, and every node drops every route through the hop and doubts the node at the far end for a second, keeping nodes off routes through it but not off one it originates, except over a session to it opened since; a DRAIN names a node that sent a GOAWAY, whose routes rank draining. The path, the dead hop, holds, and the doubt keep routes free of stale copies, and of loops except briefly when an origin on three or more relays leaves them all at once, with no distance, sequence number, route request, or echo. On a scoped session a DEAD applies only to the routes heard there.
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
@@ -2651,7 +2634,6 @@ An application-specific payload.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A relay forwards the smallest stated value.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups: a read starting partway through a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
-- Added `Start Byte` to FETCH, after `Frame Start`: the response's first frame states its full size and carries only its payload from that byte, so a frame read partway on one publisher continues on another from where it stopped.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.

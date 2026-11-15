@@ -8,11 +8,9 @@
 // for it. Mirrors `subscriber/routed.rs` in rs/moq-net for a node that forwards nothing: an
 // endpoint applies the peer's withdrawals and holds, and casts no doubt.
 
-import { Duration, sleep } from "@moq/clock";
 import { type Dispose, type GetPromise, race } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { transportStats } from "../connection/stats.ts";
 import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { Cost, type Hop, routesEqual, WireRoute } from "../hop.ts";
@@ -34,7 +32,6 @@ import {
 	type Unusable,
 } from "./announce.ts";
 import type { Carrier, Claim, Floors } from "./floors.ts";
-import { LinkRtt } from "./link_rtt.ts";
 import * as rekey from "./rekey.ts";
 import type { Version } from "./version.ts";
 
@@ -178,14 +175,6 @@ export class Routed {
 	#closed = Promise.withResolvers<void>();
 	#stopDrain?: Dispose;
 
-	// This link's min RTT, read once a second while the peer has a route, as Rust's
-	// `Routed::sample`: no route, no timer, and a pause restarts the window.
-	#link = new LinkRtt();
-	#linkRtt: Duration | undefined;
-	#sampler?: AbortController;
-	// The running sampler's first read, settled once it landed or the sampler stopped.
-	#firstRead = Promise.resolve();
-
 	constructor(session: Session) {
 		this.#session = session;
 		this.#routes = new SlotMap(session.slots);
@@ -318,7 +307,6 @@ export class Routed {
 		this.#closing = true;
 		this.#closed.resolve();
 		this.#stopDrain?.();
-		this.#sampler?.abort();
 		for (const wire of this.#routes.values()) {
 			this.#session.floors.leave(wire.node, wire.carrier);
 			for (const path of wire.view.claims.keys()) this.#session.consumes.withdraw(path, wire.owner);
@@ -331,50 +319,6 @@ export class Routed {
 		const readers = [...this.#readers];
 		this.#readers.clear();
 		for (const reader of readers) reader.announced.close(err);
-	}
-
-	// Returns whether it started a sampler.
-	#sample(): boolean {
-		if (this.#routes.size === 0 && this.#sampler) {
-			this.#sampler.abort();
-			this.#sampler = undefined;
-			this.#link = new LinkRtt();
-			this.#linkRtt = undefined;
-		} else if (this.#routes.size > 0 && !this.#sampler) {
-			const ctrl = new AbortController();
-			this.#sampler = ctrl;
-			const first = Promise.withResolvers<void>();
-			this.#firstRead = first.promise;
-			void this.#readLink(ctrl.signal, this.#link, first.resolve);
-			return true;
-		}
-		return false;
-	}
-
-	async #readLink(signal: AbortSignal, window: LinkRtt, read: () => void) {
-		try {
-			while (!signal.aborted && window.reading) {
-				const rtt = (await transportStats(this.#session.quic)).rtt;
-				if (signal.aborted || this.#closing) return;
-				// A transport reporting 0 has not measured one.
-				const now = window.read(rtt?.isZero() ? undefined : rtt);
-				if (now !== this.#linkRtt) {
-					this.#linkRtt = now;
-					// RTT never selects a route, so the consume cache keeps its picks: only the
-					// reported routes change, each path once.
-					const paths = new Set<Path.Valid>();
-					for (const wire of this.#routes.values())
-						for (const path of wire.view.claims.keys()) paths.add(path);
-					for (const path of paths) this.#touch(path, false);
-				}
-				read();
-				await sleep(LinkRtt.INTERVAL, { signal });
-			}
-		} catch {
-			// Aborted: the routes went or the session ended.
-		} finally {
-			read();
-		}
 	}
 
 	#route(id: bigint): Route {
@@ -432,11 +376,6 @@ export class Routed {
 				priority: Math.min(0, wire.offer.priority),
 				draining: wire.offer.draining || wire.drain || undefined,
 				available: !wire.held,
-				// The relay's sum plus this link's own, unknown while either is.
-				rtt:
-					wire.offer.rtt !== undefined && this.#linkRtt !== undefined
-						? this.#linkRtt.checkedAdd(Duration.millis(Number(wire.offer.rtt)))
-						: undefined,
 			}),
 		);
 	}
@@ -605,7 +544,7 @@ export class Routed {
 	// The peer started a route to `node` with the next Route ID, covering the requested prefix
 	// with the Prefix ID `asked` joined with `suffix`, along `offer`, or along `path` when this
 	// node refuses the offer.
-	async #startRoute(
+	#startRoute(
 		node: bigint,
 		asked: bigint,
 		suffix: Path.Valid | undefined,
@@ -629,14 +568,9 @@ export class Routed {
 			{ region: region.path, prefix: at, hidden: region.hidden, revision: undefined },
 		);
 		this.#routes.set(id, wire);
-		const started = this.#sample();
 		if (named !== undefined) this.#named.set(named, id);
 		// A refused route's floors stay its own, as Rust's node never holds the route.
 		if (this.#joined(wire)) this.#session.floors.join(node, wire.carrier);
-		// The link's first read lands before the route's first claims show, as Rust reads the link
-		// before it serves them: a listing reports a path's route when it turns present and not
-		// again for an RTT, so a read landing after would never reach it.
-		if (started) await race([this.#firstRead, this.#closed.promise]);
 	}
 
 	// The peer let go of the route and every claim under it: offline, not withdrawn.
@@ -646,7 +580,6 @@ export class Routed {
 			this.#claims.delete(id);
 		}
 		this.#routes.delete(wire.id);
-		this.#sample();
 		const named = this.#key(wire.node, wire.prefix);
 		if (named !== undefined && this.#named.get(named) === wire.id) this.#named.delete(named);
 		this.#drop(wire);
@@ -1034,7 +967,6 @@ export class Routed {
 		for (const wire of ended) {
 			for (const path of wire.view.claims.keys()) consumes.withdraw(path, wire.owner);
 		}
-		this.#sample();
 		if (fresh.length > 0 || ended.length > 0) this.#session.revalidate();
 		// A claim no route carries any more was let go, not withdrawn by its origin.
 		for (const path of touched) this.#touch(path, true);
@@ -1063,7 +995,7 @@ export class Routed {
 				// arrive outside a DEAD's updates.
 				break;
 			case "routeStart":
-				await this.#startRoute(msg.node, msg.prefix, msg.suffix, msg.offer, msg.offer.path);
+				this.#startRoute(msg.node, msg.prefix, msg.suffix, msg.offer, msg.offer.path);
 				break;
 			case "routeUpdate":
 				this.#move(this.#route(msg.id), msg.offer);
@@ -1109,7 +1041,7 @@ export class Routed {
 				break;
 			}
 			case "refused":
-				await this.#refused(msg.message, msg.reason);
+				this.#refused(msg.message, msg.reason);
 				break;
 			case "endedId": {
 				const live = this.#claim(msg.id);

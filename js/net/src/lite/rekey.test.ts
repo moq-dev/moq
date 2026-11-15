@@ -109,7 +109,6 @@ test("a route ranks unheld, then off the subscriber's path, then by its offer", 
 		priority: 0,
 		metric: 1n,
 		downOnly: false,
-		rtt: undefined,
 		...extra,
 	});
 	const ranked = [

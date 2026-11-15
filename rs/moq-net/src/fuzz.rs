@@ -587,7 +587,6 @@ fn route_offer(node: u64) -> crate::route::path::Offer {
 		priority: i8::MAX,
 		metric: 0,
 		down_only: false,
-		rtt: None,
 	}
 }
 
@@ -983,7 +982,6 @@ impl PathRouteRelay {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			})),
 		);
 		let snapshot = (0..claims)
@@ -1068,7 +1066,6 @@ impl PathRouteFollower {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			})),
 		);
 		let changes = (0..self.claims)
@@ -1115,8 +1112,6 @@ impl PathRouteFollower {
 pub struct PathRouteDrain {
 	router: crate::route::path::Router<usize, ()>,
 	recipients: usize,
-	idle: usize,
-	rtt: u64,
 }
 
 impl PathRouteDrain {
@@ -1150,7 +1145,6 @@ impl PathRouteDrain {
 					priority: i8::MAX,
 					metric: 1,
 					down_only: false,
-					rtt: None,
 				})),
 			);
 			let claim = Path::new(&format!("live/{i}/x")).unwrap();
@@ -1172,14 +1166,7 @@ impl PathRouteDrain {
 				)
 				.unwrap();
 		}
-		let idle = sessions + recipients;
-		router.connect(idle, 9_000, crate::route::Link::default()).unwrap();
-		let mut node = Self {
-			router,
-			recipients,
-			idle,
-			rtt: 0,
-		};
+		let mut node = Self { router, recipients };
 		node.flush();
 		node
 	}
@@ -1206,14 +1193,6 @@ impl PathRouteDrain {
 		self.router.events();
 		self.router.changed();
 		out.len()
-	}
-
-	/// An RTT change on a session with no routes, which changes nothing it was sent.
-	pub fn idle(&mut self) {
-		self.rtt = self.rtt % 8 + 1;
-		self.router
-			.rtt(self.idle, Some(std::time::Duration::from_millis(self.rtt)));
-		assert_eq!(self.flush(), 0);
 	}
 
 	fn flush(&mut self) -> usize {
