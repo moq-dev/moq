@@ -121,11 +121,10 @@ test("an Opus description reaches WebCodecs with its mapping and no pre-skip", (
 	// The catalog's bytes are left alone.
 	expect(head[10]).toBe(0x38);
 
-	// dOps keeps its pre-skip at the same place after the version and channel count.
+	// WebCodecs reads only a signed OpusHead, so a dOps stays dropped, as a truncated header fails.
 	const dops = new Uint8Array([0, 2, 0x01, 0x38, 0, 0, 0xbb, 0x80, 0, 0, 0]);
-	expect(decoderDescription("opus", dops)?.slice(2, 4)).toEqual(new Uint8Array([0, 0]));
-
-	expect(() => decoderDescription("opus", new Uint8Array([7, 1, 2]))).toThrow();
+	expect(decoderDescription("opus", dops)).toBeUndefined();
+	expect(() => decoderDescription("opus", head.slice(0, 12))).toThrow();
 	expect(decoderDescription("opus", undefined)).toBeUndefined();
 	const asc = new Uint8Array([0x12, 0x10]);
 	expect(decoderDescription("mp4a.40.2", asc)).toBe(asc);

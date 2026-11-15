@@ -108,9 +108,15 @@ export class Spatial {
 		up.set(0, 1, 0).applyQuaternion(rotation);
 
 		const listener = this.#context.listener;
+		if (!this.#tracksPosition) position.set(0, 0, 0);
+		// Firefox has no listener AudioParams, only the older setters.
+		if (!listener.positionX) {
+			listener.setPosition(position.x, position.y, position.z);
+			listener.setOrientation(forward.x, forward.y, forward.z, up.x, up.y, up.z);
+			return;
+		}
 		const at = this.#context.currentTime;
 		const set = (param: AudioParam, value: number) => param.setTargetAtTime(value, at, 0.01);
-		if (!this.#tracksPosition) position.set(0, 0, 0);
 		set(listener.positionX, position.x);
 		set(listener.positionY, position.y);
 		set(listener.positionZ, position.z);

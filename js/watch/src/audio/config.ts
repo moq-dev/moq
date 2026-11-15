@@ -58,16 +58,17 @@ const OPUS_HEAD = new TextEncoder().encode("OpusHead");
  *
  * An Opus stream past stereo cannot decode without its OpusHead's channel mapping, but Chromium then
  * trims the header's pre-skip itself, again after every flush. The decoder's Terminal owns that trim,
- * gap resumes included, so WebCodecs gets a copy with the pre-skip zeroed.
+ * gap resumes included, so WebCodecs gets a copy with the pre-skip zeroed. WebCodecs reads only a
+ * signed OpusHead, so a dOps or an unsigned header stays dropped, as before.
  */
 export function decoderDescription(codec: string, description: Uint8Array | undefined): Uint8Array | undefined {
 	if (!description || codec !== "opus") return description;
-	// Validates the header, which may be an OpusHead, one without its signature, or a dOps.
+	if (!OPUS_HEAD.every((byte, index) => description[index] === byte)) return undefined;
+	// Validates the header's length.
 	Util.Opus.preSkip(description);
-	const signed = OPUS_HEAD.every((byte, index) => description[index] === byte);
 	const copy = description.slice();
-	// Two bytes after the version and channel count, in either byte order.
-	copy.fill(0, (signed ? OPUS_HEAD.length : 0) + 2, (signed ? OPUS_HEAD.length : 0) + 4);
+	// The two little-endian bytes after the version and channel count.
+	copy.fill(0, OPUS_HEAD.length + 2, OPUS_HEAD.length + 4);
 	return copy;
 }
 
