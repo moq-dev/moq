@@ -12,7 +12,7 @@ import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
-import type { Consumer as FrameConsumer } from "./frame.ts";
+import type { Consumer as FrameConsumer, Info as FrameInfo } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
@@ -645,15 +645,21 @@ export const hooks: {
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/**
 	 * Create a received group at its wire offset before publishing it to readers; `fill` marks one a
-	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
+	 * fill's subscription answered, which the feed never promised, and `meta` a metadata copy, which
+	 * a payload copy already cached discards. Assigned by `track.ts`.
 	 */
-	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
+	receiveGroup: (
+		producer: Producer,
+		group: { sequence: bigint; start: number; fill?: boolean; meta?: boolean },
+	) => GroupProducer;
 	/**
 	 * Hold the copy of `sequence` still arriving, if one is, for a duplicate to wait on: until
 	 * released, that copy's failure leaves its readers open for the duplicate to continue. Assigned
 	 * by `track.ts`.
 	 */
-	arrivingGroup: (producer: Producer, sequence: bigint) => Arriving | undefined;
+	arrivingGroup: (producer: Producer, sequence: bigint, meta?: boolean) => Arriving | undefined;
+	/** The cached groups of `[start, end)` held only as metadata, costing what the cache holds. Assigned by `track.ts`. */
+	cachedMeta: (producer: Producer, start: bigint, end: bigint) => bigint[];
 	/** The cached groups of `[start, end)` still arriving, by sequence, costing what the cache holds. Assigned by `track.ts`. */
 	arrivingIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
 	/** The producer's largest reported location and its subsequent changes. */
@@ -802,15 +808,23 @@ export const hooks: {
 	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
 	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
 	 * stale, or a lite-07 continuation of a group whose stream yielded. Each read starts at frame
-	 * `from`, so a group whose cache holds only frames past it is given up. Mirrors the Rust
-	 * crate-private `track::Subscriber::reoffer_groups`.
+	 * `from`, so a group whose cache holds only frames past it is given up. Each reads in the
+	 * subscription's mode, or `meta` when given, as a continuation keeps its stream's. Mirrors the
+	 * Rust crate-private `track::Subscriber::reoffer_groups`.
 	 */
 	reofferGroups: (
 		subscriber: Subscriber,
 		start: bigint,
 		end: bigint,
 		from?: number,
+		meta?: boolean,
 	) => { groups: GroupConsumer[]; givenUp: Run[] };
+	/**
+	 * Update a subscriber as {@link Subscriber.update} does, where an update clearing `meta` asks
+	 * for the payload from `payload`, the first frame the peer misses (or from every group read as
+	 * metadata, without one).
+	 */
+	updateSubscriber: (subscriber: Subscriber, options: Subscription, payload: Position | undefined) => void;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -871,6 +885,12 @@ export const hooks: {
 	/** Whether this source copy began at frame 0 and may still write it. */
 	groupMayStart: (group: GroupProducer) => boolean;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
+	/** Mark a group, before anything is written, as a metadata copy: it holds each frame's header without its payload. */
+	metaGroup: (group: GroupProducer) => void;
+	/** Whether a group is a metadata copy. */
+	groupMeta: (group: GroupProducer) => boolean;
+	/** Append a frame's header to a metadata copy. */
+	writeGroupHeader: (group: GroupProducer, info: FrameInfo) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
 	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
@@ -1123,6 +1143,9 @@ export const hooks: {
 	reofferGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
+	updateSubscriber: () => {
+		throw new Error("track.ts not loaded");
+	},
 	deliveredRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1207,6 +1230,9 @@ export const hooks: {
 	arrivingIn: () => {
 		throw new Error("track.ts not loaded");
 	},
+	cachedMeta: () => {
+		throw new Error("track.ts not loaded");
+	},
 	succeedGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1223,6 +1249,15 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	metaGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupMeta: () => {
+		throw new Error("group.ts not loaded");
+	},
+	writeGroupHeader: () => {
 		throw new Error("group.ts not loaded");
 	},
 	writeGroupFrame: () => {

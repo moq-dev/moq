@@ -16,4 +16,5 @@ export {
 	type StreamOptions,
 	TimestampMismatch,
 	TooFarBehind,
+	Unsupported,
 } from "./error.ts";

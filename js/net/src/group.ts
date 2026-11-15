@@ -14,6 +14,8 @@ import {
 	EMPTY,
 	evicted,
 	type Consumer as FrameConsumer,
+	Header,
+	headerOf,
 	type Info as FrameInfo,
 	type Producer as FrameProducer,
 	joined,
@@ -37,6 +39,7 @@ const FRAME_BYTES = 256;
 
 function frameBytes(frame: Frame): number {
 	if (frame instanceof Chunked) return FRAME_BYTES + frame.retained;
+	if (frame instanceof Header) return FRAME_BYTES;
 	const slice = stored(frame);
 	return FRAME_BYTES + (slice ? slice.payload.length + slice.inflated : frame.payload.byteLength);
 }
@@ -101,6 +104,8 @@ class GroupState {
 	start = 0;
 	// The wire offset this copy began at; unlike `start`, reads never advance it.
 	offset = 0;
+	// Whether this copy holds, or this view reads, each frame's header without its payload.
+	meta = false;
 
 	cacheBytes = 0;
 	// The source copy's access record in its track's cache, while cached. A mirror shares its
@@ -283,6 +288,8 @@ export class Producer {
 	static {
 		hooks.bindGroupCompression = (group, compressed) => {
 			const state = group.#state;
+			// A metadata copy holds headers, which declare their plain size whatever the track stores.
+			if (state.meta) return;
 			if (state.compressed === compressed) return;
 			if (state.compressed !== undefined)
 				throw new ProtocolViolation("group compression disagrees with its track");
@@ -329,6 +336,11 @@ export class Producer {
 			const state = next.#state;
 			for (const [mirror, reads] of failed.#mirrors ?? []) {
 				failed.#unmirror(mirror);
+				// A metadata copy cannot continue a payload reader.
+				if (state.meta && !mirror.meta && mirror.closed.peek() === undefined) {
+					mirror.closed.set(error);
+					continue;
+				}
 				// The successor continues a mirror from the frame it reached, so it must hold that
 				// frame from its start. Compression binds a group to its prefix, so a compressed
 				// successor starts at 0.
@@ -367,6 +379,20 @@ export class Producer {
 			state.total.set(start);
 		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
+		hooks.metaGroup = (group) => {
+			const state = group.#state;
+			if (state.total.peek() !== state.offset || state.closed.peek() !== undefined || group.#mirrors?.size)
+				throw new Error("group already started");
+			state.meta = true;
+		};
+		hooks.groupMeta = (group) => group.#state.meta;
+		hooks.writeGroupHeader = (group, info) => {
+			if (!group.#state.meta) throw new Error("a payload group takes no bare header");
+			if (!Number.isSafeInteger(info.size) || info.size < 0) throw new RangeError("invalid frame size");
+			const header = new Header(info, now());
+			const commits = group.#admit(header);
+			group.#append(header, commits);
+		};
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
 		hooks.groupProgress = (group, fn) => {
@@ -435,10 +461,13 @@ export class Producer {
 	 * Frames written so far are replayed synchronously; later writes and close are teed
 	 * in as they happen.
 	 *
+	 * With `meta`, the handle reads each frame's header without its payload, as a metadata copy does.
+	 *
 	 * @internal Track fan-out and fetch coalescing only. Use {@link consume} instead.
 	 */
-	mirror(): Consumer {
+	mirror(meta = false): Consumer {
 		const dst = new GroupState(this.sequence);
+		dst.meta = this.#state.meta || meta;
 		dst.timestamp = this.#state.timestamp;
 		dst.latest = this.#state.latest;
 		dst.flate = this.#state.flate;
@@ -517,7 +546,13 @@ export class Producer {
 
 	/** Writes a frame to the group. */
 	writeFrame(frame: Frame) {
+		this.#refuseMeta();
 		this.#writeFrame(frame);
+	}
+
+	// A metadata copy holds only the headers its stream carried.
+	#refuseMeta(): void {
+		if (this.#state.meta) throw new Error("a metadata group takes no payload");
 	}
 
 	/**
@@ -528,6 +563,7 @@ export class Producer {
 	 * written until this one finishes.
 	 */
 	createFrame(info: FrameInfo): FrameProducer {
+		this.#refuseMeta();
 		const { size, timestamp } = info;
 		if (!Number.isSafeInteger(size) || size < 0) throw new RangeError("invalid frame size");
 		const frame = { payload: EMPTY, timestamp };
@@ -980,6 +1016,15 @@ export class Consumer {
 	}
 
 	/**
+	 * Whether this group carries each frame's header without its payload, as a metadata
+	 * subscription reads it. {@link nextFrame} then returns each
+	 * frame's timestamp and declared size, and reading its payload throws.
+	 */
+	get meta(): boolean {
+		return this.#state.meta;
+	}
+
+	/**
 	 * When the group joined its track at this hop, before its first frame, on the installed
 	 * clock: its header was received, or it was fetched or created here.
 	 *
@@ -1269,6 +1314,8 @@ export class Consumer {
 	// Whether the next frame can be read whole without waiting.
 	#ready(): boolean {
 		const front = this.#bufferedFrames().first;
+		// A metadata read takes a header without waiting for its payload.
+		if (this.#state.meta) return front !== undefined;
 		return front !== undefined && !(front instanceof Chunked && front.done.peek() === undefined);
 	}
 
@@ -1285,6 +1332,14 @@ export class Consumer {
 		}
 		const front = frames.first;
 		if (!front) return undefined;
+		// A metadata read takes the header at once, never waiting for or reading the payload.
+		if (this.#state.meta) {
+			frames.shift();
+			const sequence = this.#state.start++;
+			this.#refresh();
+			this.#state.charge?.touch();
+			return { sequence, frame: headerOf(front) };
+		}
 		if (front instanceof Chunked) {
 			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
@@ -1356,12 +1411,19 @@ export class Consumer {
 	 */
 	tryReadFrame(): Frame | undefined {
 		if (this.#verdict.peek()) return undefined;
+		this.#payloadRead();
 		return this.#readBufferedFrame()?.frame;
+	}
+
+	// Refuse a payload read of a metadata group, rather than pass its frames off as empty.
+	#payloadRead(): void {
+		if (this.#state.meta) throw new Error("a metadata group carries no payload; read its headers with nextFrame");
 	}
 
 	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
 	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
 		if (this.#verdict.peek()) return undefined;
+		this.#payloadRead();
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
 		return { sequence: read.sequence, ...read.frame };
@@ -1411,7 +1473,8 @@ export class Consumer {
 
 	/**
 	 * Reads the next frame as it arrives, as Rust's `next_frame`: resolves once its header is
-	 * buffered, without waiting for its payload. Use it for a frame too large to hold whole.
+	 * buffered, without waiting for its payload. Use it for a frame too large to hold whole, or
+	 * to read a {@link meta} group's headers, whose payload reads throw.
 	 */
 	async nextFrame(): Promise<FrameConsumer | undefined> {
 		const read = await this.#readFrame(0, false, true);
@@ -1420,6 +1483,7 @@ export class Consumer {
 	}
 
 	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
+		if (!streaming) this.#payloadRead();
 		for (;;) {
 			const verdict = this.#verdict.peek();
 			if (verdict) {

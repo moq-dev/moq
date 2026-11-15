@@ -86,6 +86,21 @@ export class Delivered {
 		return gaps;
 	}
 
+	/** Count every sequence in `[start, end)` as not handed out, such as a group read as metadata whose payload is now asked for. */
+	remove(start: bigint, end: bigint): void {
+		if (start >= end) return;
+		const kept: [bigint, bigint][] = [];
+		for (const [first, last] of this.#runs) {
+			if (last < start || first >= end) {
+				kept.push([first, last]);
+				continue;
+			}
+			if (first < start) kept.push([first, start - 1n]);
+			if (last >= end) kept.push([end, last]);
+		}
+		this.#runs = kept;
+	}
+
 	/** Count every sequence below `floor` as handed out. */
 	forgetBelow(floor: bigint): void {
 		if (floor <= 0n) return;

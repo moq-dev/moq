@@ -1,7 +1,7 @@
 import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
-import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
+import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError, Unsupported } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
 
@@ -34,15 +34,7 @@ function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && expires;
 }
 
-/** The session or peer carries no AUTH exchange, or takes no tokens in band. */
-export class Unsupported extends Error {
-	/** The moq-lite session code for this condition. */
-	readonly code = SessionCode.Unsupported;
-	constructor(message = "auth unsupported") {
-		super(message);
-		this.name = "Unsupported";
-	}
-}
+export { Unsupported };
 
 /** A handle already backs a session that is open and not draining, or its requests were already taken. */
 export class Duplicate extends Error {
