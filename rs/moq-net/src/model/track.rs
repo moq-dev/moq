@@ -3869,6 +3869,8 @@ pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer)
 	let join = fills.lock().fly(&fills, key, frame, asking)?;
 	Some(Board::Wait(Boarding {
 		join: Box::new(join),
+		fills,
+		asking,
 		key,
 		frame,
 	}))
@@ -3888,6 +3890,9 @@ pub(super) fn hand_over(
 pub(super) struct Boarding {
 	// Boxed: a reader holds one only while boarding.
 	join: Box<fill::Join>,
+	// Where to ask again, with what, when a tighter budget than this reader's refused it.
+	fills: kio::Shared<FillState>,
+	asking: fill::Asking,
 	key: u64,
 	frame: u64,
 }
@@ -3908,15 +3913,36 @@ impl Boarding {
 		};
 		let key = self.key;
 		let answer = self.join.outcome().poll(waiter, |outcome| match outcome.refused(key) {
-			Some((err, _)) => Poll::Ready(Err(err.clone())),
-			None if outcome.is_accepted(key) => Poll::Ready(outcome.partial(key, frames).ok_or(Error::Cancel)),
+			Some((err, asked)) => Poll::Ready(Err((err.clone(), asked))),
+			None if outcome.is_accepted(key) => Poll::Ready(outcome.partial(key, frames).ok_or((Error::Cancel, None))),
 			None => Poll::Pending,
 		});
-		Poll::Ready(match ready!(answer) {
-			Ok(Ok(copy)) => copy.try_consume().ok_or(Error::Cancel),
-			Ok(Err(err)) => Err(err),
-			Err(_closed) => Err(Error::NotFound),
-		})
+		// The closed channel's guard borrows the join, which a retry replaces.
+		let (err, asked) = match ready!(answer.map(|answer| answer.map_err(drop))) {
+			Ok(Ok(copy)) => return Poll::Ready(copy.try_consume().ok_or(Error::Cancel)),
+			Ok(Err(refused)) => refused,
+			Err(_closed) => return Poll::Ready(Err(Error::NotFound)),
+		};
+		// Boarded a flight already asked under a tighter budget, which judged the group too
+		// old for that budget, not ours: ask again with ours. Terminates, since the new
+		// flight asks at least our budget.
+		if !matches!(err, Error::Old) || !looser(asked, self.asking.max_delay) {
+			return Poll::Ready(Err(err));
+		}
+		let Some(join) = self.fills.lock().fly(&self.fills, key, self.frame, self.asking) else {
+			return Poll::Ready(Err(err));
+		};
+		*self.join = join;
+		self.poll(waiter)
+	}
+}
+
+/// Whether `ours` waits longer than the budget `asked` upstream, `None` being the longest.
+fn looser(asked: Option<Duration>, ours: Option<Duration>) -> bool {
+	match (asked, ours) {
+		(Some(asked), Some(ours)) => ours > asked,
+		(Some(_), None) => true,
+		(None, _) => false,
 	}
 }
 
@@ -7004,12 +7030,7 @@ impl Fetching {
 		// Joined after a tighter budget went on the wire, which judged the group too old
 		// for that budget, not ours: ask again with ours. Terminates, since the new
 		// fill asks at least our budget.
-		let looser = match (asked, self.max_delay) {
-			(Some(asked), Some(ours)) => ours > asked,
-			(Some(_), None) => true,
-			(None, _) => false,
-		};
-		if matches!(err, Error::Old) && looser {
+		if matches!(err, Error::Old) && looser(asked, self.max_delay) {
 			let options = group::Fetch {
 				priority: self.priority,
 				max_delay: self.max_delay,
@@ -27613,6 +27634,44 @@ mod test {
 		let fill = asked(&requests).expect("a flight");
 		assert_eq!(fill.priority(), -3);
 		assert_eq!(fill.max_delay(), Some(budget));
+	}
+
+	/// A rider that boarded a flight already asked under a tighter budget is not failed by
+	/// that budget's `Old`: it asks a flight of its own with its budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looser_rider_asks_again_after_old() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let subscribe = |budget: u64| {
+			let delay = Delay::default().with_max(Duration::from_secs(budget));
+			producer.subscribe(Subscription::default().with_delay(delay))
+		};
+		let (mut tight, mut loose) = (subscribe(1), subscribe(10));
+		let mut live = producer.append_next().unwrap();
+		for index in 0..3_000u32 {
+			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+				.unwrap();
+		}
+		let recv = |sub: &mut Subscriber| sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+		let (mut tight, mut loose) = (recv(&mut tight), recv(&mut loose));
+
+		assert_eq!(read_numbered(&mut tight), None, "boarding");
+		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(req.max_delay(), Some(Duration::from_secs(1)));
+		assert_eq!(read_numbered(&mut loose), None, "boards the same flight");
+		assert!(requests.requested_fill_group().now_or_never().is_none(), "one flight");
+
+		req.reject(Error::Old);
+		assert!(matches!(tight.read_frame().now_or_never(), Some(Err(Error::Evicted))));
+		assert_eq!(read_numbered(&mut loose), None, "asks again");
+		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
+		let mut flight = req.accept(None).unwrap();
+		flight
+			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut loose), Some(0));
 	}
 
 	/// Pool debt sheds a flight even once the cached copy of its group was evicted whole.
