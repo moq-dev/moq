@@ -13,11 +13,7 @@ Checked 2026-11-12 at a86433043: the counting half already exists. `Tail::accoun
 - Count per version. lite-01..04 have no drop message, so they keep today's behaviour.
 - On lite-05/06, account for holes left by lost datagrams. Lite-07 stream tracks carry no datagrams, which have their own track kind.
 - Account for a stream reset before its header, so no gap is left only to the grace. Check whether the publisher already reports such a group in a SUBSCRIBE_DROP; if it needs a new signal, that is a lite-07-wip draft change, and the Wire line below changes with it.
-- Guard against a peer that never accounts for a group as the `Waiting` decision settles. Don't add a new grace.
+- Guard against a peer that never accounts for a group. Decided 2026-11-15 (maintainer, /quest-complete): ✅ (c) wait out the subscription's max delay where one is set, and ✅ (a) end the tail with an error on lite-07 when no max delay is set, so the 1 s constant goes away without a buggy peer hanging the tail forever (rejected: (a) alone, an error even where a max delay is set; (b) keep waiting until the session closes). Don't add a new grace.
 - The IETF tail keeps its grace until the moq-transport gap-signal extension (planned in [moq-dev/moq#7425](https://github.com/moq-dev/moq/pull/7425)) lands, since moq-transport can't signal gaps.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: decide what a lite-05+ tail does when the peer never accounts for a group. Options: (a) end the tail with an error; (b) keep waiting until the session closes; (c) wait out the subscription's max delay where one is set. Recommended: (c), and (a) on lite-07 when no max delay is set, so the 1 s constant goes away without a buggy peer hanging the tail forever.

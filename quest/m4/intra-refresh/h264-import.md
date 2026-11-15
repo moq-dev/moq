@@ -11,10 +11,10 @@ were immediately decodable.
 
 ## Plan
 
-The recovery-boundary planning prerequisite must settle the precision and
-publication ordering before implementing the duration proposal below. Raising
-a catalog value after a longer sweep is not yet proven safe for a viewer that
-already received those pictures. Decided 2026-10-22 (maintainer): precision
+Decided 2026-11-15 (maintainer, /quest-complete): a catalog `warmup` is a
+hint nothing enforces (see the [epic](/quest/m4/intra-refresh/README.md)), so
+raising it after a longer sweep needs no ordering against the groups it
+covers. Decided 2026-10-22 (maintainer): precision
 follows the hang draft, which rounds up
 ([#5212](https://github.com/moq-dev/moq/pull/5212)).
 
@@ -39,13 +39,19 @@ follows the hang draft, which rounds up
   sweep has measured it; a later, longer sweep mutates it upward. A stream
   whose recovery picture never arrives before the next recovery point is
   refused, not published with a guess.
+- Review the H.264 recovery-point flags and count semantics, and state which
+  profiles the import supports without changing an existing wire contract by
+  inference. A timestamp-before-keyframe rule is a conservative
+  leading-picture policy, not a complete codec dependency model.
+- Test timestamp precision, reordered pictures, `frame_num` wrap, variable
+  sweep lengths, a missed recovery picture, and a join or skip before a longer
+  sweep is known. Decode-only pictures still build reference state:
+  withholding presentation is not dropping their input. Use generated
+  fixtures, run the short cases in CI, and keep full reference-decode
+  comparisons for continuous playback and each recovery case.
 - Fixture: a synthetic fixed-framerate access-unit sequence with
   `recovery_frame_cnt = 2` beside the existing recovery-point tests in
   `split.rs`, asserting the exact `warmup`, in both the Annex B and the
   length-prefixed path; and a real clip generated with x264
   `intra-refresh=1` added as a second round-trip in `test/ts/run.sh` next to
   the closed-GOP one, asserting the catalog `warmup` and the group count.
-
-## Required
-
-- [Plan: recovery boundaries](/quest/m4/intra-refresh/recovery-boundary.md) - resolve the later-mutated warmup contract before implementing it

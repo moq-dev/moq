@@ -28,20 +28,24 @@ transport is driven, which is what makes that handoff free here too.
 moq-tokio spawns each qmux `Driver` on its own runtime (`spawn_qmux` in
 `rs/moq-tokio/src/lib.rs`), so its `tcp::Listener::accept`,
 `websocket::Listener::accept`, and `websocket::accept` return only the session.
-A worker must run the driver on its own local task set instead, so this quest
-reshapes `moq_tokio::websocket::accept` (or adds a sibling) to hand the driver
-back; the qmux constructors already return it (decided 2026-11-01, maintainer,
-in [moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)).
+A worker must run the driver on its own local task set instead, so
+`moq_tokio::websocket::accept` must hand the driver back; the qmux
+constructors already return it (decided 2026-11-01, maintainer, in
+[moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)).
+
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ reshape
+`moq_tokio::websocket::accept` itself to return the session and its driver
+(rejected: an additive sibling beside it). This breaks moq-tokio's published
+API, which the lab otherwise never touches, so this quest's PR lands with a
+breaking moq-tokio release: the cut, or the rust2 migration expected around
+2026-12-15. Its PR is marked `!` and puts the migration note in its Impact
+section.
 
 Keep the ops and web listeners' behavior identical: the same routes, the same
 CORS scoping, the same landing-page fallback, and the same
 `/certificate.sha256` fingerprint. Extend `rs/moq-relay/tests/integration/runtime_uring.rs`
 to prove a WebSocket session and an HTTP route both work when served from a
 worker.
-
-## Waiting
-
-- Maintainer: how moq-tokio hands a WebSocket session's driver back, since this lab quest must not change a published API without a decision. Options: add an additive sibling beside `moq_tokio::websocket::accept` that returns the session and its driver, or reshape `websocket::accept` itself, which breaks moq-tokio and would have to land before the cut. Recommendation: the additive sibling, so nothing here waits on the cut.
 
 ## Required
 

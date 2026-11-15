@@ -1,10 +1,10 @@
-# [S] The QUIC drivers' acknowledgment wait is public and tested at its traps
+# [S] The QUIC drivers' acknowledgment wait is tested at its traps
 
 ## Goal
 
-moq-tokio's and moq-uring's QUIC drivers let a caller await acknowledgment
-of a minted `send::Offset` on `send::Stream` and `send::Finished`, publicly,
-and each driver's tests cover the traps that wait has.
+moq-tokio's and moq-uring's QUIC drivers each have tests covering the traps
+of their crate-private acknowledgment wait, the one their `quic::web`
+adapters answer `poll_acked` with. The wait stays crate-private.
 
 ## Plan
 
@@ -21,17 +21,12 @@ trait's default `Acked::Unsupported` (decided 2026-10-22 and 2026-10-26,
 maintainer): writing into TCP is not delivery, and the browser's
 `WebTransportSendStream.getStats()` is unimplemented in shipping Chrome.
 
-What is left is making them public, in the drivers' caller-owned waiter shape
-with an async wrapper:
-
-```rust
-impl send::Stream {
-    pub fn poll_acked(&self, waiter: &kio::Waiter, offset: send::Offset) -> Poll<Result<(), send::Error>>;
-    pub async fn acked(&self, offset: send::Offset) -> Result<(), send::Error>;
-}
-```
-
-The same pair, and `offset()`, go on `send::Finished`.
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ keep only the trap tests,
+on the crate-private methods, and drop the public driver API this quest
+planned (`poll_acked`, `acked`, and `offset()` on `send::Stream` and
+`send::Finished`) (rejected: make the wait public; delete the quest). Since
+[moq-dev/moq#8845](https://github.com/moq-dev/moq/pull/8845) the adapters
+answer `poll_acked`, so nothing needs the drivers' wait public.
 
 Traps to test through each driver:
 
@@ -55,14 +50,7 @@ The wait carries no instant: a caller records one when woken, which includes
 the peer's delayed-ACK timer (up to `max_ack_delay`) as well as the return
 trip (decided 2026-10-17 on #5817).
 
-## Waiting
-
-- Maintainer: whether the drivers' wait goes public at all. Nothing in the
-  tree needs it public since moq-net reaches it through the adapters, and the
-  rules keep an API private until a consumer needs it. Options: (1) keep the
-  quest, if an out-of-tree driver user is expected to await
-  acknowledgments; (2) recommended: drop the public half and keep only the
-  trap tests, on the crate-private methods, resizing this quest to XS.
+Public API: none. Wire: none.
 
 ## Related
 
