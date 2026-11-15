@@ -508,6 +508,26 @@
 			"valid": false
 		},
 		{
+			"name": "a_repeated_unread_member",
+			"jwks": "{\"note\":1,\"note\":2,\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": true
+		},
+		{
+			"name": "an_unread_member_out_of_range",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":1e400}",
+			"valid": false
+		},
+		{
+			"name": "an_unread_member_with_a_lone_surrogate",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":\"\\ud800\"}",
+			"valid": false
+		},
+		{
+			"name": "an_unread_member_nested_too_deep",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+			"valid": false
+		},
+		{
 			"name": "leading_unicode_whitespace",
 			"jwks": "\u00a0{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
 			"valid": false
