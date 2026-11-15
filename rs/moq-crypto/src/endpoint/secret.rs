@@ -7,8 +7,7 @@ use std::sync::Arc;
 use rind::signature::Ed25519KeyPair;
 use zeroize::Zeroizing;
 
-use crate::sign::key::{KEY_LEN, PublicKey, ZBASE32, decode};
-use crate::sign::scope::SIGNATURE_LEN;
+use crate::endpoint::key::{KEY_LEN, PublicKey, ZBASE32, decode};
 
 /// The PKCS#8 v1 (RFC 8410) encoding of an Ed25519 key, up to its 32-byte seed. rind loads a seed
 /// alone only this way, and the key file stores the seed alone.
@@ -112,16 +111,6 @@ impl SecretKey {
 			)
 		})?);
 		Ok(Self::from_seed(&seed))
-	}
-
-	/// Sign `message` with Ed25519.
-	pub(crate) fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
-		self.0
-			.pair
-			.sign(message)
-			.as_ref()
-			.try_into()
-			.expect("a 64-byte Ed25519 signature")
 	}
 }
 
