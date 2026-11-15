@@ -169,7 +169,11 @@
             (cargo-llvm-cov.override {
               rustPlatform = makeRustPlatform {
                 cargo = rust-toolchain;
-                rustc = rust-toolchain;
+                # nixpkgs reads the LLVM its tests use from `rustc.llvmPackages`,
+                # which rust-overlay's toolchain lacks.
+                rustc = rust-toolchain // {
+                  llvmPackages = llvmPackages_22;
+                };
               };
             })
           ]

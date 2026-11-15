@@ -64,8 +64,8 @@ session integration (landed in [moq-dev/moq#8023](https://github.com/moq-dev/moq
 [route epic](/quest/m2/cluster-routes/README.md). Federation is
 relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
 and the mixed-version follow-up (mount takeover) gates the
-lite-07 cut, not this. Its consumer, the [mesh node](/quest/m3/mesh/node.md),
-is a Rust relay too. Acceptance still brings the js/net route layer for its
+lite-07 cut, not this. Its consumer, Kixel's mesh relay node (downstream, in
+kixel-ai/kixel.ai), is a Rust relay too. Acceptance still brings the js/net route layer for its
 Rust/JS interop checks. Rejected: session integration alone, which drops the
 proven contract the wire rule below relies on.
 

@@ -183,13 +183,10 @@ impl Shared {
 mod tests {
 	use super::*;
 
-	fn socket_path(name: &str) -> PathBuf {
-		std::env::temp_dir().join(format!("carla-bridge-{name}-{}.sock", std::process::id()))
-	}
-
 	#[test]
 	fn a_live_bridge_keeps_its_socket() {
-		let path = socket_path("live");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bridge.sock");
 		let first = Bridge::listen(&path).unwrap();
 		let err = Bridge::listen(&path).err().expect("a second bridge on the path");
 		assert!(err.to_string().contains("another bridge"), "{err:#}");
@@ -200,8 +197,8 @@ mod tests {
 
 	#[test]
 	fn a_stale_socket_is_replaced() {
-		let path = socket_path("stale");
-		let _ = std::fs::remove_file(&path);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bridge.sock");
 		// A listener that exited without unlinking, like a crashed process.
 		drop(UnixListener::bind(&path).unwrap());
 		let bridge = Bridge::listen(&path).unwrap();

@@ -250,15 +250,21 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	again.close();
 });
 
-// Quarantined: timed out at 5 s in 2 of 30 full js/net runs under 48 CPU burners; see moq-dev/moq#8355.
-test.skip("a flood of a peer's listing churn yields to the host's tasks", async () => {
+// The budget's CPU slice is stubbed to pass on every check, so the yield does not depend on load
+// and a short flood still spans many slices.
+// biome-ignore lint/style/noRestrictedGlobals: stubs the host CPU clock the budget reads.
+const host = performance;
+test("a flood of a peer's listing churn yields to the host's tasks", async () => {
+	// Starts from the real time, since the shared budget may hold a real slice start.
+	let fakeNow = host.now();
+	spyOn(host, "now").mockImplementation(() => (fakeNow += 5));
 	const { subscriber, listed } = handPlayed();
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	const peer = await listed();
 	// Churn of one name never reaches the announces cap, so only the budget bounds it.
 	const flood = await bytes(async (w) => {
 		await encodeTracksEvent(w, { kind: "added", name: "first", info }, version);
-		for (let i = 0; i < 20_000; i++) {
+		for (let i = 0; i < 1024; i++) {
 			await encodeTracksEvent(w, { kind: "added", name: "churn", info }, version);
 			await encodeTracksEvent(w, { kind: "removed", name: "churn" }, version);
 		}
