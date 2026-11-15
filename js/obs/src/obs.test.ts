@@ -134,8 +134,9 @@ test("puts a MoQ destination in a new profile and reloads it for the layers", as
 	expect(fake.param("Stream1", "WHIPSimulcastTotalLayers")).toBe("3");
 	expect(fake.param("SimpleOutput", "VBitrate")).toBe("3000");
 	expect(fake.param("SimpleOutput", "ABitrate")).toBe("128");
-	// The MoQ service tunes the encoder, so the profile keeps its own x264 options.
-	expect(fake.param("SimpleOutput", "x264Settings")).toBeNull();
+	// x264 reads these after the service's keyframe interval, so they follow the new fps.
+	expect(fake.param("SimpleOutput", "x264Settings")).toContain("bframes=0");
+	expect(fake.param("SimpleOutput", "x264Settings")).toContain("keyint=120");
 	expect(fake.param("Output", "DelayEnable")).toBe("false");
 
 	// The reload went through the other profile, after every write.

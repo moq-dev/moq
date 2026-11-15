@@ -360,17 +360,17 @@ export class Obs {
 			);
 		}
 
-		// OBS reads these on every StartStream.
+		// OBS reads these on every StartStream. Over RTMP the x264 options are the only tuning; the
+		// MoQ service tunes on its own, but x264 reads these after it, so a keyint left from an
+		// earlier fps would otherwise win.
+		const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
+		const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
 		const live: [string, string, string][] = [
 			// A stream delay holds every frame back by its length, and OBS applies it per start.
 			["Output", "DelayEnable", "false"],
+			["SimpleOutput", "UseAdvanced", "true"],
+			["SimpleOutput", "x264Settings", options],
 		];
-		// The MoQ service tunes every encoder itself; over RTMP a profile can tune only x264.
-		if (destination.kind === "rtmp") {
-			const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
-			const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
-			live.push(["SimpleOutput", "UseAdvanced", "true"], ["SimpleOutput", "x264Settings", options]);
-		}
 		if (publish.video?.bitrate !== undefined)
 			live.push(["SimpleOutput", "VBitrate", String(publish.video.bitrate)]);
 		if (publish.audio?.bitrate !== undefined)
@@ -584,8 +584,9 @@ function compareVersions(a: string, b: string): number {
 	return 0;
 }
 
-// The low-latency settings a Simple output encoder keeps. The MoQ service sets every bundled
-// encoder's keys, and VideoToolbox has no lookahead control; over RTMP only x264 takes them.
+// The low-latency settings a Simple output encoder keeps. The MoQ service tunes every encoder
+// Simple output offers and leaves others alone, and VideoToolbox has no lookahead control;
+// over RTMP only x264 takes them.
 function ignored(destination: Destination["kind"], encoder: string): Ignored[] {
 	if (encoder.startsWith("x264")) return [];
 	if (destination === "moq") {
