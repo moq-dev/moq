@@ -253,7 +253,7 @@ fn follower(prefixes: usize) -> (Sim, Node) {
 		sim.link(2 + spoke, hub, SimLink::cost(1).grant(grant), SimLink::cost(1));
 		sim.join(2 + spoke, follower, 1);
 	}
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	for spoke in 0..prefixes {
 		sim.announce(origin, &format!("live/{spoke}/x"), 0, None);
 	}
@@ -481,7 +481,7 @@ fn another_grant_does_not_turn_a_raw_route_into_a_qualified_child() {
 	}
 	sim.join(origin, relay, 2);
 	sim.join(origin, second, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "b/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -503,7 +503,7 @@ fn widening_past_a_childs_narrower_interest_releases_the_old_scope() {
 	sim.join(relay, child, 1);
 	sim.watch(relay, "a");
 	sim.watch(child, "a/x");
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	sim.announce(origin, "a/y", 0, None);
 	assert!(sim.run());
@@ -535,7 +535,7 @@ fn overlapping_scopes_do_not_oscillate_between_covering_paths() {
 	for node in [2, 3, 4] {
 		sim.watch(node, "b");
 	}
-	sim.originate(5, 7, 0);
+	sim.originate(5, 7);
 	sim.announce(5, "b/x", 0, None);
 	assert!(sim.run(), "{}", mesh(&sim));
 	for node in 0..5 {
@@ -558,7 +558,7 @@ fn widening_a_relay_does_not_oscillate_its_former_prefix() {
 	sim.join(4, 1, 1);
 	sim.watch(0, "a");
 	sim.watch(2, "a");
-	sim.originate(4, 7, 0);
+	sim.originate(4, 7);
 	sim.announce(4, "a/x", 0, None);
 	assert!(sim.run());
 
@@ -587,7 +587,7 @@ fn a_repathed_scoped_route_keeps_its_original_key() {
 		}),
 		SimLink::cost(1),
 	);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -613,7 +613,7 @@ fn qualification_does_not_turn_another_key_into_a_child() {
 	sim.link(relay, raw, SimLink::cost(4).grant(grant), SimLink::cost(1));
 	sim.link(alternate, origin, SimLink::cost(1).grant(grant), SimLink::cost(1));
 	sim.join(alternate, relay, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -639,7 +639,7 @@ fn an_unwatched_grant_retires_its_previous_stream() {
 		}),
 		SimLink::cost(1),
 	);
-	sim.originate(0, 7, 0);
+	sim.originate(0, 7);
 	sim.announce(0, "b/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);
@@ -666,7 +666,7 @@ fn a_cancelled_stream_cannot_restore_a_route() {
 		}),
 		SimLink::cost(1),
 	);
-	sim.originate(0, 7, 0);
+	sim.originate(0, 7);
 	sim.announce(0, "b/x", 0, None);
 	// The original snapshot is still in flight when the grant is cancelled.
 	sim.watch(1, "a");
@@ -875,7 +875,7 @@ fn sweep_scoped_meshes_show_what_the_rule_says() {
 				}
 			}
 		}
-		sim.originate(origin, 7, 0);
+		sim.originate(origin, 7);
 		for claim in CLAIMS {
 			if rng.chance(40) {
 				sim.announce(origin, claim, rng.next(3), None);
@@ -964,7 +964,7 @@ fn holds_never_close_a_cycle() {
 	sim.join(origin, hub, 1);
 	sim.watch(0, "a/");
 	sim.watch(1, "a/");
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	quiet(&sim, origin, "connected");
@@ -978,6 +978,35 @@ fn holds_never_close_a_cycle() {
 	for node in 0..origin {
 		assert_eq!(sim.path(node).routes(7).count(), 0, "node {node}\n{}", mesh(&sim));
 	}
+}
+
+/// A peer under a scoped grant names itself as it likes. Declaring a core relay's Node
+/// ID, its GOAWAY ranks only the routes it sent as draining, and its close doubts no
+/// node, so the relay's own routes carry on as they were.
+#[test]
+fn a_scoped_peers_goaway_and_close_touch_only_its_routes() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	let scoped = Link {
+		scope: Some(Scope {
+			regions: vec![p("a")],
+			qualify: super::super::qualifier([1; 32]),
+		}),
+		..Link::default()
+	};
+	router.connect(2, 1, scoped).unwrap();
+	router.edited(2);
+	router.route(1, 7, p(""), Some(offered(1, 0)));
+	router.batch(1, 7, p(""), vec![(p("a"), Some(1))], Some(1));
+	let draining = |router: &path::Router<usize, u8>| router.routes(7).next().unwrap().1.offer().unwrap().draining;
+	assert!(!draining(&router));
+
+	router.goaway(2, Instant::ZERO);
+	assert!(!draining(&router), "the relay's route does not drain");
+	router.disconnect([2], Instant::ZERO);
+	assert_eq!(router.retained().doubt, 0, "no node is doubted");
+	assert!(router.shown()[&(7, p("a"))].available);
 }
 
 /// An offer through a closed session is dead until its sender says what became of
@@ -1374,7 +1403,7 @@ fn a_qualified_reflection_stays_live_through_a_first_dead() {
 	sim.join(other, scoped, 5);
 	sim.join(origin, spare, 5);
 	sim.join(spare, relay, 5);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	assert!(sim.run());
 	let key = qualified("ga", 7);

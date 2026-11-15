@@ -1,6 +1,5 @@
-//! One script on both rules: [`Router`], which keeps Babel's distance, and
-//! [`path::Router`], which keeps its doubt until the timer fires. The ignored
-//! benchmarks also compare the rejected early-collection policy.
+//! One script on [`path::Router`], which keeps its doubt until the timer fires. The
+//! ignored benchmarks also compare the rejected early-collection policy.
 //!
 //! A [`Lab`] builds the same mesh on each, applies one change at a time, and
 //! delivers in rounds: every message queued when a round starts crosses its link
@@ -13,23 +12,19 @@ use std::collections::BTreeSet;
 
 use super::*;
 
-/// The production router and its accepted replacement, checked in ordinary CI.
-const RULES: [Rule; 2] = [Rule::Distance, Rule::PATH];
+/// The production rule, checked in ordinary CI.
+const RULES: [Rule; 1] = [Rule::PATH];
 
 /// The rules compared, in the report's order.
-pub(super) const COMPARED: [Rule; 3] = [Rule::Distance, Rule::EARLY, Rule::PATH];
+pub(super) const COMPARED: [Rule; 2] = [Rule::EARLY, Rule::PATH];
 
-/// A queue of messages, or of echoed ROUTE_ENDs, from one node to another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Chan {
-	Msg(Node, Node),
-	Ack(Node, Node),
-}
+/// A queue of messages from one node to another.
+pub(super) type Chan = (Node, Node);
 
 /// What a router sent and showed so far.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Sent {
-	/// Route messages of every kind, requests and echoes included.
+	/// Route messages of every kind.
 	pub msgs: usize,
 	/// Routes those messages name.
 	pub items: usize,
@@ -115,8 +110,6 @@ impl Net for Sim {
 
 	fn close(&mut self, a: Node, b: Node) {
 		self.disconnect(a, b);
-		self.closed(a);
-		self.closed(b);
 	}
 
 	fn mute(&mut self, node: Node, peer: Node) {
@@ -126,7 +119,6 @@ impl Net for Sim {
 
 	fn sever(&mut self, node: Node, peer: Node) {
 		Sim::sever(self, node, peer);
-		self.closed(peer);
 	}
 
 	fn reset(&mut self, node: Node) {
@@ -134,7 +126,7 @@ impl Net for Sim {
 	}
 
 	fn publish(&mut self, node: Node, id: Id) {
-		self.originate(node, id, 0);
+		self.originate(node, id);
 	}
 
 	fn claim(&mut self, node: Node, claim: &str, live: bool) {
@@ -145,19 +137,14 @@ impl Net for Sim {
 	}
 
 	fn ready(&self) -> Vec<(Chan, usize)> {
-		let msgs = (self.busy().into_iter()).map(|(from, to)| (Chan::Msg(from, to), self.queued(from, to)));
-		let acks = (self.busy_acks().into_iter()).map(|(from, to)| (Chan::Ack(from, to), self.queued_acks(from, to)));
-		let held = |chan: &Chan| match *chan {
-			Chan::Msg(from, to) | Chan::Ack(from, to) => self.held.contains(&(from, to)),
-		};
-		msgs.chain(acks).filter(|(chan, _)| !held(chan)).collect()
+		(self.busy().into_iter())
+			.filter(|chan| !self.held.contains(chan))
+			.map(|(from, to)| ((from, to), self.queued(from, to)))
+			.collect()
 	}
 
-	fn step(&mut self, chan: Chan) {
-		match chan {
-			Chan::Msg(from, to) => self.deliver(from, to),
-			Chan::Ack(from, to) => self.deliver_ack(from, to),
-		};
+	fn step(&mut self, (from, to): Chan) {
+		self.deliver(from, to);
 	}
 
 	fn tick(&mut self) -> bool {
@@ -176,23 +163,12 @@ impl Net for Sim {
 	fn sent(&self) -> Sent {
 		let (offline, unavailable, starts) = tally(self.events.iter().map(|event| event.kind));
 		Sent {
-			msgs: self.stats.route_msgs + self.stats.requests,
-			items: self.stats.route_items + self.stats.requests,
+			msgs: self.stats.route_msgs,
+			items: self.stats.route_items,
 			claims: self.stats.claim_items,
 			offline,
 			unavailable,
 			starts,
-		}
-	}
-}
-
-impl Sim {
-	/// A publisher advances its seqno when a session its route went out on closes,
-	/// as `route::Node` has it do. A new session lengthens no path, so it does not.
-	/// The path rule has no seqno.
-	fn closed(&mut self, node: Node) {
-		if self.declared[node].is_some() && !self.paths() {
-			self.bump(node);
 		}
 	}
 }
@@ -858,15 +834,11 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 	total
 }
 
-/// Under churn every rule settles and is right once it does, and the distance
-/// never loops, even for a step.
+/// Under churn every rule settles and is right once it does.
 #[test]
 fn every_rule_settles_after_churn() {
 	for rule in RULES {
-		let cost = churn(rule, 0..60);
-		if rule == Rule::Distance {
-			assert_eq!(cost.loops, 0);
-		}
+		churn(rule, 0..60);
 	}
 }
 
@@ -913,7 +885,7 @@ fn path_changes_keep_claims_and_withdrawals_keep_routes() {
 		for costs in &costs {
 			assert!(costs.values().all(|cost| cost.settled && cost.loops == 0));
 		}
-		for path in &costs[1..] {
+		for path in &costs {
 			for change in [Change::Leave, Change::Detour, Change::Home] {
 				assert_eq!(path[&change].sent.claims, 0);
 			}

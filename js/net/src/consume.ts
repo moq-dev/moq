@@ -39,7 +39,10 @@ class Validity {
 }
 
 // The route a consume selected: its instance, and the origin node its requests name (lite-07).
-type Selection = Served & { readonly route: Pick<WireRoute, "instance" | "node">; readonly validity?: Validity };
+type Selection = Served & {
+	readonly route: Pick<WireRoute, "instance" | "node" | "depth">;
+	readonly validity?: Validity;
+};
 
 class Blind implements Selection {
 	readonly identity = {};
@@ -148,11 +151,13 @@ export class BroadcastCache {
 	}
 
 	/**
-	 * The origin node of the best route now serving `instance` at `path` (lite-07), whichever
-	 * instance wins the path, or undefined when no route names one.
+	 * The publisher node of the best route now serving `instance` at `path` (lite-07), and the
+	 * depth of that route's prefix, whichever instance wins the path, or undefined when no route
+	 * names one.
 	 */
-	node(path: Path.Valid, instance: Instance.Valid): bigint | undefined {
-		return this.pinned(path, instance).route.node;
+	node(path: Path.Valid, instance: Instance.Valid): { node: bigint; depth: number } | undefined {
+		const { node, depth } = this.pinned(path, instance).route;
+		return node === undefined ? undefined : { node, depth: depth ?? 0 };
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */

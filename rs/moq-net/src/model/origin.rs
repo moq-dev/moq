@@ -100,8 +100,10 @@ pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
 	/// for loop detection, and the route identity it declares on moq-lite-07, which also
 	/// names it in the hops of each route it forwards there. Random by
-	/// default, so each process is a fresh identity; one reused across a restart has its
-	/// lite-07 routes refused until a seqno request lifts them past the old process's.
+	/// default, so each process is a fresh identity. Set one only if it is fresh per
+	/// process too: a restarted process numbers its lite-07 sessions from 1 again, so a
+	/// peer that still remembers one of the old process's sessions as closed refuses
+	/// the routes through the new one's session of the same number.
 	pub hop: NonZeroU64,
 
 	/// The key this origin proves to every lite-07 peer, which files the routes it sends
@@ -503,6 +505,9 @@ pub struct RouteInfo {
 	/// peer that names no node.
 	pub(crate) node: Option<u64>,
 
+	/// Which of the route layer's routes to [`Self::node`] it follows; see [`Lane`].
+	pub(crate) lane: Lane,
+
 	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
 	/// every other eligible route, whatever its preference or cost, yet still serves when
 	/// nothing else does.
@@ -533,9 +538,41 @@ impl RouteInfo {
 			via: Hop::UNKNOWN,
 			source: Source::Local,
 			node: None,
+			lane: Lane::default(),
 			draining: false,
 			available: true,
 			rtt: None,
+		}
+	}
+}
+
+/// Which of the lite-07 route layer's routes to a publisher a route follows: one per
+/// prefix covering the claim. Only the narrowest live one is primary, which a reader
+/// here follows; a request a peer forwards follows the one it names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Lane {
+	/// How many segments the route's prefix has, absolute.
+	pub depth: u64,
+	pub primary: bool,
+	/// The one the route layer selected for its prefix, ranked ahead of the alternates
+	/// a reader fails over to at once when it goes.
+	pub selected: bool,
+	/// The Node IDs of the origin nodes the route's path crosses: a request from one of
+	/// them never follows it.
+	pub path: std::sync::Arc<[u64]>,
+	/// The lowest priority of a link on the route's path, which ranks the route where a
+	/// session's preference does, or `None` for a route the route layer did not select.
+	pub priority: Option<i8>,
+}
+
+impl Default for Lane {
+	fn default() -> Self {
+		Self {
+			depth: 0,
+			primary: true,
+			selected: true,
+			path: std::sync::Arc::new([]),
+			priority: None,
 		}
 	}
 }
@@ -636,6 +673,13 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_node(mut self, node: Option<u64>) -> Self {
 		self.node = node;
+		self
+	}
+
+	/// Follow the route layer's route `lane`; see [`Self::lane`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_lane(mut self, lane: Lane) -> Self {
+		self.lane = lane;
 		self
 	}
 
@@ -842,7 +886,13 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 	};
 	(
 		entry.draining || !entry.available,
-		Reverse(entry.preference),
+		// The route layer's selected route ahead of its alternates.
+		!entry.lane.selected,
+		// A lite-07 route ranks by the lowest preference of any link on its path.
+		Reverse(match entry.lane.priority {
+			Some(priority) => entry.preference.min(Preference::new(priority)),
+			None => entry.preference,
+		}),
 		anonymous,
 		entry.cost,
 		!entry.local,
@@ -862,6 +912,7 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (
+	bool,
 	bool,
 	Reverse<Preference>,
 	bool,
@@ -1290,6 +1341,7 @@ impl OriginConsumerState {
 				draining: false,
 				available: meta.7,
 				rtt: meta.8,
+				lane: Lane::default(),
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1327,6 +1379,8 @@ struct RouteEntry {
 	link: Link,
 	/// The origin node serving the route; see [`RouteInfo::node`].
 	node: Option<u64>,
+	/// The route layer's route it follows; see [`RouteInfo::lane`].
+	lane: Lane,
 	/// Whether the route ranks last; see [`RouteInfo::draining`]. Local selection state,
 	/// so never part of [`Self::meta`].
 	draining: bool,
@@ -1433,7 +1487,9 @@ impl RouteEntry {
 	/// appears in the chain. Hop 0 identifies nobody, so it is never excluded.
 	fn visible_to(&self, exclude: Option<Hop>) -> bool {
 		match exclude {
-			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
+			Some(peer) if peer != Hop::UNKNOWN => {
+				self.via != peer && !self.hops.contains(&peer) && !self.lane.path.contains(&peer.id())
+			}
 			_ => true,
 		}
 	}
@@ -1532,25 +1588,26 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route.
+	/// Every route, of the route layer's only the primary ones (see [`Lane`]).
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
 	Own,
-	/// Only the routes the route layer selected toward this origin node.
+	/// Only the route layer's route toward the origin node `node` whose prefix has
+	/// `depth` segments, absolute.
 	#[cfg_attr(
 		not(feature = "async"),
 		allow(dead_code, reason = "only the async session names a node")
 	)]
-	Is(u64),
+	Route { node: u64, depth: u64 },
 }
 
 impl NodeFilter {
-	fn admits(self, node: Option<u64>) -> bool {
+	fn admits(self, node: Option<u64>, lane: &Lane) -> bool {
 		match self {
-			Self::Any => true,
+			Self::Any => node.is_none() || lane.primary,
 			Self::Own => node.is_none(),
-			Self::Is(id) => node == Some(id),
+			Self::Route { node: id, depth } => node == Some(id) && lane.depth == depth,
 		}
 	}
 }
@@ -1561,7 +1618,7 @@ impl Horizon {
 		self.admits_link(entry.link)
 			&& entry.visible_to(self.exclude)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
-			&& self.node.admits(entry.node)
+			&& self.node.admits(entry.node, &entry.lane)
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -2309,6 +2366,10 @@ impl Producer {
 	/// operators rank by this instead of comparing their metrics. Hand each CDN's
 	/// session its own rank to use the primary while it has a route and fail over to
 	/// the next.
+	///
+	/// A moq-lite-07 route ranks by the lowest preference of any link on its path, so
+	/// two relays never prefer each other's paths forever. A link promoted above the
+	/// links before it gains nothing there: demote the fallbacks instead.
 	pub fn with_preference(mut self, preference: Preference) -> Self {
 		self.preference = preference;
 		self
@@ -2349,9 +2410,9 @@ impl Producer {
 
 	/// See [`Consumer::route_closing`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self) -> Option<crate::route::node::Closing> {
+	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
 		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing())
+		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
@@ -3005,6 +3066,7 @@ impl Announcing {
 				local: self.local,
 				link: self.link,
 				node: route.node,
+				lane: route.lane.clone(),
 				draining: route.draining,
 				available: route.available,
 				rtt: route.rtt,
@@ -3630,6 +3692,7 @@ impl AnnounceProducer {
 			entry.auth = route.auth.clone();
 			entry.via = route.via;
 			entry.node = route.node;
+			entry.lane = route.lane.clone();
 			entry.draining = route.draining;
 			entry.available = route.available;
 			entry.rtt = route.rtt;
@@ -3692,6 +3755,7 @@ impl AnnounceProducer {
 			via: entry.via,
 			source: entry.entered(),
 			node: entry.node,
+			lane: entry.lane.clone(),
 			draining: entry.draining,
 			available: entry.available,
 			rtt: entry.rtt,
@@ -3838,6 +3902,38 @@ impl kio::Task for FeedOwnClaims {
 			return Poll::Ready(());
 		}
 		claims.poll(waiter)
+	}
+}
+
+/// The driver's task firing the route node's timers on the origin's clock: a doubt
+/// lifting, a dead hop expiring, a hold reaching its deadline. It ends once nothing owns
+/// the origin.
+struct RouteTimer {
+	node: crate::route::Node,
+	deadline: crate::time::Deadline,
+	origin: TasksWeak,
+}
+
+impl kio::Task for RouteTimer {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.origin.poll_orphaned(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		loop {
+			if let Poll::Ready(at) = self.node.poll_deadline(self.deadline.deadline(), waiter) {
+				self.deadline.set(at);
+				continue;
+			}
+			ready!(self.deadline.poll(waiter));
+			// Firing moves the deadline past now, which the next pass arms.
+			self.node.timeout();
+			if self.node.poll_deadline(self.deadline.deadline(), waiter).is_pending() {
+				// It stayed put: wait for it to move rather than fire it again.
+				return Poll::Pending;
+			}
+		}
 	}
 }
 
@@ -7392,13 +7488,14 @@ impl Consumer {
 		id.and_then(NonZeroU64::new)
 	}
 
-	/// Hold back the disconnect of every route stream dropped until the guard is
-	/// released, so a session closing its streams costs the route layer one recompute;
-	/// `None` while no session created the route node, which then has no streams.
+	/// Hold back the disconnect of every route stream of the session `tag` dropped until
+	/// the guard is released, so the session closing costs the route layer one recompute
+	/// and reports its hops dead; `None` while no session created the route node, which
+	/// then has no streams.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self) -> Option<crate::route::node::Closing> {
+	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
 		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing())
+		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on
@@ -7449,7 +7546,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.hop());
+		let node = crate::route::Node::origin(self.hop(), self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),
@@ -7470,6 +7567,11 @@ impl Consumer {
 		drop(shared);
 		self.tasks.push(FeedOwnClaims {
 			claims,
+			origin: self.tasks.clone(),
+		});
+		self.tasks.push(RouteTimer {
+			node: created.0.clone(),
+			deadline: crate::time::Deadline::new(&self.timers),
 			origin: self.tasks.clone(),
 		});
 		created
@@ -7536,6 +7638,13 @@ impl Consumer {
 		self.scope.allowed.contains(&subtree)
 			&& !self.scope.excluded.iter().any(overlaps)
 			&& !self.scope.mounts.iter().any(|mount| overlaps(&mount.at))
+	}
+
+	/// Where `path`, relative to this handle's root, lies on the origin: past its mount,
+	/// if any. `None` when it does not fit the wire limits there.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolve(&self, path: &Path) -> Option<Path> {
+		self.scope.resolve(&self.root.join(path).ok()?)
 	}
 
 	/// A clone that sees only the routes `node` admits: a request naming an origin
@@ -10520,6 +10629,37 @@ mod tests {
 		);
 	}
 
+	/// A lite-07 route ranks by the lowest priority of any link on its path, so one that
+	/// crossed a demoted link further on loses to a dearer one that crossed none.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn request_avoids_a_path_through_a_demoted_link_even_when_cheaper() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let route = |node, priority, cost| {
+			let lane = Lane {
+				priority: Some(priority),
+				..Lane::default()
+			};
+			RouteInfo::new()
+				.with_hops(hops(&[node]))
+				.with_node(Some(node))
+				.with_lane(lane)
+				.with_cost(cost)
+		};
+
+		let demoted = producer.forward("room", route(10, -10, 1)).unwrap();
+		let unranked = producer.forward("room", route(11, 0, 5)).unwrap();
+
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&unranked).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			demoted.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"the cheaper path through a demoted link must not serve"
+		);
+	}
+
 	/// A draining route ranks below every other eligible one, even on a preferred link
 	/// against a demoted one, whatever the costs say.
 	#[kio::test]
@@ -11084,7 +11224,10 @@ mod tests {
 			proxy: true,
 			..Default::default()
 		};
-		let stream = producer.route_node().answer(link, Path::empty()).unwrap();
+		let stream = producer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		assert!(
 			matches!(
 				stream.try_output(),
@@ -11141,7 +11284,10 @@ mod tests {
 			proxy: true,
 			..Default::default()
 		};
-		let stream = producer.route_node().answer(link, Path::empty()).unwrap();
+		let stream = producer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		let reenter = Arc::new(Reenter {
 			consumer: producer.consume(),
 			reentered: AtomicUsize::new(0),
@@ -16108,7 +16254,10 @@ mod tests {
 		};
 		let consumer = producer.consume();
 		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
-		let stream = consumer.route_node().answer(link, Path::empty()).unwrap();
+		let stream = consumer
+			.route_node()
+			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
+			.unwrap();
 		assert!(
 			driver.poll(Instant::now(), &waiter).is_ok(),
 			"the producer owns the origin"

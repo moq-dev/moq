@@ -113,8 +113,10 @@ export class Datagrams {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
 	instance?: Instance.Valid;
-	/** The origin node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
+	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
 	node: bigint;
+	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
+	depth: number;
 	/** The datagram track's name. */
 	track: string;
 	/** The subscriber priority, higher first. */
@@ -125,11 +127,13 @@ export class Datagrams {
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
 		node?: bigint;
+		depth?: number;
 		track: string;
 		priority: number;
 	}) {
 		this.instance = properties.instance;
 		this.node = properties.node ?? 0n;
+		this.depth = properties.depth ?? 0;
 		this.id = properties.id;
 		this.broadcast = properties.broadcast;
 		this.track = properties.track;
@@ -143,7 +147,7 @@ export class Datagrams {
 			await w.u62(this.id);
 			await w.string(Path.encode(this.broadcast));
 			await encodePin(w, version, this.instance);
-			await encodeNode(w, version, this.node);
+			await encodeNode(w, version, this.node, this.depth);
 			await w.string(this.track);
 			await w.u8(toWire(this.priority));
 		});
@@ -152,18 +156,21 @@ export class Datagrams {
 	/** Decode the size-prefixed request. */
 	static async decode(reader: Reader, version: Version): Promise<Datagrams> {
 		guard(version);
-		return Message.decode(
-			reader,
-			async (r) =>
-				new Datagrams({
-					id: await r.u62(),
-					broadcast: Path.decode(await r.string()),
-					instance: await decodePin(r, version),
-					node: await decodeNode(r, version),
-					track: await r.string(),
-					priority: fromWire(await r.u8()),
-				}),
-		);
+		return Message.decode(reader, async (r) => {
+			const id = await r.u62();
+			const broadcast = Path.decode(await r.string());
+			const instance = await decodePin(r, version);
+			const { node, depth } = await decodeNode(r, version, broadcast);
+			return new Datagrams({
+				id,
+				broadcast,
+				instance,
+				node,
+				depth,
+				track: await r.string(),
+				priority: fromWire(await r.u8()),
+			});
+		});
 	}
 }
 

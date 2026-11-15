@@ -58,8 +58,7 @@ Work:
 - Re-run #8622's reconnect and churn measurements under the new rule and
   report reachable-but-unrouted observations, stale routes, and loops beside
   timer-only doubt.
-- Update the epic's Plan item 27, the draft's Routing section if
-  [the switch](/quest/m2/cluster-routes/switch.md) has landed, and the
+- Update the epic's Plan item 27, the draft's Routing section, and the
   `verify-route` skill.
 
 ## Related

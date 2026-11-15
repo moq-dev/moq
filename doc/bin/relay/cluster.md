@@ -18,9 +18,12 @@ carry it: natively on moq-lite up to moq-lite-06, and via the
 
 moq-lite-07-wip carries the list once per publishing node instead of once per
 broadcast. Each publishing node declares a random routing identity, and relays
-run a distance-vector route to it, loop-free by Babel's feasibility condition,
-so every claim of one origin shares that route. The route names the relays it
-crossed, and a relay never uses one that names itself.
+keep a route to it per prefix, which every claim of that origin under the prefix
+shares. The route names each relay it crossed and the session it crossed on, and
+a relay never uses one that names itself. A relay that loses a session names it
+to its neighbours, so every route through it is dropped at once, and a relay left
+without a route holds its claims, unavailable, for up to ten seconds while one may
+return.
 The first relay a request reaches picks the origin node, by a hash of the path
 and the node's identity that every relay computes alike, and names it on the
 request so later hops follow their own route to that node. A relay running both

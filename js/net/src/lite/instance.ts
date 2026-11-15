@@ -1,5 +1,7 @@
+import { ProtocolViolation } from "../error.ts";
 import * as Instance from "../instance.ts";
 import * as Mint from "../mint.ts";
+import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasInstance, hasRoutes, type Version } from "./version.ts";
 
@@ -27,15 +29,31 @@ export async function decodePin(r: Reader, version: Version): Promise<Instance.V
 	return decode(bytes, minted);
 }
 
-/** Encode the origin node a request names, 0 letting the publisher select one. Only lite-07
- * carries it, so an older peer always selects, and a node set here is dropped. Mirrors rs/moq-net. */
-export async function encodeNode(w: Writer, version: Version, node: bigint): Promise<void> {
-	if (hasRoutes(version)) await w.u62(node);
+/** Encode the publisher node a request names, 0 letting the publisher select one, then how many
+ * leading segments of the request's path make up the prefix of the route it follows, 0 with no
+ * node. Only lite-07 carries them, so an older peer always selects, and a node set here is
+ * dropped. Mirrors rs/moq-net. */
+export async function encodeNode(w: Writer, version: Version, node: bigint, depth = 0): Promise<void> {
+	if (!hasRoutes(version)) return;
+	// A route needs its publisher.
+	if (node === 0n && depth !== 0) throw new Error("a route depth without its node");
+	await w.u62(node);
+	await w.u53(depth);
 }
 
-/** Decode the origin node a request names; see {@link encodeNode}. */
-export async function decodeNode(r: Reader, version: Version): Promise<bigint> {
-	return hasRoutes(version) ? await r.u62() : 0n;
+/** Decode the publisher node a request for `broadcast` names, and its route's depth; see
+ * {@link encodeNode}. A depth past the path's segments names no prefix of it. */
+export async function decodeNode(
+	r: Reader,
+	version: Version,
+	broadcast: Path.Valid,
+): Promise<{ node: bigint; depth: number }> {
+	if (!hasRoutes(version)) return { node: 0n, depth: 0 };
+	const node = await r.u62();
+	const depth = await r.u53();
+	if ((node === 0n && depth !== 0) || depth > Path.parts(broadcast).length)
+		throw new ProtocolViolation(`route depth ${depth} names no prefix of ${broadcast}`);
+	return { node, depth };
 }
 
 /** Encode the instance, its minted flag, and the epoch an announcement serves. Every route
