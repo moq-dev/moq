@@ -75,7 +75,6 @@ interop *args:
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
-        sign_interop \
         tracks_interop \
         varint_interop \
         --run-ignored all

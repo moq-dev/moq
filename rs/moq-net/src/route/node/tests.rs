@@ -66,7 +66,6 @@ fn served_at(claim: Claim, metric: Metric, primary: bool) -> Served {
 	Served {
 		claim,
 		metric,
-		rtt: None,
 		available: true,
 		draining: false,
 		priority: 0,
@@ -266,7 +265,6 @@ fn nothing_moves_across_a_dead() {
 		priority: 0,
 		metric,
 		down_only: false,
-		rtt: None,
 	};
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
@@ -296,7 +294,6 @@ fn a_reader_behind_repeated_failures_overruns() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let dead = |session, gone| Dead::Closed {
 		hop: Hop { node: 2, session },
@@ -373,7 +370,6 @@ fn a_claim_started_and_withdrawn_unread_leaves_nothing() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -427,7 +423,6 @@ fn a_read_route_ends_alone() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
@@ -537,7 +532,6 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		from_a.route(100, Path::empty(), Some(Reach::Finite(offer)));
 		// A route goes on the wire only with a claim it shows, once that is served.
@@ -637,7 +631,6 @@ fn a_goaway_moves_the_forwarded_route_to_another_stream() {
 			priority: i8::MAX,
 			metric,
 			down_only: false,
-			rtt: None,
 		};
 		let live = claim(&instance, 0);
 		stream.route(5, Path::empty(), Some(Reach::Finite(offer)));
@@ -675,7 +668,6 @@ fn dropped_streams_disconnect_once_the_last_closing_guard_goes() {
 		priority: i8::MAX,
 		metric: 0,
 		down_only: false,
-		rtt: None,
 	};
 	receive.route(1, Path::empty(), Some(Reach::Finite(offer)));
 	receive.batch(
@@ -726,7 +718,6 @@ fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -772,7 +763,6 @@ fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -807,11 +797,10 @@ fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
 	assert_eq!(last, Some((vec![p("live/y")], Some(6))));
 }
 
-/// What one route update makes a relay do, behind an origin with `claims` claims beside
-/// another origin with `others`: the serve commands its session applies to the origin,
-/// for a repath and then for an RTT change, and the ROUTE and other messages a stream
-/// watching the root is sent for both.
-fn reserved(claims: usize, others: usize) -> (usize, usize, usize, usize) {
+/// What one repath makes a relay do, behind an origin with `claims` claims beside another
+/// origin with `others`: the serve commands its session applies to the origin, and the
+/// ROUTE and other messages a stream watching the root is sent.
+fn reserved(claims: usize, others: usize) -> (usize, usize, usize) {
 	let instance = Instance::random();
 	let relay = Node::new(2, 2, clock());
 	let edge = relay.answer(peer(3, 3), Link::default(), Path::empty()).unwrap();
@@ -828,7 +817,6 @@ fn reserved(claims: usize, others: usize) -> (usize, usize, usize, usize) {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: Some(Duration::ZERO),
 		};
 		Some(Reach::Finite(offer))
 	};
@@ -843,16 +831,11 @@ fn reserved(claims: usize, others: usize) -> (usize, usize, usize, usize) {
 	}
 	serve_all(&up);
 	outputs(&edge);
-	// Read after each update, since a route's unread changes coalesce.
-	let mut sent = Vec::new();
 	up.route(5, p("o5"), offer(5, 501));
 	let repath = served(outputs(&up)).len();
-	sent.extend(wire(outputs(&edge)));
-	up.rtt(Some(Duration::from_millis(40)));
-	let rtt = served(outputs(&up)).len();
-	sent.extend(wire(outputs(&edge)));
+	let sent = wire(outputs(&edge));
 	let routes = (sent.iter()).filter(|out| matches!(out, Output::Route { .. })).count();
-	(repath, rtt, routes, sent.len() - routes)
+	(repath, routes, sent.len() - routes)
 }
 
 /// A route update re-serves every claim behind it: the session rewrites the origin's
@@ -864,15 +847,9 @@ fn reserved(claims: usize, others: usize) -> (usize, usize, usize, usize) {
 fn residual_a_route_update_reserves_every_claim() {
 	for claims in [1, 8, 64] {
 		for others in [0, 64] {
-			let (repath, rtt, routes, other) = reserved(claims, others);
-			// The RTT change moves both origins' routes, which share the link.
-			assert_eq!(
-				(repath, rtt),
-				(claims, claims + others),
-				"{claims} claims, {others} beside"
-			);
-			let changed = 2 + usize::from(others > 0);
-			assert_eq!((routes, other), (changed, 0), "a ROUTE per route changed, and no claim");
+			let (repath, routes, other) = reserved(claims, others);
+			assert_eq!(repath, claims, "{claims} claims, {others} beside");
+			assert_eq!((routes, other), (1, 0), "one ROUTE, and no claim");
 		}
 	}
 }
@@ -896,7 +873,6 @@ fn residual_each_closed_session_is_remembered_until_the_doubt_timer() {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		up.route(5, Path::empty(), Some(Reach::Finite(offer)));
 		up.batch(

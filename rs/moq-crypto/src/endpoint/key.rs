@@ -1,6 +1,6 @@
 //! The Ed25519 public key that names an endpoint, and its z-base-32 text.
 //!
-//! This builds without the `sign` feature, so a crate that only names endpoints shares the one
+//! This builds without the `endpoint` feature, so a crate that only names endpoints shares the one
 //! codec without `moq-net` or rind.
 
 use std::fmt;
@@ -35,13 +35,6 @@ impl PublicKey {
 	/// The raw 32-byte Ed25519 public key.
 	pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
 		&self.0
-	}
-
-	/// Whether `signature` is this key's Ed25519 signature over `message`.
-	#[cfg(feature = "sign")]
-	pub(crate) fn verify(&self, message: &[u8], signature: &[u8; crate::sign::scope::SIGNATURE_LEN]) -> bool {
-		rind::signature::PublicKey::new(&rind::signature::verify::ED25519, &self.0)
-			.is_ok_and(|key| key.verify(message, signature).is_ok())
 	}
 }
 
@@ -99,49 +92,62 @@ pub(crate) fn decode(text: &str) -> Result<[u8; KEY_LEN], InvalidKey> {
 
 #[cfg(test)]
 mod tests {
-	use serde_json::Value;
-
 	use super::PublicKey;
 
-	fn vectors() -> Value {
-		serde_json::from_str(include_str!("../../../../drafts/moq-sign-00.json")).unwrap()
-	}
+	/// Public key bytes (hex) and their endpoint ID. The first is RFC 8032's test 1.
+	const KEYS: [(&str, &str); 3] = [
+		(
+			"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+			"47pjoycnsrfmxikm95jh13y88e8qnhzu5kungjpxyepgt7a8krpy",
+		),
+		(
+			"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			"999999999999999999999999999999999999999999999999999o",
+		),
+		(
+			"0000000000000000000000000000000000000000000000000000000000000000",
+			"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+		),
+	];
+
+	/// Text that is not the one canonical form of any key.
+	const INVALID: [&str; 11] = [
+		"EYAMFTWCF3SCK8RS5M1MEUGF8ODWQG78473T7P3ST9WXOB9CSZ8Y",
+		"eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8",
+		"eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8yy",
+		"0yamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y",
+		"eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8b",
+		"4030b2c68c2e6cc51c96dae4b44cc53c07471ba7d7731eb7368fe8f807ecb5ce",
+		"",
+		"9999999999999999999999999999999999999999999999999999",
+		"eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y====",
+		" eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y",
+		"eyamftwcf3sck8rs5m1meugf8odwqg78473t7p3st9wxob9csz8y\n",
+	];
 
 	#[test]
-	fn vector_keys() {
-		for row in vectors()["keys"].as_array().unwrap() {
-			let id = &row["id"];
-			let bytes = hex::decode(row["public"].as_str().unwrap()).unwrap();
-			let endpoint: PublicKey = row["endpoint"].as_str().unwrap().parse().unwrap();
-			assert_eq!(
-				endpoint,
-				PublicKey::from_bytes(bytes.clone().try_into().unwrap()),
-				"{id}"
-			);
-			assert_eq!(endpoint.as_bytes().as_slice(), bytes, "{id}");
-			assert_eq!(endpoint.to_string(), row["endpoint"].as_str().unwrap(), "{id}");
+	fn keys_round_trip_their_text() {
+		for (public, endpoint) in KEYS {
+			let bytes: [u8; 32] = hex::decode(public).unwrap().try_into().unwrap();
+			let key: PublicKey = endpoint.parse().unwrap();
+			assert_eq!(key, PublicKey::from_bytes(bytes), "{endpoint}");
+			assert_eq!(key.as_bytes(), &bytes, "{endpoint}");
+			assert_eq!(key.to_string(), endpoint);
 			#[cfg(feature = "serde")]
 			{
-				assert_eq!(serde_json::to_value(endpoint).unwrap(), row["endpoint"], "{id}");
-				assert_eq!(
-					serde_json::from_value::<PublicKey>(row["endpoint"].clone()).unwrap(),
-					endpoint,
-					"{id}"
-				);
+				let text = serde_json::Value::from(endpoint);
+				assert_eq!(serde_json::to_value(key).unwrap(), text, "{endpoint}");
+				assert_eq!(serde_json::from_value::<PublicKey>(text).unwrap(), key, "{endpoint}");
 			}
 		}
 	}
 
 	#[test]
-	fn vector_invalid_ids() {
-		for row in vectors()["invalid_ids"].as_array().unwrap() {
-			let id = &row["id"];
-			assert!(row["text"].as_str().unwrap().parse::<PublicKey>().is_err(), "{id}");
+	fn invalid_text_is_refused() {
+		for text in INVALID {
+			assert!(text.parse::<PublicKey>().is_err(), "{text:?}");
 			#[cfg(feature = "serde")]
-			assert!(
-				serde_json::from_value::<PublicKey>(row["text"].clone()).is_err(),
-				"{id}"
-			);
+			assert!(serde_json::from_value::<PublicKey>(text.into()).is_err(), "{text:?}");
 		}
 	}
 }

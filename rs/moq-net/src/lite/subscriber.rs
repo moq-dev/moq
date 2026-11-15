@@ -10288,7 +10288,6 @@ mod tests {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			};
 			lite::AnnounceBroadcast::RouteStart {
 				node,
@@ -10877,7 +10876,6 @@ mod tests {
 			priority: i8::MAX,
 			metric: 0,
 			down_only: false,
-			rtt: None,
 		};
 		let naming = |id: u64| -> [(&str, Encode); 6] {
 			[

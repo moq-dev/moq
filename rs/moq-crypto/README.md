@@ -2,17 +2,17 @@
 
 # moq-crypto
 
-Cryptography for [Media over QUIC](https://moq.dev): the `sign` module signs every frame so
-relays cannot forge it, and the `e2ee` module encrypts groups, datagrams, and track names so
-relays cannot read them. Both wrap `moq-net` and check timestamps with its
-`track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts. The `provider`
-module is the [rind](https://github.com/kixel-ai/rind) rustls provider; `cpu` holds the CPU
-check and error that the MoQ crates share.
+Cryptography for [Media over QUIC](https://moq.dev): the `e2ee` module encrypts groups,
+datagrams, and track names so relays cannot read them. It wraps `moq-net` and checks timestamps
+with its `track::Info::rescale`, so a frame it accepts is one `moq-net` accepts. The `endpoint`
+module holds the key that names an endpoint. The `provider` module is the
+[rind](https://github.com/kixel-ai/rind) rustls provider; `cpu` holds the CPU check and error
+that the MoQ crates share.
 
 ## Features
 
-`sign` and `e2ee`, both default, enable the two modules. With default features off, the crate is
-only `sign::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
+`endpoint` and `e2ee`, both default, enable those modules. With default features off, the crate is
+only `endpoint::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
 `moq-net` or rind, for crates that only name endpoints.
 `serde` adds the key's string serialization. `cpu`, enabled by `e2ee` and `provider`, adds
 only rind. `provider`, off by default, adds the rustls integration without `moq-net`, so
@@ -34,47 +34,12 @@ runs rind's slower paths rather than being refused:
 moq-auth, moq-hls, e2ee, moq-rtmp, and the transports report the same `cpu::UnsupportedCpu`, and
 `moq_tokio::crypto` re-exports this module's API.
 
-## Signing
+## Endpoint key
 
-Per-frame Ed25519 signatures for [Media over QUIC](https://moq.dev) broadcasts. Profile
-`moq-sign-00` from [draft-lcurley-moq-sign](https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/).
-
-Relays forward and cache signed frames; they cannot forge, retime, or relocate them. Signatures
-authenticate content, not liveness: a relay that recorded an instance can replay it whole.
-
-### Shape
-
-An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed as 52 z-base-32
-characters (a DNS label). `SecretKey::load_or_generate(path)` keeps one key for the life of a host,
-as 52 z-base-32 characters in a `0600` file it never replaces implicitly.
-
-`broadcast::Producer` wraps the `moq-net` broadcast and signs each frame over the application
-path, instance, track, group, frame index, and timestamp (at the track's timescale). It signs under
-the instance of the route that serves the broadcast, which the route mints fresh:
-
-```rust
-let key = SecretKey::load_or_generate("/var/lib/moq/endpoint.key")?;
-let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public()))?;
-let route = origin.route(&path, RouteOptions::hidden())?;
-let signed = broadcast::Producer::new(route.broadcast().clone(), key, path, route.instance());
-let messages = signed.create_track("messages", None)?;
-route.announce()?;
-```
-
-A subscriber wraps the broadcast an origin resolved in a `broadcast::Consumer` with the key it
-expects and the same application path; it takes the instance from the route. A frame reaches the
-application only after it verifies. A forged or relocated frame ends its group with
-`Error::Signature`, and the track keeps delivering other groups. Every hop must carry the instance
-and timestamps unchanged, which means moq-lite-07. A group's end is not signed: a relay may drop
-a group's tail, as MoQ already allows.
-
-A broadcast at the identity level, which trusts the relay's token check alone, uses `moq-net`
-directly.
-
-### Processing
-
-Signing is inline and synchronous. `cargo bench -p moq-crypto --bench sign` measures it: a 1 KiB frame costs
-about 8 µs to sign and 32 µs to sign and verify through an origin on one core.
+An endpoint's `endpoint::SecretKey` is an Ed25519 key that `SecretKey::load_or_generate(path)` keeps
+for the life of a host, as 52 z-base-32 characters in a `0600` file it never replaces implicitly.
+`moq-relay` loads it for `--cluster-route-key`, where it converts into `moq_net::origin::RouteKey`.
+Its `endpoint::PublicKey` is the endpoint ID, displayed as those 52 characters (a DNS label).
 
 ## Encryption
 

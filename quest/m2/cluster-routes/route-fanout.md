@@ -19,16 +19,17 @@ once fixed:
 - Unrelated streams (`route::tests::cost::residual_a_route_change_visits_every_unrelated_stream`,
   `residual_closing_a_stream_revisits_every_other_stream`): every route change
   visits every answering stream for each identity it recomputes, and changes
-  with no single route in scope (RTT, DEAD, drain, close) plan every prefix
-  of each stream. Closing one viewer costs the origins it watched times all
-  other streams, so viewer churn is quadratic. Measured: an RTT change with
-  1,000 origins and 1,000 unrelated streams takes 847 ms. Recommended: index
-  the answering streams in `rs/moq-net/src/route/path.rs` by the prefixes
-  they ask for and by the routes sent to them.
+  with no single route in scope (DEAD, drain, close) plan every prefix of
+  each stream. Closing one viewer costs the origins it watched times all
+  other streams, so viewer churn is quadratic. Measured (bench
+  `routes/path/repath`): one repath takes 9.8 µs beside 10 unrelated streams
+  and 1.09 ms beside 1,000. Recommended: index the answering streams in
+  `rs/moq-net/src/route/path.rs` by the prefixes they ask for and by the
+  routes sent to them.
 - Per-broadcast rewrites (`route::node::tests::residual_a_route_update_reserves_every_claim`):
-  in `rs/moq-net/src/route/node.rs`, any change to a route, its RTT included,
-  re-serves every claim behind it into the origin (`Node::home`), a
-  route-table write per broadcast that wakes the fronts below it. The wire
+  in `rs/moq-net/src/route/node.rs`, any change to a route re-serves every
+  claim behind it into the origin (`Node::home`), a route-table write per
+  broadcast that wakes the fronts below it. The wire
   stays flat. Recommended: one shared record per route in the origin that its
   broadcasts refer to, coordinated with [route wakes](/quest/m4/route-wakes.md).
 - History-bound state (`residual_same_clock_churn_is_remembered_until_its_timer`,

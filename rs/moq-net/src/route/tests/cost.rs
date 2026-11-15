@@ -59,19 +59,15 @@ struct Cost {
 struct Relay {
 	router: path::Router<Node, u8>,
 	far: usize,
-	rtt: u64,
 	closed: usize,
 }
 
-/// The route `neighbour` offers for origin `id` through `far`, carrying an RTT so a
-/// change to the link's RTT changes the offer this relay sends on.
+/// The route `neighbour` offers for origin `id` through `far`.
 fn offer(id: Id, far: Id, neighbour: usize) -> path::Reach {
-	let mut offer = along(
+	path::Reach::Finite(along(
 		&[(id, 0), (far, 1), (1000 + neighbour as Id, 1)],
 		1 + neighbour as Metric,
-	);
-	offer.rtt = Some(Duration::ZERO);
-	path::Reach::Finite(offer)
+	))
 }
 
 fn origin(origin: usize) -> Path {
@@ -108,7 +104,6 @@ impl Relay {
 		let mut relay = Self {
 			router,
 			far: 0,
-			rtt: 0,
 			closed: 0,
 		};
 		relay.measure(|_| {});
@@ -121,13 +116,6 @@ impl Relay {
 		self.far = 1 - self.far;
 		let reach = offer(1, FAR[self.far], 0);
 		self.measure(|router| router.route(0, 1, origin(0), Some(reach)))
-	}
-
-	/// The RTT of the link to the first neighbour changes: every route it offers does.
-	fn relink(&mut self) -> Cost {
-		self.rtt = self.rtt % 2 + 1;
-		let rtt = Duration::from_millis(5 * self.rtt);
-		self.measure(|router| router.rtt(0, Some(rtt)))
 	}
 
 	/// The session of the next stream this relay answers closes.
@@ -234,41 +222,20 @@ fn a_repath_costs_the_streams_it_reaches_and_nothing_per_claim() {
 	}
 }
 
-/// An RTT change on one link re-offers each route through it to each stream watching
-/// that route, and sends no claim: the work is flat in the claims behind each route, and
-/// grows linearly in the routes through the link and the streams they reach.
-#[test]
-fn a_link_update_costs_the_routes_through_it_and_nothing_per_claim() {
-	assert_flat("claims", sweep(claims, FLAT, Relay::relink));
-	let routes = sweep(origins, LINEAR, Relay::relink);
-	assert_linear("routes through the link", routes);
-	assert_eq!(routes.map(|cost| cost.touched), LINEAR);
-	assert_eq!(routes.map(|cost| cost.routes), LINEAR.map(|n| n * BASE.streams));
-	let reached = sweep(watched, LINEAR, Relay::relink);
-	assert_linear("streams the change reaches", reached);
-	assert_eq!(reached.map(|cost| cost.routes), LINEAR.map(|n| n * BASE.origins));
-	for cost in routes.into_iter().chain(reached) {
-		assert_eq!((cost.claims, cost.other, cost.shown), (0, 0, 0), "{cost:?}");
-	}
-}
-
 /// A route change visits every stream this relay answers for each identity it
 /// recomputes, even a stream whose prefix no route meets: `advertise` walks every
 /// answering stream, and so does `run` for the sources a selection change moves. An
-/// update with no single route in scope (an RTT change, a DEAD, a drain, a closed
-/// session) also plans every prefix of each, since `stream` returns all of them when no
+/// update with no single route in scope (a DEAD, a drain, a closed session) also plans every prefix of each, since `stream` returns all of them when no
 /// region narrows it. Both should be flat in the streams the change misses, which needs
 /// an index of the streams by the prefixes they ask for and the routes they were sent.
 #[test]
 fn residual_a_route_change_visits_every_unrelated_stream() {
-	for change in [Relay::repath as fn(&mut Relay) -> Cost, Relay::relink] {
-		let costs = sweep(unwatched, FLAT, change);
-		assert!(costs.iter().all(|cost| cost.routes == 0), "{costs:?}");
-		assert!(
-			costs.windows(2).all(|pair| pair[1].work > pair[0].work),
-			"fixed, so flip this residual: {costs:?}"
-		);
-	}
+	let costs = sweep(unwatched, FLAT, Relay::repath);
+	assert!(costs.iter().all(|cost| cost.routes == 0), "{costs:?}");
+	assert!(
+		costs.windows(2).all(|pair| pair[1].work > pair[0].work),
+		"fixed, so flip this residual: {costs:?}"
+	);
 }
 
 /// Closing one stream's session, which sent this relay nothing, re-plans every route
