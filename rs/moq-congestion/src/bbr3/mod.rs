@@ -8024,7 +8024,7 @@ mod test {
         }
         assert_eq!(sim.bbr.loss_events_in_round, 3);
 
-        // The round ends with an ACK of what was sent after its first loss.
+        // The round ends with an ACK of a packet sent after the last delivery before its first loss.
         sim.ack(20 * MS, first + 3..sim.pn, false);
         assert_eq!(sim.bbr.loss_events_in_round, 0);
         assert_eq!(sim.bbr.state, BbrState::Startup);
