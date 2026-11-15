@@ -450,6 +450,8 @@ pub(super) struct Slot {
 	/// How many units of program tables begin in the slot, each laying the tables as they
 	/// stood ([`Schedule::set_psi`]).
 	pub begun: usize,
+	/// The payload of the frames whose units finish in the slot, to count once it goes out.
+	pub charges: Vec<Charge>,
 }
 
 impl Slot {
@@ -1057,15 +1059,16 @@ impl Schedule {
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
 	}
 
-	/// Move each unit that has gone out whole into its decoder buffer, and count its frames.
-	fn retire(&mut self) {
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
+	/// Move each unit that has gone out whole into its decoder buffer, returning the charges
+	/// of the frames it carries.
+	fn retire(&mut self) -> Vec<Charge> {
+		let mut charges = Vec::new();
+		for unit in self.units.iter_mut().filter(|unit| unit.remaining() == 0) {
 			self.decoding.extend(unit.leaving());
-			for (bill, bytes) in &unit.charges {
-				bill.deliver(*bytes);
-			}
+			charges.append(&mut unit.charges);
 		}
 		self.units.retain(|unit| unit.remaining() > 0);
+		charges
 	}
 
 	/// Drop everything queued and start the grid afresh.
@@ -1233,7 +1236,7 @@ impl Schedule {
 		let tables = (0..self.units.len())
 			.filter(|&i| self.units[i].remaining() == 0 && self.enforce(i, index))
 			.count();
-		self.retire();
+		let charges = self.retire();
 		Ok(Some(Slot {
 			index,
 			discontinuity,
@@ -1247,6 +1250,7 @@ impl Schedule {
 			clock,
 			tables,
 			begun,
+			charges,
 		}))
 	}
 
@@ -1272,6 +1276,7 @@ impl Schedule {
 			clock: self.clock,
 			tables: 0,
 			begun: 0,
+			charges: Vec::new(),
 		};
 		let clock = self.clock.filter(|pid| self.buffers.contains_key(pid));
 		let mut holding = self.holding(|i| self.units[i].remaining());
@@ -1600,7 +1605,7 @@ impl Schedule {
 			}) {
 			return Err(self.missed(unit.pid, index, rate));
 		}
-		self.retire();
+		out.charges = self.retire();
 		self.busy_slots = if out.nulls > 0 { 0 } else { self.busy_slots + 1 };
 		Ok(out)
 	}
@@ -3373,6 +3378,7 @@ mod tests {
 			clock: None,
 			tables: 0,
 			begun: 0,
+			charges: Vec::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -3415,6 +3421,7 @@ mod tests {
 			clock: None,
 			tables: 0,
 			begun: 0,
+			charges: Vec::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);

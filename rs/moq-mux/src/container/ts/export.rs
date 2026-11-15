@@ -255,6 +255,8 @@ struct Tally {
 	units: Vec<u16>,
 	/// The last program tables to finish in the frame.
 	tables: Option<Laid>,
+	/// The payload of the frames whose units finish in the frame, counted once it goes out.
+	charges: Vec<schedule::Charge>,
 }
 
 /// A video frame waiting on a decode clock, with the codec config it was read under.
@@ -2043,6 +2045,9 @@ where
 		self.program.liveness.written_pcr(pcr);
 		for pid in tally.units {
 			self.program.liveness.delivered(pid, 1);
+		}
+		for (bill, bytes) in tally.charges {
+			bill.deliver(bytes);
 		}
 		Some(out)
 	}
@@ -4052,6 +4057,7 @@ where
 				pcr: (slot.pcr, discontinuity),
 				units: slot.units,
 				tables,
+				charges: slot.charges,
 			};
 			self.program.queue.push_back((frame, tally));
 			if !spent.is_empty() {
