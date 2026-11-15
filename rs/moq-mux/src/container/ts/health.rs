@@ -351,10 +351,10 @@ impl Health {
 				}
 			}
 		} else if let Some(timer) = self.pmt.get_mut(&pid) {
-			if scrambled {
-				self.errors.pid(pid).pmt_error += 1;
-			} else if section_start(pkt) == Some(PMT_TABLE_ID) {
-				timer.reset(now);
+			match PmtPacket::of(pkt, continuation) {
+				PmtPacket::Scrambled => self.errors.pid(pid).pmt_error += 1,
+				PmtPacket::Section => timer.reset(now),
+				PmtPacket::Other => {}
 			}
 		}
 		if self.pcr_pid == Some(pid) && self.pcr(pid, pkt, at.count) {
@@ -666,6 +666,32 @@ impl Delta {
 			Self::Forward(step)
 		} else {
 			Self::Back(wrap - step)
+		}
+	}
+}
+
+/// What a packet on a PMT PID means for its `PMT_error_2` timer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmtPacket {
+	/// It starts a PMT section, whatever its CRC, so the timer restarts.
+	Section,
+	/// It is scrambled, itself a `PMT_error_2`.
+	Scrambled,
+	/// Neither, as one continuing a section, or one the [`Multiplex`] graded corrupt or a
+	/// duplicate.
+	Other,
+}
+
+impl PmtPacket {
+	pub(super) fn of(pkt: &[u8; TsPacket::SIZE], continuation: Continuation) -> Self {
+		if matches!(continuation, Continuation::Corrupt | Continuation::Duplicate) {
+			Self::Other
+		} else if pkt[3] & 0xc0 != 0 {
+			Self::Scrambled
+		} else if section_start(pkt) == Some(PMT_TABLE_ID) {
+			Self::Section
+		} else {
+			Self::Other
 		}
 	}
 }

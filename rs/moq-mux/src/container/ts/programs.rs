@@ -6,7 +6,7 @@ use anyhow::Context;
 use mpeg2ts::ts::Pid;
 
 use super::demux::{Demux, Packet};
-use super::health::{Checks, Health};
+use super::health::{Checks, Health, PmtPacket};
 use super::import::SectionReassembler;
 use super::unclaimed::Unclaimed;
 use super::{Ext, Import, catalog::SI_PIDS, health, psi, stats};
@@ -54,11 +54,11 @@ pub struct Programs {
 	pat: Option<psi::Pat>,
 	/// The programs the latest PAT lists and no PMT has started yet, by the PMT PID it names
 	/// for them.
-	waiting: HashMap<u16, Waiting>,
+	waiting: HashMap<u16, HashMap<u16, Wait>>,
 	/// `PMT_error_2` on the PMT PIDs only waiting programs read.
 	pmt_errors: health::Errors,
-	/// The PMT sections on each PMT PID the latest PAT lists, reassembled once for every program.
-	pmts: HashMap<u16, SectionReassembler>,
+	/// Each PMT PID the latest PAT lists.
+	pmts: HashMap<u16, PmtPid>,
 	/// Whether each PID, by index, is one of [`Self::pmts`], read without hashing every packet.
 	pmt_pids: Vec<bool>,
 	/// PMT sections dropped for a bad CRC, by PID.
@@ -92,20 +92,42 @@ pub struct Programs {
 /// `PMT_error_2`: a PMT recurs at least every 0.5 s of program clock.
 const PMT_LIMIT: u64 = super::passthrough::PCR_HZ / 2;
 
-/// The programs waiting for their PMT on one PMT PID.
-struct Waiting {
-	programs: HashMap<u16, Wait>,
-	/// The [`Clock`] reading of the PID's last PMT section, or of the PAT that named it, from
-	/// which its next `PMT_error_2` is timed.
+/// Whether a running program reads its PMT on `pid`, so its health times `PMT_error_2` there.
+fn timed(tallies: &BTreeMap<(u16, Checks), Tally>, pid: u16) -> bool {
+	tallies
+		.get(&(pid, Checks::Table))
+		.is_some_and(|tally| tally.owner.is_some())
+}
+
+/// A PMT PID the latest PAT lists.
+struct PmtPid {
+	/// Its PMT sections, reassembled once for every program.
+	sections: SectionReassembler,
+	/// The [`Clock`] reading from which its next `PMT_error_2` is timed: that of the packet
+	/// starting its last PMT section, or of the PAT that named it, moved on 0.5 s for each
+	/// interval already past. Kept whichever programs read the PID, so a waiting program times
+	/// it on from where a running one left it.
 	section: u64,
 }
 
-impl Waiting {
+impl PmtPid {
 	fn new(now: u64) -> Self {
 		Self {
-			programs: HashMap::new(),
+			sections: SectionReassembler::default(),
 			section: now,
 		}
+	}
+
+	/// Move [`Self::section`] past each 0.5 s interval without a PMT section through `now`,
+	/// returning how many it passed.
+	fn overdue(&mut self, now: u64) -> u64 {
+		let silent = now.saturating_sub(self.section);
+		if silent <= PMT_LIMIT {
+			return 0;
+		}
+		let count = (silent - 1) / PMT_LIMIT;
+		self.section += count * PMT_LIMIT;
+		count
 	}
 }
 
@@ -479,10 +501,17 @@ impl Programs {
 		if self.pat.is_none() && listed.is_empty() {
 			return Ok(());
 		}
+		// A running program's health counted the intervals its PMT PID has already gone
+		// without a PMT, so a program left waiting on the PID once it retires counts on from
+		// there.
+		let ticks = self.clock.ticks;
+		for pmt in self.pmts.values_mut() {
+			pmt.overdue(ticks);
+		}
 		self.retire(&listed)?;
 		let mut moved = Vec::new();
 		self.waiting.retain(|pid, waiting| {
-			waiting.programs.retain(|number, _| match listed.get(number) {
+			waiting.retain(|number, _| match listed.get(number) {
 				Some(listed) if listed == pid => true,
 				Some(&listed) => {
 					moved.push((*number, listed));
@@ -490,26 +519,18 @@ impl Programs {
 				}
 				None => false,
 			});
-			!waiting.programs.is_empty()
+			!waiting.is_empty()
 		});
 		// A PMT on a new PID is due 0.5 s from the PAT that names it.
-		let ticks = self.clock.ticks;
 		let now = Wait::Since(ticks);
 		for (number, pid) in moved {
-			(self.waiting.entry(pid))
-				.or_insert_with(|| Waiting::new(ticks))
-				.programs
-				.insert(number, now);
+			self.waiting.entry(pid).or_default().insert(number, now);
 		}
 		let known: HashSet<u16> = self
 			.programs
 			.iter()
 			.map(|program| program.number)
-			.chain(
-				self.waiting
-					.values()
-					.flat_map(|waiting| waiting.programs.keys().copied()),
-			)
+			.chain(self.waiting.values().flat_map(|waiting| waiting.keys().copied()))
 			.collect();
 		for (&number, &pid) in &listed {
 			if known.contains(&number) {
@@ -518,10 +539,7 @@ impl Programs {
 			if self.pat.is_some() {
 				tracing::info!(program = number, pmt_pid = pid, "TS program joined the PAT");
 			}
-			(self.waiting.entry(pid))
-				.or_insert_with(|| Waiting::new(ticks))
-				.programs
-				.insert(number, now);
+			self.waiting.entry(pid).or_default().insert(number, now);
 		}
 		// A PMT PID the PAT now names starts reassembling at its next section.
 		let named: HashSet<u16> = listed.values().copied().collect();
@@ -530,7 +548,7 @@ impl Programs {
 		}
 		self.pmts.retain(|pid, _| named.contains(pid));
 		for pid in named {
-			self.pmts.entry(pid).or_default();
+			self.pmts.entry(pid).or_insert_with(|| PmtPid::new(ticks));
 			self.pmt_pids[usize::from(pid)] = true;
 		}
 		self.pat = Some(pat.clone());
@@ -542,15 +560,17 @@ impl Programs {
 	fn time_waits(&mut self) {
 		self.joining = false;
 		self.deadline = None;
-		for waiting in self.waiting.values() {
-			let mut next = waiting.section + PMT_LIMIT;
-			for wait in waiting.programs.values() {
-				if let Wait::Since(since) = wait {
-					self.joining = true;
-					next = next.min(since + PMT_LIMIT);
-				}
-			}
-			self.deadline = Some(self.deadline.map_or(next, |deadline| deadline.min(next)));
+		for (pid, waiting) in &self.waiting {
+			let overdue = self.pmts.get(pid).map(|pmt| pmt.section + PMT_LIMIT);
+			let late = waiting
+				.values()
+				.filter_map(|wait| match wait {
+					Wait::Since(since) => Some(since + PMT_LIMIT),
+					Wait::Late | Wait::Described => None,
+				})
+				.min();
+			self.joining |= late.is_some();
+			self.deadline = self.deadline.into_iter().chain(overdue).chain(late).min();
 		}
 	}
 
@@ -560,7 +580,7 @@ impl Programs {
 	fn expire(&mut self) {
 		let now = self.clock.ticks;
 		for (&pid, waiting) in &mut self.waiting {
-			for (&number, wait) in &mut waiting.programs {
+			for (&number, wait) in waiting.iter_mut() {
 				if matches!(*wait, Wait::Since(since) if now > since + PMT_LIMIT) {
 					tracing::warn!(
 						program = number,
@@ -570,14 +590,9 @@ impl Programs {
 					*wait = Wait::Late;
 				}
 			}
-			let silent = now - waiting.section;
-			if silent > PMT_LIMIT {
-				let count = (silent - 1) / PMT_LIMIT;
-				waiting.section += count * PMT_LIMIT;
-				let timed = (self.tallies.get(&(pid, Checks::Table))).is_some_and(|tally| tally.owner.is_some());
-				if !timed {
-					self.pmt_errors.pmt_error(pid, count);
-				}
+			let count = self.pmts.get_mut(&pid).map_or(0, |pmt| pmt.overdue(now));
+			if count > 0 && !timed(&self.tallies, pid) {
+				self.pmt_errors.pmt_error(pid, count);
 			}
 		}
 		self.time_waits();
@@ -714,10 +729,19 @@ impl Programs {
 	/// so its own PMT path applies the PMT and starts its clock from the PCR already seen. Of
 	/// several revisions in the packet, the last decides.
 	fn describe(&mut self, packet: &Packet) -> anyhow::Result<()> {
-		let Some(sections) = self.pmts.get_mut(&packet.pid) else {
+		let Some(pmt) = self.pmts.get_mut(&packet.pid) else {
 			return Ok(());
 		};
 		let mut waiting = self.waiting.get_mut(&packet.pid);
+		// Timed as a running program's health times its PMT PID, before any CRC check.
+		match PmtPacket::of(packet.pkt, packet.continuation) {
+			PmtPacket::Section => pmt.section = self.clock.ticks,
+			PmtPacket::Scrambled if waiting.is_some() && !timed(&self.tallies, packet.pid) => {
+				self.pmt_errors.pmt_error(packet.pid, 1);
+			}
+			PmtPacket::Scrambled | PmtPacket::Other => {}
+		}
+		let sections = &mut pmt.sections;
 		let before = waiting.is_some().then(|| sections.clone());
 		let mut completed = Vec::new();
 		sections.push(packet.pkt, &mut completed);
@@ -732,12 +756,9 @@ impl Programs {
 				corrupt += 1;
 				continue;
 			}
-			let Some(waiting) = &mut waiting else {
-				continue;
-			};
-			waiting.section = self.clock.ticks;
-			if let Some(pmt) = psi::Pmt::parse(&section)
-				&& waiting.programs.contains_key(&pmt.program_number)
+			if let Some(waiting) = &waiting
+				&& let Some(pmt) = psi::Pmt::parse(&section)
+				&& waiting.contains_key(&pmt.program_number)
 			{
 				latest.retain(|seen| seen.program_number != pmt.program_number);
 				latest.push(pmt);
@@ -753,7 +774,7 @@ impl Programs {
 		let mut described = false;
 		for pmt in latest.iter().filter(|pmt| pmt.streams.is_empty()) {
 			described |= matches!(
-				waiting.programs.insert(pmt.program_number, Wait::Described),
+				waiting.insert(pmt.program_number, Wait::Described),
 				Some(Wait::Since(_))
 			);
 		}
@@ -765,9 +786,9 @@ impl Programs {
 			return Ok(());
 		}
 		for pmt in &latest {
-			waiting.programs.remove(&pmt.program_number);
+			waiting.remove(&pmt.program_number);
 		}
-		if waiting.programs.is_empty() {
+		if waiting.is_empty() {
 			self.waiting.remove(&packet.pid);
 		}
 		for pmt in latest {
@@ -1232,6 +1253,66 @@ mod test {
 		let alone = pmt_error(&[(1, 0x100)]);
 		assert!(alone > 0);
 		assert_eq!(pmt_error(&[(1, 0x100), (3, 0x100)]), alone);
+	}
+
+	/// A waiting program's PMT PID is timed as a running program's health times its own: a PMT
+	/// section with a bad CRC still restarts the interval, so it counts as a CRC error alone.
+	#[test]
+	fn a_late_pmt_with_a_bad_crc_counts_only_its_crc() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		mux.pat(&[(1, 0x100), (3, 0x300)]);
+		for ms in (0..=2000).step_by(100) {
+			mux.pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0)
+				.section(0x300, &corrupt(pmt_section(3, 0, &[(MP2, 0x73, &[])])))
+				.packet(0x1ff, Flags::pcr(27_000_000 + ms * MS));
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		}
+		let stats = programs.stats();
+		assert_eq!(stats.crc_error, 21, "each PMT section counts its bad CRC");
+		assert_eq!(stats.pmt_error, 0, "and no PMT_error_2");
+	}
+
+	/// A PMT PID a running program leaves to a waiting one keeps its interval: the waiting
+	/// program counts `PMT_error_2` 0.5 s after the PID's last PMT section, not after the PAT
+	/// that added it.
+	#[test]
+	fn a_late_pmt_times_on_from_a_retired_programs_pid() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let mut pmt_error = Vec::new();
+		for ms in (0..=1000).step_by(50) {
+			match ms {
+				0..400 => mux.pat(&[(1, 0x100), (5, 0x500)]),
+				400..450 => mux.pat(&[(1, 0x100), (2, 0x100), (5, 0x500)]),
+				_ => mux.pat(&[(2, 0x100), (5, 0x500)]),
+			};
+			match ms {
+				0 => mux.pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0),
+				800 => mux.pmt(0x100, 2, 0x1ff, &[(MP2, 0x62)], 0),
+				_ => &mut mux,
+			};
+			mux.pmt(0x500, 5, 0x1ff, &[(MP2, 0x65)], 0)
+				.packet(0x1ff, Flags::pcr(27_000_000 + ms * MS));
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			pmt_error.push((ms, programs.stats().pmt_error));
+		}
+		let at = |ms: u64| pmt_error.iter().find(|&&(at, _)| at == ms).unwrap().1;
+		assert_eq!(at(500), 0, "program 1 retired before its PMT was due");
+		assert_eq!(at(550), 1, "due 0.5 s after program 1's last PMT");
+		assert_eq!(at(1000), 1, "program 2's PMT ends the wait");
+		let running: Vec<_> = instances(&programs).into_iter().map(|(number, _)| number).collect();
+		assert_eq!(running, [5, 2], "program 2 starts once its PMT arrives");
 	}
 
 	/// A program leaving the PAT flushes the picture it shares with a program still running,
