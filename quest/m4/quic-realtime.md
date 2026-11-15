@@ -36,7 +36,9 @@ spike assumed no consumer; teleoperation uplinks are one):
   scheduler's grants. So the candidates group arrivals into bursts before
   fitting a trend, as GoogCC does. Reproduce it with `just rs quic-sim`.
 - Bake-off: all three candidates in parallel, each a controller
-  in `moq-congestion`. The moq-shaper presets `cellular-step`,
+  in the workspace-only `moq-congestion-lab` (the delay bound stays in
+  `moq-congestion`'s `bbr3/`, its setter hidden); a winner moves into
+  `moq-congestion`. The moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
   delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) brought
@@ -60,14 +62,15 @@ spike assumed no consumer; teleoperation uplinks are one):
   only stops a rung on a session with a sender, so a `Realtime` that cannot
   probe would silently leave moq-cli, OBS, and FFI simulcast publishers with
   no rung disable or recovery. A candidate that cannot probe does not ship.
-- Naming: add `Realtime` to `moq_tokio::quic::CongestionControl` (`realtime`
-  on the CLI and in TOML), which is `non_exhaustive`, so it is additive.
-  `Delay` keeps meaning BBR3; reword its doc line to say model-based, since
-  BBR does not react to queuing delay directly. A new variant rather than
-  upgrading `Delay`, so current users see no behavior change.
+- Naming (revised 2026-11-14, below): each winner joins
+  `moq_tokio::quic::CongestionControl` as a variant named after its algorithm
+  (`gcc`, `scream` on the CLI and in TOML), which is `non_exhaustive`, so it is
+  additive, as is a new moq-ffi `MoqCongestionControl` constructor. `Delay`
+  keeps meaning BBR3, documented as model-based BBR v3. A new variant rather
+  than upgrading `Delay`, so current users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
-- SCReAMv2 landed as `moq_congestion::Scream`
+- SCReAMv2 landed as `moq_congestion_lab::scream::Scream`
   ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
   `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
   `scream` integration tests over the real presets. Its estimate is a window
@@ -178,7 +181,7 @@ the candidates would publish unselectable with moq-congestion's first
 release. Decided 2026-11-14 (maintainer, pick on
 [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ the cut ships
 BBR through the existing selector and keeps GCC, SCReAM, and the BBR3 delay
-bound off the published API ([congestion selector](/quest/m2/congestion-candidates.md)).
+bound off the published API.
 This bake-off tests them, and each winner joins `CongestionControl` as a
 variant named after its algorithm, or, for the delay bound, a `bbr3::Config`
 option; losers stay out of the published API.

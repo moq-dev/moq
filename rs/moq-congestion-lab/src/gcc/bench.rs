@@ -2,7 +2,7 @@
 //! so its cost grows with the packets each ACK carries.
 
 use super::*;
-use crate::Acked;
+use moq_congestion::Acked;
 use cpu_time::ThreadTime;
 
 const PACKET: u16 = 1200;

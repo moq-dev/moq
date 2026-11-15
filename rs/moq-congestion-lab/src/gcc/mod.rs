@@ -77,7 +77,7 @@ use std::{collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
 
-use crate::{
+use moq_congestion::{
     Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent,
     pacer::{self, Pacer, Rate},
 };
@@ -279,7 +279,7 @@ impl Gcc {
     /// GoogCC runs on the round-trip delay. Once it reports one, a packet without one, as when
     /// the ACK carrying its time was lost, still counts as received for the loss-based estimate,
     /// but not toward delay, rather than mix the two clocks.
-    fn acked(&mut self, packet: &crate::Acked, now: Instant) -> PacketResult {
+    fn acked(&mut self, packet: &moq_congestion::Acked, now: Instant) -> PacketResult {
         let (receive_time, ambiguous_receive_time) = match packet.received {
             Some(received) => (self.receive_time(received, now), false),
             None => (timestamp(now), self.receive_basis.is_some()),
@@ -383,10 +383,9 @@ impl Controller for Gcc {
             data_in_flight: size(sent.in_flight),
         });
         self.apply(update);
-        Packet {
-            probe_cluster,
-            ..Default::default()
-        }
+        let mut packet = Packet::default();
+        packet.probe_cluster = probe_cluster;
+        packet
     }
 
     fn on_ack(&mut self, ack: Ack<'_>) {

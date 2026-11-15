@@ -1,12 +1,12 @@
-# [XS] moq-congestion's SCReAMv2 follows its draft and reference
+# [XS] moq-congestion-lab's SCReAMv2 follows its draft and reference
 
 ## Goal
 
-moq-congestion's `scream` carries every fix to its queue-delay target path
+moq-congestion-lab's `scream` carries every fix to its queue-delay target path
 from newer revisions of draft-ietf-ccwg-rfc8298bis-screamv2 and from
 [EricssonResearch/scream](https://github.com/EricssonResearch/scream)'s
 `ScreamV2Tx.cpp`, each ported with its test or recorded as not applying, and
-`rs/moq-congestion/src/scream.rs`'s module doc names the draft revision and
+`rs/moq-congestion-lab/src/scream.rs`'s module doc names the draft revision and
 reference commit checked.
 
 ## Plan

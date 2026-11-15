@@ -1,4 +1,4 @@
-//! SCReAMv2 ([`congestion::scream::Scream`]) on the seeded sim: an encoder that follows the controller's
+//! SCReAMv2 ([`scream::Scream`]) on the seeded sim: an encoder that follows the controller's
 //! estimate sends up through a bottleneck shaped like each cellular moq-shaper preset, and the run
 //! reports the queue it built, what it carried, and how fast it answered each step.
 //!
@@ -11,7 +11,8 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::congestion::{bbr3, scream};
+use crate::congestion::bbr3;
+use moq_congestion_lab::scream;
 
 const FPS: u64 = 30;
 /// Frames per group, each group on its own stream: a keyframe every two seconds

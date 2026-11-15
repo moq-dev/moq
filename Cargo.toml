@@ -20,6 +20,7 @@ default-members = [
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
     "rs/moq-congestion",
+    "rs/moq-congestion-lab",
     "rs/moq-archive",
     "rs/moq-auth",
     "rs/moq-boy",

@@ -16,9 +16,10 @@
 
 use std::sync::Arc;
 
-use crate::pacer::{Pacer, Rate};
-use crate::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
-use crate::{Duration, Instant};
+use moq_congestion::pacer::{Pacer, Rate};
+use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
+use kio::clock::Instant;
+use std::time::Duration;
 
 /// equivalent to MIN_REF_WND: the smallest reference window, in bytes
 const MIN_REF_WND: f64 = 3000.0;
@@ -578,7 +579,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::{Acked, Lost};
+    use moq_congestion::{Acked, Lost};
 
     const MTU: u16 = 1200;
     const PROPAGATION: Duration = Duration::from_millis(20);

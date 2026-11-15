@@ -1,4 +1,4 @@
-//! SCReAMv2 ([`congestion::scream::Scream`]) over real sockets through the cellular moq-shaper presets.
+//! SCReAMv2 ([`moq_congestion_lab::scream::Scream`]) over real sockets through the cellular moq-shaper presets.
 //!
 //! A media sender encodes 30 frames a second at the controller's estimate, a keyframe every two
 //! seconds, each group on its own stream, up through the shaper's uplink. Each frame carries when
@@ -221,7 +221,7 @@ async fn run(preset: &moq_shaper::Preset) -> Run {
 		.with_no_client_auth();
 	let mut client = driver::client::Config::new(Arc::new(tls));
 	client.transport.congestion = Arc::new(Recorder {
-		inner: Arc::new(congestion::scream::Config::default()),
+		inner: Arc::new(moq_congestion_lab::scream::Config::default()),
 		log: log.clone(),
 	});
 	client.transport.receive_timestamps = std::num::NonZeroU32::new(32);

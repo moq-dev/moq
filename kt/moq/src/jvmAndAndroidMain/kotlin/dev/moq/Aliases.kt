@@ -40,7 +40,10 @@ typealias ServerTls = uniffi.moq.MoqServerTls
 /** QUIC transport tuning, such as the peer's inbound stream cap. */
 typealias QuicConfig = uniffi.moq.MoqQuicConfig
 
-/** The congestion control family for a QUIC connection. */
+/**
+ * The congestion control family for a QUIC connection. Build one with `CongestionControl.delay()`,
+ * `loss()`, or `none()`; a new algorithm joins as a new constructor.
+ */
 typealias CongestionControl = uniffi.moq.MoqCongestionControl
 
 /** The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start. */

@@ -132,6 +132,8 @@ flume = "0.12"
 kio = { path = "../kio", features = ["sim"] }
 # The integration tests build congestion controllers directly.
 moq-congestion = { path = "../moq-congestion" }
+# The candidate controllers the real-socket comparisons run.
+moq-congestion-lab = { path = "../moq-congestion-lab" }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
 # The tests run QUIC sessions on the simulator. Only `sim`, so a test build keeps the

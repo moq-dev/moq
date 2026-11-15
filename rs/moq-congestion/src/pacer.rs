@@ -12,7 +12,7 @@ use std::time::Duration;
 /// than one congestion window per RTT, as recommended in
 /// <https://tools.ietf.org/html/draft-ietf-quic-recovery-34#section-7.7>
 #[derive(Debug, Clone)]
-pub(crate) struct Pacer {
+pub struct Pacer {
     capacity: u64,
     /// Inputs [`Self::capacity`] was derived from, or `None` if it was derived from a pacing rate
     last_window_inputs: Option<WindowInputs>,
@@ -35,7 +35,7 @@ struct WindowInputs {
 
 impl Pacer {
     /// Obtains a new [`Pacer`].
-    pub(crate) fn new(smoothed_rtt: Duration, window: u64, mtu: u16, now: Instant) -> Self {
+    pub fn new(smoothed_rtt: Duration, window: u64, mtu: u16, now: Instant) -> Self {
         let capacity = optimal_capacity(smoothed_rtt, window, mtu);
         Self {
             capacity,
@@ -47,7 +47,7 @@ impl Pacer {
     }
 
     /// Record that a packet has been transmitted.
-    pub(crate) fn on_transmit(&mut self, packet_length: u16) {
+    pub fn on_transmit(&mut self, packet_length: u16) {
         let bytes = u64::from(packet_length);
         let spent = bytes.min(self.tokens);
         self.tokens -= spent;
@@ -74,7 +74,7 @@ impl Pacer {
     /// The 5/4 ratio used here comes from the suggestion that N = 1.25 in the draft IETF RFC for
     /// QUIC.
     /// `rate` is the controller output the bucket refills at; see [`Rate`].
-    pub(crate) fn delay(
+    pub fn delay(
         &mut self,
         smoothed_rtt: Duration,
         bytes_to_send: u64,
@@ -206,7 +206,7 @@ impl Pacer {
 
 /// The controller output a [`Pacer`] refills at.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Rate {
+pub struct Rate {
     /// Congestion window in bytes. Without a `pacing_rate`, the bucket refills at one window per
     /// smoothed RTT, sped up by 5/4.
     pub window: u64,
@@ -220,7 +220,7 @@ pub(crate) struct Rate {
 /// Burst intervals trade distributing datagrams over time against waking the connection up more
 /// often than user-space timer accuracy can service; overshooting one by more than 25% loses the
 /// tokens for the extra elapsed time.
-pub(crate) fn rate_capacity(pacing_rate: u64, mtu: u16) -> u64 {
+pub fn rate_capacity(pacing_rate: u64, mtu: u16) -> u64 {
     let mtu = u64::from(mtu);
     let bytes_in =
         |interval: Duration| ((pacing_rate as u128 * interval.as_nanos()) / 1_000_000_000) as u64;

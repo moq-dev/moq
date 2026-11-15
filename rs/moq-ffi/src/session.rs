@@ -129,7 +129,7 @@ pub struct MoqQuicConfig {
 	pub mtu_discovery: Option<bool>,
 	/// The congestion control family.
 	#[uniffi(default = None)]
-	pub congestion_control: Option<MoqCongestionControl>,
+	pub congestion_control: Option<Arc<MoqCongestionControl>>,
 	/// Directory, which must exist, to write qlog traces into. Fails `new` unless
 	/// [`moq_qlog_supported`].
 	#[uniffi(default = None)]
@@ -141,23 +141,32 @@ pub struct MoqQuicConfig {
 }
 
 /// The congestion control family for a QUIC connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum MoqCongestionControl {
-	/// Loss-based (CUBIC): chases throughput, so the send rate sawtooths.
-	Loss,
-	/// Delay-based (BBR): keeps queues short and the send rate steady enough for an encoder to track.
-	Delay,
-	/// No congestion control and no pacing, for tests and controlled links.
-	None,
-}
+///
+/// An immutable object rather than an enum, so a new algorithm joins as a constructor without
+/// breaking callers that switch over a closed enum.
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
+pub struct MoqCongestionControl(moq_tokio::quic::CongestionControl);
 
-impl From<MoqCongestionControl> for moq_tokio::quic::CongestionControl {
-	fn from(family: MoqCongestionControl) -> Self {
-		match family {
-			MoqCongestionControl::Loss => Self::Loss,
-			MoqCongestionControl::Delay => Self::Delay,
-			MoqCongestionControl::None => Self::None,
-		}
+#[uniffi::export]
+impl MoqCongestionControl {
+	/// Loss-based (CUBIC): chases throughput, so the send rate sawtooths.
+	#[uniffi::constructor]
+	pub fn loss() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Loss))
+	}
+
+	/// Delay-based (BBR v3), the default: keeps queues short and the send rate steady enough for
+	/// an encoder to track.
+	#[uniffi::constructor]
+	pub fn delay() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Delay))
+	}
+
+	/// No congestion control and no pacing, for tests and controlled links.
+	#[uniffi::constructor]
+	pub fn none() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::None))
 	}
 }
 
@@ -169,7 +178,7 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 		quic.keep_alive = config.keep_alive.map(Into::into);
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
-		quic.congestion_control = config.congestion_control.map(Into::into);
+		quic.congestion_control = config.congestion_control.map(|family| family.0);
 		quic.qlog = config.qlog.map(Into::into);
 		quic.keylog = config
 			.keylog

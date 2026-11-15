@@ -34,7 +34,10 @@ pub struct Packet {
     /// The GCC probe cluster it was sent in, if any. Sixteen bits fit the padding after the
     /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
     /// far more than either starts in the two seconds a cluster is kept.
-    pub(crate) probe_cluster: Option<NonZeroU16>,
+    ///
+    /// Not public API: GCC is a candidate outside this crate, and the field may go in any release.
+    #[doc(hidden)]
+    pub probe_cluster: Option<NonZeroU16>,
 }
 
 /// An empty state, for a controller that keeps none.

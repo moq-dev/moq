@@ -2145,6 +2145,9 @@ impl Config {
     ///
     /// Without receive timestamps, which the transport requests separately, it does nothing.
     /// Off by default.
+    ///
+    /// Not public API until the realtime bake-off tests it: hidden, and changed in any release.
+    #[doc(hidden)]
     pub fn delay_bound(&mut self, value: bool) -> &mut Self {
         self.delay_bound = value;
         self
