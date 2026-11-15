@@ -173,9 +173,19 @@ type Got = moq_net::Result<(u64, Duration)>;
 
 /// Read every frame of `video` at `path` through `node`, following it from the start.
 async fn reader(node: &origin::Producer, path: &str, start: kio::clock::Instant) -> mpsc::UnboundedReceiver<Got> {
+	reader_of(node, path, "video", start).await
+}
+
+/// Read every frame of `name` at `path` through `node`, following it from the start.
+async fn reader_of(
+	node: &origin::Producer,
+	path: &str,
+	name: &str,
+	start: kio::clock::Instant,
+) -> mpsc::UnboundedReceiver<Got> {
 	let remote = node.consume().request(path, None).await.unwrap();
 	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
-	let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
+	let mut sub = remote.track(name).unwrap().subscribe(prefs).await.unwrap();
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
 		let _keep = remote;
@@ -301,6 +311,17 @@ impl Links {
 			}
 		}
 		subscriptions
+	}
+
+	/// Track subscriptions each link serves now, by name.
+	fn open(&self) -> BTreeMap<String, u64> {
+		let mut open = BTreeMap::new();
+		for (tier, role, traffic) in self.registry.snapshot().traffic() {
+			if role == stats::Role::Publisher {
+				*open.entry(tier.as_str().to_string()).or_default() += traffic.active_subscriptions();
+			}
+		}
+		open
 	}
 
 	/// Announce-stream messages each link sent, by name.
@@ -874,4 +895,78 @@ async fn residual_two_depths_of_one_claim_subscribe_twice() {
 		assert_eq!(links.subscriptions()["w-r"], 2, "{:?}", links.subscriptions());
 	}
 	assert_eq!(worker.served(), 1);
+}
+
+/// `P` publishes `live` through `X` to `A` and through `Y` to `B`, and through `C` to
+/// both at a higher cost. `A` and `B` link to each other cheaply, at 50 ms each way, so
+/// each prefers the other's route over `C`'s. Two unrelated links close at once, `X`'s to
+/// `A` and `Y`'s to `B`: each relay doubts only its own lost hop, so `A` moves onto `B`'s
+/// direct route and `B` onto `A`'s, both stale, and the routes loop until the news
+/// crosses. Readers on `A` and `B` follow `video` from before the cut, and readers asking
+/// for `audio`, which nobody read yet, join while the loop stands.
+///
+/// Proves the loop formed (each relay asked the other), that it ends with the routes: once
+/// they settle on `C`, every reader gets every frame once, in order, and no request is left
+/// between `A` and `B`.
+#[kio::test]
+async fn a_request_into_a_routing_loop_follows_the_routes_out() {
+	let links = Links::new();
+	let [p, x, y, c, a, b] = [1, 2, 3, 4, 5, 6].map(produce_origin);
+	let broadcast = p.route("live", origin::RouteOptions::hidden()).unwrap();
+	let video = broadcast.broadcast().create_track("video", timed()).unwrap();
+	let audio = broadcast.broadcast().create_track("audio", timed()).unwrap();
+	broadcast.announce().unwrap();
+	let _p_x = links.link("p-x", &p, &x, 1).await;
+	let _p_y = links.link("p-y", &p, &y, 1).await;
+	let _p_c = links.link("p-c", &p, &c, 1).await;
+	let x_a = links.link("x-a", &x, &a, 1).await;
+	let y_b = links.link("y-b", &y, &b, 1).await;
+	let mut between = Vec::new();
+	for (name, from, to) in [("a-b", &a, &b), ("b-a", &b, &a)] {
+		let mut options = links.options(name, from, to);
+		options.cost = Some(1);
+		options.latency = Duration::from_millis(50);
+		between.push(connect_mock(options).await);
+	}
+	let _c_a = links.link("c-a", &c, &a, 10).await;
+	let _c_b = links.link("c-b", &c, &b, 10).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	let start = kio::clock::now();
+	let mut feeds = [Feed::new(video, start, STEP), Feed::new(audio, start, STEP)];
+	let run = async |feeds: &mut [Feed; 2], count| {
+		let [video, audio] = feeds;
+		futures::join!(video.run(count), audio.run(count));
+	};
+	let mut readers = Vec::new();
+	for (name, node) in [("A", &a), ("B", &b)] {
+		readers.push((name, 0, reader_of(node, "live", "video", start).await));
+	}
+	run(&mut feeds, MOVE).await;
+	cut(&x_a);
+	cut(&y_b);
+	kio::clock::sleep(Duration::from_millis(5)).await;
+	// Asked while the loop stands, so their subscriptions answer only once it ends.
+	let asked = async {
+		let at_a = reader_of(&a, "live", "audio", start).await;
+		let at_b = reader_of(&b, "live", "audio", start).await;
+		[("A", 1, at_a), ("B", 1, at_b)]
+	};
+	let (asked, ()) = futures::join!(asked, run(&mut feeds, MOVE));
+	readers.extend(asked);
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	let subscriptions = links.subscriptions();
+	let open = links.open();
+	println!("a request into a loop: subscriptions {subscriptions:?}, open {open:?}");
+	for link in ["a-b", "b-a"] {
+		assert!(subscriptions.get(link).is_some_and(|count| *count > 0), "{link} looped: {subscriptions:?}");
+		assert_eq!(open[link], 0, "{link} left a request: {open:?}");
+	}
+	for (name, index, rx) in &mut readers {
+		let live = Liveness::of(rx, &feeds[*index]);
+		assert!(live.seamless(), "{name}, track {index}: {live:?}");
+	}
+	drop(between);
+	drop(broadcast);
 }
