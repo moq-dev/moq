@@ -24,10 +24,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: gstreamer-ci
-  cancel-in-progress: false
-
 env:
   IMAGE: ghcr.io/moq-dev/gstreamer-ci
   PIN: .github/docker/gstreamer/image
@@ -102,6 +98,13 @@ jobs:
     # `publish`, because `publish` admits only release refs and its release
     # credentials have no business on `main`.
     environment: bot
+    # Serialize publishing without dropping a run: by default a newly queued
+    # run replaces the pending one, so a schedule could cancel a Dockerfile
+    # push that must ship. Only this job holds the group, so builds and other
+    # branches' dispatches never queue behind it.
+    concurrency:
+      group: gstreamer-ci-publish
+      queue: max
     permissions:
       contents: read
       packages: write
