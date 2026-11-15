@@ -1549,4 +1549,71 @@ mod tests {
 			"a joining stream gets the running mode"
 		);
 	}
+
+	/// Inside a Flatpak, the camera portal's D-Bus handshake sends `BEGIN` only
+	/// once every answer the bus owes it has arrived. Before xdg-dbus-proxy 0.1.6,
+	/// the sandbox's proxy parses nothing after it forwards `BEGIN` but messages,
+	/// so an answer still on its way back (zbus 6 writes the whole handshake at
+	/// once) closes the connection and fails every portal call.
+	#[test]
+	fn portal_handshake_waits_for_each_answer() {
+		let socket = std::env::temp_dir().join(format!("moq-portal-handshake-{}.sock", std::process::id()));
+		let isolated = test_env::Env::default()
+			.set("FLATPAK_ID", "dev.moq.Test")
+			.set("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", socket.display()))
+			.isolate();
+		if !isolated {
+			return;
+		}
+		// The child reads back the path its parent picked.
+		let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap();
+		let path = address.strip_prefix("unix:path=").unwrap().to_owned();
+		let _ = std::fs::remove_file(&path);
+		let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+		let bus = std::thread::spawn(move || old_proxy(listener.accept().unwrap().0));
+
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		// The bus hangs up at `BEGIN`, so the portal itself never opens.
+		let _ = runtime.block_on(ashpd::desktop::camera::Camera::new());
+		let _ = std::fs::remove_file(&path);
+		bus.join().unwrap().unwrap();
+	}
+
+	/// Plays a session bus behind xdg-dbus-proxy 0.1.5 through the client's
+	/// `BEGIN`, failing when `BEGIN` arrives in the same read as a command it had
+	/// not answered yet.
+	fn old_proxy(mut stream: std::os::unix::net::UnixStream) -> Result<(), String> {
+		use std::io::{Read, Write};
+
+		let mut pending = Vec::new();
+		let mut chunk = [0; 4096];
+		loop {
+			let read = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+			if read == 0 {
+				return Err("the client hung up before BEGIN".into());
+			}
+			pending.extend_from_slice(&chunk[..read]);
+			let mut owed = Vec::new();
+			while let Some(end) = pending.windows(2).position(|w| w == b"\r\n") {
+				let line: Vec<u8> = pending.drain(..end + 2).collect();
+				// The credentials byte leads the first line.
+				let line = String::from_utf8_lossy(&line);
+				let line = line.trim_start_matches('\0').trim_end();
+				let command = line.split(' ').next().unwrap_or_default();
+				match command {
+					"AUTH" => owed.push("OK 0123456789abcdef0123456789abcdef\r\n"),
+					"NEGOTIATE_UNIX_FD" => owed.push("AGREE_UNIX_FD\r\n"),
+					"BEGIN" if owed.is_empty() => return Ok(()),
+					"BEGIN" => return Err(format!("BEGIN came before the answers {owed:?}")),
+					_ => return Err(format!("unexpected handshake line {line:?}")),
+				}
+			}
+			for answer in owed {
+				stream.write_all(answer.as_bytes()).map_err(|e| e.to_string())?;
+			}
+		}
+	}
 }
