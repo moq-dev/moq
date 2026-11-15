@@ -18,6 +18,7 @@ export class Consumer {
 	constructor(track: Net.Track.Subscriber, props: ConsumerProps);
 	readonly buffered: Signals.Getter<BufferedRanges>;
 	close(): void;
+	readonly finished: Signals.Getter<boolean>;
 	next(): Promise<Read | undefined>;
 	readonly spread: Signals.Getter<Net.Clock.Duration>;
 }

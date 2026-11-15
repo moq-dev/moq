@@ -13,6 +13,8 @@ same way, so no change to interest edits caused it.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete of [the interest set](https://github.com/moq-dev/moq/pull/8728)): ✅ keep in m2 (rejected: move to m3, drop it).
+
 Recommended:
 
 1. Rerun `HoldCycle.cfg` with `-simulate num=3000 -depth 100` and no seed

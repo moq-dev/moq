@@ -4167,6 +4167,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-auth-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-auth",
+]
+
+[[package]]
 name = "moq-bench"
 version = "0.1.0"
 dependencies = [
@@ -4274,6 +4282,7 @@ dependencies = [
  "object_store",
  "percent-encoding",
  "pollster",
+ "rand 0.10.3",
  "reqwest",
  "rind-object-store",
  "rustls",
@@ -4720,6 +4729,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-test",
+ "url",
  "workspace-hack",
 ]
 
@@ -4786,6 +4796,14 @@ dependencies = [
  "tracing-test",
  "windows-sys 0.61.2",
  "workspace-hack",
+]
+
+[[package]]
+name = "moq-sock-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-sock",
 ]
 
 [[package]]
@@ -4951,6 +4969,14 @@ dependencies = [
  "url",
  "web-transport-proto",
  "workspace-hack",
+]
+
+[[package]]
+name = "moq-uring-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-uring",
 ]
 
 [[package]]
@@ -6671,6 +6697,14 @@ dependencies = [
  "tracing",
  "web-transport-trait",
  "workspace-hack",
+]
+
+[[package]]
+name = "qmux-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "qmux 0.7.0",
 ]
 
 [[package]]

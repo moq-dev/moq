@@ -17,6 +17,7 @@ mod residual;
 mod routing;
 mod rtt;
 mod scope;
+mod search;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -78,6 +79,7 @@ macro_rules! both {
 pub(super) use both;
 
 /// One node's router, under either rule.
+#[derive(Clone)]
 enum Relay {
 	Distance(Router<Node, Item>),
 	Path(path::Router<Node, Item>),
@@ -182,9 +184,37 @@ pub(super) struct Item {
 	pub since: Rev,
 }
 
+/// `peer` replaces everything it asks `router` for with `prefixes`, in one edit.
+pub(super) fn reask<A: Clone + Eq + std::fmt::Debug>(
+	router: &mut path::Router<Node, A>,
+	peer: Node,
+	prefixes: &[&str],
+) -> Result<(), Error> {
+	let new: BTreeSet<Path> = prefixes.iter().map(|prefix| p(prefix)).collect();
+	let old = router.answers(peer);
+	let remove = old.difference(&new).cloned().collect();
+	let add = new.difference(&old).cloned().collect();
+	router.edit(peer, path::Edit { remove, add })
+}
+
 /// A contract path: a trailing `/` (a wildcard in the contract) is dropped.
 pub(super) fn p(path: &str) -> Path {
 	Path::new(path.strip_suffix('/').unwrap_or(path)).expect("a valid path")
+}
+
+/// A path rule offer crossing `hops`, each a node and the session it learned the
+/// route on, the publisher first and the sender last.
+pub(super) fn along(hops: &[(Id, u64)], metric: Metric) -> path::Offer {
+	path::Offer {
+		path: (hops.iter())
+			.map(|&(node, session)| path::Hop { node, session })
+			.collect(),
+		draining: false,
+		priority: i8::MAX,
+		metric,
+		down_only: false,
+		rtt: None,
+	}
 }
 
 /// A scoped publish grant: the credential subject that qualifies identities,
@@ -335,12 +365,14 @@ pub(super) struct Stats {
 	pub delivered: usize,
 }
 
+#[derive(Clone, Debug)]
 struct Change {
 	rev: Rev,
 	claim: Path,
 	item: Option<Item>,
 }
 
+#[derive(Clone)]
 pub(super) struct Sim {
 	rule: Rule,
 	nodes: Vec<Relay>,
@@ -889,6 +921,18 @@ impl Sim {
 	pub fn wait(&mut self, elapsed: Duration) {
 		self.now = self.now.saturating_add(elapsed);
 		self.tick();
+	}
+
+	/// Move the clock to `node`'s next doubt or dead-hop timer, unless already past
+	/// it, and fire that node's timers due by then, leaving every other node's.
+	pub fn fire(&mut self, node: Node) {
+		let at = self.nodes[node].deadline().expect("a timer");
+		self.now = self.now.max(at);
+		let now = self.now;
+		if let Relay::Path(router) = &mut self.nodes[node] {
+			router.timeout(now);
+		}
+		self.flush();
 	}
 
 	/// Fire every doubt timer due by now.

@@ -1,0 +1,20 @@
+# drill: tests::sim::random_workloads
+# expect: RFC 9000 §14.1
+# package: moq-quic
+# target: --lib
+#
+# Stops the client padding the datagrams that carry its Initial packets, so the
+# first flight leaves below 1200 bytes.
+diff --git a/rs/moq-quic/src/connection/mod.rs b/rs/moq-quic/src/connection/mod.rs
+--- a/rs/moq-quic/src/connection/mod.rs
++++ b/rs/moq-quic/src/connection/mod.rs
+@@ -973,7 +973,8 @@
+ 			coalesce = coalesce && !builder.short_header;
+ 
+ 			// https://tools.ietf.org/html/draft-ietf-quic-transport-34#section-14.1
+-			pad_datagram |= space_id == SpaceId::Initial && (self.side.is_client() || ack_eliciting);
++			// MUTATION: a client's Initial goes out unpadded.
++			pad_datagram |= space_id == SpaceId::Initial && self.side.is_server() && ack_eliciting;
+ 
+ 			if close {
+ 				trace!("sending CONNECTION_CLOSE");

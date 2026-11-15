@@ -1,0 +1,31 @@
+{
+	"name": "@moq/obs",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "Set up the OBS Studio on the user's own machine from a web page, over obs-websocket.",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/obs"
+	},
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@moq/clock": "workspace:^",
+		"@moq/signals": "workspace:^",
+		"zod": "^4.6.7"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.4",
+		"typescript": "7.0.2"
+	}
+}

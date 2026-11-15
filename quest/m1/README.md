@@ -53,12 +53,10 @@ after m2, which is when they can start.
 Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): tests
 that guard what production traffic reaches join m1 ahead of the questline's
 m4 default, so changes are proven before they ship: the
-[QUIC Interop Runner](/quest/m1/quic-interop.md),
-[sim rule checks](/quest/m1/quic-sim-rules.md),
-[relay parser fuzz targets](/quest/m1/fuzz-relay-parsers.md), and from m4
+[QUIC Interop Runner](/quest/m1/quic-interop.md), sim rule checks,
+relay parser fuzz targets (qmux, moq-auth), and from m4
 the relay on the sim (landed),
-[mutation testing](/quest/m1/mutants.md), and
-[peer-reachable unsafe](/quest/m1/wire-fuzz-coverage.md). OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
+mutation testing (#8712), and peer-reachable unsafe. OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
 google/oss-fuzz.
 Left in m4 without a pick: Kani, Miri seeds and TSan, the JS corpus, and
 bindings interop.

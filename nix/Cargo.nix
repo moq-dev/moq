@@ -120,6 +120,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-auth-fuzz" = rec {
+      packageId = "moq-auth-fuzz";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-auth-fuzz";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-bench" = rec {
       packageId = "moq-bench";
       build = internal.buildRustCrateWithFeatures {
@@ -390,6 +400,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-sock-fuzz" = rec {
+      packageId = "moq-sock-fuzz";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-sock-fuzz";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-srt" = rec {
       packageId = "moq-srt";
       build = internal.buildRustCrateWithFeatures {
@@ -440,6 +460,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-uring-fuzz" = rec {
+      packageId = "moq-uring-fuzz";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-uring-fuzz";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-v4l" = rec {
       packageId = "moq-v4l";
       build = internal.buildRustCrateWithFeatures {
@@ -484,6 +514,16 @@ rec {
       packageId = "qmux 0.7.0";
       build = internal.buildRustCrateWithFeatures {
         packageId = "qmux 0.7.0";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
+    "qmux-fuzz" = rec {
+      packageId = "qmux-fuzz";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "qmux-fuzz";
       };
 
       # Debug support which might change between releases.
@@ -17693,8 +17733,42 @@ rec {
           "async"
           "client"
           "default"
+          "fuzz"
           "serve"
         ];
+      };
+      "moq-auth-fuzz" = rec {
+        crateName = "moq-auth-fuzz";
+        version = "0.0.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "jwk";
+            path = "fuzz_targets/jwk.rs";
+            requiredFeatures = [ ];
+          }
+          {
+            name = "token";
+            path = "fuzz_targets/token.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-auth/fuzz;
+        };
+        dependencies = [
+          {
+            name = "libfuzzer-sys";
+            packageId = "libfuzzer-sys";
+          }
+          {
+            name = "moq-auth";
+            packageId = "moq-auth";
+            features = [ "fuzz" ];
+          }
+        ];
+
       };
       "moq-bench" = rec {
         crateName = "moq-bench";
@@ -18256,6 +18330,10 @@ rec {
             name = "pollster";
             packageId = "pollster";
             optional = true;
+          }
+          {
+            name = "rand";
+            packageId = "rand 0.10.3";
           }
           {
             name = "reqwest";
@@ -20163,7 +20241,10 @@ rec {
           }
         ];
         features = {
-          "fuzz" = [ "dep:arbitrary" ];
+          "fuzz" = [
+            "dep:arbitrary"
+            "sim"
+          ];
           "qlog" = [ "dep:qlog" ];
         };
         resolvedDefaultFeatures = [
@@ -20762,6 +20843,10 @@ rec {
             name = "tracing";
             packageId = "tracing";
           }
+          {
+            name = "url";
+            packageId = "url";
+          }
         ];
         devDependencies = [
           {
@@ -21126,6 +21211,36 @@ rec {
           {
             name = "workspace-hack";
             packageId = "workspace-hack";
+          }
+        ];
+        features = {
+        };
+        resolvedDefaultFeatures = [ "fuzz" ];
+      };
+      "moq-sock-fuzz" = rec {
+        crateName = "moq-sock-fuzz";
+        version = "0.0.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "sock_cmsg";
+            path = "fuzz_targets/sock_cmsg.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-sock/fuzz;
+        };
+        dependencies = [
+          {
+            name = "libfuzzer-sys";
+            packageId = "libfuzzer-sys";
+          }
+          {
+            name = "moq-sock";
+            packageId = "moq-sock";
+            features = [ "fuzz" ];
           }
         ];
 
@@ -22060,6 +22175,12 @@ rec {
             target = { target, features }: ("linux" == target."os" or null);
           }
           {
+            name = "moq-sock";
+            packageId = "moq-sock";
+            target = { target, features }: ("linux" == target."os" or null);
+            features = [ "fuzz" ];
+          }
+          {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
@@ -22151,6 +22272,7 @@ rec {
         features = {
           "_manual" = [ "kio/manual" ];
           "default" = [ "quic" ];
+          "fuzz" = [ "moq-sock/fuzz" ];
           "qlog" = [ "moq-quic?/qlog" ];
           "quic" = [
             "dep:moq-congestion"
@@ -22163,9 +22285,39 @@ rec {
           "_manual"
           "_probe"
           "default"
+          "fuzz"
           "qlog"
           "quic"
         ];
+      };
+      "moq-uring-fuzz" = rec {
+        crateName = "moq-uring-fuzz";
+        version = "0.0.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "uring_cmsg";
+            path = "fuzz_targets/uring_cmsg.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-uring/fuzz;
+        };
+        dependencies = [
+          {
+            name = "libfuzzer-sys";
+            packageId = "libfuzzer-sys";
+          }
+          {
+            name = "moq-uring";
+            packageId = "moq-uring";
+            usesDefaultFeatures = false;
+            features = [ "fuzz" ];
+          }
+        ];
+
       };
       "moq-v4l" = rec {
         crateName = "moq-v4l";
@@ -39531,6 +39683,11 @@ rec {
             rename = "criterion";
           }
           {
+            name = "kio";
+            packageId = "kio";
+            features = [ "sim" ];
+          }
+          {
             name = "qmux";
             packageId = "qmux 0.6.5";
             rename = "qmux06";
@@ -39578,6 +39735,12 @@ rec {
             "tls"
             "wss"
           ];
+          "fuzz" = [
+            "tcp"
+            "ws"
+            "kio/sim"
+            "tokio/io-util"
+          ];
           "tcp" = [ "tokio/net" ];
           "tls" = [
             "tcp"
@@ -39598,12 +39761,42 @@ rec {
         };
         resolvedDefaultFeatures = [
           "default"
+          "fuzz"
           "tcp"
           "tls"
           "uds"
           "ws"
           "wss"
         ];
+      };
+      "qmux-fuzz" = rec {
+        crateName = "qmux-fuzz";
+        version = "0.0.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "qmux";
+            path = "fuzz_targets/qmux.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/qmux/fuzz;
+        };
+        dependencies = [
+          {
+            name = "libfuzzer-sys";
+            packageId = "libfuzzer-sys";
+          }
+          {
+            name = "qmux";
+            packageId = "qmux 0.7.0";
+            usesDefaultFeatures = false;
+            features = [ "fuzz" ];
+          }
+        ];
+
       };
       "quick-xml 0.41.0" = rec {
         crateName = "quick-xml";

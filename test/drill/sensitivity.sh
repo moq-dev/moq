@@ -16,6 +16,11 @@
 #   # drill:  the test that must fail once it is applied
 #   # expect: a substring the failure output must contain
 #
+# and two optional ones, for a test outside moq-relay's drills:
+#
+#   # package: the crate holding the test (default moq-relay)
+#   # target:  the nextest target selection (default --test drills)
+#
 # A mutated tree that fails to COMPILE is not a pass here: a compile error proves
 # the patch touched something, not that the drill was watching. Same for a drill
 # that fails for a reason other than the one its mutation names.
@@ -130,11 +135,12 @@ snapshot() {
 # Run one drill under nextest's process-level timeout, writing its output to
 # `log`, and print the exit status.
 run_drill() {
-    local dir="$1" drill="$2" log="$3"
+    local dir="$1" drill="$2" log="$3" package="$4" target="$5"
     local status=0
     (
         cd "$dir"
-        "$CARGO" nextest run --locked -p moq-relay --test drills --run-ignored all -E "test(=$drill)" --test-threads 1
+        # shellcheck disable=SC2086 # the target is a list of nextest arguments
+        "$CARGO" nextest run --locked -p "$package" $target --run-ignored all -E "test(=$drill)" --test-threads 1
     ) >"$log" 2>&1 || status=$?
     echo "$status"
 }
@@ -154,6 +160,10 @@ for patch in "$MUTATIONS"/*.patch; do
 
     drill=$(header "$patch" drill)
     expect=$(header "$patch" expect)
+    package=$(header "$patch" package)
+    package=${package:-moq-relay}
+    target=$(header "$patch" target)
+    target=${target:---test drills}
     if [[ -z "$drill" || -z "$expect" ]]; then
         echo "$name: missing a '# drill:' or '# expect:' header" >&2
         failed=$((failed + 1))
@@ -173,7 +183,7 @@ for patch in "$MUTATIONS"/*.patch; do
 
     if [[ $BASELINE -eq 1 ]]; then
         log=$(mktemp "${TMPDIR:-/tmp}/drill-baseline.XXXXXX")
-        status=$(run_drill "$WORKSPACE" "$drill" "$log")
+        status=$(run_drill "$WORKSPACE" "$drill" "$log" "$package" "$target")
         if [[ "$status" != 0 ]]; then
             echo "  FAIL: $drill does not pass unmutated, so it can prove nothing" >&2
             tail -20 "$log" >&2
@@ -199,7 +209,7 @@ for patch in "$MUTATIONS"/*.patch; do
     fi
 
     log=$(mktemp "${TMPDIR:-/tmp}/drill-mutated.XXXXXX")
-    status=$(run_drill "$dir" "$drill" "$log")
+    status=$(run_drill "$dir" "$drill" "$log" "$package" "$target")
 
     if [[ "$status" == 0 ]]; then
         echo "  FAIL: $drill still passed with '$name' applied; it is not watching this behavior" >&2
@@ -208,7 +218,7 @@ for patch in "$MUTATIONS"/*.patch; do
         echo "  FAIL: '$name' broke the build, which is not behavioral proof" >&2
         grep -E 'error\[[A-Z0-9]+\]: ' "$log" | head -5 >&2
         failed=$((failed + 1))
-    elif ! grep -qE "(FAIL|TIMEOUT).*moq-relay::drills $drill" "$log"; then
+    elif ! grep -qE "(FAIL|TIMEOUT).*$package(::[a-z_]+)? $drill" "$log"; then
         echo "  FAIL: '$name' never got as far as running $drill" >&2
         tail -20 "$log" >&2
         failed=$((failed + 1))
