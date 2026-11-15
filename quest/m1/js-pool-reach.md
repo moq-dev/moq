@@ -31,7 +31,3 @@ keeping the expiries; restore them from git with a consumer.
 Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) delete the unreachable eviction (rejected: (b) expose `capacity`; (c) keep it for parity).
 
 Public API: none. Wire: none.
-
-## Related
-
-- [JS bundle audit](/quest/m1/js-bundle-audit.md) - counts what each feature adds to the first-load bundle

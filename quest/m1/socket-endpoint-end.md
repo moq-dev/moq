@@ -21,7 +21,3 @@ section asks (`Open { .. } | Closed(Error)`).
 `socket::is_endpoint` exists only in Rust and JS.
 
 Public API: moq-ffi and every binding gain `is_endpoint`. Wire: none.
-
-## Related
-
-- [Byte streams over MoQ](/quest/m1/stream/README.md) - builds on socket endpoints
