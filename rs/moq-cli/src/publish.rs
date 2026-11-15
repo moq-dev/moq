@@ -487,8 +487,7 @@ impl Publish {
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
 		if let PublishFormat::Ts { program } = *format {
-			let mut republish =
-				ts::Republish::new(origin.clone(), moq_net::Path::new(name)?, config)?.with_instance(instance)?;
+			let mut republish = ts::Republish::new(origin.clone(), moq_net::Path::new(name)?, instance, config)?;
 			if let Some(program) = program {
 				republish = republish.with_program(program);
 			}
@@ -1467,7 +1466,6 @@ pub(crate) mod tests {
 		.await
 	}
 
-	/// A source for the broadcast at `path`, resolved through `origin`.
 	/// A stdin TS import of `demo` on an origin of its own, and a reader of its first instance's
 	/// broadcast.
 	fn ts_stdin() -> (Publish, moq_net::broadcast::Consumer) {
@@ -1497,6 +1495,7 @@ pub(crate) mod tests {
 		(publish, consumer)
 	}
 
+	/// A source for the broadcast at `path`, resolved through `origin`.
 	async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
 		let consumer = origin.consume();
 		let broadcast = consumer.request(path, None).await.unwrap();

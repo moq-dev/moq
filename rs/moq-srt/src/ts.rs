@@ -88,7 +88,8 @@ impl Publisher {
 				// Each instance is its own publisher, so an encoder reconnecting under the same
 				// stream id, or a source whose clock stepped, replaces the stale broadcast instead
 				// of resuming into it.
-				let mut republish = ts::Republish::new(origin.clone(), name, config).map_err(moq_mux::Error::from)?;
+				let mut republish = ts::Republish::new(origin.clone(), name, moq_net::Instance::random(), config)
+					.map_err(moq_mux::Error::from)?;
 				if let Some(Program::One(program)) = program {
 					republish = republish.with_program(program);
 				}

@@ -146,20 +146,7 @@ struct Program {
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
 	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
-		let Some(listed) = &mut self.pending else {
-			return Ok(true);
-		};
-		if !matches!(
-			listed.poll_largest(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Some(_))
-		) {
-			return Ok(false);
-		}
-		self.route
-			.announce()
-			.with_context(|| format!("failed to announce program {}", self.number))?;
-		self.pending = None;
-		Ok(true)
+		super::republish::listed(&mut self.pending, &self.route).with_context(|| format!("program {}", self.number))
 	}
 }
 

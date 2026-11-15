@@ -129,11 +129,16 @@ impl Instance {
 }
 
 impl Republish {
-	/// Import the multiplex onto `name`, its catalogs built from `config`, under a fresh
-	/// instance created now, so its [`catalog`](Self::catalog) can be filled before any input.
+	/// Import the multiplex onto `name`, its catalogs built from `config`, publishing the first
+	/// instance as `instance` and each after it under a fresh one. The first is created now, so
+	/// its [`catalog`](Self::catalog) can be filled before any input.
+	///
+	/// Pass [`Instance::random`](moq_net::Instance::random) unless the instance is shared, such as
+	/// across a run's broadcasts; see [`RouteOptions::with_instance`](moq_net::origin::RouteOptions::with_instance).
 	pub fn new(
 		origin: moq_net::origin::Producer,
 		name: impl Into<moq_net::Path>,
+		instance: moq_net::Instance,
 		config: catalog::Config,
 	) -> anyhow::Result<Self> {
 		let target = Target {
@@ -142,7 +147,8 @@ impl Republish {
 			config,
 			program: None,
 		};
-		let instance = target.open(moq_net::origin::RouteOptions::hidden(), None)?;
+		let options = moq_net::origin::RouteOptions::hidden().with_instance(instance, 0);
+		let instance = target.open(options, None)?;
 		Ok(Self {
 			target,
 			instance,
@@ -155,16 +161,6 @@ impl Republish {
 		self.target.program = Some(program);
 		self.instance.import = self.instance.import.with_program(program);
 		self
-	}
-
-	/// Publish the first instance as `instance` rather than a fresh one, such as one a run shares
-	/// across its broadcasts; see [`RouteOptions::with_instance`](moq_net::origin::RouteOptions::with_instance).
-	///
-	/// Call it before filling the [`catalog`](Self::catalog): it replaces the first instance.
-	pub fn with_instance(mut self, instance: moq_net::Instance) -> anyhow::Result<Self> {
-		let options = moq_net::origin::RouteOptions::hidden().with_instance(instance, 0);
-		self.instance = self.target.open(options, None)?;
-		Ok(self)
 	}
 
 	/// The current instance's broadcast, such as for a track of the caller's own.
@@ -235,10 +231,18 @@ impl Republish {
 	/// it. Fails when the input ended before the instance declared a track, so nothing was
 	/// announced. A finish that fails aborts every track with the cause.
 	pub fn finish(mut self) -> anyhow::Result<Finished> {
-		while let Some(republished) = self.decode(&[])? {
-			tracing::warn!(step = %republished.step, "the source changed at end of input; republishing");
+		loop {
+			match self.decode(&[]) {
+				Ok(Some(republished)) => {
+					tracing::warn!(step = %republished.step, "the source changed at end of input; republishing")
+				}
+				Ok(None) => return self.instance.finish(true),
+				Err(err) => {
+					self.abort(moq_net::Error::Transport(format!("{err:#}")));
+					return Err(err);
+				}
+			}
 		}
-		self.instance.finish(true)
 	}
 
 	/// Abort the current instance's catalog and media tracks with `err`. Consumes the importer.
@@ -250,7 +254,10 @@ impl Republish {
 }
 
 /// Announce `route` once the catalog track `pending` has a group, returning whether it has.
-fn listed(pending: &mut Option<moq_net::track::Consumer>, route: &moq_net::origin::Route) -> anyhow::Result<bool> {
+pub(super) fn listed(
+	pending: &mut Option<moq_net::track::Consumer>,
+	route: &moq_net::origin::Route,
+) -> anyhow::Result<bool> {
 	let Some(listed) = pending else {
 		return Ok(true);
 	};
@@ -312,7 +319,13 @@ mod tests {
 	fn a_switch_republishes_under_a_new_instance_with_the_rate() {
 		let open = || {
 			let origin = crate::source::produce_origin();
-			Republish::new(origin, moq_net::Path::from_static("demo"), catalog::Config::default()).unwrap()
+			Republish::new(
+				origin,
+				moq_net::Path::from_static("demo"),
+				moq_net::Instance::random(),
+				catalog::Config::default(),
+			)
+			.unwrap()
 		};
 		let mut measured = open();
 		assert!(measured.decode(CLIP).unwrap().is_none());
@@ -370,8 +383,13 @@ mod tests {
 		let mut data = CLIP[..400 * 188].to_vec();
 		data.extend(shift(CLIP, |_| -SWITCH));
 		let origin = crate::source::produce_origin();
-		let mut republish =
-			Republish::new(origin, moq_net::Path::from_static("demo"), catalog::Config::default()).unwrap();
+		let mut republish = Republish::new(
+			origin,
+			moq_net::Path::from_static("demo"),
+			moq_net::Instance::random(),
+			catalog::Config::default(),
+		)
+		.unwrap();
 		let first = republish.instance.route.clone();
 		let step = republish.decode(&data).unwrap().expect("a switch");
 		assert!(matches!(step.step, Step::Rewind { .. }), "{step:?}");
@@ -381,11 +399,66 @@ mod tests {
 		assert!(delivered(&finished.stats()));
 	}
 
+	/// Held input that fails to decode at the finish aborts the instance reading it, so its
+	/// readers get the cause rather than a clean end.
+	#[tokio::test(start_paused = true)]
+	async fn a_failure_in_held_input_aborts_the_instance() {
+		let mut data = CLIP.to_vec();
+		data.extend(shift(CLIP, |_| -SWITCH));
+		// A second program appearing mid-stream ends an import that picked none.
+		data.extend(
+			super::super::fixture::Mux::default()
+				.pat(&[(1, 0x100), (2, 0x200)])
+				.bytes(),
+		);
+		let origin = crate::source::produce_origin();
+		let mut republish = Republish::new(
+			origin,
+			moq_net::Path::from_static("demo"),
+			moq_net::Instance::random(),
+			catalog::Config::default(),
+		)
+		.unwrap();
+		republish.decode(&data).unwrap().expect("a switch");
+		// The next instance's media tracks only exist within the finish, so read its catalog, which
+		// is aborted with them. A held copy keeps a mere drop from ending it.
+		let _copy = republish.catalog().clone();
+		let mut catalog = republish
+			.broadcast()
+			.consume()
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let err = republish.finish().err().expect("two programs");
+		assert!(
+			err.downcast_ref::<super::super::MultipleProgramsError>().is_some(),
+			"{err:#}"
+		);
+		let ended = kio::clock::timeout(std::time::Duration::from_secs(1), async {
+			loop {
+				if let Err(err) = catalog.recv_group().await.transpose()? {
+					return Some(err);
+				}
+			}
+		})
+		.await
+		.expect("the catalog ends");
+		assert!(ended.is_some(), "the catalog ends with the cause, not cleanly");
+	}
+
 	/// Input that ends before declaring a track fails, and nothing was announced.
 	#[test]
 	fn an_input_with_no_track_fails_unannounced() {
 		let origin = crate::source::produce_origin();
-		let republish = Republish::new(origin, moq_net::Path::from_static("demo"), catalog::Config::default()).unwrap();
+		let republish = Republish::new(
+			origin,
+			moq_net::Path::from_static("demo"),
+			moq_net::Instance::random(),
+			catalog::Config::default(),
+		)
+		.unwrap();
 		let route = republish.instance.route.clone();
 		let err = republish.finish().err().expect("nothing was declared");
 		assert!(err.to_string().contains("declared"), "{err:#}");
