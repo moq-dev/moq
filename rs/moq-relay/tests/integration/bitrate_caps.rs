@@ -1,12 +1,12 @@
 //! A capped grant over QUIC is admitted and holds its session to its caps, and every
-//! session holds only the SETUP window until it is admitted, on the tokio listener and
+//! session holds only the SETUP window until it is admitted, on kio's QUIC simulator and
 //! the io_uring workers alike.
 //!
-//! The tokio listener runs on kio's QUIC simulator, so a transfer's time is exact and
-//! asserted within a window: a cap that throttles far below its rate fails too. The
-//! io_uring workers serve real sockets, so there the caps are measured on the wall clock
-//! as lower bounds on how long a transfer takes: uncapped, the same transfer takes
-//! milliseconds.
+//! The simulator runs the relay's `Connection` behind a moq-tokio server, not `Relay`'s own
+//! listener, so a transfer's time is exact and asserted within a window: a cap that
+//! throttles far below its rate fails too. The io_uring workers serve real sockets, so
+//! there the caps are measured on the wall clock as lower bounds on how long a transfer
+//! takes: uncapped, the same transfer takes milliseconds.
 #![cfg(feature = "quic")]
 
 use std::{net::SocketAddr, time::Duration};
