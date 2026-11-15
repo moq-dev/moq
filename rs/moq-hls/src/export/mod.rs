@@ -4720,7 +4720,10 @@ mod tests {
 		assert_ne!(cut, other, "cut at groups 7 and 8");
 		assert!(early.numbered(&cut, 3).await.unwrap().is_some());
 		for tag in [&other, early.tag()] {
-			assert!(early.numbered(tag, 3).await.unwrap().is_none(), "{tag} names other bytes");
+			assert!(
+				early.numbered(tag, 3).await.unwrap().is_none(),
+				"{tag} names other bytes"
+			);
 		}
 	}
 
