@@ -1,22 +1,13 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
 [page] announced: broadcast=openmoq/ffmpeg/artemis active=true
-[page] announced: broadcast=moq-test-00 active=true
-[page] announced: broadcast=smoke-rust-4022-18030.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4022-18030.hang track=catalog.json
+[page] announced: broadcast=smoke-rust-4233-17195.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4233-17195.hang track=catalog.json
 [page] announced: broadcast=gm/srt/passthrough active=true
-[page] announced: broadcast=gm/abr/cmaf active=true
-[page] announced: broadcast=gm/abr/cymedia active=true
-[page] subscribe written: id=2 broadcast=smoke-rust-4022-18030.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4022-18030.hang track=catalog.json
-[page] received catalog hang smoke-rust-4022-18030.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4022-18030.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4022-18030.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4022-18030.hang track=0.avc3
-decoded 10 frames from smoke-rust-4022-18030.hang (vite)
+[page] subscribe written: id=2 broadcast=smoke-rust-4233-17195.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4233-17195.hang track=catalog.json
+[page] received catalog hang smoke-rust-4233-17195.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4233-17195.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4233-17195.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4233-17195.hang track=0.avc3
+decoded 13 frames from smoke-rust-4233-17195.hang (vite)
