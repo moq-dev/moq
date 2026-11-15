@@ -361,10 +361,7 @@ fn a_scope_with_several_regions_asks_for_each() {
 #[test]
 fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
 	let long = |head: &str, n: usize| p(&format!("{head}/{}", format!("{n:02}").repeat(500)));
-	let fits = |set: &BTreeSet<Path>| {
-		let bytes: usize = set.iter().map(|prefix| prefix.as_str().len() + 5).sum();
-		bytes + 8 <= path::ASK_BYTES
-	};
+	let fits = |set: &BTreeSet<Path>| path::ask_bytes(set, &Path::empty()) <= path::ASK_BYTES;
 	let wanted: BTreeSet<Path> = (0..40).flat_map(|n| [long("live/a", n), long("live/b", n)]).collect();
 	assert!(!fits(&wanted));
 
@@ -399,6 +396,38 @@ fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
 	let few: BTreeSet<Path> = wanted.iter().take(8).cloned().collect();
 	router.watch(few.clone()).unwrap();
 	assert_eq!(router.asks(1), few);
+
+	// A prefix alone in its region gives way to the region, so none is dropped.
+	let alone: BTreeSet<Path> = (0..80).map(|n| long(&format!("r{n}"), n)).collect();
+	assert!(!fits(&alone));
+	router.watch(alone.clone()).unwrap();
+	let link = Link {
+		scope: Some(Scope {
+			regions: (0..80).map(|n| p(&format!("r{n}"))).collect(),
+			qualify: Arc::new(|id| id | QUALIFIED),
+		}),
+		..Link::default()
+	};
+	router.connect(3, 3, link).unwrap();
+	let asks = router.asks(3);
+	assert!(fits(&asks));
+	assert_eq!(asks.len(), 80, "every region is still asked for");
+	assert!(
+		asks.iter()
+			.all(|asked| alone.iter().any(|prefix| prefix.has_prefix(asked)))
+	);
+
+	// The session sends each prefix as it follows its root, which is what must fit.
+	let root = p(&"root".repeat(250));
+	let beneath: BTreeSet<Path> = (0..80).map(|n| root.join(&p(&format!("r{n}"))).unwrap()).collect();
+	assert!(!fits(&beneath));
+	router.watch(beneath.clone()).unwrap();
+	let link = Link {
+		root: root.clone(),
+		..Link::default()
+	};
+	router.connect(4, 4, link).unwrap();
+	assert_eq!(router.asks(4), beneath);
 }
 
 /// Widening several prefixes into one keeps the route this node was using at any of

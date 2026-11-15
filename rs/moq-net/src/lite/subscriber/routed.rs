@@ -215,6 +215,7 @@ impl Routed {
 			proxy: answering.is_some_and(|origin| origin.proxy()),
 			scope: None,
 			interest: BTreeSet::new(),
+			root: root.clone(),
 			// The node files the stream under its session.
 			..Default::default()
 		};
