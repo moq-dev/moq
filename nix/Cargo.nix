@@ -20710,7 +20710,10 @@ rec {
             "_quic"
             "moq-tokio/quic"
           ];
-          "test-support" = [ "moq-tokio/sim" ];
+          "test-support" = [
+            "kio/sim"
+            "moq-tokio/sim"
+          ];
           "uds" = [ "moq-tokio/uds" ];
           "websocket" = [
             "moq-tokio/websocket"
