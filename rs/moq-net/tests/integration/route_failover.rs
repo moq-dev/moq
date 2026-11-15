@@ -548,8 +548,12 @@ async fn live_mesh_withdraw_retracts_once_without_latency() {
 ///
 /// Pins behaviour the contract's continuity goal contradicts, owned by the request-loop
 /// quest: a reader on a relay that stayed available may end with `Unroutable` (3 readers,
-/// all for publisher 22). The replaced doubt rule, which held those relays instead, ended
-/// none of them.
+/// all for publisher 22, listed in [`UNROUTABLE`]). The replaced doubt rule, which held
+/// those relays instead, ended none of them.
+/// The (publisher, relay) readers [`live_mesh_link_failure_keeps_presence`] pins as ending
+/// with `Unroutable` though their relay stayed available.
+const UNROUTABLE: [(usize, usize); 3] = [(22, 17), (22, 24), (22, 31)];
+
 #[kio::test]
 async fn live_mesh_link_failure_keeps_presence() {
 	let version = lite07();
@@ -632,10 +636,11 @@ async fn live_mesh_link_failure_keeps_presence() {
 			let live = Liveness::of(rx, &feed);
 			if !live.seamless() {
 				lost_readers += 1;
-				// Pinned: the request met a stale route.
-				let unroutable = matches!(live.ended, Some(Error::Stream(StreamError::Unroutable)));
+				// Pinned: only these readers end with `Unroutable` on a relay that stayed available.
+				let pinned = UNROUTABLE.contains(&(publisher, *relay))
+					&& matches!(live.ended, Some(Error::Stream(StreamError::Unroutable)));
 				assert!(
-					dark.contains(relay) || unroutable,
+					dark.contains(relay) || pinned,
 					"publisher {publisher}: relay {relay} kept a usable route but its reader got {live:?}"
 				);
 			}

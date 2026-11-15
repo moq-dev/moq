@@ -218,9 +218,18 @@ fn residual_a_relay_kept_off_by_doubt_lets_go_before_it_lifts() {
 		let cut = sim.now();
 		sim.disconnect(x, r2);
 		sim.disconnect(x, r3);
-		assert_eq!(sim.shows(r3, 7, "live/x"), Some(false), "{}: held at the cut", rule.as_str());
+		assert_eq!(
+			sim.shows(r3, 7, "live/x"),
+			Some(false),
+			"{}: held at the cut",
+			rule.as_str()
+		);
 		assert!(sim.flow());
-		assert!(sim.now() < cut.saturating_add(Doubt::DEFAULT.timer), "{}", rule.as_str());
+		assert!(
+			sim.now() < cut.saturating_add(Doubt::DEFAULT.timer),
+			"{}",
+			rule.as_str()
+		);
 		assert_eq!(sim.shows(r3, 7, "live/x"), None, "{}: let go in doubt", rule.as_str());
 		assert!(sim.run());
 		assert_eq!(sim.toward(r3, 7), Some(Some(r4)), "{}: after the doubt", rule.as_str());
