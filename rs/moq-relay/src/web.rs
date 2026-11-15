@@ -235,6 +235,28 @@ impl Web {
 		}
 	}
 
+	/// Serve these listeners, already bound, in place of binding `http.listen` and
+	/// `https.listen`.
+	pub(crate) fn with_bound(
+		mut self,
+		http: Option<net::TcpListener>,
+		https: Option<net::TcpListener>,
+	) -> anyhow::Result<Self> {
+		if let Some(listener) = http {
+			let addr = listener.local_addr().context("failed to resolve HTTP bind address")?;
+			self.addrs.http = Some(addr);
+			tracing::info!(%addr, kind = "http", "listening");
+			self.http_listener = Some(listener);
+		}
+		if let Some(listener) = https {
+			let addr = listener.local_addr().context("failed to resolve HTTPS bind address")?;
+			self.addrs.https = Some(addr);
+			tracing::info!(%addr, kind = "https", "listening");
+			self.https_listener = Some(listener);
+		}
+		Ok(self)
+	}
+
 	/// Bind the configured listeners now, so [`addrs`](Self::addrs) reports ephemeral ports before serving.
 	pub fn bind(mut self) -> anyhow::Result<Self> {
 		let https = &self.config.https;

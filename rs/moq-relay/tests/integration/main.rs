@@ -23,6 +23,7 @@ mod drain;
 mod embed;
 #[cfg(feature = "test-support")]
 mod goaway_cluster;
+mod handoff;
 mod hidden_cluster;
 mod implementation;
 mod lan_mesh;
