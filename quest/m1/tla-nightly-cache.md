@@ -18,8 +18,7 @@ model. Key a cache of passing results on a hash of spec, config, and TLC
 version (`actions/cache` works), and run every config whenever the key
 misses.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) cache passing results by input hash (rejected: (b) every config every night).
+
 Public API: none. Wire: none.
 
-## Waiting
-
-- Maintainer: (a) cache passing results by input hash (recommended); (b) keep [moq-dev/moq#8483](https://github.com/moq-dev/moq/pull/8483)'s every config every night

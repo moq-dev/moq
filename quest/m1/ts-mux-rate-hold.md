@@ -22,11 +22,10 @@ not on `release`, so moving it breaks nothing shipped. Padded export drew a
 line of fixes ([moq-dev/moq#7967](https://github.com/moq-dev/moq/pull/7967),
 [moq-dev/moq#8449](https://github.com/moq-dev/moq/pull/8449)).
 
-Recommended: (a), so only an export joining in the first window pays.
+Then only an export joining in the first window pays.
+
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) the padded export waits up to one window for the rate (rejected: (b) pad only to an explicit `--mux-rate`; (c) keep the import's hold).
 
 Public API: none. Wire: the catalog's `muxRate` may arrive in a later catalog
 update than the first.
 
-## Waiting
-
-- Maintainer: (a) the padded export waits up to one window for the rate (recommended); (b) pad only to an explicit `--mux-rate` and stop measuring, which breaks the shipped `muxRate` field; (c) keep the import's hold

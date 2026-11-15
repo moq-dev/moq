@@ -175,5 +175,10 @@ owns that feedback. The bake-off and shipping `Realtime` do not wait on it.
 
 Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
 the candidates would publish unselectable with moq-congestion's first
-release; [congestion candidates](/quest/m2/congestion-candidates.md) decides
-whether they leave first, in which case this bake-off restores them from git.
+release. Decided 2026-11-14 (maintainer, pick on
+[moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ the cut ships
+BBR through the existing selector and keeps GCC, SCReAM, and the BBR3 delay
+bound off the published API ([congestion selector](/quest/m2/congestion-candidates.md)).
+This bake-off tests them, and each winner joins `CongestionControl` as a
+variant named after its algorithm, or, for the delay bound, a `bbr3::Config`
+option; losers stay out of the published API.

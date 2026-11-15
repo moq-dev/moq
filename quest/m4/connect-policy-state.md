@@ -23,12 +23,11 @@ hand-ported to `reload.ts`; REVIEW.md reads a line of fixes like that as a
 design problem. moq-tokio's `Retired` then `Offline` double write briefly
 publishes an aborted session.
 
-Recommended: (a). It makes JS the same shape the
+It makes JS the same shape the
 [trace validation](/quest/m4/reconnect-trace-validation.md) checks, so that
 quest can cover both languages.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) port the policy object to JS and snapshot it in moq-tokio (rejected: (b) wait for rs2ts; (c) JS traces only).
+
 Public API: none. Wire: none.
 
-## Waiting
-
-- Maintainer: (a) port the policy object to JS now and snapshot it in moq-tokio (recommended); (b) wait for a generated JS port ([rs2ts](/quest/m5/rs2ts-js.md)); (c) leave the shapes and add JS traces to trace validation

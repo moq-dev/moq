@@ -23,7 +23,7 @@ redialing can't change, such as a rejected token") and the comments in
 `rs/moq-gst/src/sink/session.rs` are false since
 [moq-dev/moq#8618](https://github.com/moq-dev/moq/pull/8618).
 
-Recommended: mark a session established only once it clears
+Mark a session established only once it clears
 `Backoff::healthy`, which `Retry::settle` already computes, so no error kind
 is read; mirror it in `js/net`'s `#establishedHref`; update `Handover.tla`
 through `/verify-reconnect`; fix the gst docs and comments and
@@ -31,9 +31,8 @@ through `/verify-reconnect`; fix the gst docs and comments and
 #8618 settled that a refusal of a session that was live retries; this changes
 only a first session that never became healthy.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) a session is established only once it clears `Backoff::healthy` (rejected: (b) keep retrying and correct only the docs).
+
 Public API: none. Wire: none. Behavior: a client whose first session is
 refused before it is healthy ends with that error.
 
-## Waiting
-
-- Maintainer: (a) healthy-gated fail-fast (recommended); (b) keep retrying and correct only the gst docs and comments

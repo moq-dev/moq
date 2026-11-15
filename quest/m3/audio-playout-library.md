@@ -30,11 +30,10 @@ the lag rule, and no declared-silence or stretch handling.
 - Move `media.rs`'s audio tests with the code; then bump studio so
   `moq-scene` adopts the type and deletes its copy.
 
-Recommended: (b), so the epic's remaining children land first and this
+It waits so the epic's remaining children land first and this
 breaks nothing in the cut.
+
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (b) m3, after the audio playout epic merges (rejected: (a) an m2 child; (c) leave placement in the binary).
 
 Public API: `moq-audio` gains the placement type. Wire: none.
 
-## Waiting
-
-- Maintainer: (a) make it an m2 child of the audio playout epic and rebase [moq-dev/moq#8676](https://github.com/moq-dev/moq/pull/8676) onto it; (b) m3, after the epic merges (recommended); (c) leave placement in the binary and accept studio's drift

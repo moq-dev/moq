@@ -22,14 +22,13 @@ and added a writer that loops until a read lands, which is a retry around the
 cause. Pass `max: None` (or the language's unset value) to both consumers, and
 delete Kotlin's writer loop.
 
-Recommended: as a rule for new tests, assert native timing and decoding once,
+As a rule for new tests, assert native timing and decoding once,
 in moq-ffi's Rust tests, and limit wrapper tests to the code each wrapper
 owns (record mapping, cancellation, async adapters, lifetimes). Six copies of
 this test took three separate fixes over a week, and three copies were still
 unfixed.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) fix all four copies, and from now on native timing and decoding are asserted once, in moq-ffi's Rust tests, while wrapper tests cover only the code each wrapper owns; this quest writes that rule into `rs/moq-ffi/AGENTS.md` (rejected: (b) delete the four copies now).
+
 Public API: none. Wire: none.
 
-## Waiting
-
-- Maintainer: fix the four copies (recommended now), or delete them and keep only Rust's `raw_audio_decode_delay` plus a record-mapping test per wrapper; and whether native behaviour is tested once in moq-ffi from now on (recommended)

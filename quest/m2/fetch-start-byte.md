@@ -1,10 +1,10 @@
-# [S] Decide whether lite-07 freezes with FETCH Start Byte
+# [S] lite-07 freezes without FETCH Start Byte
 
 ## Goal
 
-Before lite-07 freezes, the maintainer settles whether FETCH keeps
-[moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699)'s Start Byte,
-which continues a half-read frame by byte after a failover, and the draft,
+lite-07's FETCH carries no Start Byte: a failover mid-frame refetches the
+frame and skips what was read, as before
+[moq-dev/moq#8699](https://github.com/moq-dev/moq/pull/8699), and the draft,
 Rust, and JS match.
 
 ## Plan
@@ -19,13 +19,12 @@ frame's prefix, on one hop, per failover. The cost is a `Lead` type in the group
 66 start-byte sites across `rs/moq-net` and `js/net`, and a field frozen in
 lite-07. No quest names a consumer of frames over 32 MiB.
 
-Recommended: (a), restoring refetch-and-skip, and require a named consumer of
+Restore refetch-and-skip, and require a named consumer of
 large frames before [byte holes](/quest/m3/unbounded-groups/byte-holes.md)
 starts.
+
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) back Start Byte out of lite-07 and restore refetch-and-skip (rejected: (b) keep it).
 
 Public API: (a) removes the start-byte surface #8699 added. Wire: lite-07-wip
 FETCH loses Start Byte.
 
-## Waiting
-
-- Maintainer: (a) back Start Byte out of lite-07 (recommended); (b) keep it, since it is built and tested

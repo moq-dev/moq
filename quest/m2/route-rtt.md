@@ -1,10 +1,9 @@
-# [S] Decide whether ROUTE keeps its RTT
+# [S] ROUTE drops its informational RTT
 
 ## Goal
 
-Before lite-07 freezes, the maintainer settles whether ROUTE carries an
-informational RTT now that routes name their path, and the draft, Rust, JS,
-and the bindings match.
+lite-07's ROUTE_START and ROUTE_UPDATE carry no RTT, and `RouteInfo::rtt` is
+gone from Rust, JS, and the bindings, with the `js/net` sampler that fed it.
 
 ## Plan
 
@@ -25,9 +24,8 @@ its in-repo consumer, link quality, moved downstream
 polls `getStats()` every second while a route exists, and nothing in JS reads
 `RouteInfo.rtt`.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) drop the field and `RouteInfo::rtt` in Rust, JS, and the bindings, and the `js/net` `getStats()` sampler that fills it (rejected: (b) keep it after a sweep; (c) per-session link RTT summed along the path).
+
 Public API: (a) removes `RouteInfo::rtt` in Rust, JS, and the bindings.
 Wire: lite-07-wip ROUTE_START/ROUTE_UPDATE lose the field.
 
-## Waiting
-
-- Maintainer: (a) drop the field and `RouteInfo::rtt` (recommended: no reader, and an unmeasured fan-out); (b) keep it after sweeping publishers against link changes; (c) carry each session's link RTT once per session and let a receiver sum it along the route's path, only for a named consumer

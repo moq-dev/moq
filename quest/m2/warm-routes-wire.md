@@ -1,11 +1,11 @@
-# [S] Decide whether lite-07 freezes with warm routes
+# [S] lite-07 freezes without warm routes
 
 ## Goal
 
-Before lite-07 freezes, the maintainer settles whether WARM_START,
-WARM_UPDATE, WARM_END, and SUBSCRIBE's `Warm` byte ship in lite-07, and the
-draft, `rs/moq-net`, and `js/net` match that decision. Until a production
-implementation exists, the merge gate stops paying for the cache sweep.
+lite-07 freezes without WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's
+`Warm` byte: the draft, `rs/moq-net`, and `js/net` drop them, and the merge
+gate stops running `sweep_cache_routing`, which runs nightly until a
+production implementation brings the warm wire back in a later wip version.
 
 ## Plan
 
@@ -35,14 +35,13 @@ on [moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732).
   ([moq-dev/moq#8756](https://github.com/moq-dev/moq/pull/8756)); item 11's
   choice of lite-07 had neither as evidence.
 
-Recommended: (b), and before select is planned, measure copies and relays
+Before select is planned, measure copies and relays
 crossed against plain path routing on an edge/core topology; if the only win
 is LAN siblings, (d). Whatever is picked, move `sweep_cache_routing` out of
 the gate into the nightly sweep until a production rule exists.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (b) strip WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's `Warm` byte from lite-07, and re-add them in the then-current wip version with the implementation, after measuring copies and relays crossed against plain path routing; `sweep_cache_routing` leaves the merge gate for the nightly sweep (rejected: (a) keep the wire as it is; (c) keep the messages and drop the byte; (d) move the epic downstream).
+
 Public API: none. Wire: lite-07-wip loses or keeps the warm messages and the
 `Warm` byte.
 
-## Waiting
-
-- Maintainer: (a) keep the warm wire in lite-07 as it is; (b) strip it from lite-07 and re-add it in the then-current wip version with the implementation and a sweep that drives production code (recommended); (c) keep the WARM_* messages, which receivers skip by length, but drop the `Warm` byte; (d) move the cache-routing epic downstream with the mesh work

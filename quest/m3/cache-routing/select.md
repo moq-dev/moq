@@ -20,11 +20,10 @@ and how many moves warm routes caused.
   without touching the session. Add a check of the Goal's efficiency to
   `steady()`, copies held against a cold-routing baseline, since a rule that
   never offered a copy passes the sweep now. The rule covers the
-  warm messages lite-07 carries, which `rs/moq-net/src/lite/` reads and
-  ignores today, and SUBSCRIBE's `Warm` byte, which it and `js/net` send as 0
-  (follow the route) and ignore when read, warm state derived
-  from each front's demand, and the choice of what to pull. The long sweep
-  already runs nightly from `test/route-sweep.sh`.
+  warm messages and SUBSCRIBE's `Warm` byte (which return to the wire with
+  it, below), warm state derived from each front's demand, and the choice of
+  what to pull. The long sweep already runs nightly from
+  `test/route-sweep.sh`.
 - Extend today's selection rather than adding a second selector.
   `route_order` in `rs/moq-net/src/model/origin.rs` already hashes equal
   routes per path, and a front already moves to a better route of its own
@@ -34,9 +33,8 @@ and how many moves warm routes caused.
 - Bound the warm state a peer can make a relay hold by design, as
   announcements are bounded.
 - Each pull sets SUBSCRIBE's `Warm` byte, which #8732 put in place of the
-  `Serves` field; Rust and `js/net` send 0 (follow the route) today, and
-  `js/net`, which forwards nothing, keeps doing so and skips the warm types as
-  unknown.
+  `Serves` field; `js/net`, which forwards nothing, sends 0 (follow the
+  route) and skips the warm types as unknown.
 - Export upstream copies held, warm routes sent and received, and moves by
   cause through the relay's existing metrics.
 - `rs/moq-net/AGENTS.md` says a relay behaves the same warm or cold. That
@@ -44,10 +42,16 @@ and how many moves warm routes caused.
   request goes to. If the rule's wording contradicts warm routes, bring a
   rewording to the maintainer.
 
-Public API: report any relay configuration added for warm routes. Wire: a
-change the implementation needs updates the draft's Warm Routes section in
-the same PR, in lite-07 while it is unpublished and in the next version
-after.
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)):
+✅ lite-07 freezes without the warm wire
+([warm routes on the wire](/quest/m2/warm-routes-wire.md)), so this quest
+re-adds WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's `Warm` byte in the
+then-current wip version, and first measures copies and relays crossed
+against plain path routing.
+
+Public API: report any relay configuration added for warm routes. Wire: the
+warm messages and the `Warm` byte return in the then-current wip version,
+with the draft's Warm Routes section.
 
 ## Related
 

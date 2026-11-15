@@ -34,9 +34,8 @@ fix against both the sweep and this fixture.
 If [warm routes on the wire](/quest/m2/warm-routes-wire.md) moves the epic
 downstream, this moves with it.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ a fix adds no join latency; one that only clears cycles faster comes first (rejected: a carrier waiting for a crossing message before it joins).
+
 Public API: none. Wire: none expected; a rule change that needs one updates
 the draft's Warm Routes section.
 
-## Waiting
-
-- Maintainer: whether a fix may add join latency, such as a carrier waiting for a crossing message before it joins (recommended: no; a fix that only clears cycles faster comes first)

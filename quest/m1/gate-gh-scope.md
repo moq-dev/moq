@@ -17,13 +17,12 @@ Its wall time is about twice its CPU time, and it failed none of 34 queue
 failures sampled from 11-12 to 11-14. Three files take 65 s of its 115 s
 locally (`dispatch-query.test.py`, `nightly.test.py`, `rs/select.test.py`).
 
-Recommended: (a). Give `module gh` a path pattern covering what its tests
+Give `module gh` a path pattern covering what its tests
 read (`sh/`, `bench/`, `.github/`, justfiles, `test/smoke/`, the Go publish
 scripts) and keep the actionlint and zizmor lints on workflow changes; run
 the three slow files in parallel if the lane still leads.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) scope the module to tooling paths, with Nightly's `gate` as the backstop (rejected: (b) keep it on every diff and only parallelize).
+
 Public API: none. Wire: none.
 
-## Waiting
-
-- Maintainer: (a) scope the module to tooling paths, with Nightly's `gate` as the backstop (recommended); (b) keep it on every diff and only parallelize its slow files

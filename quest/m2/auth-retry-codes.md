@@ -20,11 +20,10 @@ knows to answer `Internal`. lite-07 freezes this behavior at the cut.
 [moq-dev/moq#8618](https://github.com/moq-dev/moq/pull/8618) removed the same
 pattern from the reconnect loop for AGENTS.md's "never match on errors".
 
-Recommended: (a). It changes no behavior and makes the contract visible to
+It changes no behavior and makes the contract visible to
 other implementations.
+
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) write today's three codes (the session error codes Rust's `Internal`, `TooManyRequests`, and `Timeout` encode) into the draft as "not decided, present again after backoff", and have Rust and JS pass the decoded code to the retry decision (rejected: (b) every refusal final; (c) retry every refusal).
 
 Public API: none. Wire: lite-07-wip's AUTH_ERROR gains a retry rule.
 
-## Waiting
-
-- Maintainer: (a) write today's three codes into the draft as "not decided, present again after backoff" and pass the decoded code to the retry decision (recommended); (b) every refusal is final and the application re-adds the token; (c) retry every refusal while the credential is held

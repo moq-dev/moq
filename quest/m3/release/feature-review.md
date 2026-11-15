@@ -39,7 +39,10 @@ it would ship as is are listed in that PR. It covered the MPEG-TS work the
 first run owed (decided 2026-10-19): the guide's evidence holds (every unit
 test `doc/bin/ts.md` cites exists, `ts.yml` runs every harness flag it cites,
 and the TS Nightly was green for its last eight runs), and its contract
-breaks became m1 quests.
+breaks became m1 quests. Decided 2026-11-14 (maintainer, pick on #8764): ✅
+every line the first pass would ship as is ships as is, and its follow-ups
+carry the maintainer's picks; the VR catalog fields stay, since a VR demo
+([moq-dev/moq#6373](https://github.com/moq-dev/moq/pull/6373)) reads them.
 
 The delta pass:
 

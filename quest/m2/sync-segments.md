@@ -1,4 +1,4 @@
-# [M] Decide how moq_mux::sync handles segment transitions
+# [M] moq_mux::sync resets at a segment transition, as JS does
 
 ## Goal
 
@@ -18,13 +18,12 @@ behind two locks.
 transitions, so Rust runs a third model the deleted mux-sync quest said not
 to invent.
 
-Recommended: (a). Coordinate with
+Coordinate with
 [moq-dev/moq#8749](https://github.com/moq-dev/moq/pull/8749), which changes
 the same clock.
+
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) delete the transitions and reset the way JS does (rejected: (b) one enum per role, ported to JS).
 
 Public API: possibly `moq_mux::sync`'s transition surface, unpublished.
 Wire: none.
 
-## Waiting
-
-- Maintainer: (a) delete transitions and reset the way JS does (recommended: one rule in both languages); (b) keep transitions, refactored into one enum per role, and port them to JS

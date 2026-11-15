@@ -45,18 +45,13 @@ hand-copied lifecycle path; that landed in
 
 Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
 `rs/moq-uring` is about 12,000 lines with 140 commits since the last release,
-off in every shipped build, and no PR measured a throughput win (the rerun is
-parked in [uring bench follow-ups](/quest/m5/uring-bench-followups.md) for
-want of a consumer). Its WebTransport layer is a copy of moq-tokio's
-(`rs/moq-uring/src/quic/web/` against `rs/moq-tokio/src/quic/web/`), and 25
-commits in the window edited both. The 2026-10-08 decision to ship at parity
-without a performance prerequisite did not have that cost as evidence.
+no PR measured a throughput win, and its WebTransport layer is a copy of
+moq-tokio's that 25 commits in the window edited twice. Decided 2026-11-14
+(maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)):
+✅ continue toward parity as decided, with no benchmark gate (rejected: freeze
+new io_uring features until a quiet-host benchmark shows a gain).
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: (a) freeze new io_uring features until a quiet-host `bench-runtime` run shows a gain, and settle a shared sans-IO WebTransport core in [the sans-IO driver](/quest/m4/quic-sansio-driver.md) (recommended); (b) continue toward parity as decided
 
 ## Required
 

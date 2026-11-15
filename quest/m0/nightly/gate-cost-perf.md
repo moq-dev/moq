@@ -1,9 +1,10 @@
-# [XS] Gate cost can count instructions on the merge-queue runners
+# [S] Gate cost can count instructions on the merge-queue runners
 
 ## Goal
 
-Nightly's `Gate cost` job (`just gh gate-cost`) counts user-space instructions
-with perf on the `nixos` merge-queue runners and passes.
+The `Gate cost` job (`just gh gate-cost`), part of Nightly today, counts
+user-space instructions with perf on the `nixos` merge-queue runners and
+passes, and runs on a schedule of its own at the merge queue's quietest hour.
 
 ## Plan
 
@@ -33,7 +34,15 @@ Check with `perf stat -e instructions:u true` as the runner user inside a
 queue container, then the next scheduled Nightly's Gate cost job; never
 dispatch Nightly.
 
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+once perf counts, gate cost runs for hours (timeout 330 min) on a `moq-queue`
+runner, and scheduled Nightlies start 5 to 9 h late, around 15:00 UTC when
+the queue takes 47 to 90 entries an hour, which adds noise to its own series
+and slows the queue. Decided 2026-11-14 (maintainer, pick on
+[moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ gate cost
+moves to its own schedule at the queue's quietest hour (rejected: keep it in
+Nightly and trust only its instruction counts).
+
 ## Waiting
 
 - Maintainer: merge the dotfiles PR and rebuild `nixos`, which restarts the CI runner containers; an agent does not deploy host config. Check with the `perf stat` command above.
-- Maintainer: once perf counts, where gate cost runs (found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md): it is set to run for hours, timeout 330 min, on a `moq-queue` runner, and scheduled Nightlies start 5 to 9 h late, around 15:00 UTC when the queue takes 47 to 90 entries an hour, adding noise to its own series and slowing the queue): (a) its own schedule at the queue's quietest hour (recommended); (b) keep it in Nightly and trust only its instruction counts

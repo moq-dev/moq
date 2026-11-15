@@ -72,14 +72,12 @@ draft already requires for delivered or finally dropped groups, and the
 YIELDED continuations keep their hold. Also check whether GROUP's
 previous-start link makes SUBSCRIBE_SKIP redundant.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) OLD drops are final on their subscription: this rewrite deletes `Update`, the reopen and re-offer paths, and their model configs (rejected: (b) keep reopening and finish [finished across updates](/quest/m3/lite-finished-across-updates.md)).
+
 Public API: none beyond [the model](/quest/m2/time-addressing/model.md).
 Wire: lite-07-wip GROUP, GROUP_END, SUBSCRIBE, SUBSCRIBE_UPDATE,
 SUBSCRIBE_OK, SUBSCRIBE_STARTED, SUBSCRIBE_FINISH, SUBSCRIBE_SKIP, and
 SUBSCRIBE_DROP change.
-
-## Waiting
-
-- Maintainer: (a) OLD drops are final on their subscription, deleting `Update` and the reopen and re-offer paths (recommended: the rewrite already touches every one of these messages); (b) keep reopening, and finish [finished across updates](/quest/m3/lite-finished-across-updates.md)
 
 ## Required
 

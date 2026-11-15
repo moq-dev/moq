@@ -1,12 +1,11 @@
-# [M] Decide whether warmup video keeps two decoders
+# [M] Warmup video plays through one decoder
 
 ## Goal
 
-Before the cut, the maintainer settles whether a video rendition with a
-`warmup` plays through two decoders (min-delay and max-delay) in `@moq/watch`,
-`moq_video::decode`, and `moq play`, or through one decoder that joins one
-group earlier through the container consumer's existing warmup reach, as audio
-does. The docs describe what ships.
+A video rendition with a `warmup` plays through one decoder that joins one
+group earlier through the container consumer's existing warmup reach, as
+audio does, in `@moq/watch`, `moq_video::decode`, and `moq play`; the
+max-delay lane and its selector are gone, and the docs describe what ships.
 
 ## Plan
 
@@ -35,19 +34,17 @@ Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md).
 The two-decoder design was the maintainer's decision on 2026-10-14; the new
 evidence is the 2026-11-12 move to m4 and the absence of any producer.
 
-Recommended: (a). Pass `warmup` to the container consumer for video, delete
+Pass `warmup` to the container consumer for video, delete
 `Rendition`'s selector and the max-delay lanes in JS, `decode/select.rs` and
 `moq play`'s dual path in Rust, keep `insertRecoveryPoint` only if Chromium
 needs it for one decoder, trim `doc/lib/js/watch.md`, and rescope the m4
 dual-decoder quest to deciding whether a second decoder pays for itself, with
 catch-up measurements.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) one decoder through the container consumer's warmup reach, revisiting two in m4 with measurements (rejected: (b) keep it as Chromium-only and experimental; (c) keep it as is).
+
 Public API: (a) removes the dual-decoder selection from `@moq/watch` and
 `moq_video::decode`, unpublished. Wire: none.
-
-## Waiting
-
-- Maintainer: (a) one decoder now, revisiting two in m4 with measurements (recommended: no producer, and 2x decode for a join-time gain); (b) keep it, documented as Chromium-only and experimental; (c) keep it as is
 
 ## Related
 

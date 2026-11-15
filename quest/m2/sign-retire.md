@@ -1,11 +1,10 @@
-# [S] Decide whether per-frame signing ships
+# [S] Per-frame signing leaves moq before the cut
 
 ## Goal
 
-The cut publishes per-frame signed broadcasts (moq-sign-00) only if the
-maintainer decides to; otherwise the signing wrappers, their JS twin, the
-draft, and its vectors leave moq, and the endpoint key the cluster route key
-uses stays. Either way, the docs say what moq-crypto publishes.
+The cut publishes no per-frame signing (moq-sign-00): the signing wrappers,
+their JS twin, the draft, and its vectors leave moq, the endpoint key the
+cluster route key uses stays, and the docs say what moq-crypto publishes.
 
 ## Plan
 
@@ -26,15 +25,14 @@ API, and `doc/lib/rs/index.md` wrongly calls moq-crypto "Workspace-only".
 
 e2ee stays: its draft (rev 00) and `moq-e2ee` are already published.
 
-Recommended: (a). Delete `rs/moq-crypto/src/sign/` except `SecretKey` and
+Delete `rs/moq-crypto/src/sign/` except `SecretKey` and
 `PublicKey` (kept behind a feature that does not pull in `moq-net`), its
 bench, `js/crypto`'s sign wrappers, and `drafts/draft-lcurley-moq-sign.md` with
 `moq-sign-00.{json,ts}`; correct `doc/lib/rs/index.md`, `doc/lib/js/index.md`,
 and `doc/concept/standard.md` to say e2ee is published and experimental.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) delete per-frame signing and keep the endpoint key (rejected: (b) hand it downstream; (c) publish it at the cut).
+
 Public API: (a) removes moq-crypto's and @moq/crypto's signing wrappers,
 neither yet published. Wire: (a) withdraws the unpublished moq-sign-00 draft.
 
-## Waiting
-
-- Maintainer: (a) delete signing, keeping the endpoint key (recommended: git keeps it if a platform asks); (b) hand it to the downstream mesh with the rest; (c) keep it and publish it at the cut

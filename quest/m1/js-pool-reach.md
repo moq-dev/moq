@@ -25,14 +25,12 @@ This revisits the pool quest's decision to port it "with no new setting"
 (deleted by #8177), with the evidence that two weeks on nothing reaches the
 path.
 
-Recommended: delete byte debt, shed, reader debt, and run billing from JS,
+Delete byte debt, shed, reader debt, and run billing from JS,
 keeping the expiries; restore them from git with a consumer.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) delete the unreachable eviction (rejected: (b) expose `capacity`; (c) keep it for parity).
+
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: (a) delete the unreachable eviction (recommended); (b) expose `capacity` with a named consumer, such as a long-running viewer; (c) keep it for parity with Rust
 
 ## Related
 

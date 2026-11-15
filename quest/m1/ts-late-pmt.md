@@ -19,8 +19,7 @@ guide documents that ("A listed program whose PMT does not arrive within
 health "is logged and reported without changing what publishes". Treat the
 late program's PIDs as unclaimed and update `doc/bin/ts.md`.
 
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) report and continue (rejected: (b) keep ending the import and reword the Loss section).
+
 Public API: none. Wire: none.
 
-## Waiting
-
-- Maintainer: (a) report and continue (recommended: one dead service should not take down a multiplex); (b) keep ending the import, and reword the Loss section to except it
