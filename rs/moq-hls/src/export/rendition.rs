@@ -2048,7 +2048,8 @@ fn poll_retired(claim: &kio::Consumer<Claim>, waiter: &kio::Waiter) -> Poll<()> 
 /// track ends or fails.
 ///
 /// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, or once
-/// the track ends. A watcher joining mid-segment can't know the groups before its first, so it
+/// the track ends. A later one starts with the group after it, as soon as a frame of that group
+/// passes the next line, so the newest group's frames are read as they arrive. A watcher joining mid-segment can't know the groups before its first, so it
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 struct WatchMedia {
@@ -2078,7 +2079,7 @@ enum Step {
 		_track: moq_net::track::Consumer,
 		subscribing: moq_net::track::Subscribing,
 	},
-	/// Waiting for the next group.
+	/// Waiting for the next group, reading the newest one's frames as they arrive.
 	Next,
 	/// Reading a group's first frame, which places it.
 	First(moq_net::group::Consumer),
@@ -2107,6 +2108,9 @@ struct Follow {
 	spacing: Option<Duration>,
 	/// Nothing is listed before the first segment this watcher saw start.
 	whole: bool,
+	/// Whether the newest group's frames are still read as they arrive, which may place it before
+	/// its successor starts.
+	reading: bool,
 }
 
 impl Follow {
@@ -2122,6 +2126,7 @@ impl Follow {
 			latest: None,
 			spacing: None,
 			whole: false,
+			reading: false,
 		}
 	}
 
@@ -2143,6 +2148,7 @@ impl Follow {
 			// grid numbers what resumes by its own timestamps, as every edge does.
 			First::Marker(at) => {
 				self.latest = None;
+				self.reading = false;
 				(self.grid.stop(at), (group.start, None), None)
 			}
 			First::Media(pts, reach, declared) => {
@@ -2151,6 +2157,7 @@ impl Follow {
 					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
 				self.latest = Some((group, pts, reach));
+				self.reading = true;
 				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
 			}
 		};
@@ -2374,6 +2381,29 @@ impl WatchMedia {
 					if retired() {
 						return Poll::Ready(Ok(()));
 					}
+					// The newest group's frames that are in may place it before its successor starts.
+					while follow.reading && follow.grid.pending() {
+						let Some((group, _, reach)) = follow.latest.as_mut() else {
+							break;
+						};
+						let pts = match group.poll_read_frame(waiter) {
+							Poll::Pending => break,
+							Poll::Ready(Ok(Some(frame))) => match frame_reach(&follow.container, frame, reach) {
+								Some(pts) => pts,
+								None => continue,
+							},
+							// Ended or failed: its successor places it, and an ended track reads it
+							// again for its end, failing there if it failed.
+							Poll::Ready(Ok(None) | Err(_)) => {
+								follow.reading = false;
+								break;
+							}
+						};
+						let slots = follow.grid.reach(pts);
+						if let Some(done) = follow.list(&self.rendition, slots, None, None, false) {
+							return Poll::Ready(done);
+						}
+					}
 					let groups = self.groups.as_mut().expect("subscribed above");
 					match ready!(groups.poll_next_group(waiter))? {
 						Some(group) => self.step = Step::First(group),
@@ -2558,6 +2588,25 @@ fn first_frame(
 	let mut reach = Reach::default();
 	reach.add(decoded);
 	Some(First::Media(pts, reach, size))
+}
+
+/// Count what a frame after its group's first reaches, and return where it starts on the grid: the
+/// transport's stamp, or else its newest sample's, as [`first_frame`] reads a group's start.
+fn frame_reach(
+	container: &moq_mux::catalog::hang::Container,
+	frame: moq_net::frame::Frame,
+	reach: &mut Reach,
+) -> Option<moq_net::Timestamp> {
+	use moq_mux::container::Container as _;
+	let stamp = frame.timestamp;
+	let decoded = container.decode(frame).ok()?;
+	let newest = decoded
+		.iter()
+		.filter(|sample| !sample.payload.is_empty() && sample.timestamp.scale().is_some())
+		.map(|sample| sample.timestamp)
+		.max_by_key(|pts| pts.as_nanos().ok());
+	reach.add(decoded);
+	if stamp.scale().is_some() { Some(stamp) } else { newest }
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.

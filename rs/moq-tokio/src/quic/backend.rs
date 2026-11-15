@@ -375,6 +375,7 @@ impl Client {
 	}
 
 	/// Whether each endpoint binds on a simulated host rather than a UDP socket.
+	#[cfg(any(feature = "sim", feature = "websocket"))]
 	pub fn is_simulated(&self) -> bool {
 		match self.bind {
 			Bind::Udp(_) => false,

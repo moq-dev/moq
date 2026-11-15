@@ -4014,6 +4014,38 @@ mod tests {
 		assert!(test.drain_failed("video0").await.is_empty());
 	}
 
+	// A live segment lists once a frame of the group after it passes the next line, not once the
+	// group after that starts: off the grid, that is a whole GOP sooner.
+	#[tokio::test(start_paused = true)]
+	async fn a_segment_lists_once_the_next_group_passes_its_line() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut video0 = test.publish("video0");
+		let frame = |group: &mut moq_net::group::Producer, pts_ms: u64| {
+			let frame = vp8_frame(pts_ms * 1_000, false);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(group)
+			.unwrap();
+		};
+		// Group 0 holds line 2s, so it is segment 1; group 1 may still end before line 4s.
+		video0.at(0, 500);
+		let mut next = video0.open(1, 2_500);
+		frame(&mut next, 3_900);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			test.rendition("video0").snapshot().segments.is_empty(),
+			"group 1 may still end before 4s and join segment 1"
+		);
+
+		frame(&mut next, 4_100);
+		let snapshot = test.listed("video0", 1).await;
+		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
+		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
+		drop(next);
+	}
+
 	// A recording refuses a listed segment whose media is gone, but reports a grid slot the
 	// rendition holds nothing for (after an overrun) as a gap that keeps its number, so a recorder
 	// can tell it from rows it missed.
