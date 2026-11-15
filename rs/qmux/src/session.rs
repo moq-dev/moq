@@ -145,7 +145,6 @@ pub struct Session {
 	/// The application protocol, cached at establishment so `protocol()` can borrow it.
 	protocol: Option<String>,
 	/// What the TLS handshake learned about the peer, on a session over TLS.
-	#[cfg(feature = "tls")]
 	pub(crate) tls: Option<Arc<crate::tls::Handshake>>,
 }
 
@@ -198,7 +197,6 @@ impl Session {
 			_guard: Arc::new(Guard(inner.clone())),
 			inner: inner.clone(),
 			protocol: config.negotiated_protocol(),
-			#[cfg(feature = "tls")]
 			tls: None,
 		};
 		Ok((session, Driver::new(inner, transport)))
@@ -875,5 +873,5 @@ impl std::fmt::Debug for RecvLease<'_> {
 	}
 }
 
-#[cfg(all(test, any(feature = "tcp", all(unix, feature = "uds"))))]
+#[cfg(test)]
 mod tests;

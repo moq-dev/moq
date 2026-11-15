@@ -35,11 +35,10 @@ pub mod shutdown;
 pub mod stats;
 #[cfg(feature = "test-support")]
 mod test_support;
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 pub(crate) mod uring;
 /// The HTTP/HTTPS server: health, certificate fingerprint, announcements, fetch, and WebSocket sessions.
 pub mod web;
-#[cfg(feature = "websocket")]
 mod websocket;
 
 /// The shared default stream limit for MoQ clients and relays.

@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[2]
 FUZZ_CRATES = ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring")
 FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in FUZZ_CRATES)
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
-LINUX = os.uname().sysname == "Linux"
 
 
 def target_features():
@@ -74,7 +73,7 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        features = [*DEVICE_FEATURES.split(), *(["moq-relay/io-uring"] if LINUX else [])]
+        features = DEVICE_FEATURES.split()
         features += [feature for feature in target_features() if feature not in features]
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
@@ -87,8 +86,7 @@ class SelectTest(unittest.TestCase):
                     )
         selected = self.selected("sh/rs/nextest.sh")
         # The gate's lint runs no extra target or feature builds.
-        for recipe in ("uring-check", "capture"):
-            self.assertNotIn(f"rs {recipe}", selected)
+        self.assertNotIn("rs capture", selected)
 
     def test_cargo_configuration_selects_workspace(self):
         for path in (".cargo/config.toml", ".cargo/config"):
@@ -181,15 +179,12 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
 
-    def test_io_uring_joins_the_linux_test_build(self):
-        for path in ("rs/moq-uring/src/lib.rs", "rs/moq-relay/src/lib.rs", "rs/moq-net/src/lib.rs"):
+    def test_io_uring_changes_test_the_relay(self):
+        for path in ("rs/moq-uring/src/lib.rs", "rs/moq-relay/src/lib.rs"):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
-                self.assertEqual(" moq-relay/io-uring" in calls[0], LINUX, calls)
-                if path == "rs/moq-uring/src/lib.rs":
-                    self.assertIn("/rs/moq-uring#", calls[0])
-        self.assertNotIn("moq-relay/io-uring", self.selected("rs/moq-cli/src/main.rs", action="test")[0])
+                self.assertIn("/rs/moq-relay#", calls[0])
 
     def test_net_session_tests_follow_the_library(self):
         for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs", "rs/moq-net-tests/tests/integration/main.rs"):

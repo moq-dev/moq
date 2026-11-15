@@ -259,7 +259,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	#[cfg(feature = "tcp")]
 	fn stream_bind_does_not_suppress_worker_quic() {
 		let mut listen = crate::listen::Config::default();
 		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());

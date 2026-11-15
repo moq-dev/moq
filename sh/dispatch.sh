@@ -417,7 +417,7 @@ step() {
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py
-            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench
             ;;
         check:quest) run bash sh/quest.sh check ;;
         check:audio_quality) run just test audio-quality --replays --enforce ;;

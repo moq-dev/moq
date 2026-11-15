@@ -69,15 +69,10 @@ pub trait Transport {
 	}
 }
 
-#[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
 mod stream;
-#[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
 pub use stream::Stream;
-#[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
 pub(crate) use stream::build as build_stream_session;
 
-#[cfg(feature = "ws")]
 mod websocket;
 // Public for `Driver<WsTransport<_>>`, though callers never need to name it.
-#[cfg(feature = "ws")]
 pub(crate) use websocket::WsTransport;

@@ -35,9 +35,3 @@ doc on `MoqQuicConfig::qlog`. `doc/bin/relay/config.md` drops "Needs the
 `qlog` build feature", `doc/bin/obs.md` drops its `-DMOQ_FFI_QLOG=ON` source
 build for traces, and the `rs/justfile` uring recipes drop `moq-relay/qlog`
 from their clippy run and `--features qlog` from moq-uring's nextest run.
-
-## Related
-
-- [Always compile the network stack](/quest/m2/features-network.md) - removes
-  the other moq-tokio and moq-relay features; expect conflicts in the same
-  manifests

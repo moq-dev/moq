@@ -4,7 +4,6 @@
 //!
 //! Over real sockets, so the caps are measured on the wall clock as lower bounds on
 //! how long a transfer takes: uncapped, the same transfer takes milliseconds.
-#![cfg(feature = "quic")]
 
 use std::time::Duration;
 
@@ -236,7 +235,7 @@ async fn tokio_window_opens_once_admitted() {
 	window_opens_once_admitted(relay, port).await;
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 async fn uring_relay() -> Option<(Relay, u16, tempfile::TempDir)> {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	match moq_uring::Worker::new(Default::default()) {
@@ -257,7 +256,7 @@ async fn uring_relay() -> Option<(Relay, u16, tempfile::TempDir)> {
 	Some((relay, port, dir))
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_session_is_held_to_its_caps() {
 	if let Some((relay, port, _dir)) = uring_relay().await {
@@ -265,7 +264,7 @@ async fn uring_session_is_held_to_its_caps() {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_window_opens_once_admitted() {
 	if let Some((relay, port, _dir)) = uring_relay().await {

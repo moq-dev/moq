@@ -12215,11 +12215,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [
-              "quic"
-              "websocket"
-            ];
           }
           {
             name = "tokio";
@@ -17814,7 +17809,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [ "net" ];
           }
           {
             name = "procfs";
@@ -17875,22 +17869,7 @@ rec {
             packageId = "workspace-hack";
           }
         ];
-        features = {
-          "default" = [
-            "quic"
-            "websocket"
-            "tcp"
-          ];
-          "quic" = [ "moq-tokio/quic" ];
-          "tcp" = [ "moq-tokio/tcp" ];
-          "websocket" = [ "moq-tokio/websocket" ];
-        };
-        resolvedDefaultFeatures = [
-          "default"
-          "quic"
-          "tcp"
-          "websocket"
-        ];
+
       };
       "moq-boy" = rec {
         crateName = "moq-boy";
@@ -17956,7 +17935,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [ "net" ];
           }
           {
             name = "moq-video";
@@ -18006,21 +17984,12 @@ rec {
           }
         ];
         features = {
-          "default" = [
-            "quic"
-            "websocket"
-          ];
           "jemalloc" = [ "moq-tokio/jemalloc" ];
           "openh264" = [ "moq-video/openh264" ];
-          "quic" = [ "moq-tokio/quic" ];
-          "websocket" = [ "moq-tokio/websocket" ];
         };
         resolvedDefaultFeatures = [
-          "default"
           "jemalloc"
           "openh264"
-          "quic"
-          "websocket"
         ];
       };
       "moq-c" = rec {
@@ -18079,12 +18048,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "quic"
-              "websocket"
-              "tcp"
-              "uds"
-            ];
           }
           {
             name = "moq-video";
@@ -18288,11 +18251,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "tcp"
-              "uds"
-              "watch"
-            ];
           }
           {
             name = "moq-transcode";
@@ -18476,11 +18434,7 @@ rec {
             "moq-video/capture"
             "moq-audio/capture"
           ];
-          "cluster-lan" = [ "moq-relay/cluster-lan" ];
           "default" = [
-            "cluster-lan"
-            "quic"
-            "websocket"
             "nvidia"
             "vaapi"
             "s3"
@@ -18516,7 +18470,6 @@ rec {
           ];
           "pulseaudio" = [ "moq-audio?/pulseaudio" ];
           "qlog" = [ "moq-tokio/qlog" ];
-          "quic" = [ "moq-tokio/quic" ];
           "s3" = [
             "object_store/aws-base"
             "object_store/reqwest"
@@ -18535,12 +18488,10 @@ rec {
             "moq-transcode?/vaapi"
           ];
           "vpx" = [ "moq-video?/vpx" ];
-          "websocket" = [ "moq-tokio/websocket" ];
         };
         resolvedDefaultFeatures = [
           "azure"
           "capture"
-          "cluster-lan"
           "default"
           "gcs"
           "jemalloc"
@@ -18550,13 +18501,11 @@ rec {
           "play"
           "pulseaudio"
           "qlog"
-          "quic"
           "s3"
           "transcode"
           "v4l2"
           "vaapi"
           "vpx"
-          "websocket"
         ];
       };
       "moq-congestion" = rec {
@@ -18836,6 +18785,7 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
+            usesDefaultFeatures = false;
           }
           {
             name = "moq-video";
@@ -18997,6 +18947,7 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
+            usesDefaultFeatures = false;
           }
           {
             name = "tokio";
@@ -19202,11 +19153,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [
-              "tcp"
-              "quic"
-            ];
           }
           {
             name = "mp4-atom";
@@ -20377,7 +20323,6 @@ rec {
           {
             name = "hyper";
             packageId = "hyper";
-            optional = true;
           }
           {
             name = "hyper-util";
@@ -20437,17 +20382,13 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "watch"
-              "tcp"
-            ];
           }
           {
             name = "moq-uring";
             packageId = "moq-uring";
-            optional = true;
             usesDefaultFeatures = false;
             target = { target, features }: ("linux" == target."os" or null);
+            features = [ "quic" ];
           }
           {
             name = "prometheus-client";
@@ -20456,9 +20397,7 @@ rec {
           {
             name = "qmux";
             packageId = "qmux 0.7.0";
-            optional = true;
             usesDefaultFeatures = false;
-            features = [ "ws" ];
           }
           {
             name = "rand";
@@ -20530,7 +20469,6 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            optional = true;
             usesDefaultFeatures = false;
             features = [
               "connect"
@@ -20565,7 +20503,6 @@ rec {
           {
             name = "web-transport-proto";
             packageId = "web-transport-proto";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
           }
         ];
@@ -20626,12 +20563,6 @@ rec {
             packageId = "pem 4.0.0";
           }
           {
-            name = "qmux";
-            packageId = "qmux 0.7.0";
-            usesDefaultFeatures = false;
-            features = [ "tcp" ];
-          }
-          {
             name = "rcgen";
             packageId = "rcgen";
             usesDefaultFeatures = false;
@@ -20678,52 +20609,17 @@ rec {
           }
         ];
         features = {
-          "_uring" = [
-            "dep:moq-uring"
-            "dep:web-transport-proto"
-          ];
-          "cluster-lan" = [ "moq-tokio/mdns" ];
-          "default" = [
-            "cluster-lan"
-            "quic"
-            "websocket"
-            "uds"
-          ];
-          "io-uring" = [
-            "_uring"
-            "moq-tokio/driver"
-            "moq-uring/quic"
-          ];
           "jemalloc" = [ "moq-tokio/jemalloc" ];
           "qlog" = [
             "moq-tokio/qlog"
-            "moq-uring?/qlog"
-          ];
-          "quic" = [
-            "_quic"
-            "moq-tokio/quic"
+            "moq-uring/qlog"
           ];
           "test-support" = [ "moq-tokio/sim" ];
-          "uds" = [ "moq-tokio/uds" ];
-          "websocket" = [
-            "moq-tokio/websocket"
-            "dep:qmux"
-            "dep:hyper"
-            "dep:tokio-tungstenite"
-          ];
         };
         resolvedDefaultFeatures = [
-          "_quic"
-          "_uring"
-          "cluster-lan"
-          "default"
-          "io-uring"
           "jemalloc"
           "qlog"
-          "quic"
           "test-support"
-          "uds"
-          "websocket"
         ];
       };
       "moq-rtmp" = rec {
@@ -20844,8 +20740,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [ "net" ];
           }
           {
             name = "rind-rustls";
@@ -21431,7 +21325,6 @@ rec {
           {
             name = "dns-lookup";
             packageId = "dns-lookup";
-            optional = true;
           }
           {
             name = "futures";
@@ -21444,12 +21337,10 @@ rec {
           {
             name = "http";
             packageId = "http";
-            optional = true;
           }
           {
             name = "httparse";
             packageId = "httparse";
-            optional = true;
           }
           {
             name = "humantime";
@@ -21480,13 +21371,11 @@ rec {
           {
             name = "mdns-sd";
             packageId = "mdns-sd";
-            optional = true;
             features = [ "async" ];
           }
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
-            optional = true;
           }
           {
             name = "moq-crypto";
@@ -21497,12 +21386,11 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
-            optional = true;
+            features = [ "async" ];
           }
           {
             name = "moq-quic";
             packageId = "moq-quic";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
@@ -21512,18 +21400,11 @@ rec {
           {
             name = "notify";
             packageId = "notify";
-            optional = true;
           }
           {
             name = "qmux";
             packageId = "qmux 0.7.0";
-            optional = true;
             usesDefaultFeatures = false;
-            features = [
-              "wss"
-              "tls"
-              "tcp"
-            ];
           }
           {
             name = "rand";
@@ -21532,13 +21413,11 @@ rec {
           {
             name = "rcgen";
             packageId = "rcgen";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "reqwest";
             packageId = "reqwest";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
@@ -21549,12 +21428,10 @@ rec {
           {
             name = "rind-rcgen";
             packageId = "rind-rcgen";
-            optional = true;
           }
           {
             name = "rustc-hash";
             packageId = "rustc-hash 2.1.3";
-            optional = true;
           }
           {
             name = "rustls";
@@ -21572,7 +21449,6 @@ rec {
           {
             name = "rustls-webpki";
             packageId = "rustls-webpki";
-            optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
           }
@@ -21616,13 +21492,11 @@ rec {
           {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            optional = true;
             usesDefaultFeatures = false;
             features = [ "handshake" ];
           }
@@ -21657,7 +21531,6 @@ rec {
           {
             name = "web-transport-proto";
             packageId = "web-transport-proto";
-            optional = true;
           }
           {
             name = "webpki-roots";
@@ -21767,91 +21640,20 @@ rec {
           }
         ];
         features = {
-          "_certs" = [
-            "dep:rcgen"
-            "dep:rind-rcgen"
-            "dep:rustls-webpki"
-          ];
-          "_transport" = [
-            "net"
-            "dep:moq-quic"
-          ];
-          "default" = [
-            "net"
-            "quic"
-            "websocket"
-            "tcp"
-            "uds"
-          ];
-          "driver" = [
-            "_certs"
-            "dep:moq-congestion"
-            "dep:moq-quic"
-            "dep:rustc-hash"
-          ];
           "jemalloc" = [
             "dep:tikv-jemallocator"
             "dep:tikv-jemalloc-ctl"
           ];
-          "mdns" = [ "dep:mdns-sd" ];
-          "net" = [
-            "dep:moq-net"
-            "moq-net/async"
-            "_certs"
-          ];
-          "qlog" = [ "moq-quic?/qlog" ];
-          "qmux" = [
-            "_transport"
-            "dep:qmux"
-          ];
-          "quic" = [
-            "_transport"
-            "driver"
-            "dep:http"
-            "dep:web-transport-proto"
-            "dep:reqwest"
-            "watch"
-            "dep:dns-lookup"
-          ];
+          "qlog" = [ "moq-quic/qlog" ];
           "sim" = [
             "kio/sim"
-            "moq-quic?/sim"
-          ];
-          "tcp" = [
-            "qmux"
-            "dep:dns-lookup"
-            "dep:tokio-rustls"
-          ];
-          "uds" = [
-            "tcp"
-            "qmux/uds"
-          ];
-          "watch" = [ "dep:notify" ];
-          "websocket" = [
-            "qmux"
-            "watch"
-            "dep:dns-lookup"
-            "dep:httparse"
-            "dep:tokio-rustls"
-            "dep:tokio-tungstenite"
+            "moq-quic/sim"
           ];
         };
         resolvedDefaultFeatures = [
-          "_certs"
-          "_transport"
-          "default"
-          "driver"
           "jemalloc"
-          "mdns"
-          "net"
           "qlog"
-          "qmux"
-          "quic"
           "sim"
-          "tcp"
-          "uds"
-          "watch"
-          "websocket"
         ];
       };
       "moq-transcode" = rec {
@@ -21943,11 +21745,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [
-              "quic"
-              "websocket"
-            ];
           }
           {
             name = "moq-video";
@@ -22165,9 +21962,7 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
             target = { target, features }: ("linux" == target."os" or null);
-            features = [ "quic" ];
           }
           {
             name = "moq-uring";
@@ -22950,10 +22745,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "net"
-              "tcp"
-            ];
           }
           {
             name = "pcap-file";
@@ -39537,7 +39328,6 @@ rec {
           {
             name = "futures";
             packageId = "futures";
-            optional = true;
           }
           {
             name = "kio";
@@ -39568,13 +39358,11 @@ rec {
           {
             name = "rustls";
             packageId = "rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "rustls-native-certs";
             packageId = "rustls-native-certs";
-            optional = true;
           }
           {
             name = "thiserror";
@@ -39583,21 +39371,21 @@ rec {
           {
             name = "tokio";
             packageId = "tokio";
+            features = [ "net" ];
           }
           {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            optional = true;
             usesDefaultFeatures = false;
             features = [
               "connect"
               "handshake"
+              "rustls-tls-native-roots"
             ];
           }
           {
@@ -39669,43 +39457,12 @@ rec {
           }
         ];
         features = {
-          "default" = [
-            "tls"
-            "wss"
-          ];
           "fuzz" = [
-            "tcp"
-            "ws"
             "kio/sim"
             "tokio/io-util"
           ];
-          "tcp" = [ "tokio/net" ];
-          "tls" = [
-            "tcp"
-            "dep:tokio-rustls"
-            "dep:rustls"
-          ];
-          "uds" = [ "tokio/net" ];
-          "ws" = [
-            "dep:tokio-tungstenite"
-            "dep:futures"
-          ];
-          "wss" = [
-            "ws"
-            "dep:rustls-native-certs"
-            "dep:rustls"
-            "tokio-tungstenite/rustls-tls-native-roots"
-          ];
         };
-        resolvedDefaultFeatures = [
-          "default"
-          "fuzz"
-          "tcp"
-          "tls"
-          "uds"
-          "ws"
-          "wss"
-        ];
+        resolvedDefaultFeatures = [ "fuzz" ];
       };
       "qmux-fuzz" = rec {
         crateName = "qmux-fuzz";
@@ -59680,15 +59437,6 @@ rec {
             ];
           }
           {
-            name = "tungstenite";
-            packageId = "tungstenite";
-            usesDefaultFeatures = false;
-            features = [
-              "__rustls-tls"
-              "handshake"
-            ];
-          }
-          {
             name = "typenum";
             packageId = "typenum";
             usesDefaultFeatures = false;
@@ -61119,15 +60867,6 @@ rec {
             features = [
               "env-filter"
               "local-time"
-            ];
-          }
-          {
-            name = "tungstenite";
-            packageId = "tungstenite";
-            usesDefaultFeatures = false;
-            features = [
-              "__rustls-tls"
-              "handshake"
             ];
           }
           {

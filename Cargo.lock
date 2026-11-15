@@ -10459,7 +10459,6 @@ dependencies = [
  "tower-http 0.6.11",
  "tracing-core",
  "tracing-subscriber",
- "tungstenite",
  "typenum",
  "url",
  "usage-argv",

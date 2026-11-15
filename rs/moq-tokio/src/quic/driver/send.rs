@@ -108,7 +108,6 @@ impl Stream {
 	}
 
 	/// Poll a write without retaining or copying the caller's buffer.
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
 		self.half.poll_write(waiter, buf)
 	}
@@ -171,7 +170,6 @@ impl Stream {
 	}
 
 	/// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
-	#[cfg(feature = "quic")]
 	pub(crate) fn set_drop_reset(&mut self, offset: Option<Offset>, code: VarInt) {
 		if let Some(offset) = &offset {
 			self.half.own(offset);
@@ -196,20 +194,17 @@ impl Stream {
 	}
 
 	/// Whether the peer acknowledged every byte written so far
-	#[cfg(feature = "quic")]
 	pub(crate) fn acknowledged(&self) -> bool {
 		self.half.acknowledged()
 	}
 
 	/// How many leading bytes the peer acknowledged
-	#[cfg(feature = "quic")]
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.half.acked_len()
 	}
 
 	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
 	/// never will
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.half.poll_all_acked(waiter)
 	}
@@ -267,19 +262,16 @@ impl Finished {
 	}
 
 	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
-	#[cfg(feature = "quic")]
 	pub(crate) fn acknowledged(&self) -> bool {
 		self.half.acknowledged()
 	}
 
 	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
-	#[cfg(feature = "quic")]
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.half.acked_len()
 	}
 
 	/// Wait for every byte to be acknowledged. See [`Stream::poll_all_acked()`].
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.half.poll_all_acked(waiter)
 	}
@@ -395,7 +387,6 @@ impl Half {
 	}
 
 	/// Whether the peer acknowledged every byte written so far; never once reset or stopped.
-	#[cfg(feature = "quic")]
 	fn acknowledged(&self) -> bool {
 		let mut conn = self.stream.conn.state.lock();
 		let mut stream = conn.inner.send_stream(self.stream.id);
@@ -404,7 +395,6 @@ impl Half {
 	}
 
 	/// How many leading bytes the peer acknowledged, each counted once.
-	#[cfg(feature = "quic")]
 	fn acked_len(&self) -> u64 {
 		let mut conn = self.stream.conn.state.lock();
 		conn.inner.send_stream(self.stream.id).acked_len()
@@ -412,7 +402,6 @@ impl Half {
 
 	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
 	/// never will, as after a reset or `STOP_SENDING`.
-	#[cfg(feature = "quic")]
 	fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut conn = self.stream.conn.state.lock();
 		let mut stream = conn.inner.send_stream(self.stream.id);

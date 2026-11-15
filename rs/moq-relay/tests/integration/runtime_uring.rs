@@ -5,7 +5,7 @@
 //!
 //! Linux-only like the mode itself. Unsupported local kernels skip loudly;
 //! CI_STRICT makes CI refuse them.
-#![cfg(all(target_os = "linux", feature = "_uring"))]
+#![cfg(target_os = "linux")]
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -945,7 +945,6 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 }
 
 /// A moq-transport SETUP credential reaches the decider on both ring transports.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn uring_forwards_the_setup_token() {
 	use moq_tokio::quic::{driver, web};
@@ -1095,7 +1094,6 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 /// The relay and the client run on a manual clock, so only the test passes time.
 /// Both select no congestion control, so neither paces: a pacer waits on time
 /// passing.
-#[cfg(feature = "quic")]
 #[test]
 fn uring_workers_bound_stalled_handshakes() {
 	use moq_net::transport::Error as _;
@@ -1203,7 +1201,6 @@ fn uring_workers_bound_stalled_handshakes() {
 /// first answers, and every answer back, so the server never sees the client
 /// finish its handshake. Returns the address to dial, and a signal for the
 /// server's first answer.
-#[cfg(feature = "quic")]
 async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::oneshot::Receiver<()>) {
 	let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind hop");
 	let addr = socket.local_addr().expect("hop address");

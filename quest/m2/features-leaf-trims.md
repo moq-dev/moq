@@ -47,8 +47,3 @@ mention these features, and `rs/justfile`: the `audio-devices` recipe's
 `--features aec,pulseaudio` becomes `capture,playback,pulseaudio`, and the
 CodSpeed bench recipe drops `moq-audio/bus`. moq-audio's `bus` bench drops its
 `required-features = ["bus"]`.
-
-## Related
-
-- [Always compile the network stack](/quest/m2/features-network.md) - the same
-  rule applied to the transport crates

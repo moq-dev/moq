@@ -574,7 +574,6 @@ async fn datagrams_need_records() {
 }
 
 /// A keep-alive that would expire before the first Pong could return is refused.
-#[cfg(feature = "ws")]
 #[tokio::test]
 async fn websocket_keep_alive_needs_room_for_a_pong() {
 	use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
@@ -596,7 +595,6 @@ async fn websocket_keep_alive_needs_room_for_a_pong() {
 
 /// A sender that never runs out of output still sends its WebSocket keep-alive Pings, so
 /// a peer that has no keep-alive and sends nothing back does not let it time out.
-#[cfg(feature = "ws")]
 #[tokio::test(start_paused = true)]
 async fn websocket_keep_alive_runs_during_continuous_output() {
 	use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
