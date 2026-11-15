@@ -373,6 +373,11 @@ impl Routed {
 		}
 	}
 
+	/// Whether a DEAD still waits for ROUTE_UPDATEs it counted.
+	pub(in crate::lite) fn moving(&self) -> bool {
+		self.moving.is_some()
+	}
+
 	/// The peer finished its stream: it is leaving, and answers nothing more.
 	pub(in crate::lite) fn finish(&mut self) -> Result<(), Error> {
 		if self.moving.is_some() {

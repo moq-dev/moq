@@ -384,6 +384,10 @@ impl Running {
 				return Ok(false);
 			}
 			match reader.poll_decode_maybe::<Msg>(waiter) {
+				// A DEAD's ROUTE_UPDATEs follow it with nothing between.
+				Poll::Ready(Ok(Some(Msg::Request { .. }))) if self.routed.moving() => {
+					return Err(Error::ProtocolViolation);
+				}
 				Poll::Ready(Ok(Some(Msg::Request { remove, add }))) => self.answer.request(remove, add)?,
 				Poll::Ready(Ok(Some(announce))) => self.routed.receive(announce)?,
 				// The peer is leaving: its routes ended, and it asks for nothing more.

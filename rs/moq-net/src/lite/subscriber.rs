@@ -10176,6 +10176,38 @@ mod tests {
 		cursor.expect_next_offline("room").await;
 	}
 
+	/// Nothing comes between a DEAD and the ROUTE_UPDATEs it counts, not even a request
+	/// from the peer's other half.
+	#[kio::test]
+	async fn a_request_inside_a_dead_closes_the_session() {
+		const VERSION: Version = Version::Lite07;
+		let dead = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
+				hop: crate::route::path::Hop { node: 7, session: 0 },
+				far: 9,
+				gone: true,
+				moved: 1,
+			})
+			.encode(w, VERSION)
+			.unwrap()
+		};
+		let request = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Request {
+				remove: Vec::new(),
+				add: Vec::new(),
+			}
+			.encode(w, VERSION)
+			.unwrap()
+		};
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &route_start(7), &dead, &request]);
+		let (mut routes, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let result = routes.poll(&kio::Waiter::noop());
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+			"{result:?}"
+		);
+	}
+
 	/// A peer streaming announces gets a budget of them read per poll, so the session's
 	/// other tasks run between them, and the announce behind the flood still arrives.
 	#[kio::test]
