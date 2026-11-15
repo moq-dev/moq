@@ -629,6 +629,9 @@ class Rendition {
 
 	// A timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
+	// Counts timeline restarts. A picture whose clock wait resolved before one, but whose callback
+	// resumes after it, belongs to the old timeline and must neither show nor stamp `timestamp`.
+	#generation = 0;
 	// A hole was read, so the next decoded frame resets the codec only if it rewinds.
 	#holed = false;
 	// The newest timestamp fed to the codec since it last opened.
@@ -740,6 +743,7 @@ class Rendition {
 					if (signal.aborted) return;
 					this.#count({ decoded: 1 });
 					const timestamp = Duration.micros(frame.timestamp);
+					const generation = this.#generation;
 					// Still warming up after a join or gap: decoded for its references alone.
 					if (recovery.warming(timestamp)) return;
 					if (this.#late(timestamp)) {
@@ -758,6 +762,9 @@ class Rendition {
 					// Resolves at once when the delay is "instant". Closing the track releases it.
 					// Check the captured signal again in case cancellation followed the resolved wait.
 					if (!(await this.clock.wait(timestamp, signal)) || signal.aborted) return;
+					// The wait checks the clock's epoch, but a break can still land between its resolution
+					// and this continuation, clearing the state #late reads below.
+					if (this.#generation !== generation) return;
 
 					if (this.#late(timestamp)) {
 						// Late frame, don't render it.
@@ -1019,6 +1026,7 @@ class Rendition {
 	// A fresh timeline invalidates parked pictures and its previous decoded span. The held picture
 	// stays until the new keyframe renders; the codec resets before that keyframe is decoded.
 	#onBreak(): void {
+		this.#generation++;
 		this.first.set(undefined);
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);

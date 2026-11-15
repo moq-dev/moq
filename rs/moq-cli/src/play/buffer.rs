@@ -147,15 +147,18 @@ impl Buffer {
 	}
 }
 
-/// Where a `warmup` from `floor` ends, at its scale, or `None` when there is none.
+/// Where a `warmup` from `floor` ends, at its scale, or `None` when there is none. Rounds
+/// up to the next tick, so a coarse scale never hides less than the whole warmup.
 fn warmed(floor: moq_net::Timestamp, warmup: Duration) -> Option<moq_net::Timestamp> {
 	if warmup.is_zero() {
 		return None;
 	}
-	let warmup = moq_net::Timestamp::try_from(warmup)
-		.ok()?
-		.convert(floor.scale()?)
-		.ok()?;
+	let scale = floor.scale()?;
+	let ticks = warmup
+		.as_nanos()
+		.checked_mul(u128::from(scale.as_u64()))?
+		.div_ceil(1_000_000_000);
+	let warmup = moq_net::Timestamp::new(u64::try_from(ticks).ok()?, scale).ok()?;
 	floor.checked_add(warmup).ok()
 }
 
@@ -303,6 +306,17 @@ mod tests {
 		assert!(buffer.frames.is_empty(), "aged out with no keyframe to resume at");
 		buffer.push(frame(300, true), Duration::ZERO, warmup);
 		assert_eq!(buffer.present.unwrap().as_millis().unwrap(), 400);
+	}
+
+	/// A coarse scale rounds the warmup up a tick rather than hiding less than all of it.
+	#[test]
+	fn a_coarse_scale_rounds_the_warmup_up() {
+		let floor = moq_net::Timestamp::from_scale(10, 10).unwrap();
+		let present = warmed(floor, Duration::from_millis(150)).unwrap();
+		assert_eq!(present.value(), 12, "150 ms at 10 Hz ends at the second tick");
+		let present = warmed(floor, Duration::from_millis(200)).unwrap();
+		assert_eq!(present.value(), 12, "an exact warmup does not round");
+		assert!(warmed(moq_net::Timestamp::unscaled(3), Duration::from_millis(150)).is_none());
 	}
 
 	/// An encoder's first picture has nothing before it to warm up from.

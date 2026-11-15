@@ -1763,6 +1763,35 @@ describe("Decoder with a warmup rendition", () => {
 		}
 	});
 
+	it("drops a picture whose clock wait resolved before a timeline break it resumes after", async () => {
+		// Hold 1100's wait open: resolving it once the break is read stands in for a wait that returned
+		// true but whose output callback resumed only after the break.
+		let release: ((present: boolean) => void) | undefined;
+		const original = Track.prototype.wait;
+		const wait = spyOn(Track.prototype, "wait").mockImplementation(function (this: Track, timestamp, signal) {
+			if (timestamp.asMicros() !== 1_100_000) return original.call(this, timestamp, signal);
+			return new Promise<boolean>((resolve) => {
+				release = resolve;
+			});
+		});
+		const run = await refresh({});
+		try {
+			await run.push(at(10n, 1000, true), at(10n, 1100));
+			expect(run.shown).toEqual([1000]);
+			// A declared end, then a fresh encoder starting over at 0.
+			await run.push(marker(10n, 1_200_000), at(11n, 0, true));
+			expect(run.shown).toEqual([1000, 0]);
+			release?.(true);
+			await microtasks();
+			// The old timeline's picture neither shows nor late-rejects the new timeline's next one.
+			await run.push(at(11n, 100));
+			expect(run.shown).toEqual([1000, 0, 100]);
+		} finally {
+			wait.mockRestore();
+			await run.close();
+		}
+	});
+
 	it("needs no warmup for a fresh encoder, even after a join or a gap", async () => {
 		const run = await refresh();
 		try {
