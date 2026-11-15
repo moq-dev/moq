@@ -120,18 +120,13 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 			}),
 		);
 		await expect(RequestError.decode(new Reader(undefined, retry, version), version)).rejects.toThrow(RangeError);
-		const params = await Parameters.decode(
-			new Reader(undefined, fields(version, 1, 0x0a, UNSAFE), version),
-			version,
-		);
-		expect(() => params.fillTimeout).toThrow(RangeError);
-		expect(() => Filter.decodeFill(fields(version, 1, 0x0a, UNSAFE), version)).toThrow(RangeError);
-		const safe = new Parameters();
-		safe.fillTimeout = Number.MAX_SAFE_INTEGER;
-		const bytes = await Writer.collect(version, (w) => safe.encode(w, version));
-		expect((await Parameters.decode(new Reader(undefined, bytes, version), version)).fillTimeout).toBe(
-			Number.MAX_SAFE_INTEGER,
-		);
+	});
+
+	// FILL_TIMEOUT is ignored, so the largest varint is as welcome as any other.
+	test(`${version}: FILL_TIMEOUT is accepted and ignored at the varint maximum`, async () => {
+		const max = (1n << 62n) - 1n;
+		await Parameters.decode(new Reader(undefined, fields(version, 1, 0x0a, max), version), version);
+		expect(Filter.decodeFill(fields(version, 1, 0x0a, max), version)).toEqual({ rangeFilters: false });
 	});
 
 	test(`${version}: object indices, timestamps, lengths and statuses refuse unsafe numbers`, () => {
