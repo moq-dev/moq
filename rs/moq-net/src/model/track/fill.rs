@@ -111,7 +111,7 @@ impl Pending {
 
 /// What a reader asks its fills with, which it may change while they are out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Asking {
+pub(in crate::model) struct Asking {
 	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
