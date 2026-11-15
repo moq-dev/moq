@@ -115,7 +115,7 @@ smoke *args:
 portrait:
     ./portrait/run.sh
 
-# Paint a stereo 360 broadcast per eye in demo/vr, and turn its ambisonic decode with the head.
+# Import a VR180 MP4 with ambisonic Opus and check demo/vr lays it out by the catalog's VR fields.
 vr:
     ./vr/run.sh
 

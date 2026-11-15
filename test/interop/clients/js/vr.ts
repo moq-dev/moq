@@ -22,7 +22,16 @@ const server = Bun.serve({
 const origin = `http://localhost:${server.port}`;
 
 const VIEWPORT = { width: 640, height: 360 };
-type Colour = "red" | "lime" | "blue" | "magenta" | "other";
+// Radians the demo turns the camera per dragged pixel.
+const DRAG = 0.005;
+type Colour = "red" | "lime" | "blue" | "magenta" | "dark" | "other";
+
+// What demo/vr puts on `window.vr`, as far as this reads it.
+type Demo = {
+	video: { out: { config: { peek(): unknown } } };
+	audio: { out: { config: { peek(): unknown } } };
+	scene: { listener?: { output: AudioNode } };
+};
 
 // The colour at the centre of the page, read from a screenshot: WebGL discards its drawing buffer after
 // each frame, so the canvas itself reads back blank.
@@ -43,15 +52,17 @@ async function centre(page: Page): Promise<{ colour: Colour; rgb: number[] }> {
 	const hi = (v: number) => v > 150;
 	const lo = (v: number) => v < 100;
 	const colour: Colour =
-		hi(r) && lo(g) && lo(b)
-			? "red"
-			: lo(r) && hi(g) && lo(b)
-				? "lime"
-				: lo(r) && lo(g) && hi(b)
-					? "blue"
-					: hi(r) && lo(g) && hi(b)
-						? "magenta"
-						: "other";
+		r < 40 && g < 40 && b < 40
+			? "dark"
+			: hi(r) && lo(g) && lo(b)
+				? "red"
+				: lo(r) && hi(g) && lo(b)
+					? "lime"
+					: lo(r) && lo(g) && hi(b)
+						? "blue"
+						: hi(r) && lo(g) && hi(b)
+							? "magenta"
+							: "other";
 	return { colour, rgb };
 }
 
@@ -65,83 +76,115 @@ async function waitForCentre(page: Page, want: Colour, timeout: number): Promise
 	check(last.colour === want, `centre is ${want}`, () => `got ${last.colour} rgb(${last.rgb.join(", ")})`);
 }
 
-// Render plane waves through the ambisonic decoder offline and return each ear's RMS level.
-async function ears(page: Page, direction: number[], yaw: number): Promise<{ L: number; R: number }> {
-	return page.evaluate(
-		async ({ direction, yaw }) => {
-			const { Spatial } = await import("/audio-check.js");
-			const rate = 48_000;
-			const context = new OfflineAudioContext(2, rate, rate);
-			const buffer = context.createBuffer(4, rate, rate);
-			const [x, y, z] = direction;
-			// A 1 kHz plane wave encoded in ACN W, Y, Z, X with SN3D.
-			[1, y, z, x].forEach((gain, channel) => {
-				const data = buffer.getChannelData(channel);
-				for (let i = 0; i < data.length; i++) data[i] = 0.5 * gain * Math.sin((2 * Math.PI * 1000 * i) / rate);
-			});
-			const discrete = {
-				channelCount: 4,
-				channelCountMode: "explicit",
-				channelInterpretation: "discrete",
-			} as const;
-			const source = new AudioBufferSourceNode(context, { buffer, ...discrete });
-			const root = new GainNode(context, discrete);
-			source.connect(root);
-			const spatial = new Spatial(root, { kind: "ambisonic" });
-			// The head yawed left by `yaw` about +Y, standing at the origin.
-			const head = {
-				decompose: (
-					position: { set(x: number, y: number, z: number): void },
-					rotation: { set(x: number, y: number, z: number, w: number): void },
-				) => {
-					position.set(0, 0, 0);
-					rotation.set(0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2));
-				},
-			};
-			spatial.pose(head);
-			source.start();
-			const rendered = await context.startRendering();
-			// Skip the first 100 ms, while the listener glides into place.
-			const rms = (channel: number) => {
-				const data = rendered.getChannelData(channel).subarray(rate / 10);
-				return Math.sqrt(data.reduce((sum, v) => sum + v * v, 0) / data.length);
-			};
-			return { L: rms(0), R: rms(1) };
-		},
-		{ direction, yaw },
-	);
+// Turn the view left (right when negative) by dragging, as a desktop viewer looks around. The drag
+// starts at the far edge so it stays on the page, where every pointer move lands.
+async function turnLeft(page: Page, radians: number): Promise<void> {
+	const { width, height } = VIEWPORT;
+	const distance = radians / DRAG;
+	check(Math.abs(distance) < width - 2, "the turn fits one drag", () => `${distance} px`);
+	const start = distance > 0 ? 1 : width - 1;
+	await page.mouse.move(start, height / 2);
+	await page.mouse.down();
+	await page.mouse.move(start + distance, height / 2, { steps: 20 });
+	await page.mouse.up();
 }
 
-function louder(level: { L: number; R: number }, ear: "L" | "R" | "neither", assertion: string) {
+// Each ear's RMS level at the demo's spatial mix, averaged over half a second of live playback.
+async function ears(page: Page): Promise<{ L: number; R: number }> {
+	return page.evaluate(async () => {
+		const output = (window as unknown as { vr: Demo }).vr.scene.listener?.output;
+		if (!output) throw new Error("the demo has no spatial audio");
+		const context = output.context;
+		const split = new ChannelSplitterNode(context, { numberOfOutputs: 2 });
+		output.connect(split);
+		const meters = [0, 1].map((channel) => {
+			const analyser = new AnalyserNode(context, { fftSize: 2048 });
+			split.connect(analyser, channel);
+			return analyser;
+		});
+		const sums = [0, 0];
+		const data = new Float32Array(2048);
+		for (let i = 0; i < 10; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			for (const [channel, meter] of meters.entries()) {
+				meter.getFloatTimeDomainData(data);
+				sums[channel] += data.reduce((sum, v) => sum + v * v, 0) / data.length;
+			}
+		}
+		output.disconnect(split);
+		const [L, R] = sums.map((sum) => Math.sqrt(sum / 10));
+		return { L, R };
+	});
+}
+
+function louder(level: { L: number; R: number }, ear: "L" | "neither", assertion: string) {
 	const ratio = level.L / level.R;
-	const ok = ear === "L" ? ratio > 2 : ear === "R" ? ratio < 0.5 : ratio > 0.9 && ratio < 1.1;
+	const ok = level.L + level.R > 0.01 && (ear === "L" ? ratio > 2 : ratio > 0.8 && ratio < 1.25);
 	check(ok, assertion, () => `L ${level.L.toFixed(3)} R ${level.R.toFixed(3)}`);
 }
 
-const browser = await launch(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]);
+const browser = await launch(["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]);
 let failed = true;
 try {
 	const query = new URLSearchParams({ url: values.url, name: "vr.hang" });
 	const [page, errors] = await open(browser, `${origin}/?${query}`, "vr", true, { viewport: VIEWPORT });
 
-	// Straight ahead is the left eye's centre: the catalog's stereo packing cropped the frame and the
+	// The catalog the demo read carries what the importer found in the MP4's sv3d, st3d, and dOps.
+	await page.waitForFunction(
+		() => {
+			const { vr } = window as unknown as { vr: Demo };
+			return vr.video.out.config.peek() !== undefined && vr.audio.out.config.peek() !== undefined;
+		},
+		undefined,
+		{ timeout: 30_000 },
+	);
+	const catalog = await page.evaluate(() => {
+		const { vr } = window as unknown as { vr: Demo };
+		const video = vr.video.out.config.peek() as { projection?: unknown; stereo?: unknown };
+		const audio = vr.audio.out.config.peek() as { layout?: unknown; numberOfChannels?: unknown };
+		return {
+			projection: video.projection,
+			stereo: video.stereo,
+			layout: audio.layout,
+			channels: audio.numberOfChannels,
+		};
+	});
+	const want = {
+		projection: { kind: "equirectangular", fov: 180 },
+		stereo: "left-right",
+		layout: "ambisonic",
+		channels: 4,
+	};
+	check(
+		Bun.deepEquals(catalog, want),
+		"the catalog carries the fixture's VR fields",
+		() => JSON.stringify(catalog),
+	);
+
+	// Straight ahead is the left eye's centre: the stereo packing cropped the frame and the
 	// equirectangular projection faced its centre forward.
 	await waitForCentre(page, "red", 30_000);
 
-	// Drag 90 degrees left (0.005 rad per pixel): a sphere wraps the left eye's left quarter there,
-	// where a flat screen would show only the background.
-	await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
-	await page.mouse.down();
-	await page.mouse.move(VIEWPORT.width / 2 + Math.PI / 2 / 0.005, VIEWPORT.height / 2, { steps: 20 });
-	await page.mouse.up();
+	// The left eye's left quarter lies 45 degrees left over a 180 degree field.
+	await turnLeft(page, Math.PI / 4);
 	await waitForCentre(page, "lime", 5_000);
 
-	louder(await ears(page, [0, 1, 0], 0), "L", "a source on the left is louder in the left ear");
-	louder(await ears(page, [0, 1, 0], Math.PI / 2), "neither", "turning left to face that source centres it");
-	louder(await ears(page, [1, 0, 0], Math.PI / 2), "R", "a source ahead moves to the right ear after turning left");
+	// 120 degrees left is past the field's edge: empty scene. A full sphere would show the frame's blue.
+	await turnLeft(page, (Math.PI * 75) / 180);
+	await waitForCentre(page, "dark", 5_000);
+
+	// Face forward again. The drags were gestures, so the audio graph is running. The fixture's sound
+	// is a plane wave from the left: the left ear hears it, and turning to face it centres it.
+	await turnLeft(page, (-Math.PI * 120) / 180);
+	const ahead = await ears(page);
+	louder(ahead, "L", "a source on the left is louder in the left ear");
+	await turnLeft(page, Math.PI / 2);
+	const facing = await ears(page);
+	louder(facing, "neither", "turning left to face that source centres it");
 
 	throwPageErrors(errors);
-	console.log("vr: stereo equirectangular painted per eye, facing forward; ambisonics follow the head");
+	const level = ({ L, R }: { L: number; R: number }) => `L ${L.toFixed(3)} R ${R.toFixed(3)}`;
+	console.log(`vr: ${JSON.stringify(catalog)} laid out; ahead ${level(ahead)}, facing ${level(facing)}`);
 	failed = false;
 } finally {
 	await finishTraces(failed);

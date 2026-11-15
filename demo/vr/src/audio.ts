@@ -91,6 +91,11 @@ export class Spatial {
 		return panner;
 	}
 
+	// The mix every placement feeds, for meters and the harness.
+	get output(): AudioNode {
+		return this.#out;
+	}
+
 	set muted(muted: boolean) {
 		this.#out.gain.setTargetAtTime(muted ? 0 : 1, this.#context.currentTime, 0.01);
 	}

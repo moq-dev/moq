@@ -16,6 +16,9 @@ const video = new Video.Decoder({ source: videoSrc, sync, enabled: true });
 const scene = new Scene(document.body);
 const effect = new Signals.Effect();
 
+// The console and test/vr read the catalog and the scene through this.
+Object.assign(window, { vr: { audio: audioSrc, video: videoSrc, scene } });
+
 // clone the frame once decoder gets it out
 effect.run((e) => {
 	const frame = e.get(video.out.frame);

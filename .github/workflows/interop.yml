@@ -160,7 +160,8 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
 
-      - name: VR projection
+      - name: VR catalog fields
+        id: vr
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test vr
         shell: bash -leo pipefail {0}
@@ -244,6 +245,7 @@ jobs:
             "Interop (moq-transport)": "${{ steps.interop-ietf.outcome }}",
             "Released wire compatibility": "${{ steps.wire-compat.outcome }}",
             "Portrait transcode": "${{ steps.portrait.outcome }}",
+            "VR catalog fields": "${{ steps.vr.outcome }}",
             "Interop negative control": "${{ steps.negative.outcome }}",
             "Media output and lifecycle": "${{ steps.media.outcome }}",
             "Media track identity changes": "${{ steps.media-rename.outcome }}"
