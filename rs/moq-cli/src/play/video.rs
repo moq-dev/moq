@@ -99,6 +99,29 @@ impl Decoder for moq_video::decode::Sink {
 	}
 }
 
+/// One encoder's media between declared ends. The codec drains each one before
+/// decoding the next, which a fresh encoder opens with a keyframe.
+#[derive(Default)]
+struct Segment {
+	media: Buffer,
+	/// When its first picture arrived.
+	arrived: Option<Instant>,
+}
+
+impl std::ops::Deref for Segment {
+	type Target = Buffer;
+
+	fn deref(&self) -> &Buffer {
+		&self.media
+	}
+}
+
+impl std::ops::DerefMut for Segment {
+	fn deref_mut(&mut self) -> &mut Buffer {
+		&mut self.media
+	}
+}
+
 /// The earlier deadline, where `None` is no deadline.
 /// The later of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no `Ord`.
 fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
@@ -166,11 +189,10 @@ impl<O: Output> Video<O> {
 		// Wakes the max-delay decoder when the clock, the segments, or the selector change.
 		let wake = tokio::sync::Notify::new();
 		let closed = std::sync::atomic::AtomicBool::new(false);
-		// One buffer per encoder between declared ends, oldest first. The codec drains
-		// each before decoding the next, which a fresh encoder opens with a keyframe.
-		// The front never holds the rest back for long: no picture is due later than
-		// one shared delay after it arrived, since the reference is the earliest arrival.
-		let buffers = Mutex::new(VecDeque::from([Buffer::default()]));
+		// One segment per encoder between declared ends, oldest first.
+		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
+		// Signalled when a segment behind the front becomes the front.
+		let advanced = tokio::sync::Notify::new();
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
 		let receive = async {
 			// Video has no jitter estimate, so its target is the encoder delay alone,
@@ -203,6 +225,29 @@ impl<O: Output> Video<O> {
 			let mut end = None;
 
 			loop {
+				// Stop reading while media queued behind the front segment arrived more
+				// than the age budget ago, as behind a decoder slower than real time, so
+				// the subscription evicts the excess. Each segment ages out only its own
+				// media, so without this the queue would grow a segment per restart.
+				while buffers
+					.lock()
+					.unwrap()
+					.iter()
+					.skip(1)
+					.filter(|segment| segment.oldest().is_some())
+					.filter_map(|segment| segment.arrived)
+					.min()
+					.is_some_and(|arrived| arrived.elapsed() > self.max_delay + held)
+				{
+					tokio::select! {
+						() = advanced.notified() => {}
+						Ok(()) = encoder.changed() => target(*encoder.borrow_and_update()),
+						delay = role.delay_changed(shared) => {
+							shared = delay;
+							follow(&mut track, &mut held, shared);
+						}
+					}
+				}
 				let read = tokio::select! {
 					read = track.read() => read?,
 					Ok(()) = encoder.changed() => {
@@ -232,14 +277,16 @@ impl<O: Output> Video<O> {
 									buffers.remove(index);
 								}
 							}
-							buffers.push_back(Buffer::default());
+							buffers.push_back(Segment::default());
 							// Another timeline: its arrivals stop holding the clock until this one.
 							role.reset();
 						}
 						if role.received(frame.timestamp, Instant::now()) {
 							self.output.send(Event::Wake);
 						}
-						buffers.back_mut().unwrap().push(frame, self.max_delay + held);
+						let back = buffers.back_mut().unwrap();
+						back.push(frame, self.max_delay + held);
+						back.arrived.get_or_insert_with(Instant::now);
 						false
 					}
 					// Lost media discards every picture still buffered. An end declared
@@ -247,7 +294,7 @@ impl<O: Output> Video<O> {
 					// from the replacement encoder.
 					Some(Read::Gap { .. }) => {
 						buffers.clear();
-						buffers.push_back(Buffer::default());
+						buffers.push_back(Segment::default());
 						let front = buffers.front_mut().unwrap();
 						front.generation = before + 1;
 						front.ended = end.is_some();
@@ -440,6 +487,7 @@ impl<O: Output> Video<O> {
 							let next = buffers.get(1).is_some_and(|next| next.oldest().is_some());
 							if next {
 								buffers.pop_front();
+								advanced.notify_one();
 							}
 							next
 						};
@@ -1411,6 +1459,62 @@ mod tests {
 			*flushed.lock().unwrap(),
 			2,
 			"each encoder drains before its replacement"
+		);
+	}
+
+	/// A decoder slower than real time leaves short segments queued behind the
+	/// front. Each ages out only its own media, so receive stops reading once one
+	/// has waited past the age budget, and the subscription evicts the excess.
+	#[tokio::test]
+	async fn segments_behind_a_slow_decoder_leave_the_excess_to_the_subscription() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = source
+			.consume()
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = Some(moq_mux::container::Producer::new(source, format()));
+		let mut _finished = None;
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		let decoder = Buffered {
+			cost: Duration::from_millis(100),
+			..Buffered::new(0)
+		};
+		let decoded = decoder.decoded.clone();
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder, None));
+		// Two-picture segments, one per restart, published live for two seconds.
+		const SEGMENTS: u64 = 50;
+		for at in 0..60_000u64 {
+			if task.is_finished() {
+				break;
+			}
+			if at < SEGMENTS * 40 && at % 20 == 0 {
+				if at % 40 == 0 && at > 0 {
+					producer.as_mut().unwrap().discontinuity().unwrap();
+				}
+				producer.as_mut().unwrap().write(frame(at, at % 40 == 0)).unwrap();
+			} else if at == SEGMENTS * 40 {
+				_finished = producer.take().map(|producer| producer.finish().unwrap());
+			}
+			tokio::task::yield_now().await;
+			media.output.present(&media);
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		task.await.unwrap().unwrap();
+		let decoded = decoded.lock().unwrap().len() as u64;
+		assert!(decoded > 0, "nothing played");
+		assert!(
+			decoded < SEGMENTS,
+			"media queued behind the front past the age budget was kept, not evicted: {decoded}"
 		);
 	}
 
