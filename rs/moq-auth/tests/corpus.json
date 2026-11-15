@@ -262,6 +262,73 @@
 			"name": "missing_kty",
 			"jwk": { "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68" },
 			"valid": false
+		},
+		{
+			"name": "oct_with_an_rsa_algorithm",
+			"jwk": {
+				"kty": "oct",
+				"alg": "PS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA"
+			},
+			"valid": false
+		},
+		{
+			"name": "rsa_with_an_hmac_algorithm",
+			"jwk": {
+				"kty": "RSA",
+				"alg": "HS384",
+				"key_ops": ["verify"],
+				"n": "p2nsYkS2yzIvhdcez-PS9Sew7aN7fZlGwbyOJrzzfhYKj1lcKEnlc1UCnTvIuqVqAMZ2H2W0flT7dP6oYETN0mDxJMTrccAUcB9GvMIc0774y5mXSNMDD2cF7M6m7FDYo1xFk8GMUhIFJXewknY9g_SVy2OUIgEET6hqGJmhgfiw9o6WVKAKAgewHjUi2KPJcvKYwUMTLvMPnIpsGZmJBH3CU85RnkmYEg91ZJsDuJXlPv9WOrWMmeo9kkj_dFElwANxhA5-Mlzzmzz6up-skzonpMknYaCUsruYI3GheenRMWIu6Blzm-acgDgsJjwkwN_xW9qBSdfMAqW1mcmaKw",
+				"e": "AQAB"
+			},
+			"valid": false
+		},
+		{
+			"name": "ec_with_an_rsa_algorithm",
+			"jwk": {
+				"kty": "EC",
+				"alg": "RS256",
+				"key_ops": ["verify"],
+				"crv": "P-256",
+				"x": "MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw",
+				"y": "m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8"
+			},
+			"valid": false
+		},
+		{
+			"name": "p256_with_the_p384_algorithm",
+			"jwk": {
+				"kty": "EC",
+				"alg": "ES384",
+				"key_ops": ["verify"],
+				"crv": "P-256",
+				"x": "MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw",
+				"y": "m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8"
+			},
+			"valid": false
+		},
+		{
+			"name": "okp_with_an_ec_algorithm",
+			"jwk": {
+				"kty": "OKP",
+				"alg": "ES256",
+				"key_ops": ["verify"],
+				"crv": "Ed25519",
+				"x": "S9n3tEG677fSNpa0Ftf46OPBte5y1pTwvm4fPkEw_Z8"
+			},
+			"valid": false
+		},
+		{
+			"name": "an_empty_private_field",
+			"jwk": {
+				"kty": "EC",
+				"alg": "ES256",
+				"crv": "P-256",
+				"x": "MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw",
+				"y": "m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8",
+				"d": ""
+			},
+			"valid": false
 		}
 	],
 	"sets": [
@@ -316,6 +383,26 @@
 						"kid": "first"
 					},
 					{ "kty": "oct", "alg": "HS256", "k": "c2hvcnQ", "kid": "second" }
+				]
+			},
+			"valid": false
+		},
+		{
+			"name": "a_key_with_an_algorithm_its_type_cannot_use",
+			"jwks": {
+				"keys": [
+					{
+						"kty": "oct",
+						"alg": "HS256",
+						"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA",
+						"kid": "first"
+					},
+					{
+						"kty": "oct",
+						"alg": "PS256",
+						"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+						"kid": "second"
+					}
 				]
 			},
 			"valid": false

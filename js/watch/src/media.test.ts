@@ -52,7 +52,7 @@ for (const end of [
 		const track = new Moq.Track.Producer("test");
 		const consumer = new Container.Consumer(track.subscribe(), { format: new Container.Legacy.Format("data") });
 		try {
-			const pending = nextMedia(consumer);
+			const pending = nextMedia(consumer, new AbortController().signal);
 			track.abort(end);
 			if (end instanceof Moq.Error.Stream) expect(await pending).toBeUndefined();
 			else await expect(pending).rejects.toBe(end);
@@ -61,6 +61,26 @@ for (const end of [
 		}
 	});
 }
+
+// Only the publisher's clean finish says the media ended; its owner closing the reader does not.
+test("media reads a clean finish, but not its own close, as the end", async () => {
+	const track = new Moq.Track.Producer("test");
+	const finished = new Container.Consumer(track.subscribe(), { format: new Container.Legacy.Format("data") });
+	const owner = new AbortController();
+	const closed = new Container.Consumer(track.subscribe(), { format: new Container.Legacy.Format("data") });
+	try {
+		const pending = nextMedia(finished, new AbortController().signal);
+		const closing = nextMedia(closed, owner.signal);
+		owner.abort();
+		closed.close();
+		expect(await closing).toBeUndefined();
+		track.finish();
+		expect(await pending).toEqual({ kind: "finish" });
+	} finally {
+		finished.close();
+		closed.close();
+	}
+});
 
 test("media does not subscribe through a closed broadcast handle", () => {
 	const broadcast = new Moq.Broadcast.Producer();

@@ -27,6 +27,10 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `mutants` edits the route and resume code one change at a time and fails on an
+# edit no test notices; each edit rebuilds moq-net's tests, about 27 runner-hours
+# for the full set, so it rotates (see sh/rs/mutants.sh).
+#
 # `quic-interop` runs moq-quic against other QUIC stacks through the QUIC
 # Interop Runner, an hour of simulated links per peer, which only a moq-quic
 # change or a bumped pin moves.
@@ -76,6 +80,13 @@ jobs:
 
   runner-vm:
     uses: ./.github/workflows/runner-vm.yml
+
+  mutants:
+    uses: ./.github/workflows/mutants.yml
+    secrets: inherit
+    permissions:
+      contents: read
+      actions: read
 
   # The path-filtered gates main PRs skip; release PRs still run them.
   x11:
@@ -826,13 +837,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0, sock_cmsg, uring_cmsg]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0, sock_cmsg, uring_cmsg, qmux, token, jwk]
         # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
         # after five minutes, so it gets fifteen.
         include:
           - target: session_lite
             seconds: 900
           - target: session_ietf
+            seconds: 900
+          - target: qmux
             seconds: 900
     steps:
       - name: Checkout

@@ -124,8 +124,8 @@ test("a long subscription through the player path leaves nothing behind", async 
 				true,
 			);
 			// Pass over any gap or end.
-			let next = await nextMedia(consumer);
-			while (next && next.kind !== "frame") next = await nextMedia(consumer);
+			let next = await nextMedia(consumer, effect.abort);
+			while (next && next.kind !== "frame") next = await nextMedia(consumer, effect.abort);
 			if (!next) throw new Error("the track ended");
 
 			const timestamp = next.frame.timestamp;

@@ -22,7 +22,7 @@ Agent's choices, for the implementer to revisit:
   RTSP, SRT) before the formats read from a trusted publisher or a file.
 - moq-webrtc's parsers are vendored (`rs/moq-webrtc/src/vendor`): fuzz them
   where they sit, and report a finding upstream as well as fixing it here.
-- The same shape as [the relay parsers](/quest/m1/fuzz-relay-parsers.md).
+- The same shape as the relay parsers' targets (`rs/qmux/fuzz/`, `rs/moq-auth/fuzz/`).
   Where JS has the same decoder (JSON, the catalog, MSF), commit findings to
   the shared `fixtures/` corpus.
 - If the first runs find more than one PR can fix, land the targets with
