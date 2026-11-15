@@ -33,7 +33,7 @@ small examples. The [API reference](/lib/js/api/) covers every package; source l
 | [@moq/json](/lib/js/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [@moq/stats](/lib/js/api/stats) | Read a relay's published traffic stats: discover nodes and yield typed frames. |
 | [@moq/obs](/lib/js/api/obs) | Set up the OBS on the user's machine from a web page: a MoQ or RTMP(S) destination, live stats, and MoQ Sources. |
-| [@moq/crypto](https://github.com/moq-dev/moq/tree/main/js/crypto) | End-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, and per-frame Ed25519 signatures, so relays forward content they cannot read, forge, retime, or relocate. Workspace-only until the browser components or the mesh use it. |
+| [@moq/crypto](https://github.com/moq-dev/moq/tree/main/js/crypto) | Experimental end-to-end encryption of groups, datagrams, and track names, scoped to a publisher run's epoch, so relays forward content they cannot read. Workspace-only until the browser components use it. |
 | [@moq/loc](/lib/js/api/loc), [@moq/msf](/lib/js/api/msf) | The IETF LOC container and MSF catalog. |
 
 ## Web components

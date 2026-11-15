@@ -14,9 +14,11 @@ use std::sync::Arc;
 pub mod bbr3;
 /// CUBIC congestion control.
 pub mod cubic;
+#[cfg(feature = "lab")]
 pub mod gcc;
 mod pacer;
 mod rate;
+#[cfg(feature = "lab")]
 pub mod scream;
 mod unlimited;
 
@@ -62,12 +64,18 @@ pub trait Controller: Send + Sync {
     fn on_probe_filled(&mut self, in_flight: u64) {}
 
     /// An ACK newly acknowledged packets.
+    ///
+    /// Comes after [`Controller::on_loss`] for the losses the same ACK revealed, as RFC 9002's
+    /// OnAckReceived orders them, so a loss response shapes this ACK's processing.
     fn on_ack(&mut self, ack: Ack<'_>);
 
     /// Loss detection declared packets lost.
+    ///
+    /// Losses an ACK revealed come before its [`Controller::on_ack`], with the same `now`. Losses
+    /// a timer declared come with no ACK after them, so the response must take effect here.
     fn on_loss(&mut self, loss: Loss<'_>);
 
-    /// An ACK reported newly CE-marked packets.
+    /// An ACK reported newly CE-marked packets, after its [`Controller::on_ack`].
     fn on_ce(&mut self, ce: Ce);
 
     /// Packets were incorrectly deemed lost
@@ -221,8 +229,6 @@ pub struct Lost {
     pub bytes: u16,
     /// The state [`Controller::on_sent`] returned for it.
     pub packet: Packet,
-    /// Whether the packet sent just before it was delivered, so it starts a new run of losses.
-    pub new_burst: bool,
 }
 
 /// An ACK whose ECN counts reported newly CE-marked packets.
@@ -282,11 +288,13 @@ mod tests {
     /// The largest UDP payload (RFC 9000), whose two datagrams outgrow every 1200-based default
     const MTU: u16 = 65527;
 
-    fn factories() -> [(&'static str, Arc<dyn Factory>); 5] {
-        [
+    fn factories() -> Vec<(&'static str, Arc<dyn Factory>)> {
+        vec![
             ("bbr3", Arc::new(bbr3::Config::default())),
             ("cubic", Arc::new(cubic::Config::default())),
+            #[cfg(feature = "lab")]
             ("gcc", Arc::new(gcc::Config::default())),
+            #[cfg(feature = "lab")]
             ("scream", Arc::new(scream::Config::default())),
             ("unlimited", Arc::new(Unlimited)),
         ]

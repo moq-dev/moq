@@ -324,9 +324,24 @@ impl SinkSend {
 impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 	type Group = SinkGroup;
-	type Offset = ();
+	type Offset = u64;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> u64 {
+		self.written
+	}
+
+	/// Unsupported until the test acknowledges a prefix with [`Log::ack`].
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+		let answer = |acked: Option<u64>| match acked {
+			None => Poll::Ready(poll::Acked::Unsupported),
+			Some(acked) if acked >= *offset => Poll::Ready(poll::Acked::Delivered),
+			Some(_) => Poll::Pending,
+		};
+		match self.log.acked.poll(waiter, |acked| answer(**acked).map(drop)) {
+			Poll::Ready(acked) => answer(*acked).map(Ok),
+			Poll::Pending => Poll::Pending,
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.log.writes_fail.load(Ordering::Relaxed) {
@@ -413,20 +428,6 @@ impl poll::SendStream for SinkSend {
 			// Nothing to acknowledge yet, so park like a peer that never answers.
 			false => Poll::Pending,
 		}
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.log.acked.read().map(|acked| acked.min(self.written))
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.log
-			.acked
-			.poll(waiter, |acked| match **acked {
-				Some(acked) if acked >= self.written => Poll::Ready(()),
-				_ => Poll::Pending,
-			})
-			.map(drop)
 	}
 }
 

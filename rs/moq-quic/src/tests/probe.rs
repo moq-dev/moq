@@ -47,6 +47,9 @@ const FALL: Duration = Duration::from_secs(8);
 
 /// The seeds the acceptance suite runs each scenario over, probing and as the baseline
 const SEEDS: ops::RangeInclusive<u64> = 1..=8;
+/// The seeds for a competing upload, whose loss-driven sharing spreads one seed's late frames
+/// wider than the deadline budget, so eight seeds' mean decides the budget by seed alone
+const COMPETING_SEEDS: ops::RangeInclusive<u64> = 1..=32;
 /// The seed the merge gate runs
 const GATE: ops::RangeInclusive<u64> = 1..=1;
 
@@ -1175,7 +1178,7 @@ fn competing(label: &str, upload: Upload) {
 		competitor: Some(upload),
 		..Scenario::default()
 	};
-	compare(label, scenario, SEEDS);
+	compare(label, scenario, COMPETING_SEEDS);
 }
 
 #[test]

@@ -21,6 +21,13 @@
 
 HARNESS_LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# Whether `cp` can clone a file instead of copying it: GNU cp can where the
+# filesystem does, and BSD cp (macOS) has no such flag.
+HARNESS_REFLINK=0
+if cp --version 2>/dev/null | grep -q GNU; then
+    HARNESS_REFLINK=1
+fi
+
 # Absolute path to this run's private directory. Every artifact goes here.
 HARNESS_RUN=""
 
@@ -77,9 +84,18 @@ harness_env() {
 harness_begin() {
     local name="$1" rerun="${2:-}"
 
-    local root="${HARNESS_RUNS:-${TMPDIR:-/tmp}}"
+    # Runs live in the checkout, so a kept run goes away with its worktree and the
+    # binaries staged into it never fill a shared or tmpfs TMPDIR.
+    local root="${HARNESS_RUNS:-}"
+    if [[ -z "$root" ]]; then
+        local checkout
+        checkout=$(git -C "$HARNESS_LIB" rev-parse --show-toplevel) || {
+            echo "error: cannot find the checkout for the run directory; set HARNESS_RUNS" >&2
+            return 1
+        }
+        root="$checkout/.tmp/harness"
+    fi
     root="${root%/}"
-    [[ -n "${HARNESS_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
     mkdir -p "$root"
     # Harnesses change directory after this, so a relative root would move under them.
     root=$(CDPATH='' cd -- "$root" && pwd)
@@ -111,8 +127,14 @@ harness_stage() {
     local dest="$HARNESS_RUN/$1" source="$2"
     mkdir -p "$(dirname "$dest")" || return $?
     # Nested compat cells retain their own names without copying the same large
-    # binary every time. A copy also supports run directories on another disk.
-    ln -L "$source" "$dest" 2>/dev/null || cp -L "$source" "$dest"
+    # binary every time. A copy also supports run directories on another disk,
+    # where a reflink makes it nearly free on a filesystem that has them.
+    ln -L "$source" "$dest" 2>/dev/null && return 0
+    if ((HARNESS_REFLINK)); then
+        cp -L --reflink=auto "$source" "$dest"
+    else
+        cp -L "$source" "$dest"
+    fi
 }
 
 # ── endpoints ───────────────────────────────────────────────────────────────

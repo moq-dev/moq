@@ -68,9 +68,14 @@ and `moq-audio/capture` explicitly, and `full` enables `capture`.
 
 Renamed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the moq-cli feature that enables everything is named `full`, not `release`, so this quest and its followers say `full`.
 
-## Waiting
-
-- Maintainer: what ships while cpal has no release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last release is 0.18.2). (A) Wait: this quest stays blocked on [ALSA without a load-time link](/quest/m3/capture-alsa-link.md) until the cpal release ships. (B) Split: ship `full` now on macOS and Windows, which link no system audio library, and leave only Linux waiting on the cpal release. (C) Linux release binaries take libasound as a load-time requirement. (D) Fork cpal, alsa, and alsa-sys. I recommend B.
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ (A) wait for the cpal
+release that loads libasound at runtime (RustAudio/cpal#1421 is open; the last
+release is 0.18.2), so this stays blocked on
+[ALSA without a load-time link](/quest/m3/capture-alsa-link.md), and ✅ (D)
+fork cpal, alsa, and alsa-sys only once the wait becomes a blocker (rejected:
+(B) ship `full` on macOS and Windows first and leave Linux waiting; (C) Linux
+release binaries take libasound as a load-time requirement). In the
+maintainer's words: "wait, then fork cpal when it's a blocker".
 
 ## Required
 

@@ -10,6 +10,7 @@
 import * as jose from "jose";
 import * as z from "zod/mini";
 import type { Claims } from "./claims.ts";
+import * as Json from "./json.ts";
 import { Key, KeySchema, type PublicKey } from "./key.ts";
 
 /**
@@ -47,9 +48,9 @@ export interface PublicKeySet {
 function parse(jwks: string): KeySet {
 	let data: unknown;
 	try {
-		data = JSON.parse(jwks.trim());
-	} catch {
-		throw new Error("Failed to parse JWKS: invalid JSON format");
+		data = Json.parse(jwks);
+	} catch (error) {
+		throw new Error(`Failed to parse JWKS: ${error instanceof Error ? error.message : "invalid JSON"}`);
 	}
 
 	try {

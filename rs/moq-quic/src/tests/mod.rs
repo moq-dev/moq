@@ -1194,7 +1194,7 @@ fn deferred_accept_uses_handshake_idle_timeout() {
 	pair.time = start.saturating_add(Duration::from_secs(3));
 	assert!(pair.server.try_accept(delayed, pair.time).is_ok());
 
-	pair.time = start.saturating_add(Duration::from_secs(10));
+	pair.time = start.saturating_add(transport::Config::default().handshake_timeout);
 	assert_matches!(pair.server.try_accept(late, pair.time), Err(ConnectionError::TimedOut));
 }
 
@@ -6566,7 +6566,8 @@ fn gso_train_fits_one_udp_send() {
 }
 
 /// A congestion callback, as the transport reported it. Packets are named by send time, which
-/// several packets can share.
+/// several packets can share. `LossDone` and `AckDone` end each loss and ACK callback, with its
+/// `now`.
 #[derive(Debug, Clone, Copy)]
 enum PacketEvent {
 	Sent { at: Instant },
@@ -6574,6 +6575,8 @@ enum PacketEvent {
 	Lost { sent: Instant },
 	Congestion { sent: Instant, ecn: bool },
 	AppLimited { in_flight: u64 },
+	LossDone { now: Instant },
+	AckDone { now: Instant },
 }
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
@@ -6606,6 +6609,7 @@ impl Controller for PacketRecorder {
 		for acked in ack.packets {
 			self.push(PacketEvent::Acked { sent: acked.sent });
 		}
+		self.push(PacketEvent::AckDone { now: ack.now });
 	}
 
 	fn on_loss(&mut self, loss: congestion::Loss<'_>) {
@@ -6617,6 +6621,7 @@ impl Controller for PacketRecorder {
 			sent: newest.sent,
 			ecn: false,
 		});
+		self.push(PacketEvent::LossDone { now: loss.now });
 	}
 
 	fn on_ce(&mut self, ce: congestion::Ce) {
@@ -6711,7 +6716,7 @@ fn check_packet_resolution(log: &PacketLog) -> Vec<PacketEvent> {
 					assert_eq!(Some(at), last_lost, "loss congestion names another packet");
 				}
 			}
-			PacketEvent::AppLimited { .. } => {}
+			PacketEvent::AppLimited { .. } | PacketEvent::LossDone { .. } | PacketEvent::AckDone { .. } => {}
 		}
 	}
 	events
@@ -6786,6 +6791,62 @@ fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, Pac
 	// The client builds its controller before the server hears of it.
 	let log = factory.logs.lock().unwrap()[0].clone();
 	(pair, client_ch, log)
+}
+
+/// An ACK that reveals losses reports them to the controller before itself, as RFC 9002's
+/// OnAckReceived orders them, so the loss response shapes that ACK's processing.
+#[test]
+fn ack_reports_its_losses_first() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, log) = recorded_pair(Default::default());
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 16 * 1024][..]).unwrap();
+	pair.drive_client();
+	// Drop the first of the flight, so the ACK of the rest declares it lost by packet threshold.
+	assert!(
+		pair.server.inbound.len() > 4,
+		"too few packets for a packet-threshold loss"
+	);
+	pair.server.inbound.pop_front();
+	// The server takes the rest a microsecond apart, so each ACK it sends arrives at its own
+	// instant, which then names the ACK a loss was found by.
+	for (i, (arrival, ..)) in pair.server.inbound.iter_mut().enumerate() {
+		*arrival = arrival.saturating_add(Duration::from_micros(i as u64));
+	}
+	while let Some(&(arrival, ..)) = pair.server.inbound.front() {
+		pair.time = pair.time.max(arrival);
+		pair.drive_server();
+	}
+	assert!(pair.client.inbound.len() > 1, "too few ACKs to tell apart");
+	pair.drive();
+
+	let events = check_packet_resolution(&log);
+	let losses: Vec<_> = events
+		.iter()
+		.enumerate()
+		.filter_map(|(i, e)| match e {
+			PacketEvent::LossDone { now } => Some((i, *now)),
+			_ => None,
+		})
+		.collect();
+	assert!(!losses.is_empty(), "no loss reported");
+	for (i, now) in losses {
+		assert!(
+			!events[..i]
+				.iter()
+				.any(|e| matches!(e, PacketEvent::AckDone { now: at } if *at == now)),
+			"the ACK that revealed a loss was reported before it"
+		);
+		assert!(
+			events[i..]
+				.iter()
+				.any(|e| matches!(e, PacketEvent::AckDone { now: at } if *at == now)),
+			"the ACK that revealed a loss was never reported"
+		);
+	}
 }
 
 /// Counts the congestion events one controller's log reports for CE marks.

@@ -56,25 +56,18 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_START's suffix extends the requested prefix, and its 0x2 flag carries an RTT in milliseconds",
+		"name": "a ROUTE_START's suffix extends the requested prefix",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060b9234016101090002ff0019",
+		"hex": "060a9234016101090000ff00",
 		"expect": "decoded"
 	},
 	{
-		"name": "a Route Offer's 0x4 flag marks a path through a draining node",
+		"name": "a Route Offer's 0x2 flag marks a path through a draining node",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0609923400010900047f03",
+		"hex": "0609923400010900027f03",
 		"expect": "decoded"
-	},
-	{
-		"name": "a Route Offer's RTT flag without its RTT is refused",
-		"version": "moq-lite-07-wip",
-		"message": "announce",
-		"hex": "0609923400010900028003",
-		"expect": "refused"
 	},
 	{
 		"name": "a Route Offer flag no version defines is withdrawn, with whatever field it adds",

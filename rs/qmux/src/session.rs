@@ -529,6 +529,7 @@ impl SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
+	// Writing into TCP is not delivery, so acknowledgments stay unsupported.
 	type Offset = ();
 
 	fn offset(&self) -> Self::Offset {}
@@ -597,33 +598,6 @@ impl poll::SendStream for SendStream {
 			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
 			// The ID is only released on drop, so this does not happen.
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
-		}
-	}
-
-	/// Whether every byte written so far went to the transport, which acknowledges it on a
-	/// reliable transport.
-	fn acknowledged(&self) -> Option<bool> {
-		if self.end == SendEnd::Reset {
-			return Some(false);
-		}
-		let mut state = self.inner.lock();
-		let mut stream = state.conn.send_stream(self.id);
-		let offset = stream.offset();
-		Some(stream.acked(offset).unwrap_or(false))
-	}
-
-	/// The bytes the transport took, which a reliable transport delivers.
-	fn delivered(&self) -> Option<u64> {
-		Some(self.inner.lock().conn.send_stream(self.id).acked_len())
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut state = self.inner.lock();
-		let mut stream = state.conn.send_stream(self.id);
-		let offset = stream.offset();
-		match stream.poll_acked(waiter, offset) {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
 		}
 	}
 }

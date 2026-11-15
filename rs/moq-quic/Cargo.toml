@@ -54,6 +54,8 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 kio = { path = "../kio", features = ["runtime", "sim"] }
+# The candidate controllers and BBR3's delay bound the simulated comparisons run.
+moq-congestion = { path = "../moq-congestion", features = ["lab"] }
 proptest = { workspace = true }
 rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }

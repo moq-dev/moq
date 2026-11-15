@@ -1,4 +1,4 @@
-# [S] Report upstream bugs found during the pre-cut run
+# [S] Report approved upstream bugs
 
 ## Goal
 
@@ -7,18 +7,14 @@ our workaround links the report.
 
 ## Plan
 
-Posting outside `moq-dev` and `kixelated` needs maintainer approval for each
-report.
-
-- **GStreamer `faad`:** it drops the first AAC frame and shifts timestamps by
-  one frame, so the interop AAC phase check skips GStreamer
-  ([moq-dev/moq#6742](https://github.com/moq-dev/moq/pull/6742)). Remove the
-  skip once it's fixed.
-- **retina 0.4.21:** when the server sends an RTSP request during playback,
-  retina logs a warning, returns `Pending`, and goes idle until something else
-  wakes it ([moq-dev/moq#6736](https://github.com/moq-dev/moq/pull/6736)).
-- **mr-boxington:** the eviction found while landing
-  [moq-dev/moq#6709](https://github.com/moq-dev/moq/pull/6709).
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ (b) drop the three
+reports that had no recorded approval, the GStreamer `faad` first-frame drop
+([moq-dev/moq#6742](https://github.com/moq-dev/moq/pull/6742)), retina
+0.4.21's idle `Pending`
+([moq-dev/moq#6736](https://github.com/moq-dev/moq/pull/6736)), and the
+mr-boxington eviction ([moq-dev/moq#6709](https://github.com/moq-dev/moq/pull/6709)),
+and keep only the approved reports below (rejected: (a) approve some or all).
+Each workaround already works and none blocks other work.
 
 Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run). Upstream reports: ✅ Chromium VideoFrame leak
@@ -29,7 +25,9 @@ B-frames realtime ([moq-dev/moq#7402](https://github.com/moq-dev/moq/pull/7402))
 file; str0m/dimpl DTLS budget
 ([moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379)) NOT approved.
 
-Approved to file (search for an existing report first):
+Approved to file, each after searching for an existing report and reading
+the tracker's policy on LLM-written reports; where it bans them, hand the
+maintainer a draft instead:
 
 - **Chromium:** tearing down a `MediaStreamTrackProcessor` with a frame
   still in flight inside it drops that `VideoFrame` unclosed, so Chromium
@@ -57,7 +55,3 @@ Not to be filed:
   [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) fixes it there.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: which of the reports with no recorded approval may be posted: the GStreamer `faad` frame drop, retina 0.4.21's idle `Pending`, and the mr-boxington eviction (which [Mbx R2 verify](/quest/m0/ci/mbx-r2-verify.md)'s upstream threads may already cover). Options: (a) approve some or all, each after reading that project's AI policy and searching for an existing report; (b) drop all three and keep the approved Chromium and Firefox reports. Recommended: (b), since each workaround already works and none blocks other work.

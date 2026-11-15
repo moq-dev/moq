@@ -7,7 +7,6 @@
  *
  * @module
  */
-import type { Duration } from "@moq/clock";
 import type { Credential } from "./auth.ts";
 import type * as Instance from "./instance.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
@@ -113,18 +112,6 @@ export interface RouteInfo {
 	 * it recovers: request again once it turns available.
 	 */
 	readonly available: boolean;
-	/**
-	 * The round trip to the route's origin node over moq-lite-07, informational: it never ranks
-	 * or selects a route.
-	 *
-	 * Each link on the path adds its min RTT, the lowest smoothed RTT it measured over the last
-	 * 30 seconds, this session's own link included. Undefined on any other wire, on a route this
-	 * origin serves itself, and while any link on the path has no measurement.
-	 *
-	 * A listing reports it as of the event that carries the route: a change to the RTT alone is
-	 * no event.
-	 */
-	readonly rtt?: Duration;
 }
 
 /**
@@ -138,7 +125,6 @@ export function routeInfo(route: WireRoute): RouteInfo {
 		instance: route.instance,
 		cost: route.cost,
 		available: route.available ?? true,
-		rtt: route.rtt,
 	};
 }
 
@@ -197,8 +183,6 @@ export interface WireRoute {
 	 * priority of a link no one set. Local, as `node` is.
 	 */
 	readonly priority?: number;
-	/** See {@link RouteInfo.rtt}. */
-	readonly rtt?: Duration;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -223,7 +207,6 @@ export const WireRoute = {
 			node: route.node,
 			depth: route.depth,
 			priority: route.priority,
-			rtt: route.rtt,
 		};
 	},
 };
@@ -242,7 +225,7 @@ export function isAnonymous(route: WireRoute): boolean {
 
 /**
  * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node, route depth and priority, and RTT.
+ * availability, origin node, and route depth and priority.
  *
  * @internal
  */
@@ -259,7 +242,6 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.node === b.node &&
 		a.depth === b.depth &&
 		(a.priority ?? 0) === (b.priority ?? 0) &&
-		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

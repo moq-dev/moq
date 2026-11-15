@@ -39,8 +39,8 @@ const PTS_WRAP: u64 = 1 << 33;
 /// The source's clock stepped onto another timeline, or its PAT named another program, so the
 /// [`Import`](super::Import) ended its instance there.
 ///
-/// What follows is another broadcast. A caller that carries on finishes this import and
-/// publishes [`remainder`](Self::remainder) into a new one, as a new instance under a new instance.
+/// What follows is another broadcast. [`Republish`](super::Republish) carries on into a new
+/// instance on the same path.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 #[error("the source {step}; what follows is a new broadcast")]

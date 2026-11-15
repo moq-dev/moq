@@ -23,7 +23,7 @@ announces](/quest/m2/cluster-routes/README.md)). Decided 2026-11-04
 read from a key file the local relay's uplinks share
 ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)). Without a key, a
 scoped forger declaring a victim's id captures claims outside its scope
-(`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope itself
+(`a_forged_identity_is_contained_by_a_scoped_admission`). The scope itself
 (`hash(scope, id)`) was rejected 2026-10-15, and the grant's issuer-qualified
 subject (`hash(subject, id)`) was dropped 2026-11-02 (maintainer). The key
 must survive token refresh and be shared by the local relay's two uplinks. A
