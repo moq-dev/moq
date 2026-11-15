@@ -656,6 +656,12 @@ impl Permit {
 		}
 	}
 
+	/// The limit this side set on the peer, or `None` while unrestricted.
+	#[cfg(feature = "async")]
+	pub(crate) fn limit(&self) -> Option<&Patterns> {
+		self.limit.as_ref()
+	}
+
 	/// Whether both set the same limit on the peer, whatever either was granted.
 	#[cfg(feature = "async")]
 	pub(crate) fn same_limit(&self, other: &Self) -> bool {

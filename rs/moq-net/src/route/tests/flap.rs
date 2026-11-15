@@ -34,7 +34,7 @@ fn dual_homed(rule: Rule) -> Sim {
 	sim.join(r1, r2, 1);
 	sim.join(r1, r3, 1);
 	sim.join(r2, r3, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "live/x", 0, None);
 	assert!(sim.run());
 	assert_eq!(sim.next_hop(r3, 7), Some(r1));
@@ -120,7 +120,7 @@ fn ring_of_homes(rule: Rule) -> Sim {
 	for (a, b) in [(r1, r2), (r2, r3), (r3, r1)] {
 		sim.link(a, b, SimLink::cost(1), SimLink::cost(3));
 	}
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "live/x", 0, None);
 	assert!(sim.run());
 	for relay in [r1, r2, r3] {
@@ -175,7 +175,7 @@ fn a_link_opened_before_the_doubt_is_taken_at_once() {
 		sim.join(origin, r1, 1);
 		sim.join(r1, r2, 1);
 		sim.join(origin, r2, 5);
-		sim.originate(origin, 7, 0);
+		sim.originate(origin, 7);
 		sim.announce(origin, "live/x", 0, None);
 		assert!(sim.run());
 		assert_eq!(sim.toward(r2, 7), Some(Some(r1)), "{}", rule.as_str());

@@ -16,6 +16,7 @@ use std::{
 	panic::{AssertUnwindSafe, catch_unwind},
 };
 
+use super::super::view::within_any;
 use super::*;
 
 /// How far the search may go, as `RouteHandoff.cfg` bounds the model.
@@ -35,8 +36,6 @@ pub(super) struct Bounds {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Step {
 	Deliver(Node, Node),
-	/// An echoed ROUTE_END, under the distance rule.
-	Ack(Node, Node),
 	Announce {
 		origin: Node,
 		claim: &'static str,
@@ -56,7 +55,6 @@ impl fmt::Display for Step {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Deliver(from, to) => write!(f, "sim.deliver({from}, {to});"),
-			Self::Ack(from, to) => write!(f, "sim.deliver_ack({from}, {to});"),
 			Self::Announce { origin, claim, seed } => write!(f, "sim.announce({origin}, {claim:?}, {seed}, None);"),
 			Self::Unannounce { origin, claim } => write!(f, "sim.unannounce({origin}, {claim:?});"),
 			Self::Connect(a, b) => write!(f, "sim.connect({a}, {b});"),
@@ -124,17 +122,14 @@ impl World {
 	fn fingerprint(&self) -> u64 {
 		let mut hasher = DefaultHasher::new();
 		let sim = &self.sim;
-		for relay in &sim.nodes {
-			match relay {
-				Relay::Distance(router) => router.fingerprint(&mut hasher),
-				Relay::Path(router) => router.fingerprint(sim.now, &mut hasher),
-			}
+		for router in &sim.nodes {
+			router.fingerprint(sim.now, &mut hasher);
 		}
 		digest(
 			&mut hasher,
 			&(&sim.watch, &sim.restarts, &sim.declared, &sim.up, &sim.held),
 		);
-		digest(&mut hasher, &(&sim.queues, &sim.acks, &sim.history));
+		digest(&mut hasher, &(&sim.queues, &sim.history));
 		digest(
 			&mut hasher,
 			&(self.changes, self.flaps, &self.ended, self.burst, self.churn),
@@ -143,16 +138,13 @@ impl World {
 	}
 
 	fn quiet(&self) -> bool {
-		self.sim.busy().is_empty() && self.sim.busy_acks().is_empty()
+		self.sim.busy().is_empty()
 	}
 
-	/// Messages and echoes queued, by direction.
+	/// Messages queued, by direction.
 	fn queued(&self) -> BTreeMap<(Node, Node), usize> {
 		let mut out = BTreeMap::new();
 		for (key, queue) in &self.sim.queues {
-			*out.entry(*key).or_default() += queue.len();
-		}
-		for (key, queue) in &self.sim.acks {
 			*out.entry(*key).or_default() += queue.len();
 		}
 		out
@@ -252,7 +244,6 @@ impl Search<'_> {
 			.into_iter()
 			.map(|(from, to)| Step::Deliver(from, to))
 			.collect();
-		out.extend(sim.busy_acks().into_iter().map(|(from, to)| Step::Ack(from, to)));
 		for node in 0..sim.nodes.len() {
 			if sim.nodes[node].deadline().is_some() && self.patient(sim, node) {
 				out.push(Step::Fire(node));
@@ -301,9 +292,7 @@ impl Search<'_> {
 		if !self.bounds.patient {
 			return true;
 		}
-		let Relay::Path(router) = &sim.nodes[node] else {
-			return true;
-		};
+		let router = &sim.nodes[node];
 		let at = sim.now.max(router.deadline().expect("a timer"));
 		let due = router.due(at);
 		!sim.queues.values().flatten().any(|msg| match msg {
@@ -331,7 +320,7 @@ impl Search<'_> {
 		for (key, now) in world.queued() {
 			let was = queued.get(&key).copied().unwrap_or(0);
 			let consumed = match step {
-				Step::Deliver(from, to) | Step::Ack(from, to) if (*from, *to) == key => 1,
+				Step::Deliver(from, to) if (*from, *to) == key => 1,
 				_ => 0,
 			};
 			sent += now - (was - consumed);
@@ -370,7 +359,6 @@ impl Search<'_> {
 		let sim = &mut world.sim;
 		match *step {
 			Step::Deliver(from, to) => assert!(sim.deliver(from, to)),
-			Step::Ack(from, to) => assert!(sim.deliver_ack(from, to)),
 			Step::Announce { origin, claim, seed } => {
 				sim.announce(origin, claim, seed, None);
 				world.changes += 1;
@@ -399,7 +387,7 @@ impl Search<'_> {
 			Step::Fire(_) => true,
 			Step::Deliver(from, to) => match (&sim.nodes[to], sim.queues[&(from, to)].front()) {
 				(
-					Relay::Path(router),
+					router,
 					Some(Msg::Path {
 						id,
 						prefix,
@@ -413,13 +401,6 @@ impl Search<'_> {
 					router.hears(key, prefix, from)
 				}
 				(_, Some(Msg::Dead(path::Dead::Draining { .. }))) => true,
-				(
-					Relay::Distance(router),
-					Some(Msg::Route {
-						id,
-						reach: Some(Reach::Finite(_)),
-					}),
-				) => router.rx.get(id).is_some_and(|routes| routes.contains_key(&from)),
 				_ => false,
 			},
 			_ => false,
@@ -486,7 +467,7 @@ impl Search<'_> {
 	/// at that revision as a stream answering the route's prefix presents them.
 	fn offered(&self, sim: &Sim) -> Result<(), String> {
 		for (node, relay) in sim.nodes.iter().enumerate() {
-			let Relay::Path(router) = relay else { continue };
+			let router = relay;
 			for ((key, prefix), view) in router.heard() {
 				let Some(id) = sim.source(*key) else { continue };
 				for (region, &rev) in &view.floors {
@@ -521,38 +502,19 @@ impl Search<'_> {
 	/// Where a request for `claim` of `key` from `node`'s reader goes.
 	fn ask(&self, sim: &Sim, node: Node, key: Id, claim: &Path) -> Ask {
 		let mut chain = vec![node];
-		match &sim.nodes[node] {
-			Relay::Distance(_) => {
-				let mut at = node;
-				while let Some(next) = sim.next_hop(at, key) {
-					if chain.contains(&next) {
-						chain.push(next);
+		let (mut at, mut key, mut from) = (node, key, None);
+		loop {
+			match sim.path(at).forward(key, claim, from.take()) {
+				None => return Ask::Stuck,
+				Some(path::Forward::Here) => return Ask::Origin,
+				Some(path::Forward::Next { next, named, prefix }) => {
+					let looped = chain.contains(&next);
+					chain.push(next);
+					if looped {
 						return Ask::Loop(chain);
 					}
-					chain.push(next);
-					at = next;
-				}
-				match at == self.origin {
-					true => Ask::Origin,
-					false => Ask::Stuck,
-				}
-			}
-			Relay::Path(_) => {
-				let (mut at, mut key, mut from) = (node, key, None);
-				loop {
-					match sim.path(at).forward(key, claim, from.take()) {
-						None => return Ask::Stuck,
-						Some(path::Forward::Here) => return Ask::Origin,
-						Some(path::Forward::Next { next, named, prefix }) => {
-							let looped = chain.contains(&next);
-							chain.push(next);
-							if looped {
-								return Ask::Loop(chain);
-							}
-							from = Some((at, prefix));
-							(at, key) = (next, named);
-						}
-					}
+					from = Some((at, prefix));
+					(at, key) = (next, named);
 				}
 			}
 		}
@@ -597,14 +559,11 @@ impl Search<'_> {
 					));
 				}
 				for (key, _) in shown {
-					if sim.paths() && self.ask(sim, node, key, &claim) != Ask::Origin {
+					if self.ask(sim, node, key, &claim) != Ask::Origin {
 						return Err(format!("a request for {claim} from node {node} stops short"));
 					}
 				}
 			}
-		}
-		if !sim.paths() {
-			return Ok(());
 		}
 		for node in (0..sim.nodes.len()).filter(|&node| node != self.origin) {
 			let router = sim.path(node);
@@ -645,8 +604,9 @@ impl Sim {
 	/// The newest floor `node`'s kept views of the publisher hold over a region
 	/// that covers the claim or lies within it.
 	fn floor(&self, node: Node, (id, claim): &(Id, Path)) -> Option<Rev> {
-		(self.nodes[node].views().into_iter())
-			.filter(|(view_id, _)| view_id == id)
+		self.nodes[node]
+			.views()
+			.filter(|((view_id, _), _)| view_id == id)
 			.flat_map(|(_, view)| &view.floors)
 			.filter(|(region, _)| within(claim, region) || within(region, claim))
 			.map(|(_, &rev)| rev)
@@ -662,7 +622,7 @@ fn triangle(dear: Metric, watch: &str, grant: Option<Grant>) -> Mesh {
 	// The model starts with every interest applied, so the sessions' asks are
 	// answered before there is anything to route.
 	assert!(mesh.sim.run());
-	mesh.sim.originate(mesh.origin, mesh.id, 0);
+	mesh.sim.originate(mesh.origin, mesh.id);
 	mesh
 }
 
@@ -714,7 +674,7 @@ const TWO: Bounds = Bounds {
 #[ignore = "Nightly: about ten seconds in release"]
 fn every_order_from_the_first_asks_keeps_the_rules() {
 	let mut mesh = unanswered(1, "", None);
-	mesh.sim.originate(mesh.origin, mesh.id, 0);
+	mesh.sim.originate(mesh.origin, mesh.id);
 	run(mesh, &ONE);
 }
 
@@ -730,7 +690,7 @@ fn every_order_behind_a_relay_keeps_the_rules() {
 	// The model starts with every interest applied, so the sessions' asks are
 	// answered before there is anything to route.
 	assert!(sim.run());
-	sim.originate(0, 7, 0);
+	sim.originate(0, 7);
 	run(Mesh { sim, origin: 0, id: 7 }, &ONE);
 }
 
@@ -779,22 +739,22 @@ fn every_order_under_a_scoped_grant_keeps_the_rules() {
 #[test]
 #[ignore = "Nightly"]
 fn every_order_past_a_narrowed_relay_shows_what_a_path_carries() {
-	run(blind(Rule::PATH), &BLIND);
+	run(blind(), &BLIND);
 }
 
 /// `a_relay_behind_a_scoped_neighbour_is_blind`'s mesh settled with every relay
 /// asking for everything, and then the narrow relay asking for `a` alone, with
 /// nothing delivered since.
-fn blind(rule: Rule) -> Mesh {
+fn blind() -> Mesh {
 	let (origin, narrow, wide, far, relay, tail) = (0, 1, 2, 3, 4, 5);
-	let mut sim = Sim::with(rule, 6);
+	let mut sim = Sim::with(Rule::PATH, 6);
 	sim.join(origin, narrow, 1);
 	sim.join(narrow, relay, 1);
 	sim.join(origin, far, 1);
 	sim.join(far, wide, 1);
 	sim.join(wide, relay, 1);
 	sim.join(relay, tail, 1);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "a/x", 0, None);
 	sim.announce(origin, "b/x", 0, None);
 	assert!(sim.run());
@@ -809,12 +769,3 @@ const BLIND: Bounds = Bounds {
 	flaps: 0,
 	patient: true,
 };
-
-/// The search's self-check: on the distance rule, which the path rule replaces,
-/// it finds the blind relay `residual.rs` pins.
-#[test]
-#[cfg_attr(miri, ignore = "searches thousands of states")]
-fn the_search_finds_the_blind_relay() {
-	let failure = search(blind(Rule::Distance), &BLIND).expect_err("the distance rule is blind");
-	assert!(failure.rule.contains("node 4 shows b/x as []"), "{failure}");
-}

@@ -6,6 +6,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { decodeForwarded, decodeRoute, encodeRoute, utf8 } from "./instance.ts";
 import * as Message from "./message.ts";
+import { fromWire, toWire } from "./priority.ts";
 import {
 	hasAnnounceCompression,
 	hasAnnounceId,
@@ -34,18 +35,20 @@ const ANNOUNCE_UPDATE = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART = 3;
 const SYNCED = 4;
-// lite-07: the route layer. ROUTE_END also travels back as the echo.
+// lite-07: the route layer.
 const ROUTE_START = 6;
 const ROUTE_UPDATE = 7;
 const ROUTE_END = 8;
 const ANNOUNCE_FLOOR = 9;
-const ROUTE_REQUEST = 10;
 const ROUTE_HOLD = 11;
+const DEAD = 15;
 
-/**
- * The largest lite-07 varint. No origin advertises it as a Seqno or Revision: it leaves room for
- * the successor a ROUTE_REQUEST names and for the floor's offset.
- */
+// DEAD kinds.
+const DEAD_CLOSED = 0n;
+const DEAD_DRAIN = 1n;
+
+/** The largest lite-07 varint. No origin advertises it as a Revision: it leaves room for the
+ * floor's offset. */
 export const ROUTE_MAX = 2n ** 64n - 1n;
 
 /** Lite-07: copy the first `keep` path segments of the live announcement `distance` back from
@@ -53,23 +56,57 @@ export const ROUTE_MAX = 2n ** 64n - 1n;
  * {@link AnnounceHistory}. */
 export type Base = { distance: bigint; keep: number };
 
-/** How a lite-07 publisher reaches an origin node: the origin's seqno, the publisher's metric to it,
- * whether it may only travel away from an upstream, its informational RTT to it in milliseconds,
- * `undefined` when unmeasured, and the Hop ID of every node it crossed, the origin first. */
-export interface Advert {
-	seqno: bigint;
+/** One node a lite-07 route crossed: its Node ID, and the session it learned the route on, an
+ * opaque per-node counter that is 0 for the publisher's own hop. */
+export interface RouteHop {
+	node: bigint;
+	session: bigint;
+}
+
+/** How a lite-07 publisher reaches a publisher node: the `path` it crossed, the publisher first and
+ * the sender last, whether a node on it sent GOAWAY, the lowest link priority on it, the sender's
+ * metric to the publisher, whether it may only travel away from an upstream, and its informational
+ * RTT in milliseconds, `undefined` when unmeasured. Mirrors `route::path::Offer` in rs/moq-net. */
+export interface Offer {
+	path: RouteHop[];
+	draining: boolean;
+	priority: number;
 	metric: bigint;
 	downOnly: boolean;
 	rtt: bigint | undefined;
-	hops: bigint[];
 }
+
+/** A Route Offer this node refuses: the path it still names, which a later DEAD may match, and why. */
+export interface Unusable {
+	refused: Refusal;
+	path: RouteHop[];
+}
+
+/** News on DEAD about the routes the sender offered. `closed`: the session `hop` names closed, at
+ * the node `far` at its other end. Each route on the stream through that hop that `moved` names by
+ * Route ID continues on its offer there; the rest end if `gone`, and are held if not, unless the
+ * receiver is the node just before the sender on the route's path. With `more`, the next message is
+ * a DEAD naming the same hop, far node, and `gone` whose `moved` continues this one's, and the
+ * receiver applies them as one. `drain`: `node` sent GOAWAY, so every path through it ranks as
+ * draining. */
+export type Dead =
+	| {
+			kind: "closed";
+			hop: RouteHop;
+			far: bigint;
+			gone: boolean;
+			more: boolean;
+			moved: { id: bigint; offer: Offer | Unusable }[];
+	  }
+	| { kind: "drain"; node: bigint };
 
 /** The most Hops a route may carry. One that arrives with this many is unusable. */
 export const ROUTE_MAX_HOPS = 32;
 
-// ROUTE_START and ROUTE_UPDATE flags.
+// Route Offer flags.
 const DOWN_ONLY = 0x1;
 const RTT = 0x2;
+const DRAINING = 0x4;
 
 /**
  * A message on the publisher's side of the Announce Stream.
@@ -115,17 +152,18 @@ export type AnnounceBroadcast =
 	| { status: "skipped" }
 	/** Lite07+: the initial set has been delivered. */
 	| { status: "synced" }
-	/** Lite07+ ROUTE_START: the publisher reaches the origin node `node`, and assigns the route
-	 * the next Route ID. */
-	| { status: "routeStart"; node: bigint; advert: Advert }
+	/** Lite07+ ROUTE_START: the publisher reaches the publisher node `node` along `offer`, covering
+	 * the requested prefix joined with `suffix`, and assigns the route the next Route ID. */
+	| { status: "routeStart"; node: bigint; suffix: Path.Valid; offer: Offer }
 	/** Lite07+ ROUTE_UPDATE: the route with this id changed, and is usable. */
-	| { status: "routeUpdate"; id: bigint; advert: Advert }
+	| { status: "routeUpdate"; id: bigint; offer: Offer }
 	/** Lite07+ ROUTE_HOLD: the publisher has no usable route with this id, but holds it and its
 	 * claims while it recovers. */
 	| { status: "routeHold"; id: bigint }
-	/** Lite07+ ROUTE_END: the publisher let go of the route with this id and every claim under it.
-	 * The subscriber echoes it back. */
+	/** Lite07+ ROUTE_END: the publisher let go of the route with this id and every claim under it. */
 	| { status: "routeEnd"; id: bigint }
+	/** Lite07+ DEAD: a session or node on the routes the publisher offered is gone or going. */
+	| { status: "dead"; dead: Dead }
 	/** Lite07+ ANNOUNCE_FLOOR: closes the batch of claims under the route with this id, certifying
 	 * the stream's claims for it across the requested prefix as the origin's at `revision`, or
 	 * nothing when `revision` is undefined. */
@@ -137,10 +175,11 @@ export type AnnounceBroadcast =
 
 /** What a refused route message still tells the receiver, so the ids that follow it resolve. */
 export type Refusable =
-	/** ROUTE_START: assigns the next Route ID to the origin node `node`. */
-	| { kind: "routeStart"; node: bigint }
-	/** ROUTE_UPDATE of the route with this Route ID. */
-	| { kind: "routeUpdate"; id: bigint }
+	/** ROUTE_START: assigns the next Route ID to the publisher `node`, covering the requested prefix
+	 * joined with `suffix`, or no prefix when the suffix itself was refused, along `path`. */
+	| { kind: "routeStart"; node: bigint; suffix?: Path.Valid; path: RouteHop[] }
+	/** ROUTE_UPDATE of the route with this Route ID, now along `path`. */
+	| { kind: "routeUpdate"; id: bigint; path: RouteHop[] }
 	/** ANNOUNCE_START under Route ID `route`: assigns the next Announce ID, to `path`, or to no path
 	 * when the path itself was refused. */
 	| { kind: "start"; route: bigint; path?: { suffix: Path.Valid; pathBase?: Base } }
@@ -148,16 +187,7 @@ export type Refusable =
 	| { kind: "change"; id: bigint };
 
 /** Why a node refuses content a peer forwarded: well framed, but nothing it can use. */
-export type Refusal = "node" | "seqno" | "flags" | "hops" | "path" | "instance";
-
-/**
- * A message the subscriber sends on a lite-07 Announce Stream after its ANNOUNCE_REQUEST.
- *
- * `request` (ROUTE_REQUEST) asks for a route to `node`, as the publisher named it, at least as new
- * as `seqno`. `echo` is the ROUTE_END that retired Route ID `id`, sent back once the subscriber
- * dropped the route.
- */
-export type AnnounceReply = { kind: "request"; node: bigint; seqno: bigint } | { kind: "echo"; id: bigint };
+export type Refusal = "node" | "flags" | "hops" | "path" | "instance";
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
@@ -277,44 +307,95 @@ async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | unde
 	return cost;
 }
 
-/** Encode a seqno, metric, flags, RTT, and hops. No origin advertises the last seqno, and no
- * route carries more than {@link ROUTE_MAX_HOPS}. */
-async function encodeAdvert(w: Writer, advert: Advert) {
-	if (advert.seqno >= ROUTE_MAX) throw new Error("a route never advertises the last seqno");
-	if (advert.hops.length > ROUTE_MAX_HOPS) throw new Error("a route crossed too many nodes");
-	await w.u62(advert.seqno);
-	await w.u62(advert.metric);
-	await w.u8((advert.downOnly ? DOWN_ONLY : 0) | (advert.rtt === undefined ? 0 : RTT));
-	if (advert.rtt !== undefined) await w.u62(advert.rtt);
-	await w.u62(BigInt(advert.hops.length));
-	for (const hop of advert.hops) await w.u62(hop);
+/** Encode a Route Offer: the path, then flags, priority, metric, and RTT. No node offers an empty
+ * path or one past {@link ROUTE_MAX_HOPS}, nor names Node ID 0 in one. */
+async function encodeOffer(w: Writer, offer: Offer) {
+	if (offer.path.length === 0 || offer.path.length > ROUTE_MAX_HOPS || offer.path.some((hop) => hop.node === 0n))
+		throw new Error("no node offers that path");
+	await w.u62(BigInt(offer.path.length));
+	for (const hop of offer.path) {
+		await w.u62(hop.node);
+		await w.u62(hop.session);
+	}
+	await w.u8(
+		(offer.downOnly ? DOWN_ONLY : 0) | (offer.rtt === undefined ? 0 : RTT) | (offer.draining ? DRAINING : 0),
+	);
+	await w.u8(toWire(offer.priority));
+	await w.u62(offer.metric);
+	if (offer.rtt !== undefined) await w.u62(offer.rtt);
 }
 
-/** Decode an advertisement, refusing one whose seqno no origin advertises, whose flags this node
- * does not know, or that crossed too many hops. The rest of the body is skipped, since an unknown
- * flag may announce a field ahead of the hops. Mirrors rs/moq-net. */
-async function decodeAdvert(r: Reader): Promise<Advert | Refusal> {
-	const refuse = async (reason: Refusal) => {
-		await r.readAll();
-		return reason;
-	};
-	const seqno = await r.u62();
-	if (seqno === ROUTE_MAX) return refuse("seqno");
-	const metric = await r.u62();
-	const flags = await r.u8();
-	if (flags & ~(DOWN_ONLY | RTT)) return refuse("flags");
-	const rtt = flags & RTT ? await r.u62() : undefined;
+/** Decode a Route Offer. Its path comes first, so a node refusing the rest still learns the path a
+ * later DEAD may name. An empty path is the sender's own error, since it names itself last. Hops
+ * past the limit, a hop naming Node ID 0, and a flag this node does not know refuse the offer: a
+ * newer flag may add a field after the ones this node reads, so a refusal skips the rest of the
+ * body. Every hop a path counts is read, but of a path past the limit only those up to one past
+ * it are kept: a sender within the limit never sends one, and the whole would hold a body's
+ * worth for each route. Mirrors rs/moq-net. */
+async function decodeOffer(r: Reader): Promise<Offer | Unusable> {
 	const count = await r.u62();
+	if (count === 0n) throw new ProtocolViolation("a route offer with no hops");
+	const path: RouteHop[] = [];
+	for (let i = 0n; i < count; i++) {
+		const hop = { node: await r.u62(), session: await r.u62() };
+		if (path.length <= ROUTE_MAX_HOPS) path.push(hop);
+	}
+	const refuse = async (refused: Refusal): Promise<Unusable> => {
+		await r.readAll();
+		return { refused, path };
+	};
 	if (count > BigInt(ROUTE_MAX_HOPS)) return refuse("hops");
-	const hops: bigint[] = [];
-	for (let i = 0n; i < count; i++) hops.push(await r.u62());
-	return { seqno, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt, hops };
+	if (path.some((hop) => hop.node === 0n)) return refuse("node");
+	const flags = await r.u8();
+	if (flags & ~(DOWN_ONLY | RTT | DRAINING)) return refuse("flags");
+	const priority = fromWire(await r.u8());
+	const metric = await r.u62();
+	const rtt = flags & RTT ? await r.u62() : undefined;
+	return { path, draining: (flags & DRAINING) !== 0, priority, metric, downOnly: (flags & DOWN_ONLY) !== 0, rtt };
 }
 
-/** Refuse a route to the reserved Node ID 0, skipping the rest of its body. */
-async function refuseNode(r: Reader): Promise<Refusal> {
-	await r.readAll();
-	return "node";
+async function encodeDead(w: Writer, dead: Dead) {
+	if (dead.kind === "drain") {
+		if (dead.node === 0n) throw new Error("Node ID 0 names no node");
+		await w.u62(DEAD_DRAIN);
+		await w.u62(dead.node);
+		return;
+	}
+	if (dead.hop.node === 0n || dead.far === 0n) throw new Error("Node ID 0 names no node");
+	await w.u62(DEAD_CLOSED);
+	await w.u62(dead.hop.node);
+	await w.u62(dead.hop.session);
+	await w.u62(dead.far);
+	await w.u8(dead.gone ? 1 : 0);
+	await w.u8(dead.more ? 1 : 0);
+	await w.u62(BigInt(dead.moved.length));
+	for (const { id, offer } of dead.moved) {
+		if ("refused" in offer) throw new Error("a refused offer is never sent");
+		await w.u62(id);
+		// Sized, so a receiver refusing one offer still reads the next.
+		await Message.encode(w, (w) => encodeOffer(w, offer));
+	}
+}
+
+async function decodeDead(r: Reader): Promise<Dead> {
+	const nonzero = (id: bigint) => {
+		if (id === 0n) throw new ProtocolViolation("Node ID 0 names no node");
+		return id;
+	};
+	const kind = await r.u62();
+	if (kind === DEAD_DRAIN) return { kind: "drain", node: nonzero(await r.u62()) };
+	if (kind !== DEAD_CLOSED) throw new ProtocolViolation(`unknown DEAD kind ${kind}`);
+	const hop = { node: nonzero(await r.u62()), session: await r.u62() };
+	const far = nonzero(await r.u62());
+	const gone = await r.u8();
+	if (gone > 1) throw new ProtocolViolation(`DEAD Gone ${gone}`);
+	const more = await r.u8();
+	if (more > 1) throw new ProtocolViolation(`DEAD More ${more}`);
+	const count = await r.u62();
+	const moved: { id: bigint; offer: Offer | Unusable }[] = [];
+	// Each entry takes bytes, so the body bounds the count before this loop runs out.
+	for (let i = 0n; i < count; i++) moved.push({ id: await r.u62(), offer: await Message.decode(r, decodeOffer) });
+	return { kind: "closed", hop, far, gone: gone === 1, more: more === 1, moved };
 }
 
 /** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or
@@ -386,11 +467,15 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 		case "routeStart":
 			if (msg.node === 0n) throw new Error("Node ID 0 names no origin");
 			await w.u62(msg.node);
-			await encodeAdvert(w, msg.advert);
+			await w.string(Path.encode(msg.suffix));
+			await encodeOffer(w, msg.offer);
 			break;
 		case "routeUpdate":
 			await w.u62(msg.id);
-			await encodeAdvert(w, msg.advert);
+			await encodeOffer(w, msg.offer);
+			break;
+		case "dead":
+			await encodeDead(w, msg.dead);
 			break;
 		case "routeHold":
 		case "routeEnd":
@@ -433,6 +518,7 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 		case "routeUpdate":
 		case "routeHold":
 		case "routeEnd":
+		case "dead":
 		case "floor":
 			if (!hasRoutes(version)) throw new Error("routes not supported for this version");
 			return {
@@ -440,6 +526,7 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 				routeUpdate: ROUTE_UPDATE,
 				routeHold: ROUTE_HOLD,
 				routeEnd: ROUTE_END,
+				dead: DEAD,
 				floor: ANNOUNCE_FLOOR,
 			}[msg.status];
 		case "ended":
@@ -482,19 +569,30 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ROUTE_START: {
 			if (!hasRoutes(version)) break;
 			const node = await r.u62();
-			const advert = node === 0n ? await refuseNode(r) : await decodeAdvert(r);
-			if (typeof advert === "string")
-				return { status: "refused", message: { kind: "routeStart", node }, reason: advert };
-			return { status: "routeStart", node, advert };
+			// The suffix is sized, so the offer's path reads even when it is refused.
+			const text = utf8(await r.read(await r.u53()));
+			const suffix = text === undefined ? undefined : Path.tryDecode(text);
+			const offer = await decodeOffer(r);
+			if (node !== 0n && suffix !== undefined && !("refused" in offer))
+				return { status: "routeStart", node, suffix, offer };
+			const reason = node === 0n ? "node" : suffix === undefined ? "path" : (offer as Unusable).refused;
+			return { status: "refused", message: { kind: "routeStart", node, suffix, path: offer.path }, reason };
 		}
 		case ROUTE_UPDATE: {
 			if (!hasRoutes(version)) break;
 			const id = await r.u62();
-			const advert = await decodeAdvert(r);
-			if (typeof advert === "string")
-				return { status: "refused", message: { kind: "routeUpdate", id }, reason: advert };
-			return { status: "routeUpdate", id, advert };
+			const offer = await decodeOffer(r);
+			if ("refused" in offer)
+				return {
+					status: "refused",
+					message: { kind: "routeUpdate", id, path: offer.path },
+					reason: offer.refused,
+				};
+			return { status: "routeUpdate", id, offer };
 		}
+		case DEAD:
+			if (!hasRoutes(version)) break;
+			return { status: "dead", dead: await decodeDead(r) };
 		case ROUTE_HOLD:
 			if (!hasRoutes(version)) break;
 			return { status: "routeHold", id: await r.u62() };
@@ -577,41 +675,6 @@ export async function decodeAnnounceBroadcastMaybe(
 		return Message.decode(r, (r) => decodeAnnounce06Body(r, typ, version));
 	}
 	return Message.decodeMaybe(r, (r) => decodeLegacyBody(r, version));
-}
-
-/** Encode one subscriber reply on a lite-07 Announce Stream. */
-export async function encodeAnnounceReply(w: Writer, msg: AnnounceReply, version: Version): Promise<void> {
-	if (!hasRoutes(version)) throw new Error("routes not supported for this version");
-	if (msg.kind === "echo") return Message.encode(w, (w) => w.u62(msg.id), { id: ROUTE_END });
-	if (msg.node === 0n) throw new Error("Node ID 0 names no origin");
-	return Message.encode(
-		w,
-		async (w) => {
-			await w.u62(msg.node);
-			await w.u62(msg.seqno);
-		},
-		{ id: ROUTE_REQUEST },
-	);
-}
-
-/** Decode one subscriber reply, or `undefined` on a clean FIN. Any other type is a violation. */
-export async function decodeAnnounceReplyMaybe(r: Reader, version: Version): Promise<AnnounceReply | undefined> {
-	if (!hasRoutes(version)) throw new Error("routes not supported for this version");
-	if (await r.done()) return undefined;
-	const typ = await r.u53();
-	return Message.decode(r, async (r): Promise<AnnounceReply> => {
-		switch (typ) {
-			case ROUTE_REQUEST: {
-				const node = await r.u62();
-				if (node === 0n) throw new ProtocolViolation("Node ID 0 names no origin");
-				return { kind: "request", node, seqno: await r.u62() };
-			}
-			case ROUTE_END:
-				return { kind: "echo", id: await r.u62() };
-			default:
-				throw new ProtocolViolation(`unexpected announce reply type ${typ}`);
-		}
-	});
 }
 
 /**

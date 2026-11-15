@@ -16,7 +16,7 @@ fn chain(watch: &[&str], per: usize) -> Sim {
 	sim.join(origin, relay, 1);
 	sim.join(relay, client, 1);
 	sim.watch_all(client, watch);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	for room in ROOMS {
 		for i in 0..per {
 			sim.announce(origin, &format!("{room}/{i}"), 0, None);
@@ -152,7 +152,7 @@ fn an_edit_crossing_a_dead_hop_and_a_hold_settles() {
 		sim.join(r2, client, 1);
 		sim.join(r1, r2, 1);
 		sim.watch_all(client, &["live/a"]);
-		sim.originate(origin, 7, 0);
+		sim.originate(origin, 7);
 		sim.announce(origin, "live/a/x", 0, None);
 		sim.announce(origin, "live/b/y", 0, None);
 		assert!(sim.run());
@@ -204,7 +204,7 @@ fn narrowing_keeps_the_route_the_sender_would_reflect() {
 	sim.join(origin, client, 1);
 	sim.join(r1, client, 1);
 	sim.watch_all(client, &["live/a"]);
-	sim.originate(origin, 7, 0);
+	sim.originate(origin, 7);
 	sim.announce(origin, "live/a/x", 0, None);
 	assert!(sim.run());
 	assert_eq!(sim.next_hop(client, 7), Some(origin));

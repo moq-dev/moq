@@ -213,7 +213,7 @@ impl Mesh {
 	/// before its links.
 	pub fn origin(&mut self, node: Node, id: Id) {
 		self.sim.leaf(node);
-		self.sim.originate(node, id, 0);
+		self.sim.originate(node, id);
 		self.sim.announce(node, "live", 0, None);
 		self.origins.insert(id, node);
 	}

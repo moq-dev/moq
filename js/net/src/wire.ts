@@ -62,8 +62,11 @@ export interface OriginProducer {
 	interests(listener: InterestListener): Dispose;
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
-	/** Land a route a peer announced, taken as given and never forwarded back to a peer. */
-	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Claim;
+	/**
+	 * Land a route a peer announced, taken as given and never forwarded back to a peer. `covers`,
+	 * when set, says per request whether it serves a path strictly beneath `prefix`.
+	 */
+	receive(prefix: Path.Valid, route?: Partial<WireRoute>, covers?: (path: Path.Valid) => boolean): origin.Claim;
 	attach(discovery: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
@@ -164,6 +167,11 @@ export interface Established {
 	 * keeps serving.
 	 */
 	leave(): void;
+	/**
+	 * Whether the session's claim of origin `node` at `at` may serve a request for `path` beneath
+	 * it: lite-07's floors. Unset where every claim covers its subtree.
+	 */
+	covers?(node: bigint, at: Path.Valid, path: Path.Valid): boolean;
 	// private: plumbing
 	/**
 	 * This session's side of its auth handle.

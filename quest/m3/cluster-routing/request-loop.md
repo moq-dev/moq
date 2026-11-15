@@ -42,10 +42,6 @@ and one still unanswered when it forms. Check which relay state carries the
 pending request (the front in `rs/moq-net/src/model/front.rs`, and how
 `route/node.rs` `home`s it) before choosing where the fix goes.
 
-## Required
-
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the sessions whose next hops can loop
-
 ## Related
 
 - [A dual-homed publisher stays reachable while one link flaps](/quest/m2/cluster-routes/flapping-publisher.md) - another failure mode from the same BGP comparison

@@ -63,17 +63,19 @@ import { Budget } from "../util/yield.ts";
 import { hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
-	type Advert,
 	AnnounceHistory,
 	AnnounceInit,
 	AnnounceOk,
 	type Refusal as AnnounceRefusal,
 	AnnounceRequest,
 	type Base,
+	type Dead,
 	decodeAnnounceBroadcastMaybe,
-	encodeAnnounceReply,
+	type Offer,
 	type Refusable,
 	ROUTE_MAX_HOPS,
+	type RouteHop,
+	type Unusable,
 } from "./announce.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
@@ -158,9 +160,10 @@ interface SubscribeSetup {
  */
 interface Consumed {
 	readonly instance?: Instance.Valid;
-	// The origin node every request names (lite-07): the one the route selected at consume
-	// reaches, or 0 to leave the choice to the publisher.
+	// The publisher node every request names (lite-07): the one the route selected at consume
+	// reaches, or 0 to leave the choice to the publisher, and the depth of that route's prefix.
 	readonly node?: bigint;
+	readonly depth?: number;
 	readonly id?: number;
 	readonly valid?: AbortSignal;
 	// Aborted once another stream takes the path, which may answer a request without an instance
@@ -168,10 +171,12 @@ interface Consumed {
 	readonly answering?: AbortSignal;
 }
 
-// What a request names to pin it: the serving instance, and on lite-07 its origin node.
+// What a request names to pin it: the serving instance, and on lite-07 its publisher node and the
+// depth of the route's prefix.
 interface Pin {
 	readonly instance?: Instance.Valid;
 	readonly node?: bigint;
+	readonly depth?: number;
 }
 
 interface DatagramEntry {
@@ -1021,7 +1026,7 @@ export class Subscriber {
 	// origin ranks routes, and a consume pins its requests to that claim's origin node. A claim
 	// another stream's newer floor withdrew or replaced is held back until this stream catches up
 	// (see `Floors`). Mirrors `subscriber/routed.rs` in rs/moq-net for a node that forwards
-	// nothing: it holds no feasibility distance, so it never sends a ROUTE_REQUEST.
+	// nothing: an endpoint applies the peer's withdrawals and holds, and casts no doubt.
 	async #receiveRouted(
 		stream: Stream,
 		announced: announce.Producer,
@@ -1037,10 +1042,17 @@ export class Subscriber {
 		type Route = {
 			id: bigint;
 			node: bigint;
+			// The prefix it covers, the requested one joined with the peer's suffix, or undefined when
+			// this node refused that suffix, which leaves the route refused for good.
+			prefix: Path.Valid | undefined;
+			// The path the peer last named, kept while this node refuses the rest, so a DEAD finds it.
+			path: RouteHop[];
 			// Undefined while this node refuses what the peer forwarded: no route at all, its claims
-			// offline, until a ROUTE_UPDATE it can use. Mirrors rs/moq-net.
-			advert: Advert | undefined;
-			// ROUTE_HOLD: no usable path to the origin, until the next ROUTE_UPDATE.
+			// offline, until an offer it can use. Mirrors rs/moq-net.
+			offer: Offer | undefined;
+			// A DRAIN named a node on its path since its last offer: it ranks last.
+			drain: boolean;
+			// ROUTE_HOLD, or a DEAD that held it: no usable path to the publisher, until its next offer.
 			held: boolean;
 			// The Announce ID of each live claim, by path: one per path, checked by lookup.
 			claims: Map<Path.Valid, bigint>;
@@ -1068,8 +1080,10 @@ export class Subscriber {
 		// A claim refused has no `claim` until a restart names all of it, and one refused before its
 		// path has no `path` either, and never will.
 		const claims = new SlotMap<bigint, { route: bigint; path?: Path.Valid; claim?: Claim }>(this.#announces);
-		// The origin nodes with a live route here: at most one route each.
-		const nodes = new Set<bigint>();
+		// The live route to each publisher node and prefix: at most one each.
+		const named = new Map<string, bigint>();
+		const key = (node: bigint, at: Path.Valid | undefined) =>
+			at === undefined || node === 0n ? undefined : `${node} ${at}`;
 		// The routes whose committed claims include each path.
 		const byPath = new Map<Path.Valid, Set<bigint>>();
 		// What each visible path reports; see `refresh`.
@@ -1145,27 +1159,38 @@ export class Subscriber {
 			else wire.pending.set(path, claim);
 		};
 
+		// Whether this node takes what the peer offers for the route at all: not a refused offer or
+		// suffix, nor a route to the reserved node. Only such a route joins the node's floors.
+		const joined = (wire: Route): wire is Route & { offer: Offer; prefix: Path.Valid } =>
+			wire.offer !== undefined && wire.prefix !== undefined && wire.node !== 0n;
 		// A route is no route at all once it crossed as many nodes as one may, or crossed us: a copy
 		// of our own route, come back.
-		const usable = (wire: Route): wire is Route & { advert: Advert } =>
-			wire.advert !== undefined &&
-			wire.advert.hops.length < ROUTE_MAX_HOPS &&
-			!wire.advert.hops.includes(this.hop);
+		// The same, without narrowing, to compare a route before and after it changes.
+		const filed = (wire: Route): boolean => joined(wire);
+		const usable = (wire: Route): wire is Route & { offer: Offer; prefix: Path.Valid } =>
+			joined(wire) &&
+			wire.offer.path.length < ROUTE_MAX_HOPS &&
+			!wire.offer.path.some((hop) => hop.node === this.hop);
 
 		// A claim through this session: its cost plus the route's metric, past this session's link
-		// cost of 1 as Rust's default, and unavailable while the route is held.
-		const candidate = (wire: Route & { advert: Advert }, claim: Claim): WireRoute =>
+		// cost of 1 as Rust's default, ranked last while a node on its path drains, then by the
+		// lowest priority on its path, past this link's 0 as Rust's default, and unavailable while
+		// the route is held. Requests through it name its publisher and its prefix's depth.
+		const candidate = (wire: Route & { offer: Offer; prefix: Path.Valid }, claim: Claim): WireRoute =>
 			this.#drained(
 				WireRoute.normalize({
 					instance: claim.instance,
 					epoch: claim.epoch,
-					cost: claim.cost + wire.advert.metric + 1n,
+					cost: claim.cost + wire.offer.metric + 1n,
 					node: wire.node,
+					depth: Path.parts(wire.prefix).length,
+					priority: Math.min(0, wire.offer.priority),
+					draining: wire.offer.draining || wire.drain || undefined,
 					available: !wire.held,
 					// The relay's sum plus this link's own, unknown while either is.
 					rtt:
-						wire.advert.rtt !== undefined && linkRtt !== undefined
-							? linkRtt.checkedAdd(Duration.millis(Number(wire.advert.rtt)))
+						wire.offer.rtt !== undefined && linkRtt !== undefined
+							? linkRtt.checkedAdd(Duration.millis(Number(wire.offer.rtt)))
 							: undefined,
 				}),
 			);
@@ -1259,17 +1284,30 @@ export class Subscriber {
 			}
 		};
 
-		// The peer started a route to `node` with the next Route ID, reaching it by `advert`, or
-		// undefined when this node refuses what the peer forwarded.
-		const startRoute = async (node: bigint, advert: Advert | undefined) => {
-			// The peer keeps one route per origin node; a refused reserved node is none.
-			if (node !== 0n && nodes.has(node)) throw new ProtocolViolation(`second route to node ${node}`);
+		// The peer started a route to `node` with the next Route ID, covering the requested prefix
+		// joined with `suffix`, along `offer`, or along `path` when this node refuses the offer.
+		const startRoute = async (
+			node: bigint,
+			suffix: Path.Valid | undefined,
+			offer: Offer | undefined,
+			path: RouteHop[],
+		) => {
+			// The interest prefix can push a joined path past the limits: refused too.
+			const joinedPrefix = suffix === undefined ? undefined : Path.join(prefix, suffix);
+			const at = joinedPrefix !== undefined && Path.check(joinedPrefix) === undefined ? joinedPrefix : undefined;
+			const named_ = key(node, at);
+			// The peer keeps one route per publisher and prefix.
+			if (named_ !== undefined && named.has(named_))
+				throw new ProtocolViolation(`second route to node ${node} at ${at}`);
 			const id = nextRoute++;
-			const view: Route["view"] = { prefix, hidden, revision: undefined, claims: new Map() };
+			const view: Route["view"] = { prefix: at ?? prefix, hidden, revision: undefined, claims: new Map() };
 			const wire: Route = {
 				id,
 				node,
-				advert,
+				prefix: at,
+				path,
+				offer,
+				drain: false,
 				held: false,
 				claims: new Map(),
 				unnamed: new Set(),
@@ -1288,14 +1326,35 @@ export class Subscriber {
 			};
 			routes.set(id, wire);
 			const started = sample();
-			if (node !== 0n) nodes.add(node);
+			if (named_ !== undefined) named.set(named_, id);
 			// A refused route's floors stay its own, as Rust's node never holds the route.
-			if (advert !== undefined) this.#floors.join(node, wire.carrier);
+			if (joined(wire)) this.#floors.join(node, wire.carrier);
 			// The link's first read lands before the route's first claims show, as Rust
 			// reads the link before it serves them: a listing reports a path's route when
 			// it turns present and not again for an RTT, so a read landing after would
 			// never reach it.
 			if (started) await race([firstRead, announced.closed]);
+		};
+
+		// The peer let go of the route and every claim under it: offline, not withdrawn.
+		const endRoute = (wire: Route) => {
+			for (const id of [...wire.claims.values(), ...wire.unnamed]) {
+				history.end(id);
+				claims.delete(id);
+			}
+			routes.delete(wire.id);
+			sample();
+			const named_ = key(wire.node, wire.prefix);
+			if (named_ !== undefined && named.get(named_) === wire.id) named.delete(named_);
+			// Unindexed first: leaving its floors reshows another carrier at once, which
+			// refreshes these paths and so looks up every route indexed there.
+			for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(wire.id);
+			// What its last floor certified stays, so no other stream's lagging claim revives.
+			this.#floors.leave(wire.node, wire.carrier);
+			wire.shown.clear();
+			refreshRoute(wire, true);
+			this.#consumes.revalidate();
+			for (const path of wire.view.claims.keys()) if (byPath.get(path)?.size === 0) byPath.delete(path);
 		};
 
 		// A claim the peer started under `routeId` with the next Announce ID, at `path` unless this
@@ -1318,29 +1377,97 @@ export class Subscriber {
 				return;
 			}
 			if (wire.claims.has(named)) throw new ProtocolViolation(`route ${routeId} claims ${named} twice`);
+			// A route covers only the claims at or below its prefix.
+			if (wire.prefix !== undefined && !Path.hasPrefix(wire.prefix, named))
+				throw new ProtocolViolation(`route ${routeId} at ${wire.prefix} claims ${named}`);
 			claims.set(id, { route: routeId, path: named, claim });
 			wire.claims.set(named, id);
 			if (claim) change(routeId, named, claim);
 			else wire.withheld.add(id);
 		};
 
-		// The route now reaches its node by `advert`, or undefined while this node refuses what the
-		// peer forwarded. A refused route leaves the node's floors, as an ended one does, and joins
-		// again once usable, with what its last floor certified, as rs/moq-net files it again.
-		const reach = (wire: Route, advert: Advert | undefined) => {
-			const joined = wire.advert !== undefined;
-			// The reserved node names no route, whatever the peer forwards for it.
-			wire.advert = wire.node === 0n ? undefined : advert;
-			if (joined && wire.advert === undefined) {
+		// The route now reaches its node by `offer`, or along `path` while this node refuses what the
+		// peer forwarded. Either way the peer no longer holds it, nor drains a node on it but as the
+		// offer says. A refused route leaves the node's floors, as an ended one does, and joins again
+		// once usable, with what its last floor certified, as rs/moq-net files it again.
+		const reach = (wire: Route, offer: Offer | undefined, path: RouteHop[]) => {
+			const was = filed(wire);
+			wire.offer = offer;
+			wire.path = path;
+			wire.held = false;
+			wire.drain = false;
+			const now = filed(wire);
+			if (was && !now) {
 				this.#floors.leave(wire.node, wire.carrier);
 				// What its floor certified stays as it was, while the route goes on reading claims.
 				wire.view.claims = new Map(wire.view.claims);
 			}
-			if (joined || wire.advert === undefined) return;
+			if (was || !now) return;
 			this.#floors.join(wire.node, wire.carrier);
 			const others = this.#floors.floor(wire.node, wire.carrier);
 			show(wire, new Map(), true);
 			if (others) this.#consumes.revalidate();
+		};
+		// The route moved to `offer`, which this node refuses with its path when it is `Unusable`.
+		const move = (wire: Route, offer: Offer | Unusable) => {
+			const was = filed(wire);
+			if ("refused" in offer) {
+				console.warn(`refusing a forwarded route: node=${wire.node} route=${wire.id} reason=${offer.refused}`);
+				reach(wire, undefined, offer.path);
+			} else {
+				reach(wire, offer, offer.path);
+			}
+			refreshRoute(wire, !usable(wire));
+			// Its floors no longer cover anything, as on ROUTE_END.
+			if (was && !filed(wire)) this.#consumes.revalidate();
+		};
+
+		// The parts of a DEAD read so far, which apply as one once its last arrives.
+		let continued: { hop: RouteHop; far: bigint; gone: boolean; offers: Map<bigint, Offer | Unusable> } | undefined;
+
+		// A DEAD: the stream's routes through the hop it names carry on as it says. A route this
+		// node refuses still follows it, so both ends agree on which routes live. An endpoint casts
+		// no doubt: it never forwards a route, so no detour waits on one.
+		const dead = (news: Dead) => {
+			if (news.kind === "drain") {
+				for (const wire of routes.values()) {
+					if (!wire.path.some((hop) => hop.node === news.node)) continue;
+					wire.drain = true;
+					refreshRoute(wire, false);
+				}
+				return;
+			}
+			// A DEAD in parts applies with its last, each part naming the same hop, far node, and gone.
+			const parts = continued ?? { hop: news.hop, far: news.far, gone: news.gone, offers: new Map() };
+			continued = undefined;
+			const same =
+				parts.hop.node === news.hop.node &&
+				parts.hop.session === news.hop.session &&
+				parts.far === news.far &&
+				parts.gone === news.gone;
+			if (!same) throw new ProtocolViolation("DEAD part names another hop");
+			// Each part names live routes, so what the parts hold stays within the stream's.
+			const offers = parts.offers;
+			for (const { id, offer } of news.moved) offers.set(route(id).id, offer);
+			if (news.more) {
+				continued = parts;
+				return;
+			}
+			const through = [...routes.values()].filter((wire) =>
+				wire.path.some((hop) => hop.node === news.hop.node && hop.session === news.hop.session),
+			);
+			for (const wire of through) {
+				const moved = offers.get(wire.id);
+				const before = wire.path.at(-2);
+				if (moved !== undefined) move(wire, moved);
+				else if (news.gone) endRoute(wire);
+				// The peer learned it from this node, which it holds under: unchanged.
+				else if (before?.node === this.hop) continue;
+				else {
+					wire.held = true;
+					refreshRoute(wire, false);
+				}
+			}
 		};
 
 		// Apply a message whose content, which the peer only forwarded, this node refuses: withdraw
@@ -1349,17 +1476,9 @@ export class Subscriber {
 			switch (message.kind) {
 				case "routeStart":
 					console.warn(`refusing a forwarded route: node=${message.node} reason=${reason}`);
-					return startRoute(message.node, undefined);
-				case "routeUpdate": {
-					const wire = route(message.id);
-					console.warn(`refusing a forwarded route: node=${wire.node} route=${message.id} reason=${reason}`);
-					const joined = wire.advert !== undefined;
-					reach(wire, undefined);
-					refreshRoute(wire, true);
-					// Its floors no longer cover anything, as on ROUTE_END.
-					if (joined) this.#consumes.revalidate();
-					return;
-				}
+					return startRoute(message.node, message.suffix, undefined, message.path);
+				case "routeUpdate":
+					return move(route(message.id), { refused: reason, path: message.path });
 				case "start":
 					console.warn(
 						`refusing a forwarded claim: route=${message.route} claim=${history.next} reason=${reason}`,
@@ -1392,45 +1511,29 @@ export class Subscriber {
 				// undefined: the stream ended. null: the consumer closed cleanly.
 				if (!msg) break;
 				if (msg instanceof Error) throw msg;
+				// The parts of a DEAD arrive back to back.
+				if (continued && !(msg.status === "dead" && msg.dead.kind === "closed"))
+					throw new ProtocolViolation("DEAD part followed by another message");
 
 				switch (msg.status) {
 					case "routeStart":
-						await startRoute(msg.node, msg.advert);
+						await startRoute(msg.node, msg.suffix, msg.offer, msg.offer.path);
 						break;
-					case "routeUpdate": {
-						const wire = route(msg.id);
-						wire.held = false;
-						reach(wire, msg.advert);
-						refreshRoute(wire, !usable(wire));
+					case "routeUpdate":
+						move(route(msg.id), msg.offer);
 						break;
-					}
 					case "routeHold": {
 						const wire = route(msg.id);
 						wire.held = true;
 						refreshRoute(wire, false);
 						break;
 					}
-					case "routeEnd": {
-						// Every claim under the route goes with it: offline, not withdrawn.
-						const wire = route(msg.id);
-						for (const id of [...wire.claims.values(), ...wire.unnamed]) {
-							history.end(id);
-							claims.delete(id);
-						}
-						routes.delete(msg.id);
-						sample();
-						nodes.delete(wire.node);
-						// What its last floor certified stays, so no other stream's lagging claim revives.
-						this.#floors.leave(wire.node, wire.carrier);
-						for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(msg.id);
-						wire.shown.clear();
-						refreshRoute(wire, true);
-						this.#consumes.revalidate();
-						for (const path of wire.view.claims.keys())
-							if (byPath.get(path)?.size === 0) byPath.delete(path);
-						await encodeAnnounceReply(stream.writer, { kind: "echo", id: msg.id }, this.version);
+					case "routeEnd":
+						endRoute(route(msg.id));
 						break;
-					}
+					case "dead":
+						dead(msg.dead);
+						break;
 					case "floor": {
 						// The batch applies whole, at the revision its floor certifies: none while this
 						// node refuses one of the route's claims, which its origin never withdrew.
@@ -1438,8 +1541,8 @@ export class Subscriber {
 						const revision = wire.unnamed.size === 0 && wire.withheld.size === 0 ? msg.revision : undefined;
 						// A floor that certifies less keeps what the route's last one certified.
 						const certified = wire.view.revision;
-						const joined = wire.advert !== undefined;
-						if (joined && certified !== undefined && (revision === undefined || revision < certified))
+						const filed = joined(wire);
+						if (filed && certified !== undefined && (revision === undefined || revision < certified))
 							this.#floors.regress(wire.node, wire.carrier);
 						const touched = new Map<Path.Valid, boolean>();
 						for (const [path, claim] of wire.pending) {
@@ -1467,7 +1570,7 @@ export class Subscriber {
 						wire.view.revision = revision;
 						// Every other route to the node is shown anew first; with one, this route's
 						// unchanged claims may change state too.
-						const others = joined && this.#floors.floor(wire.node, wire.carrier);
+						const others = filed && this.#floors.floor(wire.node, wire.carrier);
 						show(wire, touched, others);
 						// Another view of the node may now cover a consumed path differently.
 						if (others) this.#consumes.revalidate();
@@ -1545,6 +1648,16 @@ export class Subscriber {
 	}
 
 	/**
+	 * Whether the session's claim of origin `node` at `at` may serve a request for `path` beneath
+	 * it: what the node's newest floor certifies there. See `Floors.covers`.
+	 *
+	 * @internal
+	 */
+	covers(node: bigint, at: Path.Valid, path: Path.Valid): boolean {
+		return this.#floors.covers(node, at, path);
+	}
+
+	/**
 	 * Consumes a broadcast from the connection.
 	 *
 	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
@@ -1566,13 +1679,21 @@ export class Subscriber {
 
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
 		const consumes = this.#consumes;
-		const pinned = instance.route.node;
+		const pinned =
+			instance.route.node === undefined
+				? undefined
+				: { node: instance.route.node, depth: instance.route.depth ?? 0 };
+		// The best route now serving the instance, which moves with failover even once another
+		// instance wins the path; the one it first resolved through once none does.
+		const target = (instance: Instance.Valid | undefined) =>
+			(instance !== undefined ? consumes.node(path, instance) : undefined) ?? pinned;
 		const consumed = {
 			instance: instance.route.instance,
-			// The node of the best route now serving the instance, which moves with failover even
-			// once another instance wins the path; the one it first resolved through once none does.
 			get node() {
-				return (this.instance !== undefined ? consumes.node(path, this.instance) : undefined) ?? pinned;
+				return target(this.instance)?.node;
+			},
+			get depth() {
+				return target(this.instance)?.depth;
 			},
 			id: this.#consumeNext++,
 			get valid() {
@@ -1671,6 +1792,7 @@ export class Subscriber {
 							broadcast: path,
 							instance: consumed.instance,
 							node: consumed.node,
+							depth: consumed.depth,
 							track: request.name,
 							priority,
 						}).encode(opened.writer, this.version);
@@ -1829,7 +1951,10 @@ export class Subscriber {
 			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
 			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
-			await new TracksMessage(broadcast, consumed.instance, consumed.node).encode(stream.writer, this.version);
+			await new TracksMessage(broadcast, consumed.instance, consumed.node, consumed.depth).encode(
+				stream.writer,
+				this.version,
+			);
 			let synced = false;
 			const answering = consumed.answering;
 			let unanswered = answering ? AbortSignal.any([stop, answering]) : stop;
@@ -2039,6 +2164,7 @@ export class Subscriber {
 			broadcast,
 			instance: consumed.instance,
 			node: consumed.node,
+			depth: consumed.depth,
 			track: name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
@@ -2372,7 +2498,7 @@ export class Subscriber {
 	// stays open, as interest in the track, until the caller closes it.
 	async #trackInfo(
 		broadcast: Path.Valid,
-		{ instance, node }: Pin,
+		{ instance, node, depth }: Pin,
 		track: string,
 		signal: AbortSignal | undefined,
 		deadline: Deadline,
@@ -2381,7 +2507,7 @@ export class Subscriber {
 			{ version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Track);
-				await new TrackMessage(broadcast, track, instance, node).encode(stream.writer, this.version);
+				await new TrackMessage(broadcast, track, instance, node, depth).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
 				return { info, stream };
 			},
@@ -2589,7 +2715,7 @@ export class Subscriber {
 		deadline: Deadline,
 		maxDelay?: Duration,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const { instance, node, valid } = consumed;
+		const { instance, node, depth, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
@@ -2609,6 +2735,7 @@ export class Subscriber {
 						broadcast,
 						instance,
 						node,
+						depth,
 						track,
 						priority,
 						maxDelay:
@@ -3067,6 +3194,7 @@ export class Subscriber {
 								broadcast,
 								instance: consumed.instance,
 								node: consumed.node,
+								depth: consumed.depth,
 								track: name,
 								priority,
 								maxDelay,

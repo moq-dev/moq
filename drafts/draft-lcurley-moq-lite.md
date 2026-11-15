@@ -39,7 +39,6 @@ normative:
 informative:
   I-D.lcurley-moq-cluster:
   RFC7627:
-  RFC8966:
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
     target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
@@ -402,15 +401,16 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 ### Announce
 A subscriber can open an Announce Stream to discover claims matching a prefix.
 A claim is an announcement that paths under its prefix can be served by one origin node; it claims capability, not inventory, so it never asserts that any specific broadcast exists.
-A route is how the publisher reaches an origin node, and every claim on the stream travels under the route to its origin (see [Routing](#routing)).
+A route is how the publisher reaches an origin node for the paths under a prefix, and every claim on the stream travels under a route to its origin covering it (see [Routing](#routing)).
 
 The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by the matching routes and claims and any future changes:
 
-- ROUTE_START: the publisher reaches an origin node.
-- ROUTE_UPDATE: a route's seqno, metric, down-only bit, RTT, or hops changed.
+- ROUTE_START: the publisher reaches an origin node for a prefix.
+- ROUTE_UPDATE: a route's path, drain, priority, metric, down-only bit, or RTT changed.
 - ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
 - ROUTE_END: the publisher let go of a route and every claim under it.
+- DEAD: a session on the path of routes the publisher sent closed, or a node on it sent a GOAWAY.
 - ANNOUNCE_START: a matching claim of a route's origin node.
 - ANNOUNCE_END: the origin withdrew a claim.
 - ANNOUNCE_UPDATE: a claim's cost changed.
@@ -421,7 +421,7 @@ The publisher replies with a single ANNOUNCE_OK message followed by the matching
 - WARM_END: the publisher withdrew a warm route.
 - SYNCED: the initial set is complete.
 
-In the other direction, the subscriber sends ROUTE_REQUEST and echoes every ROUTE_END (see [Routing](#routing)).
+The subscriber sends nothing on the stream after its ANNOUNCE_REQUEST.
 
 The publisher MUST send [SYNCED](#synced) exactly once, after the initial set.
 The subscriber MAY batch messages until SYNCED; subsequent ones are live updates.
@@ -430,15 +430,15 @@ The publisher MAY coalesce changes to a claim it has not yet sent, and sends no 
 A retraction of a claim or route already sent MAY precede SYNCED.
 
 Each ROUTE_START implicitly assigns the next Route ID on the stream, each ANNOUNCE_START the next Announce ID, and each WARM_START the next Warm ID: three counters starting at 0 that increment by 1 per assignment.
-No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node, the claim's prefix, or the warm route's path.
+No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node and the route's prefix, the claim's prefix, or the warm route's path.
 Ids are never reused within a stream.
 A ROUTE_END retires its Route ID, the Announce ID of every claim under the route, and the Warm ID of every warm route under it; an ANNOUNCE_END retires one Announce ID, and a WARM_END one Warm ID.
 
-A stream has at most one live route per origin node, and each route at most one live claim per prefix.
+A stream has at most one live route per origin node and prefix, and each route at most one live claim per prefix, at or below the route's prefix.
 Another origin claiming the same prefix is another claim, under its own route.
 An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping its id live; a claim never moves to another route.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START for a prefix its route already claims, or any message before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node and prefix that already have a live route on the stream, an ANNOUNCE_START for a prefix its route already claims or outside the route's prefix, or any message before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that every route and claim on it is gone.
 
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except in a claim, which it refuses instead (see [Refused Content](#refused-content)), including one resolved by [Compression](#announce-compression).
@@ -452,16 +452,18 @@ Each origin node numbers the changes to its own claims with a Revision, starting
 A stream carries a route's claims in batches: the ANNOUNCE messages under the route since its last ANNOUNCE_FLOOR, closed by the next one.
 The publisher sends a ROUTE_START before any claim under it, and SYNCED only once every route it sent has a floor.
 
-A floor names a Revision and certifies that the stream's claims for the route, across the whole requested prefix, are the origin's claims at that Revision as the request presents them (see [Announce](#announce)).
+A floor names a Revision and certifies that the stream's claims for the route, across the route's whole prefix, are the origin's claims at that Revision as the request presents them (see [Announce](#announce)).
 It certifies only what its own request shows: a stream whose ANNOUNCE_REQUEST did not set `Hidden` certifies nothing about hidden claims.
-A publisher that does not know the route's claims across the whole requested prefix at one Revision, such as a relay that knows them only beneath part of it, still closes each batch, with a floor that certifies nothing.
+A publisher that does not know the route's claims across its whole prefix at one Revision, such as a relay that knows them only beneath part of it, still closes each batch, with a floor that certifies nothing.
 A subscriber that may receive claims only beneath one prefix, because its [scope](#auth-stream) or the publisher's confines the stream there, SHOULD request that prefix rather than one above it, so the publisher can certify the request. When that prefix changes, it SHOULD open a request for the new one and end the old one once the new one is SYNCED.
 
 The subscriber applies a batch whole, once its floor arrives.
-A receiver that hears one origin's claims on several streams merges them claim by claim, each at the prefix its stream presents it: of the streams whose floor certifies the claim, the one with the highest Revision decides whether it exists, and a claim no floor certifies exists while some stream carries it.
+A receiver keeps one view of an origin's claims for each prefix it holds a route to the origin at: the claims of the floor with the highest Revision that a route it believes, at that prefix or one covering it, gave it.
+It believes a route while the route is usable, its Path does not name the receiver, and its stream answers the receiver's current request; a held route, or one the receiver refused, certifies nothing.
 An older floor never revives a claim whose withdrawal a newer one delivered.
-A floor that certifies nothing proves no claim absent: the stream's claims stay until its ANNOUNCE_END or ROUTE_END.
-While a receiver has a usable route to the origin and every peer whose last advertised route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
+While no route it believes has given a floor that certifies the prefix, the view holds the claims its selected route carries there, uncertified: a floor that certifies nothing proves no claim absent.
+The view stays whole while the receiver holds a route covering the prefix, usable or held, and the receiver shows each claim from the view at the narrowest prefix covering it, available while a usable route covers it.
+Once the receiver holds no route covering the prefix, the view's claims go offline, which is not an ANNOUNCE_END.
 
 #### Compression {#announce-compression}
 An ANNOUNCE_START MAY copy the head of its path from a live claim on the same stream, its base.
@@ -474,16 +476,16 @@ The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `P
 A resolved path that breaks its own rules, or a base whose path the subscriber refused, refuses the claim (see [Refused Content](#refused-content)).
 
 #### Refused Content {#refused-content}
-Route messages carry content the publisher may only have forwarded: a route's Node ID, Seqno, Flags, and Hops, a claim's path, Instance, and Lite-06 Chain, and a warm route's path, Instance, Flags, and Hops.
+Route messages carry content the publisher may only have forwarded: a route's Node ID, Route Suffix, and [Route Offer](#route-offer), a claim's path, Instance, and Lite-06 Chain, and a warm route's path, Instance, Flags, and Hops.
 A newer version or release may send such content that an older receiver cannot use, so a receiver that refuses it withdraws only the route or claim it describes and keeps the session, as BGP treats a malformed attribute as a withdrawal ({{?RFC7606}}).
 This specification marks each such value "refused"; the receiver skips the rest of the message's body, and SHOULD log and count each refusal so a refused route is never silently missing.
 
-- A refused ROUTE_START still assigns its Route ID, and a refused ROUTE_UPDATE keeps it; either leaves the receiver no route, so its claims go offline as on ROUTE_END. The messages naming the Route ID stay valid, and a later ROUTE_UPDATE the receiver can use makes the route usable again, with the claims its last floor certified. A route to Node ID 0 stays refused.
+- A refused ROUTE_START still assigns its Route ID, and a refused ROUTE_UPDATE, or a refused Route Offer among a [DEAD](#dead)'s moved routes, keeps it; each leaves the receiver no route, so its claims go offline as on ROUTE_END. The messages naming the Route ID stay valid, and a later ROUTE_UPDATE the receiver can use makes the route usable again, with the claims its last floor certified. A route to Node ID 0, or whose Route Suffix was refused, stays refused. A refused Route Offer's Path still counts, so a later DEAD naming a hop on it applies to the route as to any other.
 - A refused ANNOUNCE_START still assigns its Announce ID, and a refused ANNOUNCE_UPDATE or ANNOUNCE_RESTART keeps it; the claim goes offline at its route's next floor, which is not an ANNOUNCE_END. A claim whose path was refused stays refused; any other comes back with a later ANNOUNCE_RESTART the receiver can use. Its origin withdrew nothing, so while a route has a live claim the receiver refused, the receiver takes the route's floors as certifying nothing, and a relay forwards no withdrawal for the claim.
 - A refused WARM_START still assigns its Warm ID.
 
 Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, such as an RTT flag without its RTT, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
-A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 Hops is unusable, so the relay's Hop never takes one past 32.
+A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 hops is unusable, so the relay's own hop never takes one past 32.
 
 #### Hidden Paths {#hidden}
 A claim is hidden from a request when a segment of its path below the requested prefix starts with `.` (0x2E).
@@ -495,7 +497,9 @@ Hiding is a convenience for discovery, not access control: a publisher MAY treat
 SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
 
 #### Routing {#routing}
-Routing follows the Babel routing protocol [RFC8966], keyed by origin node: each node selects one route per origin node and advertises it to its neighbours.
+Each node selects, per origin node and prefix, one route by its path: the nodes it crossed, each with the session it was learned on.
+A node never uses a route whose path names it, and a node that loses a session names that hop to its neighbours, so every route through it is dropped wherever it went.
+There is no distance, sequence number, route request, or echo.
 
 An origin node names itself with a Node ID: a non-zero 64-bit value, fresh for each process restart and shared by every session of that process.
 An origin MUST NOT declare a Node ID with the most significant bit set.
@@ -504,20 +508,25 @@ The derivation is keyed by the key the peer proved with the [Route Key Parameter
 A relay MUST ignore a qualified Node ID received from such a peer, and claims under its qualified Node IDs outside that peer's grant.
 A Node ID is otherwise declared, not proven.
 
-An origin advertises its own route with a Metric of 0 and a Seqno that only it advances.
+A route covers a prefix: the one its receiver requested, or a narrower one that a node on its path requested.
+A stream answering a request carries the sender's route to each origin node at every prefix inside the request, under that prefix, and at the requested prefix itself the best-ranked usable route covering it.
+A node keeps, ranks, and selects its routes per origin node and prefix.
+
+An origin advertises its own route with a Metric of 0.
 A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the Metric of every route the peer sends; the sum is its metric through that peer.
 Each link adds at least 1, so a route's metric strictly increases away from its origin.
 A metric that overflows 64 bits makes the route unusable.
 
-A route carries its Hops: the Hop ID of every node it crossed, the origin node first and the sender last.
-A Hop ID is a non-zero 64-bit value a node names itself with for as long as its process runs, such as the Node ID it started with; a rotation does not change it.
-A receiver tolerates a zero or repeated Hop ID instead of closing the session: such a route harms only itself.
-A node sending its selected route appends its own Hop ID to the Hops it received, and an origin's own route starts with its Hop ID alone.
-A relay forwards the other entries unchanged and never qualifies them.
-A route that arrives with 32 Hops is unusable.
+A route carries its Path: one hop per node it crossed, the origin node first and the sender last.
+A hop names a node by its Hop ID, and the session the node learned the route on by its Session Number.
+A Hop ID is a non-zero 64-bit value a node names itself with for as long as its process runs, such as the Node ID it started with; a rotation of its Node ID does not change it.
+A node numbers each session it opens or accepts with a Session Number of its own, unique among its sessions for as long as its process runs, so a restarted process MUST take a new Hop ID.
+An origin's own route has a Path of its own hop alone, with Session Number 0, and a node sending a route it learned appends its own hop, naming the session it learned the route on.
+A relay forwards the other hops unchanged and never qualifies them.
+A route that arrives with 32 hops is unusable, since the receiver's own hop would take it past 32.
 
 A route may also carry an RTT: the round trip to its origin node in milliseconds, summed link by link.
-It is informational: nothing ranks or selects a route, or judges it feasible, by its RTT.
+It is informational: nothing ranks or selects a route by its RTT.
 An origin advertises its own route with an RTT of 0.
 A receiver adds its link min RTT for the session to the RTT of every route the peer sends; the sum is its RTT through that peer, which it advertises on the route it selects.
 A link min RTT is the lowest smoothed RTT [RFC9002] the connection measured over the last 30 seconds, read once a second, in milliseconds rounded up.
@@ -528,38 +537,23 @@ A sum too large to encode is sent without one too.
 An endpoint learns its round trip to an origin node by adding its own link min RTT to the RTT of the route it selected; without its own, the RTT alone covers every hop past its first.
 Like the Metric, an RTT is unverified: a peer can misstate only what crosses it.
 
-A node keeps a feasibility distance per Node ID: the highest Seqno of any route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
-A route is feasible when no feasibility distance is kept for its Node ID yet, when its Seqno is greater than the distance's, or when its Seqno is equal and its advertised Metric is lower.
-A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
-It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
-It MUST NOT select a route whose Hops name it either, feasible or not: that is a copy of a route the node sent, which no distance refuses once the node dropped it.
-Such a route counts below as an infeasible route where the feasibility condition refuses it, and as no route where it does not: its sender routes through the node, and moves once it hears the node has no route.
-Under a qualified Node ID it counts only if its Hops also begin with those of the route the node last sent under that Node ID: otherwise a relay past the node derived the Node ID from the node's route under another, and that copy stands whatever the node does.
+A route is draining when a node on its Path sent a GOAWAY, as the route's draining flag or a [DEAD](#dead) says, or when its session received one.
+Its priority is the lowest local priority of a session on its Path: a receiver takes the lower of the priority the route carries and its own local priority for the session, and an origin's own route carries the highest.
+A node ranks its usable routes to an origin node at a prefix: one that is not draining first, then the highest priority, then the lowest metric.
+Extending a route never clears its drain, never raises its priority, and always raises its metric, so no node ranks a route above how the neighbour it came from ranked it, and selection converges.
+A node selects its best-ranked usable route at once.
+A route is unusable while its Path names the node, it is held, a hop on its Path is dead, a node on its Path is in doubt (see [Dead Hops](#dead-hops)) unless it is the route the node already uses, it arrived with 32 hops, or its metric overflows.
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its down-only flag set; a node sends a down-only route with the flag set, and never on an upstream session.
 
-A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch carrying that withdrawal, closed by its floor (which certifies the withdrawal where the node can certify the request), then ROUTE_END. It starts that route on the stream again only once the subscriber echoed the ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
-A node that does not forward, such as a client, sends only its own route, and holds no feasibility distance for any other.
-An origin advances its Seqno whenever its own set of sessions changes.
-It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
+A node sends its route to an origin node at a prefix on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch carrying that withdrawal, closed by its floor (which certifies the withdrawal where the node can certify the request), then ROUTE_END.
+A subscriber therefore holds no route for an origin node its request does not meet.
+A node that does not forward, such as a client, sends only its own route.
+An origin never advertises a Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
 
-A node with no usable route to an origin node holds it while it can still recover: while every route it has to the node is infeasible, or a peer holds a route whose last advertisement is feasible here.
-A held route travels as a ROUTE_HOLD, and its claims stay shown but unavailable until a ROUTE_UPDATE makes it usable again.
-Otherwise the node lets go, sending ROUTE_END wherever it advertised the route, and its claims go offline.
-Neither proves that the origin withdrew its claims.
-
-A node whose routes to an origin node are all infeasible sends a ROUTE_REQUEST with its distance's Seqno plus 1 to the peer whose route it would select were it feasible.
-A node holding a selected route at least that new answers by advertising it, and the origin answers by raising its Seqno to at least the requested one; a request for 2^64-1 rotates the origin's Node ID.
-Any other node forwards the request to the peer whose route it would select, even the requester.
-Every node keeps one pending request per origin node, its own or forwarded, at the highest Seqno requested, dropping requests no newer, until it selects a route at least that new or has no route left, and sends it again whenever its Seqno rises or that peer changes.
-
-The receiver of a ROUTE_END echoes it back on the same stream once it dropped the route.
-A node drops a feasibility distance once no peer's route to the node is left open, it advertises none, and every ROUTE_END it sent for it was echoed; a closed session counts as an echo.
-No peer then routes through the node, and the Hops refuse any copy of its own route that still returns.
-
-A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it.
-A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node it selected or was given.
-A relay forwards a request naming an origin node only on its selected route to that node, or a SUBSCRIBE through the neighbor [Warm Routes](#warm-routes) chooses for its broadcast, and resets it with UNROUTABLE when it has no usable route to it, so the request never reaches another origin.
+A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it, and the Route Depth of the route it follows: how many leading segments of its Broadcast Path make up the route's prefix.
+A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node and Route Depth of the route it selected or was given.
+A relay forwards a request naming an origin node only along the route it sent the requester to that node at that prefix, or a SUBSCRIBE through the neighbor [Warm Routes](#warm-routes) chooses for its broadcast, and resets it with UNROUTABLE when that route is no longer usable or its Path names the requester, so the request never reaches another origin or loops.
 
 Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
@@ -567,6 +561,47 @@ When another Broadcast wins the path, subscriptions already open stay on theirs 
 A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced claim.
 A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance with `Minted` set, so a reader can tell it names an announcement rather than the publisher's stream.
 A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
+
+#### Dead Hops {#dead-hops}
+A node that loses a session names the hop it lost: its own Hop ID and that session's Session Number, with the Hop ID of the node at the far end.
+It sends one [DEAD](#dead) for it to each neighbour it sent a route whose Path holds the hop, covering every origin node, and each neighbour passes the hop on in the same way, once per neighbour while it has sent that neighbour a route through it.
+The DEAD lists the routes on the stream that moved to another Path, each with its new Route Offer.
+A sender whose moved routes do not fit one message lists them over consecutive DEADs naming the same hop, each but the last with `More` set, and the receiver applies them as one DEAD listing all of them once the last arrives.
+The sender's other routes on the stream through the hop end if `Gone` is set.
+Otherwise each is held, except one the sender ends with a ROUTE_END after the DEAD, and one the sender learned from the receiver itself, which the sender holds only by a ROUTE_HOLD after the DEAD: until then the receiver waits for its answer (see [Holds](#holds)).
+
+A receiver applies a DEAD only when a route that peer sent it holds the named hop right after a hop of the far node; otherwise it changes nothing.
+Then every route through the hop is dead, whoever sent it: the sender's routes carry on as the DEAD says, and every other route through the hop is unusable until its own sender says what became of it.
+The receiver remembers the dead hop, so a route through it that arrives late stays unusable.
+
+A closed session also casts doubt on the node at its far end, since a dead relay is reported one neighbour at a time: a neighbour that has not heard yet may still offer a stale route through it.
+A receiver doubts the far node for one second, during which it moves onto no route through that node; the route it already uses stays usable.
+Nothing on the wire carries the doubt.
+A node that sees a session close doubts its far end in the same way.
+
+On a session whose peer holds a scoped publish grant (see [AUTH_OK](#auth-ok)), a DEAD applies only to the routes heard on that session, and the receiver neither remembers the hop nor doubts the far node: a peer withdraws only what it sent, and cannot drop routes through a hop it only read in a path.
+Such a peer also names itself as it likes, so its GOAWAY ranks only the routes heard on that session draining and is not passed on, and its session closing doubts no node and sends no DEAD: the routes it sent end one by one.
+
+A node that receives a GOAWAY ranks every route through its peer draining, and doubts the peer as a closed session's far end, so it moves at once only onto routes that avoid it.
+It sends a DEAD naming the draining node to each neighbour it sent a route through that node, and each neighbour passes it on in the same way, once per neighbour while it has sent that neighbour such a route.
+A receiver applies it only for a node on a route that peer sent it, ranks every route through that node draining, and doubts the node in the same way.
+A draining route stays usable.
+
+#### Holds {#holds}
+A node with no usable route to an origin node at a prefix holds the route, unavailable, while it may recover, and sends ROUTE_HOLD wherever it sent the route:
+
+- while the neighbour it learned the route from holds it, on the Path this node's route extended, or has yet to say what became of it after a DEAD;
+- while a neighbour offers a route that only the doubt keeps this node from using; or
+- until each neighbour that learned the route from this node, whose route back names this node just before itself, has answered: with another route, a ROUTE_HOLD, or a ROUTE_END.
+
+A neighbour that holds under this node answers with a ROUTE_HOLD rather than waiting on it, so holds never wait on each other in a cycle.
+A node holds a route for at most 10 seconds: a neighbour that has not answered by then counts as answering with nothing.
+A hold protects a claim's presence, not loop freedom, so ending it early is safe.
+A held route's claims stay shown but unavailable until a ROUTE_UPDATE makes it usable again.
+Otherwise the node lets go, sending ROUTE_END wherever it sent the route, and its claims go offline.
+Neither proves that the origin withdrew its claims.
+A node closes the session when an Announce Stream it answers has made no progress for 10 seconds with messages left to send, so a peer that stops reading never holds a route.
+It MAY also close it when the stream falls behind repeated failures of the routes it carries, such as when DEADs it has yet to send outnumber the hops on those routes, so a peer that reads too slowly never holds every failure.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request naming no origin node names a path, and the receiver resolves it against the claims covering that path whose route it selected and is usable.
@@ -577,7 +612,7 @@ The winning tier is the whole answer: a refusal from it never falls through to a
 Nor is a refusal retried at another claim of the same prefix.
 
 Within the tier, a claim is ineligible while another claim of the same prefix carries its Instance at a higher Epoch, however cheap it is.
-Among the eligible claims, the receiver SHOULD prefer a route whose session has not received a GOAWAY, then the highest local priority of the route's session, then the lowest cost, the claim's Announce Cost plus its route's metric, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+Among the eligible claims, the receiver SHOULD prefer a route that is not draining, then the route with the highest priority, then the lowest cost, the claim's Announce Cost plus its route's metric, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 The Rendezvous Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by the origin's Node ID as 8 little-endian bytes.
 Every node that knows the same claims ranks them the same, so equal-cost origins of one prefix share its paths and every relay sends one path to the same origin.
 When choosing which claim to advertise for a prefix, the requested path is the prefix itself.
@@ -1101,7 +1136,7 @@ The Cost Parameter declares what reaching this endpoint costs: a receiver adds t
 
 The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Metric and the Announce Cost.
 An absent parameter means the default cost of 1, under which a route's metric is its hop count.
-A value of 0 is a PROTOCOL_VIOLATION: a free link would leave a route as close as the one it came from, which the feasibility condition relies on never happening.
+A value of 0 is a PROTOCOL_VIOLATION: a free link would leave a route as cheap as the one it came from, and selection converges only because extending a route raises its metric (see [Routing](#routing)).
 
 Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
 
@@ -1183,7 +1218,7 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 Any other value is a PROTOCOL_VIOLATION.
 
 The publisher MUST respond with an ANNOUNCE_OK message followed by the matching routes and claims and any future changes, subject to [Routing](#routing).
-The subscriber then sends only [ROUTE_REQUEST](#route-request) and [ROUTE_END](#route-end) echoes on the stream.
+The subscriber then sends nothing more on the stream; a publisher MUST close the session with a PROTOCOL_VIOLATION if it receives more, and treats the subscriber closing its side as the end of its interest.
 Implementations SHOULD consider reasonable limits on the number of matching claims and routes to prevent resource exhaustion.
 
 
@@ -1214,20 +1249,16 @@ An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream
 
 
 ## ROUTE_START {#route-start}
-A publisher sends a ROUTE_START message when it reaches an origin node (see [Routing](#routing)).
-Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, ANNOUNCE_START, and WARM_START (see [Announce](#announce)).
+A publisher sends a ROUTE_START message when it reaches an origin node for a prefix (see [Routing](#routing)).
+Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, DEAD, ANNOUNCE_FLOOR, ANNOUNCE_START, and WARM_START (see [Announce](#announce)).
 
 ~~~
 ROUTE_START Message {
   Type (i) = 0x6
   Message Length (i)
   Node ID (i),
-  Seqno (i),
-  Metric (i),
-  Flags (8),
-  [RTT (i),]
-  Hop Count (i),
-  Hop ID (i) ...,
+  Route Suffix (s),
+  Route Offer (..),
 }
 ~~~
 
@@ -1238,27 +1269,55 @@ Set to 0x6 to indicate a ROUTE_START message.
 The origin node, as the publisher names it on this session.
 0 is refused (see [Refused Content](#refused-content)).
 
-**Seqno**:
-The origin's sequence number of the route, which only the origin advances.
-2^64-1 is refused.
+**Route Suffix**:
+The route's prefix, relative to the requested prefix: the route covers the requested prefix joined with it, and is empty for a route at the requested prefix itself.
+A suffix that is not a valid path, or that joins the requested prefix past the limits of a broadcast path, is refused.
+
+**Route Offer**:
+The route, as below.
+
+### Route Offer {#route-offer}
+What a route says: its Path, then its attributes.
+ROUTE_START, ROUTE_UPDATE, and a DEAD's moved routes carry it.
+
+~~~
+Route Offer {
+  Hop Count (i),
+  Hop (..) ...,
+  Flags (8),
+  Priority (8),
+  Metric (i),
+  [RTT (i),]
+}
+
+Hop {
+  Hop ID (i),
+  Session Number (i),
+}
+~~~
+
+**Hop Count**:
+The number of Hops that follow.
+0 is a PROTOCOL_VIOLATION, since the publisher names itself last; more than 32 is refused.
+
+**Hop**:
+The route's Path (see [Routing](#routing)), in order, the origin node's first and the publisher's own last: each node's Hop ID and the Session Number it learned the route on, 0 for the origin's own.
+A Hop ID of 0 is refused.
+The Path comes first, so a receiver that refuses the rest of the offer still learns the hops a later [DEAD](#dead) may name.
+
+**Flags**:
+A bit field: 0x1 when the route is down-only, 0x2 when an RTT follows, and 0x4 when the route is draining (see [Routing](#routing)).
+Any other bit set is refused, rather than ignored: a later version may give a bit a meaning that changes the route, or a field ahead of the ones defined here.
+
+**Priority**:
+The route's priority, the lowest local priority of a session on its Path, as a u8 with 128 as the midpoint; higher ranks first.
 
 **Metric**:
 The publisher's metric to the origin node, 0 when it is the origin.
 
-**Flags**:
-A bit field: 0x1 when the route is down-only (see [Routing](#routing)), and 0x2 when an RTT follows.
-Any other bit set is refused, rather than ignored: a later version may give a bit a meaning that changes the route, or a field ahead of the Hops.
-
 **RTT**:
 The publisher's RTT to the origin node in milliseconds (see [Routing](#routing)), 0 when it is the origin.
 Present only when Flags has 0x2 set, and absent when the publisher has none.
-
-**Hop Count**:
-The number of Hop IDs that follow.
-More than 32 is refused.
-
-**Hop ID**:
-The route's Hops (see [Routing](#routing)), in order, the publisher's own last.
 
 
 ## ROUTE_UPDATE {#route-update}
@@ -1269,12 +1328,7 @@ ROUTE_UPDATE Message {
   Type (i) = 0x7
   Message Length (i)
   Route ID (i),
-  Seqno (i),
-  Metric (i),
-  Flags (8),
-  [RTT (i),]
-  Hop Count (i),
-  Hop ID (i) ...,
+  Route Offer (..),
 }
 ~~~
 
@@ -1284,14 +1338,14 @@ Set to 0x7 to indicate a ROUTE_UPDATE message.
 **Route ID**:
 The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
-**Seqno**, **Metric**, **Flags**, **RTT**, **Hop Count**, and **Hop ID**:
+**Route Offer**:
 As defined for [ROUTE_START](#route-start), replacing the route's.
 A ROUTE_UPDATE for a held route makes it usable again.
 
 
 ## ROUTE_HOLD {#route-hold}
-A publisher sends a ROUTE_HOLD message when it has no usable route to the origin node but still holds the route and its claims while it recovers (see [Routing](#routing)), referencing its Route ID.
-The receiver keeps the route's last Seqno, Metric, Flags, RTT, and Hops, and does not select it until a ROUTE_UPDATE.
+A publisher sends a ROUTE_HOLD message when it has no usable route to the origin node but still holds the route and its claims while it recovers (see [Holds](#holds)), referencing its Route ID.
+The receiver keeps the route's last Route Offer, and does not use the route until a ROUTE_UPDATE.
 
 ~~~
 ROUTE_HOLD Message {
@@ -1313,9 +1367,6 @@ A publisher sends a ROUTE_END message when it lets go of a route, referencing it
 It retires the Route ID and every claim under the route, whose ANNOUNCE_END the publisher does not send.
 It claims nothing about the origin's claims, which may still be served elsewhere.
 
-The subscriber sends the same message back on the stream once it dropped the route, its echo (see [Routing](#routing)).
-A subscriber MUST send exactly one echo for each ROUTE_END, and a publisher MUST close the session with a PROTOCOL_VIOLATION on an echo naming a Route ID it has not ended or already saw echoed.
-
 ~~~
 ROUTE_END Message {
   Type (i) = 0x8
@@ -1331,31 +1382,73 @@ Set to 0x8 to indicate a ROUTE_END message.
 The ordinal implicitly assigned by a prior ROUTE_START on this stream.
 
 
-## ROUTE_REQUEST {#route-request}
-A subscriber sends a ROUTE_REQUEST message to ask for a route to an origin node at least as new as a Seqno (see [Routing](#routing)).
-It names the origin node rather than a Route ID, so it stays valid while a ROUTE_END for that route is in flight.
+## DEAD {#dead}
+A publisher sends a DEAD message when a session on the Path of routes it sent closed, or a node on it sent a GOAWAY (see [Dead Hops](#dead-hops)).
+It covers every origin node, and assigns no id.
 
 ~~~
-ROUTE_REQUEST Message {
-  Type (i) = 0xA
+DEAD Message {
+  Type (i) = 0xF
   Message Length (i)
-  Node ID (i),
-  Seqno (i),
+  Kind (i),
+  [Closed (..),]
+  [Drain (..),]
+}
+
+Closed {
+  Hop (..),
+  Far Hop ID (i),
+  Gone (8),
+  More (8),
+  Moved Count (i),
+  Moved (..) ...,
+}
+
+Moved {
+  Route ID (i),
+  Offer Length (i),
+  Route Offer (..),
+}
+
+Drain {
+  Hop ID (i),
 }
 ~~~
 
 **Type**:
-Set to 0xA to indicate a ROUTE_REQUEST message.
+Set to 0xF to indicate a DEAD message.
 
-**Node ID**:
-The origin node, as the publisher names it on this session.
+**Kind**:
+0 when a session closed, followed by Closed, and 1 when a node sent a GOAWAY, followed by Drain.
+Any other value is a PROTOCOL_VIOLATION.
+
+**Hop**:
+The hop that died: the Hop ID of the node that lost the session, and that session's Session Number, as a [Route Offer](#route-offer)'s Path names it.
+A Hop ID of 0 is a PROTOCOL_VIOLATION.
+
+**Far Hop ID**:
+The Hop ID of the node at the session's other end, which the receiver doubts.
 0 is a PROTOCOL_VIOLATION.
 
-**Seqno**:
-The Seqno the subscriber needs.
-A publisher with no route to the origin node drops the request.
+**Gone**:
+1 when every route on the stream through the hop that Moved does not list has ended, 0 when the rest are held (see [Dead Hops](#dead-hops)).
+Any other value is a PROTOCOL_VIOLATION.
 
-A publisher MUST close the session with a PROTOCOL_VIOLATION if it receives any message type other than ROUTE_REQUEST or ROUTE_END after the ANNOUNCE_REQUEST.
+**More**:
+1 when the next message on the stream is a DEAD continuing this one's Moved list, which the receiver applies with it, and 0 for the last or only part.
+A part with More set followed by any other message, or by a DEAD whose Kind, Hop, Far Hop ID, or Gone differs, is a PROTOCOL_VIOLATION.
+Any other value is a PROTOCOL_VIOLATION.
+
+**Moved Count**:
+The number of Moved entries that follow.
+
+**Moved**:
+A route on the stream through the hop that moved to another Path: its Route ID, which MUST name a live route, and its new [Route Offer](#route-offer), preceded by the offer's length in bytes.
+A refused offer leaves the receiver no route, as a refused ROUTE_UPDATE does, and the length lets it read the next entry; an offer that does not fill its length exactly is a PROTOCOL_VIOLATION.
+
+**Hop ID** (Drain):
+The Hop ID of the node that sent the GOAWAY.
+0 is a PROTOCOL_VIOLATION.
 
 
 ## ANNOUNCE_START {#announce-start}
@@ -1633,6 +1726,7 @@ SUBSCRIBE Message {
   Instance (b)
   Minted (8)
   Node ID (i)
+  Route Depth (i)
   Track Name (s)
   Subscriber Priority (8)
   Group Order (8)
@@ -1662,7 +1756,7 @@ Anchor {
 A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
 
-**Instance**, **Minted**, and **Node ID**:
+**Instance**, **Minted**, **Node ID**, and **Route Depth**:
 As in [TRACK](#track).
 
 **Subscriber Priority**:
@@ -1784,6 +1878,7 @@ TRACK Message {
   Instance (b)
   Minted (8)
   Node ID (i)
+  Route Depth (i)
   Track Name (s)
 }
 ~~~
@@ -1798,6 +1893,11 @@ A relay fills in the Instance and Minted of the claim it resolved when forwardin
 
 **Node ID**:
 The origin node that serves the request, as the publisher names it on this session, or 0 for whichever the publisher selects (see [Routing](#routing)).
+TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry it the same way.
+
+**Route Depth**:
+How many leading segments of the Broadcast Path make up the prefix of the route to the origin node the request follows (see [Routing](#routing)), 0 for a route at the empty prefix.
+It MUST be 0 when the Node ID is 0, and at most the Broadcast Path's segments; any other value is a PROTOCOL_VIOLATION.
 TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry it the same way.
 
 **Track Name**:
@@ -1867,13 +1967,14 @@ TRACKS Message {
   Instance (b)
   Minted (8)
   Node ID (i)
+  Route Depth (i)
 }
 ~~~
 
 **Broadcast Path**:
 The path of the Broadcast to list.
 
-**Instance**, **Minted**, and **Node ID**:
+**Instance**, **Minted**, **Node ID**, and **Route Depth**:
 As in [TRACK](#track).
 The listing is pinned to the stream that answers it and ends with that stream.
 
@@ -1935,6 +2036,7 @@ DATAGRAMS Message {
   Instance (b)
   Minted (8)
   Node ID (i)
+  Route Depth (i)
   Track Name (s)
   Subscriber Priority (8)
 }
@@ -2145,6 +2247,7 @@ FETCH Message {
   Instance (b)
   Minted (8)
   Node ID (i)
+  Route Depth (i)
   Track Name (s)
   Subscriber Priority (8)
   Subscriber Max Age (i)
@@ -2158,7 +2261,7 @@ FETCH Message {
 **Broadcast Path**:
 The broadcast path of the track to fetch from.
 
-**Instance**, **Minted**, and **Node ID**:
+**Instance**, **Minted**, **Node ID**, and **Route Depth**:
 As in [TRACK](#track).
 
 **Track Name**:
@@ -2445,19 +2548,20 @@ An application-specific payload.
 - An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
-- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
+- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, for the paths under a prefix, with an additive metric and a down-only bit. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin and prefix rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
 - ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
-- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A node never selects a route whose Hops name it, so one that dropped its feasibility distance cannot take back a copy of its own route. A zero or repeated Hop ID in a route's Hops is tolerated, where a repeated non-zero Hop ID in moq-lite-06's Hop ID list is a PROTOCOL_VIOLATION.
-- Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
-- Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
-- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
+- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x4) and priority, which rank before its metric.
+- Added ROUTE_HOLD (0xB), which holds a route while it may recover, for at most 10 seconds; ROUTE_END lets it go. Neither withdraws the origin's claims.
+- Added DEAD (0xF): a node that loses a session names that hop once to each neighbour it sent a route through it, listing the routes that moved, and every node drops every route through the hop and doubts the node at the far end for a second; a DRAIN names a node that sent a GOAWAY, whose routes rank draining. The path, the dead hop, holds, and the doubt keep routes free of loops and stale copies, with no distance, sequence number, route request, or echo. On a scoped session a DEAD applies only to the routes heard there.
+- A node closes a session whose peer leaves an Announce Stream undrained for 10 seconds, and the subscriber sends nothing on the stream after ANNOUNCE_REQUEST.
+- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the route's prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
 - A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
 - A subscriber whose scope confines a stream to one prefix SHOULD request that prefix, and replace the request when the prefix changes.
-- A route goes on a stream only while it has a claim the request presents, and ends after the batch withdrawing its last claim. It starts on that stream again only once the subscriber echoed the ROUTE_END.
-- Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
+- A route goes on a stream only while it has a claim the request presents, and ends after the batch withdrawing its last claim.
+- Added `Node ID` and `Route Depth` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected and the prefix of the route it follows, which every later hop follows.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
 - The Cost parameter must be at least 1.
-- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the local priority of the route's session, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
+- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the route's drain and priority, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 - Added warm routes: WARM_START (0xC), WARM_UPDATE (0xD), and WARM_END (0xE) on the Announce Stream, and `Warm` on SUBSCRIBE and SUBSCRIBE_UPDATE. A relay MAY pull each broadcast through a neighbor that offers a copy of it, carrying the copy's Hops from its carrier, its Warm Cost, its drain, and its priority. A carrier offers its copy whatever it pulls and joins only a lower-ranked carrier's; a relay with no reader offers each neighbor its best source that avoids it, pulls it only while that is what it offered each relay it serves, and follows its route when a neighbor following its own pulls through it. The offers settle as a path vector does, and the pulls are then free of loops.
 - Added the temporary Lite-06 Chain Setup Parameter (0x9) and a trailing Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART: the moq-lite-06 Hop ID list of a claim learned over moq-lite-06, which a node drops when it names that node.
@@ -2514,7 +2618,7 @@ An application-specific payload.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
-- A receiver refuses forwarded route content it cannot use, such as an unknown route flag, more than 32 Hops, or an invalid claim path or Instance, withdrawing only that route or claim rather than closing the session ([Refused Content](#refused-content)). A refused claim goes offline, and its route's floors certify nothing while it holds one.
+- A receiver refuses forwarded route content it cannot use, such as an unknown route flag, more than 32 hops on a route's Path, or an invalid claim path or Instance, withdrawing only that route or claim rather than closing the session ([Refused Content](#refused-content)). A refused claim goes offline, and its route's floors certify nothing while it holds one.
 
 ## moq-lite-06
 

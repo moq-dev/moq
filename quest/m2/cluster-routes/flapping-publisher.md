@@ -3,9 +3,12 @@
 ## Goal
 
 On real lite-07 sessions, a publisher connected to two relays whose link to
-one of them closes and reopens faster than the doubt timer stays reachable at
-every relay through its other link, the whole time, while the flapping link
-waits out the timer each time it returns. The draft states the rule.
+one of them closes and reopens faster than the doubt timer stays reachable
+through its other link, while the flapping link waits out the timer each time
+it returns. A relay that already hears a route through the other link that
+does not name it stays routed the whole time; any other relay is routed again
+once a neighbour re-offers, a round trip after the news, instead of after the
+timer. The draft states the rule.
 
 ## Plan
 
@@ -14,8 +17,9 @@ waits out the timer each time it returns. The draft states the rule.
 doubt blocks a route through a node, not one that begins at it, except the
 node's own route on a session to it opened since the doubt began. The model
 checks it (`Flap.cfg`, `TwoHomes.cfg`, `Homes.cfg`, and `Routed`), the path
-router applies it, and `route/tests/flap.rs` pins it on the router. Sessions
-still run Babel's distance, so what is left waits on the switch:
+router applies it, and `route/tests/flap.rs` pins it on the router.
+[The switch](https://github.com/moq-dev/moq/pull/8731) put lite-07 sessions on
+the path router, so what is left is:
 
 - A fixture on real sessions with mocked time: the dual-homed publisher with
   one link flapping at half the timer, where a subscriber at a far relay
@@ -25,10 +29,6 @@ still run Babel's distance, so what is left waits on the switch:
   it opened since, but not off the route it already uses or another route that
   begins there; a publisher on three or more relays that leaves them all at
   once can loop a request until the news arrives.
-
-## Required
-
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - sessions that run the path rule, and the draft's Routing section to amend
 
 ## Related
 

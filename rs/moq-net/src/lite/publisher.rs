@@ -194,6 +194,35 @@ impl Shared {
 		crate::auth::Gate::new(self.auth.clone(), broadcast.clone(), crate::auth::Direction::Publish)
 	}
 
+	/// The routes a request resolves through when it names the origin node `node` and the
+	/// route it was offered covering the first `depth` segments of `broadcast`: this node's
+	/// own when it publishes the broadcast, else the route this node follows to `node`
+	/// covering that prefix. `None` when that route is gone or would lead back to the
+	/// peer. A request naming no node resolves through any route.
+	fn node_filter(
+		&self,
+		origin: origin::Consumer,
+		broadcast: &crate::Path,
+		(node, depth): (u64, u64),
+	) -> Option<origin::Consumer> {
+		if node == 0 {
+			return Some(origin);
+		}
+		let prefix = origin.resolve(&broadcast.head(usize::try_from(depth).ok()?)?)?;
+		let claim = origin.resolve(broadcast)?;
+		let filter = match origin
+			.route_node()
+			.forward(self.peer_setup.tag(), node, &claim, &prefix)?
+		{
+			crate::route::node::Via::Here => origin::NodeFilter::Own,
+			crate::route::node::Via::Route { prefix } => origin::NodeFilter::Route {
+				node,
+				depth: prefix.parts().count() as u64,
+			},
+		};
+		Some(origin.with_node(filter))
+	}
+
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
 	/// through the peer, so a subscription is never served data that flowed
 	/// through the subscriber. The identity is the one the peer declared in its
@@ -202,19 +231,6 @@ impl Shared {
 	/// SETUP (sent at startup on every lite-05+ session, well before it could
 	/// learn of anything to subscribe to); the result is cached, since the peer
 	/// sends exactly one SETUP per session.
-	/// The routes a request naming the origin node `node` resolves through: that
-	/// node's, this node's own when it names this one, or any for 0.
-	fn node_filter(&self, origin: origin::Consumer, node: u64) -> origin::Consumer {
-		if node == 0 {
-			return origin;
-		}
-		let filter = match origin.route_node().declared() == node {
-			true => origin::NodeFilter::Own,
-			false => origin::NodeFilter::Is(node),
-		};
-		origin.with_node(filter)
-	}
-
 	fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
 		if let Some(origin) = self.serving.get() {
 			return Poll::Ready(origin.clone());
@@ -293,7 +309,7 @@ impl Publisher {
 impl Drop for Publisher {
 	fn drop(&mut self) {
 		// Every announce stream closes with the session: disconnect them together.
-		let _closing = self.shared.origin.route_closing();
+		let _closing = self.shared.origin.route_closing(self.shared.peer_setup.tag());
 		self.children = kio::Tasks::new();
 	}
 }
@@ -987,6 +1003,7 @@ impl AnnounceServe {
 				self.shared.auth.clone(),
 			)
 			.with_peer_setup(self.shared.peer_setup.clone())
+			.with_session(self.shared.session.clone(), self.shared.runtime.clone())
 		});
 
 		// The identity whose routes we filter out. Lite-04/05 carry it per
@@ -1710,8 +1727,10 @@ trait Request: Sized {
 	/// The instance the request pins, if any.
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance>;
 
-	/// The origin node the request names (lite-07), or 0 to let this side select.
-	fn node(msg: &Self::Message) -> u64;
+	/// The origin node the request names (lite-07), or 0 to let this side select, and
+	/// how many leading segments of its broadcast make up the prefix of the route it
+	/// follows.
+	fn node(msg: &Self::Message) -> (u64, u64);
 
 	/// Start answering, once the broadcast resolves. `track` is the name [`Request::take_track`]
 	/// moved out of `msg`, which no longer holds it.
@@ -1988,8 +2007,10 @@ impl<R: Request> RequestServe<R> {
 						// served on demand by the route covering it (an `origin::Claim`), or
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
-						let origin = self.shared.node_filter(origin, R::node(msg));
 						let path = R::target(msg).0.clone();
+						let Some(origin) = self.shared.node_filter(origin, &path, R::node(msg)) else {
+							return Poll::Ready(Err(Error::Unroutable));
+						};
 						*requesting = Some(origin.lookup(path, R::instance(msg)).into_inner());
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
@@ -2161,8 +2182,8 @@ impl Request for TrackInfoServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> u64 {
-		msg.node
+	fn node(msg: &Self::Message) -> (u64, u64) {
+		(msg.node, msg.depth)
 	}
 
 	fn start(
@@ -2277,8 +2298,8 @@ impl Request for TracksServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> u64 {
-		msg.node
+	fn node(msg: &Self::Message) -> (u64, u64) {
+		(msg.node, msg.depth)
 	}
 
 	fn start(shared: &Shared, _: Self::Message, _: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2383,8 +2404,8 @@ impl Request for SubscribeServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> u64 {
-		msg.node
+	fn node(msg: &Self::Message) -> (u64, u64) {
+		(msg.node, msg.depth)
 	}
 
 	fn start(
@@ -2982,8 +3003,8 @@ impl Request for DatagramServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> u64 {
-		msg.node
+	fn node(msg: &Self::Message) -> (u64, u64) {
+		(msg.node, msg.depth)
 	}
 
 	fn start(
@@ -3142,8 +3163,8 @@ impl Request for FetchServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> u64 {
-		msg.node
+	fn node(msg: &Self::Message) -> (u64, u64) {
+		(msg.node, msg.depth)
 	}
 
 	fn start(
@@ -3702,104 +3723,60 @@ mod announce_test {
 		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced]);
 	}
 
-	/// A lite-07 peer that never stops sending ROUTE_REQUEST neither holds the task
-	/// nor keeps a new claim from being announced.
-	#[kio::test]
-	async fn a_lite07_reply_flood_yields_and_announces() {
-		/// A peer whose replies never run out.
-		struct Flood(bytes::Bytes);
-		impl crate::transport::poll::Chunks for Flood {
+	/// A lite-07 peer sends nothing after its request: a byte more on the stream is a
+	/// protocol violation.
+	#[test]
+	fn a_lite07_peer_writing_after_its_request_violates_the_stream() {
+		/// A peer that keeps writing.
+		struct Chatty;
+		impl crate::transport::poll::Chunks for Chatty {
 			type Error = SinkError;
 			fn poll_read_chunk(
 				&mut self,
 				_: &kio::Waiter,
 				_: usize,
 			) -> std::task::Poll<Result<Option<bytes::Bytes>, SinkError>> {
-				std::task::Poll::Ready(Ok(Some(self.0.clone())))
+				std::task::Poll::Ready(Ok(Some(bytes::Bytes::from_static(&[0x01]))))
 			}
 			fn stop(&mut self, _: u32) {}
 		}
 
 		let origin = Hop::new(1).unwrap().produce();
-		let consumer = origin.consume();
-		let mut answer =
-			super::routed::Answer::new(consumer, crate::Path::empty(), true, crate::auth::Link::new(false));
-		let request = lite::AnnounceReply::RouteRequest { node: 7, seqno: 1 };
-		let flood = Flood(crate::coding::Encode::encode_bytes(&request, Version::Lite07).unwrap());
+		let mut answer = super::routed::Answer::new(
+			origin.consume(),
+			crate::Path::empty(),
+			true,
+			crate::auth::Link::new(false),
+		);
 		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
 		let mut stream = Stream::<Transport, Version> {
 			writer: Writer::new(
 				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
 				Version::Lite07,
 			),
 			reader: Reader::new(
-				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(flood)),
+				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(Chatty)),
 				Version::Lite07,
 			),
 		};
-		let waiter = kio::Waiter::noop();
+		let polled = answer.poll(&mut stream, false, &kio::Waiter::noop());
 		assert!(
-			answer.poll(&mut stream, false, &waiter).is_pending(),
-			"the flood yields"
-		);
-		wire.take_ok();
-		let announces = wire.take_announces();
-		assert_eq!(
-			announces.last(),
-			Some(&lite::AnnounceBroadcast::Synced),
-			"{announces:?}"
-		);
-
-		let _route = origin.announce("x", origin::RouteInfo::new()).unwrap();
-		// The origin feeds its node from a task.
-		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
-		assert!(
-			announces
-				.iter()
-				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { .. })),
-			"{announces:?}"
+			matches!(polled, std::task::Poll::Ready(Err(Error::ProtocolViolation))),
+			"{polled:?}"
 		);
 	}
 
 	/// A lite-07 stream holds a route on the wire only while it shows one of the
 	/// route's claims: an origin whose only claim is hidden from the peer starts no
-	/// route, and the route ends after the floor once its last shown claim goes. The
-	/// node's own end of the route waits on the peer's echo of that end, and the route
-	/// starts again only after it.
+	/// route, the route ends after the floor once its last shown claim goes, and it
+	/// starts again under a new Route ID with the next one.
 	#[kio::test]
 	async fn a_lite07_route_goes_only_with_a_shown_claim() {
-		/// The peer's replies, queued by the test.
-		#[derive(Clone, Default)]
-		struct Replies(Arc<Mutex<std::collections::VecDeque<bytes::Bytes>>>);
-		impl crate::transport::poll::Chunks for Replies {
-			type Error = SinkError;
-			fn poll_read_chunk(
-				&mut self,
-				_: &kio::Waiter,
-				_: usize,
-			) -> std::task::Poll<Result<Option<bytes::Bytes>, SinkError>> {
-				match self.0.lock().unwrap().pop_front() {
-					Some(chunk) => std::task::Poll::Ready(Ok(Some(chunk))),
-					None => std::task::Poll::Pending,
-				}
-			}
-			fn stop(&mut self, _: u32) {}
-		}
-
 		let origin = Hop::new(1).unwrap().produce();
-		let stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
+		let _stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
 		let consumer = origin.consume();
-		let node = consumer.route_node();
 		let mut answer =
 			super::routed::Answer::new(consumer, crate::Path::empty(), false, crate::auth::Link::new(false));
-		let replies = Replies::default();
 		let log = Log::default();
 		let mut wire = Wire {
 			writes: log.writes.clone(),
@@ -3811,10 +3788,7 @@ mod announce_test {
 				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
 				Version::Lite07,
 			),
-			reader: Reader::new(
-				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(replies.clone())),
-				Version::Lite07,
-			),
+			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
 		};
 		let waiter = kio::Waiter::noop();
 		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
@@ -3858,20 +3832,8 @@ mod announce_test {
 			"{announces:?}"
 		);
 
-		// The node ends the route too, while the peer may still hold its copy.
-		drop(stats);
-		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		wire.assert_quiet();
-		assert_eq!(node.retained().echoes, 1, "the node's end waits on the peer");
-
 		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		wire.assert_quiet();
-
-		let echo = lite::AnnounceReply::RouteEnd { id: 0 };
-		(replies.0.lock().unwrap()).push_back(crate::coding::Encode::encode_bytes(&echo, Version::Lite07).unwrap());
 		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
 		let announces = wire.take_announces();
 		assert!(
@@ -3885,7 +3847,87 @@ mod announce_test {
 			),
 			"{announces:?}"
 		);
-		assert_eq!(node.retained().echoes, 0);
+	}
+
+	/// A DEAD whose moved routes outgrow one message goes in consecutive parts, each
+	/// fitting one and all but the last with More set, which list its moved routes in
+	/// order, so failing over many routes at once never fails the stream; one that fits
+	/// goes whole.
+	#[test]
+	fn a_lite07_dead_past_one_message_goes_in_parts() {
+		use crate::route::path::{Hop, Offer};
+		let offer = Offer {
+			// The longest path, of the widest Hop IDs.
+			path: (0..crate::route::MAX_HOPS as u64)
+				.map(|session| Hop {
+					node: crate::route::GENERATED - session,
+					session,
+				})
+				.collect(),
+			draining: false,
+			priority: 0,
+			metric: 1,
+			down_only: false,
+			rtt: None,
+		};
+		let dead = |moved: std::ops::Range<u64>, more| lite::Dead::Closed {
+			hop: Hop { node: 7, session: 1 },
+			far: 8,
+			gone: true,
+			more,
+			moved: moved.map(|id| (id, Ok(offer.clone()))).collect(),
+		};
+		let encodes = |msg: &lite::AnnounceBroadcast| {
+			crate::coding::Encode::encode(
+				msg,
+				&mut crate::coding::Encoder::new(&mut Vec::new(), Version::Lite07.into()),
+				Version::Lite07,
+			)
+			.is_ok()
+		};
+		// Past three times 65,535 bytes at about 300 a route.
+		let many = 700;
+		assert!(!encodes(&lite::AnnounceBroadcast::Dead(dead(0..many, false))));
+
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<Transport, Version> {
+			writer: Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			),
+			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
+		};
+		let waiter = kio::Waiter::noop();
+		super::routed::buffer_dead(&mut stream, dead(0..2, false)).unwrap();
+		assert!(stream.writer.poll_flush(&waiter).is_ready());
+		assert_eq!(
+			wire.take_announces(),
+			[lite::AnnounceBroadcast::Dead(dead(0..2, false))]
+		);
+
+		super::routed::buffer_dead(&mut stream, dead(0..many, false)).unwrap();
+		assert!(stream.writer.poll_flush(&waiter).is_ready());
+		let sent = wire.take_announces();
+		assert!(sent.len() >= 3, "{} parts", sent.len());
+		let mut next = 0;
+		for (i, part) in sent.iter().enumerate() {
+			let lite::AnnounceBroadcast::Dead(lite::Dead::Closed { moved, .. }) = part else {
+				panic!("a DEAD part: {part:?}");
+			};
+			let end = next + moved.len() as u64;
+			assert!(end > next, "part {i} lists no route");
+			assert_eq!(
+				*part,
+				lite::AnnounceBroadcast::Dead(dead(next..end, i + 1 < sent.len()))
+			);
+			next = end;
+		}
+		assert_eq!(next, many);
 	}
 
 	#[test]
@@ -11138,6 +11180,7 @@ mod tests {
 					let track = lite::Track {
 						instance: None,
 						node: 0,
+						depth: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 					};
@@ -11147,6 +11190,7 @@ mod tests {
 						order: crate::track::Order::Descending,
 						instance: None,
 						node: 0,
+						depth: 0,
 						id: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -11161,6 +11205,7 @@ mod tests {
 					let fetch = lite::Fetch {
 						instance: None,
 						node: 0,
+						depth: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
@@ -11211,6 +11256,7 @@ mod tests {
 				order: crate::track::Order::Descending,
 				instance: None,
 				node: 0,
+				depth: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -11278,6 +11324,7 @@ mod tests {
 		lite::Track {
 			instance: None,
 			node: 0,
+			depth: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 		}
@@ -11354,6 +11401,7 @@ mod tests {
 		lite::Track {
 			instance: None,
 			node: 0,
+			depth: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
 		}
@@ -11364,6 +11412,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			instance: None,
 			node: 0,
+			depth: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
@@ -11559,6 +11608,7 @@ mod tests {
 					lite::Track {
 						instance: None,
 						node: 0,
+						depth: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 					}
@@ -11707,6 +11757,7 @@ mod tests {
 						order: crate::track::Order::Ascending,
 						instance: None,
 						node: 0,
+						depth: 0,
 						id: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
@@ -11842,6 +11893,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			instance: None,
 			node: 0,
+			depth: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -11975,6 +12027,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			instance: None,
 			node: 0,
+			depth: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -12230,6 +12283,7 @@ mod tests {
 			lite::Fetch {
 				instance: None,
 				node: 0,
+				depth: 0,
 				broadcast: crate::Path::new("room").unwrap(),
 				track: Default::default(),
 				priority: 0,
@@ -12301,6 +12355,7 @@ mod tests {
 		lite::Fetch {
 			instance: None,
 			node: 0,
+			depth: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -12378,6 +12433,7 @@ mod tests {
 		lite::Fetch {
 			instance: None,
 			node: 0,
+			depth: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -12462,6 +12518,7 @@ mod tests {
 			lite::Fetch {
 				instance: None,
 				node: 0,
+				depth: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
 				priority: 0,
@@ -12586,6 +12643,7 @@ mod tests {
 				order: crate::track::Order::Descending,
 				instance: None,
 				node: 0,
+				depth: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -12646,6 +12704,7 @@ mod tests {
 			broadcast: crate::Path::from_static("room"),
 			instance: None,
 			node: 0,
+			depth: 0,
 		};
 		let request = request.encode_bytes(version).unwrap().to_vec();
 		let session = ScriptedSession::per_stream(vec![request.clone(), request]);
@@ -12701,6 +12760,7 @@ mod tests {
 				order: crate::track::Order::Descending,
 				instance: None,
 				node: 0,
+				depth: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -12841,6 +12901,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			instance: None,
 			node: 0,
+			depth: 0,
 			id: 0,
 			broadcast: crate::Path::new(broadcast).unwrap(),
 			track: track.into(),

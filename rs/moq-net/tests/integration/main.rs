@@ -54,6 +54,7 @@ mod model;
 mod mount;
 mod multi_cdn;
 mod partial_group;
+mod path_routes;
 mod quiet_catalog;
 mod range_anchors;
 mod range_fill;
