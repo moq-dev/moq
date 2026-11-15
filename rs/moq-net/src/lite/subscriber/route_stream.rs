@@ -15,8 +15,7 @@ use std::{
 };
 
 use crate::{
-	Error, Path, SessionError,
-	coding,
+	Error, Path, SessionError, coding,
 	driver::Transport,
 	lite::{self, AnnounceBroadcast as Msg, Version},
 	origin,
@@ -282,7 +281,12 @@ impl Running {
 
 	/// Send what the node queued for the peer, and serve what it queued for the origin.
 	/// Ready only with an error.
-	fn poll_send(&mut self, subscriber: &Subscriber, publish: &Publish, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	fn poll_send(
+		&mut self,
+		subscriber: &Subscriber,
+		publish: &Publish,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
 		loop {
 			ready!(self.budget.poll_yield(waiter));
 			match self.sending {

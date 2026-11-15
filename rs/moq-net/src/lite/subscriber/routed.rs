@@ -849,11 +849,7 @@ impl Routed {
 	/// Apply a DEAD and the offers its ROUTE_UPDATEs gave as one.
 	fn apply_dead(&mut self, moving: Moving) -> Result<(), Error> {
 		let Moving {
-			hop,
-			far,
-			gone,
-			offers,
-			..
+			hop, far, gone, offers, ..
 		} = moving;
 		// The node applies only a DEAD it credits. One it drops still changes the stream's
 		// routes, as the peer applies it to what it sent, so the node then hears each

@@ -117,7 +117,9 @@ pub(crate) fn plan(
 	let mut carried: BTreeMap<u64, Carried> = BTreeMap::new();
 	let kept = |claims: &BTreeMap<Path, u64>| -> BTreeMap<Path, Claim> {
 		let claims = claims.iter();
-		claims.map(|(path, id)| (path.clone(), Claim { id: *id, from: *id })).collect()
+		claims
+			.map(|(path, id)| (path.clone(), Claim { id: *id, from: *id }))
+			.collect()
 	};
 	for ((_, wider), sources) in widening {
 		let winner = (sources.iter().copied())
@@ -126,7 +128,11 @@ pub(crate) fn plan(
 		let mut claims = BTreeMap::new();
 		for id in &sources {
 			let route = &routes[id];
-			claims.extend(kept(&route.claims).into_iter().filter(|(path, _)| *path != route.prefix));
+			claims.extend(
+				kept(&route.claims)
+					.into_iter()
+					.filter(|(path, _)| *path != route.prefix),
+			);
 		}
 		let route = Carried {
 			id: winner,
@@ -242,7 +248,11 @@ mod tests {
 			]
 		);
 		// The claim at the route's own prefix goes; the loser's claims move in.
-		let claims: Vec<_> = plan.routes[0].claims.iter().map(|(p, c)| (p.to_string(), c.id)).collect();
+		let claims: Vec<_> = plan.routes[0]
+			.claims
+			.iter()
+			.map(|(p, c)| (p.to_string(), c.id))
+			.collect();
 		assert_eq!(claims, vec![("a/b/x".to_string(), 1), ("a/c/y".to_string(), 2)]);
 		assert_eq!(plan.routes[1].region, path("a"));
 		assert_eq!((plan.next_route, plan.next_claim), (4, 5));
@@ -251,7 +261,10 @@ mod tests {
 	#[test]
 	fn narrowing_presents_the_covering_claim() {
 		let routes = BTreeMap::from([
-			(0, route(7, "a", "a", BEST, &[("a", 0), ("a/b/x", 1), ("a/c", 2), ("a/d", 3)])),
+			(
+				0,
+				route(7, "a", "a", BEST, &[("a", 0), ("a/b/x", 1), ("a/c", 2), ("a/d", 3)]),
+			),
 			(1, route(7, "a/c", "a", HELD, &[("a/c/y", 4)])),
 		]);
 		let added = [path("a/c"), path("a/b")];

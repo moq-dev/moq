@@ -1365,11 +1365,12 @@ mod tests {
 		ok.encode(&mut Encoder::new(&mut bytes, Version::Lite06.into()), Version::Lite06)
 			.unwrap();
 		assert_eq!(bytes, [2, 1, 7]);
-		let res = ok.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()), Version::Lite07);
-		assert!(matches!(res, Err(EncodeError::Version)));
-		assert!(
-			crate::coding::decode_buf(&mut &[0u8][..], Version::Lite07, |r, v| AnnounceOk::decode(r, v)).is_err()
+		let res = ok.encode(
+			&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()),
+			Version::Lite07,
 		);
+		assert!(matches!(res, Err(EncodeError::Version)));
+		assert!(crate::coding::decode_buf(&mut &[0u8][..], Version::Lite07, |r, v| AnnounceOk::decode(r, v)).is_err());
 	}
 
 	#[test]
@@ -1987,7 +1988,10 @@ mod tests {
 			prefix: Path::from_static("room"),
 			exclude_hop: Hop::UNKNOWN,
 		};
-		let res = msg.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()), Version::Lite07);
+		let res = msg.encode(
+			&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()),
+			Version::Lite07,
+		);
 		assert!(matches!(res, Err(EncodeError::Version)));
 
 		let edit = AnnounceBroadcast::Request {
@@ -2000,9 +2004,15 @@ mod tests {
 			.unwrap();
 		// Type, length, the removed Prefix IDs, then each added prefix with its Hidden.
 		assert_eq!(bytes, [&[16, 12, 2, 0, 7, 2, 4][..], b"room", &[1, 0, 0]].concat());
-		assert_eq!(broadcast_round_trip(&AnnounceBroadcast::Ok, Version::Lite07), AnnounceBroadcast::Ok);
+		assert_eq!(
+			broadcast_round_trip(&AnnounceBroadcast::Ok, Version::Lite07),
+			AnnounceBroadcast::Ok
+		);
 		for msg in [edit, AnnounceBroadcast::Ok] {
-			let res = msg.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()), Version::Lite06);
+			let res = msg.encode(
+				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
+				Version::Lite06,
+			);
 			assert!(matches!(res, Err(EncodeError::Version)), "{msg:?}");
 		}
 	}

@@ -191,9 +191,7 @@ fn a_region_inside_two_routes_stays_online_through_either() {
 	down.edit(asked).unwrap();
 	up.edited();
 	pump(&down, &up);
-	let online = || {
-		(leaf.shown().iter()).any(|((_, path), (_, available))| *path == p("live/a/x") && *available)
-	};
+	let online = || (leaf.shown().iter()).any(|((_, path), (_, available))| *path == p("live/a/x") && *available);
 	assert!(online(), "{:?}", leaf.shown());
 
 	// The origin ends the narrow route: the broad one still covers the region.
@@ -749,7 +747,11 @@ fn a_closed_session_takes_its_mounts() {
 		"the mount is sent what its target holds"
 	);
 	drop(session);
-	assert_eq!(relay.lock().router.neighbors(), 0, "the mount's key went with the session");
+	assert_eq!(
+		relay.lock().router.neighbors(),
+		0,
+		"the mount's key went with the session"
+	);
 	drop(mount);
 	assert_eq!(relay.lock().router.neighbors(), 0);
 }

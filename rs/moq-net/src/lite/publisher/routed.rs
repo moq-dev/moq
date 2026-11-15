@@ -294,14 +294,18 @@ impl Answer {
 	}
 
 	/// Act on one thing a mount queued, if any has.
-	pub(in crate::lite) fn poll_mounts(&mut self, writer: &mut Writer, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub(in crate::lite) fn poll_mounts(
+		&mut self,
+		writer: &mut Writer,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
 		let after = self.mounts.range(self.turn + 1..);
-		let ready = after.chain(self.mounts.range(..=self.turn)).find_map(|(source, mount)| {
-			match mount.stream.poll_output(waiter) {
+		let ready = after
+			.chain(self.mounts.range(..=self.turn))
+			.find_map(|(source, mount)| match mount.stream.poll_output(waiter) {
 				Poll::Ready(output) => Some((*source, output)),
 				Poll::Pending => None,
-			}
-		});
+			});
 		let Some((source, output)) = ready else {
 			return Poll::Pending;
 		};
@@ -383,21 +387,23 @@ impl Answer {
 	/// beneath, or the session's own.
 	fn source(&self, path: &Path) -> Source {
 		let mut mounts = self.mounts.iter();
-		mounts.find(|(_, mount)| mount.mount.holds(path)).map_or(MAIN, |(source, _)| *source)
+		mounts
+			.find(|(_, mount)| mount.mount.holds(path))
+			.map_or(MAIN, |(source, _)| *source)
 	}
 
 	/// The node put the peer's last request in effect, leaving the session's key the
 	/// routes `carried`: answer it, carry the wire's routes over, and send what they lack.
-	fn edited(
-		&mut self,
-		writer: &mut Writer,
-		carried: Vec<route::path::Carried<node::Claim>>,
-	) -> Result<(), Error> {
+	fn edited(&mut self, writer: &mut Writer, carried: Vec<route::path::Carried<node::Claim>>) -> Result<(), Error> {
 		let Some(request) = self.request.take() else {
 			return Ok(());
 		};
 		writer.buffer(&Msg::Ok)?;
-		let old: BTreeSet<Path> = self.prefixes.values().filter_map(|prefix| prefix.path.clone()).collect();
+		let old: BTreeSet<Path> = self
+			.prefixes
+			.values()
+			.filter_map(|prefix| prefix.path.clone())
+			.collect();
 		for id in &request.remove {
 			self.prefixes.remove(id);
 			let mounts = self.mounts.iter().filter(|(_, mount)| mount.prefix == *id);
@@ -416,7 +422,11 @@ impl Answer {
 			added.extend(prefix.path.clone().map(|path| (id, path)));
 			self.prefixes.insert(id, prefix);
 		}
-		let new: BTreeSet<Path> = self.prefixes.values().filter_map(|prefix| prefix.path.clone()).collect();
+		let new: BTreeSet<Path> = self
+			.prefixes
+			.values()
+			.filter_map(|prefix| prefix.path.clone())
+			.collect();
 
 		// What the node now sends the session's key replaces what it sent before.
 		self.unsource(MAIN);

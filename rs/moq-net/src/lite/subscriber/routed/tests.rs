@@ -538,7 +538,10 @@ async fn a_dead_and_its_updates_apply_as_one() {
 	let mut routed = start();
 	routed.receive(dead(1)).unwrap();
 	assert_eq!(routed.routes.len(), 3);
-	assert!(routed.routes[&0].path().contains(&hop(3)), "nothing applies before the last update");
+	assert!(
+		routed.routes[&0].path().contains(&hop(3)),
+		"nothing applies before the last update"
+	);
 	routed.receive(update(0, 4)).unwrap();
 	let mut live: Vec<_> = routed.routes.keys().copied().collect();
 	live.sort_unstable();
@@ -618,9 +621,7 @@ async fn a_refused_route_still_follows_a_dead() {
 	assert!(served(&routed).is_empty());
 
 	// The session it crossed closed for good: it ends, and its Announce ID retires.
-	routed
-		.receive(closed(3, true, 0))
-		.unwrap();
+	routed.receive(closed(3, true, 0)).unwrap();
 	assert!(routed.routes.is_empty() && routed.claims.is_empty() && routed.named.is_empty());
 	assert!(routed.receive(Msg::EndedId { id: 0 }).is_err());
 
@@ -758,9 +759,7 @@ async fn a_scoped_drain_survives_a_new_limit() {
 			},
 		};
 		routed.receive(route).unwrap();
-		routed
-			.receive(Msg::Dead(Dead::Drain { node: 9 }))
-			.unwrap();
+		routed.receive(Msg::Dead(Dead::Drain { node: 9 })).unwrap();
 		// Narrowing the request carries the route over under another Route ID.
 		let draining = |routed: &super::Routed| {
 			let route = routed.routes.values().next().expect("the route");

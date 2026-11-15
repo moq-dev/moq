@@ -24,8 +24,8 @@ use rangemap::RangeSet;
 
 mod fills;
 use fills::{FillAsk, RangeFills};
-mod routed;
 pub(super) mod route_stream;
+mod routed;
 
 pub(super) struct SubscriberConfig {
 	pub runtime: crate::time::Deadlines,
@@ -10048,22 +10048,22 @@ mod tests {
 	/// What reads a peer's announces of the root: its stream, or from lite-07 the
 	/// session's route layer.
 	enum Announcing {
-		Prefix(AnnouncePrefix),
-		Routes(Box<route_stream::RouteStream>, Subscriber),
+		Prefix(Box<AnnouncePrefix>),
+		Routes(Box<(route_stream::RouteStream, Subscriber)>),
 	}
 
 	impl Announcing {
 		fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 			match self {
 				Self::Prefix(prefix) => prefix.poll(waiter),
-				Self::Routes(routes, _) => routes.poll(waiter).map(Err),
+				Self::Routes(routes) => routes.0.poll(waiter).map(Err),
 			}
 		}
 
 		fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 			match self {
 				Self::Prefix(prefix) => prefix.poll_run(waiter),
-				Self::Routes(routes, _) => routes.poll_run(waiter),
+				Self::Routes(routes) => routes.0.poll_run(waiter),
 			}
 		}
 	}
@@ -10101,15 +10101,17 @@ mod tests {
 		let snapshot = subscriber.origin.snapshot("");
 		if !version.has_routes() {
 			let prefix = AnnouncePrefix::new(subscriber.clone(), Path::from_static(""), snapshot);
-			return (Announcing::Prefix(prefix), consumer);
+			return (Announcing::Prefix(Box::new(prefix)), consumer);
 		}
 		// The peer's SETUP arrived, and it opened its Announce Stream.
 		subscriber.peer_setup.set(lite::Setup::default()).unwrap();
 		let recv = crate::transport::boxed::RecvStream::new(session.recv());
-		let _ = subscriber.announce_streams.try_push(route_stream::Reader::new(recv, version));
+		let _ = subscriber
+			.announce_streams
+			.try_push(route_stream::Reader::new(recv, version));
 		let mut routes = route_stream::RouteStream::new(subscriber.clone(), route_stream::Publish::idle());
 		routes.want(Path::empty(), snapshot);
-		(Announcing::Routes(Box::new(routes), subscriber), consumer)
+		(Announcing::Routes(Box::new((routes, subscriber))), consumer)
 	}
 
 	/// A lite-07 peer keeps one Announce Stream for the session: a second one closes the
@@ -10137,9 +10139,10 @@ mod tests {
 		let mut cursor = consumer.routes();
 		assert!(routes.poll(&waiter).is_pending());
 		cursor.assert_next_active("room");
-		let Announcing::Routes(_, subscriber) = &routes else {
+		let Announcing::Routes(running) = &routes else {
 			unreachable!("lite-07 runs the route layer");
 		};
+		let subscriber = &running.1;
 		let second = crate::transport::boxed::RecvStream::new(session.recv());
 		let _ = (subscriber.announce_streams).try_push(route_stream::Reader::new(second, VERSION));
 		let result = routes.poll(&waiter);
@@ -10460,7 +10463,9 @@ mod tests {
 	/// the reserved node, and ROUTE_END retires it like any other.
 	#[kio::test]
 	async fn a_refused_route_start_holds_its_route_id() {
-		let mut cases = refused_offers(&[7, 0, 0]).map(|(what, body)| (what, body, true)).to_vec();
+		let mut cases = refused_offers(&[7, 0, 0])
+			.map(|(what, body)| (what, body, true))
+			.to_vec();
 		cases.push(("node 0", offer_body(&[0, 0, 0], 1, 7, 0, &[]), false));
 		for (what, body, revives) in cases {
 			let script = announce_script(

@@ -3095,7 +3095,11 @@ mod tests {
 		let path = crate::Path::from_static;
 		assert_eq!(permit(None, None).granted_regions(), None);
 		assert_eq!(permit(None, Some(&["a/b"])).granted_regions(), None);
-		assert_eq!(permit(Some(&[""]), Some(&["a"])).granted_regions(), None, "a root grant");
+		assert_eq!(
+			permit(Some(&[""]), Some(&["a"])).granted_regions(),
+			None,
+			"a root grant"
+		);
 		assert_eq!(permit(Some(&["a"]), None).granted_regions(), Some(vec![path("a")]));
 		assert_eq!(
 			permit(Some(&["a", "b"]), Some(&["c"])).granted_regions(),

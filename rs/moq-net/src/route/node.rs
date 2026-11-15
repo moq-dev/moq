@@ -1534,7 +1534,8 @@ impl State {
 						&& let Some(mut outbox) = sending(&self.queues, to)
 					{
 						let homes = &self.homes;
-						let awaits = |id: Id, path: &Path, item: &Claim| awaits(homes, id, path, &item.instance, item.epoch);
+						let awaits =
+							|id: Id, path: &Path, item: &Claim| awaits(homes, id, path, &item.instance, item.epoch);
 						outbox.edited(to, routes, awaits, &mut self.waiting);
 					}
 				}
