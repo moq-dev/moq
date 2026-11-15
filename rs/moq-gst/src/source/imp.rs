@@ -6081,6 +6081,8 @@ mod session_tests {
 			panic!("moqsink frames never reached moqsrc");
 		};
 		play();
+		// Past the healthy bar, so the outage redials rather than ending both sessions.
+		block(Duration::from_secs(1));
 		let held = pipeline.by_name("src").unwrap().src_pads();
 		*relay.admit.lock().unwrap() = Admit::Down;
 		relay.close.send(moq_net::Error::GoingAway).unwrap();
@@ -6114,6 +6116,8 @@ mod session_tests {
 		let mut publisher = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
+		// Past the healthy bar, so the refusals are redials rather than a first session's.
+		block(Duration::from_secs(1));
 		*relay.admit.lock().unwrap() = Admit::Refuse;
 		relay.close.send(moq_net::Error::GoingAway).unwrap();
 		let mut refused = relay.dropped.subscribe();
