@@ -2745,6 +2745,15 @@ impl AnnouncePrefix {
 		}
 	}
 
+	/// Let go of this request, all but the claims its route layer serves, which stay in
+	/// the origin until the caller drops them.
+	fn retire(mut self: Box<Self>) -> Option<routed::Retired> {
+		match &mut self.state {
+			PrefixState::Run(step) => step.run.routed.as_mut().map(routed::Routed::retire),
+			_ => None,
+		}
+	}
+
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -2914,17 +2923,23 @@ impl AnnouncePrefix {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
+							// This request now carries what the one it replaces did. The old
+							// stream closes first, so the node hands this one its claims, but
+							// what it served leaves the origin only once this one serves it:
+							// a claim this request files under another route prefix or
+							// identity, such as a region widened to the root, would otherwise
+							// be let go in between.
+							let retired = self.replacing.take().and_then(|old| old.retire());
 							// What the initial set put in the node is served before the
 							// snapshot lets readers see the origin synced.
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
+							drop(retired);
 							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							self.snapshot = None;
-							// This request now carries what the one it replaces did.
-							self.replacing = None;
 							continue;
 						}
 						if run.initial > 0 {
@@ -10832,6 +10847,65 @@ mod tests {
 			);
 			let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{what}: {err}");
+		}
+	}
+
+	/// Every well-formed message naming a Route ID closes the session when the neighbour
+	/// never assigned it (5, past its two routes) or already retired it (0, after its
+	/// ROUTE_END), as the draft requires: a route's state is the neighbour's to keep in
+	/// step, so a stray ID means the two ends disagree on which routes live.
+	#[kio::test]
+	async fn an_unassigned_or_retired_route_id_closes_the_session() {
+		type Encode = Box<dyn Fn(&mut crate::coding::Encoder<'_>)>;
+		let encode = |message: lite::AnnounceBroadcast| -> Encode {
+			Box::new(move |w| message.encode(w, Version::Lite07).unwrap())
+		};
+		let offer = crate::route::path::Offer {
+			path: [crate::route::path::Hop { node: 7, session: 0 }].into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 0,
+			down_only: false,
+		};
+		let naming = |id: u64| -> [(&str, Encode); 6] {
+			[
+				(
+					"ROUTE_UPDATE",
+					Box::new(raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))),
+				),
+				("ROUTE_HOLD", encode(lite::AnnounceBroadcast::RouteHold { id })),
+				("ROUTE_END", encode(lite::AnnounceBroadcast::RouteEnd { id })),
+				("ANNOUNCE_FLOOR", Box::new(floor(id, Some(1)))),
+				("ANNOUNCE_START", Box::new(claim_on(id, "x"))),
+				(
+					"DEAD",
+					encode(lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
+						hop: crate::route::path::Hop { node: 7, session: 0 },
+						far: 7,
+						gone: false,
+						more: false,
+						moved: vec![(id, Ok(offer.clone()))],
+					})),
+				),
+			]
+		};
+		let end = encode(lite::AnnounceBroadcast::RouteEnd { id: 0 });
+		for (id, before, what) in [(5, None, "unassigned"), (0, Some(&end), "retired")] {
+			for (message, naming) in naming(id) {
+				let mut script = two_routes();
+				let messages: Vec<&dyn Fn(&mut crate::coding::Encoder<'_>)> =
+					before.into_iter().map(|end| &**end).chain([&*naming]).collect();
+				script.extend(announce_script(Version::Lite07, &messages));
+				let (mut prefix, _consumer) = root_prefix(
+					Version::Lite07,
+					crate::lite::test_transport::ScriptedSession::new(script),
+				);
+				let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+				assert!(
+					matches!(err, Error::ProtocolViolation),
+					"{message} of a {what} route: {err}"
+				);
+			}
 		}
 	}
 

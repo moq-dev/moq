@@ -222,8 +222,10 @@ maintainer asked that what remains be unblocked or punted, and picked these on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)). m2 keeps only
 what would need a breaking release had it landed right after the cut:
 
-- ✅ Left m2: [the request loop](/quest/m3/cluster-routing/request-loop.md)
-  to m3's cluster-routing epic (a fixture and a fix, no wire);
+- ✅ Left m2: [the request loop](/quest/m2/cluster-routes/request-loop.md)
+  to m3's cluster-routing epic (a fixture and a fix, no wire), until it
+  returned to m2's cluster-routes epic on 2026-11-15 (maintainer, on
+  [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832));
   [media consumers](/quest/m3/time-addressing-consumers.md) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers);
   [moq-transport time addressing](/quest/m4/ietf-time-addressing.md) to m4

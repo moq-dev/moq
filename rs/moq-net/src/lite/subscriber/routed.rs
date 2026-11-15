@@ -119,6 +119,11 @@ struct ServedClaim {
 /// A served claim's identity, its path, and the prefix of the route it is served along.
 type ServedKey = (route::Id, Path, Path);
 
+/// What a replaced request's stream served, kept in the origin until dropped.
+pub(super) struct Retired {
+	_served: HashMap<ServedKey, ServedClaim>,
+}
+
 /// The route layer one lite-07 announce stream feeds.
 pub(super) struct Routed {
 	node: node::Node,
@@ -665,6 +670,14 @@ impl Routed {
 		let route = self.routes.get_mut(&claim.route).ok_or(Error::ProtocolViolation)?;
 		route.change(path, change);
 		Ok(())
+	}
+
+	/// Take what the stream serves, for the caller to let go of once the request replacing
+	/// this one serves it too.
+	pub(super) fn retire(&mut self) -> Retired {
+		let mut served = std::mem::take(&mut self.served);
+		served.extend(self.previous.drain());
+		Retired { _served: served }
 	}
 
 	/// Move what the stream holds onto a budget of its own with the session's cap, while a

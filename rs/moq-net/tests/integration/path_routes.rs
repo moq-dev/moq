@@ -21,44 +21,48 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_wi
 
 /// How long a relay holds a route no neighbour answers for, and lets an announce
 /// stream stall before closing its session.
-const HOLD: Duration = Duration::from_secs(10);
+pub(super) const HOLD: Duration = Duration::from_secs(10);
 
 /// How long a closed session's far end is doubted.
-const DOUBT: Duration = Duration::from_secs(1);
+pub(super) const DOUBT: Duration = Duration::from_secs(1);
 
-fn lite07() -> Version {
+/// The wip version the path rule runs on.
+pub(super) fn lite07() -> Version {
 	"moq-lite-07-wip".parse().unwrap()
 }
 
 /// One change a node showed at a path: how long after the cut, its kind, and whether a
 /// usable route reached the publisher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Seen {
-	at: Duration,
-	kind: support::Kind,
-	available: bool,
+pub(super) struct Seen {
+	pub at: Duration,
+	pub kind: support::Kind,
+	pub available: bool,
+	/// The cost of the route shown, which tells its path apart.
+	pub cost: u64,
 }
 
 /// The changes a node shows at a path.
-struct Watch {
-	rx: mpsc::UnboundedReceiver<(kio::clock::Instant, support::Kind, bool)>,
+pub(super) struct Watch {
+	rx: mpsc::UnboundedReceiver<(kio::clock::Instant, support::Kind, bool, u64)>,
 }
 
 impl Watch {
 	/// What the node showed since the last call, timed from `start`.
-	fn seen(&mut self, start: kio::clock::Instant) -> Vec<Seen> {
+	pub(super) fn seen(&mut self, start: kio::clock::Instant) -> Vec<Seen> {
 		std::iter::from_fn(|| self.rx.try_recv().ok())
-			.map(|(at, kind, available)| Seen {
+			.map(|(at, kind, available, cost)| Seen {
 				at: at.saturating_duration_since(start),
 				kind,
 				available,
+				cost,
 			})
 			.collect()
 	}
 }
 
 /// Watch every change `node` shows at `path`, past what it shows now.
-async fn record(node: &origin::Producer, path: &'static str) -> Watch {
+pub(super) async fn record(node: &origin::Producer, path: &'static str) -> Watch {
 	let mut routes = node.consume().routes();
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
@@ -73,7 +77,8 @@ async fn record(node: &origin::Producer, path: &'static str) -> Watch {
 				origin::RouteKind::End => support::Kind::End,
 				origin::RouteKind::Offline => support::Kind::Offline,
 			};
-			let seen = (kio::clock::now(), kind, event.announce.route.available());
+			let route = &event.announce.route;
+			let seen = (kio::clock::now(), kind, route.available(), route.cost().value());
 			if tx.unbounded_send(seen).is_err() {
 				break;
 			}
@@ -85,30 +90,31 @@ async fn record(node: &origin::Producer, path: &'static str) -> Watch {
 	watch
 }
 
-fn withdrawn(seen: &Seen) -> bool {
+/// Whether the node let go of the path, ended or offline.
+pub(super) fn withdrawn(seen: &Seen) -> bool {
 	matches!(seen.kind, support::Kind::End | support::Kind::Offline)
 }
 
 /// Close a session at both ends, as a dropped connection does.
-fn cut(pair: &MockPair) {
+pub(super) fn cut(pair: &MockPair) {
 	pair.server.abort(Error::Cancel);
 	pair.client.abort(Error::Cancel);
 }
 
 /// Publish `path` on `node`.
-fn publish(node: &origin::Producer, path: &str) -> origin::Route {
+pub(super) fn publish(node: &origin::Producer, path: &str) -> origin::Route {
 	let route = node.route(path, origin::RouteOptions::hidden()).unwrap();
 	route.announce().unwrap();
 	route
 }
 
 /// Wait long enough for every message in flight to land, without reaching the doubt.
-async fn land() {
+pub(super) async fn land() {
 	kio::clock::sleep(Duration::from_millis(100)).await;
 }
 
 /// Let the network settle, doubts and holds included.
-async fn quiesce() {
+pub(super) async fn quiesce() {
 	kio::clock::sleep(HOLD + DOUBT).await;
 }
 

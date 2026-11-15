@@ -129,8 +129,9 @@ maintainer picked these on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)), applying the maintainer's rule that m2 keeps only what
 would need a breaking release had it landed right after the cut:
 
-- ✅ [The request loop](/quest/m3/cluster-routing/request-loop.md) moved
+- ✅ [The request loop](/quest/m2/cluster-routes/request-loop.md) moved
   to m3 and no longer gates this: a fixture and a fix with no wire change.
+  It returned to m2 on 2026-11-15 and still does not gate this.
 - ✅ [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) stays
   in [Routes and announces](/quest/m2/cluster-routes/README.md), so this
   still waits on it (maintainer, /quest-complete on

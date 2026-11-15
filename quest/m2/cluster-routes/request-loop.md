@@ -3,7 +3,8 @@
 ## Goal
 
 A subscription that loops between relays while routes settle reaches the
-publisher once the next hops stop looping, instead of hanging silently.
+publisher once the next hops stop looping, instead of hanging silently or
+ending with `Unroutable` while its relay shows the broadcast available.
 Under the path rule, selected next hops can loop for a moment
 ([epic](/quest/m2/cluster-routes/README.md) Plan item 27). A request
 forwarded around that loop meets a relay already requesting the same track
@@ -12,6 +13,12 @@ pending request that never follows its route's change waits forever with
 no data and no failure.
 
 ## Plan
+
+Decided 2026-11-15 (maintainer, on
+[moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ move it
+back to m2, under the cluster-routes epic (rejected: keep it in m3). Relays
+that show a broadcast available while ending readers' subscriptions should
+block the milestone.
 
 Moved from m2 to m3 2026-11-14 (the m2 triage before the cut, under
 /quest-afk, for the maintainer's review): ✅ m3, under the cluster-routing
@@ -32,6 +39,16 @@ Decided 2026-11-13 (maintainer, /quest-plan on the BGP failure modes):
   FETCH, and the other requests and turns a loop that would heal into an
   error the subscriber sees). Epic Plan item 27 already rejected keeping a
   request from going back through the relay that sent it.
+
+Found again by [acceptance](/quest/m2/cluster-routes/acceptance.md) once
+[moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734) merged:
+`route_failover::live_mesh_link_failure_keeps_presence` cuts all but one of a
+publishing relay's links on a 34-relay mesh, and 3 readers on relays that
+stayed available end with `Unroutable` instead of hanging, all for one
+publisher. Each such relay moved onto a neighbour's direct route that the
+neighbour's own close made stale; the replaced doubt rule held them and
+ended none. The test pins those readers: flip it once a pending request
+follows its route and they read on.
 
 The fixture runs real lite-07 relays with mocked time. Form the loop the
 churn sweeps found (two unrelated failures at once, so two relays briefly
