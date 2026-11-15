@@ -18739,7 +18739,7 @@ rec {
           "async" = [ "kio?/async" ];
           "cpu" = [ "dep:rind" ];
           "default" = [
-            "sign"
+            "endpoint"
             "e2ee"
           ];
           "e2ee" = [
@@ -18752,28 +18752,26 @@ rec {
             "dep:uuid"
             "dep:zeroize"
           ];
+          "endpoint" = [
+            "dep:moq-net"
+            "dep:rind"
+            "dep:zeroize"
+          ];
           "provider" = [
             "cpu"
             "dep:rind-rustls"
             "dep:rustls"
           ];
           "serde" = [ "dep:serde" ];
-          "sign" = [
-            "dep:bytes"
-            "dep:kio"
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
         };
         resolvedDefaultFeatures = [
           "async"
           "cpu"
           "default"
           "e2ee"
+          "endpoint"
           "provider"
           "serde"
-          "sign"
         ];
       };
       "moq-ffi" = rec {
@@ -20412,7 +20410,7 @@ rec {
             name = "moq-crypto";
             packageId = "moq-crypto";
             usesDefaultFeatures = false;
-            features = [ "sign" ];
+            features = [ "endpoint" ];
           }
           {
             name = "moq-net";
