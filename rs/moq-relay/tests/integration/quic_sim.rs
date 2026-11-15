@@ -268,16 +268,18 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 		let (dialed, accepted) = (dialed.expect("dial"), accepted.expect("accept"));
 
 		let write = async {
-			let mut group = accepted.producer.append_group().unwrap();
+			let mut group = accepted.producer.append_group(0).unwrap();
 			let info = moq_net::frame::Info {
 				size: CHUNK as u64,
-				timestamp: None,
+				timestamp: moq_net::Timestamp::unscaled(0),
 			};
 			for index in 0..BULK / CHUNK {
 				group.ready(&info).await;
-				group.write_frame(None, vec![index as u8; CHUNK]).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; CHUNK])
+					.unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		let read = async {
 			let mut ordered = dialed.consumer.ordered();
