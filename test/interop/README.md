@@ -554,7 +554,7 @@ The replacement case is quarantined from the default run on every engine: under 
 load it intermittently leaves the audio stalled past the switch bound after a route
 switch or fallback (the viewer logs `skipping missing groups` on the audio track first),
 and Firefox also showed intermittent missing tone samples. Run it explicitly with
-`just test media --media-cases replacement`, or `--media-engines firefox` for Firefox;
+`just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
 its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
