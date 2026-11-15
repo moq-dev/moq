@@ -162,7 +162,6 @@ would need a breaking release had it landed right after the cut:
 - [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - removes WARM_* and SUBSCRIBE's `Warm` byte from lite-07
 - [ROUTE's RTT](/quest/m2/route-rtt.md) - removes ROUTE's informational RTT
 - [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
-- [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records
 - [Subscriber Min Age](/quest/m2/subscriber-min-age.md) - removes SUBSCRIBE's minimum age, which nothing reads
 
 ## Related
