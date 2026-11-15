@@ -14,9 +14,10 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use futures::StreamExt;
+use moq_relay::sim::{self, Net};
 use moq_relay::{cluster, shutdown};
 
-use crate::memory::{self, Net};
+use crate::memory;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
@@ -57,9 +58,9 @@ fn dialing() -> moq_tokio::connect::Config {
 	config
 }
 
-/// A cluster dialing `peers` through `net`, its dials already started.
-async fn clustered(net: &Net, peers: &[&str], connect: moq_tokio::connect::Config) -> cluster::Cluster {
-	memory::start(memory::spawn_cluster(net.options(peers)), connect).await
+/// A cluster named `name` dialing `peers` through `net`, its dials already started.
+async fn clustered(net: &Net, name: &str, peers: &[&str], connect: moq_tokio::connect::Config) -> cluster::Cluster {
+	memory::start(memory::spawn_cluster(net.options(name, peers)), connect).await
 }
 
 /// The next session `accepted` hands over.
@@ -106,11 +107,11 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 /// force-close at all and `drain_session` awaiting a peer that never leaves.
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let net = Net::new();
-	let mut accepted = net.upstream("upstream", &memory::origin());
+	let mut accepted = net.upstream("upstream", &sim::origin());
 
 	let client_connection = within(
 		"client connects",
-		connect_once(net.client(Default::default()), net.url("upstream")),
+		connect_once(net.client("client", Default::default()), net.url("upstream")),
 	)
 	.await
 	.expect("connect");
@@ -135,7 +136,7 @@ fn cluster_continues_a_group_split_by_goaway() {
 /// holding it, and the next group after it, never the split group a second time.
 async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let net = Net::new();
-	let upstream_origin = memory::origin();
+	let upstream_origin = sim::origin();
 	let broadcast = upstream_origin
 		.route("cam", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -146,7 +147,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let mut accepted_a = net.upstream("a", &upstream_origin);
 	let mut accepted_b = net.upstream("b", &upstream_origin);
-	let cluster = clustered(&net, &["a"], dialing()).await;
+	let cluster = clustered(&net, "relay", &["a"], dialing()).await;
 
 	let session_a = accept("A accepts", &mut accepted_a).await;
 	let consumer = cluster.origin.consume();
@@ -244,7 +245,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	// ── the shared "live" broadcast both siblings can serve ─────────
 	let net = Net::new();
-	let upstream_origin = memory::origin();
+	let upstream_origin = sim::origin();
 	let broadcast = upstream_origin
 		.route("cam", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -257,7 +258,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	let mut accepted_b = net.upstream("b", &upstream_origin);
 
 	// ── the relay cluster under test, dialing sibling A ─────────────
-	let cluster = clustered(&net, &["a"], dialing()).await;
+	let cluster = clustered(&net, "relay", &["a"], dialing()).await;
 
 	// A dials in; hold its server-side session so we can drain it.
 	let session_a = accept("sibling A accepts the cluster dial", &mut accepted_a).await;
@@ -379,7 +380,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	lite07.version = vec![LITE_07.parse().unwrap()];
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
-	let top_origin = memory::origin();
+	let top_origin = sim::origin();
 	let broadcast = top_origin
 		.route("diamond", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -390,17 +391,17 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut top_accepted = net.upstream("top", &top_origin);
 
 	// ── MID-B: full relay clustered to TOP, up for the whole test ───────
-	let mid_b = clustered(&net, &["top"], lite07.clone()).await;
+	let mid_b = clustered(&net, "mid-b", &["top"], lite07.clone()).await;
 	let mut mid_b_accepted = net.relay("mid-b", &mid_b, &auth, &shutdown::Observer::disabled());
 	let _mid_b_session = accept("TOP accepts MID-B", &mut top_accepted).await;
 
 	// ── MID-A: mini-relay consuming TOP, serving BOTTOM, drains later ───
-	let mid_a_origin = memory::origin();
+	let mid_a_origin = sim::origin();
 	// An upstream link: MID-A relays for BOTTOM, so it asks TOP for everything.
 	let mid_a_upstream = within(
 		"MID-A connects to TOP",
 		connect_once(
-			net.client(lite07.clone())
+			net.client("mid-a", lite07.clone())
 				.with_subscriber(mid_a_origin.clone().with_link(moq_net::origin::Link::Upstream)),
 			net.url("top"),
 		),
@@ -411,21 +412,22 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut mid_a_accepted = net.upstream("mid-a", &mid_a_origin);
 
 	// ── BOTTOM: full relay clustered to MID-A ───────────────────────────
-	let bottom = clustered(&net, &["mid-a"], lite07).await;
+	let bottom = clustered(&net, "bottom", &["mid-a"], lite07).await;
 	let _bottom_accepted = net.relay("bottom", &bottom, &auth, &shutdown::Observer::disabled());
 	// MID-A's first inbound connection is BOTTOM's cluster dial: hold its
 	// server-side session so we can drain it.
 	let session_bottom_on_a = accept("MID-A accepts BOTTOM", &mut mid_a_accepted).await;
 
 	// ── SUBSCRIBER: connects to BOTTOM ───────────────────────────────────
-	let sub_origin = memory::origin();
+	let sub_origin = sim::origin();
 	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
 	let recorded = memory::record(sub_origin.consume().routes());
 	let sub_connection = within(
 		"subscriber connects to BOTTOM",
 		connect_once(
-			net.client(Default::default()).with_subscriber(sub_origin.clone()),
+			net.client("subscriber", Default::default())
+				.with_subscriber(sub_origin.clone()),
 			net.url("bottom"),
 		),
 	)
@@ -649,7 +651,7 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 /// closed on schedule rather than held for as long as the dial takes.
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let net = Net::new();
-	let mut accepted = net.upstream("upstream", &memory::origin());
+	let mut accepted = net.upstream("upstream", &sim::origin());
 	// Never answers: the dial hangs in the transport handshake.
 	let mut black_hole = net.black_hole("black-hole");
 
@@ -666,7 +668,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 
 	let connection = within(
 		"client connects",
-		net.client(config)
+		net.client("client", config)
 			.connect(url::Url::parse(&net.url("upstream")).unwrap())
 			.established(),
 	)
@@ -695,7 +697,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	within("the old session closes", server_session.closed()).await;
 	// The handover counts from the GOAWAY's arrival, one link after it was sent; the
 	// close itself skips the latency.
-	let bound = handover + memory::LATENCY;
+	let bound = handover + sim::LATENCY;
 	assert!(
 		sent.elapsed() <= bound,
 		"the old session outlived its {handover:?} handover by {:?}: the replacement dial was never interrupted to enforce it",
