@@ -1352,37 +1352,23 @@ mod tests {
 		assert!(matches!(decode(&wire, usize::MAX), Err(DecodeError::InvalidValue)));
 	}
 
-	/// Lite-07's ANNOUNCE_OK is empty: SYNCED replaces the count, and routes replace the
-	/// Hop ID. Lite-06 keeps both.
+	/// Lite-06's ANNOUNCE_OK opens the stream with a Hop ID and a count. Lite-07's is a
+	/// message of the Announce Stream instead: SYNCED replaces the count, and routes
+	/// the Hop ID.
 	#[test]
-	fn announce_ok_is_empty_on_lite07() {
-		for version in [Version::Lite06, Version::Lite07] {
-			let mut bytes = Vec::new();
-			AnnounceOk {
-				origin: Hop::new(1).unwrap(),
-				active: 7,
-			}
-			.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+	fn announce_ok_opens_only_a_lite06_stream() {
+		let ok = AnnounceOk {
+			origin: Hop::new(1).unwrap(),
+			active: 7,
+		};
+		let mut bytes = Vec::new();
+		ok.encode(&mut Encoder::new(&mut bytes, Version::Lite06.into()), Version::Lite06)
 			.unwrap();
-			assert_eq!(
-				bytes,
-				if version == Version::Lite06 {
-					vec![2, 1, 7]
-				} else {
-					vec![0]
-				}
-			);
-		}
-		assert_eq!(
-			crate::coding::decode_buf(&mut &[0u8][..], Version::Lite07, |r, v| AnnounceOk::decode(r, v)).unwrap(),
-			AnnounceOk {
-				origin: Hop::UNKNOWN,
-				active: 0,
-			}
-		);
-		// A body where the draft has none is malformed.
+		assert_eq!(bytes, [2, 1, 7]);
+		let res = ok.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()), Version::Lite07);
+		assert!(matches!(res, Err(EncodeError::Version)));
 		assert!(
-			crate::coding::decode_buf(&mut &[1u8, 1][..], Version::Lite07, |r, v| AnnounceOk::decode(r, v)).is_err()
+			crate::coding::decode_buf(&mut &[0u8][..], Version::Lite07, |r, v| AnnounceOk::decode(r, v)).is_err()
 		);
 	}
 
@@ -2013,7 +1999,7 @@ mod tests {
 		edit.encode(&mut Encoder::new(&mut bytes, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
 		// Type, length, the removed Prefix IDs, then each added prefix with its Hidden.
-		assert_eq!(bytes, [&[16, 11, 2, 0, 7, 2, 4][..], b"room", &[1, 0, 0]].concat());
+		assert_eq!(bytes, [&[16, 12, 2, 0, 7, 2, 4][..], b"room", &[1, 0, 0]].concat());
 		assert_eq!(broadcast_round_trip(&AnnounceBroadcast::Ok, Version::Lite07), AnnounceBroadcast::Ok);
 		for msg in [edit, AnnounceBroadcast::Ok] {
 			let res = msg.encode(&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()), Version::Lite06);

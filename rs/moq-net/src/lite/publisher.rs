@@ -3831,236 +3831,6 @@ mod announce_test {
 		);
 	}
 
-	#[test]
-	fn synced_survives_a_removed_initial_route_and_live_churn() {
-		let origin = Hop::new(1).unwrap().produce();
-		let removed = origin.announce("z/removed", origin::RouteInfo::new()).unwrap();
-		let _initial = origin.announce("z/retained", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(0usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		drop(removed);
-		let mut churn = Vec::new();
-		for limit in 1..=4 {
-			churn.push(origin.announce(format!("a/{limit}"), origin::RouteInfo::new()).unwrap());
-			*budget.write().ok().unwrap() = limit;
-			assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		}
-		assert_eq!(wire.take_ok().active, 0);
-		let messages = wire.take_announces();
-		assert!(
-			matches!(&messages[0], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/retained")
-		);
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced { prefix: 0 });
-		assert!(!messages.iter().any(
-			|msg| matches!(msg, lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/removed")
-		));
-	}
-
-	#[test]
-	fn a_partial_regrant_cannot_overtake_an_initial_route() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
-		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(1usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant {
-			subscribe: crate::Pattern::literal("b").unwrap().into(),
-			..Default::default()
-		});
-		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
-			panic!("the changed grant is ready");
-		};
-		run.regrant(&mut stream, &consumer, restricted).unwrap();
-		*budget.write().ok().unwrap() = 8;
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.take_ok();
-		let messages = wire.take_announces();
-		assert!(matches!(&messages[1], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "b"));
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced { prefix: 0 });
-		assert_eq!(messages[3], lite::AnnounceBroadcast::EndedId { id: 0 });
-	}
-
-	#[test]
-	fn synced_cuts_a_regrant_burst_at_the_initial_bound() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
-		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(0usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant::default());
-		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
-			panic!("the changed grant is ready");
-		};
-		run.regrant(&mut stream, &consumer, restricted).unwrap();
-		let _live = origin.announce("c", origin::RouteInfo::new()).unwrap();
-		run.regrant(&mut stream, &consumer, crate::auth::Permit::default())
-			.unwrap();
-		*budget.write().ok().unwrap() = 4;
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.take_ok();
-		let messages = wire.take_announces();
-		assert_eq!(messages.len(), 4);
-		let initial: std::collections::BTreeSet<_> = messages[..2]
-			.iter()
-			.map(|message| match message {
-				lite::AnnounceBroadcast::Active { suffix, .. } => suffix.rest.as_str(),
-				other => panic!("expected an initial start, got {other:?}"),
-			})
-			.collect();
-		assert_eq!(initial, std::collections::BTreeSet::from(["a", "b"]));
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced { prefix: 0 });
-		assert_eq!(
-			messages
-				.iter()
-				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Synced { prefix: 0 }))
-				.count(),
-			1
-		);
-	}
-
-	#[test]
-	fn a_seen_retraction_can_precede_synced() {
-		let origin = Hop::new(1).unwrap().produce();
-		let first = origin.announce("a", origin::RouteInfo::new()).unwrap();
-		let unseen = origin.announce("b", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(1usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		drop(unseen);
-		drop(first);
-		*budget.write().ok().unwrap() = 4;
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.take_ok();
-		assert!(matches!(
-			wire.take_announces().as_slice(),
-			[
-				lite::AnnounceBroadcast::Active { .. },
-				lite::AnnounceBroadcast::EndedId { id: 0 },
-				lite::AnnounceBroadcast::Synced { prefix: 0 }
-			]
-		));
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.assert_quiet();
-	}
-
-	#[test]
-	fn an_empty_cold_relay_syncs_without_its_upstream() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _upstream = origin.snapshot("");
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		assert!(!announced.is_synced());
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		assert!(
-			run.poll(&mut stream, &consumer, &mut announced, &kio::Waiter::noop())
-				.is_pending()
-		);
-		wire.take_ok();
-		assert_eq!(wire.take_announces(), vec![lite::AnnounceBroadcast::Synced { prefix: 0 }]);
-	}
-
 	/// The hops stamped on every harness route.
 	fn pub_hops() -> Hops {
 		Hops::try_from(vec![Hop::new(9).unwrap()]).unwrap()
@@ -4291,126 +4061,32 @@ mod announce_test {
 	}
 
 	/// A new best route the wire cannot tell apart (another session, same chain and
-	/// cost) under another instance is another source, in either direction: an
-	/// ANNOUNCE_RESTART on lite-07, carrying the instance, and an end and a fresh
-	/// start before it.
+	/// cost) under another instance is another source, in either direction: an end and
+	/// a fresh start.
 	#[kio::test]
 	async fn source_flip_restarts() {
-		for version in [Version::Lite06, Version::Lite07] {
-			let mut h = harness_on(version).await;
-			let route = crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(7);
-			let newer = h.origin.announce("cam", route.clone()).unwrap();
-			// A restart waits out the update hold like an update.
-			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
-			settle().await;
-			let restarted = |msgs: Vec<lite::AnnounceBroadcast>| match (version, msgs.as_slice()) {
-				(
-					Version::Lite07,
-					[
-						lite::AnnounceBroadcast::Restart {
-							id: 0,
-							instance: Some(_),
-							cost,
-							..
-						},
-					],
-				) => {
-					assert_eq!(*cost, crate::origin::Cost::new(7))
-				}
-				(
-					Version::Lite06,
-					[
-						lite::AnnounceBroadcast::EndedId { .. },
-						lite::AnnounceBroadcast::Active { suffix, .. },
-					],
-				) => {
-					assert_eq!(suffix.rest.as_str(), "cam")
-				}
-				(_, other) => panic!("expected a restart on {version}, got {other:?}"),
-			};
-			restarted(h.wire.take_announces());
-
-			drop(newer);
-			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
-			settle().await;
-			restarted(h.wire.take_announces());
-			h.assert_idle();
-		}
-	}
-
-	/// Another instance restarts the advertisement, and so does a newer epoch of the same
-	/// one, which the peer must rank: lite-07 carries both.
-	#[kio::test]
-	async fn a_new_instance_or_epoch_restarts_with_it() {
-		let mut h = harness_on(Version::Lite07).await;
-		let instance = crate::Instance::random();
-		let route = |epoch| {
-			crate::origin::RouteInfo::new()
-				.with_instance(instance.clone(), epoch)
-				.with_hops(pub_hops())
-				.with_cost(7)
-		};
-		let _first = h.origin.announce("cam", route(1)).unwrap();
-		let _newer = h.origin.announce("cam", route(2)).unwrap();
+		let mut h = harness_on(Version::Lite06).await;
+		let route = crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(7);
+		let newer = h.origin.announce("cam", route.clone()).unwrap();
+		// A restart waits out the update hold like an update.
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
-		match h.wire.take_announces().as_slice() {
+		let restarted = |msgs: Vec<lite::AnnounceBroadcast>| match msgs.as_slice() {
 			[
-				lite::AnnounceBroadcast::Restart {
-					id: 0,
-					instance: Some(sent),
-					epoch: 2,
-					..
-				},
-			] => assert_eq!(*sent, instance),
-			other => panic!("expected a restart, got {other:?}"),
-		}
-		h.assert_idle();
-	}
-
-	/// A grant that grows while another instance replaces an advertised one still restarts it,
-	/// whether the instance is named or minted: the regrant takes in what the old cursor had
-	/// pending rather than dropping it.
-	#[kio::test]
-	async fn a_restart_pending_when_the_grant_grows_still_restarts() {
-		// The peer's ceiling: what it may subscribe to is what we may announce to it.
-		let grant = |paths: &[&str]| crate::auth::Grant {
-			publish: Default::default(),
-			subscribe: paths
-				.iter()
-				.map(|path| crate::Pattern::subtree(path).unwrap())
-				.collect(),
-			expires: None,
-		};
-		for anonymous in [false, true] {
-			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&grant(&["cam"]));
-			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
-
-			// Same chain and cost, so only the instance changed. Both land before the loop polls.
-			let route = crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(7);
-			let named = (!anonymous).then(crate::Instance::random);
-			let route = match &named {
-				Some(instance) => route.with_instance(instance.clone(), 0),
-				None => route,
-			};
-			let newer = h.origin.announce("cam", route).unwrap();
-			let instance = newer.route().and_then(|route| route.instance);
-			auth.handle().authorize(&grant(&["cam", "other"]));
-			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
-			settle().await;
-			match h.wire.take_announces().as_slice() {
-				[
-					lite::AnnounceBroadcast::Restart {
-						id: 0, instance: sent, ..
-					},
-				] => {
-					assert_eq!(*sent, instance, "anonymous={anonymous}")
-				}
-				other => panic!("expected a restart (anonymous={anonymous}), got {other:?}"),
+				lite::AnnounceBroadcast::EndedId { .. },
+				lite::AnnounceBroadcast::Active { suffix, .. },
+			] => {
+				assert_eq!(suffix.rest.as_str(), "cam")
 			}
-			h.assert_idle();
-		}
+			other => panic!("expected a restart, got {other:?}"),
+		};
+		restarted(h.wire.take_announces());
+
+		drop(newer);
+		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
+		settle().await;
+		restarted(h.wire.take_announces());
+		h.assert_idle();
 	}
 
 	/// Costs past the wire ceiling clamp to the same value, so moving between them

@@ -18,9 +18,14 @@ fn offer() -> Offer {
 }
 
 fn start(path: &'static str) -> Msg {
+	start_on(0, path)
+}
+
+/// A claim of `path` on the Route ID `route`.
+fn start_on(route: u64, path: &'static str) -> Msg {
 	Msg::Active {
 		suffix: PathRef::literal(Path::from_static(path)),
-		route: 0,
+		route,
 		instance: Some(Instance::random()),
 		epoch: 0,
 		hops: Default::default(),
@@ -116,13 +121,29 @@ async fn an_excluded_claim_never_enters_the_node() {
 	assert_eq!(shown(&routed), ["live"]);
 	assert_eq!(served(&routed), ["live"]);
 
-	// A narrower limit certifies nothing, so widening it again replays every
-	// committed claim into a fresh view; only the replay filter keeps `.stats` out.
+	// A narrower limit asks for less, which carries the route over under the next
+	// Route ID with the claims the narrower prefix covers.
 	routed.relimit(&subscriber, &limited("live/**")).unwrap();
 	assert_eq!(shown(&routed), ["live"]);
 	assert_eq!(served(&routed), ["live"]);
 
+	// Widening it again keeps the route, without the claim at its prefix or a floor:
+	// the peer sends what the wider prefix adds and floors it, and only the filter
+	// keeps `.stats` out.
 	routed.relimit(&subscriber, &Default::default()).unwrap();
+	let floor = Msg::Floor {
+		id: 1,
+		revision: Some(0),
+	};
+	for msg in [
+		start_on(1, "live"),
+		start_on(1, ".stats/node"),
+		start_on(1, ".stats/node/evil"),
+		floor,
+	] {
+		routed.receive(msg).unwrap();
+	}
+	routed.outputs(&subscriber);
 	assert_eq!(shown(&routed), ["live"]);
 	assert_eq!(served(&routed), ["live"]);
 }
@@ -637,7 +658,6 @@ async fn a_refused_route_still_follows_a_dead() {
 #[kio::test]
 async fn an_uncredited_dead_keeps_the_node_in_step() {
 	use crate::lite::Dead;
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 	let prefix = Path::empty();
 	let shown = |routed: &super::Routed| -> Vec<(String, bool)> {
 		(routed.node.shown().into_iter())
@@ -645,6 +665,7 @@ async fn an_uncredited_dead_keeps_the_node_in_step() {
 			.collect()
 	};
 	for gone in [true, false] {
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
 		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
 		let route = Msg::RouteStart {
 			node: 7,
@@ -710,7 +731,11 @@ async fn a_scoped_drain_survives_a_new_limit() {
 		routed
 			.receive(Msg::Dead(Dead::Drain { node: 9 }))
 			.unwrap();
-		let draining = |routed: &super::Routed| routed.routes[&0].offer.as_ref().unwrap().draining;
+		// Narrowing the request carries the route over under another Route ID.
+		let draining = |routed: &super::Routed| {
+			let route = routed.routes.values().next().expect("the route");
+			route.offer.as_ref().unwrap().draining
+		};
 		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
 		routed.relimit(&subscriber, &limited("live/a/**")).unwrap();
 		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");

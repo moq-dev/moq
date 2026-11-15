@@ -7247,7 +7247,7 @@ mod tests {
 
 	#[kio::test]
 	async fn announce_interest_waits_for_credit() {
-		for version in [Version::Lite04, Version::Lite07] {
+		for version in [Version::Lite04, Version::Lite06] {
 			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _interest = origin.consume().routes();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
@@ -10274,7 +10274,7 @@ mod tests {
 		}
 	}
 
-	/// A route message body: `lead` (a ROUTE_START's Node ID and empty suffix, or a
+	/// A route message body: `lead` (a ROUTE_START's Node ID, Prefix ID, and empty suffix, or a
 	/// ROUTE_UPDATE's Route ID), then an offer along `hops` hops from Node ID `first` up,
 	/// with `flags`, the top priority, metric 0, and `rest`.
 	fn offer_body(lead: &[u64], hops: u64, first: u64, flags: u8, rest: &[u8]) -> Vec<u8> {
@@ -10391,8 +10391,8 @@ mod tests {
 	/// the reserved node, and ROUTE_END retires it like any other.
 	#[kio::test]
 	async fn a_refused_route_start_holds_its_route_id() {
-		let mut cases = refused_offers(&[7, 0]).map(|(what, body)| (what, body, true)).to_vec();
-		cases.push(("node 0", offer_body(&[0, 0], 1, 7, 0, &[]), false));
+		let mut cases = refused_offers(&[7, 0, 0]).map(|(what, body)| (what, body, true)).to_vec();
+		cases.push(("node 0", offer_body(&[0, 0, 0], 1, 7, 0, &[]), false));
 		for (what, body, revives) in cases {
 			let script = announce_script(
 				Version::Lite07,

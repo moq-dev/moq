@@ -2042,23 +2042,25 @@ pub fn pattern(data: &[u8]) -> bool {
 }
 
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
-/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message and
-/// both kinds of DEAD (the sweep sets ROUTE_START's type byte but fills its size byte
-/// with the body pattern, so none decodes whole), and a DATAGRAMS request, whose eight
-/// fields outgrow the sweep's longest body.
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message,
+/// both kinds of DEAD, and an ANNOUNCE_REQUEST and its ANNOUNCE_OK (the sweep sets
+/// ROUTE_START's type byte but fills its size byte with the body pattern, so none
+/// decodes whole), and a DATAGRAMS request, whose eight fields outgrow the sweep's
+/// longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[8, 0, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 8, 1, 0, 1, 1, 0, 0, 0x80, 1]),
+	(5, &[6, 9, 1, 0, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[7, 7, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
-	(5, &[15, 7, 0, 1, 1, 2, 0, 0, 0]),
-	(5, &[15, 7, 0, 1, 1, 2, 0, 1, 0]),
-	(5, &[15, 15, 0, 1, 1, 2, 1, 0, 1, 0, 6, 1, 1, 1, 0, 0x80, 1]),
+	(5, &[15, 6, 0, 1, 1, 2, 0, 0]),
+	(5, &[15, 6, 0, 1, 1, 2, 1, 2]),
 	(5, &[15, 2, 1, 1]),
+	(5, &[16, 4, 0, 1, 0, 0]),
+	(5, &[17, 0]),
 ];
 
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,

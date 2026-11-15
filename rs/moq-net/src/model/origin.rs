@@ -11213,7 +11213,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			matches!(
-				stream.try_output(),
+				stream.try_wire(),
 				Some(crate::route::node::Output::Route { reach: Some(_), .. })
 			),
 			"the new stream is sent the route to the announced claim"
@@ -16249,7 +16249,7 @@ mod tests {
 		drop(alice);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
-		let output = stream.try_output();
+		let output = stream.try_wire();
 		assert!(
 			matches!(
 				&output,
