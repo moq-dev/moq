@@ -26,8 +26,8 @@ count (`moq_tokio::quic::DEFAULT_MAX_STREAMS = 10_000`), so the worst case
 is about 10k times N times a few hundred bytes. Incoming announces are
 bounded by `session::Limits`; outgoing interest streams are not.
 
-Once [one route stream](/quest/m2/cluster-routes/route-stream.md)
-lands, lite-07 holds one interest stream per side, so what remains exposed is
+Since [one route stream](https://github.com/moq-dev/moq/pull/8835),
+lite-07 holds one interest stream per side, so what remains exposed is
 lite-05/06 and moq-transport.
 
 Bound it by design, not with a cap: cursors walk a shared, refcounted table
