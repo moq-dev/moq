@@ -421,19 +421,20 @@ async function decodeRequest(r: Reader): Promise<AnnounceBroadcast> {
 }
 
 /** Whether the prefixes `set` fit the Adds of one ANNOUNCE_REQUEST, as a subscriber's whole set
- * must. */
-export function requestFits(set: Iterable<Path.Valid>, version: Version): boolean {
-	const size = (value: number) => encodeVarint(value, version).byteLength;
+ * must, beside the Prefix IDs `remove`. */
+export function requestFits(set: Iterable<Path.Valid>, version: Version, remove: readonly bigint[] = []): boolean {
+	const size = (value: number | bigint) => encodeVarint(value, version).byteLength;
 	const encoder = new TextEncoder();
 	let count = 0;
-	let bytes = 0;
+	let bytes = size(remove.length);
+	for (const id of remove) bytes += size(id);
 	for (const prefix of set) {
 		const length = encoder.encode(Path.encode(prefix)).byteLength;
 		count += 1;
 		bytes += size(length) + length + 1;
 		if (bytes > MAX_MESSAGE_SIZE) return false;
 	}
-	return bytes + size(0) + size(count) <= MAX_MESSAGE_SIZE;
+	return bytes + size(count) <= MAX_MESSAGE_SIZE;
 }
 
 /** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or

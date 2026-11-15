@@ -428,6 +428,31 @@ fn a_reader_behind_repeated_failures_overruns() {
 	assert!(outbox.sealing.is_empty());
 }
 
+/// An edit adding many prefixes queues a SYNCED for each, which a momentarily slow
+/// reader holds unread: none of it, nor this side's own edit, counts toward an overrun.
+#[test]
+fn an_edit_of_many_prefixes_never_overruns() {
+	use super::super::path::Hop;
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let offer = Offer {
+		path: [Hop { node: 1, session: 0 }].into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+	};
+	outbox.route(7, (1, Path::empty()), Some(Reach::Finite(offer)), &mut waiting);
+	let prefixes = 100 * MAX_HOPS;
+	for i in 0..prefixes {
+		outbox.seal(Barrier::Synced(Path::new(&format!("p/{i}")).unwrap()));
+	}
+	outbox.seal(Barrier::Ask(Default::default()));
+	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
+	assert_eq!(outbox.sealed, 0);
+	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), prefixes + 2);
+}
+
 /// A claim started and withdrawn before the reader read it leaves nothing queued, so a
 /// route whose claims churn at fresh paths keeps only its live ones however slowly the
 /// peer reads. A withdrawal of a claim the reader holds still goes, and so does one of a

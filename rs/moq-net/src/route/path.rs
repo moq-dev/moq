@@ -675,6 +675,9 @@ pub(super) fn meet(a: &Path, b: &Path) -> Option<Path> {
 /// whole set as the Adds of one ANNOUNCE_REQUEST.
 pub(crate) const ASK_BYTES: usize = 65_535;
 
+/// The most bytes an ANNOUNCE_REQUEST spends removing one prefix: its Prefix ID.
+const REMOVE_BYTES: usize = 8;
+
 /// An upper bound on the bytes `set` takes as the Adds of one ANNOUNCE_REQUEST: each
 /// prefix as it follows the session's `root`, with its length and its flag, behind the
 /// two counts.
@@ -1263,11 +1266,32 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if want == requested {
 			return;
 		}
-		let edit = Edit {
-			remove: requested.difference(&want).cloned().collect(),
-			add: want.difference(&requested).cloned().collect(),
+		let remove: Vec<Path> = requested.difference(&want).cloned().collect();
+		let add: BTreeSet<Path> = want.difference(&requested).cloned().collect();
+		// The wanted set fits one request as Adds, but an edit also names each prefix it
+		// removes: one past the limit removes first, as many as fit, and adds once that
+		// is answered.
+		let edit = match ask_bytes(&add, &session.link.root) + REMOVE_BYTES * remove.len() <= ASK_BYTES {
+			true => {
+				session.edits.push_back(want);
+				Edit {
+					remove,
+					add: add.into_iter().collect(),
+				}
+			}
+			false => {
+				let remove: Vec<Path> = remove.into_iter().take((ASK_BYTES - 8) / REMOVE_BYTES).collect();
+				let mut left = requested;
+				for prefix in &remove {
+					left.remove(prefix);
+				}
+				session.edits.push_back(left);
+				Edit {
+					remove,
+					add: Vec::new(),
+				}
+			}
 		};
-		session.edits.push_back(want);
 		self.out.push(Out::Ask { to: neighbor, edit });
 	}
 

@@ -5482,7 +5482,10 @@ test("a lite-07 DEAD and its ROUTE_UPDATEs apply as one", async () => {
 // both readers, and only what the wider prefix adds arrives.
 test("a lite-07 edit to a wider prefix keeps the claims the route carried", async () => {
 	const half = Path.from("a");
-	const { subscriber, announced, send, edits, settled, another } = await routedStream(undefined, Path.Pattern.subtree(half));
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(
+		undefined,
+		Path.Pattern.subtree(half),
+	);
 	const [x, y] = [Path.from("a/x"), Path.from("b/y")];
 	const instance = Instance.parse("i");
 	expect(edits).toMatchObject([{ remove: [], add: [{ prefix: half }] }]);

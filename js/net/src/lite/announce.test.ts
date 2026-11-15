@@ -234,6 +234,10 @@ test("a requested set fits one message", () => {
 	expect(requestFits(fits, v)).toBe(true);
 	expect(requestFits([...fits, long(64), long(65)], v)).toBe(false);
 	expect(requestFits([], v)).toBe(true);
+	// An edit names the Prefix IDs it removes beside its Adds, which can pass the limit together.
+	const removes = Array.from({ length: 1000 }, (_, i) => BigInt(i));
+	expect(requestFits([], v, removes)).toBe(true);
+	expect(requestFits(fits, v, removes)).toBe(false);
 });
 
 // The draft reserves Hop ID 0 for a responder that was never assigned an id, or that

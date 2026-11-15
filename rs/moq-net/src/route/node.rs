@@ -250,12 +250,21 @@ enum Barrier {
 }
 
 impl Barrier {
-	/// What it counts in [`Outbox::sealed`]: itself, and each route a DEAD moves.
+	/// What it counts in [`Outbox::sealed`]: a DEAD, and each route it moves. The edits'
+	/// markers and SYNCEDs count nothing: each side has one edit unanswered at a time,
+	/// and the peer reads this side's ANNOUNCE_OK before it edits again, so however
+	/// many prefixes an edit adds, the reader holds back no more than about two edits.
 	fn cost(&self) -> usize {
 		match self {
 			Self::Dead(Dead::Closed { moved, .. }) => 1 + moved.len(),
-			_ => 1,
+			Self::Dead(Dead::Draining { .. }) => 1,
+			Self::Ask(_) | Self::Edited(_) | Self::Synced(_) => 0,
 		}
+	}
+
+	/// Whether the route changes queued ahead of it count in [`Outbox::sealed`].
+	fn counts(&self) -> bool {
+		matches!(self, Self::Dead(_))
 	}
 
 	fn output(self) -> Output {
@@ -589,8 +598,9 @@ impl Outbox {
 		self.segment();
 		let segment = self.segments.back_mut().expect("just opened");
 		let mut sealed = barrier.cost();
+		let counts = barrier.counts();
 		for (key, (seq, pending)) in &mut segment.pending {
-			pending.sealed = self.known.contains_key(key);
+			pending.sealed = counts && self.known.contains_key(key);
 			if pending.sealed {
 				self.sealing.entry(key.clone()).or_default().sealed += 1;
 				sealed += 1;
@@ -695,7 +705,7 @@ impl Outbox {
 	/// moved entry, and a change queued after, so a reader holding more than that unread
 	/// for every route it holds is slower than the routes fail: a peer that reads a
 	/// trickle while its routes churn would otherwise hold a DEAD per failure forever.
-	/// The markers and SYNCEDs its own edits queue count the same way.
+	/// What the edits queue counts nothing (see [`Barrier::cost`]).
 	fn overrun(&self) -> bool {
 		self.sealed > 3 * MAX_HOPS * (self.known.len() + 1)
 	}

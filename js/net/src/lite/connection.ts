@@ -7,16 +7,7 @@ import type { Drain } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import {
-	closeError,
-	error,
-	fromClose,
-	fromTransport,
-	ProtocolViolation,
-	StreamCode,
-	Stream as StreamError,
-	sessionCause,
-} from "../error.ts";
+import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop, toHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { hooks } from "../internal.ts";
@@ -24,8 +15,7 @@ import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import type { Own } from "../route.ts";
-import { type Reader, Readers, Stream, UnexpectedEnd, Writer } from "../stream.ts";
-import { isDecodeError } from "../util/decode_error.ts";
+import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire, wireOf } from "../wire.ts";
@@ -151,6 +141,8 @@ export class Connection implements Session {
 	#setupSeen = false;
 	// Lite-07: the peer opened its one Announce Stream.
 	#announceSeen = false;
+	// The transport closed, so a stream breaking says nothing about the peer.
+	#transportClosed = false;
 
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
@@ -239,7 +231,10 @@ export class Connection implements Session {
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
-		const leave = () => this.#auth.close();
+		const leave = () => {
+			this.#transportClosed = true;
+			this.#auth.close();
+		};
 		void quic.closed.then(leave, leave);
 		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
 		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
@@ -618,13 +613,11 @@ export class Connection implements Session {
 			try {
 				msg = await decodeAnnounceBroadcastMaybe(stream, this.#version);
 			} catch (err: unknown) {
-				if (err instanceof ProtocolViolation) throw err;
-				if (isDecodeError(err) || err instanceof UnexpectedEnd)
-					throw new ProtocolViolation("invalid Announce Stream encoding", { cause: err });
-				if (fromTransport(err) instanceof StreamError)
-					throw new ProtocolViolation("Announce Stream reset", { cause: err });
-				// The session ended under the stream.
-				throw err;
+				// While the session lives, whatever broke the stream, a reset, a message cut
+				// short, or one that does not decode, lost what the peer said. An ending
+				// session's own end says why.
+				if (this.#transportClosed || this.#phase.kind === "closed") throw err;
+				throw new ProtocolViolation("Announce Stream broke", { cause: err });
 			}
 			if (!msg) break;
 			await this.#subscriber.announce(msg);

@@ -396,9 +396,15 @@ impl Running {
 					self.routed.finish()?;
 					return Ok(true);
 				}
-				// A reset stream ends the session, as the peer's messages are lost.
-				Poll::Ready(Err(Error::Stream(_))) => return Err(Error::ProtocolViolation),
-				Poll::Ready(Err(err)) => return Err(err),
+				// The peer may only finish the stream: while the session lives, whatever else
+				// broke it lost what the peer said. An ending session's own end says why.
+				Poll::Ready(Err(err)) => {
+					if subscriber.session.poll_ending(waiter).is_ready() {
+						return Err(err);
+					}
+					tracing::debug!(%err, "the peer's Announce Stream broke");
+					return Err(Error::ProtocolViolation);
+				}
 				Poll::Pending => return Ok(read),
 			}
 			read = true;

@@ -40,6 +40,8 @@ struct Moving {
 struct Asked {
 	/// Absolute.
 	path: Path,
+	/// Relative to the session, as the wire names it.
+	relative: Path,
 	/// The peer answered the ANNOUNCE_REQUEST adding it, so its stream may name it.
 	live: bool,
 	/// The peer sent its initial set.
@@ -55,10 +57,14 @@ struct Editing {
 /// One route the peer sent on the stream, by its Route ID.
 struct WireRoute {
 	node: route::Id,
-	/// The requested prefix it lies in, absolute.
+	/// The requested prefix it lies in, relative to the session.
 	region: Path,
-	/// The prefix it covers, absolute, or `None` when this node refused the suffix the
-	/// peer forwarded, which leaves the route refused for good.
+	/// The prefix it covers, relative to the session as the wire names it, or `None`
+	/// when its suffix is refused, which leaves the route refused for good. Both ends
+	/// carry routes over an edit by this, whatever this node can hold.
+	wire: Option<Path>,
+	/// The prefix it covers, absolute, or `None` when its suffix is refused or joins
+	/// the root past the path limits.
 	prefix: Option<Path>,
 	/// What the peer offers, or the path of an offer this node refuses, which a DEAD
 	/// still matches.
@@ -123,6 +129,9 @@ struct WireClaim {
 	/// Absolute: the origin node keys every claim from the origin's root. `None` when this
 	/// node refused the path, which the claim then never has.
 	path: Option<Path>,
+	/// Relative to the session, as the wire names it, or `None` when the path is
+	/// refused. Both ends carry claims over an edit by this, whatever this node can hold.
+	wire: Option<Path>,
 	/// `None` while this node refuses what the peer forwarded, until an ANNOUNCE_RESTART
 	/// names all of it again.
 	claim: Option<node::Claim>,
@@ -417,6 +426,7 @@ impl Routed {
 			self.next_prefix += 1;
 			let asked = Asked {
 				path,
+				relative: relative.clone(),
 				live: false,
 				synced: false,
 			};
@@ -442,9 +452,11 @@ impl Routed {
 		if self.routes.values().any(|route| !route.pending.is_empty()) {
 			return Err(Error::ProtocolViolation);
 		}
+		// Planned as the wire names them, so a path this node cannot hold under its root
+		// carries over as it does at the peer.
 		let old: BTreeSet<Path> = (self.asked.values())
 			.filter(|asked| asked.live)
-			.map(|asked| asked.path.clone())
+			.map(|asked| asked.relative.clone())
 			.collect();
 		for id in &editing.remove {
 			self.asked.remove(id);
@@ -453,19 +465,23 @@ impl Routed {
 		for id in &editing.add {
 			let asked = self.asked.get_mut(id).expect("an added prefix");
 			asked.live = true;
-			added.push(asked.path.clone());
+			added.push(asked.relative.clone());
 		}
-		let new: BTreeSet<Path> = self.asked.values().map(|asked| asked.path.clone()).collect();
+		let new: BTreeSet<Path> = self.asked.values().map(|asked| asked.relative.clone()).collect();
 
 		let own = self.node.hop();
 		let table: BTreeMap<u64, rekey::Route> = (self.routes.iter())
 			.map(|(id, route)| {
+				// Every claim the wire names a path for, held here or not.
+				let claims = (route.claims.values().chain(&route.unnamed))
+					.filter_map(|id| Some((self.claims[id].wire.clone()?, *id)))
+					.collect();
 				let route = rekey::Route {
 					node: route.node,
-					prefix: route.prefix.clone().unwrap_or_else(|| route.region.clone()),
+					prefix: route.wire.clone().unwrap_or_else(|| route.region.clone()),
 					region: route.region.clone(),
 					order: rekey::order(route.held, route.offer.as_ref().map_err(|path| &**path), own),
-					claims: route.claims.clone(),
+					claims,
 				};
 				(*id, route)
 			})
@@ -476,10 +492,12 @@ impl Routed {
 		let mut moved = Vec::new();
 		for carried in plan.routes {
 			let source = &routes[&carried.from];
+			let wire = source.wire.as_ref().map(|_| carried.prefix.clone());
 			let mut route = WireRoute {
 				node: source.node,
 				region: carried.region,
-				prefix: source.prefix.as_ref().map(|_| carried.prefix.clone()),
+				prefix: wire.as_ref().and_then(|wire| self.root.join(wire).ok()),
+				wire,
 				offer: source.offer.clone(),
 				held: source.held,
 				claims: BTreeMap::new(),
@@ -489,41 +507,50 @@ impl Routed {
 				committed: None,
 			};
 			let mut committed = BTreeMap::new();
-			for (path, claim) in &carried.claims {
-				let held = claims[&claim.from].claim.clone();
+			for (wire, claim) in &carried.claims {
 				if claim.id != claim.from {
-					let relative = path.strip_prefix(&self.root).unwrap_or_default();
-					let assigned = self.decoder.insert(relative);
+					let assigned = self.decoder.insert(wire.clone());
 					debug_assert_eq!(assigned, claim.id, "both ends assign the same id");
 				}
-				match &held {
-					Some(held) => {
+				let path = self.claim_path(Some(wire.clone()));
+				let held = claims[&claim.from].claim.clone().filter(|_| path.is_some());
+				match (&path, &held) {
+					(Some(path), Some(held)) => {
 						committed.insert(path.clone(), held.clone());
+						route.claims.insert(path.clone(), claim.id);
 					}
-					None => {
+					(Some(path), None) => {
 						route.withheld.insert(claim.id);
+						route.claims.insert(path.clone(), claim.id);
+					}
+					(None, _) => {
+						route.unnamed.insert(claim.id);
 					}
 				}
-				route.claims.insert(path.clone(), claim.id);
 				let claim_route = carried.id;
 				self.claims.insert(
 					claim.id,
 					WireClaim {
 						route: claim_route,
-						path: Some(path.clone()),
+						path,
+						wire: Some(wire.clone()),
 						claim: held,
 					},
 				);
 			}
-			// A claim without a path stays with the route it was sent under.
+			// A claim the wire names no path for stays with the route it was sent under.
 			if carried.id == carried.from {
 				for id in &source.unnamed {
+					if claims[id].wire.is_some() {
+						continue;
+					}
 					route.unnamed.insert(*id);
 					self.claims.insert(
 						*id,
 						WireClaim {
 							route: carried.id,
 							path: None,
+							wire: None,
 							claim: None,
 						},
 					);
@@ -650,8 +677,8 @@ impl Routed {
 				hops,
 				cost,
 			} => {
-				let path = self.decoder.start(Some(suffix))?;
-				let path = self.claim_path(path);
+				let wire = self.decoder.start(Some(suffix))?;
+				let path = self.claim_path(wire.clone());
 				let claim = claim(instance, epoch, cost, hops)?;
 				let id = self.decoder.last();
 				// Fields valid alone can still resolve, or join the root, past the path limits.
@@ -660,7 +687,7 @@ impl Routed {
 					tracing::warn!(route, claim = id, %reason, "refusing a forwarded claim");
 					self.stats.refuse_route();
 				}
-				self.start(id, route, path, Some(claim))?;
+				self.start(id, route, wire, path, Some(claim))?;
 			}
 			Msg::Update { id, hops, cost } => {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
@@ -716,10 +743,12 @@ impl Routed {
 		// The peer names a prefix in effect on its stream.
 		let region = (self.asked.get(&asked).filter(|asked| asked.live))
 			.ok_or(Error::ProtocolViolation)?
-			.path
+			.relative
 			.clone();
-		// Fields valid alone can still join the prefix past the path limits.
-		let prefix = suffix.and_then(|suffix| region.join(&suffix).ok());
+		// Fields valid alone can still join the prefix past the path limits, and this node
+		// holds it only where it fits under the root too.
+		let wire = suffix.and_then(|suffix| region.join(&suffix).ok());
+		let prefix = wire.as_ref().and_then(|wire| self.root.join(wire).ok());
 		let key = prefix.clone().filter(|_| node != 0).map(|prefix| (node, prefix));
 		// The peer keeps one route per publisher and prefix.
 		if key.as_ref().is_some_and(|key| self.named.contains_key(key)) {
@@ -734,6 +763,7 @@ impl Routed {
 		let route = WireRoute {
 			node,
 			region,
+			wire,
 			prefix,
 			offer,
 			held: false,
@@ -937,11 +967,11 @@ impl Routed {
 				self.offer(id, Err(path))?;
 			}
 			Refusable::Start { route, suffix } => {
-				let path = self.decoder.start(suffix)?;
-				let path = self.claim_path(path);
+				let wire = self.decoder.start(suffix)?;
+				let path = self.claim_path(wire.clone());
 				let id = self.decoder.last();
 				tracing::warn!(route, claim = id, %reason, "refusing a forwarded claim");
-				self.start(id, route, path, None)?;
+				self.start(id, route, wire, path, None)?;
 			}
 			Refusable::Change { id } => {
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
@@ -986,9 +1016,17 @@ impl Routed {
 		self.root.join(&path?).ok()
 	}
 
-	/// A claim the peer started under `route`, assigned Announce ID `id`, at `path` unless
-	/// this node refused it, and `None` while this node refuses what the peer forwarded.
-	fn start(&mut self, id: u64, route: u64, path: Option<Path>, claim: Option<node::Claim>) -> Result<(), Error> {
+	/// A claim the peer started under `route`, assigned Announce ID `id`, named `relative`
+	/// on the wire and held at `path` unless this node refused either, and `None` while
+	/// this node refuses what the peer forwarded.
+	fn start(
+		&mut self,
+		id: u64,
+		route: u64,
+		relative: Option<Path>,
+		path: Option<Path>,
+		claim: Option<node::Claim>,
+	) -> Result<(), Error> {
 		let wire = self.routes.get_mut(&route).ok_or(Error::ProtocolViolation)?;
 		// A route covers only the claims at or below its prefix.
 		let outside = |path: &Path| (wire.prefix.as_ref()).is_some_and(|prefix| !route::within(path, prefix));
@@ -1008,7 +1046,15 @@ impl Routed {
 		self.held.push(self.slots.acquire()?);
 		// A claim without a path stays refused, whatever the peer sends for it.
 		let claim = claim.filter(|_| path.is_some());
-		self.claims.insert(id, WireClaim { route, path, claim });
+		self.claims.insert(
+			id,
+			WireClaim {
+				route,
+				path,
+				wire: relative,
+				claim,
+			},
+		);
 		Ok(())
 	}
 

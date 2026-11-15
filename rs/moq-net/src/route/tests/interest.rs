@@ -430,6 +430,50 @@ fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
 	assert_eq!(router.asks(4), beneath);
 }
 
+/// Swapping a set near the limit for another that shares nothing with it would name
+/// every old prefix's Prefix ID beside every new prefix, past one request: the edit
+/// removes first, and adds once that is answered.
+#[test]
+fn a_swap_too_large_for_one_request_removes_first() {
+	let fits = |set: &BTreeSet<Path>| path::ask_bytes(set, &Path::empty()) <= path::ASK_BYTES;
+	let set = |head: &str| -> BTreeSet<Path> { (0..5000).map(|n| p(&format!("{head}/{n:05}"))).collect() };
+	let (old, new) = (set("a"), set("b"));
+	assert!(fits(&old) && fits(&new));
+	let asked = |router: &mut path::Router<usize, u8>| -> Vec<path::Edit> {
+		(router.drain().into_iter())
+			.filter_map(|out| match out {
+				path::Out::Ask { edit, .. } => Some(edit),
+				_ => None,
+			})
+			.collect()
+	};
+
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(old.clone()).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	asked(&mut router);
+
+	router.watch(new.clone()).unwrap();
+	let first = asked(&mut router);
+	assert_eq!(first.len(), 1);
+	assert!(first[0].add.is_empty(), "nothing added beside the removes");
+	assert_eq!(first[0].remove.iter().cloned().collect::<BTreeSet<_>>(), old);
+
+	router.edited(1);
+	let second = asked(&mut router);
+	assert_eq!(
+		second,
+		[path::Edit {
+			remove: Vec::new(),
+			add: new.iter().cloned().collect(),
+		}]
+	);
+	router.edited(1);
+	assert!(asked(&mut router).is_empty());
+	assert_eq!(router.asks(1), new);
+}
+
 /// Widening several prefixes into one keeps the route this node was using at any of
 /// them, though the sender reflects a cheaper one from another prefix there: that
 /// one crosses a node this node doubts, which only a route already in use may stay

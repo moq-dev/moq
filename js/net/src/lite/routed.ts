@@ -252,8 +252,21 @@ export class Routed {
 	// Ask the peer for what the readers now want, one edit at a time.
 	#ask(): void {
 		if (this.#editing || this.#finished || this.#silent || this.#closing) return;
-		const { remove, add } = this.#edit();
+		let { remove, add } = this.#edit();
 		if (remove.length === 0 && add.length === 0) return;
+		// The wanted set fits one request as Adds, but an edit also names each prefix it removes:
+		// one past the limit removes first, as many as fit, and adds once that is answered.
+		const version = this.#session.version;
+		if (
+			!requestFits(
+				add.map(({ prefix }) => prefix),
+				version,
+				remove,
+			)
+		) {
+			add = [];
+			while (!requestFits([], version, remove)) remove = remove.slice(0, Math.ceil(remove.length / 2));
+		}
 		const added: bigint[] = [];
 		for (const { prefix, hidden } of add) {
 			const id = this.#nextPrefix++;

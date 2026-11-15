@@ -73,6 +73,52 @@ async fn a_withheld_announce_ok_holds_no_more_than_the_cap() {
 	assert_eq!(crate::SessionError::from(&over), crate::SessionError::TooManyRequests);
 }
 
+/// A route this node cannot hold under its root, though its prefix fits the session,
+/// carries over an edit as the peer carries it: the peer, which knows nothing of the
+/// root, assigns the next Route ID to the route it narrows, and so does this node.
+#[kio::test]
+async fn a_route_past_the_root_carries_over_as_the_peer_carries_it() {
+	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let everything: crate::Patterns = ["**"]
+		.into_iter()
+		.map(|p| p.parse::<crate::Pattern>().unwrap())
+		.collect();
+	subscriber.origin = subscriber.origin.scope("r", &everything).unwrap();
+	let prefix = Path::empty();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	// The longest path fits the session's paths, and not beneath the root.
+	let deep = Path::new(&"d".repeat(Path::MAX_BYTES)).unwrap();
+	let far = Msg::RouteStart {
+		node: 8,
+		prefix: 0,
+		suffix: deep,
+		offer: offer(),
+	};
+	let near = Msg::RouteStart {
+		node: 7,
+		prefix: 0,
+		suffix: Path::empty(),
+		offer: offer(),
+	};
+	routed.receive(far).unwrap();
+	routed.receive(near).unwrap();
+	assert!(routed.routes[&0].prefix.is_none(), "this node cannot hold it");
+
+	// Narrowed to `x`: the far route lies outside it and ends, and the near one narrows
+	// into the next Route ID.
+	routed.want(Path::from_static("x"), subscriber.origin.snapshot("x"));
+	routed.unwant(&prefix);
+	let requests = routed.outputs(&subscriber);
+	assert!(
+		matches!(requests.as_slice(), [Msg::Request { remove, add }] if remove.len() == 1 && add.len() == 1),
+		"{requests:?}"
+	);
+	routed.receive(Msg::Ok).unwrap();
+	let routes: Vec<_> = routed.routes.iter().map(|(id, route)| (*id, route.node)).collect();
+	assert_eq!(routes, [(2, 7)]);
+	routed.receive(start_on(2, "x/y")).unwrap();
+}
+
 /// A limit narrower than its regions still leaves out the claims it does not
 /// admit, and a change that keeps the regions brings them in and out again.
 #[kio::test]

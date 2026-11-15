@@ -458,7 +458,8 @@ A widened route that remains takes the claims of the widened routes that do not,
 A route that stays or widens keeps its Route ID, and its claims keep their Announce IDs.
 Each narrowed route that remains is assigned the next Route ID, in the order above; its claims keep their Announce IDs, except that its claim at its prefix is assigned the next Announce ID when the claim it comes from lies above it.
 The warm routes under a route that does not stay end.
-A route whose Route Suffix the subscriber refused (see [Refused Content](#refused-content)) is carried as one at its requested prefix, so both endpoints assign the same Route IDs.
+Whether a Route Suffix, a Route Offer, or a claim's path is refused (see [Refused Content](#refused-content)) depends only on what the publisher sent and the requested prefixes, so both endpoints carry the routes over alike and assign the same Route IDs and Announce IDs: a route whose Route Suffix is refused is carried as one at its requested prefix, a refused Route Offer ranks after every other, and a claim whose path is refused is not among its route's claims.
+A path the subscriber cannot hold for a limit of its own, such as one it joins beneath a local root, is carried as the stream names it.
 The publisher then sends whatever the carried routes lack, and an ANNOUNCE_FLOOR for each widened route.
 
 ### Floors {#floors}
