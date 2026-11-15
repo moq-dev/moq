@@ -271,7 +271,8 @@ export function joined(parts: Uint8Array[], size: number): Uint8Array {
 
 /**
  * Reads one frame's payload as it arrives, as Rust's `frame::Consumer`. Obtain one from
- * `Group.Consumer.nextFrame`.
+ * `Group.Consumer.nextFrame`. A frame of a metadata group (`Group.Consumer.meta`) carries only its
+ * size and timestamp, and reading its payload throws.
  *
  * Chunks are read-only views shared with other readers. A frame larger than its group's
  * retained tail sheds its oldest segments while it is written, so a reader that falls that
@@ -313,6 +314,8 @@ export class Consumer {
 
 	#poll(): Uint8Array | undefined | typeof WAIT {
 		const frame = this.#frame;
+		// Even a size-0 metadata frame is no empty payload.
+		if (frame instanceof Header) return frame.payload;
 		if (!(frame instanceof Chunked)) {
 			if (this.#offset >= this.size) return undefined;
 			this.#offset = this.size;
