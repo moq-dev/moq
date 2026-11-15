@@ -125,44 +125,9 @@ why = "moq-quic's client never moves to a server's preferred address (quest/m4/q
 [[known]]
 client = "moq-quic"
 server = "moq-quic"
-case = "handshakeloss"
-result = "failed"
-why = "Either side abandons a handshake after 10 s without hearing from the other, shorter than a retransmission gap under 30% loss (quest/m1/quic-handshake-loss.md)."
-
-[[known]]
-client = "moq-quic"
-server = "moq-quic"
 case = "handshakecorruption"
 result = "failed"
-why = "As handshakeloss (quest/m1/quic-handshake-loss.md)."
-
-[[known]]
-client = "quinn"
-server = "moq-quic"
-case = "handshakeloss"
-result = "failed"
-why = "moq-quic's server abandons a handshake after 10 s without hearing from the client, shorter than quinn's retransmission gaps under 30% loss (quest/m1/quic-handshake-loss.md)."
-
-[[known]]
-client = "quinn"
-server = "moq-quic"
-case = "handshakecorruption"
-result = "failed"
-why = "As handshakeloss (quest/m1/quic-handshake-loss.md)."
-
-[[known]]
-client = "quiche"
-server = "moq-quic"
-case = "handshakeloss"
-result = "failed"
-why = "quiche's client fails with InvalidState after moq-quic's server retires the connection IDs it skipped (quest/m1/quic-handshake-loss.md)."
-
-[[known]]
-client = "quiche"
-server = "moq-quic"
-case = "handshakecorruption"
-result = "failed"
-why = "As handshakeloss (quest/m1/quic-handshake-loss.md)."
+why = "About one run in ten: the server's Handshake flight lands before the client has the ServerHello, and both sides then probe only on a PTO backed off past 16 s, so a side hears nothing for the 30 s handshake timeout (quest/m4/quic-handshake-speedup.md)."
 
 [[known]]
 client = "moq-quic"

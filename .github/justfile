@@ -153,6 +153,11 @@ size-report *args:
 size-nightly output run:
     sh/size/nightly.sh '{{ output }}' '{{ run }}'
 
+# Run a command against Ubuntu's GStreamer in the pinned gstreamer-ci image (Linux).
+[positional-arguments]
+gstreamer *args:
+    sh/gh/gstreamer.sh "$@"
+
 # Install the rendered GStreamer formula against the current macOS tarball.
 [positional-arguments]
 gst-formula *args:

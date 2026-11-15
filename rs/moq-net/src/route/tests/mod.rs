@@ -10,11 +10,11 @@
 
 mod cache;
 mod compare;
+mod flap;
 mod handoff;
 mod interest;
 mod residual;
 mod routing;
-mod rtt;
 mod scope;
 mod search;
 
@@ -26,7 +26,7 @@ use std::{
 
 use kio::clock::Instant;
 
-pub(super) use super::path::{Doubt, Lift};
+pub(super) use super::path::{AtOrigin, Doubt, Lift};
 use super::*;
 
 pub(super) type Node = usize;
@@ -46,6 +46,18 @@ impl Rule {
 	/// The comparison rule lifting doubt once no heard route names the node.
 	pub const EARLY: Self = Self::Path(Doubt {
 		lift: Lift::Unnamed,
+		origin: AtOrigin::Blocked,
+		..Doubt::DEFAULT
+	});
+	/// The replaced rule, where doubt also blocks every route to a doubted publisher.
+	pub const ORIGIN: Self = Self::Path(Doubt {
+		origin: AtOrigin::Blocked,
+		..Doubt::DEFAULT
+	});
+	/// The rejected rule, where doubt never blocks a route to a doubted publisher, even
+	/// on a session to it that opened during the doubt.
+	pub const SPARED: Self = Self::Path(Doubt {
+		origin: AtOrigin::Spared,
 		..Doubt::DEFAULT
 	});
 
@@ -54,7 +66,17 @@ impl Rule {
 			Self::Path(Doubt {
 				lift: Lift::Unnamed, ..
 			}) => "path+early",
-			Self::Path(Doubt { lift: Lift::Timer, .. }) => "path",
+			Self::Path(Doubt {
+				origin: AtOrigin::Blocked,
+				..
+			}) => "path+origin",
+			Self::Path(Doubt {
+				origin: AtOrigin::Spared,
+				..
+			}) => "path+spared",
+			Self::Path(Doubt {
+				origin: AtOrigin::Own, ..
+			}) => "path",
 		}
 	}
 }
@@ -115,7 +137,6 @@ pub(super) fn along(hops: &[(Id, u64)], metric: Metric) -> path::Offer {
 		priority: i8::MAX,
 		metric,
 		down_only: false,
-		rtt: None,
 	}
 }
 
@@ -516,26 +537,6 @@ impl Sim {
 	pub fn collect(&mut self, node: Node, id: Id) {
 		self.nodes[node].collect(id);
 		self.flush();
-	}
-
-	/// `node` measures its link to `peer` at `ms`, or nothing.
-	pub fn rtt(&mut self, node: Node, peer: Node, ms: Option<u64>) {
-		let rtt = ms.map(Duration::from_millis);
-		self.nodes[node].rtt(peer, rtt);
-		self.flush();
-	}
-
-	/// The last finite route `node` sent `peer` for `id` covering `prefix`, while it
-	/// stands.
-	pub fn offer(&self, node: Node, peer: Node, id: Id, prefix: &Path) -> Option<&path::Offer> {
-		self.offered.get(&(node, peer, id, prefix.clone()))
-	}
-
-	/// The streams `node` sends a finite route for `id` on.
-	pub fn sending(&self, node: Node, id: Id) -> usize {
-		(self.offered.keys())
-			.filter(|(from, _, key, _)| *from == node && *key == id)
-			.count()
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {

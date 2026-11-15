@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -3012,12 +3010,10 @@ class MoqRouteInfo {
   final int cost;
   final MoqInstance instance;
   final bool available;
-  final Duration? rtt;
   MoqRouteInfo({
     required this.cost,
     required this.instance,
     required this.available,
-    this.rtt,
   });
 }
 
@@ -3043,18 +3039,8 @@ class FfiConverterMoqRouteInfo {
     );
     final available = available_lifted.value;
     new_offset += available_lifted.bytesRead;
-    final rtt_lifted = FfiConverterOptionalDuration.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final rtt = rtt_lifted.value;
-    new_offset += rtt_lifted.bytesRead;
     return LiftRetVal(
-      MoqRouteInfo(
-        cost: cost,
-        instance: instance,
-        available: available,
-        rtt: rtt,
-      ),
+      MoqRouteInfo(cost: cost, instance: instance, available: available),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -3064,7 +3050,6 @@ class FfiConverterMoqRouteInfo {
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterMoqInstance.allocationSize(value.instance) +
         FfiConverterBool.allocationSize(value.available) +
-        FfiConverterOptionalDuration.allocationSize(value.rtt) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3085,10 +3070,6 @@ class FfiConverterMoqRouteInfo {
       value.available,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.rtt,
-      Uint8List.view(buf.buffer, new_offset),
-    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -3096,7 +3077,6 @@ class FfiConverterMoqRouteInfo {
     return FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterMoqInstance.allocationSize(value.instance) +
         FfiConverterBool.allocationSize(value.available) +
-        FfiConverterOptionalDuration.allocationSize(value.rtt) +
         0;
   }
 }
@@ -20253,6 +20233,17 @@ List<String> moqVersions() {
   );
 }
 
+bool moqSocketIsEndpoint({required String path}) {
+  return rustCallWithLifter(
+    (status) => uniffi_moq_ffi_fn_func_moq_socket_is_endpoint(
+      FfiConverterString.lower(path),
+      status,
+    ),
+    FfiConverterBool.lift,
+    moqExceptionErrorHandler,
+  );
+}
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -23628,6 +23619,14 @@ external RustBuffer uniffi_moq_ffi_fn_func_moq_versions(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Int8 Function(RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_func_moq_socket_is_endpoint(
+  RustBuffer path,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<
   Void Function(
     Pointer<Void>,
@@ -23966,6 +23965,9 @@ external int uniffi_moq_ffi_checksum_func_moq_qlog_supported();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_versions();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_func_moq_socket_is_endpoint();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel();
@@ -24850,6 +24852,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_versions() != 28954) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_func_moq_socket_is_endpoint() != 51252) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel() != 62285) {

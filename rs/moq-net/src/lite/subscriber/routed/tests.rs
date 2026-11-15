@@ -13,7 +13,6 @@ fn offer() -> Offer {
 		priority: i8::MAX,
 		metric: 0,
 		down_only: false,
-		rtt: None,
 	}
 }
 
@@ -273,92 +272,6 @@ async fn a_handover_caps_the_old_request() {
 		new.receive(&prefix, start("z"), &mut new_decoder).is_err(),
 		"the replacement is capped on the session's"
 	);
-}
-
-/// A transport that reports its first RTT only after the stream opened, such as
-/// qmux before its first ping returns, still gets its link measured.
-#[kio::test]
-async fn a_late_rtt_is_still_read() {
-	let session = SinkSession::new(Default::default());
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
-	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
-	feed(&mut routed, &mut decoder, &[]).unwrap();
-	let waiter = kio::Waiter::noop();
-	routed.poll(&subscriber, &waiter).unwrap();
-	kio::clock::sim::advance(crate::route::LinkRtt::INTERVAL).await;
-	routed.poll(&subscriber, &waiter).unwrap();
-	assert_eq!(routed.rtt.reported(), None);
-
-	let rtt = std::time::Duration::from_millis(20);
-	session.set_stats(crate::lite::test_transport::SinkStats::default().with_rtt(rtt));
-	kio::clock::sim::advance(crate::route::LinkRtt::INTERVAL).await;
-	routed.poll(&subscriber, &waiter).unwrap();
-	assert_eq!(routed.rtt.reported(), Some(rtt));
-}
-
-/// Claims served when the peer reports Synced, before the stream is first polled,
-/// already carry the link's RTT.
-#[kio::test]
-async fn the_first_claims_served_carry_the_rtt() {
-	use crate::lite::test_transport::SinkStats;
-	let ms = std::time::Duration::from_millis;
-	let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session);
-	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
-	let route = Msg::RouteStart {
-		node: 7,
-		suffix: Path::empty(),
-		offer: Offer {
-			rtt: Some(ms(5)),
-			..offer()
-		},
-	};
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	for msg in [route, start("live"), floor] {
-		routed.receive(&prefix, msg, &mut decoder).unwrap();
-	}
-	routed.outputs(&subscriber);
-	let rtts: Vec<_> = routed.served.values().map(|entry| entry.route.route.rtt()).collect();
-	assert_eq!(rtts, [Some(ms(15))]);
-}
-
-/// A stream whose peer ends every route stops reading, and starts a fresh window
-/// once one returns, so a reading from before the pause never stays reported.
-#[kio::test]
-async fn a_pause_restarts_the_window() {
-	use crate::lite::test_transport::SinkStats;
-	let ms = std::time::Duration::from_millis;
-	let session = SinkSession::new(Default::default()).with_stats(SinkStats::default().with_rtt(ms(10)));
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(session.clone());
-	let prefix = Path::empty();
-	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let mut decoder = AnnounceDecoder::default();
-	let waiter = kio::Waiter::noop();
-	feed(&mut routed, &mut decoder, &[]).unwrap();
-	routed.poll(&subscriber, &waiter).unwrap();
-	assert_eq!(routed.rtt.reported(), Some(ms(10)));
-
-	routed.receive(&prefix, Msg::RouteEnd { id: 0 }, &mut decoder).unwrap();
-	routed.poll(&subscriber, &waiter).unwrap();
-	assert!(routed.read_rtt.is_none(), "no route, no timer");
-	session.set_stats(SinkStats::default().with_rtt(ms(100)));
-	kio::clock::sim::advance(std::time::Duration::from_secs(60)).await;
-
-	let route = Msg::RouteStart {
-		node: 7,
-		suffix: Path::empty(),
-		offer: offer(),
-	};
-	routed.receive(&prefix, route, &mut decoder).unwrap();
-	routed.poll(&subscriber, &waiter).unwrap();
-	assert_eq!(routed.rtt.reported(), Some(ms(100)));
 }
 
 /// What the stream keeps between floors is the net change to its committed claims,
