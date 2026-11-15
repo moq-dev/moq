@@ -172,10 +172,14 @@ try {
 				}
 				const group = track.appendGroup();
 				open.set(i, { group, sequence });
-				group.writeFrame({ payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, 0)) });
+				group.writeFrame({
+					payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, 0)),
+					timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+				});
 			} else if (current) {
 				current.group.writeFrame({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], current.sequence, 1)),
+					timestamp: Moq.Time.Timestamp.unscaled(current.group.sequence),
 				});
 			}
 		}

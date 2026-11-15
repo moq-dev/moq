@@ -336,8 +336,11 @@ class Drivers:
         producer = self._replies.get((command.driver_id, command.session))
         if producer is None:
             return
+        # A session track is scale-less: each reply is a group keyed one past the last.
+        largest = producer.largest()
+        key = 0 if largest is None else largest.group + 1
         try:
-            producer.write_frame(json.dumps(message, separators=(",", ":")).encode())
+            producer.write_frame(json.dumps(message, separators=(",", ":")).encode(), moq.Timestamp.unscaled(key))
         # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
         except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
             log.info("%s: reply failed: %s", self._truck, err)

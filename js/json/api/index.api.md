@@ -71,7 +71,7 @@ export namespace Snapshot {
 		constructor(config: Snapshot.Producer.Config<T>);
 		cut(): void;
 		finish(): Snapshot.Finished;
-		mutate(fn: (value: T) => void, at?: Time.Timestamp): void;
+		mutate(fn: (value: T) => void, at: Time.Timestamp): void;
 		update({ ... }: Timed<T>): void;
 	}
 }
@@ -179,7 +179,7 @@ export namespace Window {
 		cut(): void;
 		finish(): Window.Finished<T>;
 		get offset(): number;
-		pop(count: number, at?: Time.Timestamp): void;
+		pop(count: number, at: Time.Timestamp): void;
 		push({ ... }: Timed<T>): void;
 		get window(): T[];
 	}

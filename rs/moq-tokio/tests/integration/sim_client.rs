@@ -272,10 +272,10 @@ impl Publisher {
 		let mut source = self.track.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
 		let _source = source.finish().unwrap();
@@ -310,7 +310,7 @@ async fn read(origin: &moq_net::origin::Producer) -> Vec<u64> {
 		.unwrap();
 	let mut groups = Vec::new();
 	while let Some(mut group) = reader.recv_group().await.unwrap() {
-		let sequence = group.sequence;
+		let sequence = group.start;
 		let frame = group.read_frame().await.unwrap().expect("a group is cut short");
 		assert_eq!(frame.payload.len(), FRAME, "group {sequence} is cut short");
 		assert!(

@@ -40,11 +40,11 @@ fn bench_protect(c: &mut Criterion) {
 		let mut ms = 0u64;
 		b.iter(|| {
 			ms += 1;
-			let mut group = producer.append_group().unwrap();
+			let mut group = producer.append_group(ms).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(ms).unwrap(), black_box(&grouped))
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		});
 	});
 	group.throughput(Throughput::Bytes(opus.len() as u64));

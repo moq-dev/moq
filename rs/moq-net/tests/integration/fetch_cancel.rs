@@ -8,11 +8,12 @@
 //! partway through the group. A group cut short is aborted, never cached as whole.
 
 use crate::support;
+use support::AtStart;
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Timestamp, Version, origin};
+use moq_net::{Version, origin};
 use support::harness::peer;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -79,7 +80,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		}
 		Stage::MidResponse => {
 			let mut group = request.accept(0, timed()).unwrap();
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"head"))
+				.unwrap();
 
 			let mut fetched = waiting.await.unwrap();
 			let frame = fetched.read_frame().await.unwrap().unwrap();
@@ -98,8 +101,10 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 				.unwrap();
 
 			// No hop cached the head as the whole group: a fresh fetch reads it all.
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
-			group.finish().unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"tail"))
+				.unwrap();
+			group.close().unwrap();
 			let mut fetched = kio::clock::timeout(Duration::from_secs(5), track.fetch_group(0, None))
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the refetch stalled"))
@@ -112,8 +117,12 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		}
 		Stage::Drained => {
 			let mut group = request.accept(0, timed()).unwrap();
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"head"))
+				.unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"tail"))
+				.unwrap();
 
 			let mut fetched = waiting.await.unwrap();
 			for expected in [&b"head"[..], b"tail"] {
@@ -125,7 +134,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			// group is whole, so it must be cached as such rather than cancelled.
 			const LATENCY: Duration = Duration::from_millis(100);
 			_pairs.last().unwrap().client_transport.set_latency(LATENCY);
-			let group = group.finish().unwrap();
+			let group = group.close().unwrap();
 			kio::clock::sleep(LATENCY).await;
 			drop(fetched);
 			kio::clock::sleep(Duration::from_secs(1)).await;
@@ -193,9 +202,9 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	};
 	let mut group = request.accept(0, timed()).unwrap();
 	group
-		.write_frame(Timestamp::ZERO, Bytes::from_static(b"segment"))
+		.write_frame(group.at_start(), Bytes::from_static(b"segment"))
 		.unwrap();
-	let group = group.finish().unwrap();
+	let group = group.close().unwrap();
 	let mut fetched = waiting.await.unwrap();
 	assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"segment");
 	drop(fetched);

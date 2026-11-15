@@ -278,12 +278,15 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 		if (!variant)
 			break;
 		const auto *frame = &variant->frame;
+		CHECK(frame->timestamp.scale.has_value());
+		if (!frame->timestamp.scale)
+			break;
 		if (!first_decoded)
 			first_decoded = frame->timestamp;
 		const auto *samples = reinterpret_cast<const float *>(frame->data.data());
 		const size_t frames = frame->data.size() / sizeof(float) / channels;
 		const int64_t offset =
-			static_cast<int64_t>(frame->timestamp.value * RATE / frame->timestamp.scale) - (start + RATE);
+			static_cast<int64_t>(frame->timestamp.value * RATE / *frame->timestamp.scale) - (start + RATE);
 		for (size_t i = 0; i < frames; i++) {
 			const double expected = Tone(offset + static_cast<int64_t>(i));
 			for (size_t c = 0; c < channels; c++) {
@@ -298,7 +301,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	// OBS never drains an audio encoder, so the decoder trims the 312-sample pre-skip
 	// and nothing pads the tail: every input sample but that lookahead comes back.
 	// Compared as fractions of a second, since the track reads back at its own scale.
-	CHECK(first_decoded && first_decoded->value * RATE == sample(0) * first_decoded->scale);
+	CHECK(first_decoded && first_decoded->value * RATE == sample(0) * *first_decoded->scale);
 	CHECK(decoded == count * encoder.frame_size - 312);
 	CHECK(energy > 0 && error / energy < 0.05);
 	printf("  %s, %zu channels: %zu samples, error %.4f\n", preset, channels, decoded,

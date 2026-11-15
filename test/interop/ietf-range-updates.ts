@@ -9,6 +9,7 @@ import { createMockTransportPair } from "../../js/net/src/mock.ts";
 import { Producer as OriginProducer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { Stream } from "../../js/net/src/stream.ts";
+import * as Time from "../../js/net/src/time.ts";
 
 console.debug = console.error;
 console.info = console.error;
@@ -35,7 +36,10 @@ const streams: number[][] = [];
 function publishGroup() {
 	const group = track.appendGroup();
 	for (let object = 0; object < 2; object++)
-		group.writeFrame({ payload: new Uint8Array([Number(group.sequence), object]) });
+		group.writeFrame({
+			payload: new Uint8Array([Number(group.sequence), object]),
+			timestamp: Time.Timestamp.unscaled(group.sequence),
+		});
 	group.finish();
 }
 async function response(expected: number) {

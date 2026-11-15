@@ -3,6 +3,7 @@ import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import { Producer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { concat, encodeVarint, Reader } from "../stream.ts";
+import { Timestamp } from "../time.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
 import { frameDecoder, readFrames } from "./group.ts";
@@ -194,9 +195,9 @@ test.each([false, true])("a continuation's held-frame skip stops once the group 
 	const producer = new Producer(0n);
 	let partial: ReturnType<Producer["createFrame"]> | undefined;
 	if (cut) {
-		partial = producer.createFrame({ size });
+		partial = producer.createFrame({ size, timestamp: Timestamp.unscaled(producer.sequence) });
 		partial.write(new Uint8Array(5));
-	} else producer.writeFrame({ payload: new Uint8Array([1]) });
+	} else producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(producer.sequence) });
 
 	// The frame again, with fewer bytes than the skip needs, then nothing: the stream never ends.
 	let controller!: ReadableStreamDefaultController<Uint8Array>;

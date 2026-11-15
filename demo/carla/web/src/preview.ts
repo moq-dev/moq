@@ -31,6 +31,8 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 				map: "Town10HD_Opt",
 				pose,
 			},
+			// The status track is scale-less, so the write names the group it opens.
+			at: Moq.Time.Timestamp.unscaled(0n),
 		});
 		cleanup.push(() => {
 			producer.finish();

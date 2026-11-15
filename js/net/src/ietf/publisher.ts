@@ -1207,7 +1207,7 @@ export class Publisher {
 			for (;;) {
 				const datagram = await datagrams.recv();
 				if (!datagram) return;
-				if (timescale !== undefined && datagram.timestamp === undefined) {
+				if (timescale !== undefined && datagram.timestamp.scale === undefined) {
 					console.debug(`dropping a datagram without a timestamp: sequence=${datagram.sequence}`);
 					continue;
 				}

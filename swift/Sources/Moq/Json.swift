@@ -24,11 +24,12 @@ extension Json {
     public struct Timed<Value> {
         /// The decoded value.
         public let value: Value
-        /// The frame's timestamp on the broadcast clock, or `nil` when untimed.
-        public let timestamp: Timestamp?
+        /// The frame's timestamp on the broadcast clock, or `Timestamp.unscaled(key)` on a
+        /// scale-less track.
+        public let timestamp: Timestamp
 
         /// Pair `value` with its frame timestamp.
-        public init(value: Value, timestamp: Timestamp?) {
+        public init(value: Value, timestamp: Timestamp) {
             self.value = value
             self.timestamp = timestamp
         }

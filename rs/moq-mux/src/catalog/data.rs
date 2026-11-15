@@ -110,7 +110,8 @@ impl Listing {
 		if let Some(captured) = captured {
 			// A source clock running fast stamps ahead of now. Ordered as given, it would put every
 			// media track behind it by however fast it runs. It was written no later than now.
-			self.estimator.order(captured.min(now));
+			// An unscaled capture time doesn't compare, and the estimator skips it.
+			self.estimator.order(if captured > now { now } else { captured });
 		}
 		self.rendition.estimate(self.estimator.reading())
 	}

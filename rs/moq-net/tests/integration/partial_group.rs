@@ -6,6 +6,8 @@
 
 use crate::support;
 use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
@@ -62,23 +64,23 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	.expect("subscribe");
 	subscribed(&track).await;
 
-	let mut stalled = track.append_group().unwrap();
-	stalled.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
+	let mut stalled = track.append_next().unwrap();
+	stalled.write_frame(stalled.at_start(), &b"head"[..]).unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, live.recv_group())
 		.await
 		.expect("group timeout")
 		.unwrap()
 		.expect("group 0");
-	assert_eq!(group.sequence, 0);
+	assert_eq!(group.start, 0);
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	// The live edge moves a full second past the stalled group's reach.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	for millis in [1000, 2000] {
-		let mut next = track.append_group().unwrap();
+		let mut next = track.append_next().unwrap();
 		next.write_frame(Timestamp::from_millis(millis).unwrap(), &b"edge"[..])
 			.unwrap();
-		next.finish().unwrap();
+		next.close().unwrap();
 	}
 	let tail = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
@@ -92,7 +94,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		remote.track("data").unwrap().subscribe(
 			Subscription::default()
 				.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
-				.with_range(0..),
+				.with_ranges([support::keys(0..)]),
 		),
 	)
 	.await
@@ -103,7 +105,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		.expect("group timeout")
 		.unwrap()
 		.expect("a group");
-	if first.sequence != 0 {
+	if first.start != 0 {
 		stalled.abort(moq_net::Error::Cancel).unwrap();
 		return None;
 	}

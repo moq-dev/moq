@@ -39,7 +39,7 @@ export * as Path from "./path.ts";
 export * as Socket from "./socket.ts";
 /** Presentation timestamps and their timescales; durations live in {@link Clock}. */
 export * as Time from "./time.ts";
-/** A value paired with the timestamp it was captured at, absent when untimed. */
+/** A value paired with its frame's timestamp: when it was captured, or a scale-less track's group key. */
 export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";

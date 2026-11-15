@@ -1,5 +1,6 @@
 /** Sweep datagram tracks x readers, with a stalled reader sharing each bounded buffer. */
 import { Producer } from "../src/datagram.ts";
+import { Timestamp } from "../src/time.ts";
 
 const payload = new Uint8Array(1024);
 async function measure(tracks: number, readers: number): Promise<{ join: number; delivery: number }> {
@@ -11,7 +12,8 @@ async function measure(tracks: number, readers: number): Promise<{ join: number;
 	const start = performance.now();
 	for (let i = 0; i < 256; i++) {
 		for (const [index, producer] of producers.entries()) {
-			producer.append(undefined, payload);
+			// A scale-less datagram's timestamp is its sequence.
+			producer.append(Timestamp.unscaled(i), payload);
 			for (const consumer of consumers[index]) {
 				if ((await consumer.recv())?.sequence !== BigInt(i)) throw new Error("missing datagram");
 			}

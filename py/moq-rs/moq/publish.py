@@ -62,8 +62,10 @@ class GroupProducer:
         """
         await self._inner.ready(size)
 
-    def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp) -> None:
         """Write a frame with its presentation timestamp.
+
+        On a scale-less track the timestamp is ``Timestamp.unscaled(self.sequence)``.
 
         Never blocks: without :meth:`ready`, a writer that outpaces its readers
         sheds the front of the group instead.
@@ -143,8 +145,12 @@ class TrackProducer:
         """
         self._inner.skip_groups(start, end)
 
-    def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
-        """Write a single-frame group with its presentation timestamp."""
+    def write_frame(self, payload: bytes, timestamp: Timestamp) -> None:
+        """Write a single-frame group with its presentation timestamp.
+
+        The group starts at the frame's time; on a scale-less track the timestamp is
+        :meth:`Timestamp.unscaled` at the new group's key instead.
+        """
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
     def largest(self) -> Position | None:

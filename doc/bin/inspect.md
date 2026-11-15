@@ -53,9 +53,10 @@ curl http://localhost:4443/fetch/anon/demo/bbb.hang/catalog.json | jq
 ```
 
 Both write the frame payloads of one group back to back: the newest group, or
-the one `--group 42` (`?group=42`) names. `moq fetch --json` prints one line
-per frame instead, `{"group": 42, "frame": 0, "size": 1234, "payload": "<base64>"}`,
-which shows where the frames split.
+the one that starts at `--group 42` (`?group=42`) in the track's timescale.
+`moq fetch --json` prints one line per frame instead,
+`{"group": 42, "frame": 0, "size": 1234, "payload": "<base64>"}`, with the
+group's start, which shows where the frames split.
 
 `fetch` takes the track name literally. `/fetch` splits its path on the last
 `/`, so it cannot reach a track whose name contains one. Both give up after 30

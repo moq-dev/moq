@@ -9,7 +9,7 @@ import type * as frame from "./frame.ts";
 import type * as group from "./group.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import type { Cursor, Reader } from "./stream.ts";
-import type { Timestamp } from "./time.ts";
+import { received, type Timestamp } from "./time.ts";
 import { SEGMENT_BYTES } from "./util/limits.ts";
 
 /** A decoded frame header, and its payload unless that streams in after it. */
@@ -18,6 +18,7 @@ export interface WirePayload {
 	size: number;
 	/** The payload, or `undefined` past one segment, where it follows the header on the stream. */
 	payload?: Uint8Array;
+	/** The timestamp the wire carried, which a scale-less track's frame lacks. */
 	timestamp?: Timestamp;
 }
 
@@ -28,7 +29,8 @@ export function decodePayload(c: Cursor, size: number): Uint8Array | undefined {
 
 /**
  * Write a decoded frame into `producer`, streaming from `stream` a payload its decode left
- * there. Resolves false if the group closed first, which already failed the frame.
+ * there. A frame the wire carried no timestamp for, on a scale-less track, takes its group's
+ * key. Resolves false if the group closed first, which already failed the frame.
  */
 export async function receiveFrame(
 	stream: Reader,
@@ -36,11 +38,12 @@ export async function receiveFrame(
 	frame: WirePayload,
 	inflated?: number,
 ): Promise<boolean> {
+	const timestamp = received(frame.timestamp, producer.sequence);
 	if (frame.payload) {
-		hooks.writeGroupFrame(producer, frame as group.Frame, inflated);
+		hooks.writeGroupFrame(producer, { payload: frame.payload, timestamp }, inflated);
 		return true;
 	}
-	return fillFrame(stream, producer, producer.createFrame({ size: frame.size, timestamp: frame.timestamp }));
+	return fillFrame(stream, producer, producer.createFrame({ size: frame.size, timestamp }));
 }
 
 /**

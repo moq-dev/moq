@@ -8,12 +8,13 @@ import { Producer as GroupProducer } from "./group.ts";
 import { Connection as LiteConnection } from "./lite/connection.ts";
 import { ALPN_03, ALPN_04, Version } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
+import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 test("group read handles independently replay buffered and future frames", async () => {
 	const group = new GroupProducer(0n);
 	const first = group.consume();
-	const payload = (text: string) => ({ payload: new TextEncoder().encode(text) });
+	const payload = (text: string) => ({ payload: new TextEncoder().encode(text), timestamp: Timestamp.unscaled(0n) });
 	try {
 		group.writeFrame(payload("a"));
 		expect(await first.readString()).toBe("a");
@@ -42,9 +43,12 @@ test.each(["group", "track"] as const)("%s JSON rejects an empty frame without t
 	const subscriber = kind === "track" ? producer.subscribe().ordered() : undefined;
 	const group = kind === "track" ? producer.createGroup(0n) : new GroupProducer(0n);
 	const reader = subscriber ?? group.consume();
-	group.writeFrame({ payload: new Uint8Array() });
+	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.sequence) });
 	for (const value of [null, false, 0, ""])
-		group.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		group.writeFrame({
+			payload: new TextEncoder().encode(JSON.stringify(value)),
+			timestamp: Timestamp.unscaled(group.sequence),
+		});
 	group.finish();
 	producer.finish();
 	producer.close();

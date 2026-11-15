@@ -82,7 +82,7 @@ impl Live {
 				open
 			}
 			None => {
-				let group = self.producer.create_group(group::Info { sequence })?;
+				let group = self.producer.create_group(group::Info { start: sequence })?;
 				let open = self.open.insert(Open {
 					group,
 					sequence,
@@ -96,7 +96,7 @@ impl Live {
 			}
 		};
 		for frame in &entry.frames {
-			let timestamp = timestamp(frame.timestamp, self.timescale)?;
+			let timestamp = timestamp(frame.timestamp, self.timescale, entry.sequence)?;
 			open.group.write_frame(timestamp, frame.payload.clone())?;
 			open.next += 1;
 		}
@@ -105,7 +105,7 @@ impl Live {
 
 	fn close(&mut self) -> Result<()> {
 		if let Some(open) = self.open.take() {
-			open.group.finish()?;
+			open.group.close()?;
 		}
 		Ok(())
 	}
@@ -124,13 +124,7 @@ impl Live {
 		self.close()?;
 		match end {
 			End::Finish(at) => {
-				self.producer.finish_at(
-					Position {
-						group: at.group,
-						frame: at.frame,
-					},
-					None,
-				)?;
+				self.producer.finish_at(Position::new(at.group, at.frame), None)?;
 				// An empty group stores no object, so the replay declares it never produces what
 				// the archive holds nothing for up to the end, and the end settles over it.
 				let fin = at.group + u64::from(at.frame != 0);
@@ -159,22 +153,18 @@ pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mut
 	}
 }
 
-/// Answer `fill`'s lookup of `pts` with the group containing it: the newest group starting at
-/// or before it, found among the objects whose keys say they may hold it, or the oldest stored
-/// group when every one starts after it. Left unanswered when the archive holds no group, or
-/// the store fails.
-async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, pts: Timestamp) {
-	let (around, timed, timescale) = {
+/// Answer `fill`'s lookup of `pts`, in the track's timescale, with the group containing it: the
+/// newest group starting at or before it, found among the objects whose keys say they may hold
+/// it, or the oldest stored group when every one starts after it. A group starts at its key,
+/// as the live cache resolves it. Left unanswered when the archive holds no group, or the store
+/// fails.
+async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, pts: u64) {
+	let (around, timed) = {
 		let index = index.lock().unwrap();
-		(index.around(pts), index.timed(), index.timescale)
+		(index.around(pts), index.timed())
 	};
-	let Some(timescale) = timescale else {
-		// A reader's time start on an untimed track is refused before it is looked up.
-		return;
-	};
-	let limit = pts.as_scale(timescale);
-
-	// Newest first: only a group whose first frame an object holds says where it starts.
+	// Newest first, skipping a group whose head was pruned, which can't be served from its first
+	// frame.
 	for (start, path) in around {
 		let Some(object) = load(shared, index, start, &path, timed).await else {
 			return;
@@ -185,13 +175,8 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 			.enumerate()
 			.rev()
 			.filter(|(position, _)| *position > 0 || object.frame_start == 0)
-			.find_map(|(_, entry)| {
-				let first = entry.frames.first()?;
-				first
-					.timestamp
-					.is_some_and(|at| u128::from(at) <= limit)
-					.then_some(entry.sequence)
-			});
+			.find(|(_, entry)| !entry.frames.is_empty() && entry.sequence <= pts)
+			.map(|(_, entry)| entry.sequence);
 		if let Some(sequence) = found {
 			return serve_group(shared, index, fill, sequence).await;
 		}
@@ -343,7 +328,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		if index < frame {
 			continue;
 		}
-		let written = timestamp(stored.timestamp, timescale)
+		let written = timestamp(stored.timestamp, timescale, sequence)
 			.map_err(|_| moq_net::Error::ProtocolViolation)
 			.and_then(|timestamp| producer.write_frame(timestamp, stored.payload.clone()));
 		if let Err(err) = written {
@@ -352,7 +337,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 			return;
 		}
 	}
-	let _ = producer.finish();
+	let _ = producer.close();
 }
 
 /// The served properties of a track stored with `info`: no max age, since the archive's
@@ -372,10 +357,11 @@ pub(super) fn timescale(info: &Info) -> Result<Option<Timescale>> {
 }
 
 /// A stored timestamp on its track, which must be timed exactly when the frame is.
-fn timestamp(value: Option<u64>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+fn timestamp(value: Option<u64>, timescale: Option<Timescale>, sequence: u64) -> Result<Timestamp> {
 	match (value, timescale) {
-		(Some(value), Some(timescale)) => Ok(Some(Timestamp::new(value, timescale).map_err(|_| Error::Id(value))?)),
-		(None, None) => Ok(None),
+		(Some(value), Some(timescale)) => Timestamp::new(value, timescale).map_err(|_| Error::Id(value)),
+		// A scale-less frame's timestamp is its group's key.
+		(None, None) => Ok(Timestamp::unscaled(sequence)),
 		_ => Err(Error::Timing),
 	}
 }

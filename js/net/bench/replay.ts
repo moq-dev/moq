@@ -1,7 +1,7 @@
 /** Sweep cached-group replay to joining subscribers, and arrivals into unread backlogs. */
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 
 type Order = "monotonic" | "reverse" | "mixed";
 const ORDERS: Order[] = ["monotonic", "reverse", "mixed"];
@@ -33,7 +33,7 @@ function publish(track: Track.Producer, sequence: number): void {
 	const group = track.createGroup(BigInt(sequence));
 	const payload = new Uint8Array(PAYLOAD);
 	new DataView(payload.buffer).setUint32(0, sequence);
-	group.writeFrame({ payload });
+	group.writeFrame({ payload, timestamp: Time.Timestamp.unscaled(group.sequence) });
 	group.finish();
 }
 

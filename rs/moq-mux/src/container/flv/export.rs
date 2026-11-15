@@ -263,7 +263,7 @@ impl FlvTrack {
 		let released = (|| {
 			while let Some(((mut arrival, record, bill), dts, pts)) = clock.pop(flush)? {
 				// A tie the clock moved presents on the tick it moved to.
-				if arrival.item.timestamp.as_millis() != u128::from(pts) {
+				if arrival.item.timestamp.as_millis()? != u128::from(pts) {
 					arrival.item.timestamp = moq_net::Timestamp::from_millis(pts)?;
 				}
 				if let Some(settled) = settled {
@@ -307,7 +307,7 @@ impl FlvTrack {
 			crate::jitter::Arrival {
 				arrived,
 				read,
-				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
+				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.try_into()?,
 				restart,
 				sync,
 				leading,
@@ -522,7 +522,7 @@ impl<S: Stream> Export<S> {
 						let arrival = crate::jitter::Arrival {
 							arrived: track.empty,
 							read: kio::clock::now(),
-							decode: frame.timestamp.into(),
+							decode: frame.timestamp.try_into()?,
 							restart: track.source.markers(),
 							sync: kind == 1 || frame.keyframe,
 							leading: false,
@@ -545,7 +545,7 @@ impl<S: Stream> Export<S> {
 							// Clocked in FLV's milliseconds, so the leading frames step a tag tick apart.
 							let source = arrival.item.timestamp;
 							let arrived = arrival.arrived;
-							clock.push((arrival, record, bill), source.as_millis() as u64, source)?;
+							clock.push((arrival, record, bill), source.as_millis()? as u64, source)?;
 							track.release(key, Some(arrived), self.shift, false, &mut self.jitter)?;
 						}
 						None => {
@@ -1021,7 +1021,7 @@ fn audio_flavor(config: &hang::catalog::AudioConfig) -> crate::Result<Flavor> {
 
 /// The frame's presentation time on the tag clock, `shift` milliseconds past its own.
 fn frame_timestamp_ms(frame: &Frame, shift: u32) -> crate::Result<u32> {
-	u32::try_from(frame.timestamp.as_millis())
+	u32::try_from(frame.timestamp.as_millis()?)
 		.ok()
 		.and_then(|pts| pts.checked_add(shift))
 		.ok_or_else(|| Error::TimestampRange.into())

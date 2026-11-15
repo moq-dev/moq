@@ -29,9 +29,10 @@ const serving = (async () => {
 		let broadcast = broadcasts.get(request.path);
 		if (!broadcast) {
 			broadcast = new Moq.Broadcast.Producer();
-			broadcast
-				.createTrack("value", { maxAge: null })
-				.writeFrame({ payload: new TextEncoder().encode(request.path) });
+			broadcast.createTrack("value", { maxAge: null }).writeFrame({
+				payload: new TextEncoder().encode(request.path),
+				timestamp: Moq.Time.Timestamp.unscaled(0n),
+			});
 			broadcasts.set(request.path, broadcast);
 		}
 		request.serve(broadcast);

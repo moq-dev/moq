@@ -15,8 +15,11 @@ import { DatagramWindow } from "./window.ts";
 export interface Datagram {
 	/** The datagram track's own sequence. */
 	sequence: bigint;
-	/** Presentation timestamp, or `undefined` when untimed. Not authenticated. */
-	timestamp?: Time.Timestamp;
+	/**
+	 * Presentation timestamp, or on a scale-less track {@link Time.Timestamp.unscaled} at the
+	 * sequence. Not authenticated.
+	 */
+	timestamp: Time.Timestamp;
 	/** Decrypted application bytes. */
 	plaintext: Uint8Array;
 }
@@ -67,18 +70,26 @@ export class Producer {
 	get closed(): NetDatagram.Producer["closed"] {
 		return this.#inner.closed;
 	}
-	/** Encrypt a payload at the next datagram sequence, returning that sequence. */
-	async append(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<bigint> {
-		const sequence = this.#next;
+	/**
+	 * Encrypt a payload at the next datagram sequence, returning that sequence.
+	 *
+	 * A scale-less track has no time, so there `timestamp` is {@link Time.Timestamp.unscaled} at the
+	 * sequence to write, as with {@link insert}.
+	 */
+	async append(timestamp: Time.Timestamp, plaintext: Uint8Array): Promise<bigint> {
+		const sequence = timestamp.scale === undefined ? BigInt(timestamp.value) : this.#next;
 		await this.insert(sequence, timestamp, plaintext);
 		return sequence;
 	}
-	/** Encrypt at an explicit unused sequence, refusing predictable failures before allocating it. */
-	async insert(sequence: bigint, timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<void> {
+	/**
+	 * Encrypt at an explicit unused sequence, refusing predictable failures before allocating it.
+	 * On a scale-less track `timestamp` is {@link Time.Timestamp.unscaled} at `sequence`.
+	 */
+	async insert(sequence: bigint, timestamp: Time.Timestamp, plaintext: Uint8Array): Promise<void> {
 		if (this.#finished || this.#aborted) throw this.#aborted ?? new Error("datagram track is closed");
 		checkGroup(sequence);
 		if (sequence < this.#next) throw new Failure("reuse");
-		const at = NetDatagram.rescale(this.#info, timestamp);
+		const at = NetDatagram.rescaleIn(this.#info, timestamp, sequence);
 		const iv = this.#key.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1n;
 		const owned = plaintext.slice();

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::StreamError;
 
-/// Why a group sequence will not be delivered.
+/// Why a group key will not be delivered.
 ///
 /// lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
 /// earlier versions name both in SUBSCRIBE_DROP.
@@ -43,7 +43,7 @@ impl Hole {
 		}
 	}
 
-	/// The error a reader waiting on the sequence ends with: a sequence never produced is
+	/// The error a reader waiting on the key ends with: a key never produced is
 	/// simply not found.
 	pub fn error(&self) -> StreamError {
 		match self {
