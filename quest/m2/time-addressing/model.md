@@ -161,7 +161,7 @@ recorded only sequencing.
   `Range::groups(RangeBounds<u64>)` and
   `Subscription::with_range` go. JS's omitted start keeps meaning `Oldest`.
 - **Fence what grows after the cut.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `Position` becomes
-  `#[non_exhaustive]`, so byte-holes can add a byte offset without a break.
+  `#[non_exhaustive]`, so a later byte offset or other field lands without a break.
 - **Wires without a start.** Check which moq-lite versions can encode a
   historical start; lite-01/02 may not. On any that can't, an `Oldest` or
   earlier start gets the live feed, and the PR documents that exception
