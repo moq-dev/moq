@@ -331,9 +331,10 @@ which leaves the prior 500 ms later.
 
 A group the consumer skips unread carries no timestamp to test, so the consumer
 tells backlog by its sequence instead: one at or below the publisher's largest
-group when the subscription began, the first largest the subscriber learns (from
-moq-lite's subscribe answer, or the first group to land when the publisher
-reports none), was produced before it. Only such a group's arrival is reported,
+group when the subscription began, the largest the subscriber knows once the
+publisher answered (moq-lite's subscribe answer carries it, and without one the
+groups that landed stand in), was produced before it. Read any earlier, a cached
+group racing the answer would set it. Only such a group's arrival is reported,
 with `backlog`, so a path that drops late groups from the start, all produced
 since, holds no join open. A report extends the join only while the join is
 **open**, before any interval has measured the path: after that, a skipped group

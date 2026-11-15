@@ -2,7 +2,7 @@
 // its cursor unread still tells the estimator when it arrived, but only when the publisher's largest
 // at the subscription's start shows it was produced before.
 
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Duration, type Installed, Instant, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track, Varint } from "@moq/net";
@@ -120,4 +120,59 @@ test("late groups dropped from the start hold no join open", async () => {
 		() => false,
 	);
 	expect(dropped).toBe(lost);
+});
+
+test("the join's boundary is the publisher's answer, not a group that raced it", async () => {
+	// Group 150 lands from a cache before the publisher answers that it stood at group 200. Group 160
+	// then arrives below the cursor: produced before the subscription, so it is backlog.
+	const track = new Track.Producer("audio");
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
+	let answered = false;
+	let answer!: () => void;
+	const started = new Promise<void>((resolve) => {
+		answer = resolve;
+	});
+	const raced = new Proxy(subscriber, {
+		get(target, key) {
+			if (key === "start") return () => started.then(() => undefined);
+			if (key === "largest") return async () => ({ group: answered ? 200n : 150n, frame: 0 });
+			const value = Reflect.get(target, key, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const consumer = new Consumer(raced, {
+		format: new Format("audio"),
+		delay: { max: Duration.millis(2000) },
+		wait: Duration.millis(100),
+	});
+	const write = (sequence: number, media: number) => {
+		const group = track.createGroup(BigInt(sequence));
+		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
+		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
+		group.finish();
+	};
+	try {
+		write(150, 0);
+		await clock.advance(Duration.ZERO);
+		answered = true;
+		answer();
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 150n });
+		write(201, 1020);
+		await clock.advance(Duration.millis(200));
+		expect(await consumer.next()).toMatchObject({ kind: "gap" });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 201n });
+		write(160, 200);
+		write(202, 1040);
+		await clock.advance(Duration.ZERO);
+		expect(reported).toHaveLength(1);
+	} finally {
+		backlog.mockRestore();
+		consumer.close();
+		track.finish();
+		track.close();
+	}
 });

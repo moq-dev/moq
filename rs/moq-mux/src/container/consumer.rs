@@ -209,8 +209,8 @@ pub struct Consumer<F: Container> {
 	// The newest group the publisher's largest named so far.
 	largest: Option<u64>,
 
-	// The publisher's largest group when the subscription began: one at or below it was produced
-	// before, so dropping it unread skips the join's backlog.
+	// The publisher's largest group as the start was decided: one at or below it was produced
+	// before the subscription, so dropping it unread skips the join's backlog.
 	joined: Option<u64>,
 
 	// When the latest backlog group dropped without delivering all of it landed.
@@ -569,11 +569,6 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn poll_event_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
-		// Where the publisher stood as the subscription began, before any group can be dropped
-		// against it. Polled only until then, so later groups wake nothing extra.
-		if self.joined.is_none() {
-			self.poll_largest(waiter);
-		}
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 
@@ -597,6 +592,7 @@ impl<F: Container> Consumer<F> {
 				(floor, served) => floor.or(served),
 			};
 			if let Some(start) = start {
+				self.join(waiter);
 				let (joined, backlog) = (self.joined, &mut self.backlog);
 				self.pending.retain(|group| {
 					let keep = group.sequence >= start;
@@ -636,6 +632,7 @@ impl<F: Container> Consumer<F> {
 						None => return Poll::Pending,
 					},
 				};
+				self.join(waiter);
 				// Nothing has been read, so discarding what lies below the start is no gap.
 				self.discard(|group| group.sequence < start)?;
 				self.current = start;
@@ -1204,13 +1201,18 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	// Take every largest the publisher reported since the last poll; the first is the one the
-	// subscription began at.
+	// Take every largest the publisher reported since the last poll.
 	fn poll_largest(&mut self, waiter: &kio::Waiter) {
 		while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
-			self.joined.get_or_insert(largest.group);
 			self.largest = self.largest.max(Some(largest.group));
 		}
+	}
+
+	// Where the publisher stood as the subscription began, taken as the start is decided: after its
+	// answer rather than from a group that raced it, and before anything is dropped against it.
+	fn join(&mut self, waiter: &kio::Waiter) {
+		self.poll_largest(waiter);
+		self.joined = self.largest;
 	}
 
 	// Drop the pending groups `pick` selects without delivering them. A drop must not hide what
