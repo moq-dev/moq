@@ -40,6 +40,10 @@ pub struct Subscribe<'a> {
 	/// carries a larger one, which a [`SubscribeDrop`] echoes. Lite07+ only; earlier wires
 	/// decode as 0 and drop it on encode.
 	pub update: u64,
+	/// Whether the subscriber wants each group's frame headers without their payload; see
+	/// [`crate::track::Subscription::meta`]. Lite07+ only: earlier wires decode as `false`
+	/// and refuse to encode `true`.
+	pub meta: bool,
 }
 
 impl Subscribe<'_> {
@@ -58,6 +62,7 @@ impl Subscribe<'_> {
 			ranges: self.ranges,
 			order: self.order,
 			update: self.update,
+			meta: self.meta,
 		}
 	}
 }
@@ -159,6 +164,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		};
 		let update = decode_update(r, version)?;
 		decode_warm(r, version)?;
+		let meta = decode_meta(r, version)?;
 
 		Ok(Self {
 			id,
@@ -173,6 +179,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			ranges,
 			order,
 			update,
+			meta,
 		})
 	}
 
@@ -196,8 +203,31 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		}
 		encode_update(w, version, self.update)?;
 		encode_warm(w, version);
+		encode_meta(w, version, self.meta)?;
 
 		Ok(())
+	}
+}
+
+/// Decode whether the subscriber wants frame headers without payload. A wire without the
+/// field decodes as the payload.
+fn decode_meta(r: &mut Decoder<'_>, version: Version) -> Result<bool, DecodeError> {
+	match version.has_meta() {
+		true => super::group::decode_bool(r),
+		false => Ok(false),
+	}
+}
+
+/// Encode the metadata mode. A wire without the field cannot ask for it, and is never asked
+/// to emulate it by carrying payload the subscriber would discard.
+fn encode_meta(w: &mut Encoder<'_>, version: Version, meta: bool) -> Result<(), EncodeError> {
+	match version.has_meta() {
+		true => {
+			w.u8(meta.into());
+			Ok(())
+		}
+		false if meta => Err(EncodeError::Version),
+		false => Ok(()),
 	}
 }
 
@@ -735,6 +765,13 @@ pub struct SubscribeUpdate<R = RangeEdit> {
 	pub order: Order,
 	/// See [`Subscribe::update`]: larger than the subscription's previous one.
 	pub update: u64,
+	/// See [`Subscribe::meta`]: clearing it asks for the payload of the groups served in
+	/// metadata mode, from [`Self::payload`].
+	pub meta: bool,
+	/// The subscriber's first missing frame, from which an update clearing `meta` asks for the
+	/// payload, or `None` for every group served in metadata mode, each from frame 0. Read only
+	/// on an update that clears `meta`, and sent as `None` otherwise. Lite07+ only.
+	pub payload: Option<crate::track::Position>,
 }
 
 impl<R> SubscribeUpdate<R> {
@@ -748,6 +785,8 @@ impl<R> SubscribeUpdate<R> {
 			ranges,
 			order: self.order,
 			update: self.update,
+			meta: self.meta,
+			payload: self.payload,
 		}
 	}
 }
@@ -787,6 +826,15 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			false => None,
 		};
 		decode_warm(r, version)?;
+		let meta = decode_meta(r, version)?;
+		let payload = match version.has_meta() {
+			true => {
+				let group = r.varint()?.checked_sub(1);
+				let frame = r.varint()?;
+				group.map(|group| crate::track::Position::new(group, frame))
+			}
+			false => None,
+		};
 
 		Ok(Self {
 			wanted_group,
@@ -796,6 +844,8 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			ranges,
 			order,
 			update,
+			meta,
+			payload,
 		})
 	}
 
@@ -828,6 +878,11 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			w.varint_opt(self.wanted_group)?;
 		}
 		encode_warm(w, version);
+		encode_meta(w, version, self.meta)?;
+		if version.has_meta() {
+			w.varint_opt(self.payload.map(|payload| payload.group))?;
+			w.varint(self.payload.map_or(0, |payload| payload.frame))?;
+		}
 		Ok(())
 	}
 }
@@ -1513,16 +1568,80 @@ mod test {
 	fn warm_trails_subscribe_only_on_lite07() {
 		let msg = subscribe_sample();
 		let lite07 = encode(&msg, Version::Lite07).unwrap();
-		assert_eq!(lite07.last(), Some(&0));
-		let head = &lite07[..lite07.len() - 1];
+		// Warm, then Meta.
+		assert_eq!(&lite07[lite07.len() - 2..], &[0, 0]);
+		let head = &lite07[..lite07.len() - 2];
 		let decode = |warm: &[u8]| {
-			let buf = [head, warm].concat();
+			let buf = [head, warm, &[0]].concat();
 			crate::coding::decode_from(&mut buf.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
 		};
 		decode(&[0]).unwrap();
 		decode(&[1]).unwrap();
 		assert!(decode(&[2]).is_err());
 		assert!(decode(&[]).is_err());
+	}
+
+	/// SUBSCRIBE carries the metadata mode on lite-07 alone: an older wire refuses to ask for
+	/// it rather than carry payload the subscriber would discard, and any byte but 0 or 1 is
+	/// malformed.
+	#[test]
+	fn meta_trails_subscribe_only_on_lite07() {
+		let mut msg = subscribe_sample();
+		msg.meta = true;
+		let lite07 = encode(&msg, Version::Lite07).unwrap();
+		assert_eq!(lite07.last(), Some(&1));
+		let decoded = crate::coding::decode_from(&mut lite07.as_slice(), Version::Lite07, Subscribe::decode_msg).unwrap();
+		assert!(decoded.meta);
+
+		let mut bad = lite07.clone();
+		*bad.last_mut().unwrap() = 2;
+		assert!(crate::coding::decode_from(&mut bad.as_slice(), Version::Lite07, Subscribe::decode_msg).is_err());
+
+		assert!(matches!(encode(&msg, Version::Lite06), Err(EncodeError::Version)));
+		msg.meta = false;
+		let lite06 = encode(&msg, Version::Lite06).unwrap();
+		let decoded = crate::coding::decode_from(&mut lite06.as_slice(), Version::Lite06, Subscribe::decode_msg).unwrap();
+		assert!(!decoded.meta);
+	}
+
+	/// An update clearing the metadata mode names the first missing frame, its group plus one
+	/// leaving 0 for none, and an older wire refuses the mode.
+	#[test]
+	fn update_carries_meta_and_the_payload_position() {
+		let update = |meta, payload| SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: std::time::Duration::ZERO,
+			min_delay: None,
+			ranges: RangeEdit::Edit {
+				remove: Vec::new(),
+				add: Vec::new(),
+			},
+			order: crate::track::Order::Descending,
+			update: 1,
+			meta,
+			payload,
+		};
+		let roundtrip = |msg: &SubscribeUpdate| {
+			let buf = msg.encode_bytes(Version::Lite07).unwrap();
+			let got =
+				crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
+					.unwrap();
+			(buf, got)
+		};
+
+		let (buf, got) = roundtrip(&update(false, Some(Position::new(0, 5))));
+		assert_eq!(&buf[buf.len() - 3..], &[0, 1, 5], "meta 0, group 0 plus one, frame 5");
+		assert_eq!((got.meta, got.payload), (false, Some(Position::new(0, 5))));
+
+		let (buf, got) = roundtrip(&update(true, None));
+		assert_eq!(&buf[buf.len() - 3..], &[1, 0, 0]);
+		assert_eq!((got.meta, got.payload), (true, None));
+
+		assert!(matches!(
+			update(true, None).encode_bytes(Version::Lite06),
+			Err(EncodeError::Version)
+		));
 	}
 
 	/// SUBSCRIBE and SUBSCRIBE_UPDATE carry their update number on lite-07 alone.
@@ -1594,6 +1713,7 @@ mod test {
 				end: absolute(10, 0),
 			}],
 			update: 0,
+			meta: false,
 		}
 	}
 
@@ -1797,6 +1917,8 @@ mod test {
 			ranges: sent.edit(&msg.ranges).unwrap(),
 			order: crate::track::Order::Ascending,
 			update: 0,
+			meta: false,
+			payload: None,
 		};
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
@@ -1869,6 +1991,8 @@ mod test {
 				ranges: edit,
 				order: crate::track::Order::Descending,
 				update: 0,
+				meta: false,
+				payload: None,
 			};
 			let buf = update.encode_bytes(version).unwrap();
 			let got =
@@ -1970,10 +2094,10 @@ mod test {
 
 		msg.ranges = vec![Range::OLDEST];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last but for the update number and whether the pull joins a copy: a
-		// count of one, then two anchors of type 0.
-		let at = buf.len() - 5;
-		assert_eq!(&buf[at..], [1, 0, 0, 0, 0]);
+		// The list is last but for the update number, whether the pull joins a copy, and the
+		// metadata mode: a count of one, then two anchors of type 0.
+		let at = buf.len() - 6;
+		assert_eq!(&buf[at..], [1, 0, 0, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -1982,7 +2106,7 @@ mod test {
 		));
 
 		let mut buf = encode(&msg, version).unwrap();
-		let last = buf.len() - 3;
+		let last = buf.len() - 4;
 		buf[last] = 4;
 		assert!(matches!(
 			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
@@ -2049,6 +2173,8 @@ mod test {
 					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 					order: crate::track::Order::Descending,
 					update: 0,
+					meta: false,
+					payload: None,
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
@@ -2083,6 +2209,8 @@ mod test {
 					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 					order: crate::track::Order::Descending,
 					update: 0,
+					meta: false,
+					payload: None,
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
@@ -2112,6 +2240,8 @@ mod test {
 				ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 				order,
 				update: 0,
+				meta: false,
+				payload: None,
 			};
 			let mut buf = Vec::new();
 			update

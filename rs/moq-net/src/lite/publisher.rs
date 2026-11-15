@@ -6556,6 +6556,7 @@ impl GroupServe {
 			subscribe: self.ctx.id,
 			key: self.key,
 			frame_start: self.frame_start,
+			meta: false,
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
@@ -7963,6 +7964,8 @@ mod serve_group_test {
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			order: Order::Descending,
 			update: 0,
+			meta: false,
+			payload: None,
 		};
 		run.replace(update(Some(0)));
 		assert_eq!(track.demand().wanted(), Some(0), "stale request is not a join");
@@ -8124,6 +8127,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		{
 			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -8283,6 +8288,8 @@ mod serve_group_test {
 			ranges,
 			order: Order::Descending,
 			update: 0,
+			meta: false,
+			payload: None,
 		}
 	}
 
@@ -8739,6 +8746,8 @@ mod serve_group_test {
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
 			update: 1,
+			meta: false,
+			payload: None,
 		});
 		write_group(&mut track, 2, 2000);
 		let _track = track.finish().unwrap();
@@ -8780,6 +8789,8 @@ mod serve_group_test {
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
 			update: 1,
+			meta: false,
+			payload: None,
 		});
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(
@@ -8826,6 +8837,8 @@ mod serve_group_test {
 					ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 					order: Order::Descending,
 					update: 1,
+					meta: false,
+					payload: None,
 				});
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 				let (opened, drops, why): (u64, &[(u64, u64, u64)], _) = match (version, widen) {
@@ -8871,6 +8884,8 @@ mod serve_group_test {
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update: 1,
+				meta: false,
+				payload: None,
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert_eq!(
@@ -8917,6 +8932,8 @@ mod serve_group_test {
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update: 1,
+				meta: false,
+				payload: None,
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let expected: &[(u64, u64, u64)] = match version {
@@ -8954,6 +8971,8 @@ mod serve_group_test {
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
 			update,
+			meta: false,
+			payload: None,
 		};
 
 		// Group 0 goes out whole: every frame and the FIN, which the peer has yet to
@@ -9023,6 +9042,8 @@ mod serve_group_test {
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				order: Order::Descending,
 				update: 1,
+				meta: false,
+				payload: None,
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			// Group 2 is served either way.
@@ -9073,6 +9094,8 @@ mod serve_group_test {
 				ranges: vec![(id, lite::Range::span(start, 0, None, None))],
 				order: Order::Descending,
 				update,
+				meta: false,
+				payload: None,
 			};
 			// Widened: group 0 is fresh again, and waits its turn.
 			run.update(update(0, Some(0), 1));
@@ -9131,6 +9154,8 @@ mod serve_group_test {
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update,
+				meta: false,
+				payload: None,
 			});
 		}
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -9167,6 +9192,8 @@ mod serve_group_test {
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update,
+				meta: false,
+				payload: None,
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		}
@@ -9209,6 +9236,8 @@ mod serve_group_test {
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
 				update,
+				meta: false,
+				payload: None,
 			});
 		}
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -9404,6 +9433,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(2, 2)]);
@@ -9831,6 +9862,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -9873,6 +9906,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -9920,6 +9955,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		};
 		run.replace(update(5));
 		{
@@ -9967,6 +10004,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		};
 		run.replace(update(5));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10014,6 +10053,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		write_group(&mut track, 5, 5);
 		assert_eq!(settle(&mut run), 1, "served a group below the latest");
@@ -10107,6 +10148,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 
 		write_group(&mut track, 0, 0);
@@ -10245,6 +10288,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
@@ -10276,6 +10321,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 3, "group 0 is cached and now in range");
@@ -10304,6 +10351,8 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(7), 0, None, None)],
 			update: 0,
+			meta: false,
+			payload: None,
 		};
 		relay.run.replace(update);
 		relay.settle();
@@ -11176,6 +11225,7 @@ mod tests {
 						min_delay: None,
 						ranges: vec![lite::Range::span(None, 0, None, None)],
 						update: 0,
+						meta: false,
 					};
 					leave_request::<SubscribeServe>(version, &subscribe, wait, close).await;
 
@@ -11241,6 +11291,7 @@ mod tests {
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
+				meta: false,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
@@ -11397,6 +11448,7 @@ mod tests {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
 		}
 	}
 
@@ -11742,6 +11794,7 @@ mod tests {
 						min_delay: None,
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 						update: 0,
+						meta: false,
 					};
 					let mut serve =
 						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.broadcast().consume())
@@ -11879,6 +11932,7 @@ mod tests {
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
 			update: 0,
+			meta: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -11907,6 +11961,8 @@ mod tests {
 				add: Vec::new(),
 			},
 			update: 0,
+			meta: false,
+			payload: None,
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
 		session.push(&update(Some(2), 7).encode_bytes(version).unwrap());
@@ -11970,6 +12026,8 @@ mod tests {
 				add: Vec::new(),
 			},
 			update: 0,
+			meta: false,
+			payload: None,
 		}
 	}
 
@@ -12012,6 +12070,7 @@ mod tests {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -12541,6 +12600,7 @@ mod tests {
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
+				meta: false,
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -12658,6 +12718,7 @@ mod tests {
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
+				meta: false,
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -12799,6 +12860,7 @@ mod tests {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
+			meta: false,
 		};
 		let mut script = Vec::new();
 		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)

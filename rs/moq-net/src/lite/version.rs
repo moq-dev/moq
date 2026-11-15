@@ -407,6 +407,16 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and GROUP carry the metadata mode, whose Group
+	/// Streams carry each frame's header without its payload. Added in lite-07; an older peer
+	/// cannot be asked for it.
+	pub(crate) fn has_meta(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group,
 	/// so a join at any hop reaches the publisher. Added in lite-07; older peers see a
 	/// track that never refreshes.

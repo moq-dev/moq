@@ -15,6 +15,10 @@ pub struct Group {
 	// missing, either because the subscription started partway in or because the
 	// publisher only holds the tail. Lite06+ only; older versions always start at 0.
 	pub frame_start: u64,
+
+	/// Whether the stream carries each frame's header without its payload: the metadata
+	/// mode the subscription asked for when the stream opened. Lite07+ only.
+	pub meta: bool,
 }
 
 impl Group {
@@ -26,7 +30,7 @@ impl<'a> Message<'a> for Group {
 	/// Every field at its longest varint, so a header still arriving holds few bytes at its
 	/// [unidentified](crate::priority::RECV_UNIDENTIFIED) receive rank. Versions before
 	/// lite-07 carry no more fields, in a shorter varint form.
-	const MAX_SIZE: usize = Self::FIELDS * crate::coding::varint::MAX_LEN;
+	const MAX_SIZE: usize = Self::FIELDS * crate::coding::varint::MAX_LEN + 1;
 
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let subscribe = r.varint()?;
@@ -35,11 +39,16 @@ impl<'a> Message<'a> for Group {
 			true => r.varint()?,
 			false => 0,
 		};
+		let meta = match version.has_meta() {
+			true => decode_bool(r)?,
+			false => false,
+		};
 
 		Ok(Self {
 			subscribe,
 			key,
 			frame_start,
+			meta,
 		})
 	}
 
@@ -54,7 +63,23 @@ impl<'a> Message<'a> for Group {
 			return Err(EncodeError::Version);
 		}
 
+		match version.has_meta() {
+			true => w.u8(self.meta.into()),
+			// The peer would read the frame headers as payload.
+			false if self.meta => return Err(EncodeError::Version),
+			false => {}
+		}
+
 		Ok(())
+	}
+}
+
+/// A one-byte boolean: 0 or 1, anything else malformed.
+pub(super) fn decode_bool(r: &mut Decoder<'_>) -> Result<bool, DecodeError> {
+	match r.u8()? {
+		0 => Ok(false),
+		1 => Ok(true),
+		_ => Err(DecodeError::InvalidValue),
 	}
 }
 
@@ -69,6 +94,7 @@ mod test {
 			subscribe: 1,
 			key: 7,
 			frame_start: 4,
+			meta: false,
 		};
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
@@ -85,6 +111,7 @@ mod test {
 			subscribe: 1,
 			key: 7,
 			frame_start: 4,
+			meta: false,
 		};
 		let mut buf = Vec::new();
 		assert!(
@@ -126,12 +153,14 @@ mod test {
 				subscribe: max,
 				key: max,
 				frame_start: if version.has_frame_bounds() { max } else { 0 },
+				meta: version.has_meta(),
 			};
 
 			let mut body = Vec::new();
 			msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 				.unwrap();
-			assert_eq!(body.len(), fields * longest, "{version:?}");
+			let flags = usize::from(version.has_meta());
+			assert_eq!(body.len(), fields * longest + flags, "{version:?}");
 			assert!(body.len() <= <Group as Message>::MAX_SIZE, "{version:?}");
 
 			let mut wire = Vec::new();
@@ -140,19 +169,47 @@ mod test {
 			let (got, used) = Group::decode_slice(&wire, version).unwrap();
 			assert_eq!(used, wire.len(), "{version:?}");
 			assert_eq!(
-				(got.subscribe, got.key, got.frame_start),
-				(msg.subscribe, msg.key, msg.frame_start),
+				(got.subscribe, got.key, got.frame_start, got.meta),
+				(msg.subscribe, msg.key, msg.frame_start, msg.meta),
 				"{version:?}"
 			);
 		}
 
-		assert_eq!(<Group as Message>::MAX_SIZE, 27);
+		assert_eq!(<Group as Message>::MAX_SIZE, 28);
 		let over = <Group as Message>::MAX_SIZE + 1;
 		let mut wire = vec![over as u8];
 		wire.resize(1 + over, 0);
 		assert!(matches!(
 			Group::decode_slice(&wire, Version::Lite07),
-			Err(DecodeError::MessageTooLarge { size: 28, max: 27 })
+			Err(DecodeError::MessageTooLarge { size: 29, max: 28 })
 		));
+	}
+
+	/// Each stream marks its own mode on lite-07, and an older peer cannot carry it.
+	#[test]
+	fn meta_marks_the_stream_on_lite07_only() {
+		let msg = Group {
+			subscribe: 1,
+			key: 7,
+			frame_start: 0,
+			meta: true,
+		};
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+			.unwrap();
+		assert_eq!(buf.last(), Some(&1));
+		let got =
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| Group::decode_msg(r, v)).unwrap();
+		assert!(got.meta);
+
+		// Any other byte is malformed.
+		*buf.last_mut().unwrap() = 2;
+		assert!(crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| Group::decode_msg(r, v)).is_err());
+
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
+				.is_err()
+		);
 	}
 }

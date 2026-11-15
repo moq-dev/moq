@@ -942,8 +942,10 @@ A subscriber therefore reads every stream under its own header, never under the 
 A metadata frame is not the frame: it never satisfies a reader of the payload, never fills a cache as a complete frame, and never moves a resumed read past the frames it names.
 A relay serves a metadata subscription from a payload copy while it holds one, and otherwise subscribes upstream in metadata mode; it asks upstream for payload only for readers that want payload.
 
-An update that clears `Meta` asks for the payload of every Group the subscription received in metadata mode: each counts as never delivered, so the publisher serves it again in payload mode, from frame 0, when the live Ranges cover it, as it would a newly covered Group, and otherwise accounts for it as for any other Group.
-A subscriber whose reader holds part of such a Group already ignores the frames it holds, as for a continuation.
+An update that clears `Meta` asks for the payload from the subscriber's first missing frame, its `Payload Group` and `Payload Frame` (see [SUBSCRIBE_UPDATE](#subscribe-update)).
+Every Group the subscription received in metadata mode from that Group on counts as never delivered, so the publisher serves it again in payload mode when the live Ranges cover it, as it would a newly covered Group, and otherwise accounts for it as for any other Group.
+The Group Stream for the `Payload Group` starts at `Payload Frame`, its `Frame Start` saying so, and every later one at frame 0; a subscriber that ends up holding a frame twice ignores the second, as for a continuation.
+A Group received in metadata mode below the `Payload Group` stays delivered.
 An update that sets `Meta` leaves the payload Group Streams already open as they are.
 
 A Group Stream in payload mode for a Group the subscription received in metadata mode replaces it, and the subscriber reads it; a Group Stream in metadata mode for a Group the subscription received in payload mode adds nothing, and the subscriber reads it to its end and discards it.
@@ -1853,6 +1855,8 @@ SUBSCRIBE_UPDATE Message {
   Wanted Group (i)
   Warm (8)
   Meta (8)
+  Payload Group (i)
+  Payload Frame (i)
 }
 ~~~
 
@@ -1873,6 +1877,11 @@ The newest group the subscriber's live-edge joins want, encoded as the sequence 
 Like the other fields, it is subscription state: every SUBSCRIBE_UPDATE restates it, and the latest one applies.
 A publisher MUST ignore a value at or below its largest group, and otherwise evaluate it as a new SUBSCRIBE under the Track's Refresh ratio.
 A new SUBSCRIBE itself counts as a join and needs no Wanted Group field.
+
+**Payload Group** and **Payload Frame**:
+The subscriber's first missing frame when this update clears `Meta`, from which it asks for the payload (see [Metadata](#metadata)): `Payload Group` is its Group Sequence plus one, and `Payload Frame` its index within that Group.
+A `Payload Group` of 0 names no position, which asks for every Group the subscription received in metadata mode, each from frame 0.
+Unlike the other fields they are no subscription state: a publisher reads them only on an update that clears `Meta`, and a subscriber sends 0 for both otherwise.
 
 ## TRACK
 TRACK is sent by a subscriber to request a Track's immutable publisher properties.
@@ -2205,7 +2214,7 @@ A drop that follows a skip of the same sequences changes nothing.
 
 A Group Stream for a sequence the subscriber already saw dropped, as after such a re-offer, wins over the drop: the subscriber delivers it.
 A Group Stream also wins over a stale drop of its sequence that arrives after it, since the stream can overtake a drop the publisher sent first.
-Either way the Group Stream accounts for the sequence, and the next SUBSCRIBE_UPDATE does not reopen it: the publisher, having served it, neither serves it again nor names it in another drop, unless the stream was in [metadata mode](#metadata) and the update clears `Meta`.
+Either way the Group Stream accounts for the sequence, and the next SUBSCRIBE_UPDATE does not reopen it: the publisher, having served it, neither serves it again nor names it in another drop, unless the stream was in [metadata mode](#metadata) and an update clearing `Meta` re-serves it.
 
 For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 This includes streams reset before their headers were delivered, and streams the subscriber stopped (STOP_SENDING), which it may have discarded unread; such a drop carries the STOP_SENDING's Error Code.
@@ -2618,7 +2627,7 @@ On a Group Stream in [metadata mode](#metadata), a FRAME carries only `Payload L
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.
 - A publisher that withheld SUBSCRIBE_OK sends it, then the drops it withheld, once no group can resolve the start: every Group of a bounded subscription was given up, or the Track finished.
 - The subscriber FINs its Subscribe Stream once it wants nothing more, such as after settling its tail past SUBSCRIBE_FINISH, and the publisher FINs in reply; graceful session close waits for the subscriber's FIN or reset.
-- Added [metadata mode](#metadata): `Meta` on SUBSCRIBE, SUBSCRIBE_UPDATE, and GROUP. A metadata Group Stream's FRAMEs carry each frame's timestamp and declared size without payload. An update clearing `Meta` re-serves in payload mode every Group received in metadata mode, and each Group Stream keeps the mode it was opened in.
+- Added [metadata mode](#metadata): `Meta` on SUBSCRIBE, SUBSCRIBE_UPDATE, and GROUP. A metadata Group Stream's FRAMEs carry each frame's timestamp and declared size without payload. An update clearing `Meta` names the subscriber's first missing frame in `Payload Group` and `Payload Frame`, and the publisher re-serves in payload mode from there every Group received in metadata mode. Each Group Stream keeps the mode it was opened in.
 
 ### Delivery {#changelog-07-delivery}
 

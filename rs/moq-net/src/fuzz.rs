@@ -1468,6 +1468,7 @@ impl LiteSample {
 				subscribe: 3,
 				key: 1_234,
 				frame_start: 0,
+				meta: false,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1484,6 +1485,7 @@ impl LiteSample {
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
 				update: 0,
+				meta: false,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1688,6 +1690,7 @@ impl Default for Messages {
 					end: None,
 				}],
 				update: 0,
+				meta: false,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
@@ -1701,6 +1704,8 @@ impl Default for Messages {
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
 				update: 0,
+				meta: false,
+				payload: None,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1717,6 +1722,7 @@ impl Default for Messages {
 				subscribe: 7,
 				key: 123_456,
 				frame_start: 0,
+				meta: false,
 			},
 			ietf_subscribe: ietf::Subscribe {
 				max_age: None,
@@ -1870,6 +1876,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
 			update: 0,
+			meta: false,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),

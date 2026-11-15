@@ -4968,6 +4968,7 @@ mod tests {
 					subscribe: 7,
 					key: 3,
 					frame_start: 0,
+					meta: false,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
 				.unwrap();
@@ -5053,6 +5054,7 @@ mod tests {
 			subscribe: 7,
 			key,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -5163,6 +5165,7 @@ mod tests {
 			subscribe: 7,
 			key: 0,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -5350,6 +5353,7 @@ mod tests {
 			subscribe: 7,
 			key: 5,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -5512,6 +5516,7 @@ mod tests {
 			subscribe: 7,
 			key: 3,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -5582,6 +5587,7 @@ mod tests {
 				subscribe: 7,
 				key: 3,
 				frame_start: 0,
+				meta: false,
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -5698,6 +5704,7 @@ mod tests {
 				subscribe: 7,
 				key: 3,
 				frame_start: 0,
+				meta: false,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
@@ -5849,6 +5856,7 @@ mod tests {
 				subscribe: 7,
 				key: 3,
 				frame_start: 0,
+				meta: false,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
@@ -5938,6 +5946,7 @@ mod tests {
 			subscribe: 7,
 			key: 3,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -6019,6 +6028,7 @@ mod tests {
 			subscribe: 7,
 			key: 3,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -6102,6 +6112,7 @@ mod tests {
 			subscribe: 7,
 			key: 3,
 			frame_start: 0,
+			meta: false,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -6738,6 +6749,7 @@ mod tests {
 				subscribe: 0,
 				key,
 				frame_start: 0,
+				meta: false,
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -7882,6 +7894,7 @@ mod tests {
 				subscribe: 0,
 				key,
 				frame_start: 0,
+				meta: false,
 			}
 			.encode(&mut w, version)
 			.unwrap();
@@ -7953,6 +7966,7 @@ mod tests {
 			subscribe: 0,
 			key,
 			frame_start: 0,
+			meta: false,
 		};
 		let mut entry = TrackEntry::new(None, Default::default());
 		let (_early_wait, early) = entry.park(&header(1));
@@ -11085,6 +11099,7 @@ mod tests {
 			subscribe: 7,
 			key: 0,
 			frame_start: u64::MAX - 1,
+			meta: false,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -11147,6 +11162,7 @@ mod tests {
 				subscribe: 7,
 				key: 0,
 				frame_start: start,
+				meta: false,
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -12317,6 +12333,8 @@ fn buffer_update(
 		ranges,
 		order: active.order,
 		update: active.update,
+		meta: false,
+		payload: None,
 	})
 }
 
@@ -12386,6 +12404,7 @@ impl Establish {
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
 			update: 0,
+			meta: false,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
