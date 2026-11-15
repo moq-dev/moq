@@ -957,7 +957,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBREnterDrain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.2>
+    ///
+    /// Clears the congestion signals as Linux does, so the loss or CE mark that ended Startup is
+    /// charged once, not again by the next loss round in Drain.
     fn enter_drain(&mut self) {
+        self.reset_congestion_signals();
         self.state = BbrState::Drain;
         self.pacing_gain = self.drain_pacing_gain;
         self.cwnd_gain = self.default_cwnd_gain;
@@ -1116,14 +1120,10 @@ impl Bbr3 {
     ///
     /// `reno_bdp = min(BBR.bdp, C.cwnd)` is a packet count in the spec, which quotes the BDPs it
     /// bounds against in packets ("25Mbps * 30 ms / (1514 bytes) ~= 62 packets"), so convert from
-    /// bytes before comparing against a round count. Without a BDP estimate there is no
-    /// Reno-equivalent round count to respect, and probing is left to `bw_probe_wait`.
+    /// bytes before comparing against a round count, rounding up as Linux does.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.2>
     fn is_reno_coexistence_probe_time(&self) -> bool {
-        let reno_rounds = self.target_inflight() / self.smss;
-        if reno_rounds == 0 {
-            return false;
-        }
+        let reno_rounds = self.target_inflight().div_ceil(self.smss);
         let rounds = Ord::min(reno_rounds, self.reno_rounds_bound);
         self.rounds_since_bw_probe >= rounds
     }
@@ -1744,8 +1744,13 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRTargetInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3>
+    ///
+    /// The BDP is floored as `BBRInflight` floors it, by the offload budget and `min_pipe_cwnd`
+    /// (Linux's `bbr_target_inflight` goes through `bbr_inflight`), so a small-BDP flow probes
+    /// no more often than every few rounds. The cwnd then caps it, so a cut cwnd shortens the wait.
     fn target_inflight(&self) -> u64 {
-        Ord::min(self.bdp, self.cwnd)
+        let bdp = Ord::max(self.bdp, self.offload_budget);
+        Ord::min(Ord::max(bdp, self.min_pipe_cwnd), self.cwnd)
     }
 
     /// equivalent to BBRResetShortTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3>
@@ -7642,7 +7647,13 @@ mod test {
         assert_eq!(bbr.bdp, bdp);
         let expected = bbr.bbr.quantization_budget(2 * bdp + bbr.bbr.extra_acked);
         assert_eq!(bbr.max_inflight, expected);
-        assert_eq!(bbr.target_inflight(), Ord::min(bdp, bbr.cwnd));
+        assert_eq!(
+            bbr.target_inflight(),
+            Ord::min(
+                Ord::max(bdp, bbr.offload_budget.max(bbr.min_pipe_cwnd)),
+                bbr.cwnd
+            )
+        );
     }
 
     /// DRAIN waits for inflight to reach the BDP at BBR.bw, which a loss in DRAIN lowers below
@@ -8093,6 +8104,59 @@ mod test {
         assert!(sim.bbr.pacing_rate < pacing);
         let bdp = sim.bbr.bbr.get_inflight(sim.bbr.bbr.max_bw, 1.0);
         assert_eq!(sim.bbr.inflight_longterm, bdp);
+    }
+
+    /// The CE that ends Startup is charged once: the next loss round in Drain does not cut the
+    /// short-term bounds again.
+    #[test]
+    fn drain_entry_clears_the_congestion_signals() {
+        let mut sim = scripted();
+        sim.round(0, 10, 10 * MS);
+        sim.round_ce(10 * MS, 20, 10 * MS);
+        assert_eq!(sim.bbr.state, BbrState::Drain);
+        assert!(!sim.bbr.ce_in_round);
+
+        // A flight above the BDP keeps DRAIN going while a new loss round ends.
+        let first = sim.pn;
+        sim.send(20 * MS, 100);
+        sim.ack(30 * MS, first..first + 1, false);
+        sim.ack(31 * MS, first + 1..first + 2, false);
+        assert_eq!(sim.bbr.state, BbrState::Drain);
+        assert_eq!(sim.bbr.bw_shortterm, f64::INFINITY);
+        assert_eq!(sim.bbr.inflight_shortterm, u64::MAX);
+    }
+
+    /// A flow whose BDP is under a packet still waits `min_pipe_cwnd` worth of rounds before
+    /// probing for Reno coexistence, and a cwnd cut below its BDP shortens the wait.
+    #[test]
+    fn reno_probe_time_floors_a_small_bdp() {
+        let mut sim = probed();
+        let bbr = &mut sim.bbr;
+        bbr.bdp = 100;
+        bbr.offload_budget = 0;
+        bbr.cwnd = 100_000;
+        assert_eq!(bbr.target_inflight(), bbr.min_pipe_cwnd);
+        bbr.reno_rounds_bound = 62;
+        bbr.rounds_since_bw_probe = 3;
+        assert!(!bbr.is_reno_coexistence_probe_time());
+        bbr.rounds_since_bw_probe = 4;
+        assert!(bbr.is_reno_coexistence_probe_time());
+
+        // The floor holds a BDP the offload budget exceeds above `min_pipe_cwnd`.
+        bbr.offload_budget = 10 * 1200;
+        bbr.rounds_since_bw_probe = 9;
+        assert!(!bbr.is_reno_coexistence_probe_time());
+        bbr.rounds_since_bw_probe = 10;
+        assert!(bbr.is_reno_coexistence_probe_time());
+
+        // A cut cwnd caps the target, and a partial packet rounds up.
+        bbr.bdp = 100 * 1200;
+        bbr.cwnd = 7 * 1200 - 1;
+        assert_eq!(bbr.target_inflight(), bbr.cwnd);
+        bbr.rounds_since_bw_probe = 6;
+        assert!(!bbr.is_reno_coexistence_probe_time());
+        bbr.rounds_since_bw_probe = 7;
+        assert!(bbr.is_reno_coexistence_probe_time());
     }
 
     /// CE ends a bandwidth probe as too much loss does, bounding inflight by the flight that drew
