@@ -85,7 +85,9 @@ A broadcast holds one program. A multi-program stream is refused until
 broadcast (`event.hang` becomes `event/1.hang`, `event/2.hang`), following the
 PAT: a program it adds publishes, one it drops ends, and one that returns
 publishes as a new [instance](/concept/moq-lite#publisher-instances). A listed
-program whose PMT does not arrive within 0.5 s of program clock ends the import.
+program whose PMT does not arrive within 0.5 s of program clock counts as
+`PMT_error_2` in the feed health while the others publish, and starts once its
+PMT arrives.
 
 A PMT that adds, removes, or retypes a stream, or reuses a PID, ends the old
 track and continues under a fresh name; the export announces each layout at its

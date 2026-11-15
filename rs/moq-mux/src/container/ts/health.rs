@@ -144,6 +144,11 @@ impl Errors {
 		}
 	}
 
+	/// Count `count` more `PMT_error_2` intervals on `pid`.
+	pub(super) fn pmt_error(&mut self, pid: u16, count: u64) {
+		self.pid(pid).pmt_error += count;
+	}
+
 	fn pid(&mut self, pid: u16) -> &mut PidErrors {
 		self.pids.entry(pid).or_default()
 	}
