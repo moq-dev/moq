@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { FakeObs, type FakeOptions } from "./fake.test-util.ts";
-import { ConnectError, connect, type Publish, RequestError } from "./index.ts";
+import { ConnectError, connect, type Ignored, type Publish, RequestError } from "./index.ts";
 
 let clock: Manual;
 let installed: { close(): void };
@@ -37,6 +37,8 @@ async function reason(promise: Promise<unknown>): Promise<string> {
 const MOQ: Publish = {
 	destination: { kind: "moq", url: "https://relay.example/anon", broadcast: "me.hang", layers: 3 },
 };
+
+const RTMP: Publish["destination"] = { kind: "rtmp", server: "rtmps://live.example/app", key: "key" };
 
 test("authenticates with the password", async () => {
 	obs({ password: "secret" });
@@ -132,6 +134,7 @@ test("puts a MoQ destination in a new profile and reloads it for the layers", as
 	expect(fake.param("Stream1", "WHIPSimulcastTotalLayers")).toBe("3");
 	expect(fake.param("SimpleOutput", "VBitrate")).toBe("3000");
 	expect(fake.param("SimpleOutput", "ABitrate")).toBe("128");
+	// x264 reads these after the service's keyframe interval, so they follow the new fps.
 	expect(fake.param("SimpleOutput", "x264Settings")).toContain("bframes=0");
 	expect(fake.param("SimpleOutput", "x264Settings")).toContain("keyint=120");
 	expect(fake.param("Output", "DelayEnable")).toBe("false");
@@ -219,7 +222,7 @@ test("refuses a new profile for a canvas obs-websocket can't copy", async () => 
 
 test("a retry finishes a reload the connection dropped before", async () => {
 	obs({
-		quitAfter: (type, data) => type === "SetProfileParameter" && data?.parameterName === "x264Settings",
+		quitAfter: (type, data) => type === "SetProfileParameter" && data?.parameterName === "DelayEnable",
 	});
 	const first = await connect();
 	await expect(first.configure(MOQ)).rejects.toThrow();
@@ -310,16 +313,31 @@ test("puts an RTMP destination in the profile with one rendition", async () => {
 		settings: { server: "rtmps://live.example/app", key: "key", use_auth: false },
 	});
 	expect(fake.param("Stream1", "WHIPSimulcastTotalLayers")).toBe("1");
+	// Over RTMP the profile is the only way to tune x264.
+	expect(fake.param("SimpleOutput", "x264Settings")).toContain("bframes=0");
+	expect(fake.param("SimpleOutput", "x264Settings")).toContain("keyint=60");
 	client.close();
 });
 
 test("names the low-latency settings an encoder keeps", async () => {
-	obs();
-	fake.profiles.set("MoQ", new Map([["SimpleOutput.StreamEncoder", "nvenc"]]));
-	const client = await connect();
-	const configured = await client.configure(MOQ);
-	expect(configured).toEqual({ profile: "MoQ", encoder: "nvenc", ignored: ["bframes", "keyint", "lookahead"] });
-	client.close();
+	const cases: [Publish["destination"], string, Ignored[]][] = [
+		[MOQ.destination, "nvenc_hevc", []],
+		[MOQ.destination, "qsv_av1", []],
+		[MOQ.destination, "amd", []],
+		[MOQ.destination, "apple_h264", ["lookahead"]],
+		[MOQ.destination, "third_party", ["bframes", "keyint", "lookahead"]],
+		[RTMP, "x264", []],
+		[RTMP, "nvenc", ["bframes", "keyint", "lookahead"]],
+	];
+	for (const [destination, encoder, ignored] of cases) {
+		restore?.[Symbol.dispose]();
+		obs({ plugin: destination.kind === "moq" });
+		fake.profiles.set("MoQ", new Map([["SimpleOutput.StreamEncoder", encoder]]));
+		const client = await connect();
+		const configured = await client.configure({ destination });
+		expect(configured).toEqual({ profile: "MoQ", encoder, ignored });
+		client.close();
+	}
 });
 
 test("refuses while an output runs", async () => {

@@ -47,12 +47,9 @@ pub struct RtcConfig {
 	pub(crate) pause_threshold: Duration,
 	pub(crate) send_buffer_audio: usize,
 	pub(crate) send_buffer_video: usize,
-	pub(crate) sctp_max_buffered_amount: usize,
-	pub(crate) sctp_max_message_size: u32,
 	pub(crate) rtp_mode: bool,
 	pub(crate) enable_raw_packets: bool,
 	pub(crate) vp9_packetizer_mode: Vp9PacketizerMode,
-	pub(crate) snap_enabled: bool,
 	pub(crate) mtu: RangeInclusive<usize>,
 }
 
@@ -524,69 +521,6 @@ impl RtcConfig {
 		self.send_buffer_video
 	}
 
-	/// Sets how many bytes the data channels can buffer for sending, summed over all channels.
-	///
-	/// [`Channel::write()`][crate::vendor::str0m::channel::Channel::write()] does not accept a message (returns
-	/// `false`) that would take the total [buffered amount][crate::vendor::str0m::channel::Channel::buffered_amount()]
-	/// above this limit. A message larger than the limit is never accepted.
-	///
-	/// Written data counts as buffered until the remote peer acknowledges it, including after it
-	/// has been sent. The limit therefore also caps the data in flight, and with it the data
-	/// channel throughput at about this many bytes per round trip. The SCTP congestion window
-	/// and the remote peer's advertised receive window can limit the data in flight further.
-	///
-	/// Raising the limit helps a sender whose data rate times the round trip time exceeds it.
-	/// Beyond what the network path holds, a higher limit only adds queueing delay, and accepted
-	/// data is kept in memory until it is acknowledged.
-	///
-	/// Defaults to 128 KiB.
-	pub fn set_sctp_max_buffered_amount(mut self, bytes: usize) -> Self {
-		self.sctp_max_buffered_amount = bytes;
-		self
-	}
-
-	/// Returns how many bytes the data channels can buffer for sending.
-	///
-	/// ```ignore
-	/// # use crate::vendor::str0m::Rtc;
-	/// let config = Rtc::builder();
-	///
-	/// // Defaults to 128 KiB.
-	/// assert_eq!(config.sctp_max_buffered_amount(), 128 * 1024);
-	/// ```
-	pub fn sctp_max_buffered_amount(&self) -> usize {
-		self.sctp_max_buffered_amount
-	}
-
-	/// Sets the maximum data channel message size this peer can receive, in bytes.
-	///
-	/// This limit is advertised in SDP as `a=max-message-size` and applied to SCTP,
-	/// including when using the direct API or SNAP. It does not change the remote
-	/// peer's receive limit or the local send buffer limit.
-	///
-	/// The SCTP receive storage budget is at least 1 MiB and large enough to
-	/// reassemble one message at this limit. Storage is allocated as data arrives.
-	///
-	/// A value of 0 advertises unlimited message size, subject to local capacity.
-	/// Internally, both the message limit and receive storage budget are `u32::MAX`.
-	///
-	/// Defaults to 256 KiB.
-	pub fn set_sctp_max_message_size(mut self, bytes: u32) -> Self {
-		self.sctp_max_message_size = bytes;
-		self
-	}
-
-	/// Returns the maximum data channel message size this peer can receive, in bytes.
-	///
-	/// ```ignore
-	/// # use crate::vendor::str0m::RtcConfig;
-	/// let config = RtcConfig::new().set_sctp_max_message_size(512 * 1024);
-	/// assert_eq!(config.sctp_max_message_size(), 512 * 1024);
-	/// ```
-	pub fn sctp_max_message_size(&self) -> u32 {
-		self.sctp_max_message_size
-	}
-
 	/// Make the entire Rtc be in RTP mode.
 	///
 	/// This means all media, read from [`RtpPacket`][crate::vendor::str0m::rtp::RtpPacket] and written to
@@ -619,29 +553,6 @@ impl RtcConfig {
 	/// Should not be enabled outside of tests and troubleshooting.
 	pub fn enable_raw_packets(mut self, enabled: bool) -> Self {
 		self.enable_raw_packets = enabled;
-		self
-	}
-
-	/// Enable SNAP (SCTP Negotiation Acceleration Protocol).
-	///
-	/// When enabled, the `a=sctp-init` attribute is included in outgoing SDP
-	/// offers, allowing the SCTP association to skip the 4-way handshake
-	/// and go directly to established state. This saves up to two network
-	/// round-trip times when establishing data channels.
-	///
-	/// If the remote answer does not accept SNAP, str0m logs a warning and
-	/// falls back to the regular SCTP handshake.
-	///
-	/// When this is `false`, outgoing SDP offers will not include `a=sctp-init`.
-	/// However, incoming offers that contain `a=sctp-init` will still be
-	/// reciprocated in answers, since str0m always supports the extension at
-	/// the protocol level (per §5.4 of draft-hancke-tsvwg-snap).
-	///
-	/// See [draft-hancke-tsvwg-snap](https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/).
-	///
-	/// Default: `false`
-	pub fn set_snap_enabled(mut self, enabled: bool) -> Self {
-		self.snap_enabled = enabled;
 		self
 	}
 
@@ -738,12 +649,9 @@ impl Default for RtcConfig {
 			pause_threshold: Duration::from_millis(1500),
 			send_buffer_audio: 50,
 			send_buffer_video: 1000,
-			sctp_max_buffered_amount: crate::vendor::str0m::sctp::DEFAULT_MAX_BUFFERED_AMOUNT,
-			sctp_max_message_size: crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE,
 			rtp_mode: false,
 			enable_raw_packets: false,
 			vp9_packetizer_mode: Vp9PacketizerMode::default(),
-			snap_enabled: false,
 			mtu: DATAGRAM_MTU_TARGET..=DATAGRAM_MTU_WARN,
 		}
 	}
@@ -752,18 +660,6 @@ impl Default for RtcConfig {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn sctp_max_message_size_round_trips() {
-		assert_eq!(
-			RtcConfig::default().sctp_max_message_size(),
-			crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE
-		);
-		for bytes in [0, 32 * 1024, 512 * 1024, u32::MAX] {
-			let config = RtcConfig::new().set_sctp_max_message_size(bytes);
-			assert_eq!(config.clone().sctp_max_message_size(), bytes);
-		}
-	}
 
 	#[test]
 	fn default_mtu_is_datagram_mtu_target() {

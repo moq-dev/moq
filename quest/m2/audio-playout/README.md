@@ -1,4 +1,4 @@
-# Audio playout
+# [M] Audio playout
 
 ## Goal
 
@@ -98,11 +98,12 @@ that replaced the NetEq controller and splices under it, are done, as is the
 shared clock following a lasting path-delay step
 ([moq-dev/moq#8749](https://github.com/moq-dev/moq/pull/8749)).
 The estimator stops folding a join's intervals
-([moq-dev/moq#8730](https://github.com/moq-dev/moq/pull/8730)). Output latency
+([moq-dev/moq#8730](https://github.com/moq-dev/moq/pull/8730)), including
+those behind a backlog the consumers skip unread
+([moq-dev/moq#8761](https://github.com/moq-dev/moq/pull/8761)). Output latency
 landed in [moq-dev/moq#8676](https://github.com/moq-dev/moq/pull/8676): both
 players place audio where it is heard and count the output latency in the
-target. The [join's skipped backlog](/quest/m2/audio-playout/join-backlog.md)
-is independent.
+target.
 The [calibration](/quest/m3/audio-calibrate.md) re-measures every ceiling
 after this epic.
 

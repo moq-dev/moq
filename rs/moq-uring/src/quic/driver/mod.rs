@@ -105,7 +105,8 @@ pub(crate) fn endpoint_config(
 	config.cid_generator = Some(Arc::new(move || {
 		let mut cids = moq_quic::RandomConnectionIdGenerator::default();
 		if let Some(shard) = shard {
-			cids.set_shard(shard.index(), shard.count());
+			cids.set_shard(shard.index(), shard.count())
+				.set_generations(shard.generations());
 		}
 		Box::new(cids)
 	}));

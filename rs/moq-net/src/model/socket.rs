@@ -6,31 +6,25 @@
 //! broadcasts are used only to route sessions, so ordinary grants decide each endpoint's
 //! roles. Each connection is a session: two tracks, one in the dialer's client broadcast
 //! and one in the acceptor's server broadcast, both named
-//! `<protocol>/<dialer>/<acceptor>/<session>`. Sessions are never announced or listed.
+//! `track/<dialer>/<acceptor>/<session>`. Sessions are never announced or listed.
 //!
-//! A session speaks one of two protocols:
-//!
-//! - `tcp`: one reliable, ordered byte pipe each way, as TCP gives. Each half is a single
-//!   group. Dial with [`Endpoint::dial_tcp`], accept with `accept_tcp` or
-//!   [`Endpoint::poll_accept_tcp`], and read and write a [`TcpStream`].
-//! - `track`: each half is a whole track, so messages are groups, with the track's own
-//!   priority, delay budget and order. Dial with [`Endpoint::dial_track`], accept with
-//!   `accept_track` or [`Endpoint::poll_accept_track`], and read and write a
-//!   [`TrackStream`].
+//! Each half of a session is a whole track, so messages are groups, with the track's own
+//! priority, delay budget and order. Dial with [`Endpoint::dial_track`], accept with
+//! `accept_track` or [`Endpoint::poll_accept_track`], and read and write a [`TrackStream`].
+//! The leading `track` names the protocol; a dial in any other is reset.
 //!
 //! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.server/<B>` for
-//! the track `<protocol>/A/B/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
-//! from `A` in its protocol's queue. To accept it, `B` subscribes to `<prefix>/.client/<A>`
+//! the track `track/A/B/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
+//! from `A`. To accept it, `B` subscribes to `<prefix>/.client/<A>`
 //! for the same track name, and `A` answers only a session it dialed, so the exchange
 //! checks that `A` really asked `B`: a dial forged in `A`'s name is reset. Naming both ends
 //! binds a session to them, so an endpoint `A` dialed cannot replay the session to a third
 //! endpoint `C`: `C` resets a name for another acceptor, and `A` never dialed
-//! `<protocol>/A/C/S`. Each side then writes its own half and reads the peer's.
+//! `track/A/C/S`. Each side then writes its own half and reads the peer's.
 //!
 //! See `doc/concept/socket.md` for the convention other languages follow.
 
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
@@ -39,7 +33,6 @@ use crate::{Error, Path, SessionError, StreamError};
 use super::WeakEntry;
 use super::origin::{self, RouteOptions};
 use super::track::{self, Delay, Order, Subscription};
-use super::{frame, group};
 
 /// Refuse an id that is not one plain path segment: empty, or holding a `/` or a `\`.
 fn check_id(id: &str) -> Result<(), Error> {
@@ -128,181 +121,29 @@ fn messages() -> track::Info {
 	track::Info::default().with_max_age(None)
 }
 
-mod sealed {
-	use super::*;
+/// The protocol segment leading every session's track name.
+const PROTOCOL: &str = "track";
 
-	/// The protocols an endpoint speaks.
-	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-	pub enum Protocol {
-		Tcp,
-		Track,
-	}
-
-	/// What an endpoint's handles share.
-	pub struct Shared {
-		pub(super) id: Arc<str>,
-		pub(super) prefix: Path,
-		/// Where this endpoint's broadcasts are announced, at first use.
-		pub(super) publisher: origin::Producer,
-		/// Where the peers' endpoints are requested.
-		pub(super) origin: origin::Consumer,
-		/// Where the `tcp` sessions' pumps run: the origin's driver.
-		pub(super) tasks: crate::util::TasksWeak,
-		/// The sessions withholding the broadcasts from their peer.
-		pub(super) withheld: origin::HiddenWithheld,
-		pub(super) state: kio::Lock<State>,
-	}
-
-	/// A session's two halves, once the handshake is done.
-	pub struct Parts {
-		pub shared: Arc<Shared>,
-		/// This side's half, served to the peer.
-		pub producer: track::Producer,
-		/// The peer's half, subscribed reliably and in order.
-		pub subscriber: track::Subscriber,
-		pub peer: Arc<str>,
-		pub session: Arc<str>,
-	}
-
-	/// What a protocol does with a session's halves.
-	pub trait Open: Sized {
-		/// The protocol's segment, the first of a session's track name.
-		const PROTOCOL: Protocol;
-
-		/// Make the stream an application reads and writes.
-		fn open(parts: Parts) -> Self;
-	}
+/// What a session's reader asks for: every message from group 0, oldest first, however
+/// late it is, so a burst written before the answer is kept.
+fn subscription() -> Subscription {
+	Subscription::default()
+		.with_order(Order::Ascending)
+		.with_delay(Delay::default().with_max(None))
+		.with_range(0..)
 }
 
-use sealed::{Parts, Protocol, Shared};
-
-impl Protocol {
-	fn as_str(self) -> &'static str {
-		match self {
-			Self::Tcp => "tcp",
-			Self::Track => "track",
-		}
-	}
-
-	fn parse(protocol: &str) -> Option<Self> {
-		match protocol {
-			"tcp" => Some(Self::Tcp),
-			"track" => Some(Self::Track),
-			_ => None,
-		}
-	}
-
-	/// What a session's reader asks for: every message, oldest first, however late it is,
-	/// scheduled at `priority` against the reader's other subscriptions.
-	fn subscription(self, priority: i8) -> Subscription {
-		let reliable = Subscription::default()
-			.with_priority(priority)
-			.with_order(Order::Ascending)
-			.with_delay(Delay::default().with_max(None));
-		match self {
-			// The half's only group is the live one, so a live join reads it from its first
-			// frame, even one written before the answer: over moq-transport, a SUBSCRIBE
-			// plus a joining FETCH or fill for that group's head.
-			Self::Tcp => reliable,
-			// Starts at group 0, so a burst written before the answer is kept.
-			Self::Track => reliable.with_range(0..),
-		}
-	}
-}
-
-/// A session's stream: a [`TcpStream`] or a [`TrackStream`]. Names the protocol a dial,
-/// an incoming dial, or an accept is for.
-pub trait Stream: sealed::Open {}
-
-/// A `tcp` session: one reliable, ordered byte pipe each way, as TCP gives.
-///
-/// Each half is the session track's only group, which is one QUIC stream on every hop,
-/// so it is reliable, ordered and flow controlled like a TCP direction. A frame is a
-/// write. Finishing [`Self::producer`] is FIN, and aborting or dropping it is RST; the
-/// peer reads the same from [`Self::consumer`]. Reading ends once the peer finished, and
-/// fails with its reset. A second group on a peer's half is a protocol error that resets
-/// the session.
-///
-/// Await [`group::Producer::poll_ready`] (or `ready`) before each write: it waits until the peer reads, so
-/// the writer runs at most a window ahead of the reader and nothing is lost. A writer
-/// that never waits sheds the front of its half, and a reader that falls behind it fails
-/// with [`Error::Evicted`].
-///
-/// Dropping [`Self::consumer`] before the peer finished resets the session, since nobody
-/// reads what the peer writes. The endpoint closing resets it too.
-pub struct TcpStream {
-	/// This side's half: the frames written here reach the peer in order.
-	pub producer: group::Producer,
-	/// The peer's half: its frames, in order.
-	pub consumer: group::Consumer,
-	peer: Arc<str>,
-	session: Arc<str>,
-}
-
-impl TcpStream {
-	/// The peer endpoint's id.
-	pub fn peer(&self) -> &str {
-		&self.peer
-	}
-
-	/// The session's id, which the dialer chose.
-	pub fn session(&self) -> &str {
-		&self.session
-	}
-}
-
-impl Stream for TcpStream {}
-
-impl sealed::Open for TcpStream {
-	const PROTOCOL: Protocol = Protocol::Tcp;
-
-	fn open(parts: Parts) -> Self {
-		let Parts {
-			shared,
-			producer: track,
-			subscriber,
-			peer,
-			session,
-		} = parts;
-		let (producer, ours) = match track.create_group(group::Info { sequence: 0 }) {
-			Ok(group) => {
-				let demand = group.demand();
-				(group, Some(demand))
-			}
-			// The track already ended, such as by the endpoint closing: hand out a half
-			// that reports it.
-			Err(err) => {
-				let group =
-					group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
-				let _ = group.handle().abort(err);
-				(group, None)
-			}
-		};
-		// The application reads a copy of the peer's half that the pump fills, so the
-		// session can end it: the peer's own copy is the session's, not this side's.
-		let local = group::Producer::new(group::Info { sequence: 0 }, track::Info::default(), Default::default());
-		let consumer = local.consume();
-		let pump = Pump {
-			shared: shared.clone(),
-			track: Some(track),
-			ours,
-			subscriber: Some(subscriber),
-			received: false,
-			remote: None,
-			local_handle: local.handle(),
-			local: Some(Local::Between {
-				group: local,
-				next: None,
-			}),
-		};
-		shared.tasks.push(pump);
-		Self {
-			producer,
-			consumer,
-			peer,
-			session,
-		}
-	}
+/// What an endpoint's handles share.
+struct Shared {
+	id: Arc<str>,
+	prefix: Path,
+	/// Where this endpoint's broadcasts are announced, at first use.
+	publisher: origin::Producer,
+	/// Where the peers' endpoints are requested.
+	origin: origin::Consumer,
+	/// The sessions withholding the broadcasts from their peer.
+	withheld: origin::HiddenWithheld,
+	state: kio::Lock<State>,
 }
 
 /// A `track` session: each half is a whole track, and each message a group.
@@ -343,31 +184,6 @@ impl TrackStream {
 	}
 }
 
-impl Stream for TrackStream {}
-
-impl sealed::Open for TrackStream {
-	const PROTOCOL: Protocol = Protocol::Track;
-
-	fn open(parts: Parts) -> Self {
-		Self {
-			producer: parts.producer,
-			consumer: parts.subscriber,
-			peer: parts.peer,
-			session: parts.session,
-		}
-	}
-}
-
-/// Dials from peers in one protocol, waiting to be accepted.
-#[derive(Default)]
-struct Queue {
-	/// Whether the protocol is accepted: from its first accept on.
-	listening: bool,
-	dials: VecDeque<track::Request>,
-	/// The accepts waiting for a dial.
-	waiting: kio::WaiterList,
-}
-
 /// An endpoint's handler for the requests to its server broadcast: the dials peers send.
 ///
 /// A poller takes it out to poll it with no lock held, since taking a request wakes the
@@ -393,8 +209,10 @@ struct State {
 	server: Option<origin::Route>,
 	/// Where the dials peers send arrive.
 	handler: Handler,
-	tcp: Queue,
-	track: Queue,
+	/// Dials from peers, waiting to be accepted.
+	dials: VecDeque<track::Request>,
+	/// The accepts waiting for a dial.
+	waiting: kio::WaiterList,
 	/// This side's half of every session handed out, aborted when the endpoint closes.
 	streams: Vec<track::TrackWeak>,
 	/// Why the endpoint stopped, once it did.
@@ -402,13 +220,6 @@ struct State {
 }
 
 impl State {
-	fn queue(&mut self, protocol: Protocol) -> &mut Queue {
-		match protocol {
-			Protocol::Tcp => &mut self.tcp,
-			Protocol::Track => &mut self.track,
-		}
-	}
-
 	/// Keep `producer`'s track, so the endpoint closing ends it.
 	fn hold(&mut self, producer: &track::Producer) {
 		self.streams.retain(|stream| !stream.is_closed());
@@ -468,23 +279,22 @@ impl Shared {
 		Ok(requests)
 	}
 
-	/// Queue every dial on hand and take the next in `protocol`, registering `waiter` for
-	/// more, and fail with the endpoint's end once it stopped. The first call announces the
+	/// Queue every dial on hand and take the next, registering `waiter` for more, and fail
+	/// with the endpoint's end once it stopped. The first call announces the
 	/// server broadcast, and fails as [`origin::Producer::route`] does when the origin may
 	/// not publish it.
 	///
 	/// A request on the server broadcast naming this endpoint as the dialer names no dial
 	/// to it, since its own dials live in its client broadcast: it is reset with
 	/// [`Error::NotFound`]. So is a request naming another acceptor, such as a session
-	/// replayed from the endpoint it was dialed to. A request in a protocol nobody accepts
-	/// is reset with [`Error::Unsupported`].
+	/// replayed from the endpoint it was dialed to. A request in another protocol than
+	/// `track` is reset with [`Error::Unsupported`].
 	///
 	/// The handler is polled with no lock held (see [`Handler`]), and resets and wakes go
 	/// out after the lock is released.
-	fn poll_dial(&self, protocol: Protocol, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
+	fn poll_dial(&self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
 		let taken = {
 			let mut state = self.state.lock();
-			state.queue(protocol).listening = true;
 			if state.end.is_some() {
 				None
 			} else if let Handler::Taken(waiting) = &mut state.handler {
@@ -558,52 +368,42 @@ impl Shared {
 				wakes.push(waiting.take());
 			}
 		}
-		// Dials whose dialer gave up leave both queues on every poll, which each new dial
-		// triggers, so a queue holds no more than the dials still open, even in a protocol
-		// the application stopped accepting.
-		for protocol in [Protocol::Tcp, Protocol::Track] {
-			let queue = state.queue(protocol);
-			if queue.dials.iter().any(|request| !request.demand().is_wanted()) {
-				let (open, abandoned): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut queue.dials)
-					.into_iter()
-					.partition(|request| request.demand().is_wanted());
-				queue.dials = open;
-				resets.extend(abandoned.into_iter().map(|request| (request, Error::Cancel)));
-			}
+		// Dials whose dialer gave up leave the queue before an accept takes one, so it holds
+		// no more than the dials still open, and an accept gets a live one.
+		if state.dials.iter().any(|request| !request.demand().is_wanted()) {
+			let (open, abandoned): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut state.dials)
+				.into_iter()
+				.partition(|request| request.demand().is_wanted());
+			state.dials = open;
+			resets.extend(abandoned.into_iter().map(|request| (request, Error::Cancel)));
 		}
 		for request in taken {
 			// `None` for a name naming no dial to this endpoint: outside the scheme, this
 			// endpoint's own, or for another acceptor.
 			let target = match parse(request.name()) {
-				Some(name) if name.acceptor == &*self.id && name.dialer != &*self.id => {
-					Some(Protocol::parse(name.protocol))
-				}
+				Some(name) if name.acceptor == &*self.id && name.dialer != &*self.id => Some(name.protocol == PROTOCOL),
 				_ => None,
 			};
 			match target {
 				// Taken while the endpoint closed: reset like the dials it queued.
 				_ if state.end.is_some() => resets.push((request, Error::Cancel)),
-				Some(Some(protocol)) if state.queue(protocol).listening => {
-					let queue = state.queue(protocol);
-					queue.dials.push_back(request);
-					wakes.push(queue.waiting.take());
+				Some(true) => {
+					state.dials.push_back(request);
+					wakes.push(state.waiting.take());
 				}
-				Some(_) => resets.push((request, Error::Unsupported)),
+				Some(false) => resets.push((request, Error::Unsupported)),
 				None => resets.push((request, Error::NotFound)),
 			}
 		}
 		let next = match &state.end {
 			Some(err) => Poll::Ready(Err(err.clone())),
-			None => {
-				let queue = state.queue(protocol);
-				match queue.dials.pop_front() {
-					Some(request) => Poll::Ready(Ok(request)),
-					None => {
-						queue.waiting.register(waiter);
-						Poll::Pending
-					}
+			None => match state.dials.pop_front() {
+				Some(request) => Poll::Ready(Ok(request)),
+				None => {
+					state.waiting.register(waiter);
+					Poll::Pending
 				}
-			}
+			},
 		};
 		drop(state);
 		if let Some((handler, server)) = retired {
@@ -666,11 +466,8 @@ impl Shared {
 			}
 			Handler::None => None,
 		};
-		let mut queued = Vec::new();
-		for queue in [&mut state.tcp, &mut state.track] {
-			queued.extend(queue.dials.drain(..));
-			wakes.push(queue.waiting.take());
-		}
+		let queued = std::mem::take(&mut state.dials);
+		wakes.push(state.waiting.take());
 		let streams = std::mem::take(&mut state.streams);
 		let routes = [state.client.take(), state.server.take()];
 		drop(guard);
@@ -701,14 +498,13 @@ impl Shared {
 /// which holds its half of each session it accepts. So a pure client never announces a
 /// server broadcast, and the origin's grants decide which roles it may take.
 ///
-/// It accepts dials in a protocol from that protocol's first accept on, like a TCP
-/// listener: before that, a dial in it is reset with [`Error::Unsupported`], and after it,
-/// dials queue until accepted. Until the endpoint's first accept in any protocol, it has no
-/// server broadcast, so a dial to it waits as for a peer not online yet.
+/// It accepts dials from its first accept on, like a TCP listener, and dials queue until
+/// accepted. Until then it has no server broadcast, so a dial to it waits as for a peer
+/// not online yet.
 ///
 /// Dropping it, or [`Self::close`], retracts its broadcasts, resets the dials waiting to be
-/// accepted, and resets every session it handed out: a [`TcpStream`] entirely, and this
-/// side's half of a [`TrackStream`]. The peer's half of a [`TrackStream`] is read through
+/// accepted, and resets this side's half of every session it handed out. The peer's half
+/// of a [`TrackStream`] is read through
 /// its [`TrackStream::consumer`], which the application owns: drop the streams too, which
 /// releases the subscriptions.
 ///
@@ -719,8 +515,6 @@ impl Shared {
 /// ([`origin::Consumer::with_hidden`]) carries it and doesn't count. Nothing tells a
 /// dialer that the peer sits behind such a hop, so a dial to it waits as for a peer not
 /// announced yet, while the peer's own accepts fail.
-///
-/// `tcp` sessions run a task on the origin's driver, which must keep running.
 pub struct Endpoint {
 	shared: Arc<Shared>,
 }
@@ -748,13 +542,12 @@ impl Endpoint {
 				publisher: origin.clone(),
 				withheld: consumer.hidden_withheld(),
 				origin: consumer,
-				tasks: origin.tasks(),
 				state: kio::Lock::new(State {
 					client: None,
 					server: None,
 					handler: Handler::None,
-					tcp: Queue::default(),
-					track: Queue::default(),
+					dials: VecDeque::new(),
+					waiting: kio::WaiterList::new(),
 					streams: Vec::new(),
 					end: None,
 				}),
@@ -772,40 +565,20 @@ impl Endpoint {
 		&self.shared.prefix
 	}
 
-	/// Dial the server `peer` in a new `tcp` session, resolving once the peer accepts it.
+	/// Dial the server `peer` in a new session, resolving once the peer accepts it.
+	///
+	/// `info` describes this side's half; `None` keeps every message until read, with no
+	/// max age.
 	///
 	/// Waits for as long as the peer takes to accept: drop the returned future to give up,
 	/// which resets the session. That includes waiting for the peer's server broadcast to
 	/// be announced. Fails with the peer's reset when it rejects the dial, or does not
-	/// accept `tcp` sessions, and with [`Error::Unsupported`] for a dial to this endpoint
-	/// itself or across a hop that can't carry it (see [`Endpoint`]). The first dial
-	/// announces the client broadcast, and fails as [`origin::Producer::route`] does when
-	/// the origin may not publish it.
-	///
-	/// `priority` schedules the peer's half against this origin's other subscriptions on
-	/// every hop, as a track subscription's does; see [`Subscription::priority`].
-	pub fn dial_tcp(&self, peer: &str, priority: i8) -> Result<kio::Pending<Dialing<TcpStream>>, Error> {
-		self.dial(peer, None, priority)
-	}
-
-	/// Dial the server `peer` in a new `track` session; see [`Self::dial_tcp`].
-	///
-	/// `info` describes this side's half; `None` keeps every message until read, with no
-	/// max age.
-	pub fn dial_track(
-		&self,
-		peer: &str,
-		info: impl Into<Option<track::Info>>,
-	) -> Result<kio::Pending<Dialing<TrackStream>>, Error> {
-		self.dial(peer, Some(info.into().unwrap_or_else(messages)), 0)
-	}
-
-	fn dial<S: Stream>(
-		&self,
-		peer: &str,
-		info: Option<track::Info>,
-		priority: i8,
-	) -> Result<kio::Pending<Dialing<S>>, Error> {
+	/// accept, and with [`Error::Unsupported`] for a dial to this endpoint itself or across
+	/// a hop that can't carry it (see [`Endpoint`]). The first dial announces the client
+	/// broadcast, and fails as [`origin::Producer::route`] does when the origin may not
+	/// publish it.
+	pub fn dial_track(&self, peer: &str, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<Dialing>, Error> {
+		let info = info.into().unwrap_or_else(messages);
 		let shared = &self.shared;
 		let path = endpoint_path(&shared.prefix, Role::Server, peer)?;
 		if peer == &*shared.id {
@@ -813,7 +586,7 @@ impl Endpoint {
 		}
 		let client = shared.client()?;
 		let session = session_id();
-		let name = track_name(S::PROTOCOL.as_str(), &shared.id, peer, &session);
+		let name = track_name(PROTOCOL, &shared.id, peer, &session);
 		// This side's half, waiting for the peer to ask for it, which only the peer can:
 		// nobody else knows the session.
 		let answer = client.broadcast().reserve_unlisted_track(name.clone())?;
@@ -824,46 +597,32 @@ impl Endpoint {
 			peer: peer.into(),
 			session,
 			name,
-			info,
-			subscription: S::PROTOCOL.subscription(priority),
+			info: Some(info),
 			demand: answer.demand(),
 			answer: Some(Answer::Reserved(answer)),
 			step: Step::Resolving(resolving),
-			stream: PhantomData,
 		}))
 	}
 
-	fn poll_accept<S: Stream>(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<S>, Error>> {
+	/// The next dial from a peer; fails with [`Error::Closed`] once the endpoint closed,
+	/// and with [`Error::Unsupported`] while no peer can reach it (see [`Endpoint`]).
+	///
+	/// The first call starts accepting dials. They queue until taken, or until their
+	/// dialer gives up, so keep accepting, and accept or reject each one. The first call
+	/// also announces the server broadcast, and fails as [`origin::Producer::route`] does
+	/// when the origin may not publish it.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_accept_track(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming, Error>> {
 		let shared = &self.shared;
 		shared.poll_reachable(waiter)?;
-		let request = ready!(shared.poll_dial(S::PROTOCOL, waiter))?;
+		let request = ready!(shared.poll_dial(waiter))?;
 		let name = parse(request.name()).expect("sorted as a dial");
 		Poll::Ready(Ok(Incoming {
 			shared: shared.clone(),
 			peer: name.dialer.into(),
 			session: name.session.into(),
 			request: Some(request),
-			stream: PhantomData,
 		}))
-	}
-
-	/// The next `tcp` dial from a peer; fails with [`Error::Closed`] once the
-	/// endpoint closed, and with [`Error::Unsupported`] while no peer can reach it (see
-	/// [`Endpoint`]).
-	///
-	/// The first call starts accepting `tcp` dials. They queue until taken, or until their
-	/// dialer gives up, so keep accepting, and accept or reject each one. The endpoint's
-	/// first accept in either protocol announces its server broadcast, and fails as
-	/// [`origin::Producer::route`] does when the origin may not publish it.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_accept_tcp(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TcpStream>, Error>> {
-		self.poll_accept(waiter)
-	}
-
-	/// The next `track` dial from a peer; see [`Self::poll_accept_tcp`].
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_accept_track(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TrackStream>, Error>> {
-		self.poll_accept(waiter)
 	}
 
 	/// Close the endpoint; see [`Endpoint`].
@@ -878,21 +637,19 @@ impl Drop for Endpoint {
 	}
 }
 
-/// A dial from a peer, from [`Endpoint::poll_accept_tcp`] or
-/// [`Endpoint::poll_accept_track`] (or their async `accept_tcp` and `accept_track`): accept
-/// or reject it.
+/// A dial from a peer, from [`Endpoint::poll_accept_track`] (or its async `accept_track`):
+/// accept or reject it.
 ///
 /// Dropping it rejects it with [`Error::Cancel`].
-pub struct Incoming<S: Stream> {
+pub struct Incoming {
 	shared: Arc<Shared>,
 	peer: Arc<str>,
 	session: Arc<str>,
 	/// The dialer's request for this side's half; taken by an accept or a reject.
 	request: Option<track::Request>,
-	stream: PhantomData<fn() -> S>,
 }
 
-impl<S: Stream> Incoming<S> {
+impl Incoming {
 	/// The id the dialer claims. An accept checks it: the dial connects only if that
 	/// endpoint really dialed this session to this endpoint.
 	pub fn peer(&self) -> &str {
@@ -912,7 +669,12 @@ impl<S: Stream> Incoming<S> {
 		}
 	}
 
-	fn accept_with(mut self, info: Option<track::Info>, priority: i8) -> kio::Pending<Accepting<S>> {
+	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
+	///
+	/// `info` describes this side's half, as for [`Endpoint::dial_track`]. Nothing is
+	/// written before the dialer answers.
+	pub fn accept(mut self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting> {
+		let info = info.into().unwrap_or_else(messages);
 		let shared = self.shared.clone();
 		let (peer, session) = (self.peer.clone(), self.session.clone());
 		let request = self.request.take().expect("taken only by accept, reject or drop");
@@ -927,40 +689,18 @@ impl<S: Stream> Incoming<S> {
 		};
 		kio::Pending::new(Accepting {
 			shared: shared.clone(),
-			name: track_name(S::PROTOCOL.as_str(), &peer, &shared.id, &session),
+			name: track_name(PROTOCOL, &peer, &shared.id, &session),
 			peer,
 			session,
-			info,
-			subscription: S::PROTOCOL.subscription(priority),
+			info: Some(info),
 			demand: request.demand(),
 			request: Some(request),
 			step,
-			stream: PhantomData,
 		})
 	}
 }
 
-impl Incoming<TcpStream> {
-	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
-	///
-	/// `priority` schedules the dialer's half, as for [`Endpoint::dial_tcp`]. Nothing is
-	/// written before the dialer answers.
-	pub fn accept(self, priority: i8) -> kio::Pending<Accepting<TcpStream>> {
-		self.accept_with(None, priority)
-	}
-}
-
-impl Incoming<TrackStream> {
-	/// Accept the dial, resolving once the dialer answers, which proves it dialed.
-	///
-	/// `info` describes this side's half, as for [`Endpoint::dial_track`]. Nothing is
-	/// written before the dialer answers.
-	pub fn accept(self, info: impl Into<Option<track::Info>>) -> kio::Pending<Accepting<TrackStream>> {
-		self.accept_with(Some(info.into().unwrap_or_else(messages)), 0)
-	}
-}
-
-impl<S: Stream> Drop for Incoming<S> {
+impl Drop for Incoming {
 	fn drop(&mut self) {
 		if let Some(request) = self.request.take() {
 			request.reject(Error::Cancel);
@@ -984,13 +724,13 @@ enum Step {
 
 impl Step {
 	/// Advance until the peer serves its half, subscribing to `track` in its endpoint.
-	fn poll(&mut self, waiter: &kio::Waiter, subscription: &Subscription, track: &str) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, waiter: &kio::Waiter, track: &str) -> Poll<Result<(), Error>> {
 		loop {
 			match self {
 				Self::Resolving(following) => {
 					// Only the first call is made here, and it never reports the path offline.
 					let broadcast = ready!(following.poll_available(waiter))?.expect("the first call is never offline");
-					let subscribing = broadcast.track(track)?.subscribe(subscription.clone()).into_inner();
+					let subscribing = broadcast.track(track)?.subscribe(subscription()).into_inner();
 					*self = Self::Subscribing(subscribing);
 				}
 				Self::Subscribing(subscribing) => {
@@ -1014,13 +754,13 @@ impl Step {
 
 /// Hand out a session's stream once its handshake is done, unless the endpoint stopped,
 /// in which case this side's half is aborted, outside the lock.
-fn open<S: Stream>(
-	shared: &Arc<Shared>,
+fn open(
+	shared: &Shared,
 	producer: track::Producer,
 	step: &mut Step,
 	peer: &Arc<str>,
 	session: &Arc<str>,
-) -> Result<S, Error> {
+) -> Result<TrackStream, Error> {
 	let mut state = shared.state.lock();
 	if let Some(err) = state.end.clone() {
 		drop(state);
@@ -1029,13 +769,12 @@ fn open<S: Stream>(
 	}
 	state.hold(&producer);
 	drop(state);
-	Ok(S::open(Parts {
-		shared: shared.clone(),
+	Ok(TrackStream {
 		producer,
-		subscriber: step.take_subscriber(),
+		consumer: step.take_subscriber(),
 		peer: peer.clone(),
 		session: session.clone(),
-	}))
+	})
 }
 
 /// This side's half of a dial.
@@ -1058,29 +797,25 @@ impl Answer {
 	}
 }
 
-/// A dial, from [`Endpoint::dial_tcp`] or [`Endpoint::dial_track`]: resolves once the peer
-/// accepts.
+/// A dial, from [`Endpoint::dial_track`]: resolves once the peer accepts.
 ///
 /// Dropping it gives up, resetting the session.
-pub struct Dialing<S: Stream> {
+pub struct Dialing {
 	shared: Arc<Shared>,
 	peer: Arc<str>,
 	session: Arc<str>,
 	/// The session's track name.
 	name: String,
 	info: Option<track::Info>,
-	/// How this side reads the peer's half.
-	subscription: Subscription,
 	/// Whether the peer asked for this side's half, which it does on accept.
 	demand: track::Demand,
 	answer: Option<Answer>,
 	step: Step,
-	stream: PhantomData<fn() -> S>,
 }
 
-impl<S: Stream> Dialing<S> {
-	/// Poll for the peer to accept; see [`Endpoint::dial_tcp`].
-	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
+impl Dialing {
+	/// Poll for the peer to accept; see [`Endpoint::dial_track`].
+	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackStream, Error>> {
 		let result = self.poll_inner(waiter);
 		if let Poll::Ready(Err(err)) = &result {
 			if let Some(answer) = self.answer.take() {
@@ -1091,7 +826,7 @@ impl<S: Stream> Dialing<S> {
 		result
 	}
 
-	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
+	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackStream, Error>> {
 		self.shared.poll_end(waiter)?;
 		self.shared.poll_reachable(waiter)?;
 
@@ -1110,7 +845,7 @@ impl<S: Stream> Dialing<S> {
 			}
 		}
 
-		ready!(self.step.poll(waiter, &self.subscription, &self.name))?;
+		ready!(self.step.poll(waiter, &self.name))?;
 		// The peer serves its half only after asking for this side's, so a conforming peer
 		// asked already; wait for its request regardless.
 		let Some(Answer::Served(_)) = &self.answer else {
@@ -1123,15 +858,15 @@ impl<S: Stream> Dialing<S> {
 	}
 }
 
-impl<S: Stream> kio::Task for Dialing<S> {
-	type Output = Result<S, Error>;
+impl kio::Task for Dialing {
+	type Output = Result<TrackStream, Error>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
 
-impl<S: Stream> Drop for Dialing<S> {
+impl Drop for Dialing {
 	fn drop(&mut self) {
 		// Given up: reset the session for the peer.
 		if let Some(answer) = self.answer.take() {
@@ -1141,25 +876,22 @@ impl<S: Stream> Drop for Dialing<S> {
 }
 
 /// An accept, from an [`Incoming`] dial: resolves once the dialer answers.
-pub struct Accepting<S: Stream> {
+pub struct Accepting {
 	shared: Arc<Shared>,
 	peer: Arc<str>,
 	session: Arc<str>,
 	/// The session's track name.
 	name: String,
 	info: Option<track::Info>,
-	/// How this side reads the peer's half.
-	subscription: Subscription,
 	/// The dialer's request for this side's half, served once the dialer answers.
 	request: Option<track::Request>,
 	/// Whether the dialer still subscribes to this side's half: the dial stays open while
 	/// it does.
 	demand: track::Demand,
 	step: Step,
-	stream: PhantomData<fn() -> S>,
 }
 
-impl<S: Stream> Accepting<S> {
+impl Accepting {
 	/// Poll for the dialer to answer, which proves it dialed.
 	///
 	/// Waits for the dialer's endpoint to be announced for as long as the dial stays open,
@@ -1167,7 +899,7 @@ impl<S: Stream> Accepting<S> {
 	/// [`Error::Unsupported`] while this endpoint can't reach it (see [`Endpoint`]). Fails
 	/// with the dialer's reset when it never dialed this session, such as a dial forged in
 	/// its name, and resets the dialer's request with the same error.
-	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
+	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackStream, Error>> {
 		let result = self.poll_inner(waiter);
 		if let Poll::Ready(Err(err)) = &result {
 			self.step = Step::Done;
@@ -1178,13 +910,13 @@ impl<S: Stream> Accepting<S> {
 		result
 	}
 
-	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
+	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackStream, Error>> {
 		self.shared.poll_end(waiter)?;
 		self.shared.poll_reachable(waiter)?;
 		if self.demand.poll_state(waiter) != track::DemandState::Active {
 			return Poll::Ready(Err(Error::Cancel));
 		}
-		ready!(self.step.poll(waiter, &self.subscription, &self.name))?;
+		ready!(self.step.poll(waiter, &self.name))?;
 
 		// Accepted outside the lock, since it wakes the dialer.
 		let request = self.request.take().ok_or(Error::Closed)?;
@@ -1193,244 +925,20 @@ impl<S: Stream> Accepting<S> {
 	}
 }
 
-impl<S: Stream> kio::Task for Accepting<S> {
-	type Output = Result<S, Error>;
+impl kio::Task for Accepting {
+	type Output = Result<TrackStream, Error>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
 	}
 }
 
-impl<S: Stream> Drop for Accepting<S> {
+impl Drop for Accepting {
 	fn drop(&mut self) {
 		// Given up: reset the dialer's request.
 		if let Some(request) = self.request.take() {
 			request.reject(Error::Cancel);
 		}
-	}
-}
-
-/// A `tcp` session's task on the origin's driver.
-///
-/// It copies the peer's half into the group the application reads, a frame at a time and
-/// paced by that reader, so backpressure reaches the peer. It ends this side's half the
-/// way the application ended its group, and resets the session on a second group from the
-/// peer, the application dropping its reader, or the endpoint closing.
-struct Pump {
-	shared: Arc<Shared>,
-	/// This side's half, held so the application can write only its one group.
-	track: Option<track::Producer>,
-	/// This side's group, watched for how the application ends it without keeping it open.
-	ours: Option<group::Demand>,
-	/// The peer's half, watched for its one group, and for a second.
-	subscriber: Option<track::Subscriber>,
-	/// Whether the peer's group arrived.
-	received: bool,
-	/// The peer's group, from its arrival until it ends.
-	remote: Option<group::Consumer>,
-	/// The application's copy of the peer's group, until it ends.
-	local: Option<Local>,
-	local_handle: group::Handle,
-}
-
-/// Where a `tcp` session's pump is in copying the peer's group.
-enum Local {
-	/// Between frames, holding the next one read from the peer until the application's
-	/// reader makes room for it.
-	Between {
-		group: group::Producer,
-		next: Option<frame::Consumer>,
-	},
-	/// Copying a frame as its bytes arrive, so a reader sees them before the frame ends.
-	Frame { from: frame::Consumer, to: frame::Producer },
-}
-
-impl Local {
-	fn abort(self, err: Error) {
-		let _ = match self {
-			Self::Between { group, .. } => group.abort(err),
-			Self::Frame { to, .. } => to.abort(err),
-		};
-	}
-}
-
-impl Pump {
-	/// Reset everything still open with `err`.
-	fn reset(&mut self, err: Error) {
-		if let Some(local) = self.local.take() {
-			local.abort(err.clone());
-		}
-		if let Some(track) = self.track.take() {
-			let _ = track.abort(err);
-		}
-		self.ours = None;
-		self.subscriber = None;
-		self.remote = None;
-	}
-
-	fn poll_session(&mut self, waiter: &kio::Waiter) -> Result<(), Error> {
-		self.shared.poll_end(waiter)?;
-
-		// This side's half ends the way the application ended its group.
-		if let Some(ours) = &self.ours
-			&& let Poll::Ready(outcome) = ours.poll_closed(waiter)
-		{
-			self.ours = None;
-			match outcome {
-				Ok(()) => {
-					if let Some(track) = &self.track {
-						let _ = track.finish_shared();
-					}
-				}
-				Err(err) => {
-					if let Some(track) = self.track.take() {
-						let _ = track.abort(err);
-					}
-				}
-			}
-		}
-
-		// The peer's half holds one group: a second is a protocol error, even after the
-		// first finished, for as long as either half is open.
-		if !self.received
-			&& let Some(subscriber) = &mut self.subscriber
-		{
-			match subscriber.poll_recv_group(waiter) {
-				Poll::Pending => {}
-				Poll::Ready(Ok(Some(group))) => {
-					if group.sequence != 0 {
-						tracing::debug!(sequence = group.sequence, "a second group on a tcp session");
-						return Err(Error::ProtocolViolation);
-					}
-					self.received = true;
-					self.remote = Some(group);
-				}
-				Poll::Ready(Ok(None)) => self.subscriber = None,
-				// Ended short of its group: the peer's reset.
-				Poll::Ready(Err(err)) => return Err(err),
-			}
-		}
-		if self.received
-			&& let Some(subscriber) = &mut self.subscriber
-		{
-			// Not `poll_recv_group`: polled on every wake while reading the group it handed
-			// out, it stalled that group's delivery.
-			while let Poll::Ready(largest) = subscriber.poll_largest(waiter) {
-				match largest {
-					Some(largest) if largest.group > 0 => {
-						tracing::debug!(sequence = largest.group, "a second group on a tcp session");
-						return Err(Error::ProtocolViolation);
-					}
-					Some(_) => {}
-					// The track ended, finished or reset: `poll_largest` reports both
-					// alike, so ask which, and pass on the peer's reset.
-					None => match subscriber.poll_finished(waiter) {
-						Poll::Ready(Ok(_)) => {
-							self.subscriber = None;
-							break;
-						}
-						Poll::Ready(Err(err)) => return Err(err),
-						Poll::Pending => break,
-					},
-				}
-			}
-		}
-
-		if self.local.is_none() {
-			return Ok(());
-		}
-		// Nobody reads what the peer writes.
-		if self.local_handle.poll_unwanted(waiter).is_ready() {
-			return Err(Error::Cancel);
-		}
-
-		let Some(remote) = &mut self.remote else {
-			// Finished without a group: an empty half.
-			if !self.received
-				&& self.subscriber.is_none()
-				&& let Some(Local::Between { group, .. }) = self.local.take()
-			{
-				let _ = group.finish();
-			}
-			return Ok(());
-		};
-		loop {
-			match self.local.take().expect("checked above") {
-				Local::Between { group, next: None } => match remote.poll_next_frame(waiter) {
-					Poll::Pending => {
-						self.local = Some(Local::Between { group, next: None });
-						return Ok(());
-					}
-					Poll::Ready(Ok(Some(frame))) => {
-						self.local = Some(Local::Between {
-							group,
-							next: Some(frame),
-						})
-					}
-					Poll::Ready(Ok(None)) => {
-						group.finish()?;
-						self.remote = None;
-						return Ok(());
-					}
-					Poll::Ready(Err(err)) => {
-						self.local = Some(Local::Between { group, next: None });
-						return Err(err);
-					}
-				},
-				Local::Between {
-					group,
-					next: Some(from),
-				} => {
-					let info = frame::Info {
-						size: from.size,
-						timestamp: None,
-					};
-					if group.poll_ready(waiter, &info).is_pending() {
-						self.local = Some(Local::Between {
-							group,
-							next: Some(from),
-						});
-						return Ok(());
-					}
-					let to = group.create_frame(info)?;
-					self.local = Some(Local::Frame { from, to });
-				}
-				Local::Frame { mut from, mut to } => match from.poll_read_chunk(waiter) {
-					Poll::Pending => {
-						self.local = Some(Local::Frame { from, to });
-						return Ok(());
-					}
-					Poll::Ready(Ok(Some(chunk))) => {
-						let written = to.write(chunk);
-						self.local = Some(Local::Frame { from, to });
-						written?;
-					}
-					Poll::Ready(Ok(None)) => {
-						let group = to.finish()?;
-						self.local = Some(Local::Between { group, next: None });
-					}
-					Poll::Ready(Err(err)) => {
-						self.local = Some(Local::Frame { from, to });
-						return Err(err);
-					}
-				},
-			}
-		}
-	}
-}
-
-impl kio::Task for Pump {
-	type Output = ();
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Err(err) = self.poll_session(waiter) {
-			self.reset(err);
-		}
-		// Done once both halves ended; dropping the track then leaves its end in place.
-		if self.ours.is_none() && self.local.is_none() {
-			return Poll::Ready(());
-		}
-		Poll::Pending
 	}
 }
 
@@ -1440,12 +948,12 @@ mod tests {
 
 	#[test]
 	fn track_names_round_trip() {
-		let name = track_name("tcp", "alice", "bob", "0123abcd");
-		assert_eq!(name, "tcp/alice/bob/0123abcd");
+		let name = track_name("track", "alice", "bob", "0123abcd");
+		assert_eq!(name, "track/alice/bob/0123abcd");
 		assert_eq!(
 			parse(&name),
 			Some(Name {
-				protocol: "tcp",
+				protocol: "track",
 				dialer: "alice",
 				acceptor: "bob",
 				session: "0123abcd"
@@ -1458,14 +966,14 @@ mod tests {
 		for name in [
 			"command",
 			"alice/s",
-			"tcp/alice/s",
-			"tcp/alice/bob/",
-			"tcp//bob/s",
-			"tcp/alice//s",
+			"track/alice/s",
+			"track/alice/bob/",
+			"track//bob/s",
+			"track/alice//s",
 			"/alice/bob/s",
-			"tcp/alice/bob/s/0",
-			"tcp/a\\b/bob/s",
-			"tcp/alice/bob/s\\",
+			"track/alice/bob/s/0",
+			"track/a\\b/bob/s",
+			"track/alice/bob/s\\",
 		] {
 			assert_eq!(parse(name), None, "{name}");
 		}
@@ -1514,7 +1022,7 @@ mod tests {
 		impl Wake for Close {
 			fn wake(self: Arc<Self>) {
 				// The handler is out being polled, so this waits for it.
-				let accept = self.shared.poll_dial(Protocol::Track, &kio::Waiter::noop());
+				let accept = self.shared.poll_dial(&kio::Waiter::noop());
 				assert!(accept.is_pending());
 				self.shared.close();
 				self.woken.store(true, Ordering::SeqCst);
@@ -1527,12 +1035,12 @@ mod tests {
 			let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
 			let noop = kio::Waiter::noop();
 			// Listening, so the dial queues for the handler.
-			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
+			assert!(endpoint.poll_accept_track(&noop).is_pending());
 
 			let server = endpoint.shared.state.lock().server.clone().unwrap();
 			let broadcast = server.broadcast().consume();
 			let dial = broadcast
-				.track("tcp/alice/bob/0123456789abcdef0123456789abcdef")
+				.track("track/alice/bob/0123456789abcdef0123456789abcdef")
 				.unwrap()
 				.subscribe(None)
 				.into_inner();
@@ -1545,7 +1053,7 @@ mod tests {
 
 			// The wake closes the endpoint while this takes the dial, which it resets.
 			assert!(matches!(
-				endpoint.poll_accept_tcp(&noop),
+				endpoint.poll_accept_track(&noop),
 				Poll::Ready(Err(Error::Closed))
 			));
 			assert!(close.woken.load(Ordering::SeqCst));
@@ -1559,20 +1067,18 @@ mod tests {
 		thread.join().unwrap();
 	}
 
-	/// A dial queued in a protocol the application stopped accepting leaves the queue once
-	/// its dialer gives up, so dialing and giving up again never piles up requests.
+	/// A dial whose dialer gave up leaves the queue, so an accept never takes it, and
+	/// dialing and giving up again never piles up requests.
 	#[test]
 	fn abandoned_dials_leave_the_queue() {
 		let (origin, _driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 		let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
 		let noop = kio::Waiter::noop();
-		// Accepting both protocols, then only `tcp`.
 		assert!(endpoint.poll_accept_track(&noop).is_pending());
-		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
 		let server = endpoint.shared.state.lock().server.clone().unwrap();
 		let broadcast = server.broadcast().consume();
-		let queued = || endpoint.shared.state.lock().track.dials.len();
+		let queued = || endpoint.shared.state.lock().dials.len();
 		let dial = |session: u32| {
 			let dial = broadcast
 				.track(&format!("track/alice/bob/{session:032x}"))
@@ -1582,16 +1088,23 @@ mod tests {
 			assert!(dial.poll_ok(&noop).is_pending());
 			dial
 		};
-		for session in 0..3 {
-			let dial = dial(session);
-			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
+		let accept = || match endpoint.poll_accept_track(&noop) {
+			Poll::Ready(Ok(incoming)) => incoming.session().to_string(),
+			_ => panic!("no dial to accept"),
+		};
+
+		// The accept takes both dials on hand and queues the second.
+		let _first = dial(0);
+		let mut waiting = dial(1);
+		assert_eq!(accept(), format!("{:032x}", 0));
+		for session in (2..8).step_by(2) {
 			assert_eq!(queued(), 1, "dial {session}");
-			drop(dial);
+			drop(waiting);
+			let _taken = dial(session);
+			waiting = dial(session + 1);
+			assert_eq!(accept(), format!("{session:032x}"));
 		}
-		let _open = dial(3);
-		let _also = dial(4);
-		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
-		assert_eq!(queued(), 2);
+		assert_eq!(queued(), 1);
 	}
 
 	#[test]

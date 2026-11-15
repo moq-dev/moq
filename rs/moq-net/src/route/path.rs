@@ -2728,7 +2728,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		let lifted: Vec<Id> = self
 			.doubted
 			.iter()
-			.filter_map(|(node, state)| (matches!(state, Suspicion::Doubted { .. }) && !self.named(*node)).then_some(*node))
+			.filter_map(|(node, state)| {
+				(matches!(state, Suspicion::Doubted { .. }) && !self.named(*node)).then_some(*node)
+			})
 			.collect();
 		for node in lifted {
 			let at = self.doubted[&node].deadline();

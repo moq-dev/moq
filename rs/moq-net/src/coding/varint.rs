@@ -17,6 +17,10 @@ pub struct BoundsExceeded;
 /// The largest value the QUIC form can carry: `2^62 - 1`.
 pub(crate) const MAX_QUIC: u64 = (1 << 62) - 1;
 
+/// The longest varint either form decodes, minimal or not: the leading-ones form's 9 bytes,
+/// past QUIC's 8.
+pub(crate) const MAX_LEN: usize = 9;
+
 /// How a protocol version lays out a varint on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Form {
