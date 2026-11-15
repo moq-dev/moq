@@ -224,7 +224,7 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	// Native codec errors, behind the optional `audio`/`video` features.
+	// Native codec errors.
 	/// An audio codec operation failed.
 	#[error("{reason}")]
 	Audio {

@@ -3067,7 +3067,7 @@ mod tests {
 	}
 
 	/// By default a server with TLS terminates RTMPS and still serves a plaintext client on the
-	/// same port. Gated on `tls` (RTMPS support).
+	/// same port.
 	#[tokio::test]
 	async fn rtmps_and_rtmp_share_one_port() {
 		let (server_config, connector) = tls_fixture();
