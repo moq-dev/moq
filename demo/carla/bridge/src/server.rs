@@ -294,8 +294,8 @@ mod tests {
 
 	#[test]
 	fn a_superseded_connection_changes_nothing() {
-		let path = std::env::temp_dir().join(format!("carla-bridge-superseded-{}.sock", std::process::id()));
-		let bridge = crate::Bridge::listen(&path).unwrap();
+		let dir = tempfile::tempdir().unwrap();
+		let bridge = crate::Bridge::listen(dir.path().join("bridge.sock")).unwrap();
 		// Not the current connection: another worker replaced it (here, none
 		// is current at all).
 		let mut stale = Connection {
