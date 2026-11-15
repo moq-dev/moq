@@ -31,11 +31,20 @@ pub struct Stream {
 	unwritten: Bytes,
 	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
-	/// The stream's acknowledged prefix when it was reset, which drops the handle to it.
-	acked: u64,
+	/// Where the stream stood when it was reset, which drops the handle to it.
+	ended: Ended,
 	id: crate::quic::driver::stream::Id,
 	/// Holds the waiter of an [`AsyncWrite`](tokio::io::AsyncWrite) write across polls.
 	park: kio::Park,
+}
+
+/// Where a reset left a stream, which still answers for its acknowledgments.
+#[derive(Debug, Clone, Copy)]
+struct Ended {
+	/// The offset just past the data written.
+	offset: send::Offset,
+	/// How many leading bytes the peer acknowledged, header included.
+	acked: u64,
 }
 
 /// The mutable terminal state required by moq-net's poll trait.
@@ -55,11 +64,14 @@ impl Stream {
 	pub(crate) fn new(stream: send::Stream, close: Arc<CloseReason>, header: Bytes) -> Self {
 		let mut this = Self {
 			id: stream.id(),
+			ended: Ended {
+				offset: stream.offset(),
+				acked: 0,
+			},
 			state: State::Open(stream),
 			close,
 			unwritten: header,
 			header: None,
-			acked: 0,
 			park: Default::default(),
 		};
 		// Write the header now when it fits, so the peer can accept the stream before its
@@ -95,15 +107,6 @@ impl Stream {
 		}
 	}
 
-	/// How many leading bytes the peer acknowledged, header included.
-	fn acked_len(&self) -> u64 {
-		match &self.state {
-			State::Open(stream) => stream.acked_len(),
-			State::Finished(stream) => stream.acked_len(),
-			State::Reset(_) | State::Unsent => self.acked,
-		}
-	}
-
 	fn open(&mut self) -> Result<&mut send::Stream, Error> {
 		match &mut self.state {
 			State::Open(stream) => Ok(stream),
@@ -118,7 +121,17 @@ impl Stream {
 	/// A WebTransport header already written still reaches the peer, so it can tell which
 	/// session the reset belongs to.
 	fn reset_mut(&mut self, code: u32) {
-		self.acked = self.acked_len();
+		self.ended = match &self.state {
+			State::Open(stream) => Ended {
+				offset: stream.offset(),
+				acked: stream.acked_len(),
+			},
+			State::Finished(stream) => Ended {
+				offset: stream.offset(),
+				acked: stream.acked_len(),
+			},
+			State::Reset(_) | State::Unsent => return,
+		};
 		let code = self.close.encode_stream_code(code);
 		// The driver task can process a STOP_SENDING at any moment. The reset settles, under the
 		// connection lock, whether the peer's stop came first, and only a `closed` future taken
@@ -315,9 +328,36 @@ impl tokio::io::AsyncWrite for Stream {
 impl moq_net::transport::poll::SendStream for Stream {
 	type Error = Error;
 	type Group = send::Group;
-	type Offset = ();
+	type Offset = send::Offset;
 
-	fn offset(&self) -> Self::Offset {}
+	/// Counts the WebTransport header, which the offsets of the bytes after it include.
+	fn offset(&self) -> send::Offset {
+		match &self.state {
+			State::Open(stream) => stream.offset(),
+			State::Finished(stream) => stream.offset(),
+			State::Reset(_) | State::Unsent => self.ended.offset,
+		}
+	}
+
+	/// Once reset, answers from the prefix acknowledged by then, failing for the bytes after it.
+	fn poll_acked(
+		&self,
+		waiter: &kio::Waiter,
+		offset: &send::Offset,
+	) -> Poll<Result<moq_net::transport::poll::Acked, Self::Error>> {
+		let acked = match &self.state {
+			State::Open(stream) => stream.poll_acked(waiter, *offset),
+			State::Finished(stream) => stream.poll_acked(waiter, *offset),
+			State::Reset(_) | State::Unsent => match u64::from(*offset) <= self.ended.acked {
+				true => Poll::Ready(Ok(())),
+				false => return Poll::Ready(Err(Error::ClosedStream)),
+			},
+		};
+		match std::task::ready!(acked) {
+			Ok(()) => Poll::Ready(Ok(moq_net::transport::poll::Acked::Delivered)),
+			Err(err) => poll_error(&self.close, waiter, err).map(Err),
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.poll_write_buf(waiter, &mut buf)
@@ -343,35 +383,6 @@ impl moq_net::transport::poll::SendStream for Stream {
 			Ok(Some(code)) => Err(Error::Stopped(code)),
 			Err(err) => Err(err),
 		})
-	}
-	fn acknowledged(&self) -> Option<bool> {
-		if self.unwritten.has_remaining() {
-			return Some(false);
-		}
-		Some(match &self.state {
-			State::Open(stream) => stream.acknowledged(),
-			State::Finished(stream) => stream.acknowledged(),
-			State::Reset(_) | State::Unsent => false,
-		})
-	}
-
-	/// The acknowledged bytes past the WebTransport header, none while the header is unwritten,
-	/// and once reset, those acknowledged by the reset.
-	fn delivered(&self) -> Option<u64> {
-		if self.unwritten.has_remaining() {
-			return Some(0);
-		}
-		Some(self.acked_len().saturating_sub(self.header.map_or(0, u64::from)))
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		match &self.state {
-			// The header goes first, and a write waits on it.
-			_ if self.unwritten.has_remaining() => Poll::Pending,
-			State::Open(stream) => stream.poll_all_acked(waiter),
-			State::Finished(stream) => stream.poll_all_acked(waiter),
-			State::Reset(_) | State::Unsent => Poll::Pending,
-		}
 	}
 }
 

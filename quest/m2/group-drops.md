@@ -41,7 +41,7 @@ groups summing to those sent, on lite-06 and lite-07. So surfacing
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and
 remaining quests): ✅ key the drop signal by group start and land after
-[time addressing's model](/quest/m2/time-addressing/model.md), so its public
+[time addressing's model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md), so its public
 API never ships sequence-keyed (rejected: landing first and rekeying with
 the model). ✅ Drops surface as a `Gap { range, error }` item on
 `track::Ordered`, which already skips gaps through `poll_drop`, mirroring
@@ -64,10 +64,6 @@ arm; the PR's MIGRATE notes say so. `recv_group` and the unordered cursor are
 unchanged, so a reader that needs drop accounting reads through `Ordered`.
 `@moq/net` and the bindings mirror it only with a named consumer.
 Wire: none.
-
-## Required
-
-- [Address groups by timestamp](/quest/m2/time-addressing/model.md) - the drop range is keyed by start
 
 ## Related
 

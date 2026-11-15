@@ -38,7 +38,9 @@ typedef Request = MoqRequest;
 /// The network transport carrying an incoming session.
 typedef Transport = MoqTransport;
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control family for a QUIC connection. Build one with
+/// `CongestionControl.delay()`, `.loss()`, or `.none()`; a new algorithm joins as
+/// a new constructor.
 typedef CongestionControl = MoqCongestionControl;
 
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
@@ -74,7 +76,7 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 typedef Following = MoqFollowing;
 
 /// The read-only facts on a received route: a static cost, the stream's instance, and
-/// its informational `rtt` to the origin node.
+/// whether a usable path reaches it.
 typedef RouteInfo = MoqRouteInfo;
 
 /// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.

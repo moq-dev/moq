@@ -19,7 +19,7 @@ pulling the m2 blocker into m1). It ranks right after m2, when it can start.
 Moved to m1 2026-11-12 (maintainer, /quest-audit): a docs page breaks nothing, so the cut does not wait on it.
 
 Decided 2026-10-25 (maintainer): a separate page, not only inline doc
-updates. Write it against the design [the model](/quest/m2/time-addressing/model.md)
+updates. Write it against the design [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md)
 and [lite-07](/quest/m2/time-addressing/lite07.md) quests record, including
 that a released relay fills a hole with one FETCH per ID, so a mixed-version
 deployment upgrades its relays together. Link it from

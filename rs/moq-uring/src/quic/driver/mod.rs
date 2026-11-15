@@ -152,6 +152,7 @@ fn with_qlog(transport: &mut moq_quic::transport::Config, config: &transport::Co
 fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::Config, Error> {
 	let mut transport = moq_quic::transport::Config::default();
 	transport.idle_timeout = Some(config.idle_timeout);
+	transport.handshake_timeout = config.handshake_timeout;
 	transport.keep_alive = config.keep_alive;
 	// Our defaults where the caller set none, rather than moq-quic's; the rate caps pass through.
 	transport.limits = config.limits;

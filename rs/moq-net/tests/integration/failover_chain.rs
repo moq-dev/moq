@@ -37,12 +37,24 @@ struct Chain {
 	_relays: Vec<origin::Producer>,
 	_broadcast: origin::Route,
 	_links: Vec<MockPair>,
+	/// `A`'s sessions to `P` and, with the mesh, to `B`.
+	a_links: Vec<MockPair>,
 }
 
 impl Chain {
 	/// `E` holds group 0 half read through `A`, and group 1 handed out, while `B` serves it
 	/// from group 1 on and `A`'s session to `E` is gone.
 	async fn new() -> Self {
+		Self::build(false).await
+	}
+
+	/// [`Self::new`], with `B` routing through `A`, which is cheaper than its own link to `P`
+	/// (`EndedRelay.cfg`).
+	async fn mesh() -> Self {
+		Self::build(true).await
+	}
+
+	async fn build(mesh: bool) -> Self {
 		let version: Version = "moq-lite-07-wip".parse().unwrap();
 		let publisher = produce_origin(1);
 		let relay_a = produce_origin(2);
@@ -53,10 +65,11 @@ impl Chain {
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 
-		let mut links = vec![
-			link(version, &publisher, &relay_a).await,
-			link(version, &publisher, &relay_b).await,
-		];
+		let mut a_links = vec![link(version, &publisher, &relay_a).await];
+		let mut links = vec![priced_link(version, &publisher, &relay_b, mesh.then_some(1_000)).await];
+		if mesh {
+			a_links.push(link(version, &relay_a, &relay_b).await);
+		}
 		let a_to_e = priced_link(version, &relay_a, &relay_e, Some(1_000)).await;
 
 		let remote = relay_e
@@ -107,7 +120,17 @@ impl Chain {
 			_relays: vec![relay_a, relay_b, relay_e],
 			_broadcast: broadcast,
 			_links: links,
+			a_links,
 		}
+	}
+
+	/// `A` dies: its sessions to `P` and `B` end.
+	async fn kill_a(&mut self) {
+		for link in self.a_links.drain(..) {
+			link.server.abort(Error::Cancel);
+			link.client.abort(Error::Cancel);
+		}
+		settle().await;
 	}
 
 	/// Read group 0's next frame in the background, which fetches the rest from `B`.
@@ -135,7 +158,7 @@ impl Chain {
 	}
 }
 
-/// Without the end, the rest of group 0 comes through `B`: the path both residuals break.
+/// Without the end, the rest of group 0 comes through `B`, as it must with the end too.
 #[kio::test]
 async fn a_half_read_group_continues_through_the_new_route() {
 	let mut chain = Chain::new().await;
@@ -146,36 +169,58 @@ async fn a_half_read_group_continues_through_the_new_route() {
 	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }
 
-/// Pins a group cut short that `verify/failover/FailoverChain.tla` rules out
-/// (`NoSkipWhileHeld`). `E`'s fetch of the rest of group 0 is in flight through `B` when
-/// the publisher ends the track: `B`'s copy, asked from group 1, completes, which cancels
-/// `B`'s fetch from `P`, and `E`'s read of group 0 fails though every relay still reaches
-/// `P`, which then writes the rest. A fix keeps the fetch, so the frame arrives.
+/// `E`'s fetch of the rest of group 0 is in flight through `B` when the publisher ends the
+/// track. `B`'s copy, asked from group 1, completes, but its fetch from `P` lives on, so the
+/// rest of group 0 arrives (`NoSkipWhileHeld` in `verify/failover/FailoverChain.tla`).
 #[kio::test]
-async fn residual_ending_the_track_fails_a_fetch_in_flight() {
+async fn ending_the_track_keeps_a_fetch_in_flight() {
 	let mut chain = Chain::new().await;
 	let mut rx = chain.read_on();
 	settle().await;
 	chain.end().await;
 	chain.finish_group0();
-	let frame = kio::clock::timeout(PATIENCE, rx.next())
-		.await
-		.expect("group 0 hung")
-		.unwrap();
-	assert!(frame.is_err(), "group 0 continued: {frame:?}");
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }
 
-/// Pins a hang that `verify/failover/FailoverChain.tla` rules out (`Settles`). The
-/// publisher ends the track before `E` reads on, so `E`'s copy from `B`, asked from
-/// group 1, completes and `E`'s track ends. Reading group 0 on then asks `B`'s completed
-/// copy for the rest, and that fetch never goes on the wire: the read waits out the
-/// subscriber's budget though `P` has written the rest. A fix sends the fetch, so the
-/// frame arrives.
+/// The publisher ends the track before `E` reads on, so `E`'s copy from `B`, asked from
+/// group 1, completes and `E`'s track ends. Reading group 0 on still fetches the rest from
+/// `B`'s completed copy (`Settles` in `verify/failover/FailoverChain.tla`).
 #[kio::test]
-async fn residual_a_fetch_from_a_completed_copy_never_leaves_the_relay() {
+async fn a_fetch_from_a_completed_copy_goes_on_the_wire() {
 	let mut chain = Chain::new().await;
 	chain.end().await;
 	let mut rx = chain.read_on();
+	chain.finish_group0();
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
+}
+
+/// Reading group 0 on only past the linger, once the finished copies may be gone, still
+/// fetches the rest.
+#[kio::test]
+async fn a_fetch_after_the_finished_copies_linger_goes_on_the_wire() {
+	let mut chain = Chain::new().await;
+	chain.end().await;
+	kio::clock::sleep(Duration::from_secs(40)).await;
+	let mut rx = chain.read_on();
+	chain.finish_group0();
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
+}
+
+/// Pins a hang that `verify/failover/EndedRelay.cfg` finds (`NoSkipWhileHeld`). `E`'s fetch
+/// of the rest of group 0 goes through `B`, which serves it through `A`. The publisher ends
+/// the track, then `A` dies: `B`'s fetch fails, and `B`'s front, whose track ended, splices
+/// no copy from `P` for it though `B` still reaches `P`, so the read waits out the
+/// subscriber's budget. A fix moves the fetch to `P`, so the frame arrives.
+#[kio::test]
+async fn residual_a_fetch_cannot_move_off_a_dying_route_after_the_end() {
+	let mut chain = Chain::mesh().await;
+	let mut rx = chain.read_on();
+	settle().await;
+	chain.end().await;
+	chain.kill_a().await;
 	chain.finish_group0();
 	assert!(
 		kio::clock::timeout(PATIENCE, rx.next()).await.is_err(),

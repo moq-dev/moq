@@ -300,11 +300,6 @@ const NAMED_ONLY: &[Candidate] = &[
 		open: probe::Immediate::open,
 	},
 	Candidate {
-		name: probe::SINGLE_NAME,
-		supports: |c| matches!(c, Codec::H264),
-		open: probe::Single::open,
-	},
-	Candidate {
 		name: probe::NATIVE_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Native::open,

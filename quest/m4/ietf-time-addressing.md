@@ -3,7 +3,7 @@
 ## Goal
 
 moq-net keeps a moq-transport group ID verbatim as the group's key in both
-directions, as [the model](/quest/m2/time-addressing/model.md) builds it. It sends each group's predecessor gap in Prior Group ID Gap as a
+directions, as [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md) builds it. It sends each group's predecessor gap in Prior Group ID Gap as a
 best-effort drop signal, and marks a whole group with END_OF_GROUP. It sends
 no Timestamp object property of its own. LOC object properties are proxied
 only between two moq-transport peers.
@@ -14,7 +14,7 @@ Moved from m2 to m4 2026-11-14 (the m2 triage before the cut, under
 /quest-afk, for the maintainer's review): ✅ m4 (rejected: m2; m3, where the
 cut's re-split would keep a moq-transport wire change in the next cycle's
 wire phase). The verbatim group ID, the only part this cut needs, rides
-[the model](/quest/m2/time-addressing/model.md). What is left changes only
+[the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md). What is left changes only
 what moq-net sends third-party moq-transport peers, adds no public API, and
 has no named consumer, and AGENTS.md ranks moq-transport compatibility below
 moq-lite's. It sits beside the other moq-transport quests in m4, such as
@@ -26,7 +26,7 @@ the 2026-10-25 plan that carried each object's PTS in TIMESTAMP (0x10) with
 TIMESCALE (0x08):
 
 - **The Group ID is the key**, verbatim on ingest and egress
-  ([the model](/quest/m2/time-addressing/model.md) owns that mapping). A
+  ([the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md) owns that mapping). A
   moq-transport track is in whatever unit its IDs are in; nothing infers
   time from its objects.
 - **No Timestamp property from us.** moq-net stops sending TIMESTAMP on
@@ -58,7 +58,3 @@ survive moq-transport to moq-transport.
 
 Public API: none. Wire: moq-transport loses our TIMESTAMP property, and
 gains Prior Group ID Gap and END_OF_GROUP on whole groups.
-
-## Required
-
-- [Rust groups by start](/quest/m2/time-addressing/model.md) - the model whose keys and gaps these carry

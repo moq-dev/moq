@@ -8,7 +8,7 @@ diffed or searched that layer is gone, with no change in what readers get.
 
 ## Plan
 
-Since [the model](/quest/m2/time-addressing/model.md), a time end settles at
+Since [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md), a time end settles at
 once on keys, so `Window::rebuild` always builds `Layered` with an empty
 layer. What still assumes one:
 
@@ -25,7 +25,3 @@ paths become a full recompute of what is owed; keep the property tests that
 check owed groups and servable finds against a scan.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Rust groups by start](/quest/m2/time-addressing/model.md) - deletes the time-end walks that fed the layer

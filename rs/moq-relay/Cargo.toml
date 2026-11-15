@@ -35,10 +35,11 @@ path = "src/main.rs"
 doc = false
 
 [features]
-# A programmatic relay fixture with generated TLS and ephemeral ports, and
-# `cluster::Options::network`, which routes peer dials over in-memory links, and with
-# `quic`, `cluster::Options::sim`, which binds them on a simulated QUIC host.
-test-support = ["moq-tokio/sim"]
+# A programmatic relay fixture with generated TLS and ephemeral ports,
+# `cluster::Options::network`, which routes peer dials over in-memory links, the `sim`
+# network of named relays those links join, and with `quic`, `cluster::Options::sim`,
+# which binds them on a simulated QUIC host.
+test-support = ["kio/sim", "moq-tokio/sim"]
 default = ["cluster-lan", "quic", "websocket", "uds"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
@@ -81,7 +82,7 @@ hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server-auto"] }
 kio = { workspace = true, features = ["runtime", "serde"] }
 moq-auth = { workspace = true, features = ["async", "client"] }
-moq-crypto = { workspace = true, features = ["sign"] }
+moq-crypto = { workspace = true, features = ["endpoint"] }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }

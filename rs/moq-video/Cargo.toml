@@ -176,7 +176,13 @@ ash = { workspace = true, optional = true }
 # user picks a monitor or window in a compositor dialog, and we get back a PipeWire fd +
 # node id to stream from. The Camera portal grants a sandboxed app a PipeWire
 # remote that exposes the cameras.
-ashpd = { version = "0.14", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }
+#
+# Held at 0.13 for its zbus 5, which waits for each handshake answer inside a
+# Flatpak (`FLATPAK_ID`). zbus 6 pipelines the whole handshake, which the
+# sandbox's D-Bus proxy drops before xdg-dbus-proxy 0.1.6 (Ubuntu 24.04 LTS
+# ships 0.1.5), failing every portal call there. Checked by the camera module's
+# `portal_handshake_waits_for_each_answer` test.
+ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }
 # The NVIDIA codecs, behind the default-on `nvidia` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
@@ -285,6 +291,8 @@ kio = { path = "../kio", features = ["manual"] }
 libc = { workspace = true }
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = { workspace = true }
+# Runs the portal handshake test in a child with the Flatpak's environment.
+test-env = { path = "../test-env" }
 # `start_paused`, so the capture driver tests run on mocked time.
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }

@@ -94,8 +94,4 @@ exclude_re = [
     # The full diff it skips holds the same changes in another order, and a source
     # switch has already marked every claim that differs.
     'path\.rs:\d+:80: replace != with == in Router<N, A>::present$',
-    # NOT equivalent: Rust lets an ended stream's child wait go where
-    # RouteHandoff.tla keeps it. quest/m2/cluster-routes/ended-child-wait.md
-    # aligns the two and replaces this with a test.
-    'path\.rs:\d+:55: replace && with \|\| in Router<N, A>::advertise$',
 ]

@@ -31,6 +31,10 @@ that machinery in parallel.
   recovery point's plus the count and measures `warmup` from its timestamp
   exactly as the H.264 quest does, sharing the measurement and catalog
   mutation.
+- Review HEVC CRA, RADL, and RASL separately from H.264's recovery points.
+  The TS export already keeps RADL pictures by NAL type, and
+  `rs/moq-mux/src/container/ts/recovery_test.rs` grades actual group skips
+  and recovered output for H.264 open GOP and HEVC RASL and RADL.
 - Fixtures: synthetic NAL sequences beside the existing suffix-SEI tests,
   since x265's intra refresh emits no recovery-point SEI, and a
   redistributable externally encoded clip when available. An NVENC-generated
