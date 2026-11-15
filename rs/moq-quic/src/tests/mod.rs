@@ -7127,6 +7127,67 @@ fn leases_hold_one_stream_window() {
 	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
 }
 
+/// Lease `want` bytes of `s` once they arrive, driving the pair until they do, and hand them
+/// back unread.
+fn await_unit(
+	pair: &mut Pair,
+	(client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+	s: StreamId,
+	msg: &[u8],
+	sent: &mut usize,
+	want: usize,
+) {
+	for _ in 0..msg.len() {
+		if let Ok(n) = pair.client_send(client_ch, s).write(&mut &msg[*sent..]) {
+			*sent += n;
+		}
+		pair.drive();
+		let mut recv = pair.server_recv(server_ch, s);
+		match recv.lease(want) {
+			Ok(lease) => {
+				assert!(lease.remaining() >= want);
+				recv.restore(lease);
+				return;
+			}
+			Err(err) => assert_eq!(err, recv::Error::Blocked),
+		}
+	}
+	panic!("{want} bytes never arrived: {sent} sent");
+}
+
+/// A reader waiting for a unit larger than its stream window gets room for the unit, and after
+/// taking a few bytes, room for the few more its next unit needs, however far below the usual
+/// update threshold.
+#[test]
+fn a_waiting_reader_gets_room_for_its_unit() {
+	const STREAM: usize = 1000;
+	const UNIT: usize = 3000;
+	let _guard = subscribe();
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(4000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::new(
+		Default::default(),
+		server::Config {
+			transport,
+			..server_config()
+		},
+	);
+	let chs = pair.connect();
+	let s = pair.client_streams(chs.0).open(Dir::Uni, Default::default()).unwrap();
+	let msg = vec![0xAB; UNIT + 10];
+	let mut sent = 0;
+
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+
+	let mut recv = pair.server_recv(chs.1, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(10);
+	recv.release(lease);
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+	assert_eq!(sent, msg.len());
+}
+
 #[test]
 fn sender_window_is_not_starvation() {
 	let _guard = subscribe();

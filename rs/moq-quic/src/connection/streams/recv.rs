@@ -291,8 +291,11 @@ impl Recv {
 		// less updates. A fixed size would also work - but it would need to be
 		// smaller than `stream_receive_window` in order to make sure the stream
 		// does not get stuck.
+		// A reader waiting on more than the peer may send gets it however small: nothing it
+		// takes in the meantime would add to it.
 		let diff = max_stream_data - self.sent_max_stream_data;
-		let transmit = self.can_send_flow_control() && diff >= (stream_receive_window / 8);
+		let short = self.sent_max_stream_data < taken + self.lease.wanted();
+		let transmit = self.can_send_flow_control() && (diff >= (stream_receive_window / 8) || short);
 		(max_stream_data, transmit)
 	}
 
