@@ -396,12 +396,17 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
 			// stream, so flow control pushes back upstream.
 			let lease = match self.poll_pace(waiter, frame.poll_ready(waiter, self.stream.window())) {
-				Poll::Ready(Ok(())) => self.poll_lease(waiter, frame.remaining().min(1)),
+				// The stream alone, so `unreleased` can count while the lease is out.
+				Poll::Ready(Ok(())) => {
+					let version = &self.version;
+					self.stream
+						.poll_lease(waiter, frame.remaining().min(1))
+						.map_err(|err| version.transport_error(err))
+				}
 				Poll::Ready(Err(err)) => break Err(err),
 				Poll::Pending => Poll::Pending,
 			};
-			// Moved, so the lease's borrow of the reader ends with it and `unreleased` can count.
-			let mut lease = match { lease } {
+			let mut lease = match lease {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();
