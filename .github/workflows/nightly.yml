@@ -607,7 +607,7 @@ jobs:
         run: nix develop --command just test audio-quality --runtimes chromium --enforce --capture
         shell: bash -leo pipefail {0}
         env:
-          # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
+          # Somewhere upload-artifact can reach; the harness default is the checkout's .tmp/.
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           # A passing run is kept too: budgets.json is measured from these nights.
           HARNESS_KEEP: 1
