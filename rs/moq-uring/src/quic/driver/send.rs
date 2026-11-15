@@ -127,7 +127,7 @@ impl Stream {
 
 	/// The offset just past the data written so far.
 	pub fn offset(&self) -> Offset {
-		self.0.shared.conn.borrow_mut().send_stream(self.0.id).offset()
+		self.0.offset()
 	}
 
 	/// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`.
@@ -147,20 +147,19 @@ impl Stream {
 		self.0.priority()
 	}
 
-	/// Whether the peer acknowledged every byte written so far.
-	pub(crate) fn acknowledged(&self) -> bool {
-		self.0.acknowledged()
-	}
-
 	/// How many leading bytes the peer acknowledged.
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.0.acked_len()
 	}
 
-	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
-	/// never will.
-	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll_all_acked(waiter)
+	/// Wait for the peer to acknowledge every byte before `offset`.
+	///
+	/// Fails with the peer's stop code once it stopped the stream, or the connection's loss.
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.0.poll_acked(waiter, offset)
 	}
 
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
@@ -208,9 +207,9 @@ impl Finished {
 		self.0.priority()
 	}
 
-	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
-	pub(crate) fn acknowledged(&self) -> bool {
-		self.0.acknowledged()
+	/// The offset just past the data written. See [`Stream::offset()`].
+	pub(crate) fn offset(&self) -> Offset {
+		self.0.offset()
 	}
 
 	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
@@ -218,9 +217,12 @@ impl Finished {
 		self.0.acked_len()
 	}
 
-	/// Wait for every byte to be acknowledged. See [`Stream::poll_all_acked()`].
-	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll_all_acked(waiter)
+	/// Wait for the peer to acknowledge every byte before `offset`. See [`Stream::poll_acked()`].
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.0.poll_acked(waiter, offset)
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -293,12 +295,8 @@ impl Half {
 			.unwrap_or_default()
 	}
 
-	/// Whether the peer acknowledged every byte written so far; never once reset or stopped.
-	fn acknowledged(&self) -> bool {
-		let mut conn = self.shared.conn.borrow_mut();
-		let mut stream = conn.send_stream(self.id);
-		let offset = stream.offset();
-		stream.acked(offset).unwrap_or(false)
+	fn offset(&self) -> Offset {
+		self.shared.conn.borrow_mut().send_stream(self.id).offset()
 	}
 
 	/// How many leading bytes the peer acknowledged, each counted once.
@@ -306,16 +304,25 @@ impl Half {
 		self.shared.conn.borrow_mut().send_stream(self.id).acked_len()
 	}
 
-	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
-	/// never will, as after a reset or `STOP_SENDING`.
-	fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Wait for the peer to acknowledge every byte before `offset`.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
-		let offset = stream.offset();
-		match stream.poll_acked(waiter, offset) {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		if ready!(stream.poll_acked(waiter, offset)).is_ok() {
+			return Poll::Ready(Ok(()));
 		}
+		// A held stream is never released, and a reset consumes its handle, so only the peer's
+		// stop or the connection's loss leaves its bytes unacknowledged.
+		let stopped = match stream.end() {
+			Ok(Some(End::Stopped(code))) => Some(code),
+			_ => None,
+		};
+		drop(conn);
+		Poll::Ready(Err(match (stopped, self.shared.closed()) {
+			(Some(code), _) => Error::Stopped(code),
+			(None, Some(err)) => Error::Connection(err),
+			(None, None) => unreachable!("a held stream's acknowledgment failed while the connection lives"),
+		}))
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {

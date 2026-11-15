@@ -2137,6 +2137,20 @@ impl Delivery {
 		!self.frames.is_empty() && self.through < written
 	}
 
+	/// The stream offset billed through.
+	pub(crate) fn through(&self) -> u64 {
+		self.through
+	}
+
+	/// Whether a frame waiting on delivery ends after stream offset `after`, at or before `through`.
+	pub(crate) fn ends_between(&self, after: u64, through: u64) -> bool {
+		self.frames
+			.iter()
+			.rev()
+			.find(|&&(_, end)| end <= through)
+			.is_some_and(|&(_, end)| end > after)
+	}
+
 	/// Bill the payload before stream offset `through`, which never goes back.
 	pub(crate) fn deliver(&mut self, through: u64) {
 		if through <= self.through {

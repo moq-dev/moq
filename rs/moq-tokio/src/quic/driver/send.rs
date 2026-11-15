@@ -161,13 +161,7 @@ impl Stream {
 
 	/// The offset just past the data written so far
 	pub fn offset(&self) -> Offset {
-		let stream = &self.half.stream;
-		let mut conn = stream.conn.state.lock();
-		Offset {
-			inner: conn.inner.send_stream(stream.id).offset(),
-			conn: stream.conn.stable_id(),
-			id: stream.id,
-		}
+		self.half.offset()
 	}
 
 	/// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
@@ -195,23 +189,21 @@ impl Stream {
 		self.half.priority()
 	}
 
-	/// Whether the peer acknowledged every byte written so far
-	#[cfg(feature = "quic")]
-	pub(crate) fn acknowledged(&self) -> bool {
-		self.half.acknowledged()
-	}
-
 	/// How many leading bytes the peer acknowledged
 	#[cfg(feature = "quic")]
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.half.acked_len()
 	}
 
-	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
-	/// never will
+	/// Wait for the peer to acknowledge every byte before `offset`
+	///
+	/// Fails with the peer's stop code once it stopped the stream, or the connection's loss.
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
 	#[cfg(feature = "quic")]
-	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.half.poll_all_acked(waiter)
+	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.half.poll_acked(waiter, offset)
 	}
 
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
@@ -266,10 +258,10 @@ impl Finished {
 		self.half.priority()
 	}
 
-	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
+	/// The offset just past the data written. See [`Stream::offset()`].
 	#[cfg(feature = "quic")]
-	pub(crate) fn acknowledged(&self) -> bool {
-		self.half.acknowledged()
+	pub(crate) fn offset(&self) -> Offset {
+		self.half.offset()
 	}
 
 	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
@@ -278,10 +270,13 @@ impl Finished {
 		self.half.acked_len()
 	}
 
-	/// Wait for every byte to be acknowledged. See [`Stream::poll_all_acked()`].
+	/// Wait for the peer to acknowledge every byte before `offset`. See [`Stream::poll_acked()`].
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
 	#[cfg(feature = "quic")]
-	pub(crate) fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.half.poll_all_acked(waiter)
+	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.half.poll_acked(waiter, offset)
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -394,13 +389,13 @@ impl Half {
 		conn.inner.send_stream(self.stream.id).priority().unwrap_or_default()
 	}
 
-	/// Whether the peer acknowledged every byte written so far; never once reset or stopped.
-	#[cfg(feature = "quic")]
-	fn acknowledged(&self) -> bool {
+	fn offset(&self) -> Offset {
 		let mut conn = self.stream.conn.state.lock();
-		let mut stream = conn.inner.send_stream(self.stream.id);
-		let offset = stream.offset();
-		stream.acked(offset).unwrap_or(false)
+		Offset {
+			inner: conn.inner.send_stream(self.stream.id).offset(),
+			conn: self.stream.conn.stable_id(),
+			id: self.stream.id,
+		}
 	}
 
 	/// How many leading bytes the peer acknowledged, each counted once.
@@ -410,17 +405,29 @@ impl Half {
 		conn.inner.send_stream(self.stream.id).acked_len()
 	}
 
-	/// Wait for the peer to acknowledge every byte written so far; pending forever once it
-	/// never will, as after a reset or `STOP_SENDING`.
+	/// Wait for the peer to acknowledge every byte before `offset`.
 	#[cfg(feature = "quic")]
-	fn poll_all_acked(&self, waiter: &kio::Waiter) -> Poll<()> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		self.own(&offset);
 		let mut conn = self.stream.conn.state.lock();
 		let mut stream = conn.inner.send_stream(self.stream.id);
-		let offset = stream.offset();
-		match stream.poll_acked(waiter, offset) {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		if ready!(stream.poll_acked(waiter, offset.inner)).is_ok() {
+			return Poll::Ready(Ok(()));
 		}
+		// A held stream is never released, and a reset consumes its handle, so only the peer's
+		// stop or the connection's loss leaves its bytes unacknowledged.
+		let stopped = match stream.end() {
+			Ok(Some(End::Stopped(code))) => Some(code),
+			_ => None,
+		};
+		let lost = conn.error();
+		// Panicking under the lock would poison it for every handle.
+		drop(conn);
+		Poll::Ready(Err(match (stopped, lost) {
+			(Some(code), _) => Error::Stopped(code),
+			(None, Some(err)) => Error::Connection(err),
+			(None, None) => unreachable!("a held stream's acknowledgment failed while the connection lives"),
+		}))
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {
