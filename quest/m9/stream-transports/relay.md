@@ -35,11 +35,11 @@ constructors already return it (decided 2026-11-01, maintainer, in
 
 Decided 2026-11-15 (maintainer, /quest-complete): ✅ reshape
 `moq_tokio::websocket::accept` itself to return the session and its driver
-(rejected: an additive sibling beside it). This breaks moq-tokio's published
-API, which the lab otherwise never touches, so this quest's PR lands with a
-breaking moq-tokio release: the cut, or the rust2 migration expected around
-2026-12-15. Its PR is marked `!` and puts the migration note in its Impact
-section.
+(rejected: an additive sibling beside it). That breaks moq-tokio's published
+API, which the lab never touches, so ✅ the reshape is its own m2 quest,
+[WebSocket accept hands back the driver](/quest/m2/websocket-accept-driver.md),
+listed in Required (rejected: landing it here with the rust2 migration).
+This quest keeps only the relay's internal half.
 
 Keep the ops and web listeners' behavior identical: the same routes, the same
 CORS scoping, the same landing-page fallback, and the same
@@ -49,5 +49,6 @@ worker.
 
 ## Required
 
+- [WebSocket accept hands back the driver](/quest/m2/websocket-accept-driver.md) - the moq-tokio API that returns the qmux driver for a worker to run
 - [Ring TCP](/quest/m9/stream-transports/ring.md) - the module and adapters this
   serves from

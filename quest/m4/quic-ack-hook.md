@@ -26,7 +26,8 @@ on the crate-private methods, and drop the public driver API this quest
 planned (`poll_acked`, `acked`, and `offset()` on `send::Stream` and
 `send::Finished`) (rejected: make the wait public; delete the quest). Since
 [moq-dev/moq#8845](https://github.com/moq-dev/moq/pull/8845) the adapters
-answer `poll_acked`, so nothing needs the drivers' wait public.
+answer `poll_acked`, so nothing needs the drivers' wait public. Moved from m3
+to m4 the same day (maintainer): it is now tests only (rejected: keep it in m3).
 
 Traps to test through each driver:
 
