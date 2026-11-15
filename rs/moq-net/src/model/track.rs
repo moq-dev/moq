@@ -8382,8 +8382,10 @@ impl Cursor {
 	/// Whether a bounded window has nothing left to deliver: every group in its ranges was
 	/// handed out (in any of `taken`), dropped, skipped as stale, or given up as unfillable.
 	/// An open window, or one with a fill still out, always has more, and so does one its
-	/// cap keeps a group out of, since a reader may raise a cap again.
-	fn is_exhausted(&self, logical: &[&Delivered]) -> bool {
+	/// cap keeps a group out of, since a reader may raise a cap again. Groups under `from` are
+	/// not judged: a time start resolves to the group containing it, which may lie under a
+	/// copy's resume point.
+	fn is_exhausted(&self, logical: &[&Delivered], from: u64) -> bool {
 		let taken: Vec<&Delivered> = std::iter::once(&self.record.delivered)
 			.chain(logical.iter().copied())
 			.collect();
@@ -8423,7 +8425,7 @@ impl Cursor {
 			};
 		self.filter
 			.window
-			.runs(self.filter.window.floor().unwrap_or(0))
+			.runs(self.filter.window.floor().unwrap_or(0).max(from))
 			.take_while(|run| *run.start() < end)
 			.all(|run| {
 				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
@@ -9789,7 +9791,7 @@ impl Subscriber {
 						Poll::Pending => {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
-							break match !self.parks && cursor.is_exhausted(&[]) {
+							break match !self.parks && cursor.is_exhausted(&[], 0) {
 								true => Poll::Ready(Ok(None)),
 								false => Poll::Pending,
 							};
@@ -9815,9 +9817,10 @@ impl Subscriber {
 
 	/// Whether this route copy's bounded window has nothing left for the logical readers that
 	/// handed out `logical`: what this copy took itself, wrote off, or gave up counts too.
-	pub(super) fn exhausted_for(&mut self, logical: &[&Delivered], waiter: &kio::Waiter) -> bool {
+	/// It judges from its resume point `from`: the logical reader judges what lies under it.
+	pub(super) fn exhausted_for(&mut self, logical: &[&Delivered], from: Option<u64>, waiter: &kio::Waiter) -> bool {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.is_exhausted(logical),
+			Inner::Plain(cursor) => cursor.is_exhausted(logical, from.unwrap_or(0)),
 			// A copy that is another front's logical track judges across its own copies.
 			Inner::Resume(resume, own) => {
 				let mut taken = Vec::with_capacity(logical.len() + 1);

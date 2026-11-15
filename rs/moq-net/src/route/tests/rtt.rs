@@ -96,3 +96,27 @@ fn rtt_never_selects_a_route() {
 	assert_eq!(sim.route(edge, 7).and_then(|route| route.next), Some(cheap));
 	assert_eq!(advertised(&sim, cheap, edge, 7), ms(200));
 }
+
+/// The path rule carries the same sum, and a shift on one link reaches the routes
+/// through it.
+#[test]
+fn a_path_route_follows_its_links_rtt() {
+	let (origin, a, b, c) = (0, 1, 2, 3);
+	let mut sim = Sim::with(Rule::PATH, 4);
+	sim.join(origin, a, 1);
+	sim.join(a, b, 1);
+	sim.join(b, c, 1);
+	sim.rtt(a, origin, Some(10));
+	sim.rtt(b, a, Some(20));
+	sim.rtt(c, b, Some(30));
+	originate(&mut sim, origin, 7);
+	assert!(sim.run());
+	let rtt = |sim: &Sim| match sim.path(c).routes(7).next() {
+		Some((_, path::Route::Live { offer, .. })) => offer.rtt,
+		_ => panic!("{c} has no live route to 7"),
+	};
+	assert_eq!(rtt(&sim), ms(60));
+	sim.rtt(a, origin, Some(40));
+	assert!(sim.run());
+	assert_eq!(rtt(&sim), ms(90));
+}

@@ -2006,6 +2006,10 @@ export class Subscriber {
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
 					await last();
+					// Our own unsubscribe can release the track while its marker is in flight. A
+					// released track has no end left to declare, and the publisher did nothing wrong,
+					// so refusing it would close the session and every other subscription with it.
+					if (hooks.trackReleased(track).peek() !== undefined && !hooks.trackFinished(track)) return;
 					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.finish();
 					try {
