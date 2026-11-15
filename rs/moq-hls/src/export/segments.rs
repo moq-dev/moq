@@ -128,6 +128,16 @@ pub(crate) fn tag(track: &str, config: &[u8]) -> String {
 	hash.as_ref()[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The tag of a segment under `tag` cut short after its group starting at `last`, ending at
+/// `end`; `None` for a cut that holds no group.
+///
+/// A retired rendition cuts its last segment where its edge stopped reading, which another edge
+/// may place elsewhere, so a cut is named by where it ends rather than by its number alone.
+pub(crate) fn cut(tag: &str, last: Option<u64>, end: Duration) -> String {
+	let last = last.map(|last| last.to_string()).unwrap_or_default();
+	self::tag(&format!("{tag}/{last}/{}", end.as_nanos()), b"")
+}
+
 /// One playlist segment: its number, timing, and the groups it holds.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {

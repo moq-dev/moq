@@ -329,7 +329,10 @@ pub(crate) async fn rung_entry(
 	let mut config = transcode.encoder(rung.size, encode_rate);
 	config.bitrate = Some(rung.bitrate);
 
-	let mut entry = config.probe().await?;
+	// The probe opens a session like any rung encoder, on the one the budget keeps for probes.
+	let session = transcode.sessions.probe().await;
+	let (entry, _session) = crate::config::opening(session, async move { config.probe().await }).await;
+	let mut entry = entry?;
 	entry.framerate = rung.framerate.map(moq_video::FrameRate::as_f64);
 	// A property of the source rather than the ladder: every rung shows the same picture.
 	entry.optimize_for_latency = source.optimize_for_latency;

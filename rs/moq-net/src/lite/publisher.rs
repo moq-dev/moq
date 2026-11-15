@@ -405,7 +405,12 @@ impl kio::Task for Control {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			let err = lite::error::control(&mut self.shared.session.clone(), err);
-			tracing::warn!(%err, "control stream error");
+			// A requester may give up before its request is even read: routine, like a
+			// request cancelled later (`RequestServe::poll`).
+			match is_cancel(&err) {
+				true => tracing::debug!(%err, "control stream cancelled"),
+				false => tracing::warn!(%err, "control stream error"),
+			}
 		}
 		Poll::Ready(())
 	}
