@@ -6190,8 +6190,18 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
-			kio::wait(|waiter| poll_run(&mut running, waiter)).await;
+			// The finished copy lingers for its reader, serving fetches: the subscription is
+			// what ends.
+			kio::wait(|waiter| {
+				let _ = poll_run(&mut running, waiter);
+				match running.state {
+					TrackRunState::Done => Poll::Ready(()),
+					_ => Poll::Pending,
+				}
+			})
+			.await;
 
 			let end = loop {
 				match reader.recv_group().await {
@@ -6253,6 +6263,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -6361,6 +6372,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
@@ -6932,6 +6944,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -7002,11 +7015,16 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
+		// A finished copy lingers for its reader, serving fetches; the subscription is what
+		// settles.
+		let run = poll_run(&mut running, &kio::Waiter::noop());
 		assert!(
-			poll_run(&mut running, &kio::Waiter::noop()).is_ready(),
+			matches!(running.state, TrackRunState::Done),
 			"{version:?}: FIN must settle immediately"
 		);
+		assert_eq!(run.is_ready(), !clean, "{version:?}: only a finished copy lingers");
 		if clean {
 			assert!(reader.recv_group().await.unwrap().is_none());
 		} else {
@@ -7119,6 +7137,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
 		assert!(
 			poll_run(&mut running, &kio::Waiter::noop()).is_pending(),
@@ -7197,6 +7216,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -8251,6 +8271,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate: gate_run,
 			datagrams: None,
+			finished: None,
 		};
 
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
@@ -8318,6 +8339,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate: gate_run,
 				datagrams: None,
+				finished: None,
 			};
 
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
@@ -8483,6 +8505,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate: gate_run,
 				datagrams: None,
+				finished: None,
 			};
 
 			// Cancellation can happen before the first serving poll after metadata acceptance.
@@ -8761,8 +8784,12 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
-			assert!(poll_run(&mut running, &kio::Waiter::noop()).is_ready());
+			// A finished copy lingers for its reader, serving fetches; a reset one is gone.
+			let run = poll_run(&mut running, &kio::Waiter::noop());
+			assert!(matches!(running.state, TrackRunState::Done));
+			assert_eq!(run.is_ready(), reset);
 			let end = reader.recv_group().now_or_never().expect("the track ended").map(|_| ());
 			match reset {
 				false => assert!(matches!(end, Ok(())), "{end:?}"),
@@ -12305,6 +12332,66 @@ struct TrackServeRun {
 	gate: crate::auth::Gate,
 	/// Lite-05/06: the name's datagram track, taking the datagrams its subscription carries.
 	datagrams: Option<SharedDatagrams>,
+	/// The copy once the publisher finished it, still serving fetches below its end.
+	finished: Option<FinishedServe>,
+}
+
+/// A copy whose publisher finished the track, which still takes a group below its end that
+/// a reader fetches, as a local [`track::Finished`] does. Its subscription is over, but a
+/// group read partway, or never delivered, continues only through a FETCH upstream, so the
+/// copy lingers while anyone reads it or a fetch is in flight, like a live copy nobody reads.
+/// A reader's miss is no fetch: the subscription's tail already settled what it owed.
+struct FinishedServe {
+	serving: Option<track::Producer>,
+	demand: track::Demand,
+	dynamic: track::Requests,
+	fetches: kio::Tasks<FillServeRun>,
+	closed: Transport,
+}
+
+impl FinishedServe {
+	/// Ready once nobody reads the copy and no fetch is in flight, or the session closed.
+	fn poll(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let Some(serving) = &self.serving else {
+				return Poll::Ready(());
+			};
+			match self.dynamic.poll_requested_fill(waiter) {
+				Poll::Ready(Ok(fill)) => {
+					let info = FetchInfo::Known(serving.info().clone());
+					self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+					continue;
+				}
+				// Aborted through another handle: nothing is left to serve.
+				Poll::Ready(Err(_)) => {
+					self.serving = None;
+					return Poll::Ready(());
+				}
+				Poll::Pending => {}
+			}
+			let _ = self.fetches.poll(waiter);
+			// The groups it already holds stay readable, its clean end too once settled.
+			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
+				if let Some(serving) = self.serving.take() {
+					let _ = serving.abort(crate::lite::error::from_transport(err));
+				}
+				return Poll::Ready(());
+			}
+			if !self.fetches.is_empty() || crate::util::poll_unwanted(&mut self.demand, waiter).is_pending() {
+				return Poll::Pending;
+			}
+			// No linger: a new reader asks upstream afresh rather than reading this cache, which
+			// no subscription keeps. A fetch made afterwards finds a cancelled copy, not a
+			// dropped one.
+			match self.serving.take().expect("checked above").abort_unwanted(Error::Cancel) {
+				Ok(()) => {
+					tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "finished track released");
+					return Poll::Ready(());
+				}
+				Err(used) => self.serving = Some(used),
+			}
+		}
+	}
 }
 
 /// Lite-05/06: the datagram track of a stream track's name, which the session adds to the
@@ -12451,6 +12538,7 @@ impl TrackServeRun {
 			state,
 			gate,
 			datagrams: None,
+			finished: None,
 		}
 	}
 
@@ -12461,6 +12549,10 @@ impl TrackServeRun {
 			datagrams.end(Err(Error::Unauthorized));
 		}
 		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
+		// Each fetch in flight resets itself as it drops, seeing the denial.
+		if let Some(serving) = self.finished.take().and_then(|finished| finished.serving) {
+			let _ = serving.abort(Error::Unauthorized);
+		}
 		match std::mem::replace(&mut self.state, TrackRunState::Done) {
 			TrackRunState::Info {
 				request,
@@ -12543,6 +12635,21 @@ impl kio::Task for TrackServeRun {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let run = self.poll_run(waiter);
+		if let Some(finished) = &mut self.finished
+			&& finished.poll(&self.serve, waiter).is_ready()
+		{
+			self.finished = None;
+		}
+		match self.finished {
+			Some(_) => Poll::Pending,
+			None => run,
+		}
+	}
+}
+
+impl TrackServeRun {
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// Checked before the auth wait too, so an abandoned request never parks on a token.
 		if self.poll_unwanted(waiter).is_ready() {
 			return Poll::Ready(());
@@ -12673,7 +12780,21 @@ impl kio::Task for TrackServeRun {
 							}
 						},
 						ServeEnd::Finished => {
-							let _ = serve_loop.serving.finish();
+							// Lite-07 declared the end already, which this leaves as it is.
+							let _ = serve_loop.serving.finish_shared();
+							// No FETCH before lite-05: nothing but the subscription fills a group.
+							if serve_loop.supports_fetch {
+								// A reader's miss in flight is settled by the tail instead.
+								let mut fetches = serve_loop.fetches;
+								fetches.retain(|run| run.fill.is_fetch());
+								self.finished = Some(FinishedServe {
+									serving: Some(serve_loop.serving),
+									demand: serve_loop.demand,
+									dynamic: serve_loop.dynamic.fetches_only(),
+									fetches,
+									closed: serve_loop.closed,
+								});
+							}
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Ok(()));
 							}

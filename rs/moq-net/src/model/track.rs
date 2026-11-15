@@ -5252,6 +5252,8 @@ pub struct Requests {
 	// Shared with the track's producers: a handler still serving fills keeps the
 	// track alive, like a producer clone does.
 	alive: Arc<Alive>,
+	// Takes only fetches; see [`Self::fetches_only`].
+	fetches_only: bool,
 }
 
 impl Requests {
@@ -5263,7 +5265,20 @@ impl Requests {
 			state,
 			fills,
 			alive,
+			fetches_only: false,
 		}
+	}
+
+	/// Take only [`Consumer::fetch_group`]'s fills from now on, as a session does for a
+	/// copy whose subscription ended: a reader's miss settles at once, as with no handler,
+	/// while a fetch still goes upstream. Queued misses are dropped; taken fills stay.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn fetches_only(mut self) -> Self {
+		if !self.fetches_only {
+			self.fills.lock().fetches_only();
+			self.fetches_only = true;
+		}
+		self
 	}
 
 	/// The track's name, unique within its broadcast.
@@ -5300,12 +5315,18 @@ impl Requests {
 impl Clone for Requests {
 	fn clone(&self) -> Self {
 		// Count each live handle (mirrors `broadcast::Requests`).
-		self.fills.lock().add_handler();
+		let mut fills = self.fills.lock();
+		fills.add_handler();
+		if self.fetches_only {
+			fills.fetches_only();
+		}
+		drop(fills);
 		Self {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			fills: self.fills.clone(),
 			alive: self.alive.clone(),
+			fetches_only: self.fetches_only,
 		}
 	}
 }
@@ -5316,7 +5337,10 @@ impl Drop for Requests {
 		// a live `Producer` may still be serving the subscription. It just stops serving
 		// fills: a queued one no handler will ever take closes, so its readers stop
 		// waiting on it, while one already taken stays with its `Fill`.
-		self.fills.lock().remove_handler();
+		match self.fetches_only {
+			true => self.fills.lock().remove_fetcher(),
+			false => self.fills.lock().remove_handler(),
+		}
 	}
 }
 
@@ -6762,6 +6786,7 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 			order: Order::Ascending,
 		},
 		time: None,
+		fetch: true,
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
@@ -6969,7 +6994,7 @@ impl Fetching {
 			}
 			// Never queued: no handler existed when the fetch was made. Fail fast while
 			// that's still true; a handler that appeared since may yet fill the cache.
-			return match fills.poll(waiter, |fills| match fills.has_handlers() {
+			return match fills.poll(waiter, |fills| match fills.takes_fetches() {
 				false => Poll::Ready(()),
 				true => Poll::Pending,
 			}) {
@@ -8892,6 +8917,7 @@ impl Cursor {
 				frame_end: None,
 				asking: *asking,
 				time: Some(time),
+				fetch: false,
 			};
 			let (joins, _) = fills.lock().join(&fills, &ask);
 			self.filter.lookups.push(Lookup {
