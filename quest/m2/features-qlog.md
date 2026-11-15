@@ -32,7 +32,9 @@ moq-ffi then carries qlog, so `cpp/moq/cmake/moq-ffi.cmake` drops its check
 that a prebuilt input lacks it, and moq-ffi's `moq_qlog_supported` (always
 true then) is deleted from every binding with its "fails unless supported"
 doc on `MoqQuicConfig::qlog`. `doc/bin/relay/config.md` drops "Needs the
-`qlog` build feature".
+`qlog` build feature", `doc/bin/obs.md` drops its `-DMOQ_FFI_QLOG=ON` source
+build for traces, and the `rs/justfile` uring recipes drop `moq-relay/qlog`
+from their clippy run and `--features qlog` from moq-uring's nextest run.
 
 ## Related
 

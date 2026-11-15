@@ -41,8 +41,12 @@ release workflow's `linux-features: v4l2` becomes redundant;
 with `full` anyway, so leave it to that quest.
 
 Breaking for anyone who names a removed feature: the PR's Impact section says
-to delete it. Update `doc/lib/rs` pages and crate READMEs that mention these
-features, and `rs/justfile`'s `--features aec,pulseaudio` test line.
+to delete it, except `aec`, which a manifest replaces with `capture,playback`
+to keep both device APIs. Update `doc/lib/rs` pages and crate READMEs that
+mention these features, and `rs/justfile`: the `audio-devices` recipe's
+`--features aec,pulseaudio` becomes `capture,playback,pulseaudio`, and the
+CodSpeed bench recipe drops `moq-audio/bus`. moq-audio's `bus` bench drops its
+`required-features = ["bus"]`.
 
 ## Related
 

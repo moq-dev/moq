@@ -42,7 +42,8 @@ becomes an unconditional dependency.
 Keep each runtime refusal that names a missing feature only where a platform can
 still lack it (io_uring off Linux, Unix sockets off Unix), and reword it to name
 the platform. `config.rs`'s "needs moq-relay built with the `quic` feature"
-checks go away.
+checks go away, with the tests that assert them, such as
+`workers_require_a_quic_backend` in `rs/moq-relay/src/relay.rs`.
 
 Breaking for anyone who names a removed feature in a manifest: Cargo errors on
 an unknown feature. The PR's Impact section says to delete those names from
@@ -56,8 +57,10 @@ Linux build (rejected: keep `io-uring` as an opt-in feature). It is pure Rust
 adds.
 
 Update `doc/bin/relay` and `doc/bin/cli.md` wherever they tell a source
-builder to pass one of these features, and `bench/run.sh`'s and
-`.oss-scanner/Dockerfile`'s `--features moq-relay/io-uring`.
+builder to pass one of these features, `bench/run.sh`'s and
+`.oss-scanner/Dockerfile`'s `--features moq-relay/io-uring`, and the
+`rs/justfile` recipes that name a removed feature: `features` (moq-cli's
+`websocket`), `uring`, and `uring-check` (moq-relay's `io-uring`).
 
 ## Related
 

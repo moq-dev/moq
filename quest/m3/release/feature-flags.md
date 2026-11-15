@@ -10,7 +10,9 @@ integration, forwarded by dependents under the same name; a feature that only
 trims compile time is removed in favor of always-compiled code. The scope
 covers the defaults and `full` sets of shipped binaries, and the feature lists
 the bindings and packaging builds pass. Each change the maintainer approves is
-a quest that lands before the cut.
+a quest that lands before the cut. A feature that matches a reason the Plan's
+Kept list records (the poll-first `async` design, a test or harness hook, an
+optional `serde`, or a layering split) also stays.
 
 ## Plan
 
