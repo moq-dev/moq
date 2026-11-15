@@ -11,7 +11,71 @@
 
 use std::collections::BTreeSet;
 
+use super::multi::{Broadcast, MultiSim, Suspect, Tie};
 use super::*;
+
+/// A router under comparison: today's rule, or the multicast epic's prototype.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Arm {
+	Path(Rule),
+	Multi(Suspect),
+}
+
+impl Arm {
+	/// Today's rule as it ships.
+	pub const TODAY: Self = Self::Path(Rule::PATH);
+	/// The epic's rule as written.
+	pub const PLAIN: Self = Self::Multi(Suspect::Never);
+	/// The epic's rule ranking routes through the far end of a closed session as draining.
+	pub const SUSPECT: Self = Self::Multi(Suspect::FarEnd);
+
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Path(rule) => rule.as_str(),
+			Self::Multi(Suspect::Never) => "multi",
+			Self::Multi(Suspect::FarEnd) => "multi+suspect",
+		}
+	}
+
+	fn net(self, nodes: usize) -> Box<dyn Net> {
+		match self {
+			Self::Path(rule) => Box::new(Sim::with(rule, nodes)),
+			Self::Multi(suspect) => Box::new(MultiSim::new(suspect, nodes)),
+		}
+	}
+}
+
+impl From<Rule> for Arm {
+	fn from(rule: Rule) -> Self {
+		Self::Path(rule)
+	}
+}
+
+/// What the routers retain, summed over every node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Held {
+	/// Routes heard and used.
+	pub routes: usize,
+	/// Claims, in every copy a node keeps.
+	pub claims: usize,
+	/// What waits on another node: dead hops, doubts, and suspected nodes.
+	pub pending: usize,
+}
+
+/// What readers were shown that the publishers never did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Faults {
+	/// Ends shown while the publisher still claimed.
+	pub false_ends: usize,
+	/// Starts of a life the same reader had seen end.
+	pub revivals: usize,
+}
+
+/// The scope every scoped link in a comparison grants.
+const GRANT: Grant = Grant {
+	subject: "mesh",
+	scope: "",
+};
 
 /// The production rule, checked in ordinary CI.
 const RULES: [Rule; 1] = [Rule::PATH];
@@ -58,7 +122,13 @@ impl std::ops::Sub for Sent {
 pub(super) trait Net {
 	/// `node` passes on no route it learned, like a client.
 	fn client(&mut self, node: Node);
-	fn join(&mut self, a: Node, b: Node, cost: Metric);
+	fn join(&mut self, a: Node, b: Node, cost: Metric) {
+		self.link(a, b, cost, Tie::Peer);
+	}
+	/// Configure a link and open it.
+	fn link(&mut self, a: Node, b: Node, cost: Metric, tie: Tie);
+	/// `node` sends GOAWAY on every session.
+	fn goaway(&mut self, node: Node);
 	fn open(&mut self, a: Node, b: Node);
 	fn close(&mut self, a: Node, b: Node);
 	/// The process at `node` is gone: nothing more passes between it and `peer`,
@@ -77,10 +147,16 @@ pub(super) trait Net {
 	fn tick(&mut self) -> bool {
 		false
 	}
-	/// The neighbour `node` routes `id` through: `Some(None)` at the publisher.
-	fn next(&self, node: Node, id: Id) -> Option<Option<Node>>;
+	/// The nodes a request from `from` for publisher `id` visits, and whether it
+	/// ended at the publisher: `None` with no route. A chain longer than the network
+	/// loops.
+	fn chase(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)>;
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool>;
 	fn sent(&self) -> Sent;
+	fn held(&self) -> Held;
+	fn faults(&self) -> Faults;
+	/// Routes, claims, and streams visited.
+	fn work(&self) -> usize;
 }
 
 fn tally(kinds: impl Iterator<Item = Kind>) -> (usize, usize, usize) {
@@ -101,8 +177,17 @@ impl Net for Sim {
 		self.leaf(node);
 	}
 
-	fn join(&mut self, a: Node, b: Node, cost: Metric) {
-		Sim::join(self, a, b, cost);
+	fn link(&mut self, a: Node, b: Node, cost: Metric, tie: Tie) {
+		let side = SimLink::cost(cost);
+		match tie {
+			Tie::Peer => Sim::link(self, a, b, side, side),
+			Tie::Up => Sim::link(self, a, b, side.upstream(), side),
+			Tie::Scoped => Sim::link(self, a, b, side.grant(GRANT), side.grant(GRANT)),
+		}
+	}
+
+	fn goaway(&mut self, node: Node) {
+		Sim::goaway(self, node);
 	}
 
 	fn open(&mut self, a: Node, b: Node) {
@@ -153,12 +238,65 @@ impl Net for Sim {
 		self.deadline().is_some()
 	}
 
-	fn next(&self, node: Node, id: Id) -> Option<Option<Node>> {
-		self.toward(node, id)
+	fn chase(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)> {
+		let mut hops = Vec::new();
+		if self.grants.is_empty() {
+			let mut at = from;
+			self.toward(at, id)?;
+			while hops.len() <= self.nodes.len() {
+				match self.toward(at, id) {
+					None => return Some((hops, false)),
+					Some(None) => return Some((hops, true)),
+					Some(Some(next)) => {
+						hops.push(next);
+						at = next;
+					}
+				}
+			}
+			return Some((hops, false));
+		}
+		// Past a scoped link the publisher goes by its qualified identity.
+		let claim = p(&Mesh::claim(0));
+		let key = [id, qualified(GRANT.subject, id)]
+			.into_iter()
+			.find(|key| self.path(from).forward(*key, &claim, None).is_some())?;
+		let (mut at, mut key, mut prev) = (from, key, None);
+		while hops.len() <= self.nodes.len() {
+			match self.path(at).forward(key, &claim, prev.take()) {
+				None => return Some((hops, false)),
+				Some(path::Forward::Here) => return Some((hops, true)),
+				Some(path::Forward::Next { next, named, prefix }) => {
+					prev = Some((at, prefix));
+					hops.push(next);
+					(at, key) = (next, named);
+				}
+			}
+		}
+		Some((hops, false))
 	}
 
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool> {
-		self.shows(node, id, claim)
+		(self.shows(node, id, claim)).or_else(|| self.shows(node, qualified(GRANT.subject, id), claim))
+	}
+
+	fn held(&self) -> Held {
+		let kept = self.kept();
+		Held {
+			routes: kept.routes,
+			claims: kept.items + kept.heard + kept.sent,
+			pending: kept.dead + kept.doubt + kept.draining,
+		}
+	}
+
+	fn faults(&self) -> Faults {
+		Faults {
+			false_ends: false_ends(&self.events),
+			revivals: revivals(&self.events),
+		}
+	}
+
+	fn work(&self) -> usize {
+		Sim::work(self)
 	}
 
 	fn sent(&self) -> Sent {
@@ -174,11 +312,105 @@ impl Net for Sim {
 	}
 }
 
+impl Net for MultiSim {
+	fn client(&mut self, node: Node) {
+		MultiSim::client(self, node);
+	}
+
+	fn link(&mut self, a: Node, b: Node, cost: Metric, tie: Tie) {
+		MultiSim::link(self, a, b, cost, tie);
+	}
+
+	fn goaway(&mut self, node: Node) {
+		MultiSim::goaway(self, node);
+	}
+
+	fn open(&mut self, a: Node, b: Node) {
+		MultiSim::open(self, a, b);
+	}
+
+	fn close(&mut self, a: Node, b: Node) {
+		MultiSim::close(self, a, b);
+	}
+
+	fn mute(&mut self, node: Node, peer: Node) {
+		self.hold(node, peer);
+		self.hold(peer, node);
+	}
+
+	fn sever(&mut self, node: Node, peer: Node) {
+		MultiSim::sever(self, node, peer);
+	}
+
+	fn reset(&mut self, node: Node) {
+		MultiSim::reset(self, node);
+	}
+
+	fn publish(&mut self, node: Node, id: Id) {
+		MultiSim::publish(self, node, id);
+	}
+
+	fn claim(&mut self, node: Node, claim: &str, live: bool) {
+		MultiSim::claim(self, node, claim, live);
+	}
+
+	fn ready(&self) -> Vec<(Chan, usize)> {
+		MultiSim::ready(self)
+	}
+
+	fn step(&mut self, (from, to): Chan) {
+		self.deliver(from, to);
+	}
+
+	fn chase(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)> {
+		MultiSim::chase(self, from, &(id, p(&Mesh::claim(0))))
+	}
+
+	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool> {
+		let broadcast: Broadcast = (id, p(claim));
+		self.router(node)?.shown(&broadcast)
+	}
+
+	fn sent(&self) -> Sent {
+		let (offline, unavailable, starts) = tally(self.events.iter().map(|event| event.kind));
+		Sent {
+			msgs: self.stats.route_msgs,
+			items: self.stats.route_items,
+			claims: self.stats.claim_items,
+			offline,
+			unavailable,
+			starts,
+		}
+	}
+
+	fn held(&self) -> Held {
+		let kept = self.kept();
+		Held {
+			routes: kept.routes,
+			claims: kept.items + kept.heard + kept.foreign,
+			pending: kept.pending,
+		}
+	}
+
+	fn faults(&self) -> Faults {
+		Faults {
+			false_ends: multi::false_ends(&self.events),
+			revivals: multi::revivals(&self.events),
+		}
+	}
+
+	fn work(&self) -> usize {
+		MultiSim::work(self)
+	}
+}
+
 /// A mesh of relays, each publisher attached to one of them.
 #[derive(Clone, Debug)]
 pub(super) struct Mesh {
 	pub relays: usize,
 	pub links: Vec<(Node, Node, Metric)>,
+	/// The links that are not between peers, keyed as `links` orders their ends.
+	pub ties: BTreeMap<(Node, Node), Tie>,
 	/// The relay each publisher attaches to.
 	pub homes: Vec<Node>,
 	/// Claims each publisher announces.
@@ -188,7 +420,7 @@ pub(super) struct Mesh {
 impl Mesh {
 	/// A deterministic cheapest-path tree, shared by every rule when choosing
 	/// which link or transit relay to fail. Ties use the next relay's number.
-	fn tree(&self) -> Vec<Option<Node>> {
+	pub fn tree(&self) -> Vec<Option<Node>> {
 		let home = self.homes[0];
 		let mut best = vec![None; self.relays];
 		best[home] = Some((0, home));
@@ -222,6 +454,7 @@ impl Mesh {
 		Self {
 			relays,
 			links,
+			ties: BTreeMap::new(),
 			homes: vec![0],
 			claims: 4,
 		}
@@ -235,6 +468,7 @@ impl Mesh {
 		Self {
 			relays,
 			links,
+			ties: BTreeMap::new(),
 			homes: vec![0; publishers],
 			claims: 4,
 		}
@@ -258,6 +492,7 @@ impl Mesh {
 		Self {
 			relays,
 			links,
+			ties: BTreeMap::new(),
 			homes,
 			claims: 4,
 		}
@@ -267,7 +502,7 @@ impl Mesh {
 		(self.relays + index, 100 + index as Id)
 	}
 
-	fn claim(index: usize) -> String {
+	pub fn claim(index: usize) -> String {
 		format!("live/{index}")
 	}
 }
@@ -318,10 +553,10 @@ fn pair(a: Node, b: Node) -> (Node, Node) {
 
 impl Lab {
 	/// Build `mesh` on `rule`'s router, with every publisher announcing, and let it settle.
-	pub fn new(rule: Rule, mesh: &Mesh) -> Self {
+	pub fn new(arm: impl Into<Arm>, mesh: &Mesh) -> Self {
 		let nodes = mesh.relays + mesh.homes.len();
 		let mut lab = Self {
-			net: Box::new(Sim::with(rule, nodes)),
+			net: arm.into().net(nodes),
 			mesh: mesh.clone(),
 			up: BTreeSet::new(),
 			linked: BTreeSet::new(),
@@ -330,7 +565,8 @@ impl Lab {
 			cost: Cost::default(),
 		};
 		for &(a, b, cost) in &mesh.links {
-			lab.net.join(a, b, cost);
+			let tie = mesh.ties.get(&(a, b)).copied().unwrap_or(Tie::Peer);
+			lab.net.link(a, b, cost, tie);
 			lab.up.insert(pair(a, b));
 		}
 		lab.settle();
@@ -341,7 +577,7 @@ impl Lab {
 	}
 
 	/// Publisher `index` joins its relay for the first time and announces its claims.
-	fn arrive(&mut self, index: usize) {
+	pub fn arrive(&mut self, index: usize) {
 		let (node, id) = self.mesh.publisher(index);
 		let home = self.mesh.homes[index];
 		self.net.client(node);
@@ -375,41 +611,53 @@ impl Lab {
 
 	fn reach_over(&self, up: &BTreeSet<(Node, Node)>, index: usize) -> BTreeSet<Node> {
 		let (node, _) = self.mesh.publisher(index);
-		let mut seen = BTreeSet::from([node]);
-		let mut queue = vec![node];
-		while let Some(at) = queue.pop() {
+		// A route that crossed a marked link never crosses another, so a relay is
+		// reached with or without one behind it.
+		let mut seen = BTreeSet::from([(node, false)]);
+		let mut queue = vec![(node, false)];
+		while let Some((at, marked)) = queue.pop() {
 			for &(a, b) in up {
 				let peer = match at {
 					_ if at == a => b,
 					_ if at == b => a,
 					_ => continue,
 				};
+				// `peer` learns it from `at`, and marks it if `at` is its upstream. A
+				// scoped link starts the claim afresh.
+				let tie = |from: Node, to: Node| self.mesh.ties.get(&(from, to)).copied();
+				if marked && tie(at, peer) == Some(Tie::Up) {
+					continue;
+				}
+				let scoped = tie(at, peer).or(tie(peer, at)) == Some(Tie::Scoped);
+				let marked = !scoped && (marked || tie(peer, at) == Some(Tie::Up));
 				// A publisher forwards nothing, and neither does a relay that died,
 				// whether or not its neighbours have noticed.
-				if peer < self.mesh.relays && !self.down.contains(&peer) && seen.insert(peer) {
-					queue.push(peer);
+				if peer < self.mesh.relays && !self.down.contains(&peer) && seen.insert((peer, marked)) {
+					queue.push((peer, marked));
 				}
 			}
 		}
-		seen.remove(&node);
-		seen
+		(seen.into_iter().map(|(relay, _)| relay))
+			.filter(|&relay| relay != node)
+			.collect()
 	}
 
 	fn walk(&self, from: Node, index: usize) -> Option<Walk> {
 		let (origin, id) = self.mesh.publisher(index);
 		let nodes = self.mesh.relays + self.mesh.homes.len();
-		self.net.next(from, id)?;
+		let (hops, here) = self.net.chase(from, id)?;
 		let mut at = from;
-		for _ in 0..=nodes {
-			match self.net.next(at, id) {
-				None => return Some(Walk::Broken),
-				Some(None) if at == origin => return Some(Walk::Reached),
-				Some(None) => return Some(Walk::Broken),
-				Some(Some(next)) if !self.is_up(at, next) || self.down.contains(&next) => return Some(Walk::Broken),
-				Some(Some(next)) => at = next,
+		for &next in &hops {
+			if !self.is_up(at, next) || self.down.contains(&next) {
+				return Some(Walk::Broken);
 			}
+			at = next;
 		}
-		Some(Walk::Loop)
+		Some(match () {
+			_ if hops.len() > nodes => Walk::Loop,
+			_ if here && at == origin => Walk::Reached,
+			_ => Walk::Broken,
+		})
 	}
 
 	/// Whether any relay's next hops lead round a loop.
@@ -677,7 +925,8 @@ impl Change {
 
 /// Run every change on `mesh` under `rule`, each from a settled mesh, checking the
 /// mesh is right whenever it settles.
-pub(super) fn run(rule: Rule, mesh: &Mesh) -> Vec<(Change, Cost)> {
+pub(super) fn run(arm: impl Into<Arm>, mesh: &Mesh) -> Vec<(Change, Cost)> {
+	let rule: Arm = arm.into();
 	let mut out = Vec::new();
 	let mut lab = Lab::new(rule, mesh);
 	let tree = mesh.tree();
@@ -774,7 +1023,8 @@ pub(super) struct Churn {
 /// sees the same meshes and the same changes at the same steps. Once the churn
 /// stops the mesh must settle and be right. With `two_homes` the publisher also
 /// joins a second relay, and its flaps pick either link.
-pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>, two_homes: bool) -> Churn {
+pub(super) fn churn(arm: impl Into<Arm>, cases: std::ops::Range<usize>, two_homes: bool) -> Churn {
+	let rule: Arm = arm.into();
 	let mut total = Churn::default();
 	for case in cases {
 		let mut script = XorShift(0x0bad_c0de + case as u64 * 0x9e37_79b9);
@@ -791,6 +1041,7 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>, two_homes: bool) 
 		let mesh = Mesh {
 			relays,
 			links,
+			ties: BTreeMap::new(),
 			homes: vec![script.next(relays as u64) as usize],
 			claims: 2,
 		};

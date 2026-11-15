@@ -8,6 +8,7 @@
 //! means a wildcard; every lite-07 claim already covers the paths below it, so
 //! the slash is dropped.
 
+mod bakeoff;
 mod cache;
 mod compare;
 mod cost;
@@ -15,6 +16,7 @@ mod flap;
 mod forward;
 mod handoff;
 mod interest;
+mod multi;
 mod residual;
 mod routing;
 mod scope;
