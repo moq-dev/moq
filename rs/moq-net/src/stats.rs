@@ -55,7 +55,8 @@
 //!   session's egress `bytes` / `frames` count only payload the transport
 //!   delivered (see [`SendStream::delivered`](crate::transport::poll::SendStream::delivered)),
 //!   never what a reset or a lost session discarded: a frame's bytes as they
-//!   land, and the frame with its last byte. An in-process reader counts on read.
+//!   land, and the frame with its last byte. An in-process reader counts on read,
+//!   unless it takes a [`Bill`] to count only what it delivers onward.
 //! * `datagrams`: cumulative datagrams of datagram tracks. A datagram belongs to
 //!   no group, so it bumps `bytes` but not `groups` or `frames`. A session counts
 //!   an egress datagram once the transport accepts it.
@@ -1909,6 +1910,7 @@ impl Session {
 			resolved: Some(Box::new(Mutex::new(resolved))),
 			side,
 			path,
+			billed: false,
 		}
 	}
 
@@ -2155,6 +2157,34 @@ impl Delivery {
 	}
 }
 
+/// The payload of a track a reader counts as it delivers it onward, rather than as it reads it.
+///
+/// For an in-process reader that drops some of what it reads, such as a gateway's jitter
+/// buffer: what it reads and drops counts nothing. Taken from
+/// [`track::Subscriber::bill`](crate::track::Subscriber::bill). Cheap to clone; the default
+/// counts nothing.
+#[derive(Clone, Default)]
+pub struct Bill(Option<Arc<Scope>>);
+
+impl std::fmt::Debug for Bill {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Bill")
+			.field("path", &self.0.as_ref().map(|scope| &scope.path))
+			.finish()
+	}
+}
+
+impl Bill {
+	/// Count one frame of `bytes` payload as delivered.
+	pub fn deliver(&self, bytes: u64) {
+		if let Some(scope) = &self.0 {
+			let meter = scope.meter();
+			meter.frames(1);
+			meter.bytes(bytes);
+		}
+	}
+}
+
 /// A per-`(broadcast, side)` scope, carried by the broadcast and track model
 /// handles. Created by a tagged origin at the broadcast handoff; hands out
 /// [`Meter`]s for the payload path and RAII guards for the subscription / announce
@@ -2172,6 +2202,8 @@ pub(crate) struct Scope {
 	/// Absolute broadcast path, used to key the viewer refcount and as the
 	/// `announced_bytes` length.
 	path: Path,
+	/// Whether a [`Bill`] counts the payload instead, so the meters handed out count none.
+	billed: bool,
 }
 
 /// A [`Scope`]'s counters and the session tier generation they belong to.
@@ -2192,6 +2224,7 @@ impl Clone for Scope {
 				.map(|r| Box::new(Mutex::new(r.lock().unwrap_or_else(PoisonError::into_inner).clone()))),
 			side: self.side,
 			path: self.path.clone(),
+			billed: self.billed,
 		}
 	}
 }
@@ -2228,8 +2261,21 @@ impl Scope {
 			counters,
 			traffic,
 			side: self.side,
-			delegated: false,
+			delegated: self.billed,
 		}
+	}
+
+	/// Hand the payload counts of the meters this scope hands out from now on to the returned
+	/// [`Bill`].
+	pub(crate) fn bill(&mut self) -> Bill {
+		let bill = Bill(self.is_tagged().then(|| {
+			Arc::new(Self {
+				billed: false,
+				..self.clone()
+			})
+		}));
+		self.billed = true;
+		bill
 	}
 
 	/// Open a track-subscription guard: bumps `subscriptions_started` now and

@@ -71,6 +71,9 @@ pub struct Source {
 	/// What each rendition an export reads through this source has received. See
 	/// [`stats`](Self::stats).
 	received: Arc<crate::stats::Registry<crate::stats::Received>>,
+	/// Whether the export reading through this source counts each frame's payload toward the
+	/// origin's stats as it emits the frame, rather than as it reads it. See [`Self::bill`].
+	billed: bool,
 }
 
 impl Source {
@@ -91,6 +94,7 @@ impl Source {
 			pins: Arc::new(Mutex::new(pins)),
 			priority: Arc::default(),
 			received: Default::default(),
+			billed: false,
 		}
 	}
 
@@ -104,7 +108,19 @@ impl Source {
 			pins: Arc::new(Mutex::new(pins)),
 			priority: Arc::default(),
 			received: self.received.clone(),
+			billed: self.billed,
 		}
+	}
+
+	/// Count each frame's payload as the export emits it, rather than as it reads it: for an
+	/// export that drops some of what it reads, such as a jitter buffer trimming a join.
+	pub(crate) fn bill(&mut self) {
+		self.billed = true;
+	}
+
+	/// Whether exports reading through this source count payload as they emit it.
+	pub(crate) fn billed(&self) -> bool {
+		self.billed
 	}
 
 	/// Give one export its own delivery preferences while sharing bindings and counters.
