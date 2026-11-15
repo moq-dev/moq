@@ -48,10 +48,40 @@ Update `drafts/draft-lcurley-moq-lite.md` (fields, the group-end rules, and the
 lite-07 changelog) and `doc/concept/moq-lite.md`, and run `just drafts check`
 and `just test interop --all`.
 
+Also reword `drafts/draft-lcurley-moq-e2ee.md`, which still calls the nonce's
+group input a sequence (its group-allocation rule, about line 268): it is the
+group's start, strictly increasing. The nonce bytes don't change, since both
+the Rust and JS cores already feed it the group's wire ID, which
+[the model](/quest/m2/time-addressing/model.md) makes the start. Folded in
+2026-11-14 from the removed E2EE nonce quest (the m2 triage before the cut,
+under /quest-afk, for the maintainer's review), since this PR's rename
+outdates that wording.
+
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
 Lite-07 FETCH is single-group only ([moq-dev/moq#8616](https://github.com/moq-dev/moq/pull/8616)),
 which rewrites the same lite-07 draft sections (`Range`, Positions,
 SUBSCRIBE anchors).
+
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+reopening stale (OLD) drops is overbuilt for what it serves. Every
+SUBSCRIBE_UPDATE reopens every OLD drop, and a relay settles a received stale
+drop only for readers within budget and range; it took 27 recorded decisions
+in [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670), then
+[moq-dev/moq#8546](https://github.com/moq-dev/moq/pull/8546),
+[moq-dev/moq#8551](https://github.com/moq-dev/moq/pull/8551), and
+[moq-dev/moq#8584](https://github.com/moq-dev/moq/pull/8584), and still has
+an open model finding (`StreamWins.cfg`, owned by
+[finished across updates](/quest/m3/lite-finished-across-updates.md)). The
+case it serves is a relay reader whose budget widens after the upstream
+dropped a group as OLD. Since this quest rewrites SUBSCRIBE_DROP,
+SUBSCRIBE_UPDATE, and SUBSCRIBE_SKIP anyway, it can make OLD final on its
+subscription: the widening reader asks with a SUBSCRIBE of its own, as the
+draft already requires for delivered or finally dropped groups, and the
+`Update` numbers, re-offers, reopen rules, and their model configs go, while
+YIELDED continuations keep their hold. Also check whether GROUP's
+previous-start link makes SUBSCRIBE_SKIP redundant.
+
+Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) OLD drops are final on their subscription: this rewrite deletes `Update`, the reopen and re-offer paths, and their model configs (rejected: (b) keep reopening and finish [finished across updates](/quest/m3/lite-finished-across-updates.md)).
 
 Public API: none beyond [the model](/quest/m2/time-addressing/model.md).
 Wire: lite-07-wip GROUP, GROUP_END, SUBSCRIBE, SUBSCRIBE_UPDATE,

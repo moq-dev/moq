@@ -589,6 +589,24 @@ describe("declared end", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
+	// A finished track shorter than the floor has nothing more coming to fill it.
+	for (const declared of ["before", "after"] as const) {
+		it(`plays audio short of its floor up to an end declared ${declared} it`, () => {
+			const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 });
+			if (declared === "before") buffer.end(40_000);
+			write(buffer, 0, 40, { channels: 1 });
+			if (declared === "after") {
+				expect(read(buffer, 20, 1)[0].length).toBe(0);
+				buffer.end(40_000);
+			}
+			expect(buffer.stalled).toBe(false);
+			expect(read(buffer, 20, 1)[0].length).toBe(20);
+			expect(read(buffer, 30, 1)[0].length).toBe(20);
+			expect(buffer.silent).toBe(true);
+			expect(buffer.underruns).toBe(0);
+		});
+	}
+
 	it("counts running dry short of the end as an underrun", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 20 });
 		write(buffer, 0, 20, { channels: 1 });
@@ -1251,6 +1269,29 @@ describe("time stretch", () => {
 		write(buffer, 3000, frames(200), { value: 0.5 });
 		buffer.clock(2_996_000);
 		expect(read(buffer, QUANTUM, 1)[0].every((sample) => sample === 0.5)).toBe(true);
+	});
+
+	// A finished track's whole tail is declared before it plays, as for a late joiner during the
+	// linger. Audio that starts after the clock still waits for it, and none of the tail is skipped.
+	it("pads a finished tail that starts after the clock, then plays all of it", () => {
+		const buffer = live(100, { bound: 1000 });
+		write(buffer, 500, frames(100), { value: 0.5 });
+		buffer.end(600_000);
+		let clock = 0;
+		let padded = 0;
+		let played = 0;
+		for (;;) {
+			buffer.clock(clock);
+			const [output] = read(buffer, QUANTUM, 1);
+			clock += QUANTUM_US;
+			if (output.length === 0) break;
+			if (output.some((sample) => sample !== 0)) played += output.filter((sample) => sample !== 0).length;
+			else padded += QUANTUM;
+		}
+		expect(padded).toBe(Math.floor(frames(500) / QUANTUM) * QUANTUM);
+		expect(played).toBe(frames(100));
+		expect(buffer.skips).toBe(0);
+		expect(buffer.silent).toBe(true);
 	});
 
 	// A zero bound turns the stretch off: a lag under a window that the stretch would speed through

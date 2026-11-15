@@ -114,7 +114,7 @@ mod tests {
 			m=video 0 UDP/TLS/RTP/SAVPF 0\r\n\
 			c=IN IP4 0.0.0.0\r\n\
 			a=mid:1\r\n\
-			m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+			m=application 0 UDP/DTLS/SCTP webrtc-datachannel\r\n\
 			c=IN IP4 0.0.0.0\r\n\
 			a=mid:2\r\n\
 			m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
@@ -126,7 +126,7 @@ mod tests {
 		assert!(!sections[0].contains("b="), "the session section stays unbounded");
 		assert!(sections[1].contains(bounded), "{}", sections[1]);
 		assert!(!sections[2].contains("b="), "a rejected section stays unbounded");
-		assert!(!sections[3].contains("b="), "the data channel stays unbounded");
+		assert!(!sections[3].contains("b="), "the rejected data channel stays unbounded");
 		assert!(sections[4].contains(bounded), "{}", sections[4]);
 	}
 

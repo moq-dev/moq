@@ -2734,9 +2734,11 @@ mod tests {
 			let dir = root.join(name);
 			// Nothing has crashed yet for this target; `fuzz/README.md` says what to
 			// drop in here when something does.
-			let Ok(entries) = std::fs::read_dir(&dir) else {
+			// Skip only a missing directory, so an unreadable one fails instead of passing empty.
+			if !dir.try_exists().expect("could not check the regression directory") {
 				continue;
-			};
+			}
+			let entries = std::fs::read_dir(&dir).expect("could not read the regression directory");
 
 			for entry in entries {
 				let path = entry.expect("could not read the regression directory").path();

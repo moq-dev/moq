@@ -1,0 +1,34 @@
+# drill: tests::long_header_packets_fit_a_large_mtu
+# expect: RFC 9000 §8.1
+# package: moq-quic
+# target: --lib
+#
+# Restores the anti-amplification check moq-quic inherited from quinn: any budget
+# left lets a whole path-MTU datagram through. A server whose path MTU is past
+# what three times the client's Initial allows overshoots the limit while every
+# byte still arrives, so only the rule checker sees it.
+diff --git a/rs/moq-quic/src/connection/mod.rs b/rs/moq-quic/src/connection/mod.rs
+--- a/rs/moq-quic/src/connection/mod.rs
++++ b/rs/moq-quic/src/connection/mod.rs
+@@ -583,9 +583,7 @@
+ 		// No datagram may outgrow what the anti-amplification limit has left (RFC 9000 §8.1). A
+ 		// smaller one still goes out, so a path MTU past the whole budget cannot stall the
+ 		// handshake.
+-		if let Some(budget) = self.path.anti_amplification_budget() {
+-			segment_size = segment_size.min(usize::try_from(budget).unwrap_or(usize::MAX));
+-		}
++		// MUTATION: datagrams keep the full path MTU, whatever budget is left.
+ 		// The peer's maximum UDP payload size can reduce the path MTU below our configured minimum.
+ 		let min_mtu = Ord::min(self.config.min_mtu, self.path.current_mtu());
+ 
+@@ -761,7 +759,9 @@
+ 				let padded = space_id == SpaceId::Initial && (self.side.is_client() || ack_eliciting);
+ 				let datagram = segment_size.max(min_packet_space(space_id) + tag_len);
+ 				let built = (segment_size * num_datagrams) as u64;
+-				if self.path.anti_amplification_blocked(built + datagram as u64) {
++				// MUTATION: any budget left lets a whole datagram through.
++				let _ = datagram;
++				if self.path.anti_amplification_blocked(built + 1) {
+ 					trace!("blocked by anti-amplification");
+ 					break;
+ 				}

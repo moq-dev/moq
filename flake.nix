@@ -159,6 +159,8 @@
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
             cargo-nextest
+            # Mutation testing of the route and resume code (`just rs mutants`).
+            cargo-mutants
             cargo-codspeed
             # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
             release-plz
@@ -602,8 +604,8 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
-          # Nightly's `just rs send-depth` proves native Send futures on it.
-          # Pinned so a toolchain release alone never fails that job;
+          # The gate's `just rs send-depth` proves moq-net's Send futures on it.
+          # Pinned so a toolchain release alone never fails that check;
           # bump it on purpose, like the stable toolchain above. Kept out of
           # the dev shell, which every CI job downloads.
           rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;

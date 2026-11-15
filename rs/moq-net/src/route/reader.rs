@@ -9,6 +9,7 @@ use super::view::ancestors;
 use super::{Event, Id, Kind, Shown, within};
 
 /// How the reader sees each claim, and the events not yet taken.
+#[derive(Clone, Debug)]
 pub(crate) struct Reader<A> {
 	shown: BTreeMap<(Id, Path), Shown<A>>,
 	/// The identities recomputed since [`Self::changed`] last took them, each with
@@ -148,6 +149,8 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 		for (claim, kind, item) in events {
 			self.log(id, claim, kind, item);
 		}
+		// Named as recomputed whether or not anything it shows changed, so a driver
+		// serves its claims through the routes it has now.
 		let changed = self.changed.entry(id).or_default();
 		for (claim, now) in now {
 			let key = (id, claim);

@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use crate::vendor::netem::NetemConfig;
+use crate::vendor::str0m::media::{Direction, MediaKind};
 use crate::vendor::str0m::{Event, IceConnectionState, RtcError};
 
 use super::common;
@@ -31,7 +32,7 @@ pub fn pair_kept_alive_by_remote_binding_requests() -> Result<(), RtcError> {
 	r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
 
 	let mut change = l.sdp_api();
-	change.add_channel("ch".into());
+	change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 	let (offer, pending) = change.apply().unwrap();
 	let answer = r.sdp_api().accept_offer(offer)?;
 	l.sdp_api().accept_answer(pending, answer)?;

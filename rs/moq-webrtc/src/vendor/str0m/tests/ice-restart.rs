@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::vendor::str0m::RtcConfig;
 use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::media::{Direction, MediaKind};
 use tracing::info_span;
 
 use super::common;
@@ -23,7 +24,7 @@ pub fn ice_restart() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("My little channel".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 
 		change.apply().unwrap()
 	});

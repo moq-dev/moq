@@ -574,3 +574,222 @@ fn a_relay_restart_keeps_the_claim_unavailable() {
 		assert_eq!(sim.shows(node, 7, ""), Some(true), "node {node}: {seen:?}");
 	}
 }
+
+/// A path route the next hop offers again at a cost that overflows with the link's
+/// is out of reach. With no neighbour left to answer, the node lets the route go
+/// rather than hold under a route it can never use.
+#[test]
+fn a_path_route_whose_cost_overflows_is_let_go() {
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	let hops = [(7, 0), (1, 1)];
+	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, 1))), 0);
+	router.batch(1, 7, p(""), vec![(p("live/x"), Some(1))], Some(1), 0);
+	assert!(router.shown()[&(7, p("live/x"))].available);
+	router.route(1, 7, p(""), Some(path::Reach::Finite(along(&hops, Metric::MAX))), 0);
+	assert_eq!(router.route_for(7, &p("")), None);
+	assert!(router.shown().is_empty());
+}
+
+/// A route this node qualified is another key than the one a scoped neighbour
+/// offered, so it never goes back to a neighbour its path crosses, even when the
+/// route came through a different next hop.
+#[test]
+fn a_qualified_route_is_not_returned_to_a_scoped_neighbour_it_crossed() {
+	let grant = || Link {
+		scope: Some(Scope {
+			regions: vec![p("a")],
+			qualify: Arc::new(|id| qualified("ga", id)),
+		}),
+		..Link::default()
+	};
+	let (near, far) = (2, 3);
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(near, near as Id, grant()).unwrap();
+	router.connect(far, far as Id, grant()).unwrap();
+	// The near neighbour offers the raw key from the publisher, and the far one a
+	// cheaper path through the near one.
+	let direct = along(&[(7, 0), (near as Id, 1)], 5);
+	router.route(near, 7, p("a"), Some(path::Reach::Finite(direct)), 0);
+	let through = along(&[(7, 0), (near as Id, 1), (far as Id, 1)], 1);
+	router.route(far, 7, p("a"), Some(path::Reach::Finite(through)), 0);
+	router.batch(far, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	let key = qualified("ga", 7);
+	assert_eq!(router.route_for(key, &p("a")).and_then(path::Route::next), Some(far));
+	router.peer_interest(near, Some(p("a"))).unwrap();
+	let messages = router.drain();
+	assert!(
+		!messages
+			.iter()
+			.any(|msg| matches!(msg, path::Out::Route { to, .. } if *to == near)),
+		"{messages:?}"
+	);
+}
+
+/// A down-only route never goes to an upstream link, including one a stream carries
+/// inside the upstream's interest rather than at it.
+#[test]
+fn a_down_only_route_inside_an_upstreams_interest_is_not_sent_there() {
+	let upstream = Link {
+		upstream: true,
+		..Link::default()
+	};
+	let (asker, source) = (1, 3);
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(asker, asker as Id, upstream.clone()).unwrap();
+	router.connect(source, source as Id, upstream).unwrap();
+	let offer = along(&[(7, 0), (source as Id, 1)], 1);
+	router.route(source, 7, p("a"), Some(path::Reach::Finite(offer)), 0);
+	router.batch(source, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1), 0);
+	let route = router.route_for(7, &p("a")).and_then(path::Route::offer);
+	assert!(route.is_some_and(|offer| offer.down_only));
+	router.peer_interest(asker, Some(p(""))).unwrap();
+	let messages = router.drain();
+	assert!(
+		!messages
+			.iter()
+			.any(|msg| matches!(msg, path::Out::Route { to, .. } if *to == asker)),
+		"{messages:?}"
+	);
+}
+
+/// Doubt keeps a lost route held only while a neighbour still offers a live way back.
+/// A route the dead news already reached offers none, so once the next hop reports
+/// the loss the node lets the claims go.
+#[test]
+fn a_dead_alternative_does_not_keep_a_lost_route_held() {
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [1, 2] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+	}
+	// Both paths cross the session node 6 opened to node 4.
+	let hop = path::Hop { node: 4, session: 1 };
+	for (peer, metric) in [(1, 1), (2, 5)] {
+		let offer = along(&[(7, 0), (6, 1), (4, 1), (peer as Id, 1)], metric);
+		router.route(peer, 7, p(""), Some(path::Reach::Finite(offer)), 0);
+		router.batch(peer, 7, p(""), vec![(p("live/x"), Some(1))], Some(1), 0);
+	}
+	assert_eq!(router.route_for(7, &p("")).and_then(path::Route::next), Some(1));
+	let dead = path::Dead::Closed {
+		hop,
+		far: 6,
+		moved: Vec::new(),
+		gone: true,
+	};
+	router.dead(1, dead, Instant::ZERO);
+	assert_eq!(router.route_for(7, &p("")), None);
+	assert!(router.shown().is_empty());
+}
+
+/// Every identity a rotation draws is fresh: never zero, never one still
+/// declared or just retired, and within the 53 bits a lite-06 hop carries as
+/// itself. The seed makes the first draw zero, and the high bits of every draw
+/// set, which a small seed never reaches.
+#[test]
+fn rotated_identities_are_fresh_and_in_range() {
+	// One xorshift64 draw, and its inverse to pick the seed before a chosen draw.
+	fn draw(mut x: u64) -> u64 {
+		x ^= x << 13;
+		x ^= x >> 7;
+		x ^ x << 17
+	}
+	fn undraw(y: u64) -> u64 {
+		let unshift = |y: u64, shift: &dyn Fn(u64) -> u64| (0..64).fold(y, |x, _| y ^ shift(x));
+		let x = unshift(y, &|x| x << 17);
+		let x = unshift(x, &|x| x >> 7);
+		unshift(x, &|x| x << 13)
+	}
+	// The router forces its seed odd, so take the first zero draw an odd seed reaches.
+	let seed = (1..)
+		.map(|high: u64| undraw(high << 53))
+		.find(|seed| seed & 1 == 1)
+		.expect("an odd seed");
+	assert_eq!(draw(seed) & GENERATED, 0);
+
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 0,
+	};
+	let mut router = path::Router::<Node, Item>::new(99, seed, Doubt::DEFAULT);
+	router.originate(7);
+	router.announce(p("live/x"), item).unwrap();
+	// Eight rotations, each from aging the declared identity to its last revision.
+	let mut seen = BTreeSet::from([7]);
+	for _ in 0..8 {
+		router.age(MAX - 1);
+		router.announce(p("live/x"), item).unwrap();
+		let fresh = router.declared().expect("declared");
+		assert_ne!(fresh, 0);
+		assert!(fresh <= GENERATED, "{fresh:#x} is beyond a generated hop id");
+		assert!(seen.insert(fresh), "{fresh:#x} was drawn before");
+	}
+}
+
+/// One batch may withdraw a stream's only claim and start another: the stream
+/// moves to the new claim, and the route it rides on stays up throughout.
+#[test]
+fn a_batch_replacing_a_streams_only_claim_keeps_its_route() {
+	let (up, down) = (0, 1);
+	let item = |seed| Item {
+		seed,
+		epoch: None,
+		since: 1,
+	};
+	let mut router = path::Router::<Node, Item>::new(99, 1, Doubt::DEFAULT);
+	router.connect(up, 9, Link::default()).unwrap();
+	router.connect(down, 8, Link::default()).unwrap();
+	router.peer_interest(down, Some(Path::empty())).unwrap();
+	let interest = router.interest();
+	let hops = [(7, 0), (9, 1)];
+	router.route(up, 7, p(""), Some(path::Reach::Finite(along(&hops, 1))), interest);
+	router.batch(up, 7, p(""), vec![(p("live/a"), Some(item(1)))], Some(1), interest);
+	assert!(
+		(router.drain().iter()).any(|out| matches!(out, path::Out::Route { to, reach: Some(_), .. } if *to == down))
+	);
+
+	router.batch(
+		up,
+		7,
+		p(""),
+		vec![(p("live/a"), None), (p("live/b"), Some(item(2)))],
+		Some(2),
+		interest,
+	);
+	let out = router.drain();
+	assert!(
+		!out.iter()
+			.any(|out| matches!(out, path::Out::Route { to, reach: None, .. } if *to == down)),
+		"{out:?}"
+	);
+	let changes: Vec<_> = (out.into_iter())
+		.filter_map(|out| match out {
+			path::Out::Batch { to, changes, .. } if to == down => Some(changes),
+			_ => None,
+		})
+		.flatten()
+		.collect();
+	assert!(changes.contains(&(p("live/b"), Some(item(2)))), "{changes:?}");
+	assert!(changes.contains(&(p("live/a"), None)), "{changes:?}");
+}
+
+/// A driver hears of every identity whose routes were recomputed, even when no shown
+/// claim changed, so it can serve those claims through the routes it has now.
+#[test]
+fn a_route_change_alone_names_its_identity() {
+	let up = 0;
+	let mut router = path::Router::<Node, Item>::new(99, 1, Doubt::DEFAULT);
+	router.connect(up, 9, Link::default()).unwrap();
+	let interest = router.interest();
+	let hops = [(7, 0), (9, 1)];
+	router.route(up, 7, p(""), Some(path::Reach::Finite(along(&hops, 1))), interest);
+	let item = Item {
+		seed: 1,
+		epoch: None,
+		since: 1,
+	};
+	router.batch(up, 7, p(""), vec![(p("live/a"), Some(item))], Some(1), interest);
+	assert!(router.changed()[&7].contains(&p("live/a")));
+	router.route(up, 7, p(""), Some(path::Reach::Finite(along(&hops, 2))), interest);
+	assert_eq!(router.changed(), BTreeMap::from([(7, BTreeSet::new())]));
+}

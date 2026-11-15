@@ -887,6 +887,13 @@ async function servedSubscription(
 			}
 			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
 		},
+		// Stop the next group stream the publisher opened with `code`, before reading any of it,
+		// as a subscriber that discards a stream unread does.
+		async stopServed(code: number): Promise<void> {
+			const next = await opened.read();
+			if (next.done) throw new Error("the publisher opened no group stream");
+			await next.value.cancel({ source: "stream", streamErrorCode: code });
+		},
 		// The sequence alone, for tests that only care which groups reached the wire.
 		async servedSequence(): Promise<bigint | undefined> {
 			return (await this.servedGroup())?.sequence;
@@ -1237,6 +1244,30 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				2n,
 				version === Version.DRAFT_07 ? 70 : 0,
 			]);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	// A subscriber may stop a group stream before reading which group it carried, so the drop
+	// is its only account of it. Mirrors the Rust `a_stopped_group_stream_is_dropped_with_its_stop_code`.
+	test(`lite ${version}: a stopped group stream is dropped with ${version === Version.DRAFT_07 ? "its stop code" : "no code"}`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0n });
+		try {
+			// Left open, so only the stop ends its stream.
+			const group = sub.track.createGroup(0n);
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
+			await sub.stopServed(StreamCode.Evicted);
+			for (;;) {
+				const resp = await decodeSubscribeResponse(sub.client.reader, version);
+				if (!("drop" in resp)) continue;
+				expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
+					0n,
+					1n,
+					version === Version.DRAFT_07 ? StreamCode.Evicted : 0,
+				]);
+				break;
+			}
 		} finally {
 			await sub.close();
 		}

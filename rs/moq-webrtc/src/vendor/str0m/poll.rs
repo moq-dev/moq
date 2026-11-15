@@ -18,7 +18,7 @@
 //! `Rtc` holds no knowledge of which mutation affects what.
 //!
 //! The app-facing API wrappers ([`DirectApi`][crate::vendor::str0m::change::DirectApi],
-//! [`SdpApi`][crate::vendor::str0m::change::SdpApi], [`Channel`][crate::vendor::str0m::channel::Channel])
+//! [`SdpApi`][crate::vendor::str0m::change::SdpApi])
 //! hold an [`RtcMut`] instead of `&mut Rtc`. It arms
 //! the readiness on *mutable* deref only, so a `&mut self` method that mutates
 //! re-polls the tree while a `&self` reader never does - and neither has to

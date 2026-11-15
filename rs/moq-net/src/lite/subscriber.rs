@@ -1676,11 +1676,10 @@ impl Drop for SetupWait {
 
 #[kio::machine(self.state: GroupRecvState)]
 impl GroupRecv {
-	fn new(subscriber: Subscriber, mut reader: Reader<crate::transport::boxed::RecvStream, Version>) -> Self {
-		// Until its group opens, the stream may wait unread on the peer's SETUP or its
-		// subscription's TRACK_INFO, so a full window stops it before the stream either
-		// arrives on.
-		reader.set_priority(crate::priority::RECV_PARKED);
+	/// The stream keeps its [unidentified](crate::priority::RECV_UNIDENTIFIED) rank until its
+	/// header is read, and ranks [parked](crate::priority::RECV_PARKED) only while it waits
+	/// unread, so a full window stops what holds the most first.
+	fn new(subscriber: Subscriber, reader: Reader<crate::transport::boxed::RecvStream, Version>) -> Self {
 		Self {
 			subscriber,
 			reader,
@@ -1694,12 +1693,16 @@ impl GroupRecv {
 		let header: (bool, lite::Group) = wait!(Header => {
 			// Before the header, which a wait after it would lose.
 			let Poll::Ready(ietf) = self.subscriber.peer_setup.poll_ietf(waiter) else {
-				let waits = &self.subscriber.setup_waits;
-				self.setup_wait.get_or_insert_with(|| SetupWait::new(waits));
+				if self.setup_wait.is_none() {
+					self.setup_wait = Some(SetupWait::new(&self.subscriber.setup_waits));
+					self.reader.set_priority(crate::priority::RECV_PARKED);
+				}
 				// Unread meanwhile, so a reset or an eviction would otherwise go unseen.
 				return self.reader.poll_reset(waiter).map(Err);
 			};
-			self.setup_wait = None;
+			if self.setup_wait.take().is_some() {
+				self.reader.set_priority(crate::priority::RECV_UNIDENTIFIED);
+			}
 			self.reader.poll_decode::<lite::Group>(waiter).map_ok(|hdr| (ietf, hdr))
 		})?;
 
@@ -1710,6 +1713,7 @@ impl GroupRecv {
 			match subs.get_mut(&header.1.subscribe) {
 				Some(entry) if entry.copy.is_none() => {
 					self.park_wait = Some(ParkWait::new(&self.subscriber.park_waits));
+					self.reader.set_priority(crate::priority::RECV_PARKED);
 					Some(entry.park(&header.1))
 				}
 				_ => None,
@@ -1749,6 +1753,9 @@ impl GroupRecv {
 			}
 		};
 		let mut open: Option<Open> = Some(open?);
+		if matches!(open, Some(Open::Duplicate(_))) {
+			self.reader.set_priority(crate::priority::RECV_PARKED);
+		}
 		// A duplicate of a copy still arriving waits, unread, for that copy to settle.
 		let opened: Opened = wait!(Hold => loop {
 			let mut duplicate = match open.take() {

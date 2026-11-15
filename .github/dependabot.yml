@@ -49,9 +49,12 @@ updates:
         patterns:
           - "*"
 
-  # The Dockerfile's builder image is pinned by digest; this keeps it current.
+  # The Dockerfiles' base images are pinned by digest; this keeps them current.
+  # A GStreamer CI image bump republishes it through gstreamer-ci.yml.
   - package-ecosystem: "docker"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/docker/gstreamer"
     schedule:
       interval: "weekly"
     cooldown:

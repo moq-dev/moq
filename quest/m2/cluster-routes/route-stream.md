@@ -14,6 +14,13 @@ and lite-06 and older and moq-transport are untouched.
 
 ## Plan
 
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768), the m2 triage
+before the cut): ✅ stays in m2, gating lite-07's freeze (rejected: moving the route stream and the
+interest set to lite-08). Without it lite-07 would freeze with one router key per announce
+stream, which the route model doesn't check, and keep the reopen-and-hand-over
+machinery for its lifetime.
+
 Decided 2026-11-10 (maintainer, /quest-plan on lite-07 routing).
 
 Why: today a side's requests ride the streams it opened and its answers ride
@@ -56,6 +63,45 @@ Settled:
    reopened requests that could hold three times the announce cap
    ([moq-dev/moq#8375](https://github.com/moq-dev/moq/pull/8375)'s open
    review finding) cannot occur.
+4. ✅ **A DEAD has a fixed size, and the routes it moves follow it as its own
+   ROUTE_UPDATEs** (decided 2026-11-14 by the maintainer on
+   [moq-dev/moq#8731](https://github.com/moq-dev/moq/pull/8731)'s decision
+   22, [the comment](https://github.com/moq-dev/moq/pull/8731#issuecomment-6889336680)'s
+   B; rejected: A, the parts with a More byte that the switch ships, where
+   each part repeats the header and the sender splits by encoded size; C, a
+   DEAD that holds every route through the hop with the moves after it as
+   ordinary messages, which brings churn on every failure that moves routes
+   and changes the model). A DEAD Closed is `Closed {Hop, Far, Gone, Moved
+   Count}`, and the next Moved Count messages on the stream are ROUTE_UPDATEs,
+   one per moved route. The receiver holds the DEAD until they arrive and
+   then applies everything as one step, the route model's `Fail`, so
+   `RouteHandoff.tla` and its configs are unchanged. A refused move is a
+   refused ROUTE_UPDATE: the route ends, and its path still credits the DEAD.
+   These are PROTOCOL_VIOLATIONs, so a DEAD always completes or ends the
+   session:
+   - any other message between the DEAD and its last update, whichever
+     prefix it answers;
+   - an update for a route that isn't live or doesn't cross the hop;
+   - a count above the stream's routes through the hop.
+
+   It replaces the parts in the same PR:
+   - the DEAD codec (`rs/moq-net/src/lite/announce.rs`,
+     `js/net/src/lite/announce.ts`): Moved Count in place of More and the
+     moved list, and `Dead::split` goes;
+   - `buffer_dead` (`rs/moq-net/src/lite/publisher/routed.rs`) writes the
+     DEAD and then its updates, with nothing between them and no size split;
+   - both receivers' reassembly (`Continued` in
+     `rs/moq-net/src/lite/subscriber/routed.rs`, `continued` in
+     `js/net/src/lite/subscriber.ts`) counts the updates instead of the
+     parts;
+   - the shared corpus (`rs/moq-net/fixtures/lite.json` and the fuzz seeds in
+     `rs/moq-net/src/fuzz.rs`) drops the More cases and pins a DEAD with its
+     updates and each violation;
+   - the draft's DEAD section and Dead Hops describe the count.
+
+   Test that a DEAD and its updates apply as one, in Rust and `js/net`, each
+   failing when an update applies on its own, and that each violation
+   closes the session.
 
 Recommended wire, for the implementer to confirm or improve in the PR; each
 departure is a choice to list there:
@@ -111,7 +157,12 @@ Code this replaces, for lite-07 only:
   drops the route there until the other sends again. With one prefix per
   region in the set, the peer answers at the region and nothing narrows, so
   the narrowing goes. Test a two-region scope behind a peer that holds a
-  broad and a narrow route of one node, ending each in turn.
+  broad and a narrow route of one node, ending each in turn: the region
+  inside both stays online through whichever route still lives, and goes
+  offline only once both have ended. Decided 2026-11-14 (maintainer, on
+  [moq-dev/moq#8731](https://github.com/moq-dev/moq/pull/8731)'s decision
+  12): ✅ deferred here (rejected: tracking per filed slot which wire routes
+  file into it in #8731, state this quest deletes).
 - `route::Node` registers one neighbour per session for both directions. Today `receive` and `answer` each take a fresh key (`route/node.rs`), so one session is two neighbours in the router; the interest set makes the router accept one key for both and this makes the sessions use it.
 - `js/net`: each `routes()` call opens its own stream today
   (`js/net/src/lite/subscriber.ts`), so JS gains the covering-prefix logic

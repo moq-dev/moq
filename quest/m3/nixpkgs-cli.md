@@ -11,7 +11,7 @@ encoders), kept current by nixpkgs-update from our `moq-cli-v*` tags.
 
 Decided 2026-11-05 (maintainer, /quest-plan):
 
-- Should the nixpkgs moq-cli wait for cli-packaging's `release` feature?
+- Should the nixpkgs moq-cli wait for cli-packaging's `full` feature?
   - Don't wait
   - ✅ Wait for cli-packaging
 - The maintainer added "moq-cli only when we're happy with the feature set"
@@ -34,5 +34,5 @@ their driver libraries, so make them findable at runtime (for example
 
 ## Required
 
-- [Ship capture and playback](/quest/m3/cli-packaging.md) - the `release` feature set that the nixpkgs package builds
+- [Ship capture and playback](/quest/m3/cli-packaging.md) - the `full` feature set that the nixpkgs package builds
 - [moq-relay in nixpkgs](/quest/m3/nixpkgs-relay.md) - kixelated's maintainer entry and the package conventions

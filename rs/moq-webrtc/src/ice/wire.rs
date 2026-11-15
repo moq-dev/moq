@@ -10,7 +10,7 @@ use super::canonical;
 pub type Packet = (Vec<u8>, SocketAddr);
 
 /// Bound on a session's inbound datagram queue, sized like a socket buffer: past
-/// it, datagrams are dropped rather than buffered, since ICE and SCTP tolerate loss
+/// it, datagrams are dropped rather than buffered, since ICE, DTLS, and RTP tolerate loss
 /// and a stalled session must not grow memory without limit.
 pub const INBOX: usize = 256;
 

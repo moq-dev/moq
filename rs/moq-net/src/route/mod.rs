@@ -70,7 +70,7 @@ impl Key for usize {}
 impl Key for u64 {}
 
 /// One side's configuration of a link to a neighbor.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Link {
 	/// Strictly positive: a zero-cost link would leave a path as cheap as the one it
 	/// extends, so selection would not converge.
@@ -143,6 +143,21 @@ pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
 /// The most nodes a route crosses, its origin included: the longest hop list a
 /// message carries.
 pub(crate) const MAX_HOPS: usize = 32;
+
+/// Feed `value`'s `Debug` form to `hasher`: how the exhaustive search fingerprints
+/// router state without a `Hash` impl on every type it holds.
+#[cfg(test)]
+pub(crate) fn digest(hasher: &mut impl std::hash::Hasher, value: &impl fmt::Debug) {
+	struct Feed<'a, H>(&'a mut H);
+	impl<H: std::hash::Hasher> fmt::Write for Feed<'_, H> {
+		fn write_str(&mut self, s: &str) -> fmt::Result {
+			self.0.write(s.as_bytes());
+			Ok(())
+		}
+	}
+	fmt::write(&mut Feed(&mut *hasher), format_args!("{value:?}")).expect("Debug never fails");
+	hasher.write_u8(0xff);
+}
 
 /// How a node's reader sees one announced claim.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -78,12 +78,6 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
-	/// Optional public STUN Binding listener, available with the `stun` feature.
-	#[cfg(feature = "stun")]
-	#[usage(flatten)]
-	#[serde(default)]
-	pub stun: crate::stun::Config,
-
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -143,7 +137,7 @@ pub struct Config {
 #[derive(usage_rs::Cli, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-relay", version = env!("CARGO_PKG_VERSION"))]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 struct Cli {
 	#[usage(flatten)]
 	config: Config,
@@ -158,6 +152,11 @@ struct Cli {
 /// one and read as though it were theirs.
 pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 	Cli::spec()
+}
+
+/// Every setting the relay merges, as its flags declare them.
+pub(crate) const fn registry() -> usage_rs::config::Registry {
+	Cli::SETTINGS_REGISTRY
 }
 
 impl Config {
@@ -182,7 +181,6 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
-		moq_tokio::cli::check_env(&[Cli::spec()], &[])?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -262,12 +260,6 @@ impl Config {
 		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
-		#[cfg(not(feature = "stun"))]
-		anyhow::ensure!(
-			env.get("MOQ_STUN_BIND").is_none(),
-			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
-		);
-
 		let mut deprecated = self.deprecated();
 		let (merged, resolved) = moq_tokio::cli::Merge {
 			registry: crate::settings(),
@@ -501,48 +493,6 @@ mod tests {
 		assert!(config.listen.extensions.solicit);
 		assert!(!config.connect.extensions.solicit);
 		assert!(!config.connect.extensions.ietf);
-	}
-
-	#[cfg(feature = "stun")]
-	#[test]
-	fn stun_binding_merges_file_and_cli() {
-		if !test_env::Env::without(&["MOQ_STUN_BIND"]).isolate() {
-			return;
-		}
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("stun.toml");
-		std::fs::write(&path, "[stun]\nbind = \"127.0.0.1:3478\"\n").unwrap();
-		let file = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
-		assert_eq!(file.stun.bind, Some("127.0.0.1:3478".parse().unwrap()));
-		let cli = Config::parse_and_merge([
-			std::ffi::OsString::from("moq-relay"),
-			path.into(),
-			"--stun-bind=127.0.0.1:3479".into(),
-		])
-		.unwrap();
-		assert_eq!(cli.stun.bind, Some("127.0.0.1:3479".parse().unwrap()));
-		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
-	}
-
-	#[cfg(not(feature = "stun"))]
-	#[test]
-	fn a_stun_listener_requires_the_feature() {
-		assert!(toml::from_str::<Config>("[stun]\nbind = \"127.0.0.1:3478\"").is_err());
-		assert!(Config::parse_and_merge(["moq-relay", "--stun-bind=127.0.0.1:3478"]).is_err());
-		let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
-		let env = usage_rs::config::EnvLayer::new([("MOQ_STUN_BIND".to_string(), "127.0.0.1:3478".to_string())]);
-		let error = Config::default().merge_into(&cli, &env, None).unwrap_err();
-		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
-	}
-
-	#[cfg(feature = "stun")]
-	#[test]
-	fn stun_binding_merges_the_environment() {
-		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {
-			return;
-		}
-		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
-		assert_eq!(config.stun.bind, Some("[::1]:3478".parse().unwrap()));
 	}
 
 	#[test]
@@ -1225,13 +1175,6 @@ ws = false
 		}
 	}
 
-	/// The two declarations of every merged flag stay in step.
-	#[test]
-	fn the_settings_registry_matches_the_cli() {
-		let drift = crate::settings::Settings::SETTINGS_REGISTRY.drift(Cli::SETTINGS_BINDINGS);
-		assert!(drift.is_empty(), "{drift:#?}");
-	}
-
 	/// The relay refuses to start on a `MOQ_*` variable it doesn't read, so a stale
 	/// name in the NixOS module would stop every NixOS relay; catch it here first.
 	#[test]
@@ -1259,6 +1202,21 @@ ws = false
 			unknown.is_empty(),
 			"{path} sets variables moq-relay doesn't read: {unknown:?}"
 		);
+	}
+
+	/// A `MOQ_*` variable the relay does not read is refused, naming it, while a
+	/// declared one beside it is not.
+	#[test]
+	fn unknown_env_is_refused() {
+		let env = test_env::Env::default()
+			.set("MOQ_LISTEN_TLS_CRET", "cert.pem")
+			.set("MOQ_CLUSTER_MAX_HOPS", "3");
+		if !env.isolate() {
+			return;
+		}
+		let error = Config::parse_and_merge(["moq-relay"]).unwrap_err().to_string();
+		assert!(error.contains("MOQ_LISTEN_TLS_CRET"), "{error}");
+		assert!(!error.contains("MOQ_CLUSTER_MAX_HOPS"), "{error}");
 	}
 
 	/// An embedder can merge its relay fragment without parsing the binary CLI again.

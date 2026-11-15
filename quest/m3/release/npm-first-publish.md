@@ -28,7 +28,7 @@ depends on it, so a miss fails only its own publish. All five still returned
 
 Decided 2026-10-22 (maintainer): publish a minimal `0.0.0` placeholder
 (README only) per name to claim it, then attach the trusted publisher. The
-cut publishes the real `0.1.0` through the workflow with provenance, so no
+cut publishes the real `0.1.0` (`0.0.1` for `@moq/stats`) through the workflow with provenance, so no
 real version is published by hand. `release.ts` compares against the
 `latest` tag, so the placeholder does not suppress that publish.
 
@@ -40,10 +40,6 @@ published to npm yet` install failure on every run (noted 2026-11-03 from
 [moq-dev/moq#7714](https://github.com/moq-dev/moq/pull/7714), e.g.
 [run 41591680387](https://github.com/moq-dev/moq/actions/runs/41591680387));
 it clears with the same publication.
-
-`@moq/p2p` is out of scope: it is private with no release script, so the cut
-does not publish it. [Watch opts in](/quest/m4/p2p/watch.md) owns its first
-publication, including claiming its names.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped (every `@moq` JSR
 package was archived on 2026-11-07), so no JSR names are claimed.

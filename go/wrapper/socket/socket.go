@@ -8,7 +8,7 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
-// Endpoint is a server, a client, or both, and accepts TCP and track dials separately.
+// Endpoint is a server, a client, or both, and dials and accepts track sessions.
 type Endpoint struct{ inner *ffi.MoqSocketEndpoint }
 
 // NewEndpoint makes the endpoint id beneath prefix, using origin to find peers. Its first
@@ -29,66 +29,6 @@ func (e *Endpoint) Prefix() string { return e.inner.Prefix() }
 
 // Close retracts the endpoint's broadcasts and resets pending dials and sessions.
 func (e *Endpoint) Close() { e.inner.Close() }
-
-// DialTCP dials a new tcp session; cancelling resets only this dial.
-func (e *Endpoint) DialTCP(ctx context.Context, peer string) (*TCPStream, error) {
-	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqSocketTcpStream, error) { return e.inner.DialTcp(ctx, peer) })
-	if err != nil {
-		return nil, err
-	}
-	return newTCPStream(inner), nil
-}
-
-// AcceptTCP starts listening for tcp and awaits the next dial.
-func (e *Endpoint) AcceptTCP(ctx context.Context) (*IncomingTCP, error) {
-	inner, err := bridge.CallHandle(ctx, nil, e.inner.AcceptTcp)
-	if err != nil {
-		return nil, err
-	}
-	return &IncomingTCP{inner: inner}, nil
-}
-
-// IncomingTCP is a tcp dial, consumed by accepting or rejecting it.
-type IncomingTCP struct{ inner *ffi.MoqSocketIncomingTcp }
-
-// Peer returns the claimed endpoint; accepting verifies return routability.
-func (i *IncomingTCP) Peer() string { return i.inner.Peer() }
-
-// Session returns the private session id.
-func (i *IncomingTCP) Session() string { return i.inner.Session() }
-
-// Reject refuses the dial as not found.
-func (i *IncomingTCP) Reject() error { return i.inner.Reject() }
-
-// Accept verifies return routability and accepts this dial.
-func (i *IncomingTCP) Accept(ctx context.Context) (*TCPStream, error) {
-	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqSocketTcpStream, error) { return i.inner.Accept(ctx) })
-	if err != nil {
-		return nil, err
-	}
-	return newTCPStream(inner), nil
-}
-
-// TCPStream exposes a tcp session's two halves and identities.
-type TCPStream struct {
-	// Producer is this side's write half.
-	Producer *moq.GroupProducer
-	// Consumer is the peer's subscribed read half.
-	Consumer *moq.GroupConsumer
-	// Peer is the peer endpoint's id.
-	Peer string
-	// Session is the private session id.
-	Session string
-}
-
-func newTCPStream(inner *ffi.MoqSocketTcpStream) *TCPStream {
-	defer inner.Destroy()
-	return &TCPStream{
-		Producer: bridge.WrapGroupProducer(inner.Producer()).(*moq.GroupProducer),
-		Consumer: bridge.WrapGroupConsumer(inner.Consumer()).(*moq.GroupConsumer),
-		Peer:     inner.Peer(), Session: inner.Session(),
-	}
-}
 
 // DialTrack dials a new track session; cancelling resets only this dial.
 func (e *Endpoint) DialTrack(ctx context.Context, peer string, info *moq.TrackInfo) (*TrackStream, error) {

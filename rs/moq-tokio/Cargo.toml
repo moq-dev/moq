@@ -42,7 +42,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["qmux", "watch", "dep:dns-lookup", "dep:httparse", "dep:tokio-rustls", "dep:tokio-tungstenite"]
 # Qmux over TCP: plaintext `tcp://`, and `tls://`. Server-side and client-side.
 tcp = ["qmux", "dep:dns-lookup", "dep:tokio-rustls"]
-# MoQ over a qmux session established elsewhere, such as moq-webrtc's data channel:
+# MoQ over a qmux session established elsewhere, such as over a WebRTC data channel:
 # `Client::connect_with` and `Listener::accept_with`. Every qmux transport turns it on.
 qmux = ["_transport", "dep:qmux"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
@@ -50,8 +50,9 @@ qmux = ["_transport", "dep:qmux"]
 uds = ["tcp", "qmux/uds"]
 # Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
 # and with `driver`, `quic::driver::sim` carries datagrams over seeded, impaired
-# `moq_quic::sim::Link`s with no sockets. With `net`, `sim::Network` routes a client's dials
-# over in-memory links instead. Turns on no transport of its own. Hidden from the
+# `moq_quic::sim::Link`s with no sockets; with `quic` too, `client::Config::sim` and
+# `server::Config::sim` bind a `Client` or `Server` on one of its hosts. With `net`,
+# `sim::Network` routes a client's dials over in-memory links instead. Turns on no transport of its own. Hidden from the
 # docs. Meant for dev-dependencies, so production builds never compile it.
 sim = ["kio/sim", "moq-quic?/sim"]
 

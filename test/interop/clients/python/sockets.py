@@ -1,4 +1,4 @@
-"""Python/Rust socket interop through a relay, in both directions and protocols."""
+"""Python/Rust socket interop through a relay, in both directions."""
 
 import argparse
 import asyncio
@@ -27,23 +27,17 @@ async def start(coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
     return task
 
 
-async def exchange(stream: socket.TcpStream | socket.TrackStream) -> None:
+async def exchange(stream: socket.TrackStream) -> None:
     assert stream.peer == "rust"
-    if isinstance(stream, socket.TcpStream):
+    assert stream.consumer.info().max_age is None
+    for _ in range(3):
+        group = stream.producer.append_group()
         for payload in PAYLOADS:
-            stream.producer.write_frame(payload)
-        stream.producer.finish()
-        assert [frame.payload async for frame in stream.consumer] == PAYLOADS
-    else:
-        assert stream.consumer.info().max_age is None
-        for _ in range(3):
-            group = stream.producer.append_group()
-            for payload in PAYLOADS:
-                group.write_frame(payload)
-            group.finish()
-        stream.producer.finish()
-        received = [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer]
-        assert received == [(sequence, PAYLOADS) for sequence in range(3)], received
+            group.write_frame(payload)
+        group.finish()
+    stream.producer.finish()
+    received = [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer]
+    assert received == [(sequence, PAYLOADS) for sequence in range(3)], received
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -51,46 +45,42 @@ async def main(args: argparse.Namespace) -> None:
     async with moq.Client(
         args.url, publish=origin, consume=origin, versions=[args.version], tls=moq.ClientTls(insecure=True)
     ):
-        for protocol in ("tcp", "track"):
-            for role in ("dial", "accept"):
-                prefix = f"{args.prefix}/{protocol}/{role}"
-                async with socket.Endpoint(origin, prefix, "python") as endpoint:
-                    incoming = None
-                    if role == "dial":
-                        incoming = await start(endpoint.accept_tcp() if protocol == "tcp" else endpoint.accept_track())
-                    peer = await asyncio.create_subprocess_exec(
-                        args.rust,
-                        args.url,
-                        prefix,
-                        args.version,
-                        protocol,
-                        role,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                    )
-                    assert peer.stdout is not None and peer.stdin is not None
-                    try:
-                        if incoming is not None:
-                            stream = await (await incoming).accept()
-                        else:
-                            assert await peer.stdout.readline() == b"listening\n"
-                            stream = await (
-                                endpoint.dial_tcp("rust") if protocol == "tcp" else endpoint.dial_track("rust")
-                            )
-                        await exchange(stream)
-                        assert await peer.stdout.readline() == b"drained\n"
-                        peer.stdin.write(b"drained\n")
-                        await peer.stdin.drain()
-                        assert await peer.wait() == 0
-                        print(f"socket {protocol}, Rust {role}: passed", flush=True)
-                    finally:
-                        if incoming is not None and not incoming.done():
-                            incoming.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await incoming
-                        if peer.returncode is None:
-                            peer.kill()
-                        await peer.wait()
+        for role in ("dial", "accept"):
+            prefix = f"{args.prefix}/{role}"
+            async with socket.Endpoint(origin, prefix, "python") as endpoint:
+                incoming = None
+                if role == "dial":
+                    incoming = await start(endpoint.accept_track())
+                peer = await asyncio.create_subprocess_exec(
+                    args.rust,
+                    args.url,
+                    prefix,
+                    args.version,
+                    role,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                )
+                assert peer.stdout is not None and peer.stdin is not None
+                try:
+                    if incoming is not None:
+                        stream = await (await incoming).accept()
+                    else:
+                        assert await peer.stdout.readline() == b"listening\n"
+                        stream = await endpoint.dial_track("rust")
+                    await exchange(stream)
+                    assert await peer.stdout.readline() == b"drained\n"
+                    peer.stdin.write(b"drained\n")
+                    await peer.stdin.drain()
+                    assert await peer.wait() == 0
+                    print(f"socket, Rust {role}: passed", flush=True)
+                finally:
+                    if incoming is not None and not incoming.done():
+                        incoming.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await incoming
+                    if peer.returncode is None:
+                        peer.kill()
+                    await peer.wait()
 
 
 if __name__ == "__main__":
