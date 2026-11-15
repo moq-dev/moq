@@ -912,7 +912,6 @@ mod tests {
 		assert!(reported.contains("--quic-qlog / MOQ_QUIC_QLOG"), "{reported}");
 	}
 
-
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
 	#[cfg(feature = "_transport")]
