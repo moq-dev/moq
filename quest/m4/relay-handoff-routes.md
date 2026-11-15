@@ -27,3 +27,7 @@ relay's drain ends.
 
 Exercise it with a publisher that ignores GOAWAY on the old relay and a
 subscriber on another node, past `goaway.handover`.
+
+Picked by the maintainer on 2026-11-15: ✅ keep this quest in m4 (rejected:
+drop it), and ✅ the relay-restart PR landed without it (rejected: hold that PR
+for this link).
