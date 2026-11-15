@@ -6,6 +6,7 @@
 //! <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-4.1>
 
 use kio::clock::Instant;
+#[cfg(feature = "lab")]
 use std::num::NonZeroU16;
 use std::time::Duration;
 
@@ -34,6 +35,7 @@ pub struct Packet {
     /// The GCC probe cluster it was sent in, if any. Sixteen bits fit the padding after the
     /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
     /// far more than either starts in the two seconds a cluster is kept.
+    #[cfg(feature = "lab")]
     pub(crate) probe_cluster: Option<NonZeroU16>,
 }
 
@@ -47,6 +49,7 @@ impl Default for Packet {
             lost: 0,
             tx_in_flight: 0,
             is_app_limited: false,
+            #[cfg(feature = "lab")]
             probe_cluster: None,
         }
     }
@@ -121,6 +124,7 @@ impl Sampler {
             lost: self.lost,
             tx_in_flight: sent.in_flight.try_into().unwrap_or(u32::MAX),
             is_app_limited: self.app_limited != 0,
+            #[cfg(feature = "lab")]
             probe_cluster: None,
         }
     }

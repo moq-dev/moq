@@ -2178,6 +2178,10 @@ impl Config {
     ///
     /// Without receive timestamps, which the transport requests separately, it does nothing.
     /// Off by default.
+    ///
+    /// Test support, enabled by the `lab` feature, until the realtime bake-off decides whether it
+    /// ships.
+    #[cfg(any(test, feature = "lab"))]
     pub fn delay_bound(&mut self, value: bool) -> &mut Self {
         self.delay_bound = value;
         self

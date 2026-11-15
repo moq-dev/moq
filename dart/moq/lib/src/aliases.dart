@@ -38,7 +38,9 @@ typedef Request = MoqRequest;
 /// The network transport carrying an incoming session.
 typedef Transport = MoqTransport;
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control family for a QUIC connection. Build one with
+/// `CongestionControl.delay()`, `.loss()`, or `.none()`; a new algorithm joins as
+/// a new constructor.
 typedef CongestionControl = MoqCongestionControl;
 
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.

@@ -18584,6 +18584,7 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
+            optional = true;
           }
         ];
         devDependencies = [
@@ -18605,7 +18606,10 @@ rec {
             packageId = "workspace-hack";
           }
         ];
-
+        features = {
+          "lab" = [ "dep:tracing" ];
+        };
+        resolvedDefaultFeatures = [ "lab" ];
       };
       "moq-crypto" = rec {
         crateName = "moq-crypto";
@@ -20183,6 +20187,11 @@ rec {
             ];
           }
           {
+            name = "moq-congestion";
+            packageId = "moq-congestion";
+            features = [ "lab" ];
+          }
+          {
             name = "moq-quic";
             packageId = "moq-quic";
             features = [ "mux" ];
@@ -21697,6 +21706,7 @@ rec {
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
+            features = [ "lab" ];
           }
           {
             name = "moq-shaper";
@@ -59666,6 +59676,10 @@ rec {
             ];
           }
           {
+            name = "tracing";
+            packageId = "tracing";
+          }
+          {
             name = "tracing-core";
             packageId = "tracing-core";
           }
@@ -61106,6 +61120,10 @@ rec {
               "decompression-gzip"
               "follow-redirect"
             ];
+          }
+          {
+            name = "tracing";
+            packageId = "tracing";
           }
           {
             name = "tracing-core";
