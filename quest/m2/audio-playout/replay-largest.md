@@ -55,7 +55,7 @@ settled from the trace and a local measurement:
 5. **Budgets follow.** Replay budgets equal what they measure, so every row
    that moves is re-budgeted in the same PR, and the note in `budgets.json`
    loses its sentence about the stale tune-in frame. Measured locally on
-   #8761's branch with `largest` 8994 injected, `relay-mic-rtt40` reads target
+   #8761's head with `largest` 8994 injected, `relay-mic-rtt40` reads target
    p95 120 (from 320). It also moves underruns/min 0.3 to 0.7, player skips/min
    0.3 to 0, trimmed ms/min 83 to 0, accelerated ms/min 88.3 to 97.7, A/V lag
    p50 0.6 to 2.3 and p95 6.9 to 8.6, and recover ms 250.7 to 749.3: the
@@ -63,10 +63,6 @@ settled from the trace and a local measurement:
    derived number is not on a knife's edge.
 6. **Docs.** `test/audio-quality/README.md`'s Traces section documents the
    field, how a capture records it and how the old traces derive it.
-
-## Waiting
-
-- moq-dev/moq: [#8761](https://github.com/moq-dev/moq/pull/8761) merges, which puts the backlog reports on `main`; check with `gh pr view 8761 --repo moq-dev/moq --json state`
 
 ## Related
 

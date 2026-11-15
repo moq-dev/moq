@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Duration, type Installed, Instant, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track, Varint } from "@moq/net";
+import { race } from "@moq/signals";
 import { Consumer } from "./consumer.ts";
 import { Jitter } from "./jitter.ts";
 import { Format } from "./legacy.ts";
@@ -37,7 +38,8 @@ async function play(events: Event[], backlog: (group: number) => boolean): Promi
 	});
 	const oracle = new Jitter();
 	const base = now().since(Instant.ZERO).asMillis();
-	let read = consumer.next();
+	// Settles once the outstanding read does, derived once per read so each pass adds no listener to it.
+	let read = consumer.next().then(() => true);
 	try {
 		for (const [at, sequence, media] of events) {
 			await clock.advance(Duration.millis(base + at).saturatingSub(now().since(Instant.ZERO)));
@@ -50,10 +52,10 @@ async function play(events: Event[], backlog: (group: number) => boolean): Promi
 			// Read whatever is ready, so the cursor moves as a player's does.
 			for (;;) {
 				const flushed = clock.advance(Duration.ZERO);
-				const done = await Promise.race([read.then(() => true), flushed.then(() => false)]);
+				const done = await race([read, flushed.then(() => false)]);
 				await flushed;
 				if (!done) break;
-				read = consumer.next();
+				read = consumer.next().then(() => true);
 			}
 		}
 		return [consumer.spread.peek().asMillis(), oracle.measured];
