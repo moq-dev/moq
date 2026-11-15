@@ -21,7 +21,12 @@ for (const records of [64, 1024]) {
 				const start = performance.now();
 				for (let n = 0; n < records; n++) {
 					const record = await consumer.next();
-					if (record?.value.n !== n || record.value.text !== text || record.at.isBefore(at) || at.isBefore(record.at)) {
+					if (
+						record?.value.n !== n ||
+						record.value.text !== text ||
+						record.at.isBefore(at) ||
+						at.isBefore(record.at)
+					) {
 						throw new Error("stream benchmark lost a record");
 					}
 				}
