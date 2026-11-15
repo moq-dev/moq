@@ -946,6 +946,13 @@ impl Subscriber {
 		self.reader().reoffer_groups(run)
 	}
 
+	/// Hand out again the groups in `run` the reader handed out as metadata; see
+	/// [`track::Subscriber::repay`].
+	#[cfg(feature = "async")]
+	pub(super) fn repay(&mut self, run: std::ops::Range<u64>) -> Vec<group::Consumer> {
+		self.reader().repay(run)
+	}
+
 	/// Take back every stale run this reader queued or the serving route's copy reported;
 	/// see [`track::Subscriber::reoffer_stale`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -1821,6 +1828,19 @@ impl Reader {
 		let index = self.copies.len() - 1;
 		let groups = groups.into_iter().map(|group| self.hand_out(index, group)).collect();
 		(groups, given_up)
+	}
+
+	/// The serving copy's groups in `run` handed out again, as any group of that copy is;
+	/// nothing while no copy serves.
+	#[cfg(feature = "async")]
+	fn repay(&mut self, run: std::ops::Range<u64>) -> Vec<group::Consumer> {
+		let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) else {
+			return Vec::new();
+		};
+		let groups = sub.repay(run);
+		// The serving copy is the newest one.
+		let index = self.copies.len() - 1;
+		groups.into_iter().map(|group| self.hand_out(index, group)).collect()
 	}
 
 	/// Take back every stale run: those queued here, those this reader reported, and those

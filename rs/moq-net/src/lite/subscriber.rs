@@ -1854,7 +1854,7 @@ impl GroupRecv {
 		let group: crate::recv::Group = group;
 		let track: track::Producer = track;
 		// The stream's header says how its frames read: a continuation keeps its group's mode.
-		if group.is_meta() != hdr.meta {
+		if group.handle().is_meta() != hdr.meta {
 			let _ = group.abort(Error::ProtocolViolation);
 			return Poll::Ready(Err(Error::ProtocolViolation));
 		}
@@ -12132,6 +12132,10 @@ impl TrackServe {
 		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), true, None) else {
 			return Ok(None);
 		};
+		// An older version refuses a metadata-only subscription rather than emulate it.
+		if subscription.meta && !self.subscriber.version.has_meta() {
+			return Err(Error::Unsupported);
+		}
 		let establish = self.register(subscription, ranges, None);
 		Ok(Some(Pipelined {
 			pref,

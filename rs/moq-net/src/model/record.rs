@@ -260,6 +260,20 @@ impl Record {
 		}
 	}
 
+	/// Forget that `range` was served, as a metadata stream serves it: asking for the payload
+	/// owes those groups again.
+	pub fn unserve(&mut self, range: Range<u64>) {
+		let served: Vec<_> = self
+			.reported
+			.overlapping(&range)
+			.filter(|(_, report)| matches!(report, Report::Settled))
+			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
+			.collect();
+		for run in served {
+			self.reported.remove(run);
+		}
+	}
+
 	/// Forget the drops of `range` the wire was told, which a verdict or group replaces.
 	pub fn replace_drops(&mut self, range: Range<u64>) {
 		let drops: Vec<_> = self

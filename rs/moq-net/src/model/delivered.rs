@@ -76,6 +76,32 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
+	/// Forget that the keys in `groups` were handed out, so each is handed out again once a
+	/// copy of it arrives.
+	pub fn remove_run(&mut self, groups: std::ops::Range<u64>) {
+		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
+			return;
+		};
+		let from = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.map_or(groups.start, |(start, _)| *start);
+		let touched: Vec<(u64, u64)> = self.runs.range(from..=last).map(|(start, end)| (*start, *end)).collect();
+		for (start, end) in touched {
+			if end < groups.start {
+				continue;
+			}
+			self.runs.remove(&start);
+			if start < groups.start {
+				self.runs.insert(start, groups.start - 1);
+			}
+			if end > last {
+				self.runs.insert(last + 1, end);
+			}
+		}
+	}
+
 	/// The parts of `groups` not handed out, in order.
 	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
 		let mut gaps = Vec::new();
@@ -158,6 +184,19 @@ mod test {
 
 	fn runs(delivered: &Delivered) -> Vec<(u64, u64)> {
 		delivered.runs.iter().map(|(first, last)| (*first, *last)).collect()
+	}
+
+	#[test]
+	fn remove_run_splits_the_runs_it_touches() {
+		let mut delivered = Delivered::default();
+		delivered.insert_run(0..10);
+		delivered.insert_run(12..15);
+		delivered.remove_run(3..13);
+		assert_eq!(runs(&delivered), vec![(0, 2), (13, 14)]);
+		assert!(!delivered.contains(3) && !delivered.contains(12));
+		delivered.remove_run(20..30);
+		delivered.remove_run(5..5);
+		assert_eq!(runs(&delivered), vec![(0, 2), (13, 14)]);
 	}
 
 	#[test]

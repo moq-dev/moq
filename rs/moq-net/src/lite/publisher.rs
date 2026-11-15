@@ -2562,6 +2562,7 @@ impl Request for SubscribeServe {
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest).max(bounds.frames.floor);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					run.update = msg.update;
+					run.meta = msg.meta;
 					run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority, timescale);
 					if let Some(update) = update {
 						run.update(update);
@@ -3079,6 +3080,7 @@ impl SubscribeServe {
 				max: serving_max_delay(shared.version, msg.max_delay),
 			},
 			order: msg.order,
+			meta: msg.meta,
 			..bounds.groups()
 		};
 		let subscribing = track.subscribe(subscription).into_inner();
@@ -4613,6 +4615,25 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	Ok(())
 }
 
+/// Buffer a lite-07 metadata FRAME: the `Payload Length` the payload would take, plus one,
+/// and the timestamp delta, with no payload after it.
+fn buffer_meta_info<W: crate::transport::poll::SendStream>(
+	writer: &mut Writer<W, Version>,
+	timestamp: crate::Timestamp,
+	size: u64,
+	stamp: Option<Stamp>,
+	prev_ts: &mut u64,
+) -> Result<(), Error> {
+	let length = size
+		.checked_add(1)
+		.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+	writer.buffer_varint(length)?;
+	if let Some(stamp) = stamp {
+		buffer_zigzag_delta(writer, stamp.wire(timestamp)?, prev_ts)?;
+	}
+	Ok(())
+}
+
 /// How a lite hop stamps a track's frames and a datagram track's datagrams.
 #[derive(Clone, Copy, Debug)]
 struct Stamp {
@@ -4971,6 +4992,8 @@ struct Paused {
 	/// discarded frames the transport acknowledged, so the continuation starts there.
 	group: group::Consumer,
 	frame_start: u64,
+	/// The stream was in metadata mode, which its continuation keeps.
+	meta: bool,
 }
 
 /// Waits for the subscription's budget or the cache to give the paused group up. Each
@@ -5037,6 +5060,7 @@ impl Subscription {
 			false,
 			Rank::Queue(priority),
 			group,
+			false,
 		));
 		kio::wait(|waiter| serve.poll_open(&mut self.session, self.group.as_ref(), waiter)).await?;
 		kio::wait(move |waiter| serve.poll_serve(waiter)).await
@@ -5154,7 +5178,20 @@ struct TrackRun {
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
 	unstarted: Vec<u64>,
+	/// Lite-07: whether the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for metadata only, the
+	/// mode each new Group Stream opens in.
+	meta: bool,
+	/// Lite-07: the groups served in metadata mode, which an update asking for the payload
+	/// serves again. At most [`MAX_META_RUNS`] runs, the lowest let go first.
+	meta_served: RangeSet<u64>,
+	/// Lite-07: where the payload resumes in the one group served again from partway through,
+	/// as the update asking for it said.
+	payload_from: Option<track::Position>,
 }
+
+/// The most runs of groups served as metadata a subscription remembers to serve again with
+/// the payload. Contiguous groups take one run, so only groups the cursor skipped add more.
+const MAX_META_RUNS: usize = 64;
 
 impl TrackRun {
 	fn new(
@@ -5208,6 +5245,9 @@ impl TrackRun {
 			children: kio::Tasks::new(),
 			idle: None,
 			datagrams: None,
+			meta: false,
+			meta_served: RangeSet::new(),
+			payload_from: None,
 		}
 	}
 
@@ -5273,10 +5313,28 @@ impl TrackRun {
 				max: serving_max_delay(self.ctx.version, upd.max_delay),
 			},
 			order: upd.order,
+			meta: upd.meta,
 			..groups
 		}) {
 			self.refused = Some(err);
 			return;
+		}
+		// Asking for the payload again serves every group served as metadata again, from where
+		// the update says it resumes: groups below it stay delivered. Open streams keep their
+		// mode either way.
+		let promoted = self.meta && !upd.meta;
+		self.meta = upd.meta;
+		if promoted {
+			let mut runs = std::mem::take(&mut self.meta_served);
+			if let Some(payload) = upd.payload {
+				runs.remove(0..payload.group);
+			}
+			self.payload_from = upd.payload.filter(|payload| payload.frame > 0);
+			for run in runs.iter() {
+				let groups = self.track.repay(run.clone());
+				self.track.record_mut().unserve(run.clone());
+				self.reoffered.extend(groups);
+			}
 		}
 		self.named = start;
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
@@ -5605,10 +5663,16 @@ impl TrackRun {
 			&& (self.opening.is_none() || stuck.is_some_and(|waiting| rank > waiting))
 		{
 			let PausedKey { key, .. } = self.paused.remove(&best).expect("best is paused");
-			let Paused { group, frame_start } = self.paused_tasks.remove(key).expect("a paused group waits");
+			let Paused {
+				group,
+				frame_start,
+				meta: paused_meta,
+			} = self.paused_tasks.remove(key).expect("a paused group waits");
 			tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, start = group.start, frame_start, "continuing paused group");
 			self.give_way();
-			self.open(group, frame_start);
+			// A continuation keeps the mode its stream opened in.
+			let meta = paused_meta;
+			self.open(group, frame_start, meta);
 			self.continuing = true;
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -5628,7 +5692,15 @@ impl TrackRun {
 			if self.start.emits_range() && self.track.record_mut().told(key) {
 				return Poll::Ready(Ok(ControlFlow::Continue(())));
 			}
-			match position_group(group, &self.frames) {
+			let positioned = position_group(group, &self.frames).and_then(|group| match self.payload_from {
+				Some(from) if from.group == key => {
+					self.payload_from = None;
+					let group = group.with_range((Bound::Included(from.frame), Bound::Unbounded));
+					(group.index() == from.frame).then_some(group)
+				}
+				_ => Some(group),
+			});
+			match positioned {
 				Some(group) => self.serve(group),
 				None => {
 					self.drop_range(key..key + 1, &Hole::drop(StreamError::NotFound), writer)?;
@@ -6084,9 +6156,20 @@ impl TrackRun {
 		let key = group.start;
 		let frame_start = group.index();
 		self.mark_served(key);
-		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "serving group");
+		// A metadata copy has no payload to serve, whatever the subscription asks now.
+		let meta = self.meta || group.is_meta();
+		if meta {
+			self.meta_served.insert(key..key.saturating_add(1));
+			while self.meta_served.len() > MAX_META_RUNS {
+				let Some(lowest) = self.meta_served.iter().next().cloned() else {
+					break;
+				};
+				self.meta_served.remove(lowest);
+			}
+		}
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, meta, "serving group");
 		self.give_way();
-		self.open(group, frame_start);
+		self.open(group, frame_start, meta);
 	}
 
 	/// The rank of the group waiting for stream credit, if it cannot make room: it ranks below
@@ -6121,6 +6204,7 @@ impl TrackRun {
 				self.pause(Paused {
 					group: waiting.group.clone(),
 					frame_start: waiting.frame_start,
+					meta: waiting.meta,
 				});
 			}
 			false => waiting.settle_failed(&Error::Old),
@@ -6178,7 +6262,7 @@ impl TrackRun {
 
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
 	/// credit before the cursor hands out another.
-	fn open(&mut self, group: group::Consumer, frame_start: u64) {
+	fn open(&mut self, group: group::Consumer, frame_start: u64, meta: bool) {
 		let key = group.start;
 		// The stream stops at the end frame, before the group may end.
 		let capped = self.frames.end(key).is_some();
@@ -6206,6 +6290,7 @@ impl TrackRun {
 			capped,
 			rank,
 			group,
+			meta,
 		));
 	}
 }
@@ -6357,6 +6442,7 @@ impl PausedBench {
 			coverage.run.pause(Paused {
 				group: group.consume(),
 				frame_start: 0,
+				meta: false,
 			});
 			groups.push(group);
 		}
@@ -6435,6 +6521,8 @@ struct GroupServe {
 	budget: kio::coop::Budget,
 	/// Bills the group's payload as each stream delivers it.
 	meter: crate::stats::Meter,
+	/// Lite-07: the stream is in metadata mode, so each FRAME carries its header alone.
+	meta: bool,
 }
 
 #[cfg_attr(
@@ -6472,9 +6560,18 @@ impl GroupServe {
 		matches!(self.state, GroupState::Serve { .. })
 	}
 
-	fn new(ctx: GroupContext, key: u64, frame_start: u64, capped: bool, rank: Rank, group: group::Consumer) -> Self {
-		// A lite-07 peer receives a compressed group as stored, others inflated.
-		let mut group = match ctx.version.has_compression() {
+	fn new(
+		ctx: GroupContext,
+		key: u64,
+		frame_start: u64,
+		capped: bool,
+		rank: Rank,
+		group: group::Consumer,
+		meta: bool,
+	) -> Self {
+		// A lite-07 peer receives a compressed group as stored, others inflated. A metadata
+		// stream names each frame's inflated size.
+		let mut group = match ctx.version.has_compression() && !meta {
 			true => group.compressed(),
 			false => group,
 		};
@@ -6494,6 +6591,7 @@ impl GroupServe {
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 			meter,
+			meta,
 		}
 	}
 
@@ -6556,7 +6654,7 @@ impl GroupServe {
 			subscribe: self.ctx.id,
 			key: self.key,
 			frame_start: self.frame_start,
-			meta: false,
+			meta: self.meta,
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
@@ -6666,6 +6764,41 @@ impl GroupServe {
 							if let Some(records) = records {
 								match records.poll_state(writer, &mut self.group, waiter) {
 									Poll::Ready(Ok(())) => {}
+									Poll::Ready(Err(err)) => break 'serve Err(err),
+									Poll::Pending => return Poll::Pending,
+								}
+							}
+							// A metadata stream sends each frame's header as soon as the group has it,
+							// without waiting for its payload.
+							if self.meta {
+								match self.group.poll_read_info(waiter) {
+									Poll::Ready(Ok(Some(info))) => {
+										let index = self.group.index() - 1;
+										let buffered = records
+											.as_mut()
+											.map_or(Ok(()), |records| records.frame(writer, index, None))
+											.and_then(|()| {
+												buffer_meta_info(
+													writer,
+													info.timestamp,
+													info.size,
+													self.ctx.stamp,
+													&mut self.prev_ts,
+												)
+											});
+										if let Err(err) = buffered {
+											break 'serve Err(err);
+										}
+										self.group.keep_alive();
+										continue;
+									}
+									Poll::Ready(Ok(None)) => match records.take() {
+										Some(mut records) => match records.end(writer, &self.group) {
+											Ok(()) => continue,
+											Err(err) => break 'serve Err(err),
+										},
+										None => break 'serve Ok(()),
+									},
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
@@ -6889,6 +7022,7 @@ impl GroupServe {
 			let paused = Paused {
 				group,
 				frame_start: self.frame_start,
+				meta: self.meta,
 			};
 			self.ctx.outcomes.paused.lock().unwrap().push(paused);
 			return;
@@ -12921,6 +13055,7 @@ mod tests {
 		run.pause(Paused {
 			group: bench.groups[0].consume(),
 			frame_start: 1,
+			meta: false,
 		});
 		assert_eq!(run.paused_tasks.len(), 1, "the earlier wait is cancelled");
 		assert_eq!(run.paused[&100].frame_start, 1);
@@ -12959,6 +13094,7 @@ mod tests {
 		run.pause(Paused {
 			group: empty.consume(),
 			frame_start: 0,
+			meta: false,
 		});
 		run.drop_given_up_paused(&kio::Waiter::noop());
 		assert!(run.paused.contains_key(&200), "a finished group waits to continue");

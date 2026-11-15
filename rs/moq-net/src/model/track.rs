@@ -10701,7 +10701,10 @@ impl Subscriber {
 		};
 		let mut given_up = RangeSet::new();
 		given_up.insert(run.clone());
-		let budget = cursor.subscription.read().budget();
+		let (budget, meta) = {
+			let subscription = cursor.subscription.read();
+			(subscription.budget(), subscription.meta)
+		};
 		let fresh: Vec<_> = {
 			let state = cursor.state.read();
 			let budget = clamp_max_delay(budget, state.max_age_bound());
@@ -10709,7 +10712,12 @@ impl Subscriber {
 			state
 				.lookup
 				.range(run)
-				.filter(|&(&key, slot)| slot.serves_end() && cursor.admits(key) && !state.is_stale(key, &edge, budget))
+				.filter(|&(&key, slot)| {
+					slot.serves_end()
+						&& slot.is_read_as(meta)
+						&& cursor.admits(key)
+						&& !state.is_stale(key, &edge, budget)
+				})
 				.map(|(&key, slot)| (key, slot.serving().consume()))
 				.collect()
 		};
@@ -10722,6 +10730,35 @@ impl Subscriber {
 			}
 		}
 		(groups, given_up)
+	}
+
+	/// Hand out the groups in `run` again, which this subscriber handed out as metadata before
+	/// it asked for the payload: the payload copies its track caches and its range admits now,
+	/// and each other key once its payload arrives. A front's reader asks its serving route's
+	/// copy.
+	#[cfg(feature = "async")]
+	pub(crate) fn repay(&mut self, run: ops::Range<u64>) -> Vec<group::Consumer> {
+		let (groups, delivered) = match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let held: Vec<_> = {
+					let state = cursor.state.read();
+					state
+						.lookup
+						.range(run.clone())
+						.filter(|&(&key, slot)| slot.serves_end() && !slot.is_meta() && cursor.admits(key))
+						.map(|(_, slot)| slot.serving().consume())
+						.collect()
+				};
+				let groups: Vec<_> = held.into_iter().map(|group| cursor.deliver(group)).collect();
+				(groups, &mut cursor.record.delivered)
+			}
+			Inner::Resume(resume, logical) => (resume.repay(run.clone()), &mut logical.record.delivered),
+		};
+		delivered.remove_run(run);
+		for group in &groups {
+			delivered.insert(group.start);
+		}
+		groups
 	}
 
 	/// The parts of `run` this subscriber's track still holds as a received stale run: one
