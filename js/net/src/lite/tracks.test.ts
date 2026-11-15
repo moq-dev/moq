@@ -255,7 +255,8 @@ test("a listing past the announces cap is reset, and the session stays", async (
 // biome-ignore lint/style/noRestrictedGlobals: stubs the host CPU clock the budget reads.
 const host = performance;
 test("a flood of a peer's listing churn yields to the host's tasks", async () => {
-	let fakeNow = 0;
+	// Starts from the real time, since the shared budget may hold a real slice start.
+	let fakeNow = host.now();
 	spyOn(host, "now").mockImplementation(() => (fakeNow += 5));
 	const { subscriber, listed } = handPlayed();
 	const tracks = subscriber.consume(Path.from("room")).tracks();
