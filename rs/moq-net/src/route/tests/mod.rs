@@ -10,6 +10,7 @@
 
 mod cache;
 mod compare;
+mod cost;
 mod handoff;
 mod interest;
 mod residual;

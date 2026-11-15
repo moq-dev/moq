@@ -1205,6 +1205,103 @@ impl PathRouteDrain {
 	}
 }
 
+/// A path router hearing `origins` publishers from one neighbour, each under a prefix of
+/// its own with `claims` claims, and answering `streams` streams that each watch a
+/// prefix no publisher claims under, for the routes bench.
+pub struct PathRouteChange {
+	router: crate::route::path::Router<usize, ()>,
+	far: u64,
+	rtt: u64,
+}
+
+impl PathRouteChange {
+	const UP: u64 = 1_000;
+
+	fn reach(id: u64, far: u64) -> crate::route::path::Reach {
+		use crate::route::path::{Hop, Offer, Reach};
+		let path = [
+			Hop { node: id, session: 0 },
+			Hop { node: far, session: 1 },
+			Hop {
+				node: Self::UP,
+				session: 1,
+			},
+		];
+		Reach::Finite(Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+			rtt: Some(std::time::Duration::ZERO),
+		})
+	}
+
+	/// Hear `origins` publishers with `claims` claims each, and answer `streams` streams
+	/// the routes miss.
+	pub fn new(origins: usize, claims: usize, streams: usize) -> Self {
+		let mut router = crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default());
+		router.connect(0, Self::UP, crate::route::Link::default()).unwrap();
+		router.edited(0);
+		for o in 0..origins {
+			let id = 1 + o as u64;
+			let prefix = Path::new(&format!("o{o}")).unwrap();
+			router.route(0, id, prefix.clone(), Some(Self::reach(id, 500)));
+			let changes = (0..claims)
+				.map(|c| (Path::new(&format!("o{o}/{c}")).unwrap(), Some(())))
+				.collect();
+			router.batch(0, id, prefix, changes, Some(1));
+		}
+		for s in 0..streams {
+			let peer = 1 + s;
+			router
+				.connect(peer, 5_000 + s as u64, crate::route::Link::default())
+				.unwrap();
+			let add = vec![Path::new(&format!("x{s}")).unwrap().to_owned()];
+			router
+				.edit(
+					peer,
+					crate::route::path::Edit {
+						remove: Vec::new(),
+						add,
+					},
+				)
+				.unwrap();
+		}
+		let mut node = Self {
+			router,
+			far: 500,
+			rtt: 0,
+		};
+		node.flush();
+		node
+	}
+
+	/// The neighbour moves the first publisher's route onto another path, which no
+	/// stream watches.
+	pub fn repath(&mut self) {
+		self.far = if self.far == 500 { 501 } else { 500 };
+		self.router
+			.route(0, 1, Path::new("o0").unwrap(), Some(Self::reach(1, self.far)));
+		assert_eq!(self.flush(), 0);
+	}
+
+	/// The RTT of the link to the neighbour changes, and with it every route through it,
+	/// which no stream watches.
+	pub fn relink(&mut self) {
+		self.rtt = self.rtt % 8 + 1;
+		self.router.rtt(0, Some(std::time::Duration::from_millis(self.rtt)));
+		assert_eq!(self.flush(), 0);
+	}
+
+	fn flush(&mut self) -> usize {
+		let sent = self.router.drain().len();
+		self.router.events();
+		self.router.changed();
+		sent
+	}
+}
+
 /// What a client session fed into an origin hears it should ask its peer about, for
 /// the interests bench.
 pub struct Interests(crate::model::Interests);

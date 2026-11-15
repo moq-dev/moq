@@ -33,6 +33,13 @@
 //! - path/drained: after the drain, an RTT change on a session with no routes. Swept
 //!   over the same grid: the streams axis is expected to grow, since each stream's
 //!   DRAIN notice is kept; the sessions axis is not.
+//! - path/repath: a relay hears one publisher's route move onto another path, and
+//!   answers streams the route misses. Swept over the claims behind the route and those
+//!   streams: neither axis is expected to grow.
+//! - path/relink: the RTT of the link every route arrives on changes. Swept over the
+//!   publishers behind the link and the streams their routes miss: the publishers axis
+//!   is expected to grow, since each route changes; the streams axis is not, though today
+//!   it does (`route::tests::cost::residual_a_link_update_visits_every_unrelated_stream`).
 //!
 //! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
@@ -56,6 +63,12 @@ const FOLLOWED: [(usize, usize); 4] = [(16, 1), (1_024, 1), (16, 16), (1_024, 16
 /// `(sessions, streams)` shapes for a relay hearing a node it reaches over many
 /// sessions drain.
 const DRAINING: [(usize, usize); 4] = [(4, 4), (128, 4), (4, 128), (128, 128)];
+
+/// `(claims, streams)` shapes for one route's change, with streams it misses.
+const REPATH: [(usize, usize); 4] = [(1, 10), (10_000, 10), (1, 1_000), (10_000, 1_000)];
+
+/// `(publishers, streams)` shapes for a link's change, with streams its routes miss.
+const RELINK: [(usize, usize); 4] = [(1, 10), (1_000, 10), (1, 1_000), (1_000, 1_000)];
 
 /// `(claims, lag)` shapes for a relay hearing a stream that lags another.
 const LAGGING: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 10_000)];
@@ -283,6 +296,32 @@ fn bench_path_drained(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_path_repath(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/repath");
+	for (claims, streams) in REPATH {
+		let id = BenchmarkId::from_parameter(format!("{claims}c_{streams}s"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let node = fixture.get_or_insert_with(|| fuzz::PathRouteChange::new(1, claims, streams));
+			b.iter(|| node.repath());
+		});
+	}
+	group.finish();
+}
+
+fn bench_path_relink(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/path/relink");
+	for (publishers, streams) in RELINK {
+		let id = BenchmarkId::from_parameter(format!("{publishers}p_{streams}s"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let node = fixture.get_or_insert_with(|| fuzz::PathRouteChange::new(publishers, 1, streams));
+			b.iter(|| node.relink());
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_watched,
@@ -299,6 +338,8 @@ criterion_group!(
 	bench_path_teardown,
 	bench_path_refollow,
 	bench_path_drain,
-	bench_path_drained
+	bench_path_drained,
+	bench_path_repath,
+	bench_path_relink
 );
 criterion_main!(benches);
