@@ -522,7 +522,7 @@ void main() {
           keepAlive: Duration.zero,
           gso: false,
           mtuDiscovery: true,
-          congestionControl: CongestionControl.loss,
+          congestionControl: CongestionControl.loss(),
           keylog: false,
         ),
         once: true,

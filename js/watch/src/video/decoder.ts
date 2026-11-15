@@ -709,6 +709,8 @@ class Rendition {
 			delay: this.#delay,
 			warmup: this.#warmup,
 			predecessor: this.consumer ?? this.#predecessor,
+			// The one decoder drives the clock, so it skips a hole once the clock passed it.
+			playhead: this.sync,
 		});
 		effect.cleanup(() => consumer.close());
 		this.consumer = consumer;

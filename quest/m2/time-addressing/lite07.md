@@ -30,7 +30,7 @@ Decided 2026-10-25 (maintainer), from the spike:
 - `Timescale` 0 stays and means scale-less: keys and frame timestamps are
   bare numbers, and a scale-less frame carries its group's key (decided
   2026-11-03, maintainer: ingested legacy tracks with bare keys still cross
-  lite-07; see [the model](/quest/m2/time-addressing/model.md)). FRAME and
+  lite-07; see [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md)). FRAME and
   datagrams always carry a timestamp. The untimed cases of
   TIMESTAMP_MISMATCH, Time anchors, and arrival-age-only expiry become the
   scale-less cases. The rule that a Group's frame
@@ -52,7 +52,7 @@ Also reword `drafts/draft-lcurley-moq-e2ee.md`, which still calls the nonce's
 group input a sequence (its group-allocation rule, about line 268): it is the
 group's start, strictly increasing. The nonce bytes don't change, since both
 the Rust and JS cores already feed it the group's wire ID, which
-[the model](/quest/m2/time-addressing/model.md) makes the start. Folded in
+[the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md) makes the start. Folded in
 2026-11-14 from the removed E2EE nonce quest (the m2 triage before the cut,
 under /quest-afk, for the maintainer's review), since this PR's rename
 outdates that wording.
@@ -83,11 +83,7 @@ previous-start link makes SUBSCRIBE_SKIP redundant.
 
 Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) OLD drops are final on their subscription: this rewrite deletes `Update`, the reopen and re-offer paths, and their model configs (rejected: (b) keep reopening and finish [finished across updates](/quest/m3/lite-finished-across-updates.md)).
 
-Public API: none beyond [the model](/quest/m2/time-addressing/model.md).
+Public API: none beyond [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md).
 Wire: lite-07-wip GROUP, GROUP_END, SUBSCRIBE, SUBSCRIBE_UPDATE,
 SUBSCRIBE_OK, SUBSCRIBE_STARTED, SUBSCRIBE_FINISH, SUBSCRIBE_SKIP, and
 SUBSCRIBE_DROP change.
-
-## Required
-
-- [Rust groups by start](/quest/m2/time-addressing/model.md) - the model this wire carries

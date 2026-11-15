@@ -34,6 +34,7 @@ use demand::Subscriptions;
 mod fill;
 mod hole;
 mod miss;
+pub(super) use fill::Asking;
 pub use fill::Fill;
 use fill::FillState;
 pub(crate) use hole::Hole;
@@ -3843,7 +3844,8 @@ pub(super) enum Board {
 }
 
 /// Board `reader`'s group at its frame, which the copy it read shed: ride a copy that
-/// admits it, else ask the track's [`Requests`] handlers for a flight from that frame.
+/// admits it, else ask the track's [`Requests`] handlers for a flight from that frame,
+/// with the reader's priority and budget.
 /// `None` when no handler can serve one.
 ///
 /// A compressed group's flight starts at frame 0, since a later frame builds on the ones
@@ -3858,15 +3860,17 @@ pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer)
 	}
 	let fills = state.fills.clone();
 	drop(state);
+	// One group either way, so it never turns a wider fill it joins newest first.
 	let asking = fill::Asking {
-		priority: 0,
-		max_delay: None,
 		order: Order::Ascending,
+		..reader.asking()
 	};
 	let (key, frame) = (reader.start, if compress { 0 } else { reader.index() });
 	let join = fills.lock().fly(&fills, key, frame, asking)?;
 	Some(Board::Wait(Boarding {
 		join: Box::new(join),
+		fills,
+		asking,
 		key,
 		frame,
 	}))
@@ -3886,6 +3890,9 @@ pub(super) fn hand_over(
 pub(super) struct Boarding {
 	// Boxed: a reader holds one only while boarding.
 	join: Box<fill::Join>,
+	// Where to ask again, with what, when a tighter budget than this reader's refused it.
+	fills: kio::Shared<FillState>,
+	asking: fill::Asking,
 	key: u64,
 	frame: u64,
 }
@@ -3906,15 +3913,36 @@ impl Boarding {
 		};
 		let key = self.key;
 		let answer = self.join.outcome().poll(waiter, |outcome| match outcome.refused(key) {
-			Some((err, _)) => Poll::Ready(Err(err.clone())),
-			None if outcome.is_accepted(key) => Poll::Ready(outcome.partial(key, frames).ok_or(Error::Cancel)),
+			Some((err, asked)) => Poll::Ready(Err((err.clone(), asked))),
+			None if outcome.is_accepted(key) => Poll::Ready(outcome.partial(key, frames).ok_or((Error::Cancel, None))),
 			None => Poll::Pending,
 		});
-		Poll::Ready(match ready!(answer) {
-			Ok(Ok(copy)) => copy.try_consume().ok_or(Error::Cancel),
-			Ok(Err(err)) => Err(err),
-			Err(_closed) => Err(Error::NotFound),
-		})
+		// The closed channel's guard borrows the join, which a retry replaces.
+		let (err, asked) = match ready!(answer.map(|answer| answer.map_err(drop))) {
+			Ok(Ok(copy)) => return Poll::Ready(copy.try_consume().ok_or(Error::Cancel)),
+			Ok(Err(refused)) => refused,
+			Err(_closed) => return Poll::Ready(Err(Error::NotFound)),
+		};
+		// Boarded a flight already asked under a tighter budget, which judged the group too
+		// old for that budget, not ours: ask again with ours. Terminates, since the new
+		// flight asks at least our budget.
+		if !matches!(err, Error::Old) || !looser(asked, self.asking.max_delay) {
+			return Poll::Ready(Err(err));
+		}
+		let Some(join) = self.fills.lock().fly(&self.fills, key, self.frame, self.asking) else {
+			return Poll::Ready(Err(err));
+		};
+		*self.join = join;
+		self.poll(waiter)
+	}
+}
+
+/// Whether `ours` waits longer than the budget `asked` upstream, `None` being the longest.
+fn looser(asked: Option<Duration>, ours: Option<Duration>) -> bool {
+	match (asked, ours) {
+		(Some(asked), Some(ours)) => ours > asked,
+		(Some(_), None) => true,
+		(None, _) => false,
 	}
 }
 
@@ -4932,11 +4960,16 @@ impl Producer {
 
 	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
+	/// This is how an on-demand publisher ends a track once [`Demand::poll_wanted_changed`]
+	/// reports nobody wants it. Dropping the producer instead races a reader joining in
+	/// between, which then reads [`Error::Dropped`].
+	///
 	/// Consumer creation and the unwanted check share a lock, so demand returning
 	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
 	/// the track is closed, including when it was already closed; existing handles
-	/// may still observe its final state. `Err(producer)` leaves the track unchanged
-	/// so the caller can continue serving and wait for the next unwanted wake.
+	/// may still observe its final state, and a later lookup requests the track afresh.
+	/// `Err(producer)` leaves the track unchanged so the caller can continue serving and
+	/// wait for the next unwanted wake.
 	///
 	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
 	/// counts as a consumer until it reads the group's end.
@@ -4947,8 +4980,7 @@ impl Producer {
 			reason = "return the owned producer without allocating on an idle check"
 		)
 	)]
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
+	pub fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
 		let wanted = match self.state.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err, None).abort();
@@ -5252,6 +5284,8 @@ pub struct Requests {
 	// Shared with the track's producers: a handler still serving fills keeps the
 	// track alive, like a producer clone does.
 	alive: Arc<Alive>,
+	// Takes only fetches; see [`Self::fetches_only`].
+	fetches_only: bool,
 }
 
 impl Requests {
@@ -5263,7 +5297,20 @@ impl Requests {
 			state,
 			fills,
 			alive,
+			fetches_only: false,
 		}
+	}
+
+	/// Take only [`Consumer::fetch_group`]'s fills from now on, as a session does for a
+	/// copy whose subscription ended: a reader's miss settles at once, as with no handler,
+	/// while a fetch still goes upstream. Queued misses are dropped; taken fills stay.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn fetches_only(mut self) -> Self {
+		if !self.fetches_only {
+			self.fills.lock().fetches_only();
+			self.fetches_only = true;
+		}
+		self
 	}
 
 	/// The track's name, unique within its broadcast.
@@ -5300,12 +5347,16 @@ impl Requests {
 impl Clone for Requests {
 	fn clone(&self) -> Self {
 		// Count each live handle (mirrors `broadcast::Requests`).
-		self.fills.lock().add_handler();
+		match self.fetches_only {
+			true => self.fills.lock().add_fetcher(),
+			false => self.fills.lock().add_handler(),
+		}
 		Self {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			fills: self.fills.clone(),
 			alive: self.alive.clone(),
+			fetches_only: self.fetches_only,
 		}
 	}
 }
@@ -5316,7 +5367,10 @@ impl Drop for Requests {
 		// a live `Producer` may still be serving the subscription. It just stops serving
 		// fills: a queued one no handler will ever take closes, so its readers stop
 		// waiting on it, while one already taken stays with its `Fill`.
-		self.fills.lock().remove_handler();
+		match self.fetches_only {
+			true => self.fills.lock().remove_fetcher(),
+			false => self.fills.lock().remove_handler(),
+		}
 	}
 }
 
@@ -5693,6 +5747,8 @@ impl Demand {
 	///
 	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
 	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
+	/// End a track nobody wants with [`Producer::abort_unwanted`], which keeps it for a
+	/// reader that joined since.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		let active = match self.poll_state(waiter) {
@@ -6762,6 +6818,7 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 			order: Order::Ascending,
 		},
 		time: None,
+		fetch: true,
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
@@ -6931,6 +6988,7 @@ impl Fetching {
 			cache,
 			reading: Reading::new(state.clone()),
 			key,
+			priority: self.priority,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		});
@@ -6969,7 +7027,7 @@ impl Fetching {
 			}
 			// Never queued: no handler existed when the fetch was made. Fail fast while
 			// that's still true; a handler that appeared since may yet fill the cache.
-			return match fills.poll(waiter, |fills| match fills.has_handlers() {
+			return match fills.poll(waiter, |fills| match fills.takes_fetches() {
 				false => Poll::Ready(()),
 				true => Poll::Pending,
 			}) {
@@ -7001,12 +7059,7 @@ impl Fetching {
 		// Joined after a tighter budget went on the wire, which judged the group too old
 		// for that budget, not ours: ask again with ours. Terminates, since the new
 		// fill asks at least our budget.
-		let looser = match (asked, self.max_delay) {
-			(Some(asked), Some(ours)) => ours > asked,
-			(Some(_), None) => true,
-			(None, _) => false,
-		};
-		if matches!(err, Error::Old) && looser {
+		if matches!(err, Error::Old) && looser(asked, self.max_delay) {
 			let options = group::Fetch {
 				priority: self.priority,
 				max_delay: self.max_delay,
@@ -7223,6 +7276,7 @@ struct FetchExpiry {
 	cache: Arc<cache::Track>,
 	reading: Reading,
 	key: u64,
+	priority: i8,
 	max_delay: Option<Duration>,
 	superseded: Superseded,
 }
@@ -7278,9 +7332,18 @@ impl group::Expiry for FetchExpiry {
 			state,
 			cache,
 			key: self.key,
+			priority: self.priority,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		})
+	}
+
+	fn asking(&self) -> Asking {
+		Asking {
+			priority: self.priority,
+			max_delay: self.max_delay,
+			order: Order::Ascending,
+		}
 	}
 
 	fn ended(&self) {
@@ -7325,6 +7388,15 @@ impl group::Expiry for GroupExpiry {
 			key: self.key,
 			superseded: Superseded::default(),
 		})
+	}
+
+	fn asking(&self) -> Asking {
+		let subscription = self.subscription.read();
+		Asking {
+			priority: subscription.priority,
+			max_delay: subscription.delay.max,
+			order: subscription.order,
+		}
 	}
 
 	fn ended(&self) {
@@ -8892,6 +8964,7 @@ impl Cursor {
 				frame_end: None,
 				asking: *asking,
 				time: Some(time),
+				fetch: false,
 			};
 			let (joins, _) = fills.lock().join(&fills, &ask);
 			self.filter.lookups.push(Lookup {
@@ -23735,6 +23808,35 @@ mod test {
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
 	}
 
+	/// A handler that takes only fetches leaves a reader's miss to settle as with none, and
+	/// still takes a fetch.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetch_only_handler_takes_fetches_alone() {
+		let (producer, dynamic, mut subscriber) = started_late();
+		let dynamic = dynamic.fetches_only();
+		let waiter = kio::Waiter::noop();
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+			read.push(group.start);
+		}
+		assert_eq!(read, [2, 3]);
+		elapse(&producer, Duration::from_secs(31));
+		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the miss asked nothing"
+		);
+
+		let mut fetch = producer.consume().fetch_group(1, None);
+		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.clone().poll_requested_fill(&waiter) else {
+			panic!("the fetch is taken");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 2));
+		assert!(fill.is_fetch());
+	}
+
 	/// A fill whose handler leaves before taking it settles by run: a peer that starts its
 	/// feed far past the reader's floor makes the miss wide, and walking it group by group
 	/// would never finish.
@@ -27548,6 +27650,87 @@ mod test {
 			.write_frame(Timestamp::from_millis(100_000).unwrap(), numbered(0))
 			.unwrap();
 		assert!(matches!(late.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	/// A flight asks upstream with its rider's priority and budget, a subscriber's or a
+	/// fetch's, as any other fill does, so a late joiner's replay is not ranked below live
+	/// traffic. It asks oldest first whatever the rider's order, since it holds one group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_flight_asks_with_its_riders_priority() {
+		let budget = Duration::from_secs(10);
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut sub = producer.subscribe(
+			Subscription::default()
+				.with_priority(5)
+				.with_delay(Delay::default().with_max(budget))
+				.with_order(Order::Descending),
+		);
+		let mut live = producer.append_next().unwrap();
+		for index in 0..3_000u32 {
+			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+				.unwrap();
+		}
+		let mut late = sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+		assert_eq!(read_numbered(&mut late), None, "boarding");
+		let fill = asked(&requests).expect("a flight");
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		assert_eq!(fill.priority(), 5);
+		assert_eq!(fill.max_delay(), Some(budget));
+		assert_eq!(fill.order(), Order::Ascending);
+		drop(late);
+		drop(fill);
+
+		let fetch = group::Fetch::default().with_priority(-3).with_max_delay(budget);
+		let mut fetched = producer
+			.consume()
+			.fetch_group(0, fetch)
+			.now_or_never()
+			.expect("cached")
+			.expect("group 0");
+		assert_eq!(read_numbered(&mut fetched), None, "boarding");
+		let fill = asked(&requests).expect("a flight");
+		assert_eq!(fill.priority(), -3);
+		assert_eq!(fill.max_delay(), Some(budget));
+	}
+
+	/// A rider that boarded a flight already asked under a tighter budget is not failed by
+	/// that budget's `Old`: it asks a flight of its own with its budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looser_rider_asks_again_after_old() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let subscribe = |budget: u64| {
+			let delay = Delay::default().with_max(Duration::from_secs(budget));
+			producer.subscribe(Subscription::default().with_delay(delay))
+		};
+		let (mut tight, mut loose) = (subscribe(1), subscribe(10));
+		let mut live = producer.append_next().unwrap();
+		for index in 0..3_000u32 {
+			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+				.unwrap();
+		}
+		let recv = |sub: &mut Subscriber| sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+		let (mut tight, mut loose) = (recv(&mut tight), recv(&mut loose));
+
+		assert_eq!(read_numbered(&mut tight), None, "boarding");
+		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(req.max_delay(), Some(Duration::from_secs(1)));
+		assert_eq!(read_numbered(&mut loose), None, "boards the same flight");
+		assert!(requests.requested_fill_group().now_or_never().is_none(), "one flight");
+
+		req.reject(Error::Old);
+		assert!(matches!(tight.read_frame().now_or_never(), Some(Err(Error::Evicted))));
+		assert_eq!(read_numbered(&mut loose), None, "asks again");
+		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
+		let mut flight = req.accept(None).unwrap();
+		flight
+			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(0))
+			.unwrap();
+		assert_eq!(read_numbered(&mut loose), Some(0));
 	}
 
 	/// Pool debt sheds a flight even once the cached copy of its group was evicted whole.

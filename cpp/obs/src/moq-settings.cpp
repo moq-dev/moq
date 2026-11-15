@@ -350,9 +350,9 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 	// transport free to pick.
 	if (const char *family = OptionalString(settings, QUIC_CONGESTION_CONTROL)) {
 		if (strcmp(family, "delay") == 0)
-			config.quic.congestion_control = moq::CongestionControl::kDelay;
+			config.quic.congestion_control = moq::CongestionControl::delay();
 		else if (strcmp(family, "loss") == 0)
-			config.quic.congestion_control = moq::CongestionControl::kLoss;
+			config.quic.congestion_control = moq::CongestionControl::loss();
 		else
 			Refuse(error, std::string("unknown congestion control: ") + family);
 	}

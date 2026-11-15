@@ -91,12 +91,6 @@ export class Fetch {
 	/** Whether the request carried Range Filters, which we refuse. Never encoded. */
 	rangeFilters: boolean;
 
-	/**
-	 * FILL_TIMEOUT: the total wait for objects not yet available before they are reported as
-	 * a gap, zero for only what is cached. Absent waits as long as the publisher chooses.
-	 */
-	fillTimeout?: number;
-
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
 
@@ -106,7 +100,6 @@ export class Fetch {
 		subscriberPriority = DEFAULT_WIRE,
 		groupOrder,
 		rangeFilters = false,
-		fillTimeout,
 		propertiesWanted = true,
 	}: {
 		requestId: bigint;
@@ -114,7 +107,6 @@ export class Fetch {
 		subscriberPriority?: number;
 		groupOrder?: Order;
 		rangeFilters?: boolean;
-		fillTimeout?: number;
 		propertiesWanted?: boolean;
 	}) {
 		this.requestId = requestId;
@@ -122,7 +114,6 @@ export class Fetch {
 		this.subscriberPriority = subscriberPriority;
 		this.groupOrder = groupOrder;
 		this.rangeFilters = rangeFilters;
-		this.fillTimeout = fillTimeout;
 		this.propertiesWanted = propertiesWanted;
 	}
 
@@ -133,7 +124,6 @@ export class Fetch {
 		params.subscriberPriority = this.subscriberPriority;
 		if (this.groupOrder !== undefined)
 			params.groupOrder = this.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
-		params.fillTimeout = this.fillTimeout;
 
 		const type = this.type;
 		if (Filter.isDraft20(version)) {
@@ -226,7 +216,6 @@ export class Fetch {
 			// Parameters refuses anything but Ascending or Descending.
 			groupOrder: order === undefined ? undefined : order === GroupOrder.Ascending ? "ascending" : "descending",
 			rangeFilters: params.rangeFilters,
-			fillTimeout: params.fillTimeout,
 			// Defaults to 1, so an absent parameter means the requester wants them.
 			propertiesWanted: params.includeProperties ?? true,
 		});

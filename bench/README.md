@@ -924,9 +924,14 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 ### Paired comparison
 
 Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
-`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
-own, on the same runner, so night-to-night runner variance drops out. Each
-built target runs once per side in the trend's quick mode, alternating which
+`rust-extra` and `rust-uring`) also run the previous scheduled Nightly's commit beside their
+own, on the same runner, so night-to-night runner variance drops out. That
+night kept its bench executables as an artifact, which serve as the base
+instead of a rebuild: the Rust cache cannot hold a linked executable, and
+relinking `rust-bench`'s 32 fat-LTO targets took seven of its sixty minutes.
+When that night kept no executable for some target, or one cannot load on
+this runner, as after a library bump, the base is built. Each
+target runs once per side in the trend's quick mode, alternating which
 side goes first; the current side is the trend point. A target whose base
 executable is byte-identical to the current one is not compared: it is listed
 as the same build, since only noise could tell them apart. A case more than 10%

@@ -57,12 +57,12 @@ func (o RouteOptions) ffi() ffi.MoqRouteOptions {
 	return ffi.MoqRouteOptions{Hidden: o.Hidden, Cost: o.Cost, Instance: optional(o.Instance), Epoch: o.Epoch}
 }
 
-// optional lowers a nil instance to the ffi's None.
-func optional(instance *Instance) **ffi.MoqInstance {
-	if instance == nil {
+// optional lowers a nil ffi object to the ffi's None.
+func optional[T any](object *T) **T {
+	if object == nil {
 		return nil
 	}
-	return &instance
+	return &object
 }
 
 // Route creates a route at exactly path, owning a new broadcast to fill.
