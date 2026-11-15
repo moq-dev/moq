@@ -19,7 +19,9 @@ Today:
 
 - PipeWire (`rs/moq-video/src/capture/pipewire.rs`) and WGC
   (`rs/moq-video/src/capture/wgc.rs`) re-emit the last frame every frame
-  interval: move that timer to 250 ms.
+  interval. Repeat only after 250 ms without a changed frame, and keep changed
+  frames paced at the configured rate: WGC's `Delivery` uses one deadline for
+  both, so splitting them, not retuning the interval, is the change.
 - ScreenCaptureKit (`rs/moq-video/src/capture/screencapture.rs`) drops idle
   buffers and re-emits nothing, so a still Mac screen sends no frames at all:
   add the 250 ms repeat.
@@ -31,8 +33,8 @@ Today:
 Check that keyframes still come on the GoP interval, since a timer based on
 frame count would stretch to eight times as long at 4 Hz, and that
 `@moq/watch`'s latency and stall handling treats 250 ms gaps as live.
-WGC's change is the same timer value; no Windows host is listed, so its
-unit test and the Windows CI build cover it.
+No Windows host is listed: `Delivery`'s unit tests (changed frames keep their
+cadence, repeats come at 250 ms) and the Windows CI build cover WGC.
 
 Public API: none. Wire: none.
 
