@@ -141,11 +141,6 @@ pub struct Media {
 
 	pub(crate) need_open_event: bool,
 	pub(crate) need_changed_event: bool,
-
-	/// When converting media lines to SDP, it's easier to represent the app m-line
-	/// as a Media. This field is true when we do that. No Session::medias will have
-	/// this set to true – they only exist temporarily.
-	pub(crate) app_tmp: bool,
 }
 
 #[derive(Debug)]
@@ -597,7 +592,6 @@ impl Default for Media {
 		Self {
 			mid: Mid::new(),
 			index: 0,
-			app_tmp: false,
 			cname: Id::<20>::random().to_string(),
 			msid: Msid::random(),
 			kind: MediaKind::Video,
@@ -657,15 +651,6 @@ impl Media {
 			remote_exts: a.exts,
 			remote_created: false,
 			simulcast: a.simulcast.map(|s| s.into_sdp()),
-			..Default::default()
-		}
-	}
-
-	pub(crate) fn from_app_tmp(mid: Mid, index: usize) -> Media {
-		Media {
-			mid,
-			index,
-			app_tmp: true,
 			..Default::default()
 		}
 	}

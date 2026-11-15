@@ -393,6 +393,7 @@ impl<N: Copy> Route<N> {
 	}
 }
 
+#[derive(Clone, Debug)]
 struct Session {
 	/// How this node names the session in the hops of the routes it learns there.
 	number: u64,
@@ -409,6 +410,7 @@ struct Session {
 }
 
 /// Presence in `Router::answering` is the answering phase; absence is idle.
+#[derive(Clone, Debug)]
 struct Answer<A> {
 	watch: Path,
 	tx: BTreeMap<RouteId, Sent<A>>,
@@ -418,6 +420,7 @@ struct Answer<A> {
 	told_draining: BTreeSet<Id>,
 }
 
+#[derive(Clone, Debug)]
 struct Origin<A> {
 	view: View<A>,
 }
@@ -481,6 +484,7 @@ pub(crate) struct Retained {
 	pub draining: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct Router<N, A> {
 	hop: Id,
 	doubt: Doubt,
@@ -848,7 +852,6 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			None => view.items.remove(&claim),
 		};
 		let dirty = Dirty {
-			all: false,
 			claims: BTreeSet::from([claim]),
 			..Default::default()
 		};
@@ -1145,6 +1148,14 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		(heard.state == State::Live).then_some(&heard.offer)
 	}
 
+	/// Whether `from` offered a route for `id` under `prefix`, in any state.
+	#[cfg(test)]
+	pub fn hears(&self, id: Id, prefix: &Path, from: N) -> bool {
+		self.rx
+			.get(&(id, prefix.clone()))
+			.is_some_and(|routes| routes.contains_key(&from))
+	}
+
 	/// Every route this node uses for `id`, by prefix.
 	pub fn routes(&self, id: Id) -> impl Iterator<Item = (&Path, &Route<N>)> {
 		of(&self.routes, id).map(|((_, prefix), route)| (prefix, route))
@@ -1236,6 +1247,65 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	#[cfg(test)]
 	pub fn work(&self) -> usize {
 		self.work.get()
+	}
+
+	/// Hash what decides this node's future as of `now`, leaving out the work
+	/// counters. A deadline counts by how far off it is, so two runs that differ
+	/// only in how much time has passed hash the same; one already due counts as
+	/// zero, since the next `timeout` fires them together. Its output and reader
+	/// events must already be taken.
+	#[cfg(test)]
+	pub fn fingerprint(&self, now: Instant, hasher: &mut impl std::hash::Hasher) {
+		let Self {
+			hop,
+			doubt,
+			opened,
+			sessions,
+			answering,
+			origins,
+			rx,
+			rx_hops,
+			tx_hops,
+			tx_nodes,
+			reflects,
+			waiting,
+			routes,
+			views,
+			scopes,
+			filed,
+			dead,
+			doubted,
+			draining,
+			watch,
+			interest,
+			reader,
+			shown_claims,
+			rng,
+			touched: _,
+			work: _,
+			out,
+		} = self;
+		debug_assert!(out.is_empty(), "output not taken");
+		let left = |at: Instant| at.saturating_duration_since(now);
+		let dead: Vec<_> = (dead.iter())
+			.map(|(hop, death)| (hop, death.far(), death.deadline().map(left)))
+			.collect();
+		let doubted: Vec<_> = (doubted.iter())
+			.map(|(node, state)| (node, matches!(state, Suspicion::Doubted(_)), left(state.deadline())))
+			.collect();
+		super::digest(hasher, &(hop, doubt, opened, sessions, answering, origins, rx));
+		super::digest(hasher, &(rx_hops, tx_hops, tx_nodes, reflects, waiting, routes, views));
+		super::digest(hasher, &(scopes, filed, dead, doubted, draining, watch, interest));
+		super::digest(hasher, &(reader, shown_claims, rng));
+	}
+
+	/// The nodes whose doubt, or whose dead hops, `timeout(now)` would let go.
+	#[cfg(test)]
+	pub fn due(&self, now: Instant) -> BTreeSet<Id> {
+		let doubts = (self.doubted.iter()).filter_map(|(node, state)| (state.deadline() <= now).then_some(*node));
+		let deaths = (self.dead.values())
+			.filter_map(|death| death.deadline().is_some_and(|at| at <= now).then_some(death.far()));
+		doubts.chain(deaths).collect()
 	}
 
 	/// Count one visit.
@@ -2444,7 +2514,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 		// Reflected sources must move before old holds ask whether a child answered.
 		let mut sources = Vec::new();
-		for (&peer, answer) in self.answering.iter().filter(|_| route_changed || !held.is_empty()) {
+		for (&peer, answer) in self.answering.iter().filter(|_| route_changed) {
 			let watch = &answer.watch;
 			for &id in &ids {
 				let region = scope.as_ref().filter(|(key, _)| *key == id).map(|(_, prefix)| prefix);
@@ -2583,6 +2653,23 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		}
 	}
 
+	/// Under [`Lift::Unnamed`], lift each doubt no heard route names before its timer.
+	#[cfg(test)]
+	fn lift_unnamed(&mut self) {
+		if self.doubt.lift != Lift::Unnamed {
+			return;
+		}
+		let lifted: Vec<Id> = self
+			.doubted
+			.iter()
+			.filter_map(|(node, state)| (matches!(state, Suspicion::Doubted(_)) && !self.named(*node)).then_some(*node))
+			.collect();
+		for node in lifted {
+			let at = self.doubted[&node].deadline();
+			self.doubted.insert(node, Suspicion::Lifted(at));
+		}
+	}
+
 	/// Forget each dead hop no heard route names once its timer fired, each draining
 	/// node no heard route names once its doubt lifted, and each told hop or draining
 	/// node no sent route names. Tests also compare early doubt collection.
@@ -2596,19 +2683,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		self.dead
 			.retain(|hop, state| named.contains(hop) || matches!(state, Death::Waiting { .. }));
 		#[cfg(test)]
-		if self.doubt.lift == Lift::Unnamed {
-			let lifted: Vec<Id> = self
-				.doubted
-				.iter()
-				.filter_map(|(node, state)| {
-					(matches!(state, Suspicion::Doubted(_)) && !self.named(*node)).then_some(*node)
-				})
-				.collect();
-			for node in lifted {
-				let at = self.doubted[&node].deadline();
-				self.doubted.insert(node, Suspicion::Lifted(at));
-			}
-		}
+		self.lift_unnamed();
 		let draining: Vec<Id> = self.draining.iter().copied().collect();
 		for node in draining {
 			if !self.named(node) && !self.doubted.contains_key(&node) {
@@ -2739,6 +2814,21 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		})
 	}
 
+	/// Assert an incremental reader view, `now` over the dirty claims, matches a full recompute.
+	#[cfg(test)]
+	fn check_shown(&self, id: Id, dirty: &Dirty, now: &BTreeMap<Path, Option<Shown<A>>>) {
+		if dirty.all {
+			return;
+		}
+		let full = (self.claims(id).into_iter())
+			.map(|claim| {
+				let shown = self.shown_now(id, &claim);
+				(claim, shown)
+			})
+			.collect();
+		self.reader.check(id, now, full);
+	}
+
 	/// Recompute what this node's reader sees of `id` and log each change: only the
 	/// `dirty` claims, unless any could have changed.
 	fn show(&mut self, id: Id, dirty: &Dirty) {
@@ -2753,15 +2843,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.map(|claim| (claim.clone(), self.shown_now(id, claim)))
 			.collect();
 		#[cfg(test)]
-		if !dirty.all {
-			let full = (self.claims(id).into_iter())
-				.map(|claim| {
-					let shown = self.shown_now(id, &claim);
-					(claim, shown)
-				})
-				.collect();
-			self.reader.check(id, &now, full);
-		}
+		self.check_shown(id, dirty, &now);
 		// A claim no longer shown under a route that still covers it was withdrawn.
 		let routes = &self.routes;
 		let ended = |claim: &Path| ancestors(claim).any(|above| routes.contains_key(&(id, above)));

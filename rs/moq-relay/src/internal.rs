@@ -98,8 +98,6 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
-	#[cfg(any(feature = "stun", test))]
-	stun: Option<crate::stun::Counters>,
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
@@ -115,8 +113,6 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
-	#[cfg(any(feature = "stun", test))]
-	stun: Option<crate::stun::Counters>,
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
@@ -146,20 +142,12 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			shutdown: None,
 			listener: None,
 			addr: None,
 		}
-	}
-
-	#[cfg(feature = "stun")]
-	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
-		self.stun = counters;
-		self
 	}
 
 	#[cfg(feature = "_quic")]
@@ -281,8 +269,6 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
-				#[cfg(any(feature = "stun", test))]
-				stun: self.stun.clone(),
 				#[cfg(feature = "_quic")]
 				demux: self.demux.clone(),
 				shutdown: self.shutdown.clone(),
@@ -450,10 +436,6 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut scrape = Scrape::new(state.stats.snapshot(), &state.listeners, &state.uring);
-	#[cfg(any(feature = "stun", test))]
-	{
-		scrape.stun = state.stun;
-	}
 	#[cfg(feature = "_quic")]
 	{
 		scrape.demux = state.demux;
@@ -590,8 +572,6 @@ struct Scrape {
 	stats: moq_net::stats::Snapshot,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
-	#[cfg(any(feature = "stun", test))]
-	stun: Option<crate::stun::Counters>,
 	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Counters>,
 	draining: Option<usize>,
@@ -620,8 +600,6 @@ impl Scrape {
 			stats,
 			listeners: listeners.to_vec(),
 			uring: uring.to_vec(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			draining: None,
@@ -639,10 +617,6 @@ impl Scrape {
 		self.encode_sessions(encoder)?;
 		encode_accepts(encoder, &self.listeners)?;
 		encode_uring(encoder, &self.uring)?;
-		#[cfg(any(feature = "stun", test))]
-		if let Some(stun) = &self.stun {
-			stun.encode(encoder)?;
-		}
 		#[cfg(feature = "_quic")]
 		if let Some(demux) = &self.demux {
 			encode_demux(encoder, demux)?;
@@ -1267,30 +1241,6 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
-	async fn stun_metrics_are_present_only_for_a_configured_listener() {
-		for stun in [None, Some(crate::stun::Counters::default())] {
-			let configured = stun.is_some();
-			let state = InternalState {
-				stats: moq_net::stats::Registry::disabled(),
-				nodes: None,
-				refusals: None,
-				sessions: crate::session::Registry::new(),
-				listeners: Vec::new(),
-				uring: Vec::new(),
-				stun,
-				#[cfg(feature = "_quic")]
-				demux: None,
-				shutdown: None,
-			};
-			let response = serve_metrics(State(state)).await;
-			let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-			let body = std::str::from_utf8(&body).unwrap();
-			assert_eq!(body.contains("moq_relay_stun_replies_total"), configured);
-			assert_eq!(body.contains("moq_relay_stun_dropped_total"), configured);
-		}
-	}
-
 	/// Every drop reason renders from zero, and only for a relay whose QUIC port
 	/// runs the demux.
 	#[cfg(feature = "_quic")]
@@ -1310,7 +1260,6 @@ mod tests {
 				sessions: crate::session::Registry::new(),
 				listeners: Vec::new(),
 				uring: Vec::new(),
-				stun: None,
 				demux,
 				shutdown: None,
 			};
@@ -1639,8 +1588,6 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			shutdown: None,
@@ -1661,8 +1608,6 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
-			#[cfg(any(feature = "stun", test))]
-			stun: None,
 			#[cfg(feature = "_quic")]
 			demux: None,
 			shutdown: None,
@@ -2058,7 +2003,6 @@ mod tests {
 			uring: vec![moq_uring::metrics::Metrics::default()],
 			#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 			uring: Vec::new(),
-			stun: Some(crate::stun::Counters::default()),
 			#[cfg(feature = "_quic")]
 			demux: Some(moq_tokio::quic::demux::Counters::default()),
 			shutdown: Some(shutdown),
@@ -2110,9 +2054,6 @@ mod tests {
 # TYPE moq_relay_stale_bytes_total counter
 # TYPE moq_relay_stale_frames_total counter
 # TYPE moq_relay_stale_groups_total counter
-# TYPE moq_relay_stun_dropped_total counter
-# TYPE moq_relay_stun_io_errors_total counter
-# TYPE moq_relay_stun_replies_total counter
 # TYPE moq_relay_subscriptions_closed_total counter
 # TYPE moq_relay_subscriptions_opened_total counter
 # TYPE moq_relay_viewers_closed_total counter
@@ -2157,13 +2098,6 @@ counter moq_relay_stale_frames_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="subscriber",tier="edge"} 0
-counter moq_relay_stun_dropped_total{reason="capacity"} 0
-counter moq_relay_stun_dropped_total{reason="global"} 0
-counter moq_relay_stun_dropped_total{reason="invalid"} 0
-counter moq_relay_stun_dropped_total{reason="io"} 0
-counter moq_relay_stun_dropped_total{reason="source"} 0
-counter moq_relay_stun_io_errors_total{} 0
-counter moq_relay_stun_replies_total{} 0
 counter moq_relay_subscriptions_closed_total{role="publisher",tier="edge"} 0
 counter moq_relay_subscriptions_closed_total{role="subscriber",tier="edge"} 0
 counter moq_relay_subscriptions_opened_total{role="publisher",tier="edge"} 0

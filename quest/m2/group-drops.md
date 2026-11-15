@@ -16,9 +16,16 @@ Planned 2026-11-04 with the maintainer, from
 reports a group the subscriber dropped without `recv_group` returning it, so a
 reader that paces on delivered-or-evicted groups stalls. Split 2026-11-14 (the
 m2 triage before the cut, under /quest-afk, for the maintainer's review):
-[the wire half](/quest/m2/group-drops-wire.md) makes every abandoned group
-known and decides lite-07's part; this publishes it. It stays in m2 because
-the `Ordered` change below is breaking.
+the wire half made every abandoned group known and decided lite-07's part;
+this publishes it. It stays in m2 because the `Ordered` change below is
+breaking.
+
+The wire half ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774))
+found every group the overcommitted cells lose already in the drop set: a
+scratch reader polling `poll_drop` beside `recv_group` finished every cell of
+the receive-windows benchmark with delivered, evicted-after-header and dropped
+groups summing to those sent, on lite-06 and lite-07. So surfacing
+`poll_drop` alone unskips those cells.
 
 - ✅ **Milestone** (maintainer, 2026-11-04): it changes public API, so it
   lands before the cut.
@@ -56,12 +63,11 @@ Callers match the new item, and a caller that ignores drops takes the group
 arm; the PR's MIGRATE notes say so. `recv_group` and the unordered cursor are
 unchanged, so a reader that needs drop accounting reads through `Ordered`.
 `@moq/net` and the bindings mirror it only with a named consumer.
-Wire: none; [the wire half](/quest/m2/group-drops-wire.md) owns it.
+Wire: none.
 
 ## Required
 
 - [Address groups by timestamp](/quest/m2/time-addressing/model.md) - the drop range is keyed by start
-- [A moq-lite subscriber always learns which group it abandoned](/quest/m2/group-drops-wire.md) - the benchmark's cells finish only once no abandoned group is lost
 
 ## Related
 

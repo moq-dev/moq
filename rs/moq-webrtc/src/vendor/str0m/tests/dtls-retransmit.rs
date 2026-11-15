@@ -261,8 +261,6 @@ fn dtls_handshake_completes_under_packet_loss() {
 
 	l.direct_api().start_dtls(true).unwrap();
 	r.direct_api().start_dtls(false).unwrap();
-	l.direct_api().start_sctp(true);
-	r.direct_api().start_sctp(false);
 
 	// Drive both sides forward. The DTLS default connect timeout is 10s,
 	// so a bounded iteration cap that allows well past that is enough to

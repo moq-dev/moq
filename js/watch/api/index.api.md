@@ -18,6 +18,7 @@ export namespace Audio {
 	export type DecoderOutput = {
 		buffered: Signals.Signal<BufferedRanges>;
 		context: Signals.Signal<AudioContext | undefined>;
+		ended: Signals.Signal<boolean>;
 		error: Signals.Signal<Error | undefined>;
 		root: Signals.Signal<AudioNode | undefined>;
 		sampleRate: Signals.Signal<number | undefined>;
@@ -101,6 +102,7 @@ export type BroadcastInput = {
 	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
+	tail: Signals.Getter<boolean>;
 };
 
 export type BroadcastOutput = {
@@ -256,6 +258,7 @@ export namespace Video {
 			height: number;
 			width: number;
 		} | undefined>;
+		ended: Signals.Signal<boolean>;
 		error: Signals.Signal<Error | undefined>;
 		stalled: Signals.Signal<boolean>;
 		stats: Signals.Signal<Video.Stats | undefined>;

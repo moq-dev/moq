@@ -4,12 +4,14 @@
 members = [
     "rs/*",
     "rs/kio/macros",
+    "rs/moq-auth/fuzz",
     "rs/moq-mux/fuzz",
     "rs/moq-net/fuzz",
     "rs/moq-quic/fuzz",
     "rs/moq-rtmp/fuzz",
     "rs/moq-sock/fuzz",
     "rs/moq-uring/fuzz",
+    "rs/qmux/fuzz",
 ]
 default-members = [
     "rs/bench-harness",
@@ -95,7 +97,6 @@ axum = { version = "0.8", default-features = false, features = [
 # Features off so each consumer picks its rustls provider.
 axum-server = "0.9"
 base64 = "0.23"
-base64ct = "1"
 bitflags = "2"
 # MSB-first bit reading for codec configs; the version h264-reader builds on.
 bitstream-io = "4.10"
@@ -125,8 +126,6 @@ humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper = "1.11"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-# Interface addresses for WebRTC host candidates (moq-webrtc's `p2p` feature).
-if-addrs = "0.15"
 indexmap = "2.14.2"
 io-uring = "0.7.15"
 jni = "0.22"
@@ -136,8 +135,7 @@ kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
 libc = "0.2"
 libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
-# DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature),
-# and `.local` candidate resolution (moq-webrtc's `p2p` feature).
+# DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
 moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
@@ -236,7 +234,6 @@ serde_with = "3"
 slab = "0.4.12"
 socket2 = "0.6"
 spki = "0.8"
-stun-types = "2.0.3"
 subtle = "2.6"
 tempfile = "3"
 thiserror = "2"

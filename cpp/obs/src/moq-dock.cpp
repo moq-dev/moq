@@ -63,37 +63,6 @@ struct EncoderOffer {
 	bool video = true;
 };
 
-// Map OBS's "simple output" encoder aliases to real encoder ids, mirroring the
-// table OBS uses internally. Falls back to x264 for anything unrecognized.
-const char *SimpleVideoEncoderId(const char *name)
-{
-	if (!name)
-		return "obs_x264";
-	if (strcmp(name, "x264") == 0 || strcmp(name, "x264_lowcpu") == 0)
-		return "obs_x264";
-	if (strcmp(name, "qsv") == 0)
-		return "obs_qsv11_v2";
-	if (strcmp(name, "qsv_av1") == 0)
-		return "obs_qsv11_av1_v2";
-	if (strcmp(name, "amd") == 0)
-		return "h264_texture_amf";
-	if (strcmp(name, "amd_hevc") == 0)
-		return "h265_texture_amf";
-	if (strcmp(name, "amd_av1") == 0)
-		return "av1_texture_amf";
-	if (strcmp(name, "nvenc") == 0)
-		return "obs_nvenc_h264_tex";
-	if (strcmp(name, "nvenc_hevc") == 0)
-		return "obs_nvenc_hevc_tex";
-	if (strcmp(name, "nvenc_av1") == 0)
-		return "obs_nvenc_av1_tex";
-	if (strcmp(name, "apple_h264") == 0)
-		return "com.apple.videotoolbox.videoencoder.ave.avc";
-	if (strcmp(name, "apple_hevc") == 0)
-		return "com.apple.videotoolbox.videoencoder.ave.hevc";
-	return "obs_x264";
-}
-
 const char *SimpleAudioEncoderId(const char *name)
 {
 	if (name && strcmp(name, "opus") == 0)
@@ -1049,7 +1018,10 @@ bool MoQDock::CreateCustomEncoders()
 
 void MoQDock::CreateVideoEncoder(const char *id, obs_data_t *settings)
 {
-	latencySummary = QString::fromUtf8(ApplyEncoderLatency(id, settings, latencyMode->currentData() == "low"));
+	obs_video_info ovi = {};
+	const double fps = obs_get_video_info(&ovi) && ovi.fps_den ? (double)ovi.fps_num / ovi.fps_den : 0;
+	latencySummary = QString::fromUtf8(latencyMode->currentData() == "low" ? ApplyEncoderLatency(id, settings, fps)
+									       : "Encoder settings unchanged");
 	LOG_INFO("%s", latencySummary.toUtf8().constData());
 	videoEncoder = OBSEncoderAutoRelease(obs_video_encoder_create(id, "moq_dock_video", settings, nullptr));
 }

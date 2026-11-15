@@ -521,11 +521,19 @@ mod tests {
 			.unwrap()
 	}
 
+	/// Sleep on the host clock until a sleep waits. One descheduled past its deadline
+	/// before it is armed fires without waiting, so returning means none did.
+	async fn sleep_until_one_waits() {
+		for _ in 0..1_000 {
+			crate::clock::sleep(Duration::from_millis(1)).await;
+		}
+	}
+
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
 	fn a_wait_on_the_host_clock_aborts() {
 		guard(true, || {
-			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
+			real().block_on(sleep_until_one_waits());
 		});
 	}
 
@@ -557,7 +565,7 @@ mod tests {
 				.block_on(async {
 					tokio::time::advance(Duration::from_secs(3_600)).await;
 					tokio::time::resume();
-					crate::clock::sleep(Duration::from_millis(1)).await;
+					sleep_until_one_waits().await;
 				});
 		});
 	}
@@ -567,7 +575,7 @@ mod tests {
 	fn a_wait_in_a_spawned_task_aborts() {
 		guard(true, || {
 			let runtime = real();
-			let task = runtime.spawn(async { crate::clock::sleep(Duration::from_millis(1)).await });
+			let task = runtime.spawn(sleep_until_one_waits());
 			// The task's panic would reach the test only through its handle.
 			let _ = runtime.block_on(task);
 		});

@@ -43,6 +43,14 @@ relay path to serve through moq-net's policy, so packaging never publishes the
 hand-copied lifecycle path; that landed in
 [moq-dev/moq#8082](https://github.com/moq-dev/moq/pull/8082).
 
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+`rs/moq-uring` is about 12,000 lines with 140 commits since the last release,
+no PR measured a throughput win, and its WebTransport layer is a copy of
+moq-tokio's that 25 commits in the window edited twice. Decided 2026-11-14
+(maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)):
+✅ continue toward parity as decided, with no benchmark gate (rejected: freeze
+new io_uring features until a quiet-host benchmark shows a gain).
+
 Public API: none. Wire: none.
 
 ## Required

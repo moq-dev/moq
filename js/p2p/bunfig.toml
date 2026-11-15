@@ -1,3 +1,0 @@
-[test]
-# A test fails when a timer fires on the host clock, unless it called hostTime().
-preload = ["../clock/src/preload.ts"]

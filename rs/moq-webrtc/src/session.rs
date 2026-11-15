@@ -252,9 +252,7 @@ impl Session {
 				} => self.send_remb(),
 
 				event = self.agent.next() => match event {
-					Ok(crate::ice::Event::Rtc(event)) => self.handle_event(event)?,
-					// No STUN servers are configured, so there is nothing to trickle.
-					Ok(_) => {}
+					Ok(event) => self.handle_event(event)?,
 					Err(crate::ice::Error::Closed) => return Ok(()),
 					Err(crate::ice::Error::Timeout) => return Err(Error::IceTimeout),
 					Err(crate::ice::Error::Rtc(err)) => return Err(Error::Rtc(err)),

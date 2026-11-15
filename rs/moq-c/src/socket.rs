@@ -1,13 +1,12 @@
 //! Socket endpoints: two-way sessions between endpoints sharing an origin.
 //!
-//! A `tcp` session's halves are each one group: write with [crate::moq_publish_group_frame] and
-//! read frames in order. A `track` session's halves are each a whole track: write with
-//! [crate::moq_publish_track_group] and read it like [crate::moq_consume_track].
+//! A session's halves are each a whole track: write with [crate::moq_publish_track_group] and
+//! read it like [crate::moq_consume_track].
 
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
-use moq_net::socket::{Endpoint, Incoming, TcpStream, TrackStream};
+use moq_net::socket::{Endpoint, Incoming, TrackStream};
 use tokio::sync::oneshot;
 
 use crate::ffi::{self, Background, OnStatus};
@@ -28,64 +27,37 @@ pub struct Socket {
 struct EndpointEntry {
 	inner: Arc<Endpoint>,
 	driver: Background,
-	/// The endpoint's `track` halves handed to C, ended when it closes.
+	/// The endpoint's halves handed to C, ended when it closes.
 	children: Children,
 }
 
-enum IncomingKind {
-	Tcp(Incoming<TcpStream>),
-	Track(Incoming<TrackStream>),
-}
-
 struct IncomingEntry {
-	inner: IncomingKind,
+	inner: Incoming,
 	peer: String,
 	session: String,
 	driver: Background,
 	children: Children,
-}
-
-/// The peer's half of a stream, read through [Consume](crate::Consume).
-pub(crate) enum Half {
-	Track(Box<moq_net::track::Subscriber>),
-	Group(moq_net::group::Consumer),
-}
-
-/// This side's half of a stream, until C takes it.
-enum Writer {
-	Track(moq_net::track::Producer),
-	Group(moq_net::group::Producer),
 }
 
 struct StreamEntry {
 	peer: String,
 	session: String,
-	writer: Option<Writer>,
-	reader: Option<Half>,
+	/// This side's half, until C takes it.
+	writer: Option<moq_net::track::Producer>,
+	/// The peer's half, until C reads it through [Consume](crate::Consume).
+	reader: Option<moq_net::track::Subscriber>,
 	driver: Background,
 	children: Children,
 }
 
 impl StreamEntry {
-	fn tcp(stream: TcpStream, driver: Background, children: Children) -> Self {
+	fn new(stream: TrackStream, driver: Background, children: Children) -> Self {
 		let (peer, session) = (stream.peer().to_string(), stream.session().to_string());
 		Self {
 			peer,
 			session,
-			writer: Some(Writer::Group(stream.producer)),
-			reader: Some(Half::Group(stream.consumer)),
-			driver,
-			children,
-		}
-	}
-
-	fn track(stream: TrackStream, driver: Background, children: Children) -> Self {
-		let (peer, session) = (stream.peer().to_string(), stream.session().to_string());
-		Self {
-			peer,
-			session,
-			writer: Some(Writer::Track(stream.producer)),
-			reader: Some(Half::Track(Box::new(stream.consumer))),
+			writer: Some(stream.producer),
+			reader: Some(stream.consumer),
 			driver,
 			children,
 		}
@@ -135,7 +107,7 @@ impl Socket {
 		&mut self,
 		endpoint: Id,
 		peer: &str,
-		track: Option<Option<moq_net::track::Info>>,
+		info: Option<moq_net::track::Info>,
 		callback: OnStatus,
 	) -> Result<Id, Error> {
 		let EndpointEntry {
@@ -145,16 +117,8 @@ impl Socket {
 		} = self.endpoint(endpoint)?;
 		let (driver, children) = (driver.clone(), children.clone());
 		let watch = driver.clone();
-		let pending: std::pin::Pin<Box<dyn Future<Output = Result<StreamEntry, Error>> + Send>> = match track {
-			None => {
-				let dialing = inner.dial_tcp(peer)?;
-				Box::pin(async move { Ok(StreamEntry::tcp(dialing.await?, driver, children)) })
-			}
-			Some(info) => {
-				let dialing = inner.dial_track(peer, info)?;
-				Box::pin(async move { Ok(StreamEntry::track(dialing.await?, driver, children)) })
-			}
-		};
+		let dialing = inner.dial_track(peer, info)?;
+		let pending = async move { Ok(StreamEntry::new(dialing.await?, driver, children)) };
 		self.tasks.spawn(
 			callback,
 			|state| &mut state.socket.tasks,
@@ -162,17 +126,14 @@ impl Socket {
 		)
 	}
 
-	fn accept(&mut self, endpoint: Id, track: bool, callback: OnStatus) -> Result<Id, Error> {
+	fn accept(&mut self, endpoint: Id, callback: OnStatus) -> Result<Id, Error> {
 		let EndpointEntry {
 			inner,
 			driver,
 			children,
 		} = self.endpoint(endpoint)?;
 		let (inner, driver, children) = (inner.clone(), driver.clone(), children.clone());
-		let poll = move |waiter: &kio::Waiter| match track {
-			false => inner.poll_accept_tcp(waiter).map_ok(IncomingKind::Tcp),
-			true => inner.poll_accept_track(waiter).map_ok(IncomingKind::Track),
-		};
+		let poll = move |waiter: &kio::Waiter| inner.poll_accept_track(waiter);
 		// The first poll starts listening, so poll once before returning: a dial sent after
 		// this call then queues for the loop instead of finding nobody listening.
 		let mut first = match poll(&kio::Waiter::noop()) {
@@ -205,13 +166,9 @@ impl Socket {
 							Err(moq_net::Error::Closed) => return Ok(()),
 							Err(err) => return Err(err.into()),
 						};
-						let (peer, session) = match &incoming {
-							IncomingKind::Tcp(incoming) => (incoming.peer(), incoming.session()),
-							IncomingKind::Track(incoming) => (incoming.peer(), incoming.session()),
-						};
 						let entry = IncomingEntry {
-							peer: peer.to_string(),
-							session: session.to_string(),
+							peer: incoming.peer().to_string(),
+							session: incoming.session().to_string(),
 							inner: incoming,
 							driver: driver.clone(),
 							children: children.clone(),
@@ -231,11 +188,7 @@ impl Socket {
 		info: Option<moq_net::track::Info>,
 		callback: OnStatus,
 	) -> Result<Id, Error> {
-		let entry = self.incoming.get(incoming).ok_or(Error::NotFound)?;
-		entry.driver.check()?;
-		if info.is_some() && matches!(entry.inner, IncomingKind::Tcp(_)) {
-			return Err(Error::InvalidConfig("a tcp session has no track info".into()));
-		}
+		self.incoming.get(incoming).ok_or(Error::NotFound)?.driver.check()?;
 		let IncomingEntry {
 			inner,
 			driver,
@@ -243,16 +196,8 @@ impl Socket {
 			..
 		} = self.incoming.remove(incoming).ok_or(Error::NotFound)?;
 		let watch = driver.clone();
-		let pending: std::pin::Pin<Box<dyn Future<Output = Result<StreamEntry, Error>> + Send>> = match inner {
-			IncomingKind::Tcp(incoming) => {
-				let accepting = incoming.accept();
-				Box::pin(async move { Ok(StreamEntry::tcp(accepting.await?, driver, children)) })
-			}
-			IncomingKind::Track(incoming) => {
-				let accepting = incoming.accept(info);
-				Box::pin(async move { Ok(StreamEntry::track(accepting.await?, driver, children)) })
-			}
-		};
+		let accepting = inner.accept(info);
+		let pending = async move { Ok(StreamEntry::new(accepting.await?, driver, children)) };
 		self.tasks.spawn(
 			callback,
 			|state| &mut state.socket.tasks,
@@ -303,8 +248,8 @@ fn write_ids(peer: &str, session: &str, peer_dst: Option<&mut moq_string>, sessi
 /// must be one path segment. Peers find each other under the same `prefix`, so connect the
 /// origin to a session (or share it locally) before dialing. Close it with [moq_socket_close].
 ///
-/// Returns a positive endpoint handle, or a negative code, such as when the origin may not
-/// publish `<prefix>/.socket/<id>`.
+/// Returns a positive endpoint handle, or a negative code, such as for an `id` that is not one
+/// path segment.
 ///
 /// # Safety
 /// - `prefix` must point at `prefix_len` bytes, and `id` at `id_len` bytes.
@@ -329,7 +274,7 @@ pub unsafe extern "C" fn moq_socket_create(
 /// Close a socket endpoint and release its handle.
 ///
 /// Withdraws the endpoint, ends its accept loops with a terminal `0`, fails its pending dials
-/// and accepts, and resets its open sessions, aborting each `track` half still open. Handles
+/// and accepts, and resets its open sessions, aborting each half still open. Handles
 /// already delivered stay valid until released.
 ///
 /// Returns zero, or a negative code if the endpoint is unknown.
@@ -345,8 +290,10 @@ pub extern "C" fn moq_socket_close(endpoint: u32) -> i32 {
 	})
 }
 
-/// Dial the endpoint `peer` in a new `tcp` session: one ordered, reliable byte-message stream
-/// each way.
+/// Dial the endpoint `peer` in a new session, whose halves are whole tracks.
+///
+/// `info` describes this side's half, or NULL to keep every message until read, with no
+/// max age.
 ///
 /// Waits for as long as the peer takes to accept, including for its endpoint to be announced.
 /// `on_stream` fires with a positive stream handle once the peer accepts, then exactly once
@@ -356,31 +303,6 @@ pub extern "C" fn moq_socket_close(endpoint: u32) -> i32 {
 /// carry it. Release `user_data` at the terminal callback.
 ///
 /// Returns a positive task handle, or a negative code.
-///
-/// # Safety
-/// - `peer` must point at `peer_len` bytes.
-/// - `on_stream` must be non-NULL, and `user_data` valid until its terminal callback.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_socket_dial_tcp(
-	endpoint: u32,
-	peer: *const c_char,
-	peer_len: usize,
-	on_stream: ffi::moq_status_callback,
-	user_data: *mut c_void,
-) -> i32 {
-	ffi::enter(move || {
-		let endpoint = ffi::parse_id(endpoint)?;
-		let peer = unsafe { ffi::parse_str(peer, peer_len)? };
-		let callback = unsafe { OnStatus::new(user_data, on_stream)? };
-		State::lock().socket.dial(endpoint, peer, None, callback)
-	})
-}
-
-/// Dial the endpoint `peer` in a new `track` session, whose halves are whole tracks; see
-/// [moq_socket_dial_tcp].
-///
-/// `info` describes this side's half, or NULL to keep every message until read, with no
-/// max age.
 ///
 /// # Safety
 /// - `peer` must point at `peer_len` bytes, and `info` be NULL or point at a [moq_track_info].
@@ -399,36 +321,19 @@ pub unsafe extern "C" fn moq_socket_dial_track(
 		let peer = unsafe { ffi::parse_str(peer, peer_len)? };
 		let info = unsafe { info.as_ref() }.map(TryInto::try_into).transpose()?;
 		let callback = unsafe { OnStatus::new(user_data, on_stream)? };
-		State::lock().socket.dial(endpoint, peer, Some(info), callback)
+		State::lock().socket.dial(endpoint, peer, info, callback)
 	})
 }
 
-/// Accept `tcp` dials from peers.
+/// Accept dials from peers.
 ///
 /// `on_incoming` fires with a positive incoming handle for each dial, then exactly once more
 /// with a terminal code: `0` once the endpoint closed or after [moq_socket_cancel], or a
 /// negative error, `MOQ_ERROR_UNSUPPORTED` while no peer can reach the endpoint. Accept each
 /// dial with [moq_socket_incoming_accept] or refuse it with [moq_socket_incoming_reject]. Dials
-/// queue until delivered, or until their dialer gives up. Run one loop per protocol.
+/// queue until delivered, or until their dialer gives up.
 ///
 /// Returns a positive task handle, or a negative code.
-///
-/// # Safety
-/// - `on_incoming` must be non-NULL, and `user_data` valid until its terminal callback.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_socket_accept_tcp(
-	endpoint: u32,
-	on_incoming: ffi::moq_status_callback,
-	user_data: *mut c_void,
-) -> i32 {
-	ffi::enter(move || {
-		let endpoint = ffi::parse_id(endpoint)?;
-		let callback = unsafe { OnStatus::new(user_data, on_incoming)? };
-		State::lock().socket.accept(endpoint, false, callback)
-	})
-}
-
-/// Accept `track` dials from peers; see [moq_socket_accept_tcp].
 ///
 /// # Safety
 /// - `on_incoming` must be non-NULL, and `user_data` valid until its terminal callback.
@@ -441,7 +346,7 @@ pub unsafe extern "C" fn moq_socket_accept_track(
 	ffi::enter(move || {
 		let endpoint = ffi::parse_id(endpoint)?;
 		let callback = unsafe { OnStatus::new(user_data, on_incoming)? };
-		State::lock().socket.accept(endpoint, true, callback)
+		State::lock().socket.accept(endpoint, callback)
 	})
 }
 
@@ -479,10 +384,9 @@ pub unsafe extern "C" fn moq_socket_incoming_info(
 
 /// Accept an incoming dial, releasing its handle.
 ///
-/// Verifies the dialer really dialed this session first. `info` describes this side's half of a
-/// `track` session, or NULL to keep every message until read; a `tcp` session takes NULL.
-/// `on_stream` fires like [moq_socket_dial_tcp]'s, and [moq_socket_cancel] gives up and resets
-/// the session.
+/// Verifies the dialer really dialed this session first. `info` describes this side's half, or
+/// NULL to keep every message until read. `on_stream` fires like [moq_socket_dial_track]'s, and
+/// [moq_socket_cancel] gives up and resets the session.
 ///
 /// Returns a positive task handle, or a negative code.
 ///
@@ -510,10 +414,7 @@ pub extern "C" fn moq_socket_incoming_reject(incoming: u32) -> i32 {
 	ffi::enter(move || {
 		let incoming = ffi::parse_id(incoming)?;
 		let entry = State::lock().socket.incoming.remove(incoming).ok_or(Error::NotFound)?;
-		match entry.inner {
-			IncomingKind::Tcp(incoming) => incoming.reject(),
-			IncomingKind::Track(incoming) => incoming.reject(),
-		}
+		entry.inner.reject();
 		Ok(())
 	})
 }
@@ -533,12 +434,8 @@ pub unsafe extern "C" fn moq_socket_stream_info(stream: u32, peer: *mut moq_stri
 	})
 }
 
-/// Take this side's half of a stream, which outlives the stream handle.
-///
-/// A `tcp` session's half is a group handle: write with [crate::moq_publish_group_frame], pacing
-/// with [crate::moq_publish_group_ready], and end it with [crate::moq_publish_group_finish] (or
-/// abort it). Dropping it unfinished resets the session. A `track` session's half is a raw track
-/// handle, written and ended with the `moq_publish_track_*` calls.
+/// Take this side's half of a stream, which outlives the stream handle: a raw track handle,
+/// written and ended with the `moq_publish_track_*` calls.
 ///
 /// Returns the positive handle, or a negative code once taken.
 #[unsafe(no_mangle)]
@@ -548,10 +445,8 @@ pub extern "C" fn moq_socket_stream_writer(stream: u32) -> i32 {
 		let mut state = State::lock();
 		let entry = state.socket.streams.get_mut(stream).ok_or(Error::NotFound)?;
 		let children = entry.children.clone();
-		match entry.writer.take().ok_or(Error::Moq(moq_net::Error::Closed))? {
-			Writer::Group(group) => state.publish.socket_group(group),
-			Writer::Track(track) => state.publish.socket_track(track, &children),
-		}
+		let track = entry.writer.take().ok_or(Error::Moq(moq_net::Error::Closed))?;
+		state.publish.socket_track(track, &children)
 	})
 }
 
@@ -561,9 +456,8 @@ pub extern "C" fn moq_socket_stream_writer(stream: u32) -> i32 {
 /// frame in order, read with [crate::moq_consume_track_frame] and released with
 /// [crate::moq_consume_track_frame_free], then exactly once more with a terminal code: `0` once
 /// the peer finished (or after [crate::moq_consume_track_cancel]), or a negative error when it
-/// reset. A `track` session's half is subscribed reliably and oldest first;
-/// [crate::moq_consume_track_update] changes that, while a `tcp` session's refuses it with
-/// `MOQ_ERROR_UNSUPPORTED`.
+/// reset. It is subscribed reliably and oldest first; [crate::moq_consume_track_update] changes
+/// that.
 ///
 /// Returns a positive track handle, or a negative code once taken.
 ///
@@ -588,8 +482,8 @@ pub unsafe extern "C" fn moq_socket_stream_reader(
 
 /// Release a stream handle.
 ///
-/// A half not yet taken is dropped: an unfinished `tcp` writer resets the session, and an
-/// unread reader stops reading. Taken halves are unaffected.
+/// A half not yet taken is dropped: an unread reader stops reading. Taken halves are
+/// unaffected.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_socket_stream_free(stream: u32) -> i32 {
 	ffi::enter(move || {

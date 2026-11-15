@@ -8,7 +8,7 @@ use crate::vendor::str0m::{DATAGRAM_MTU_TARGET_MAX, DATAGRAM_MTU_TARGET_MIN, Eve
 use super::common;
 use common::{Peer, TestRtc, init_crypto_default, init_log, progress_strict_mtu};
 
-/// End-to-end MTU compliance: walk a full ICE/DTLS/SCTP/SRTP session and
+/// End-to-end MTU compliance: walk a full ICE/DTLS/SRTP session and
 /// assert every outgoing datagram on either side has `len() <= mtu`. The
 /// check fires inside the test pump via [`progress_strict_mtu`], so any
 /// oversized datagram fails the test at the source.
@@ -26,10 +26,8 @@ fn run_mtu_compliance(mtu: usize) -> Result<(), RtcError> {
 	l.add_host_candidate((Ipv4Addr::new(1, 1, 1, 1), 1000).into());
 	r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
 
-	// Add an audio m-line and a data channel in the same offer.
 	let mut change = l.sdp_api();
 	let audio_mid = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-	let cid = change.add_channel("mtu-test".into());
 	let (offer, pending) = change.apply().unwrap();
 	let answer = r.rtc.sdp_api().accept_offer(offer)?;
 	l.rtc.sdp_api().accept_answer(pending, answer)?;
@@ -45,21 +43,6 @@ fn run_mtu_compliance(mtu: usize) -> Result<(), RtcError> {
 	let max = l.last.max(r.last);
 	l.last = max;
 	r.last = max;
-
-	// Wait for the data channel to open on L.
-	while l.channel(cid).is_none() {
-		progress_strict_mtu(&mut l, &mut r, mtu)?;
-	}
-
-	// Small data-channel send.
-	l.channel(cid)
-		.unwrap()
-		.write(false, b"hello mtu world")
-		.expect("small write");
-
-	// Large data-channel send to exercise SCTP fragmentation.
-	let big = vec![0xCDu8; 32 * 1024];
-	l.channel(cid).unwrap().write(true, &big).expect("large write");
 
 	// Audio writes (Opus) at typical 20 ms cadence.
 	let params = l.params_opus();
@@ -77,15 +60,15 @@ fn run_mtu_compliance(mtu: usize) -> Result<(), RtcError> {
 		progress_strict_mtu(&mut l, &mut r, mtu)?;
 	}
 
-	// Sanity: r received the small + part of the large data-channel send.
-	let chan_events = r
+	// Sanity: r received the audio.
+	let media_events = r
 		.events
 		.iter()
-		.filter(|(_, e)| matches!(e, Event::ChannelData(_)))
+		.filter(|(_, e)| matches!(e, Event::MediaData(_)))
 		.count();
 	assert!(
-		chan_events >= 1,
-		"expected at least one ChannelData event at r, got {chan_events}"
+		media_events >= 1,
+		"expected at least one MediaData event at r, got {media_events}"
 	);
 
 	Ok(())

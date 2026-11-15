@@ -41,7 +41,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
   publishes for the first time at this cut;
   auth key validation; the
-  [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
+  RTMPS connect signature;
   usage's derived settings; and three
   API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md),
   the capture selections, and
@@ -247,8 +247,9 @@ what would need a breaking release had it landed right after the cut:
   tier and partition tests run before it (maintainer; rejected: moving it to
   m3 and fixing late routing flaws in lite-08).
 - ✅ [Group drops](/quest/m2/group-drops.md) split: its lite-07 wire question
-  is [its own quest](/quest/m2/group-drops-wire.md), which starts now and
-  gates the freeze; the public `Ordered` API waits for the model.
+  was its own quest, settled without a wire-format change in
+  [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
+  `Ordered` API waits for the model.
   [Catalog at timestamp](/quest/m2/catalog-at-timestamp.md) no longer waits
   for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
   shrink to a rename, since the model already fills each field with the start.

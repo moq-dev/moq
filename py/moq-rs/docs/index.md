@@ -281,8 +281,6 @@ publishing and consuming. See the [socket convention](https://doc.moq.dev/concep
    :nosignatures:
 
    Endpoint
-   IncomingTcp
    IncomingTrack
-   TcpStream
    TrackStream
 ```

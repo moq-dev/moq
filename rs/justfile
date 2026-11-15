@@ -13,7 +13,7 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz --exclude qmux-fuzz --exclude moq-auth-fuzz"
 
 default:
     just check
@@ -502,6 +502,11 @@ fuzz target *args:
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
+
+# Mutate the route and resume code (`.cargo/mutants.toml`), failing on any mutant the tests miss.
+[positional-arguments]
+mutants *args:
+    bash sh/local.sh bash sh/rs/mutants.sh "$@"
 
 # Build the default workspace members.
 build:

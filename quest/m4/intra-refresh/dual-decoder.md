@@ -34,5 +34,6 @@ What remains is checking the other engines.
 
 ## Related
 
+- [Warmup with one decoder](/quest/m2/warmup-one-decoder.md) - may replace the players' two decoders with one before the cut, leaving this to decide whether a second pays for itself
 - [H.264 import](/quest/m4/intra-refresh/h264-import.md) - publishes the real `warmup` for an end-to-end x264 check
 - [Consumer warmup](/quest/m4/intra-refresh/consumer-warmup.md) - the transcoder decodes history so it never encodes stripes

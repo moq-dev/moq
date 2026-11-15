@@ -110,12 +110,6 @@ jobs:
         run: nix develop --command just test bare-fin
         shell: bash -leo pipefail {0}
 
-      - name: P2P data-channel transport
-        id: p2p
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: nix develop --command just test p2p
-        shell: bash -leo pipefail {0}
-
       - name: Interop (full matrix)
         id: interop
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -238,7 +232,6 @@ jobs:
             "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
             "Subscription termination interop": "${{ steps.bare-fin.outcome }}",
-            "P2P data-channel transport": "${{ steps.p2p.outcome }}",
             "Interop (full matrix)": "${{ steps.interop.outcome }}",
             "Interop (moq-transport)": "${{ steps.interop-ietf.outcome }}",
             "Released wire compatibility": "${{ steps.wire-compat.outcome }}",
