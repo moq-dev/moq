@@ -483,7 +483,9 @@ struct Channel {
 	messages: VecDeque<Message>,
 	/// The bytes in `messages`.
 	queued: usize,
-	/// The bytes the reader took, which stand in for delivered ones.
+	/// The bytes the writer queued, which its offsets count.
+	written: u64,
+	/// The bytes the reader took, which stand in for acknowledged ones.
 	taken: u64,
 	/// How the channel closed, once it has.
 	end: Option<End>,
@@ -544,6 +546,19 @@ impl Channel {
 		self.finished = None;
 	}
 
+	/// Whether the reader took every byte before `offset`, which stands in for an
+	/// acknowledgement, failing once a reset or stop means it never will.
+	fn acked(&self, offset: u64) -> Poll<Result<poll::Acked, Error>> {
+		if offset <= self.taken {
+			return Poll::Ready(Ok(poll::Acked::Delivered));
+		}
+		match self.end {
+			Some(End::Reset(_)) => Poll::Ready(Err(Error::Closed)),
+			Some(End::Stop(code)) => Poll::Ready(Err(Error::Stopped(code))),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// How the writer sees the channel close: reset, stopped, or finished and drained.
 	fn sent(&self) -> Poll<Result<(), Error>> {
 		match self.end {
@@ -571,9 +586,22 @@ pub struct SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = crate::transport::poll::Ungrouped;
-	type Offset = ();
+	type Offset = u64;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> u64 {
+		self.channel.lock().written
+	}
+
+	/// Delivered once the reader took every byte before `offset`, which stands in for an
+	/// acknowledgement as it does for [`poll_closed`](poll::SendStream::poll_closed).
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Error>> {
+		// Check the close first, so bytes taken before it still count below.
+		let closed = poll_close(&self.close, waiter);
+		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| channel.acked(*offset).map(drop)) {
+			return channel.acked(*offset);
+		}
+		closed.map(Err)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		let mut buf = buf;
@@ -614,6 +642,7 @@ impl poll::SendStream for SendStream {
 			lands: landing(self.latency),
 		});
 		channel.queued += size;
+		channel.written += size as u64;
 
 		Poll::Ready(Ok(size))
 	}
@@ -668,31 +697,6 @@ impl poll::SendStream for SendStream {
 			return channel.sent();
 		}
 		closed.map(Err)
-	}
-
-	/// Whether the reader took every message written so far, which stands in for an
-	/// acknowledgement as it does for [`poll_closed`](poll::SendStream::poll_closed).
-	fn acknowledged(&self) -> Option<bool> {
-		let channel = self.channel.lock();
-		// A reset on a closed session leaves the channel as it was, so only `done` records it.
-		let finished = matches!(channel.end, Some(End::Fin)) && channel.finished.is_none();
-		let open = channel.end.is_none() && !self.done;
-		Some((open || finished) && channel.messages.is_empty())
-	}
-
-	/// The bytes the reader took, standing in for delivered ones as it does for
-	/// [`acknowledged`](poll::SendStream::acknowledged).
-	fn delivered(&self) -> Option<u64> {
-		Some(self.channel.lock().taken)
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.channel
-			.poll(waiter, |channel| match channel.queued {
-				0 => Poll::Ready(()),
-				_ => Poll::Pending,
-			})
-			.map(drop)
 	}
 }
 
@@ -1104,12 +1108,10 @@ mod tests {
 			// closed the session now would beat its finish to the reader.
 			send.finish().unwrap();
 			assert!(send.poll_closed(&noop()).is_pending());
-			assert_eq!(send.acknowledged(), Some(false));
 			let start = kio::clock::now();
 			assert_eq!(landed(&mut recv).await, None);
 			assert_eq!(start.elapsed(), LATENCY);
 			assert!(ready(send.poll_closed(&noop())).is_ok());
-			assert_eq!(send.acknowledged(), Some(true));
 
 			// A reader that stops before the finish lands leaves the writer finished.
 			let (mut send, recv) = uni(&a, &b);
@@ -1176,6 +1178,47 @@ mod tests {
 		send.finish().unwrap();
 		drop(recv);
 		assert!(matches!(ready(send.poll_closed(&noop())), Err(Error::Stopped(0))));
+	}
+
+	/// An offset is acknowledged once the reader took every byte before it, and still is after a
+	/// reset; the rest fails once a reset or stop means the reader never will take it.
+	#[test]
+	fn an_offset_is_acknowledged_once_the_reader_takes_it() {
+		let acked = |send: &SendStream, offset: u64| send.poll_acked(&noop(), &offset);
+		let (a, b) = pair(Config::default());
+		let (mut send, mut recv) = uni(&a, &b);
+		assert!(matches!(
+			acked(&send, send.offset()),
+			Poll::Ready(Ok(poll::Acked::Delivered))
+		));
+
+		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+		let one = send.offset();
+		ready(write(&mut send, &Bytes::from_static(b"two"))).unwrap();
+		let two = send.offset();
+		assert_eq!((one, two), (3, 6));
+		assert!(acked(&send, one).is_pending());
+
+		// A waiter parked on the offset wakes once the reader takes the bytes.
+		let count = Arc::new(Count::default());
+		let waiter = kio::Waiter::new(Waker::from(count.clone()));
+		assert!(send.poll_acked(&waiter, &one).is_pending());
+		assert_eq!(text(read(&mut recv, 4)), "one");
+		assert!(count.0.load(Ordering::Relaxed) > 0, "the read did not wake the writer");
+		assert!(matches!(acked(&send, one), Poll::Ready(Ok(poll::Acked::Delivered))));
+		assert!(acked(&send, two).is_pending());
+
+		send.reset(1);
+		assert!(matches!(acked(&send, one), Poll::Ready(Ok(poll::Acked::Delivered))));
+		assert!(matches!(acked(&send, two), Poll::Ready(Err(Error::Closed))));
+
+		let (mut send, mut recv) = uni(&a, &b);
+		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+		recv.stop(3);
+		assert!(matches!(
+			acked(&send, send.offset()),
+			Poll::Ready(Err(Error::Stopped(3)))
+		));
 	}
 
 	#[test]

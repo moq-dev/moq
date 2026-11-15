@@ -3,7 +3,7 @@ import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as cache from "./cache.ts";
-import { NotFound, StreamCode, toStreamCode } from "./error.ts";
+import { NotFound, StreamCode, TooFarBehind, toStreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -716,14 +716,13 @@ test("a pending track info query is answered by its request, and closing rejects
 
 // A failed group's consumer settles `closed` with frames still unread; the fetch keeps its mirror
 // registered until the caller lets go, so the pool can still reclaim those frames.
-test("a fetch of a failed group leaves its unread frames to the pool's eviction", async () => {
+test("a fetch of a failed group leaves its unread frames to the pool's expiry", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
 		const broadcast = new BroadcastProducer();
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const pool = new cache.Pool();
-		hooks.poolTrack(track, pool);
+		hooks.poolTrack(track, new cache.Pool({ expiry: Duration.millis(1_000) }));
 
 		const failed = track.appendGroup();
 		failed.writeFrame(textFrame("unread"));
@@ -733,10 +732,9 @@ test("a fetch of a failed group leaves its unread frames to the pool's eviction"
 		await yieldNow();
 		expect(group.closed.peek()).toBeInstanceOf(Error);
 
-		// Debt reclaims the oldest group, which the caller has not read.
-		pool.resize(1);
-		track.writeFrame(textFrame("fresh"));
-		await expect(group.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		// The idle window reclaims the failed group, which the caller has not read.
+		await clock.advance(Duration.millis(1_500));
+		await expect(group.readFrame()).rejects.toBeInstanceOf(TooFarBehind);
 		broadcast.close();
 	} finally {
 		installed.close();

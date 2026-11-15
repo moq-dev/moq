@@ -45,16 +45,17 @@ Today:
 Guidance:
 
 - One policy type serves both crates, so a host states its rule once for
-  every destination kind. Propose its shape and its home; a value the host
-  builds is preferred over a callback, per the root `AGENTS.md`.
+  every destination kind. Decided 2026-11-15 (maintainer, /quest-complete):
+  ✅ (a) a plain value type with no I/O in moq-net, which moq-webrtc and
+  moq-rtmp both already depend on, each crate checking it at connect time.
+  A host passes it through moq-webrtc's `#[non_exhaustive]` `client::Config`
+  and moq-rtmp's `#[non_exhaustive]` `Connect`, so neither needs a second
+  break (rejected: (b) moq-tokio, beside its own dial dispatch, though
+  moq-rtmp uses moq-tokio only as a dev-dependency; (c) a crate of its own).
+  A value the host builds, not a callback, per the root `AGENTS.md`.
 - A refusal is terminal for that URL, and its error is distinct from a
   failed connection, so a caller that redials on failure does not retry it.
 - Check at connect time on the resolved address. Checking the URL and then
   letting the HTTP client resolve again is the DNS rebinding hole.
 - moq-srt's client takes a `SocketAddr` like moq-rtmp does today. It is out
   of scope until it dials a URL.
-
-## Waiting
-
-- Maintainer: where the one dial-policy type lives. (a) A plain value type with no I/O in moq-net, which moq-webrtc and moq-rtmp both already depend on, each crate checking it at connect time; (b) moq-tokio, beside its own dial dispatch, though moq-rtmp uses moq-tokio only as a dev-dependency today; (c) a crate of its own. Recommended: (a), with the moq-webrtc half added through its `#[non_exhaustive]` `client::Config`, and moq-rtmp's through its `#[non_exhaustive]` `Connect`, so neither needs a second break.
-

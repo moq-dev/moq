@@ -50,7 +50,7 @@ import {
 	subtractRuns,
 	type TrackRequestOptions,
 } from "./internal.ts";
-import { RUN_OVERHEAD as ARRIVAL_OVERHEAD, grace, Ledger } from "./ledger.ts";
+import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
@@ -712,7 +712,7 @@ class TrackState {
 	// Sequences the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaim cannot
 	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
-	// DROP costs one entry. A sink shares its producer's, which bills it to the track's account.
+	// DROP costs one entry. A sink shares its producer's, which the pool's idle window forgets.
 	drops = new DropSet();
 	// The runs this sink's own fills refused, which it reads as given up beside `drops`.
 	refused = new Signal<readonly DropRun[]>([]);
@@ -741,9 +741,6 @@ class TrackState {
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
 	startChanged = new Signal(0);
-	// Bumped when paying eviction debt folds an arrival gap before its grace passes, so a reader
-	// parked on a missing group there, with no timer to wake it, judges it again.
-	folded = new Signal(0);
 	latest?: bigint;
 	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
@@ -834,7 +831,7 @@ function after(a: Position, b: Position): boolean {
 }
 
 // A source group retained in the producer cache, with the mirror handed to each sink
-// so eviction can drop them together, and what it all bills the cache pool.
+// so eviction can drop them together, and its last access, which the cache pool ages it by.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
 // `bound` is its first frame's timestamp once checked to fit between its neighbors', which
 // bounds theirs; `unverified` marks one accepted below the eviction watermark instead.
@@ -898,8 +895,6 @@ let resubscribe: (producer: Producer) => void;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
-// The producer's cache account, which its readers' records bill to.
-let accountOf: (producer: Producer) => cache.Track<CachedGroup>;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
@@ -922,10 +917,6 @@ function sameCoverage(a: Coverage, b: Coverage): boolean {
 	);
 }
 
-/**
- * Whether the live edge `received` reached `final`: no sequence below it is left that was neither
- * written nor given up, as a declared skip or a drop. Mirrors the Rust `TrackState::reaches`.
- */
 // A run of the drop set and the pool tick it outlives the idle window at.
 interface Born extends Run {
 	expires: number;
@@ -1094,7 +1085,7 @@ export class Producer {
 	#live = new Signal<Subscription | undefined>(undefined);
 
 	// Recently written source groups, in arrival order, retained for replay to late subscribers
-	// until the cache pool evicts them, for its budget or once idle. A set, so evicting a run of
+	// until the cache pool evicts them once idle. A set, so evicting a run of
 	// them is linear. Each entry tracks the mirror it handed to every sink so eviction can drop
 	// them too: otherwise a slow consumer that never reads would pin old groups (and their frame
 	// bytes) forever.
@@ -1114,7 +1105,7 @@ export class Producer {
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	#evicted?: Start;
 	// This track's account against its broadcast's cache pool (a pool of its own when it has no
-	// broadcast), which bills the cached groups and evicts them under its budget and idle window.
+	// broadcast), which evicts the cached groups once idle.
 	#account: cache.Track<CachedGroup>;
 	// The pool tick past which each run of the drop set outlives the pool's idle window, as of when
 	// it was last given up; empty when the pool has no idle window. See `#setDrops`.
@@ -1122,8 +1113,6 @@ export class Producer {
 	// At most the lowest tick in `#dropsBorn`, so an idle scan finds nothing to forget without
 	// walking it.
 	#dropsOldest?: number;
-	// What the drop set and its expiry index bill to the account.
-	#dropsBilled = 0;
 
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
@@ -1151,9 +1140,6 @@ export class Producer {
 	// subscription's grace after a later arrival opened it, as the session's tail does, so this
 	// holds only the gaps still worth waiting for.
 	#arrivals = new Ledger();
-	// What `#arrivals` bills to the account, `ARRIVAL_OVERHEAD` per gap. Paying eviction debt folds
-	// its oldest gaps early, so an unbounded grace holds no more gaps than the pool would.
-	#arrivalsBilled = 0;
 	// What this track's own publisher produced since its last append, which skips every
 	// sequence below it that never arrived and was not given up: the producer moved on. The
 	// arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
@@ -1173,7 +1159,6 @@ export class Producer {
 			},
 			drop: (start, end, hole) => {
 				this.#drop(start, end, hole);
-				this.#chargeDebt();
 			},
 			holds: (sequence) => {
 				const entry = this.#cached.get(sequence);
@@ -1190,25 +1175,18 @@ export class Producer {
 	#openAccount(pool: cache.Pool): cache.Track<CachedGroup> {
 		return new cache.Track(pool, {
 			protects: (entry) => this.#protects(entry),
-			edge: () => {
-				const entry = this.#edgeEntry();
-				return entry && this.#protects(entry) ? entry : undefined;
-			},
-			evict: (entry, reason) => {
-				this.#evict(entry, reason);
+			evict: (entry) => {
+				this.#evict(entry);
 				this.#uncache(entry, true);
 			},
-			shed: (entry, debt, cap) => hooks.shedGroup(entry.group, debt, cap, entry.mirrors.values()),
 			settle: () => this.#settle(),
-			shedDrops: (debt, cap) => this.#shedDrops(debt, cap),
-			shedArrivals: (debt, cap) => this.#shedArrivals(debt, cap),
 			expireDrops: (now) => this.#expireDrops(now),
 			holdsDrops: () => (this.#state.drops.all[0]?.start ?? UNBOUNDED) < this.#keptDrops(),
 		});
 	}
 
-	// Give up `[start, end)` as `hole` says, or forget it without one, billing the drop set to the
-	// track's account and dating each run against the pool's idle window. Mirrors the Rust
+	// Give up `[start, end)` as `hole` says, or forget it without one, dating each run against the
+	// pool's idle window. Mirrors the Rust
 	// `TrackState::change_drops`.
 	#setDrops(start: bigint, end: bigint, hole?: Hole): void {
 		this.#state.drops.set(start, end, hole);
@@ -1223,63 +1201,7 @@ export class Producer {
 			this.#dropsBorn.set(start, end, { start, end, expires });
 			this.#dropsOldest = Math.min(this.#dropsOldest ?? expires, expires);
 		}
-		this.#billDrops();
-	}
-
-	// Bill the drop set and its expiry index to the account as they now stand.
-	#billDrops(): void {
-		const billed = this.#state.drops.size * cache.RUN_OVERHEAD + this.#dropsBorn.size * cache.BORN_OVERHEAD;
-		if (billed > this.#dropsBilled) this.#account.bill(billed - this.#dropsBilled);
-		else this.#account.unbill(this.#dropsBilled - billed);
-		this.#dropsBilled = billed;
-	}
-
-	// Forget the lowest runs of the drop set toward `debt`, at most about `cap` bytes, returning the
-	// bytes freed. Their sequences are unknown again: a reader judges them by its budget, or fills
-	// them by range.
-	#shedDrops(debt: number, cap: number): number {
-		let paid = 0;
-		const kept = this.#keptDrops();
-		while (paid < debt && paid < cap) {
-			const run = this.#state.drops.all[0];
-			if (!run || run.start >= kept) break;
-			const billed = this.#dropsBilled;
-			const end = min(run.end, kept);
-			this.#setDrops(run.start, end);
-			this.#forgot([{ start: run.start, end }]);
-			paid += billed - this.#dropsBilled;
-		}
-		return paid;
-	}
-
-	// Bill the arrivals' gaps to the account as they now stand. The run they split is the track's
-	// own, so an in-order feed bills nothing. A closed track bills none: nothing arrives to add a
-	// gap, and its account may outlive it in the pool's sweep, which would keep them billed.
-	#billArrivals(): void {
-		const closed = this.#state.closed.peek() !== undefined;
-		const billed = closed ? 0 : Math.max(0, this.#arrivals.size - 1) * ARRIVAL_OVERHEAD;
-		if (billed > this.#arrivalsBilled) this.#account.bill(billed - this.#arrivalsBilled);
-		else this.#account.unbill(this.#arrivalsBilled - billed);
-		this.#arrivalsBilled = billed;
-	}
-
-	// Fold the arrivals' oldest gaps toward `debt`, at most about `cap` bytes, returning the bytes
-	// freed: nothing waits on them any longer, as when their grace passes, so a reader parked on one
-	// judges it missing. Mirrors the Rust `TrackState::shed_arrivals`.
-	#shedArrivals(debt: number, cap: number): number {
-		let paid = 0;
-		let folded = false;
-		while (paid < debt && paid < cap && this.#arrivals.foldOldest()) {
-			const billed = this.#arrivalsBilled;
-			this.#billArrivals();
-			paid += billed - this.#arrivalsBilled;
-			folded = true;
-		}
-		if (folded) {
-			for (const state of [this.#state, ...this.#sinks]) state.folded.update((revision) => revision + 1);
-			this.#owe();
-		}
-		return paid;
+		this.#account.dropsChanged();
 	}
 
 	// Forget the runs given up longer than the pool's idle window before tick `now`; walks the set
@@ -1294,7 +1216,6 @@ export class Producer {
 		if (expired.length > 0) {
 			this.#state.drops.clear(expired);
 			this.#dropsBorn.clear(expired);
-			this.#billDrops();
 			this.#forgot(expired);
 		}
 		this.#dropsOldest = undefined;
@@ -1349,9 +1270,6 @@ export class Producer {
 				throw new Error("track already caches groups");
 			producer.#account = producer.#openAccount(pool);
 		};
-		hooks.arrivalRuns = (producer) => producer.#arrivals.size;
-		accountOf = (producer) => producer.#account;
-		hooks.billTrack = (producer) => producer.#account.reader();
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
@@ -1403,12 +1321,7 @@ export class Producer {
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
-		hooks.dropTrackGroups = (producer, start, end, hole) => {
-			const runs = producer.#drop(start, end, hole, true);
-			// A peer's drops bill the pool as its groups do, so they pay their debt the same way.
-			producer.#chargeDebt();
-			return runs;
-		};
+		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
 		hooks.supersedeStale = (producer, judged) => {
 			const held = producer.#state.drops.all
@@ -1460,8 +1373,8 @@ export class Producer {
 				return undefined;
 			}
 			hooks.arriveGroup(mirror, entry.arrived);
-			// A cache hit is an access: the group outranks those nobody read.
-			entry.charge.refresh();
+			// A cache hit is an access, restarting the group's idle window.
+			entry.charge.touch();
 			return mirror;
 		};
 		reofferCached = (producer, sink, start, end, offer) => {
@@ -1741,7 +1654,6 @@ export class Producer {
 						// A group its recovery moved to another copy no longer reads this one.
 						if (hooks.readsMirrored(mirror)) hooks.releaseGroupReader(mirror, abort);
 						entry.mirrors.delete(sink);
-						entry.charge.sub(cache.MIRROR_OVERHEAD);
 					}
 				}
 				for (const group of sink.groups.peek()) hooks.releaseGroupReader(group, abort);
@@ -1787,7 +1699,6 @@ export class Producer {
 		const dst = entry.group.mirror();
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
-		if (!entry.mirrors.has(sink)) entry.charge.bill(cache.MIRROR_OVERHEAD);
 		entry.mirrors.set(sink, dst);
 		if (sink.reads?.(dst.sequence) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
@@ -1798,16 +1709,13 @@ export class Producer {
 	}
 
 	// Drop a cached group's mirror from every sink so no consumer can pin it, the cache pool
-	// having reclaimed it for its bytes (`evicted`) or for idling (`expired`).
-	#evict(entry: CachedGroup, reason: "evicted" | "expired" = "expired"): void {
+	// having reclaimed it for idling, or a new copy having replaced it.
+	#evict(entry: CachedGroup): void {
 		// Reclaiming a group the publisher never closed ends it as the gap it is, before
 		// the mirrors below would otherwise report a clean finish to a reader that had
 		// drained it. The usual case, an already-closed group aging out, keeps its own
 		// terminal state.
-		const lost =
-			reason === "evicted"
-				? new StreamError(StreamCode.Evicted, { message: "group evicted from the cache" })
-				: new TooFarBehind();
+		const lost = new TooFarBehind();
 		EVICTED.add(lost);
 		if (!entry.group.isClosed) entry.group.abort(lost);
 		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror, lost));
@@ -1816,9 +1724,9 @@ export class Producer {
 	}
 
 	// Take a failed fill answer out of every sink that has not read it, as Rust serves no failed
-	// fetch-only slot; #mirror gives it to no new sink either. The entry stays cached, billed and
+	// fetch-only slot; #mirror gives it to no new sink either. The entry stays cached and
 	// reclaimable, as Rust keeps a spent slot until its scan reclaims it, so a reader already
-	// holding it keeps its frames and the fill's own failure while the pool still counts them.
+	// holding it keeps its frames and the fill's own failure.
 	#withhold(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) {
 			// A fetch's own outcome.
@@ -1832,7 +1740,6 @@ export class Producer {
 			if (sink.timeline[at] === mirror) sink.timeline.splice(at, 1);
 			lose(sink, mirror.sequence);
 			entry.mirrors.delete(sink);
-			entry.charge.sub(cache.MIRROR_OVERHEAD);
 			hooks.releaseGroupReader(mirror, undefined);
 		}
 	}
@@ -1841,11 +1748,10 @@ export class Producer {
 	// receive them. A reader already holding one keeps it as is.
 	#unlink(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) unlinkMirror(sink, mirror);
-		entry.charge.sub(entry.mirrors.size * cache.MIRROR_OVERHEAD);
 		entry.mirrors.clear();
 	}
 
-	// Take a cached group out of the cache lookups, releasing what it billed the pool.
+	// Take a cached group out of the cache lookups and its track's account.
 	#uncache(entry: CachedGroup, evicted = false): void {
 		this.#cache.delete(entry);
 		this.#cached.delete(entry.group.sequence);
@@ -1958,11 +1864,6 @@ export class Producer {
 		return this.#state.largest.peek();
 	}
 
-	// Accrue and pay the cache pool's eviction debt for what this track wrote.
-	#chargeDebt(): void {
-		if (this.#account.chargeDebt()) this.#settle();
-	}
-
 	// Evict the groups idle past the pool's window: every one when `full`, else a bounded scan.
 	#evictExpired(full: boolean): void {
 		if (this.#account.evictExpired(full)) this.#settle();
@@ -1979,8 +1880,6 @@ export class Producer {
 		fetched = false,
 		succeeds?: { failed: GroupProducer; kept?: Map<TrackState, GroupConsumer> },
 	): void {
-		// Before the group is cached, so the write creating it can never evict it.
-		this.#chargeDebt();
 		this.#settle();
 		const entry: CachedGroup = {
 			group,
@@ -1990,9 +1889,7 @@ export class Producer {
 			fetched: fetched || undefined,
 		};
 		hooks.chargeGroup(group, entry.charge);
-		// The failed copy's frames its continued readers still hold, billed until this entry leaves
-		// the cache, which evicts the sink mirrors holding them.
-		if (succeeds) entry.charge.bill(hooks.succeedGroup(group, succeeds.failed));
+		if (succeeds) hooks.succeedGroup(group, succeeds.failed);
 		this.#undrop(group.sequence);
 		// No reader is handed a failed fill answer (see #withhold), withheld as it aborts so a
 		// read that follows at once cannot take it: its sequence is unknown again, owed while the
@@ -2043,7 +1940,6 @@ export class Producer {
 			// Continued, it stays the sink's copy of the group, so the sink never holds two.
 			if (mirror && mirror.closed.peek() === undefined) {
 				entry.mirrors.set(sink, mirror);
-				entry.charge.bill(cache.MIRROR_OVERHEAD);
 				continue;
 			}
 			if (mirror) unlinkMirror(sink, mirror);
@@ -2186,7 +2082,6 @@ export class Producer {
 			if (sequence >= start && sequence < end) insertRun(cached, sequence, sequence + 1n);
 		}
 		this.#skipGaps(cached, start, end);
-		this.#chargeDebt();
 		return cached;
 	}
 
@@ -2271,7 +2166,6 @@ export class Producer {
 				kept ??= new Map();
 				kept.set(sink, mirror);
 				existing.mirrors.delete(sink);
-				existing.charge.sub(cache.MIRROR_OVERHEAD);
 			}
 			// Subscribers may have seen the aborted incarnation's start, so it stays a watermark.
 			this.#evict(existing);
@@ -2346,7 +2240,6 @@ export class Producer {
 		this.#arrivals.account(start, end, at);
 		// Only a gap folds, so an in-order feed never reads the subscription.
 		if (this.#arrivals.hasGaps()) this.#arrivals.expire(at, this.#grace());
-		this.#billArrivals();
 		this.#owe();
 	}
 
@@ -2507,17 +2400,13 @@ export class Producer {
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
-		if (abort && this.#state.end.peek()?.tail) {
-			this.#arrivals.expire(now(), this.#grace());
-			this.#billArrivals();
-		}
+		if (abort && this.#state.end.peek()?.tail) this.#arrivals.expire(now(), this.#grace());
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		const kept = this.#keptDrops();
 		closeTrackState(this.#state, abort);
-		this.#billArrivals();
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
 			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
@@ -2540,7 +2429,7 @@ export class Producer {
 		// never reclaims a group its subscribers have yet to drain.
 		const edge = this.#edgeEntry();
 		if (edge) {
-			edge.charge.recordWrite();
+			edge.charge.touch();
 			this.#account.demote(edge);
 		}
 		this.#evictExpired(true);
@@ -2662,8 +2551,6 @@ function blocksHole(reported: Reported, hole: Hole): boolean {
 export interface WireRecord {
 	/** Whether the wire was told of `sequence`: served, or given up. */
 	told(sequence: bigint): boolean;
-	/** Whether the pool folded `sequence` into the record's floor, final for this reader. */
-	folded(sequence: bigint): boolean;
 	/** Whether `sequence` went out as a stale drop, which a group still replaces. */
 	toldStale(sequence: bigint): boolean;
 	/** The parts of `[start, end)` the wire was told nothing of. */
@@ -2776,13 +2663,6 @@ export class Subscriber {
 		judged?: readonly Run[];
 	};
 	#reported = new Runs<Reported>(sameReport);
-	// Everything below was settled for good and folded away under pool pressure: handed out, or
-	// reported final, so none is handed out or reported again. Mirrors the Rust `Record::floor`.
-	#folded = 0n;
-	// What the record bills to the track's account, opened on its first run.
-	#bill?: cache.Reader;
-	// The pool needed a run this reader was promised, so it ended with TooFarBehind.
-	#lagged = false;
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -3225,13 +3105,9 @@ export class Subscriber {
 	#wireRecord(): WireRecord {
 		const reported = this.#reported;
 		return {
-			told: (sequence) => sequence < this.#folded || reported.at(sequence) !== undefined,
-			folded: (sequence) => sequence < this.#folded,
+			told: (sequence) => reported.at(sequence) !== undefined,
 			toldStale: (sequence) => reported.at(sequence)?.kind === "stale",
-			untold: (start, end) => {
-				const from = max(start, this.#folded);
-				return from < end ? runGaps(reported.overlapping(from, end), from, end) : [];
-			},
+			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
 			tell: (start, end, report) => {
 				if (start >= end) return;
 				// A stale report keeps the parts an upstream decided, which stay its to judge again.
@@ -3262,113 +3138,6 @@ export class Subscriber {
 					.filter((run) => run.kind === "stale" && run.expired)
 					.map(({ start, end }) => ({ start, end })),
 		};
-	}
-
-	// The bill on the account of the track this reads: `current` while it bills that account, or
-	// else a new one. A resumed reader's follows its serving copy across route changes, so the pool
-	// that holds what it reads is the one its debt comes from.
-	#billOn(current: cache.Reader | undefined): cache.Reader | undefined {
-		if (this.#resume) return this.#resume.bill(current);
-		const producer = this.#state.producer;
-		if (!producer) return current;
-		const account = accountOf(producer);
-		return current?.bills(account) ? current : account.reader();
-	}
-
-	// How many runs the record holds above its floor, each billed `cache.READER_RUN_OVERHEAD`:
-	// the handed-out prefix is one run that bills nothing.
-	#recordRuns(): number {
-		return (
-			Math.max(0, this.#delivered.runs - 1) +
-			this.#skipped.size +
-			this.#pending.length +
-			this.#reported.size +
-			this.#givenUp.length +
-			this.#state.refused.peek().length
-		);
-	}
-
-	// Bill this reader's record, and pay what it can of the debt its track left its readers by
-	// folding what it settled for good into its floor. Returns TooFarBehind once that needed a
-	// run it was promised and its record is one to end; `handed` stays above the fold (see
-	// #fold). Mirrors the Rust `Record::settle`.
-	#settleRecord(handed?: bigint): TooFarBehind | undefined {
-		if (this.#lagged) return new TooFarBehind();
-		// A closed reader released its bill for good; a read still pending must not open another.
-		if (this.#left) return undefined;
-		const bytes = this.#recordRuns() * cache.READER_RUN_OVERHEAD;
-		if (!this.#bill && bytes === 0) return undefined;
-		const bill = this.#billOn(this.#bill);
-		if (bill !== this.#bill) {
-			// The serving route changed: the replaced route's pool stops carrying this record.
-			this.#bill?.close();
-			this.#bill = bill;
-		}
-		if (!bill) return undefined;
-		bill.set(bytes);
-		if (bill.debt === 0) return undefined;
-		this.#fold(handed);
-		bill.set(this.#recordRuns() * cache.READER_RUN_OVERHEAD);
-		if (bill.debt > 0 && bill.ends) {
-			this.#lagged = true;
-			bill.close();
-			this.#bill = undefined;
-			this.#pending = [];
-			this.#reported = new Runs<Reported>(sameReport);
-			this.#skipped.clear();
-			this.#givenUp = [];
-			this.#heads = [];
-			return new TooFarBehind();
-		}
-		return undefined;
-	}
-
-	// Raise the floor over the final prefix: each run from it up to the lowest one that is not
-	// final. Final are the groups handed out, the reports nothing reopens, and this reader's own
-	// stale skips, which a wider budget would offer again only while the pool still held their
-	// groups. Not final are the reports an update reopens, the runs given up and not reported
-	// yet, and the sequences nothing settled. The runs copied from the track's drop set go
-	// first: the next scan folds in again whatever the track still holds. Mirrors the Rust
-	// `Record::fold`. It stops below `handed`, a group this read hands out that its publisher has
-	// yet to tell its wire of.
-	#fold(handed?: bigint): void {
-		if (this.#pending.some((run) => run.received)) {
-			this.#pending = this.#pending.filter((run) => !run.received);
-			this.#dropsSeen = undefined;
-		}
-		let floor = this.#folded;
-		for (;;) {
-			const reported = this.#reported.at(floor);
-			let next: bigint;
-			if (reported) {
-				if (!finalReport(reported)) break;
-				next = reported.end;
-			} else {
-				if (this.#pending.some((run) => run.start <= floor && floor < run.end)) break;
-				let end = this.#delivered.runEnd(floor);
-				if (end === undefined && this.#skipped.has(floor)) end = floor + 1n;
-				if (end === undefined) break;
-				// A report or a run given up inside it is judged on its own.
-				const [inside] = this.#reported.overlapping(floor, end);
-				if (inside) end = min(end, max(inside.start, floor));
-				for (const run of this.#pending) if (run.start > floor && run.start < end) end = run.start;
-				next = end;
-			}
-			if (handed !== undefined && floor <= handed && handed < next) next = handed;
-			if (next <= floor) break;
-			floor = next;
-		}
-		if (floor === this.#folded) return;
-		this.#folded = floor;
-		this.#delivered.forgetBelow(floor);
-		for (const sequence of this.#skipped.keys()) if (sequence < floor) this.#skipped.delete(sequence);
-		this.#pending = this.#pending.flatMap((run) => removeRun([run], 0n, floor));
-		this.#reported.set(0n, floor);
-		this.#givenUp = removeRun(this.#givenUp, 0n, floor);
-		this.#heads = removeRun(this.#heads, 0n, floor);
-		// The fills it refused, as the Rust `Misses::given_up` is forgotten below the floor.
-		if (this.#state.refused.peek().some((run) => run.start < floor))
-			this.#state.refused.update((runs) => removeRun(runs, 0n, floor));
 	}
 
 	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
@@ -4209,7 +3978,6 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};
-		hooks.billSubscriber = (subscriber, current) => subscriber.#billOn(current);
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription ?? Subscription.default());
 			const subscriber = new Subscriber(name, state);
@@ -4519,8 +4287,6 @@ export class Subscriber {
 			}));
 		}
 		this.#left = true;
-		this.#bill?.close();
-		this.#bill = undefined;
 		this.#state.waitingOrdered = false;
 		// Settle if we're first (the producer may already have); either way drop anything
 		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
@@ -4610,19 +4376,6 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
-		const recv = this.#tryRecvUnsettled(dispositions);
-		// What the read settled is billed now, and pays what it can of its readers' debt. The group
-		// it hands out stays above the fold until the next read, so the publisher tells its wire of
-		// it first rather than taking it for one already served.
-		const lagged = this.#settleRecord(recv.kind === "group" ? recv.group.sequence : undefined);
-		if (!lagged) return recv;
-		// Nobody takes the group the lag replaced, so it lets go of its source here.
-		if (recv.kind === "group") recv.group.close();
-		return { kind: "error", error: lagged };
-	}
-
-	#tryRecvUnsettled(dispositions: boolean): Recv {
-		if (this.#lagged) return { kind: "error", error: new TooFarBehind() };
 		if (this.#resume) return this.#tryResumed(false, dispositions);
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };
@@ -4726,7 +4479,7 @@ export class Subscriber {
 	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
 	// replacing what it goes out over. Mirrors the Rust `Record::report`.
 	#reportRun(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
-		const start = max(from, this.#folded);
+		const start = from;
 		if (start >= to) return undefined;
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
@@ -4744,9 +4497,6 @@ export class Subscriber {
 	// first call on, a read without dispositions keeps its budget skips for it too. A resumed
 	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
-		// What a publisher told its wire since is billed now. A reader the pool ended reports
-		// nothing more: its reads fail with the reason.
-		if (this.#settleRecord()) return undefined;
 		if (this.#resume) {
 			for (;;) {
 				const queued = this.#nextResumedDrop();
@@ -4811,7 +4561,7 @@ export class Subscriber {
 			this.#pending = insertDrops(this.#pending, received);
 		}
 		for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
-			// A received run the track has since forgotten, shed or superseded, is unknown again:
+			// A received run the track has since forgotten, expired or superseded, is unknown again:
 			// only the part it still holds as it was folded in is owed.
 			if (run.received) {
 				const folded = run;
@@ -4909,7 +4659,6 @@ export class Subscriber {
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),
-			this.#state.folded.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
 			// Accepting the track may refuse a time anchor, with no group arriving to say so.
@@ -5010,14 +4759,7 @@ export class Subscriber {
 
 	// The synchronous half of #nextGroup.
 	#tryNextGroup(): Recv {
-		if (this.#lagged) return { kind: "error", error: new TooFarBehind() };
-		let recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
-		const lagged = this.#settleRecord();
-		if (lagged) {
-			// Nobody takes the group the lag replaced, so it lets go of its source here.
-			if (recv.kind === "group") recv.group.close();
-			recv = { kind: "error", error: lagged };
-		}
+		const recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
 		// One cursor: the frame helpers must not keep draining a group this read just
 		// moved past, or interleaved reads would run backwards.
 		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.sequence < recv.group.sequence) {

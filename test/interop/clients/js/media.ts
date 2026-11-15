@@ -133,7 +133,7 @@ const selected = new Set<string>(
 	values.cases === undefined
 		? native
 			? NATIVE_CASES
-			: CASES.filter((name) => requestedPlayer !== "firefox" || name !== "replacement")
+			: CASES.filter((name) => name !== "replacement")
 		: values.cases === "none"
 			? []
 			: values.cases.split(","),
@@ -161,9 +161,9 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && values.cases === undefined && playerEngine === "firefox") {
+if (!native && values.cases === undefined) {
 	console.error(
-		"QUARANTINE\treplacement\tintermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
+		"QUARANTINE\treplacement\tintermittent audio stall after a route switch under CPU load; see quest/m0/interop-green/README.md",
 	);
 }
 

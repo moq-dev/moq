@@ -11,6 +11,8 @@ on:
 
 permissions:
   contents: read
+  # Pulls the pinned GStreamer CI image, which may be private.
+  packages: read
 
 jobs:
   build:
@@ -54,23 +56,23 @@ jobs:
             --version "$VERSION" \
             --output dist
 
-      # Load the produced plugin against a system GStreamer the runner just
-      # installed (separate from the nix copy the build linked against).
-      # This is the customer-facing scenario: `nix build .#moq-gst` then
-      # `gst-inspect-1.0 moq`. If dyld/ld.so can't resolve the plugin's deps
-      # against the system GStreamer, this step fails.
+      # Load the produced plugin against a system GStreamer, separate from the
+      # nix copy the build linked against. This is the customer-facing
+      # scenario: `nix build .#moq-gst` then `gst-inspect-1.0 moq`. If dyld or
+      # ld.so can't resolve the plugin's deps against the system GStreamer,
+      # this step fails. Linux takes Ubuntu's GStreamer from the pinned
+      # gstreamer-ci image (.github/docker/gstreamer), so an apt mirror outage
+      # can't fail the build.
       - name: Install system GStreamer
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends \
-              gstreamer1.0-tools \
-              gstreamer1.0-plugins-base \
-              gstreamer1.0-plugins-good
-          else
-            brew install gstreamer
-          fi
+        if: runner.os == 'macOS'
+        run: brew install gstreamer
+
+      - name: Log in to ghcr.io
+        if: runner.os == 'Linux'
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: docker login ghcr.io -u "$ACTOR" --password-stdin <<<"$TOKEN"
 
       - name: Smoke test (gst-inspect against system GStreamer)
         shell: bash
@@ -80,7 +82,12 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf "dist/moq-gst-v${VERSION}-${TARGET}.tar.gz" -C dist/
-          just rs gst-smoke "dist/moq-gst-v${VERSION}-${TARGET}/lib/gstreamer-1.0"
+          plugin="dist/moq-gst-v${VERSION}-${TARGET}/lib/gstreamer-1.0"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            just gh gstreamer just rs gst-smoke "$plugin"
+          else
+            just rs gst-smoke "$plugin"
+          fi
 
       - name: Test Homebrew formula against tarball
         if: runner.os == 'macOS'
@@ -134,20 +141,23 @@ jobs:
         shell: bash
         run: just gh release parse-version moq-gst
 
-      - name: Install GStreamer dev libraries
-        shell: bash
-        run: |
-          # Ubuntu 24.04 ships GStreamer 1.24, satisfying gstreamer-rs
-          # 0.23's 1.22+ headers requirement. Resulting .so dynamic-links
-          # to libgstreamer-1.0.so.0 (ABI-stable since 1.0).
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: docker login ghcr.io -u "$ACTOR" --password-stdin <<<"$TOKEN"
 
       - name: Build (release, glibc 2.34)
         shell: bash
         # Pin glibc to 2.34 so one .so covers Debian 12+/Ubuntu 22.04+
         # (.deb) and AlmaLinux/RHEL/Rocky 9+ (.rpm).
+        #
+        # The build links against Ubuntu 24.04's GStreamer 1.24 headers
+        # (gstreamer-rs needs 1.22+) from the pinned gstreamer-ci image, so an
+        # apt mirror outage can't fail it. Only this step runs in the image,
+        # with the runner's rustup toolchain and Nix packaging tools; the
+        # packaging steps after it stay on the runner. The .so dynamically
+        # links libgstreamer-1.0.so.0, ABI-stable since 1.0.
         #
         # PKG_CONFIG_ALLOW_SYSTEM_LIBS keeps the `-L /usr/lib/<multiarch>` for
         # glib in pkg-config's output. pkg-config strips system lib paths by
@@ -156,8 +166,10 @@ jobs:
         # before linking. The explicit -L lets it resolve libglib-2.0.so /
         # libgobject-2.0.so.
         env:
+          TARGET: ${{ matrix.target }}
           PKG_CONFIG_ALLOW_SYSTEM_LIBS: "1"
-        run: cargo zigbuild --locked --release --target ${{ matrix.target }}.2.34 -p moq-gst
+        run: |
+          just gh gstreamer cargo zigbuild --locked --release --target "$TARGET.2.34" -p moq-gst
 
       - name: Package .deb
         shell: bash

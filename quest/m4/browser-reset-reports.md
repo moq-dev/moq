@@ -39,8 +39,8 @@ both bugs within a few milliseconds of the stream's data.
 Decided 2026-11-13 (maintainer, `/quest-complete`): ✅ keep this follow-up
 (rejected: drop it and live with the workaround alone).
 
-## Waiting
-
-- Maintainer: approve filing at crbug.com and bugzilla.mozilla.org, outside the
-  moq orgs, which needs your go-ahead; check each tracker's policy on
-  LLM-written reports first. Recommendation: file both, with the repro.
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ approved to file at
+crbug.com and bugzilla.mozilla.org, each only after reading that tracker's
+policy on LLM-written reports and searching for an existing report. Where a
+tracker bans LLM-written reports, hand the maintainer a draft with the repro
+instead of filing it.

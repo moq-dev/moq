@@ -1,0 +1,64 @@
+# [M] A request loop heals once routes settle
+
+## Goal
+
+A subscription that loops between relays while routes settle reaches the
+publisher once the next hops stop looping, instead of hanging silently or
+ending with `Unroutable` while its relay shows the broadcast available.
+Under the path rule, selected next hops can loop for a moment
+([epic](/quest/m2/cluster-routes/README.md) Plan item 27). A request
+forwarded around that loop meets a relay already requesting the same track
+upstream, and aggregation joins it to that request. Nothing errors, so a
+pending request that never follows its route's change waits forever with
+no data and no failure.
+
+## Plan
+
+Decided 2026-11-15 (maintainer, on
+[moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ move it
+back to m2, under the cluster-routes epic (rejected: keep it in m3). Relays
+that show a broadcast available while ending readers' subscriptions should
+block the milestone.
+
+Moved from m2 to m3 2026-11-14 (the m2 triage before the cut, under
+/quest-afk, for the maintainer's review): ✅ m3, under the cluster-routing
+epic (rejected: m2). A fixture and, if it hangs, a fix to where a relay's
+pending request goes, with no wire field (the hop count was rejected below),
+so it lands after the cut as a bug fix in shipped code.
+
+Decided 2026-11-13 (maintainer, /quest-plan on the BGP failure modes):
+
+- ✅ A fixture on real relays, with no TLA+ (rejected: adding pending
+  requests and aggregation to `RouteHandoff.tla`). The model's
+  `RequestsLoopFree` already checks next hops; this checks that the
+  relay's request state follows them.
+- ✅ If the fixture hangs, a relay's pending upstream request follows its
+  route when the selected next hop changes, even before the request is
+  answered, so the loop clears with the routes (rejected: a hop count on
+  every request that fails one at the limit, which adds a field to SUBSCRIBE,
+  FETCH, and the other requests and turns a loop that would heal into an
+  error the subscriber sees). Epic Plan item 27 already rejected keeping a
+  request from going back through the relay that sent it.
+
+Found again by [acceptance](/quest/m2/cluster-routes/acceptance.md) once
+[moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734) merged:
+`route_failover::live_mesh_link_failure_keeps_presence` cuts all but one of a
+publishing relay's links on a 34-relay mesh, and 3 readers on relays that
+stayed available end with `Unroutable` instead of hanging, all for one
+publisher. Each such relay moved onto a neighbour's direct route that the
+neighbour's own close made stale; the replaced doubt rule held them and
+ended none. The test pins those readers: flip it once a pending request
+follows its route and they read on.
+
+The fixture runs real lite-07 relays with mocked time. Form the loop the
+churn sweeps found (two unrelated failures at once, so two relays briefly
+route a publisher through each other), subscribe at both while it lasts,
+then let the routes settle. Both subscribers receive the next group, and no
+upstream request is left pending. Cover a request answered before the loop
+and one still unanswered when it forms. Check which relay state carries the
+pending request (the front in `rs/moq-net/src/model/front.rs`, and how
+`route/node.rs` `home`s it) before choosing where the fix goes.
+
+## Related
+
+- [moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734) - its doubt rule lets a publisher leaving three or more relays at once loop a request until the news arrives

@@ -547,6 +547,11 @@ impl TrackEntry {
 		self.place(hdr, version, received, reading, verdict)
 	}
 
+	/// Whether the track carries moq-transport object records, which a continuation cannot resume.
+	fn has_records(&self) -> bool {
+		self.copy.as_ref().is_some_and(|copy| copy.framing.ietf.is_some())
+	}
+
 	/// Whether a YIELDED reset paused the group `key`, which the cache still holds. One the
 	/// cache gave up on is let go here, releasing the subscription's end its stream held, since
 	/// the stream asking opens the group afresh.
@@ -1736,8 +1741,15 @@ impl GroupRecv {
 		self.park_wait = None;
 		let ietf: bool = header.0;
 		let hdr: lite::Group = header.1;
-		// Lite-07 without object records: a YIELDED reset pauses the group.
-		let yields: bool = self.subscriber.version.has_yield() && !ietf;
+		// Lite-07 on a track without object records: a YIELDED reset pauses the group.
+		let yields: bool = self.subscriber.version.has_yield()
+			&& !(ietf
+				&& self
+					.subscriber
+					.subscribes
+					.lock()
+					.get(&hdr.subscribe)
+					.is_some_and(|entry| entry.has_records()));
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -2038,17 +2050,10 @@ impl FrameIngest {
 
 	/// Where the frame `header` opens goes: a new frame of the group, or on a continuation,
 	/// one the group holds already, skipped, or the one a YIELDED reset cut short, completed.
-	fn dispatch(&mut self, group: &mut crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
+	fn dispatch(&mut self, group: &crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
 		let index = self.index;
 		// The peer's Frame Start can number a frame past any count.
 		self.index = index.checked_add(1).ok_or(Error::ProtocolViolation)?;
-		// A response from a byte: the header states the frame's full size, and only the rest
-		// of it follows.
-		if group.lead_at(index).is_some() {
-			return Ok(IngestPhase::Payload {
-				frame: group.create_lead(header)?,
-			});
-		}
 		let held = group.frame_count() as u64;
 		if index >= held {
 			return Ok(IngestPhase::Admit { header });
@@ -2099,8 +2104,9 @@ impl FrameIngest {
 				let lite::ietf::Decoded { properties, gap } =
 					lite::ietf::decode_properties(&block, self.framing, true)?;
 				group.mark_gap(id, gap)?;
-				// The rest of a frame the copy starts partway into is numbered below its count.
-				let next = id == group.frame_count() as u64 || group.lead_at(id).is_some();
+				// A plain group's frames are numbered by index, so a continuation re-sending
+				// frames its group holds finds them below its count.
+				let next = id == group.frame_count() as u64 || (!records.relayed && id == self.index);
 				let plain = next && properties.is_empty();
 				if !plain && !records.relayed {
 					return Err(Error::ProtocolViolation);
@@ -2739,6 +2745,15 @@ impl AnnouncePrefix {
 		}
 	}
 
+	/// Let go of this request, all but the claims its route layer serves, which stay in
+	/// the origin until the caller drops them.
+	fn retire(mut self: Box<Self>) -> Option<routed::Retired> {
+		match &mut self.state {
+			PrefixState::Run(step) => step.run.routed.as_mut().map(routed::Routed::retire),
+			_ => None,
+		}
+	}
+
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -2908,17 +2923,23 @@ impl AnnouncePrefix {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
+							// This request now carries what the one it replaces did. The old
+							// stream closes first, so the node hands this one its claims, but
+							// what it served leaves the origin only once this one serves it:
+							// a claim this request files under another route prefix or
+							// identity, such as a region widened to the root, would otherwise
+							// be let go in between.
+							let retired = self.replacing.take().and_then(|old| old.retire());
 							// What the initial set put in the node is served before the
 							// snapshot lets readers see the origin synced.
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
+							drop(retired);
 							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							self.snapshot = None;
-							// This request now carries what the one it replaces did.
-							self.replacing = None;
 							continue;
 						}
 						if run.initial > 0 {
@@ -5664,7 +5685,9 @@ mod tests {
 			compressed: false,
 			length_first: true,
 		};
-		let header = || {
+		// The `ietf` extension's plain records: a Group State of 0 after the header, then a
+		// record before each frame, as a moq-lite track on a relay link carries them.
+		let header = |ietf: bool| {
 			let mut script = Vec::new();
 			lite::Group {
 				subscribe: 7,
@@ -5673,11 +5696,18 @@ mod tests {
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
+			if ietf {
+				script.push(0);
+			}
 			script
 		};
 		// A lite-07 FRAME: the payload size plus one, the timestamp delta, then the first
 		// `sent` bytes of the payload.
-		let frame = |script: &mut Vec<u8>, delta: i64, payload: &[u8], sent: usize| {
+		let frame = |script: &mut Vec<u8>, ietf: bool, delta: i64, payload: &[u8], sent: usize| {
+			if ietf {
+				// The next Object ID, with no properties.
+				script.extend_from_slice(&[0, 0]);
+			}
 			let mut encoder = crate::coding::Encoder::new(&mut *script, version.into());
 			encoder.varint(payload.len() as u64 + 1).unwrap();
 			encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
@@ -5685,25 +5715,34 @@ mod tests {
 		};
 		let frames: [(i64, &[u8]); 3] = [(300, b"zero"), (10, b"onetwo!"), (10, b"three")];
 
-		for overtakes in [false, true] {
+		for (overtakes, ietf) in [(false, false), (true, false), (false, true), (true, true)] {
 			// Frame 0 whole, then frame 1 cut after three bytes.
-			let mut cut = header();
-			frame(&mut cut, frames[0].0, frames[0].1, frames[0].1.len());
-			frame(&mut cut, frames[1].0, frames[1].1, 3);
-			let mut whole = header();
+			let mut cut = header(ietf);
+			frame(&mut cut, ietf, frames[0].0, frames[0].1, frames[0].1.len());
+			frame(&mut cut, ietf, frames[1].0, frames[1].1, 3);
+			let mut whole = header(ietf);
 			for (delta, payload) in frames {
-				frame(&mut whole, delta, payload, payload.len());
+				frame(&mut whole, ietf, delta, payload, payload.len());
 			}
 			let yielded = ScriptedSession::new(cut);
 			let continued = ScriptedSession::eof(whole);
 			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(ietf);
+			if ietf {
+				peer_setup
+					.set(lite::Setup {
+						ietf: true,
+						..Default::default()
+					})
+					.unwrap();
+			}
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: clock.clone(),
 				session: crate::driver::Transport::new(yielded.clone()),
 				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
-				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_setup,
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
@@ -5747,15 +5786,18 @@ mod tests {
 			let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 			assert!(res.is_ok(), "a YIELDED reset pauses rather than fails: {res:?}");
 			let res = kio::wait(|waiter| second.poll_serve(waiter)).await;
-			assert!(res.is_ok(), "overtakes: {overtakes}: {res:?}");
+			assert!(res.is_ok(), "overtakes: {overtakes}, ietf: {ietf}: {res:?}");
 
 			let mut group = reader.assert_group();
 			assert_eq!(group.start, 3);
 			for (_, payload) in frames {
 				let read = group.read_frame().await.unwrap().unwrap();
-				assert_eq!(&read.payload[..], payload, "overtakes: {overtakes}");
+				assert_eq!(&read.payload[..], payload, "overtakes: {overtakes}, ietf: {ietf}");
 			}
-			assert!(group.read_frame().await.unwrap().is_none(), "overtakes: {overtakes}");
+			assert!(
+				group.read_frame().await.unwrap().is_none(),
+				"overtakes: {overtakes}, ietf: {ietf}"
+			);
 			assert_eq!(tail.read().streams(), 2, "each stream counts toward the end");
 		}
 	}
@@ -6185,8 +6227,18 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
-			kio::wait(|waiter| poll_run(&mut running, waiter)).await;
+			// The finished copy stays for its reader, serving fetches: the subscription is what
+			// ends.
+			kio::wait(|waiter| {
+				let _ = poll_run(&mut running, waiter);
+				match running.state {
+					TrackRunState::Done => Poll::Ready(()),
+					_ => Poll::Pending,
+				}
+			})
+			.await;
 
 			let end = loop {
 				match reader.recv_group().await {
@@ -6248,6 +6300,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -6356,6 +6409,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
@@ -6926,6 +6980,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -6951,6 +7006,79 @@ mod tests {
 			assert_eq!(next.start, 3, "{version:?}");
 			assert_eq!(next.read_frame().await.unwrap().unwrap().payload.as_ref(), b"3");
 		}
+	}
+
+	/// A finished copy still serving fetches while our FIN waits for the publisher ends once
+	/// the session no longer allows the broadcast, rather than outliving the grant.
+	#[kio::test]
+	async fn a_revoked_grant_ends_a_finished_copy_awaiting_its_fin() {
+		let (session, _peer) = crate::transport::memory::pair(Default::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::all());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: auth.clone(),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: 0,
+			depth: 0,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let serve_loop = ServeLoop::new(
+			&serve,
+			broadcast.reserve_track("video").unwrap(),
+			crate::track::Info::timed(),
+		);
+		let track = serve_loop.serving.clone();
+		let finished = FinishedServe {
+			serving: Some(serve_loop.serving),
+			demand: serve_loop.demand,
+			dynamic: serve_loop.dynamic.fetches_only(),
+			fetches: serve_loop.fetches,
+			closed: serve_loop.closed,
+		};
+		// A reader holds the finished copy.
+		let _reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Finish {
+				writer: None,
+				reader: None,
+				_working: crate::session::Work::default().start(),
+			},
+			gate,
+			datagrams: None,
+			finished: Some(finished),
+		};
+
+		auth.handle().authorize(&crate::auth::Grant::default());
+		let waiter = kio::Waiter::noop();
+		let _ = kio::Task::poll(&mut running, &waiter);
+		assert!(running.finished.is_none(), "the finished copy outlived its grant");
+		let closed = track.poll_closed(&waiter);
+		assert!(matches!(closed, Poll::Ready(Err(Error::Unauthorized))), "{closed:?}");
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
@@ -6996,11 +7124,16 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
+		// A finished copy stays for its reader, serving fetches; the subscription is what
+		// settles.
+		let run = poll_run(&mut running, &kio::Waiter::noop());
 		assert!(
-			poll_run(&mut running, &kio::Waiter::noop()).is_ready(),
+			matches!(running.state, TrackRunState::Done),
 			"{version:?}: FIN must settle immediately"
 		);
+		assert_eq!(run.is_ready(), !clean, "{version:?}: only a finished copy stays");
 		if clean {
 			assert!(reader.recv_group().await.unwrap().is_none());
 		} else {
@@ -7113,6 +7246,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate,
 			datagrams: None,
+			finished: None,
 		};
 		assert!(
 			poll_run(&mut running, &kio::Waiter::noop()).is_pending(),
@@ -7191,6 +7325,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
@@ -8245,6 +8380,7 @@ mod tests {
 			state: TrackRunState::Serve(serving),
 			gate: gate_run,
 			datagrams: None,
+			finished: None,
 		};
 
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
@@ -8312,6 +8448,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate: gate_run,
 				datagrams: None,
+				finished: None,
 			};
 
 			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
@@ -8477,6 +8614,7 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate: gate_run,
 				datagrams: None,
+				finished: None,
 			};
 
 			// Cancellation can happen before the first serving poll after metadata acceptance.
@@ -8755,8 +8893,12 @@ mod tests {
 				state: TrackRunState::Serve(serving),
 				gate,
 				datagrams: None,
+				finished: None,
 			};
-			assert!(poll_run(&mut running, &kio::Waiter::noop()).is_ready());
+			// A finished copy stays for its reader, serving fetches; a reset one is gone.
+			let run = poll_run(&mut running, &kio::Waiter::noop());
+			assert!(matches!(running.state, TrackRunState::Done));
+			assert_eq!(run.is_ready(), reset);
 			let end = reader.recv_group().now_or_never().expect("the track ended").map(|_| ());
 			match reset {
 				false => assert!(matches!(end, Ok(())), "{end:?}"),
@@ -10130,7 +10272,6 @@ mod tests {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			};
 			lite::AnnounceBroadcast::RouteStart {
 				node,
@@ -10700,6 +10841,65 @@ mod tests {
 			);
 			let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{what}: {err}");
+		}
+	}
+
+	/// Every well-formed message naming a Route ID closes the session when the neighbour
+	/// never assigned it (5, past its two routes) or already retired it (0, after its
+	/// ROUTE_END), as the draft requires: a route's state is the neighbour's to keep in
+	/// step, so a stray ID means the two ends disagree on which routes live.
+	#[kio::test]
+	async fn an_unassigned_or_retired_route_id_closes_the_session() {
+		type Encode = Box<dyn Fn(&mut crate::coding::Encoder<'_>)>;
+		let encode = |message: lite::AnnounceBroadcast| -> Encode {
+			Box::new(move |w| message.encode(w, Version::Lite07).unwrap())
+		};
+		let offer = crate::route::path::Offer {
+			path: [crate::route::path::Hop { node: 7, session: 0 }].into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 0,
+			down_only: false,
+		};
+		let naming = |id: u64| -> [(&str, Encode); 6] {
+			[
+				(
+					"ROUTE_UPDATE",
+					Box::new(raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))),
+				),
+				("ROUTE_HOLD", encode(lite::AnnounceBroadcast::RouteHold { id })),
+				("ROUTE_END", encode(lite::AnnounceBroadcast::RouteEnd { id })),
+				("ANNOUNCE_FLOOR", Box::new(floor(id, Some(1)))),
+				("ANNOUNCE_START", Box::new(claim_on(id, "x"))),
+				(
+					"DEAD",
+					encode(lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
+						hop: crate::route::path::Hop { node: 7, session: 0 },
+						far: 7,
+						gone: false,
+						more: false,
+						moved: vec![(id, Ok(offer.clone()))],
+					})),
+				),
+			]
+		};
+		let end = encode(lite::AnnounceBroadcast::RouteEnd { id: 0 });
+		for (id, before, what) in [(5, None, "unassigned"), (0, Some(&end), "retired")] {
+			for (message, naming) in naming(id) {
+				let mut script = two_routes();
+				let messages: Vec<&dyn Fn(&mut crate::coding::Encoder<'_>)> =
+					before.into_iter().map(|end| &**end).chain([&*naming]).collect();
+				script.extend(announce_script(Version::Lite07, &messages));
+				let (mut prefix, _consumer) = root_prefix(
+					Version::Lite07,
+					crate::lite::test_transport::ScriptedSession::new(script),
+				);
+				let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+				assert!(
+					matches!(err, Error::ProtocolViolation),
+					"{message} of a {what} route: {err}"
+				);
+			}
 		}
 	}
 
@@ -12294,6 +12494,71 @@ struct TrackServeRun {
 	gate: crate::auth::Gate,
 	/// Lite-05/06: the name's datagram track, taking the datagrams its subscription carries.
 	datagrams: Option<SharedDatagrams>,
+	/// The copy once the publisher finished it, still serving fetches below its end.
+	finished: Option<FinishedServe>,
+}
+
+/// A copy whose publisher finished the track, which still takes a group below its end that
+/// a reader fetches, as a local [`track::Finished`] does. Its subscription is over, but a
+/// group read partway, or never delivered, continues only through a FETCH upstream, so the
+/// copy stays while anyone reads it or a fetch is in flight. A reader's miss is no fetch:
+/// the subscription's tail already settled what it owed.
+struct FinishedServe {
+	serving: Option<track::Producer>,
+	demand: track::Demand,
+	dynamic: track::Requests,
+	fetches: kio::Tasks<FillServeRun>,
+	closed: Transport,
+}
+
+impl FinishedServe {
+	/// Ready once nobody reads the copy and no fetch is in flight, or the session closed.
+	fn poll(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let Some(serving) = &self.serving else {
+				return Poll::Ready(());
+			};
+			match self.dynamic.poll_requested_fill(waiter) {
+				Poll::Ready(Ok(fill)) => {
+					let info = FetchInfo::Known(serving.info().clone());
+					self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+					continue;
+				}
+				// Aborted through another handle: nothing is left to serve.
+				Poll::Ready(Err(_)) => {
+					self.serving = None;
+					return Poll::Ready(());
+				}
+				Poll::Pending => {}
+			}
+			let _ = self.fetches.poll(waiter);
+			// The groups it already holds stay readable, its clean end too once settled.
+			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
+				if let Some(serving) = self.serving.take() {
+					let _ = serving.abort(crate::lite::error::from_transport(err));
+				}
+				return Poll::Ready(());
+			}
+			if !self.fetches.is_empty() || crate::util::poll_unwanted(&mut self.demand, waiter).is_pending() {
+				return Poll::Pending;
+			}
+			// No linger: a new reader asks upstream afresh rather than reading this cache, which
+			// no subscription keeps. A fetch made afterwards finds a cancelled copy, not a
+			// dropped one.
+			match self
+				.serving
+				.take()
+				.expect("checked above")
+				.abort_unwanted(Error::Cancel)
+			{
+				Ok(()) => {
+					tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "finished track released");
+					return Poll::Ready(());
+				}
+				Err(used) => self.serving = Some(used),
+			}
+		}
+	}
 }
 
 /// Lite-05/06: the datagram track of a stream track's name, which the session adds to the
@@ -12440,6 +12705,7 @@ impl TrackServeRun {
 			state,
 			gate,
 			datagrams: None,
+			finished: None,
 		}
 	}
 
@@ -12449,7 +12715,7 @@ impl TrackServeRun {
 		if let Some(datagrams) = &mut self.datagrams {
 			datagrams.end(Err(Error::Unauthorized));
 		}
-		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
+		self.revoke_finished();
 		match std::mem::replace(&mut self.state, TrackRunState::Done) {
 			TrackRunState::Info {
 				request,
@@ -12481,6 +12747,15 @@ impl TrackServeRun {
 				// Each fetch in flight resets itself as it drops, seeing the same denial.
 			}
 			TrackRunState::Ending { .. } | TrackRunState::Finish { .. } | TrackRunState::Done => {}
+		}
+	}
+
+	/// The session no longer allows the broadcast: end the finished copy and its fetches.
+	fn revoke_finished(&mut self) {
+		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
+		// Each fetch in flight resets itself as it drops, seeing the denial.
+		if let Some(serving) = self.finished.take().and_then(|finished| finished.serving) {
+			let _ = serving.abort(Error::Unauthorized);
 		}
 	}
 }
@@ -12532,20 +12807,39 @@ impl kio::Task for TrackServeRun {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let run = self.poll_run(waiter);
+		if let Some(finished) = &mut self.finished
+			&& finished.poll(&self.serve, waiter).is_ready()
+		{
+			self.finished = None;
+		}
+		match self.finished {
+			Some(_) => Poll::Pending,
+			None => run,
+		}
+	}
+}
+
+impl TrackServeRun {
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// Checked before the auth wait too, so an abandoned request never parks on a token.
 		if self.poll_unwanted(waiter).is_ready() {
 			return Poll::Ready(());
 		}
 		ready!(self.gate.poll_ready(waiter));
-		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
-		// Nor on a closed session, whose grants end with it: the session's end decides how
-		// its tracks end.
-		if !matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. })
+		// A finished track only waits for its FIN to be acknowledged: only its finished copy,
+		// still serving fetches, is left to revoke. Nothing is on a closed session, whose grants
+		// end with it: the session's end decides how its tracks end.
+		let ended = matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. });
+		if (!ended || self.finished.is_some())
 			&& self.gate.poll_denied(waiter).is_ready()
 			&& self.serve.subscriber.session.poll_ending(waiter).is_pending()
 		{
-			self.revoke();
-			return Poll::Ready(());
+			if !ended {
+				self.revoke();
+				return Poll::Ready(());
+			}
+			self.revoke_finished();
 		}
 		loop {
 			match &mut self.state {
@@ -12662,7 +12956,21 @@ impl kio::Task for TrackServeRun {
 							}
 						},
 						ServeEnd::Finished => {
-							let _ = serve_loop.serving.finish();
+							// Lite-07 declared the end already, which this leaves as it is.
+							let _ = serve_loop.serving.finish_shared();
+							// No FETCH before lite-05: nothing but the subscription fills a group.
+							if serve_loop.supports_fetch {
+								// A reader's miss in flight is settled by the tail instead.
+								let mut fetches = serve_loop.fetches;
+								fetches.retain(|run| run.fill.is_fetch());
+								self.finished = Some(FinishedServe {
+									serving: Some(serve_loop.serving),
+									demand: serve_loop.demand,
+									dynamic: serve_loop.dynamic.fetches_only(),
+									fetches,
+									closed: serve_loop.closed,
+								});
+							}
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Ok(()));
 							}
@@ -14072,7 +14380,6 @@ enum FetchRunState {
 		request: Option<track::GroupFill>,
 		stream: Stream<Transport, Version>,
 		frame_start: u64,
-		byte_start: u64,
 		frame_end: Option<u64>,
 	},
 	/// Flushed; waiting for the publisher to answer before accepting.
@@ -14080,7 +14387,6 @@ enum FetchRunState {
 		request: Option<track::GroupFill>,
 		stream: Stream<Transport, Version>,
 		frame_start: u64,
-		byte_start: u64,
 		frame_end: Option<u64>,
 	},
 	Ingest {
@@ -14250,15 +14556,6 @@ impl kio::Task for FetchServeRun {
 						false => 0,
 					};
 
-					// Only the rest of a frame a reader got partway through, which a compressed
-					// frame cannot start at: it inflates only from its first byte. Nor can a
-					// moq-transport track's, whose object records name whole objects.
-					let whole_objects = matches!(self.info.peek(), Some(Ok(info)) if info.ietf().is_some());
-					let byte_start = match self.serve.subscriber.version.has_byte_start() {
-						true if plain && !whole_objects && frame_start == request.frame_start() => request.byte_start(),
-						_ => 0,
-					};
-
 					let frame_end = if self.serve.subscriber.version.has_frame_bounds() && plain {
 						request.frame_end()
 					} else {
@@ -14278,7 +14575,6 @@ impl kio::Task for FetchServeRun {
 							.filter(|_| self.serve.subscriber.version.has_fetch_max_delay()),
 						group: self.group,
 						start_frame: frame_start,
-						start_byte: byte_start,
 						// A bounded plain copy keeps this provenance in the cache; older wires
 						// and compressed groups widen to a complete representation.
 						end_frame: frame_end.and_then(|end| end.checked_sub(1)),
@@ -14298,7 +14594,6 @@ impl kio::Task for FetchServeRun {
 						request: Some(request),
 						stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					};
 				}
@@ -14317,7 +14612,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						mut stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
@@ -14330,7 +14624,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					};
 				}
@@ -14367,7 +14660,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						mut stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
@@ -14399,7 +14691,6 @@ impl kio::Task for FetchServeRun {
 						group_info,
 						group::Bounds {
 							start: frame_start,
-							byte: byte_start,
 							end: frame_end,
 						},
 					) {

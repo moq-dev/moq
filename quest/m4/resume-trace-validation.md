@@ -25,16 +25,11 @@ can keep passing on code that has moved on. Milestone m4.
 - The sweep covers more than the model does (ranges, cache expiry, a second
   instance). Restrict the validated cases to what the model covers or grow
   the model, whichever costs less, and say which.
-- Before starting, check [Resume as producer replacement](/quest/m4/resume-redesign.md):
-  it deletes the per-reader path this model describes. If it has landed or is
-  in flight, validate against the redesign's model instead, or delete this
-  quest with the old one.
+- The per-reader path this model describes stays: the producer-replacement
+  redesign that would have deleted it was dropped 2026-11-15 (maintainer,
+  /quest-complete).
 - Nightly on the sweep's fresh seed (`test resume-model`); the merge gate
   only if it stays fast on the fixed cases.
 
 Public API: none. Wire: none.
 
-
-## Related
-
-- [Resume as producer replacement](/quest/m4/resume-redesign.md) - rewrites the code this validates

@@ -52,10 +52,12 @@
 //!   `frames` / `groups`.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model. A
-//!   session's egress `bytes` / `frames` count only payload the transport
-//!   delivered (see [`SendStream::delivered`](crate::transport::poll::SendStream::delivered)),
-//!   never what a reset or a lost session discarded: a frame's bytes as they
-//!   land, and the frame with its last byte. An in-process reader counts on read,
+//!   session's egress `bytes` / `frames` count only payload the peer
+//!   acknowledged (see [`SendStream::poll_acked`](crate::transport::poll::SendStream::poll_acked)),
+//!   never what a reset or a lost session discarded: a frame's bytes once an
+//!   offset past them is acknowledged, and the frame with its last byte. A
+//!   transport that cannot see acknowledgments counts the bytes the stream
+//!   took instead. An in-process reader counts on read,
 //!   unless it takes a [`Bill`] to count only what it delivers onward.
 //! * `datagrams`: cumulative datagrams of datagram tracks. A datagram belongs to
 //!   no group, so it bumps `bytes` but not `groups` or `frames`. A session counts
@@ -2135,6 +2137,20 @@ impl Delivery {
 	/// Whether a frame's payload the stream took before offset `written` waits on delivery.
 	pub(crate) fn waiting(&self, written: u64) -> bool {
 		!self.frames.is_empty() && self.through < written
+	}
+
+	/// The stream offset billed through.
+	pub(crate) fn through(&self) -> u64 {
+		self.through
+	}
+
+	/// Whether a frame waiting on delivery ends after stream offset `after`, at or before `through`.
+	pub(crate) fn ends_between(&self, after: u64, through: u64) -> bool {
+		self.frames
+			.iter()
+			.rev()
+			.find(|&&(_, end)| end <= through)
+			.is_some_and(|&(_, end)| end > after)
 	}
 
 	/// Bill the payload before stream offset `through`, which never goes back.

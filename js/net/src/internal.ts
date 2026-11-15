@@ -8,7 +8,7 @@
 import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Reader as CacheReader, Charge, Pool } from "./cache.ts";
+import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -518,11 +518,6 @@ export interface ResumeSource {
 	 * route change keeps, and those the serving copy reported.
 	 */
 	reofferStale(): Run[];
-	/**
-	 * The bill for the reader's record on the serving copy's account: `current` while it bills that
-	 * account, or else a new one. `current` without a serving copy.
-	 */
-	bill(current: CacheReader | undefined): CacheReader | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -606,8 +601,6 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
-	/** How many runs a track's arrivals hold, for tests. Assigned by `track.ts`. */
-	arrivalRuns: (producer: Producer) => number;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -791,17 +784,6 @@ export const hooks: {
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
-	 * Open a bill against a track's cache account for what a session keeps for it beside the
-	 * cache, such as its tail's record of finished streams, billed as a reader's record is, so
-	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
-	 */
-	billTrack: (producer: Producer) => CacheReader;
-	/**
-	 * The bill on the account of the track `subscriber` reads: `current` while it bills that account,
-	 * or else a new one; undefined while it has none.
-	 */
-	billSubscriber: (subscriber: Subscriber, current: CacheReader | undefined) => CacheReader | undefined;
-	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
 	 * taken back, which are owed again. Mirrors the Rust crate-private
@@ -884,13 +866,8 @@ export const hooks: {
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
-	/** Bill a cached group's bytes to `charge` from now on, or stop billing them with undefined. */
+	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
 	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
-	/**
-	 * Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most,
-	 * and end the `readers` its track holds that lost a shed frame; returns the bytes freed.
-	 */
-	shedGroup: (group: GroupProducer, debt: number, cap: number, readers: Iterable<GroupConsumer>) => number;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
@@ -955,10 +932,9 @@ export const hooks: {
 	holdGroup: (group: GroupProducer) => () => void;
 	/**
 	 * Hand `next` the readers `failed` kept open while held, teeing each from the frame it reached.
-	 * Fails those `next` cannot serve. Returns the bytes of `failed`'s frames they still hold.
-	 * Assigned by `group.ts`.
+	 * Fails those `next` cannot serve. Assigned by `group.ts`.
 	 */
-	succeedGroup: (next: GroupProducer, failed: GroupProducer) => number;
+	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
@@ -1027,9 +1003,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
-	arrivalRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1132,12 +1105,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {
-		throw new Error("track.ts not loaded");
-	},
-	billTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
-	billSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {
@@ -1258,9 +1225,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	chargeGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	shedGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFrameCount: () => {

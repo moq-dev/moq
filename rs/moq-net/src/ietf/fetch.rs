@@ -129,9 +129,9 @@ pub struct Fetch<'a> {
 	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
 	/// Never encoded; we send no range filters.
 	pub range_filters: bool,
-	/// Whether the request carried FILL_TIMEOUT (0x0A), a budget for waiting on upstream
-	/// that ends in Timed-Out gaps we cannot write, so the request is refused rather than
-	/// left to wait without it. Never encoded; we send no fill timeout.
+	/// Whether the request carried FILL_TIMEOUT (0x0A), a budget for waiting on upstream.
+	/// It is accepted and ignored: a one-group read ends with the group. Never encoded;
+	/// we send no fill timeout.
 	pub fill_timeout: bool,
 	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
 	/// draft-22). Always `true` before draft-22, which has no way to opt out.

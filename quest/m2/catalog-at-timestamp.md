@@ -17,7 +17,7 @@ leaves two timing rules in one catalog). Its first consumer is
 [the composition](/quest/m3/layers/spec.md). It lands in m2, beside lite-07
 (rejected: m3 with the composition), so lite-07 ships with the rule.
 
-[The model](/quest/m2/time-addressing/model.md) already has moq-mux's catalog
+[The model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md) already has moq-mux's catalog
 producer stamp each catalog from the broadcast clock. Today
 `rs/hang/src/catalog/consumer.rs` drops that stamp (`.map(|value|
 value.value)`), and `js/hang` does likewise; both return it with the
@@ -36,7 +36,3 @@ start. The JS half checks that `js/hang`'s catalog producer stamps from the
 broadcast clock, and makes it do so if not. It stays in m2: `rs/hang` and
 `js/hang` return the stamp with each catalog, a breaking change to both
 consumers, and the hang draft's rule is what lite-07 catalogs mean.
-
-## Required
-
-- [Rust groups are addressed by their start](/quest/m2/time-addressing/model.md) - the catalog producer stamps from the broadcast clock
