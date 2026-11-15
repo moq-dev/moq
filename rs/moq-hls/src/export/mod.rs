@@ -4044,6 +4044,39 @@ mod tests {
 		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
 		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
 		drop(next);
+
+		// A CMAF group carried whole in one fragment passes the line in its first frame.
+		let muxer = moq_mux::container::fmp4::Muxer::video(&video_config()).unwrap();
+		let mut config = video_config();
+		config.container = hang::catalog::Container::Cmaf {
+			init: muxer.init().unwrap().expect("a VP8 init from the coded size"),
+		};
+		let mut catalog = joined();
+		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.video.renditions.insert("video0".to_string(), config);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let test = Groups {
+			renditions: Groups::export(&broadcast, &catalog),
+			broadcast,
+			catalog,
+		};
+		let track = test.broadcast.create_track("video0", timed()).unwrap();
+		// Samples 100ms apart from `pts_ms` up to `last_ms`, in one fragment.
+		let fragment = |sequence: u64, pts_ms: u64, last_ms: u64| {
+			let frames: Vec<_> = (pts_ms..=last_ms)
+				.step_by(100)
+				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
+				.collect();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
+			group.write_frame(frames[0].timestamp, bytes).unwrap();
+			group.close().unwrap();
+		};
+		fragment(0, 500, 2_400);
+		fragment(1, 2_500, 4_400);
+		let snapshot = test.listed("video0", 1).await;
+		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
+		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
 	}
 
 	// A recording refuses a listed segment whose media is gone, but reports a grid slot the

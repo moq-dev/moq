@@ -2156,9 +2156,14 @@ impl Follow {
 				if let Some((_, previous, _)) = &self.latest {
 					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
+				let mut slots = self.grid.group(sequence, pts);
+				// A fragment carrying the whole group may already pass the next line.
+				if let Some(newest) = reach.newest() {
+					slots.extend(self.grid.reach(newest));
+				}
 				self.latest = Some((group, pts, reach));
 				self.reading = true;
-				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
+				(slots, (sequence, Some(pts)), declared)
 			}
 		};
 		self.list(rendition, slots, Some(read), size, false)
@@ -2386,20 +2391,25 @@ impl WatchMedia {
 						let Some((group, _, reach)) = follow.latest.as_mut() else {
 							break;
 						};
-						let pts = match group.poll_read_frame(waiter) {
+						match group.poll_read_frame(waiter) {
 							Poll::Pending => break,
-							Poll::Ready(Ok(Some(frame))) => match frame_reach(&follow.container, frame, reach) {
-								Some(pts) => pts,
-								None => continue,
-							},
+							Poll::Ready(Ok(Some(frame))) => {
+								// The container says what a frame holds, as `Step::End` reads it.
+								if let Ok(decoded) = moq_mux::container::Container::decode(&*follow.container, frame) {
+									reach.add(decoded);
+								}
+							}
 							// Ended or failed: its successor places it, and an ended track reads it
 							// again for its end, failing there if it failed.
 							Poll::Ready(Ok(None) | Err(_)) => {
 								follow.reading = false;
 								break;
 							}
+						}
+						let Some(newest) = reach.newest() else {
+							continue;
 						};
-						let slots = follow.grid.reach(pts);
+						let slots = follow.grid.reach(newest);
 						if let Some(done) = follow.list(&self.rendition, slots, None, None, false) {
 							return Poll::Ready(done);
 						}
@@ -2492,8 +2502,10 @@ impl kio::Task for WatchMedia {
 /// discontinuity marker, read as they are decoded.
 #[derive(Default)]
 struct Reach {
-	/// Each sample's pts, in nanoseconds.
+	/// The newest samples' pts, in nanoseconds, at most twice [`Reach::KEEP`].
 	stamps: Vec<u128>,
+	/// The shortest spacing between the samples folded out of `stamps`.
+	step: Option<u128>,
 	/// The latest end a sample states with its own duration, in nanoseconds.
 	ends: Option<u128>,
 	/// A frame with no payload: where the publisher says the content stops.
@@ -2501,6 +2513,10 @@ struct Reach {
 }
 
 impl Reach {
+	/// The newest distinct stamps kept when folding, well past any reordering a codec does, so a
+	/// group read as its frames arrive costs bounded memory however long it runs.
+	const KEEP: usize = 64;
+
 	/// Count every sample `frames` decodes to.
 	fn add(&mut self, frames: Vec<moq_mux::container::Frame>) {
 		for frame in frames {
@@ -2517,6 +2533,28 @@ impl Reach {
 				self.ends = self.ends.max(Some(pts + duration));
 			}
 		}
+		if self.stamps.len() > 2 * Self::KEEP {
+			self.fold();
+		}
+	}
+
+	/// Fold all but the newest [`Reach::KEEP`] distinct stamps into the shortest spacing.
+	fn fold(&mut self) {
+		self.stamps.sort_unstable();
+		self.stamps.dedup();
+		let older = self.stamps.len().saturating_sub(Self::KEEP);
+		let step = self.stamps[..(older + 1).min(self.stamps.len())]
+			.windows(2)
+			.map(|pair| pair[1] - pair[0])
+			.min();
+		self.step = self.step.into_iter().chain(step).min();
+		self.stamps.drain(..older);
+	}
+
+	/// The newest sample's pts, which places a pending group once it passes the next line.
+	fn newest(&self) -> Option<moq_net::Timestamp> {
+		let newest = self.stamps.iter().max()?;
+		moq_net::Timestamp::from_nanos(u64::try_from(*newest).ok()?).ok()
 	}
 
 	/// Where the last sample starts, which places the group on the grid, and where the content
@@ -2543,6 +2581,7 @@ impl Reach {
 			.stamps
 			.windows(2)
 			.map(|pair| pair[1] - pair[0])
+			.chain(self.step)
 			.min()
 			.or_else(|| spacing.map(|spacing| spacing.min(interval).as_nanos()));
 		let end = self
@@ -2588,25 +2627,6 @@ fn first_frame(
 	let mut reach = Reach::default();
 	reach.add(decoded);
 	Some(First::Media(pts, reach, size))
-}
-
-/// Count what a frame after its group's first reaches, and return where it starts on the grid: the
-/// transport's stamp, or else its newest sample's, as [`first_frame`] reads a group's start.
-fn frame_reach(
-	container: &moq_mux::catalog::hang::Container,
-	frame: moq_net::frame::Frame,
-	reach: &mut Reach,
-) -> Option<moq_net::Timestamp> {
-	use moq_mux::container::Container as _;
-	let stamp = frame.timestamp;
-	let decoded = container.decode(frame).ok()?;
-	let newest = decoded
-		.iter()
-		.filter(|sample| !sample.payload.is_empty() && sample.timestamp.scale().is_some())
-		.map(|sample| sample.timestamp)
-		.max_by_key(|pts| pts.as_nanos().ok());
-	reach.add(decoded);
-	if stamp.scale().is_some() { Some(stamp) } else { newest }
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.
@@ -3179,6 +3199,26 @@ mod tests {
 		assert_eq!(
 			millis(reach.finish(None, Duration::from_secs(2))),
 			(Some(500), Some(500))
+		);
+
+		// A long group read as it arrives keeps a bounded tail, yet times its end as if whole,
+		// however its samples are reordered or repeated.
+		let mut reach = Reach::default();
+		for ms in (0..10_000u64).step_by(40) {
+			let reordered = if ms % 120 == 40 {
+				ms + 40
+			} else if ms % 120 == 80 {
+				ms - 40
+			} else {
+				ms
+			};
+			reach.add(vec![sample(reordered, None, b"x"), sample(reordered, None, b"x")]);
+			assert!(reach.stamps.len() <= 2 * Reach::KEEP + 2);
+		}
+		assert_eq!(reach.newest().map(|t| t.as_millis().unwrap()), Some(9_960));
+		assert_eq!(
+			millis(reach.finish(None, Duration::from_secs(2))),
+			(Some(9_960), Some(10_000))
 		);
 	}
 
