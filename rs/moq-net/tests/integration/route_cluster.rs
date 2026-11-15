@@ -6,6 +6,10 @@
 //! region and marks them `upstream`, the cores of a region peer with each other, and
 //! each core peers with its counterpart in the other region over a priced backbone link.
 //! Publishers push to an edge of one region, and readers sit on an edge of the other.
+//!
+//! A local mesh of two LAN relays, each with its own CDN uplink, covers partitions,
+//! overlapping claims, restarts, and a grant union crossing a scoped boundary. Last, a
+//! client listing one prefix of a relay holds routes only to the origins meeting it.
 
 use crate::route_change::{Delivery, produce_origin, read, timed};
 use crate::support;
@@ -13,6 +17,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
+use moq_net::stats::{Message, Registry, SessionInfo, Tier};
 use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, Version, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
@@ -108,7 +113,10 @@ impl Links {
 	fn kill(&mut self, node: &origin::Producer) {
 		let hop = node.hop().get();
 		let touches = |(x, y, _): &(u64, u64, MockPair)| *x == hop || *y == hop;
-		self.0.iter().filter(|link| touches(link)).for_each(|(_, _, pair)| cut(pair));
+		self.0
+			.iter()
+			.filter(|link| touches(link))
+			.for_each(|(_, _, pair)| cut(pair));
 		self.0.retain(|link| !touches(link));
 	}
 }
@@ -194,7 +202,10 @@ async fn read_group(rx: &mut mpsc::UnboundedReceiver<Delivery>, name: &str, key:
 }
 
 /// Subscribe `video` at `path` on `node`, reading every group in full.
-async fn subscribe(node: &origin::Producer, path: &str) -> (moq_net::broadcast::Consumer, mpsc::UnboundedReceiver<Delivery>) {
+async fn subscribe(
+	node: &origin::Producer,
+	path: &str,
+) -> (moq_net::broadcast::Consumer, mpsc::UnboundedReceiver<Delivery>) {
 	let broadcast = (node.consume().follow(path, None).unwrap().available().await)
 		.unwrap()
 		.unwrap();
@@ -317,7 +328,15 @@ async fn a_far_edge_reads_a_claim_and_sees_its_withdrawal_once() {
 
 	let at_far = watched[6].seen();
 	assert!(
-		matches!(at_far.as_slice(), [Seen { kind: Kind::Start, available: true, cost: VIA_FIRST_CORES, .. }]),
+		matches!(
+			at_far.as_slice(),
+			[Seen {
+				kind: Kind::Start,
+				available: true,
+				cost: VIA_FIRST_CORES,
+				..
+			}]
+		),
 		"the far edge reads through the first cores: {at_far:?}"
 	);
 	for watch in &mut watched {
@@ -484,7 +503,14 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	read_group(&mut rx, "O", 0).await;
 	let start = island.seen();
 	assert!(
-		matches!(start.as_slice(), [Seen { kind: Kind::Start, cost: 2, .. }]),
+		matches!(
+			start.as_slice(),
+			[Seen {
+				kind: Kind::Start,
+				cost: 2,
+				..
+			}]
+		),
 		"over the LAN: {start:?}"
 	);
 	let instance = start[0].instance.clone();
@@ -526,7 +552,15 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	quiesce().await;
 	let healed = island.seen();
 	assert!(
-		matches!(healed.as_slice(), [Seen { kind: Kind::Update, available: true, cost: 2, .. }]),
+		matches!(
+			healed.as_slice(),
+			[Seen {
+				kind: Kind::Update,
+				available: true,
+				cost: 2,
+				..
+			}]
+		),
 		"back on the LAN in place: {healed:?}"
 	);
 	local.group(2);
@@ -547,7 +581,11 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 #[kio::test]
 async fn the_cdn_never_reaches_itself_through_the_lan() {
 	for marked in [true, false] {
-		let uplink = if marked { origin::Link::Upstream } else { origin::Link::Peer };
+		let uplink = if marked {
+			origin::Link::Upstream
+		} else {
+			origin::Link::Peer
+		};
 		let mut lan = Lan::with_uplinks(uplink).await;
 		let _cdn = Publisher::new("Q", 3, "cdn", None, &lan.cdn[0], 1).await;
 		quiesce().await;
@@ -606,7 +644,9 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 			assert_eq!(broadcast.info().instance.as_ref(), Some(instance), "{path}");
 			// Reading a track sends the request on to the claim.
 			let track = broadcast.track("video").unwrap();
-			subscribing.push(kio::clock::sim::spawn(async move { track.subscribe(None).await.map(drop) }));
+			subscribing.push(kio::clock::sim::spawn(
+				async move { track.subscribe(None).await.map(drop) },
+			));
 		}
 	}
 	land().await;
@@ -615,7 +655,9 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 	wide_paths.sort();
 	narrow_paths.sort();
 	let expected = |under: &str| {
-		let mut paths: Vec<_> = (lan.relays()).map(|relay| format!("live/{under}/{}", relay.hop())).collect();
+		let mut paths: Vec<_> = (lan.relays())
+			.map(|relay| format!("live/{under}/{}", relay.hop()))
+			.collect();
 		paths.sort();
 		paths
 	};
@@ -688,7 +730,8 @@ async fn an_epochless_replacement_restarts_everywhere() {
 		let seen = watch.seen();
 		let hop = relay.hop();
 		assert!(
-			seen.iter().all(|seen| seen.kind != Kind::End && seen.kind != Kind::Offline),
+			seen.iter()
+				.all(|seen| seen.kind != Kind::End && seen.kind != Kind::Offline),
 			"relay {hop}: {seen:?}"
 		);
 		let restart = seen.iter().position(|seen| seen.kind == Kind::Restart);
@@ -700,7 +743,9 @@ async fn an_epochless_replacement_restarts_everywhere() {
 			"relay {hop}: {seen:?}"
 		);
 		assert!(
-			seen[restart..].iter().all(|later| later.instance == seen[restart].instance),
+			seen[restart..]
+				.iter()
+				.all(|later| later.instance == seen[restart].instance),
 			"relay {hop}: {seen:?}"
 		);
 	}
@@ -816,7 +861,14 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 	for (inside, outside) in &mut watched {
 		let (inside, outside) = (inside.seen(), outside.seen());
 		assert!(
-			matches!(inside.as_slice(), [Seen { kind: Kind::Start, available: true, .. }]) && outside.is_empty(),
+			matches!(
+				inside.as_slice(),
+				[Seen {
+					kind: Kind::Start,
+					available: true,
+					..
+				}]
+			) && outside.is_empty(),
 			"scoped: inside {inside:?} outside {outside:?}"
 		);
 	}
@@ -831,7 +883,15 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 	for (inside, outside) in &mut watched {
 		let (inside, outside) = (inside.seen(), outside.seen());
 		assert!(
-			moved(&inside) && matches!(outside.as_slice(), [Seen { kind: Kind::Start, available: true, .. }]),
+			moved(&inside)
+				&& matches!(
+					outside.as_slice(),
+					[Seen {
+						kind: Kind::Start,
+						available: true,
+						..
+					}]
+				),
 			"widened: inside {inside:?} outside {outside:?}"
 		);
 	}
@@ -847,7 +907,11 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 			"expired: inside {inside:?} outside {outside:?}"
 		);
 	}
-	assert_eq!(uplink.client_transport.close_reason(), None, "the session outlived the token");
+	assert_eq!(
+		uplink.client_transport.close_reason(),
+		None,
+		"the session outlived the token"
+	);
 
 	// Inside the scope the floor still certifies a withdrawal.
 	inside.withdraw();
@@ -859,3 +923,167 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 	drop((wide, uplink, inside, outside, links));
 }
 
+/// A client of `relay` asking it only about what the client's readers watch, with the
+/// relay's side of the session counted.
+async fn reader(relay: &origin::Producer, client: &origin::Producer) -> (MockPair, Counted) {
+	let registry = Registry::new(Default::default());
+	let tier = Tier::new(moq_net::Path::from_static("client"));
+	let mut options = MockConnectOptions::new(lite07());
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(client.clone());
+	options.client_discovers_all = false;
+	options.server_stats = (registry.tier(tier.clone())).session(SessionInfo::new(moq_net::Path::from_static("")));
+	(connect_mock(options).await, Counted { registry, tier })
+}
+
+/// The control bytes a relay sent its client.
+struct Counted {
+	registry: Registry,
+	tier: Tier,
+}
+
+impl Counted {
+	/// The announce bytes sent so far: routes, claims, floors, and their ends.
+	fn announced(&self) -> u64 {
+		(self.registry.snapshot().control().iter())
+			.filter(|(tier, class, _)| *tier == self.tier && *class == Message::Announce)
+			.map(|(_, _, bytes)| bytes.tx)
+			.sum()
+	}
+}
+
+/// A reader listing `prefix` on `node`, which is all a client's discovery follows.
+struct Listing {
+	routes: origin::Routes,
+}
+
+impl Listing {
+	async fn new(node: &origin::Producer, prefix: &str) -> Self {
+		let routes = (node.consume().scope(prefix, &Patterns::from(Pattern::all())))
+			.unwrap()
+			.routes();
+		let listing = Self { routes };
+		// The request, its answer, and the initial set.
+		kio::clock::sleep(DOUBT).await;
+		listing
+	}
+
+	/// Each event since the last call, as the path relative to the prefix and its kind.
+	fn seen(&mut self) -> Vec<(String, Kind)> {
+		let mut seen = Vec::new();
+		while let std::task::Poll::Ready(Some(event)) = self.routes.poll_next(&kio::Waiter::noop()) {
+			let kind = match event.kind {
+				origin::RouteKind::Start => Kind::Start,
+				origin::RouteKind::Update => Kind::Update,
+				origin::RouteKind::Restart => Kind::Restart,
+				origin::RouteKind::End => Kind::End,
+				origin::RouteKind::Offline => Kind::Offline,
+			};
+			seen.push((event.announce.prefix.to_string(), kind));
+		}
+		seen
+	}
+}
+
+/// An origin `hop` publishing each of `paths` over its own session to `relay`.
+struct Origin {
+	node: origin::Producer,
+	routes: Vec<origin::Route>,
+	link: MockPair,
+}
+
+impl Origin {
+	async fn new(hop: u64, paths: &[&str], relay: &origin::Producer) -> Self {
+		let node = produce_origin(hop);
+		let routes = (paths.iter())
+			.map(|path| {
+				let route = node.route(*path, origin::RouteOptions::hidden()).unwrap();
+				route.announce().unwrap();
+				route
+			})
+			.collect();
+		let link = push(&node, relay, 1).await;
+		Self { node, routes, link }
+	}
+
+	/// Announce `path` and withdraw it again, a few times over.
+	async fn churn(&self, path: &str) {
+		for _ in 0..3 {
+			let route = self.node.route(path, origin::RouteOptions::hidden()).unwrap();
+			route.announce().unwrap();
+			kio::clock::sleep(DOUBT).await;
+			route.withdraw();
+			kio::clock::sleep(DOUBT).await;
+		}
+	}
+}
+
+/// A relay hears `L`, claiming `live/a` and `vod/l`, and `V`, claiming only `vod/b`, each
+/// over its own session. A client lists only `live`. It holds `L`'s route and never `V`'s:
+/// `V` churning costs the client no byte. A request outside that interest still resolves
+/// through the relay. A Rust client's request discovers its own path, so it names `V`'s
+/// node; Node ID 0, the publisher selecting, comes only from other implementations and
+/// is covered at the publisher (`an_answered_track_stream_holds_the_track_until_the_requester_closes`).
+#[kio::test]
+async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
+	let relay = produce_origin(1);
+	let _l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
+	let v = Origin::new(3, &["vod/b"], &relay).await;
+	let client = produce_origin(9);
+	let (_pair, counted) = reader(&relay, &client).await;
+	quiesce().await;
+	let mut live = Listing::new(&client, "live").await;
+	assert_eq!(live.seen(), [("a".to_string(), Kind::Start)]);
+
+	let before = counted.announced();
+	v.churn("vod/c").await;
+	assert_eq!(
+		counted.announced(),
+		before,
+		"an origin outside the interest reached the client"
+	);
+
+	let broadcast = kio::clock::timeout(HOLD, client.consume().request("vod/b", None))
+		.await
+		.expect("answered")
+		.expect("resolved through the relay");
+	assert_eq!(broadcast.info().instance, Some(v.routes[0].instance()));
+	assert!(live.seen().is_empty());
+}
+
+/// `L` claims `live/a` and `vod/l` at a relay whose client lists `live`, then withdraws
+/// `live/a`, its last claim there. Its route to the client ends behind that batch, closed
+/// by its floor: the client sees `live/a` End where the relay certifies the request, and
+/// Offline where the relay's grant to `L` (`live/a` and `vod`) knows only part of it.
+/// Either way `L`'s later churn under `vod` costs the client nothing, so the route is gone.
+#[kio::test]
+async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
+	for (scoped, gone) in [(false, Kind::End), (true, Kind::Offline)] {
+		let relay = produce_origin(1);
+		let l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
+		if scoped {
+			let mut grant = auth::Grant::default();
+			grant.publish = [Pattern::subtree("live/a").unwrap(), Pattern::subtree("vod").unwrap()]
+				.into_iter()
+				.collect();
+			l.link.server.auth().authorize(&grant);
+		}
+		let client = produce_origin(9);
+		let (_pair, counted) = reader(&relay, &client).await;
+		quiesce().await;
+		let mut live = Listing::new(&client, "live").await;
+		assert_eq!(live.seen(), [("a".to_string(), Kind::Start)], "scoped {scoped}");
+
+		l.routes[0].withdraw();
+		kio::clock::sleep(DOUBT).await;
+		assert_eq!(live.seen(), [("a".to_string(), gone)], "scoped {scoped}");
+
+		let before = counted.announced();
+		l.churn("vod/m").await;
+		assert_eq!(
+			counted.announced(),
+			before,
+			"scoped {scoped}: the route outlived the interest"
+		);
+	}
+}
