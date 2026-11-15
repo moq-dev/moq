@@ -116,7 +116,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
+congestion_control = "delay"         # "delay" (BBR v3, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.

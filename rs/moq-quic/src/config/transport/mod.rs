@@ -62,8 +62,9 @@ pub struct Config {
 	/// Used in place of [`idle_timeout`](Self::idle_timeout) until the handshake completes, so a
 	/// short idle timeout meant to detect a dead peer quickly does not also cut a handshake off
 	/// after a single probe. It applies whether the idle timeout is shorter, longer, or disabled,
-	/// and whatever idle timeout the peer advertises. Defaults to 10 seconds, as msquic's
-	/// `HandshakeIdleTimeoutMs`.
+	/// and whatever idle timeout the peer advertises. Defaults to 30 seconds, the default idle
+	/// timeout: under heavy loss a client backs its probes off past 10 seconds, and a half-open
+	/// handshake costs no more than an idle connection.
 	pub handshake_timeout: Duration,
 
 	/// Period of inactivity before sending a keep-alive packet, `None` (the default) to derive it
@@ -281,7 +282,7 @@ impl Default for Config {
 		Self {
 			limits: Limits::default(),
 			idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
-			handshake_timeout: Duration::from_secs(10),
+			handshake_timeout: DEFAULT_IDLE_TIMEOUT,
 			keep_alive: None,
 			send_fairness: true,
 

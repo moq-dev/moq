@@ -106,6 +106,19 @@ export class AuthError {
 		this.reason = reason;
 	}
 
+	/**
+	 * Whether the code says the acceptor failed to decide (INTERNAL_ERROR, TOO_MANY_REQUESTS, or
+	 * CONTROL_MESSAGE_TIMEOUT), so the presenter presents the token again after a backoff. Any
+	 * other code is the acceptor's verdict.
+	 */
+	undecided(): boolean {
+		return (
+			this.code === SessionCode.Internal ||
+			this.code === SessionCode.TooManyRequests ||
+			this.code === SessionCode.Timeout
+		);
+	}
+
 	async #encode(w: Writer) {
 		if (new TextEncoder().encode(this.reason).byteLength > MAX_REASON) {
 			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
@@ -192,6 +205,7 @@ export class LiteAuthWire implements AuthWire {
 				reply.code === SessionCode.Unsupported
 					? new Unsupported(reply.reason)
 					: new SessionError(reply.code as SessionCode, { reason: reply.reason }),
+			undecided: reply.undecided(),
 		};
 	}
 

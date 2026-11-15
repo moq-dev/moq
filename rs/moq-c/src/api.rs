@@ -1621,7 +1621,7 @@ pub struct moq_client_config {
 	/// Whether `quic_mtu_discovery` is present.
 	pub has_quic_mtu_discovery: bool,
 
-	/// Congestion control family name (`loss`, `delay`, or `none`), or NULL for the backend's choice.
+	/// Congestion control family name (`loss` for CUBIC, `delay` for BBR v3, or `none`), or NULL for the backend's choice.
 	pub quic_congestion_control: *const c_char,
 	/// The length in bytes of `quic_congestion_control`.
 	pub quic_congestion_control_len: usize,

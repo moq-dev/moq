@@ -6834,7 +6834,7 @@ async fn client_connects_with_every_knob_set() {
 			keep_alive: Some(Duration::ZERO),
 			gso: Some(false),
 			mtu_discovery: Some(true),
-			congestion_control: Some(MoqCongestionControl::Loss),
+			congestion_control: Some(MoqCongestionControl::loss()),
 			qlog: None,
 			keylog: Some(false),
 		},
@@ -10027,4 +10027,14 @@ async fn group_calls_wake_ready_after_unlocking() {
 	group.abort(1).unwrap();
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
+}
+
+/// An endpoint's broadcast is told apart from media by path, and a malformed path fails.
+#[test]
+fn socket_is_endpoint() {
+	use crate::socket::moq_socket_is_endpoint;
+	assert!(moq_socket_is_endpoint("room/.server/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room/.client/a".into()).unwrap());
+	assert!(!moq_socket_is_endpoint("room/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room//a".into()).is_err());
 }

@@ -90,7 +90,7 @@ impl Session {
 
 	/// The session's open group streams, the lowest ranked first.
 	#[cfg(test)]
-	pub(crate) fn open_streams(&self) -> Vec<open::OpenStream> {
+	pub(super) fn open_streams(&self) -> Vec<(open::Rank, Arc<Listed>)> {
 		self.opens.open_streams()
 	}
 
@@ -397,13 +397,21 @@ impl Listed {
 		self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 	}
 
-	/// The stream's rank, and whether the peer acknowledged everything written to it.
-	pub(super) fn read(&self) -> open::OpenStream {
+	/// Where the stream ranks now.
+	pub(super) fn rank(&self) -> open::Rank {
 		let state = self.lock();
-		open::OpenStream {
-			rank: open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority),
-			acknowledged: state.stream.acknowledged(),
-		}
+		open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority)
+	}
+
+	/// Whether the peer acknowledged everything written to it, never assumed when the transport
+	/// cannot tell.
+	pub(super) fn acknowledged(&self) -> bool {
+		let state = self.lock();
+		let offset = state.stream.offset();
+		matches!(
+			state.stream.poll_acked(&kio::Waiter::noop(), &offset),
+			Poll::Ready(Ok(poll::Acked::Delivered))
+		)
 	}
 
 	/// Reset the stream to make room, failing its writer with the reset's code.
@@ -605,9 +613,6 @@ trait ErasedSend: Send + Sync {
 	fn finish(&mut self) -> Result<(), Error>;
 	fn reset(&mut self, code: u32);
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
-	fn acknowledged(&self) -> Option<bool>;
-	fn delivered(&self) -> Option<u64>;
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()>;
 	fn offset(&self) -> Offset;
 	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>>;
 }
@@ -785,18 +790,6 @@ impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync>
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		poll::SendStream::poll_closed(self, waiter).map_err(Error::new)
-	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		poll::SendStream::acknowledged(self)
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		poll::SendStream::delivered(self)
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		poll::SendStream::poll_delivered(self, waiter)
 	}
 
 	fn offset(&self) -> Offset {
@@ -1030,18 +1023,6 @@ impl poll::SendStream for SendStream {
 			}
 		}
 	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.get().acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.get().delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.get().poll_delivered(waiter)
-	}
 }
 
 impl poll::RecvStream for RecvStream {
@@ -1183,7 +1164,7 @@ mod test {
 	}
 
 	fn ranks(session: &Session) -> Vec<open::Rank> {
-		session.open_streams().into_iter().map(|stream| stream.rank).collect()
+		session.open_streams().into_iter().map(|(rank, _)| rank).collect()
 	}
 
 	fn ungrouped(priority: i64) -> SendOptions<'static, Group> {
@@ -1282,8 +1263,7 @@ mod test {
 		));
 		assert!(poll::SendStream::poll_acked(&stream, &waiter, &five).is_pending());
 
-		let (a, _b) = super::super::memory::pair(Default::default());
-		let session = Session::new(a);
+		let session = Session::new(SinkSession::new(Default::default()));
 		let listed = open_group(&session, ungrouped(0));
 		let offset = poll::SendStream::offset(&listed);
 		assert!(matches!(
@@ -1292,27 +1272,21 @@ mod test {
 		));
 	}
 
-	/// A listed stream reports the peer acknowledging what was written to it, and a reset one
-	/// never is.
+	/// A listed stream reads as acknowledged once the peer has everything written to it.
 	#[test]
 	fn a_listed_stream_reports_its_acknowledgement() {
 		let (a, b) = super::super::memory::pair(Default::default());
 		let session = Session::new(a);
 		let mut stream = open_group(&session, ungrouped(0));
-		let acknowledged = || session.open_streams()[0].acknowledged;
-		assert_eq!(acknowledged(), Some(true), "nothing written is all acknowledged");
+		let acknowledged = || session.open_streams()[0].1.acknowledged();
+		assert!(acknowledged(), "nothing written is all acknowledged");
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(
 			poll::SendStream::poll_write(&mut stream, &waiter, b"group"),
 			Poll::Ready(Ok(5))
 		));
-		assert_eq!(acknowledged(), Some(false));
-		assert_eq!(
-			poll::SendStream::acknowledged(&stream),
-			Some(false),
-			"the writer reads the same"
-		);
+		assert!(!acknowledged());
 
 		let Poll::Ready(Ok(mut recv)) = poll::Session::poll_accept_uni(&b, &waiter) else {
 			panic!("the peer accepts the stream");
@@ -1321,10 +1295,7 @@ mod test {
 			poll::RecvStream::poll_read_chunk(&mut recv, &waiter, 16),
 			Poll::Ready(Ok(Some(_)))
 		));
-		assert_eq!(acknowledged(), Some(true));
-
-		poll::SendStream::reset(&mut stream, 1);
-		assert_eq!(poll::SendStream::acknowledged(&stream), Some(false));
+		assert!(acknowledged());
 	}
 
 	/// A grouped stream ranks by its group's current priority, and follows a move to another
@@ -1341,13 +1312,12 @@ mod test {
 				priority: 2,
 			},
 		);
-		let read = |session: &Session| session.open_streams()[0];
-		let grouped = |session: &Session| match read(session).rank {
+		let grouped = |session: &Session| match session.open_streams()[0].0 {
 			open::Rank::Grouped { group, stream, .. } => (group, stream),
 			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
 		};
 		assert_eq!(grouped(&session), (1, 2));
-		assert_eq!(read(&session).acknowledged, None);
+		assert!(!session.open_streams()[0].1.acknowledged());
 
 		poll::SendGroup::set_priority(&mut low, 3);
 		assert_eq!(grouped(&session), (3, 2));

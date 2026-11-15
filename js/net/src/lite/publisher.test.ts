@@ -4010,7 +4010,6 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 		priority: 127,
 		metric: 0n,
 		downOnly: false,
-		rtt: 0n,
 	};
 	try {
 		await ok();

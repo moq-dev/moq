@@ -18582,6 +18582,7 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
+            optional = true;
           }
         ];
         devDependencies = [
@@ -18603,7 +18604,10 @@ rec {
             packageId = "workspace-hack";
           }
         ];
-
+        features = {
+          "lab" = [ "dep:tracing" ];
+        };
+        resolvedDefaultFeatures = [ "lab" ];
       };
       "moq-crypto" = rec {
         crateName = "moq-crypto";
@@ -18737,7 +18741,7 @@ rec {
           "async" = [ "kio?/async" ];
           "cpu" = [ "dep:rind" ];
           "default" = [
-            "sign"
+            "endpoint"
             "e2ee"
           ];
           "e2ee" = [
@@ -18750,28 +18754,26 @@ rec {
             "dep:uuid"
             "dep:zeroize"
           ];
+          "endpoint" = [
+            "dep:moq-net"
+            "dep:rind"
+            "dep:zeroize"
+          ];
           "provider" = [
             "cpu"
             "dep:rind-rustls"
             "dep:rustls"
           ];
           "serde" = [ "dep:serde" ];
-          "sign" = [
-            "dep:bytes"
-            "dep:kio"
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
         };
         resolvedDefaultFeatures = [
           "async"
           "cpu"
           "default"
           "e2ee"
+          "endpoint"
           "provider"
           "serde"
-          "sign"
         ];
       };
       "moq-ffi" = rec {
@@ -20180,6 +20182,11 @@ rec {
             ];
           }
           {
+            name = "moq-congestion";
+            packageId = "moq-congestion";
+            features = [ "lab" ];
+          }
+          {
             name = "moq-quic";
             packageId = "moq-quic";
             features = [ "mux" ];
@@ -20405,7 +20412,7 @@ rec {
             name = "moq-crypto";
             packageId = "moq-crypto";
             usesDefaultFeatures = false;
-            features = [ "sign" ];
+            features = [ "endpoint" ];
           }
           {
             name = "moq-net";
@@ -21687,6 +21694,7 @@ rec {
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
+            features = [ "lab" ];
           }
           {
             name = "moq-shaper";
@@ -59652,6 +59660,10 @@ rec {
             ];
           }
           {
+            name = "tracing";
+            packageId = "tracing";
+          }
+          {
             name = "tracing-core";
             packageId = "tracing-core";
           }
@@ -61092,6 +61104,10 @@ rec {
               "decompression-gzip"
               "follow-redirect"
             ];
+          }
+          {
+            name = "tracing";
+            packageId = "tracing";
           }
           {
             name = "tracing-core";

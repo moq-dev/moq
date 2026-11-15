@@ -44,4 +44,4 @@ pending request (the front in `rs/moq-net/src/model/front.rs`, and how
 
 ## Related
 
-- [A dual-homed publisher stays reachable while one link flaps](/quest/m2/cluster-routes/flapping-publisher.md) - another failure mode from the same BGP comparison
+- [moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734) - its doubt rule lets a publisher leaving three or more relays at once loop a request until the news arrives

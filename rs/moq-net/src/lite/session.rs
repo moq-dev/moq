@@ -779,7 +779,7 @@ impl PresentToken {
 							};
 							tracing::warn!(%err, reason = %refused.reason, "auth token refused");
 							if !matches!(err, Error::Unsupported) {
-								self.handle.refused(self.id);
+								self.handle.refused(self.id, refused.undecided());
 							}
 							*answered = true;
 							return Poll::Ready(err);
