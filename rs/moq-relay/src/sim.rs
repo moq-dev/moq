@@ -11,7 +11,6 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use moq_net::transport::memory;
-use moq_net::transport::poll::Session as _;
 
 use crate::{Accepted, Connection, auth, cluster};
 
@@ -55,11 +54,11 @@ enum Host {
 	Hold(mpsc::UnboundedSender<moq_tokio::sim::Dial>),
 }
 
-/// One accepted link: who dialed whom, and the accepting half, which closing cuts.
+/// One accepted link: who dialed whom, and what cuts it without holding it open.
 struct Open {
 	from: String,
 	to: String,
-	link: memory::Session,
+	link: memory::Closer,
 }
 
 impl Hosts {
@@ -91,16 +90,16 @@ impl Hosts {
 				config.protocol = Some(version.alpn().to_string());
 				config.latency = LATENCY;
 				let link = dial.accept(config);
-				let accepted = host.unbounded_send((link.clone(), version)).is_ok();
+				let closer = link.closer();
+				let accepted = host.unbounded_send((link, version)).is_ok();
 				if accepted {
 					// Forget the links that closed on their own, so the list stays as long as
 					// what is open.
-					self.open
-						.retain(|open| open.link.poll_closed(&kio::Waiter::noop()).is_pending());
+					self.open.retain(|open| !open.link.is_closed());
 					self.open.push(Open {
 						from: from.to_string(),
 						to: to.clone(),
-						link,
+						link: closer,
 					});
 				}
 				accepted
