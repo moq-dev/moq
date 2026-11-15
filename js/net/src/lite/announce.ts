@@ -329,15 +329,17 @@ async function encodeOffer(w: Writer, offer: Offer) {
  * later DEAD may name. An empty path is the sender's own error, since it names itself last. Hops
  * past the limit, a hop naming Node ID 0, and a flag this node does not know refuse the offer: a
  * newer flag may add a field after the ones this node reads, so a refusal skips the rest of the
- * body. Of a path past the limit only the hops up to one past it are kept: a sender within the
- * limit never sends one, and the whole would hold a body's worth for each route. Mirrors
- * rs/moq-net. */
+ * body. Every hop a path counts is read, but of a path past the limit only those up to one past
+ * it are kept: a sender within the limit never sends one, and the whole would hold a body's
+ * worth for each route. Mirrors rs/moq-net. */
 async function decodeOffer(r: Reader): Promise<Offer | Unusable> {
 	const count = await r.u62();
 	if (count === 0n) throw new ProtocolViolation("a route offer with no hops");
 	const path: RouteHop[] = [];
-	const kept = count > BigInt(ROUTE_MAX_HOPS) ? BigInt(ROUTE_MAX_HOPS + 1) : count;
-	for (let i = 0n; i < kept; i++) path.push({ node: await r.u62(), session: await r.u62() });
+	for (let i = 0n; i < count; i++) {
+		const hop = { node: await r.u62(), session: await r.u62() };
+		if (path.length <= ROUTE_MAX_HOPS) path.push(hop);
+	}
 	const refuse = async (refused: Refusal): Promise<Unusable> => {
 		await r.readAll();
 		return { refused, path };

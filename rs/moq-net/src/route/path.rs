@@ -81,7 +81,7 @@ pub(crate) struct Offer {
 
 impl Offer {
 	/// A received path must leave room for this node's hop.
-	fn extendable(&self) -> bool {
+	pub(crate) fn extendable(&self) -> bool {
 		!self.path.is_empty() && self.path.len() < MAX_HOPS
 	}
 

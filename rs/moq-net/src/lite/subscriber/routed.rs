@@ -83,10 +83,12 @@ impl WireRoute {
 	}
 
 	/// How the node holds it, or `None` while this node refuses what the peer forwarded:
-	/// the node then holds no such route, as if the peer had ended it.
+	/// the node then holds no such route, as if the peer had ended it. That includes a
+	/// path with no room left for this node's hop, which the node refuses as ended, so a
+	/// later shorter path files the route's claims again.
 	fn reach(&self) -> Option<Reach> {
 		self.prefix.as_ref()?;
-		let offer = self.offer.as_ref().ok().filter(|_| self.node != 0)?;
+		let offer = (self.offer.as_ref().ok()).filter(|offer| self.node != 0 && offer.extendable())?;
 		Some(match self.held {
 			true => Reach::Held,
 			false => Reach::Finite(offer.clone()),

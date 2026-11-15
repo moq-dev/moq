@@ -770,3 +770,49 @@ async fn a_scoped_drain_survives_a_new_limit() {
 		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
 	}
 }
+
+/// A route whose path leaves no room for this node's hop is one the node refuses as
+/// ended, so its claims wait on the stream; a later shorter path files the route and
+/// its claims again.
+#[kio::test]
+async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
+	use crate::route::MAX_HOPS;
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let prefix = Path::empty();
+	let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let mut decoder = AnnounceDecoder::default();
+	let along = |hops: usize| Offer {
+		path: (0..hops as u64)
+			.map(|i| Hop {
+				node: 7 + i,
+				session: u64::from(i > 0),
+			})
+			.collect(),
+		..offer()
+	};
+	let shown = |routed: &super::Routed| -> Vec<String> {
+		routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
+	};
+	let route = Msg::RouteStart {
+		node: 7,
+		suffix: Path::empty(),
+		offer: along(MAX_HOPS),
+	};
+	let floor = Msg::Floor {
+		id: 0,
+		revision: Some(0),
+	};
+	for msg in [route, start("live"), floor] {
+		routed.receive(&prefix, msg, &mut decoder).unwrap();
+	}
+	routed.outputs(&subscriber);
+	assert!(shown(&routed).is_empty(), "no room for this node's hop");
+
+	let update = Msg::RouteUpdate {
+		id: 0,
+		offer: along(MAX_HOPS - 1),
+	};
+	routed.receive(&prefix, update, &mut decoder).unwrap();
+	routed.outputs(&subscriber);
+	assert_eq!(shown(&routed), ["live"]);
+}

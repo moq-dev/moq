@@ -42,6 +42,13 @@
 		"expect": "refused"
 	},
 	{
+		"name": "a Route Offer counting more hops than its body holds is malformed, though a count past the hop limit is otherwise refused as content",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "0649070083e80100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f0020002100008001",
+		"expect": "refused"
+	},
+	{
 		"name": "a ROUTE_START names its publisher, suffix, and offer: a path of node and session hops, then flags, priority, and metric",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
