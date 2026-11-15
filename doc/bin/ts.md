@@ -179,8 +179,9 @@ what the network drops, so random packet loss alone loses no content.
   hole longer than the export can pad over skips PCR slots, and then the first
   PCR after them flags the clock jump. PAT/PMT versions do not change either
   way. A group cut short keeps what arrived. Video resumes at its next
-  keyframe, dropping orphaned leading pictures; other tracks carry on. On a path slower than the media, whole groups
-  are shed and the latency holds. After an outage that exhausts the buffered
+  keyframe, dropping H.264 and H.265 leading pictures that reference the group
+  before; MPEG-2 video goes out whole. Other tracks carry on. On a path slower
+  than the media, whole groups are shed and the latency holds. After an outage that exhausts the buffered
   media, overdue padding can arrive in a burst when media resumes.
 - **Passthrough:** surviving packets go out unchanged, on their source schedule.
   A missing interval stays missing: the export never repairs continuity counters,
