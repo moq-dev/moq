@@ -1482,6 +1482,16 @@ export class Consumer {
 		return read.chunks ?? makeFrameConsumer(read.sequence, read.frame);
 	}
 
+	/**
+	 * Reads the next frame's size and timestamp without waiting for its payload, as Rust's
+	 * `read_info`. A {@link meta} group has only these.
+	 */
+	async readInfo(): Promise<FrameInfo | undefined> {
+		const frame = await this.nextFrame();
+		if (!frame) return undefined;
+		return { size: frame.size, timestamp: frame.timestamp };
+	}
+
 	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
 		if (!streaming) this.#payloadRead();
 		for (;;) {

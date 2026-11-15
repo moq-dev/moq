@@ -400,6 +400,7 @@ export namespace Group {
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
 			sequence: number;
 		} & Group.Frame | undefined>;
+		readInfo(): Promise<Frame.Info | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		readable(): Promise<void>;

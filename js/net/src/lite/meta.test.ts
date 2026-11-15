@@ -141,6 +141,18 @@ test("a metadata group reads headers, and a payload read of it fails loudly", as
 	expect(await group.nextFrame()).toBeUndefined();
 });
 
+test("readInfo reads a metadata group's sizes and timestamps", async () => {
+	const producer = new GroupProducer(3n);
+	hooks.metaGroup(producer);
+	hooks.writeGroupHeader(producer, { size: 1000, timestamp: Timestamp.fromMillis(40) });
+	producer.finish();
+
+	const group = producer.consume();
+	const info = await group.readInfo();
+	expect([info?.size, info?.timestamp.asMillis()]).toEqual([1000, 40]);
+	expect(await group.readInfo()).toBeUndefined();
+});
+
 test("a metadata view of a payload group reads each header as soon as the frame exists", async () => {
 	const producer = new GroupProducer(0n);
 	const payload = producer.consume();
