@@ -227,10 +227,10 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.4.7",
+      "version": "0.4.8",
       "dependencies": {
         "@moq/pattern": "workspace:^",
-        "@moq/qmux": "^0.3.3",
+        "@moq/qmux": "^0.3.5",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
         "bowser": "^2.14.1",
@@ -707,7 +707,7 @@
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
-    "@moq/qmux": ["@moq/qmux@0.3.3", "", { "dependencies": { "@moq/web-socket-stream": "^0.1.1" } }, "sha512-Ez1GCVwpyNGB0eWvhKIXOjXrfRlMdmO0lpJ7gqInZFzsOsYTyML0WRgh24Itczp9Kev0CXsUA/K+XrGs1dRKUA=="],
+    "@moq/qmux": ["@moq/qmux@0.3.5", "", { "dependencies": { "@moq/web-socket-stream": "^0.1.1" } }, "sha512-3cPnK8nR8gooXo/kGDUSoZJjTozJBavXFYkggwpPB7RFRSOaXpGmEhpqt04obX508w7ZEzvbaaB5iw0wNSRDGA=="],
 
     "@moq/room": ["@moq/room@workspace:js/room"],
 
