@@ -947,7 +947,8 @@ The subscriber MAY cache the error and potentially retry later.
 
 #### Yield {#yield}
 A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with YIELDED to make room for a higher-priority one.
-A Group Stream carrying the `ietf` extension's object records is never reset with YIELDED.
+A Group Stream of a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects, is never reset with YIELDED.
+Any other Group Stream may be, including one on a session with the extension: a continuation's records start at its `Frame Start`.
 
 A Group whose stream was reset with YIELDED is paused, not given up: the subscriber keeps the frames it received, and the publisher MUST later continue the Group on another Group Stream or name it in [SUBSCRIBE_DROP](#subscribe-drop).
 A continuation is a Group Stream for the paused Group whose `Frame Start` is the reset stream's own `Frame Start`, since a reset can discard frames the transport acknowledged.

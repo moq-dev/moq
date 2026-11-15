@@ -148,77 +148,83 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 
 /// On lite-07 a group whose stream a newer one reset to make room only pauses: once credit
 /// returns, a new stream continues it, and its reader receives every frame without an error.
+/// So does one on a relay link, where the `ietf` extension changes nothing for a moq-lite
+/// track, which carries no object records.
 #[kio::test]
 async fn a_reset_group_resumes_without_loss() {
-	let version: Version = "moq-lite-07-wip".parse().unwrap();
-	let publisher = origin(1);
-	let viewer = origin(2);
-	let broadcast = publisher
-		.route("live", moq_net::origin::RouteOptions::hidden())
-		.unwrap();
-	let info = track::Info::default()
-		.with_timescale(moq_net::Timescale::MILLI)
-		.with_max_age(None);
-	let track = broadcast.broadcast().create_track("0", info).unwrap();
-	broadcast.announce().unwrap();
+	for ietf in [false, true] {
+		let version: Version = "moq-lite-07-wip".parse().unwrap();
+		let publisher = origin(1);
+		let viewer = origin(2);
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let track = broadcast.broadcast().create_track("0", info).unwrap();
+		broadcast.announce().unwrap();
 
-	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
-	options.server_publish = Some(publisher.consume());
-	options.client_subscribe = Some(viewer.clone());
-	let _pair = connect_mock(options).await;
+		let mut options = MockConnectOptions::new(version);
+		options.client_extensions.ietf = ietf;
+		options.server_extensions.ietf = ietf;
+		options.transport.max_concurrent_uni_streams = Some(1);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(viewer.clone());
+		let _pair = connect_mock(options).await;
 
-	let remote = viewer
-		.consume()
-		.follow("live", None)
-		.unwrap()
-		.available()
-		.await
-		.unwrap()
-		.unwrap();
-	let prefs = track::Subscription::default()
-		.with_order(track::Order::Descending)
-		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
-	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = track::Subscription::default()
+			.with_order(track::Order::Descending)
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
-	// Unfinished, so its stream holds the only credit until the newer group resets it.
-	let mut older = track.append_next().unwrap();
-	older.write_frame(older.at_start(), b"a".as_slice()).unwrap();
-	let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
-		.await
-		.expect("the older group arrives")
-		.unwrap()
-		.unwrap();
-	assert_eq!(paused.start, 0);
-	let first = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
-		.await
-		.expect("its first frame arrives")
-		.unwrap();
-	assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
+		// Unfinished, so its stream holds the only credit until the newer group resets it.
+		let mut older = track.append_next().unwrap();
+		older.write_frame(older.at_start(), b"a".as_slice()).unwrap();
+		let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("ietf: {ietf}: the older group arrives"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(paused.start, 0);
+		let first = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
+			.await
+			.expect("its first frame arrives")
+			.unwrap();
+		assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
 
-	let mut newer = track.append_next().unwrap();
-	newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-	newer.close().unwrap();
-	let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
-		.await
-		.expect("the newer group takes the older one's credit")
-		.unwrap()
-		.unwrap();
-	assert_eq!(group.start, 1);
+		let mut newer = track.append_next().unwrap();
+		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+		newer.close().unwrap();
+		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.expect("the newer group takes the older one's credit")
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.start, 1);
 
-	// Written after the reset: a continuation carries them, behind the frame already held.
-	older.write_frame(older.at_start(), b"b".as_slice()).unwrap();
-	older.write_frame(older.at_start(), b"c".as_slice()).unwrap();
-	older.close().unwrap();
-	let mut rest = Vec::new();
-	while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
-		.await
-		.expect("the paused group continues")
-		.expect("the paused group is not given up")
-	{
-		rest.push(frame.payload);
+		// Written after the reset: a continuation carries them, behind the frame already held.
+		older.write_frame(older.at_start(), b"b".as_slice()).unwrap();
+		older.write_frame(older.at_start(), b"c".as_slice()).unwrap();
+		older.close().unwrap();
+		let mut rest = Vec::new();
+		while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
+			.await
+			.expect("the paused group continues")
+			.expect("the paused group is not given up")
+		{
+			rest.push(frame.payload);
+		}
+		assert_eq!(rest, [b"b".as_slice(), b"c".as_slice()]);
 	}
-	assert_eq!(rest, [b"b".as_slice(), b"c".as_slice()]);
 }
 
 /// On lite-07 a group paused while it waited for its next frame, which then finishes with no

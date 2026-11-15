@@ -547,6 +547,11 @@ impl TrackEntry {
 		self.place(hdr, version, received, reading, verdict)
 	}
 
+	/// Whether the track carries moq-transport object records, which a continuation cannot resume.
+	fn has_records(&self) -> bool {
+		self.copy.as_ref().is_some_and(|copy| copy.framing.ietf.is_some())
+	}
+
 	/// Whether a YIELDED reset paused the group `key`, which the cache still holds. One the
 	/// cache gave up on is let go here, releasing the subscription's end its stream held, since
 	/// the stream asking opens the group afresh.
@@ -1736,8 +1741,15 @@ impl GroupRecv {
 		self.park_wait = None;
 		let ietf: bool = header.0;
 		let hdr: lite::Group = header.1;
-		// Lite-07 without object records: a YIELDED reset pauses the group.
-		let yields: bool = self.subscriber.version.has_yield() && !ietf;
+		// Lite-07 on a track without object records: a YIELDED reset pauses the group.
+		let yields: bool = self.subscriber.version.has_yield()
+			&& !(ietf
+				&& self
+					.subscriber
+					.subscribes
+					.lock()
+					.get(&hdr.subscribe)
+					.is_some_and(|entry| entry.has_records()));
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -2100,7 +2112,11 @@ impl FrameIngest {
 					lite::ietf::decode_properties(&block, self.framing, true)?;
 				group.mark_gap(id, gap)?;
 				// The rest of a frame the copy starts partway into is numbered below its count.
-				let next = id == group.frame_count() as u64 || group.lead_at(id).is_some();
+				// A plain group's frames are numbered by index, so a continuation re-sending
+				// frames its group holds finds them below its count too.
+				let next = id == group.frame_count() as u64
+					|| group.lead_at(id).is_some()
+					|| (!records.relayed && id == self.index);
 				let plain = next && properties.is_empty();
 				if !plain && !records.relayed {
 					return Err(Error::ProtocolViolation);
@@ -5669,7 +5685,9 @@ mod tests {
 			compressed: false,
 			length_first: true,
 		};
-		let header = || {
+		// The `ietf` extension's plain records: a Group State of 0 after the header, then a
+		// record before each frame, as a moq-lite track on a relay link carries them.
+		let header = |ietf: bool| {
 			let mut script = Vec::new();
 			lite::Group {
 				subscribe: 7,
@@ -5678,11 +5696,18 @@ mod tests {
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
+			if ietf {
+				script.push(0);
+			}
 			script
 		};
 		// A lite-07 FRAME: the payload size plus one, the timestamp delta, then the first
 		// `sent` bytes of the payload.
-		let frame = |script: &mut Vec<u8>, delta: i64, payload: &[u8], sent: usize| {
+		let frame = |script: &mut Vec<u8>, ietf: bool, delta: i64, payload: &[u8], sent: usize| {
+			if ietf {
+				// The next Object ID, with no properties.
+				script.extend_from_slice(&[0, 0]);
+			}
 			let mut encoder = crate::coding::Encoder::new(&mut *script, version.into());
 			encoder.varint(payload.len() as u64 + 1).unwrap();
 			encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
@@ -5690,25 +5715,34 @@ mod tests {
 		};
 		let frames: [(i64, &[u8]); 3] = [(300, b"zero"), (10, b"onetwo!"), (10, b"three")];
 
-		for overtakes in [false, true] {
+		for (overtakes, ietf) in [(false, false), (true, false), (false, true), (true, true)] {
 			// Frame 0 whole, then frame 1 cut after three bytes.
-			let mut cut = header();
-			frame(&mut cut, frames[0].0, frames[0].1, frames[0].1.len());
-			frame(&mut cut, frames[1].0, frames[1].1, 3);
-			let mut whole = header();
+			let mut cut = header(ietf);
+			frame(&mut cut, ietf, frames[0].0, frames[0].1, frames[0].1.len());
+			frame(&mut cut, ietf, frames[1].0, frames[1].1, 3);
+			let mut whole = header(ietf);
 			for (delta, payload) in frames {
-				frame(&mut whole, delta, payload, payload.len());
+				frame(&mut whole, ietf, delta, payload, payload.len());
 			}
 			let yielded = ScriptedSession::new(cut);
 			let continued = ScriptedSession::eof(whole);
 			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(ietf);
+			if ietf {
+				peer_setup
+					.set(lite::Setup {
+						ietf: true,
+						..Default::default()
+					})
+					.unwrap();
+			}
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: clock.clone(),
 				session: crate::driver::Transport::new(yielded.clone()),
 				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
-				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_setup,
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
@@ -5752,15 +5786,18 @@ mod tests {
 			let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 			assert!(res.is_ok(), "a YIELDED reset pauses rather than fails: {res:?}");
 			let res = kio::wait(|waiter| second.poll_serve(waiter)).await;
-			assert!(res.is_ok(), "overtakes: {overtakes}: {res:?}");
+			assert!(res.is_ok(), "overtakes: {overtakes}, ietf: {ietf}: {res:?}");
 
 			let mut group = reader.assert_group();
 			assert_eq!(group.start, 3);
 			for (_, payload) in frames {
 				let read = group.read_frame().await.unwrap().unwrap();
-				assert_eq!(&read.payload[..], payload, "overtakes: {overtakes}");
+				assert_eq!(&read.payload[..], payload, "overtakes: {overtakes}, ietf: {ietf}");
 			}
-			assert!(group.read_frame().await.unwrap().is_none(), "overtakes: {overtakes}");
+			assert!(
+				group.read_frame().await.unwrap().is_none(),
+				"overtakes: {overtakes}, ietf: {ietf}"
+			);
 			assert_eq!(tail.read().streams(), 2, "each stream counts toward the end");
 		}
 	}
