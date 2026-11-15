@@ -125,7 +125,7 @@ impl<T: Serialize> Producer<T> {
 	/// # fn example(producer: &mut moq_json::snapshot::Producer<serde_json::Value>) -> moq_json::Result<()> {
 	/// producer.mutate(|catalog| {
 	///     catalog["scte35"] = serde_json::json!({ "id": 1 });
-	/// }, None)
+	/// }, moq_net::Timestamp::from_millis(100).unwrap())
 	/// # }
 	/// ```
 	///
