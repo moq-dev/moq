@@ -7415,6 +7415,15 @@ mod tests {
 					drop(fetch);
 					assert!(kio::Task::poll(&mut run, &waiter).is_ready(), "{version}: {end}");
 				}
+				drop(run);
+				// An abandoned FETCH says so on both halves, so the publisher serving it reads a
+				// cancellation rather than a fault.
+				let cancelled = match end {
+					"credit" => vec![crate::StreamError::Cancel.to_code()],
+					_ => Vec::new(),
+				};
+				assert_eq!(session.log.resets(), cancelled, "{version}: {end}");
+				assert_eq!(session.log.stops(), cancelled, "{version}: {end}");
 			}
 		}
 	}
@@ -14076,6 +14085,13 @@ impl Drop for FetchServeRun {
 	}
 }
 
+/// End a FETCH we no longer want, on both halves. A dropped read half stops with the
+/// transport's code 0, which the publisher reads as INTERNAL_ERROR and reports as a fault.
+fn cancel(mut stream: Stream<Transport, Version>) {
+	stream.reader.abort(&Error::Cancel);
+	stream.writer.abort(&Error::Cancel);
+}
+
 impl kio::Task for FetchServeRun {
 	type Output = ();
 
@@ -14103,7 +14119,7 @@ impl kio::Task for FetchServeRun {
 				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =
 					std::mem::replace(&mut self.state, FetchRunState::Done)
 				{
-					stream.writer.abort(&Error::Cancel);
+					cancel(stream);
 				}
 				return Poll::Ready(());
 			}
@@ -14303,9 +14319,10 @@ impl kio::Task for FetchServeRun {
 					) {
 						Ok(producer) => producer,
 						Err(err) => {
-							// Already served (a concurrent fetch) or the track closed.
+							// Already served (a concurrent fetch) or the track closed. Nothing failed
+							// upstream: we only stopped wanting the answer.
 							tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch not served");
-							stream.writer.abort(&err);
+							cancel(stream);
 							return Poll::Ready(());
 						}
 					};
@@ -14346,7 +14363,7 @@ impl kio::Task for FetchServeRun {
 						else {
 							unreachable!()
 						};
-						stream.writer.abort(&Error::Cancel);
+						cancel(stream);
 						return Poll::Ready(());
 					};
 					let FetchRunState::Ingest { producer, .. } =
