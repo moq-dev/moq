@@ -338,6 +338,7 @@ mod uring {
 	const HOST: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 	async fn relay() -> Option<(Relay, u16, tempfile::TempDir)> {
+		kio::clock::host_time(); // a real relay on real sockets, paced in real time
 		let _ = rind_rustls::default_provider().unwrap().install_default();
 		match moq_uring::Worker::new(Default::default()) {
 			Ok(_) => {}
