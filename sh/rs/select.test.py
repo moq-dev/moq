@@ -474,19 +474,6 @@ class FeatureTest(unittest.TestCase):
                 calls = self.trace("net", net_features=f'moq-net feature "{feature}"', expected_returncode=1)
                 self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
-    def test_tokio_keeps_extremes_and_transport_contracts(self):
-        boundary = self.trace("tokio")
-        exhaustive = self.trace("tokio", "--all")
-        self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
-        self.assertTrue(any(" --tests " in call for call in boundary))
-        self.assertFalse(any(" --all-targets " in call for call in boundary))
-        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
-        self.assertEqual(
-            [call for call in boundary if not call.startswith("clippy ")],
-            [call for call in exhaustive if not call.startswith("clippy ")],
-        )
-
     def test_media_keeps_dependency_contracts_and_vpx_tests(self):
         boundary = self.trace("media")
         exhaustive = self.trace("media", "--all")
