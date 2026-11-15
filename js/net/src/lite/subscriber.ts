@@ -20,6 +20,7 @@ import {
 	StreamError,
 	sessionCause,
 	toStreamCode,
+	Unsupported,
 	unauthorized,
 } from "../error.ts";
 import { fillChanged, type Judged, rejectGroups } from "../fill.ts";
@@ -110,6 +111,7 @@ import {
 	hasInstance,
 	hasLengthFirst,
 	hasMediaTime,
+	hasMeta,
 	hasMinDelay,
 	hasOrder,
 	hasProbeRtt,
@@ -210,6 +212,10 @@ interface SubscribeEntry {
 	// The group streams received, so the subscription can wait for the ones still owed
 	// after the publisher ends it.
 	tail: Tail;
+	// Whether the subscription last asked for metadata only (lite-07).
+	meta?: boolean;
+	// The groups received in metadata mode since, accounted for until an update clears `meta`.
+	metaReceived?: Run[];
 	// The first group the SUBSCRIBE asked for, if any.
 	requested?: bigint;
 	// The first group the publisher serves, once SUBSCRIBE_START says: null when it starts no
@@ -1964,6 +1970,11 @@ export class Subscriber {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
+		// Never emulated by fetching the payload and discarding it.
+		if (request.subscription.meta && !hasMeta(this.version)) {
+			request.reject(unsupportedMeta());
+			return;
+		}
 		const refused = unauthorized(broadcast);
 		try {
 			for (;;) {
@@ -2109,6 +2120,7 @@ export class Subscriber {
 			minDelay: minDelayOf(subscription),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
+			meta: subscription.meta === true,
 		});
 	}
 
@@ -2356,6 +2368,7 @@ export class Subscriber {
 		const entry: SubscribeEntry = {
 			track: producer,
 			maxDelay: msg.maxDelay,
+			meta: msg.meta,
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -3420,6 +3433,7 @@ export class Subscriber {
 				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
 			},
 			ranges: entry.asked,
+			meta: msg.meta,
 		};
 
 		// The wanted group is subscription state: an update announces each new one past our
@@ -3468,6 +3482,9 @@ export class Subscriber {
 			// request is: the error closes the track, so every local subscriber sees it.
 			const ranges = wireRanges(current.ranges ?? [{}]);
 			if (ranges.length === 0) throw new Error(EMPTY_RANGE);
+			// Demand turning metadata-only on a wire that cannot ask for it ends its readers.
+			const meta = current.meta === true;
+			if (meta && !hasMeta(this.version)) throw unsupportedMeta();
 			const span = wireSpan(ranges);
 
 			// Changed ranges owe groups nobody asked for until now: below a lowered floor, or
@@ -3517,7 +3534,20 @@ export class Subscriber {
 				ranges: edit?.add,
 				remove: edit?.remove,
 				update: entry.update + 1n,
+				meta,
+				// This side holds none of a metadata group's payload, so its first missing frame is frame 0
+				// of every group it received as metadata.
+				payload: undefined,
 			});
+			// Clearing `meta` owes again the groups received as metadata, until the payload or a drop
+			// names them. Only those the copy still caches: nobody reads one it let go of.
+			if (entry.meta && !meta) {
+				for (const run of entry.metaReceived ?? [])
+					for (const sequence of hooks.cachedMeta(track, run.start, run.end))
+						entry.tail.unaccount(sequence, sequence + 1n);
+				entry.metaReceived = undefined;
+			}
+			entry.meta = meta;
 			// A stale drop given up under the previous update may still be in flight, and this one
 			// may move the range or budget it was judged against, so the runs held as stale become
 			// unknown again: a reader fills them rather than trust an old verdict.
@@ -3616,6 +3646,7 @@ export class Subscriber {
 			maxDelayOf(a) === maxDelayOf(b) &&
 			// A wire without `Subscriber Min Age` cannot carry a change to it.
 			(!hasMinDelay(this.version) || minDelayOf(a) === minDelayOf(b)) &&
+			(a.meta === true) === (b.meta === true) &&
 			rangesEqual
 		);
 	}
@@ -3657,6 +3688,10 @@ export class Subscriber {
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
 		const counted = tail.open(group.sequence);
+		if (group.meta) {
+			entry.metaReceived ??= [];
+			insertRun(entry.metaReceived, group.sequence, group.sequence + 1n);
+		}
 		// Until the stream is read, or a pause hands it to the paused group.
 		let read: (() => void) | undefined = counted.done;
 		this.#reoffered(track, group.sequence, group.sequence + 1n);
@@ -3691,7 +3726,9 @@ export class Subscriber {
 					break;
 				}
 				// Kept held past a failure until this copy takes the group, below.
-				const next = hooks.arrivingGroup(track, group.sequence);
+				// A copy in the other mode is no duplicate: payload replaces metadata, and metadata over
+				// payload is discarded.
+				const next = hooks.arrivingGroup(track, group.sequence, group.meta);
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
@@ -3710,6 +3747,7 @@ export class Subscriber {
 				sequence: group.sequence,
 				start: group.frameStart,
 				fill: entry.filling,
+				meta: group.meta,
 			});
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
@@ -3731,7 +3769,12 @@ export class Subscriber {
 				judge(yielding, entry.update);
 			}
 
-			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
+			const format = {
+				scale: timescale,
+				compress: entry.compress,
+				lengthFirst: hasLengthFirst(this.version),
+				meta: group.meta,
+			};
 			const reading = readFrames(stream, producer, format, ingest);
 			const reads = entry.filling ? untilAbandoned(producer, reading) : reading;
 			if (!superseded) await reads;
@@ -3794,7 +3837,9 @@ export class Subscriber {
 	// `TrackEntry::resume`.
 	#resume(entry: SubscribeEntry, hdr: GroupMessage): PausedGroup | undefined {
 		const paused = entry.paused?.groups.get(hdr.sequence);
-		if (!paused) return undefined;
+		// A continuation keeps its stream's mode; one in the other mode is the payload re-offer of a
+		// metadata group, or metadata over payload, neither of which continues it.
+		if (!paused || hooks.groupMeta(paused.group) !== hdr.meta) return undefined;
 		entry.paused?.groups.delete(hdr.sequence);
 		// The stream that paused it is replaced, so it no longer holds the end.
 		paused.read();
@@ -4251,4 +4296,9 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
+}
+
+// The error a metadata-only demand gets from a session whose version cannot ask for it.
+function unsupportedMeta(): Unsupported {
+	return new Unsupported("metadata subscriptions need moq-lite-07");
 }

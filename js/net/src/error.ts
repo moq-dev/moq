@@ -296,6 +296,21 @@ export class NotFound extends Stream {
 }
 
 /**
+ * The session or peer cannot carry a requested feature: an AUTH exchange or in-band token, or a
+ * metadata subscription on a version before moq-lite 07. Mirrors the Rust `Error::Unsupported`.
+ *
+ * @public
+ */
+export class Unsupported extends Error {
+	/** The moq-lite session code for this condition. */
+	readonly code = SessionCode.Unsupported;
+	constructor(message = "auth unsupported") {
+		super(message);
+		this.name = "Unsupported";
+	}
+}
+
+/**
  * A peer's GOAWAY named a redirect the connection refuses, or one it could not parse.
  *
  * Terminal: the peer is leaving, so the connection stops rather than redialing the old

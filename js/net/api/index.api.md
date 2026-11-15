@@ -360,6 +360,7 @@ export namespace Error {
 			cause?: unknown;
 		});
 	}
+	export import Unsupported = Auth.Unsupported;
 }
 
 export namespace Frame {
@@ -393,6 +394,7 @@ export namespace Group {
 		get done(): boolean;
 		get frameCount(): number;
 		get isClosed(): boolean;
+		get meta(): boolean;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -855,6 +857,7 @@ export namespace Track {
 	};
 	export interface Subscription {
 		delay?: Track.Delay;
+		meta?: boolean;
 		order?: Track.Order;
 		priority?: number;
 		ranges?: Track.Range[];

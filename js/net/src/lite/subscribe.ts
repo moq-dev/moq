@@ -10,7 +10,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { floorAt, type Timescale, Timestamp } from "../time.ts";
-import type { Anchor, Order, Position, Range } from "../track.ts";
+import type { Anchor, Order, Position, Range, Subscription } from "../track.ts";
 import { UNBOUNDED } from "../util/sequence.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import * as Duration from "./duration.ts";
@@ -23,6 +23,7 @@ import {
 	hasFrameBounds,
 	hasGroupCount,
 	hasGroupOrder,
+	hasMeta,
 	hasMinDelay,
 	hasOrder,
 	hasRanges,
@@ -53,6 +54,27 @@ async function decodeWarm(r: Reader, version: Version) {
 	if (!hasWarm(version)) return;
 	const warm = await r.u8();
 	if (warm > 1) throw new ProtocolViolation(`unknown warm ${warm}`);
+}
+
+/** Decode a one-byte boolean: 0 or 1, anything else malformed. */
+export async function decodeBool(r: Reader, field: string): Promise<boolean> {
+	const value = await r.u8();
+	if (value > 1) throw new ProtocolViolation(`unknown ${field} ${value}`);
+	return value === 1;
+}
+
+/** Decode `Meta`, whether the subscriber wants frame headers without payload; a wire without it asks for payload. */
+async function decodeMeta(r: Reader, version: Version): Promise<boolean> {
+	return hasMeta(version) ? decodeBool(r, "meta") : false;
+}
+
+/**
+ * Encode `Meta`. A wire without the field cannot ask for it, and is never asked to emulate it by
+ * carrying payload the subscriber would discard.
+ */
+async function encodeMeta(w: Writer, version: Version, meta: boolean) {
+	if (hasMeta(version)) await w.u8(meta ? 1 : 0);
+	else if (meta) throw new Error("metadata subscriptions are not supported by this version");
 }
 
 /**
@@ -644,6 +666,14 @@ export class SubscribeUpdate {
 	update: bigint;
 	/** Lite-07: the Range IDs of the live ranges to retire before adding {@link ranges}. */
 	remove?: bigint[];
+	/** See {@link Subscribe.meta}: clearing it asks for the payload of the groups served in metadata mode, from {@link payload}. */
+	meta: boolean;
+	/**
+	 * The subscriber's first missing frame, from which an update clearing {@link meta} asks for the
+	 * payload, or undefined for every group served in metadata mode, each from frame 0. Read only on
+	 * an update that clears it, and sent as undefined otherwise. Lite-07+.
+	 */
+	payload?: Position;
 
 	constructor(props: {
 		priority: number;
@@ -658,6 +688,8 @@ export class SubscribeUpdate {
 		ranges?: WireRange[];
 		update?: bigint;
 		remove?: bigint[];
+		meta?: boolean;
+		payload?: Position;
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
 			throw new RangeError("wanted group must be non-negative");
@@ -673,12 +705,15 @@ export class SubscribeUpdate {
 		this.ranges = props.ranges;
 		this.update = props.update ?? 0n;
 		this.remove = props.remove;
+		this.meta = props.meta ?? false;
+		this.payload = props.payload;
 	}
 
 	async #encode(w: Writer, version: Version) {
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
+				if (this.meta) throw new Error("metadata subscriptions are not supported by this version");
 				await w.u8(toWire(this.priority));
 				break;
 			default:
@@ -709,6 +744,11 @@ export class SubscribeUpdate {
 				await encodeUpdate(w, version, this.update);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				await encodeWarm(w, version);
+				await encodeMeta(w, version, this.meta);
+				if (hasMeta(version)) {
+					await w.u62(this.payload === undefined ? 0n : this.payload.group + 1n);
+					await w.u53(this.payload?.frame ?? 0);
+				}
 				break;
 		}
 	}
@@ -735,6 +775,13 @@ export class SubscribeUpdate {
 				const update = await decodeUpdate(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
 				await decodeWarm(r, version);
+				const meta = await decodeMeta(r, version);
+				let payload: Position | undefined;
+				if (hasMeta(version)) {
+					const group = await r.u62();
+					const frame = await r.u53();
+					if (group > 0n) payload = { group: group - 1n, frame };
+				}
 				return new SubscribeUpdate({
 					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
 					priority,
@@ -743,6 +790,8 @@ export class SubscribeUpdate {
 					minDelay,
 					...span,
 					update,
+					meta,
+					payload,
 				});
 			}
 		}
@@ -816,6 +865,12 @@ export class Subscribe {
 	 */
 	update: bigint;
 
+	/**
+	 * Whether the subscriber wants each group's frame headers without their payload; see
+	 * {@link Subscription.meta}. Lite-07+: earlier wires decode as false and refuse to encode true.
+	 */
+	meta: boolean;
+
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -833,6 +888,7 @@ export class Subscribe {
 		endFrame?: number;
 		ranges?: WireRange[];
 		update?: bigint;
+		meta?: boolean;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -850,6 +906,7 @@ export class Subscribe {
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
 		this.update = props.update ?? 0n;
+		this.meta = props.meta ?? false;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -873,6 +930,7 @@ export class Subscribe {
 		}
 		await encodeUpdate(w, version, this.update);
 		await encodeWarm(w, version);
+		await encodeMeta(w, version, this.meta);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -894,6 +952,7 @@ export class Subscribe {
 				const span = await decodeSpan(r, version);
 				const update = await decodeUpdate(r, version);
 				await decodeWarm(r, version);
+				const meta = await decodeMeta(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -907,6 +966,7 @@ export class Subscribe {
 					minDelay,
 					...span,
 					update,
+					meta,
 				});
 			}
 		}

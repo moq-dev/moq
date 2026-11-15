@@ -130,11 +130,44 @@ export class Chunked implements Frame {
 	}
 }
 
+// A frame's header without its payload, as a metadata subscription reads it: its timestamp and
+// declared plain size. Reading its payload throws, so a metadata frame never passes for an empty one.
+/** @internal */
+export class Header implements Frame {
+	readonly size: number;
+	readonly timestamp: Timestamp;
+	readonly arrived?: Instant;
+
+	constructor(info: Info, arrived?: Instant) {
+		this.size = info.size;
+		this.timestamp = info.timestamp;
+		this.arrived = arrived;
+	}
+
+	get payload(): Uint8Array {
+		throw new Error("a metadata frame carries no payload");
+	}
+}
+
 // The payload size, without joining a chunked frame's segments.
 /** @internal */
 export function payloadBytes(frame: Frame): number {
-	if (frame instanceof Chunked) return frame.size;
+	if (frame instanceof Chunked || frame instanceof Header) return frame.size;
 	return stored(frame)?.payload.length ?? frame.payload.byteLength;
+}
+
+// The plain payload size a frame declares, read without its bytes: a compressed frame's inflated size.
+/** @internal */
+export function plainBytes(frame: Frame): number {
+	if (frame instanceof Chunked || frame instanceof Header) return frame.size;
+	return stored(frame)?.inflated ?? frame.payload.byteLength;
+}
+
+// The header of `frame`, which a metadata read returns in its place.
+/** @internal */
+export function headerOf(frame: Frame): Header {
+	if (frame instanceof Header) return frame;
+	return new Header({ size: plainBytes(frame), timestamp: frame.timestamp }, frame.arrived);
 }
 
 /** @internal */
@@ -238,7 +271,8 @@ export function joined(parts: Uint8Array[], size: number): Uint8Array {
 
 /**
  * Reads one frame's payload as it arrives, as Rust's `frame::Consumer`. Obtain one from
- * `Group.Consumer.nextFrame`.
+ * `Group.Consumer.nextFrame`. A frame of a metadata group (`Group.Consumer.meta`) carries only its
+ * size and timestamp, and reading its payload throws.
  *
  * Chunks are read-only views shared with other readers. A frame larger than its group's
  * retained tail sheds its oldest segments while it is written, so a reader that falls that
@@ -280,6 +314,8 @@ export class Consumer {
 
 	#poll(): Uint8Array | undefined | typeof WAIT {
 		const frame = this.#frame;
+		// Even a size-0 metadata frame is no empty payload.
+		if (frame instanceof Header) return frame.payload;
 		if (!(frame instanceof Chunked)) {
 			if (this.#offset >= this.size) return undefined;
 			this.#offset = this.size;

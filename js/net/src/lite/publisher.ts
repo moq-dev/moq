@@ -19,6 +19,7 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
+import { plainBytes } from "../frame.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
@@ -223,6 +224,12 @@ interface RunGroup {
 
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
 	end?: number;
+
+	/**
+	 * Whether the stream carries each frame's header without its payload: the group's mode when
+	 * its stream first opened, which a continuation keeps.
+	 */
+	meta: boolean;
 }
 
 /**
@@ -1077,9 +1084,14 @@ export class Publisher {
 		}
 
 		const consumer = front.track(msg.track);
+		// The subscription's mode, which an update changes: a promotion to the payload asks for it from
+		// the first frame the subscriber misses, which the stream for that group starts at.
+		let meta = msg.meta;
+		const promotion: { at?: track.Position } = {};
 		const subscription = (ranges: track.Range[]): track.Subscription => ({
 			priority: msg.priority,
 			order: msg.order,
+			meta,
 			delay: {
 				max: servingMaxDelay(this.version, msg.maxDelay),
 				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
@@ -1240,15 +1252,24 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.joinSubscriber(track);
-					track.update({
-						priority: update.priority,
-						order: update.order,
-						delay: {
-							max: servingMaxDelay(this.version, update.maxDelay),
-							min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
+					// Only an update clearing `meta` names where the payload resumes.
+					const promoted = meta && !update.meta;
+					if (promoted) promotion.at = update.payload;
+					meta = update.meta;
+					hooks.updateSubscriber(
+						track,
+						{
+							priority: update.priority,
+							order: update.order,
+							delay: {
+								max: servingMaxDelay(this.version, update.maxDelay),
+								min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
+							},
+							ranges: requestedRanges(update, info.timescale ?? undefined),
+							meta: update.meta,
 						},
-						ranges: requestedRanges(update, info.timescale ?? undefined),
-					});
+						promoted ? update.payload : undefined,
+					);
 				},
 			});
 			const finished = await this.#runTrack(track, stream.writer, controls, {
@@ -1262,6 +1283,7 @@ export class Publisher {
 				bounds,
 				update: msg.update,
 				initial: BigInt(asked.length),
+				promotion,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1437,9 +1459,11 @@ export class Publisher {
 			update: bigint;
 			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
 			initial: bigint;
+			// Where the last promotion to the payload resumes: its group's stream starts at its frame.
+			promotion: { at?: track.Position };
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial, promotion } = serving;
 		// What the wire was told of each sequence: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -1623,7 +1647,13 @@ export class Publisher {
 		const continuation = (serving: RunGroup): RunGroup | undefined => {
 			const sequence = serving.group.sequence;
 			// From the reset stream's Frame Start, which a cache holding only the group's tail can serve.
-			const [resumed, ...extra] = hooks.reofferGroups(track, sequence, sequence + 1n, serving.start).groups;
+			const [resumed, ...extra] = hooks.reofferGroups(
+				track,
+				sequence,
+				sequence + 1n,
+				serving.start,
+				serving.meta,
+			).groups;
 			for (const other of extra) other.close();
 			if (!resumed) return undefined;
 			return { ...serving, group: resumed, givenUp: new GivenUp(resumed) };
@@ -1941,6 +1971,13 @@ export class Publisher {
 					continue;
 				}
 				const range = frameRange(bounds, group.sequence);
+				// The payload of the group a promotion resumes in starts at the first frame the subscriber
+				// misses; a metadata read of it carries every header, as any other does.
+				const resumes = promotion.at;
+				if (resumes?.group === group.sequence && !group.meta) {
+					range.start = Math.max(range.start, resumes.frame);
+					promotion.at = undefined;
+				}
 
 				if (emitRange && !startSent) {
 					const source = hooks.sourceStart(track);
@@ -1990,6 +2027,7 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
+					meta: group.meta,
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet,
 				// and a paused group's continuation.
@@ -2516,9 +2554,9 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame, meta } = options;
 		// The header names the requested position, so a copy missing it must be refused.
-		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame, meta });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
@@ -2544,7 +2582,9 @@ export class Publisher {
 			let reached = hooks.groupIndex(group) === startFrame;
 
 			for (;;) {
-				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
+				// A metadata stream reads each frame's header as soon as the frame exists, never its bytes:
+				// a stored slice declares its plain size without being inflated.
+				const read = await race([hooks.readGroupFrame(group, compress || meta), stream.closed]);
 				if (!read) {
 					// The group ended before the frame the subscriber asked to start
 					// at, so this publisher can't serve the range at all. FINning here
@@ -2569,6 +2609,12 @@ export class Publisher {
 					prevTs = ts;
 				}
 
+				if (meta) {
+					// Its declared plain size and timestamp, and nothing else.
+					const size = read.inflated ?? read.chunks?.size ?? plainBytes(read.frame);
+					await write(() => stream.write(frameHeader(stream.version, delta, undefined, size, true)));
+					continue;
+				}
 				const header = frameHeader(
 					stream.version,
 					delta,

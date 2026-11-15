@@ -214,6 +214,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 		delay: { min: null, max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 1n }, end: { absolute: 9n } }],
+		meta: false,
 	});
 
 	const updated = producer.subscription.changed();
@@ -227,6 +228,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 		delay: { min: null, max: Duration.millis(500) },
 		order: "descending",
 		ranges: [{ start: { absolute: 2n }, end: { absolute: 12n } }],
+		meta: false,
 	});
 
 	subscriber.close();

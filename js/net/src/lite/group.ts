@@ -9,7 +9,8 @@ import * as Time from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, type Version } from "./version.ts";
+import { decodeBool } from "./subscribe.ts";
+import { hasFrameBounds, hasMeta, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
@@ -25,18 +26,27 @@ export class Group {
 	 */
 	frameStart: number;
 
+	/**
+	 * Whether the stream carries each frame's header without its payload: the metadata mode the
+	 * subscription asked for when the stream opened. Lite-07+.
+	 */
+	meta: boolean;
+
 	constructor({
 		subscribe,
 		sequence,
 		frameStart = 0,
+		meta = false,
 	}: {
 		subscribe: bigint;
 		sequence: bigint;
 		frameStart?: number;
+		meta?: boolean;
 	}) {
 		this.subscribe = subscribe;
 		this.sequence = sequence;
 		this.frameStart = frameStart;
+		this.meta = meta;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -48,13 +58,17 @@ export class Group {
 			// The peer would number the frames from 0 and silently misalign the group.
 			throw new Error("frame offsets not supported for this version");
 		}
+		if (hasMeta(version)) await w.u8(this.meta ? 1 : 0);
+		// The peer would read the frame headers as payload.
+		else if (this.meta) throw new Error("metadata groups are not supported by this version");
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
 		const sequence = await r.u62();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
-		return new Group({ subscribe, sequence, frameStart });
+		const meta = hasMeta(version) ? await decodeBool(r, "group meta") : false;
+		return new Group({ subscribe, sequence, frameStart, meta });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -87,6 +101,8 @@ function unzigzag(v: bigint): bigint {
 export interface WireFrame extends WirePayload {
 	/** The declared plain size on a compressed track. */
 	inflated?: number;
+	/** A metadata frame: `size` is the declared plain size, and no payload follows. */
+	meta?: boolean;
 }
 
 /** How {@link frameDecoder} reads each frame's optional fields. */
@@ -100,6 +116,11 @@ export interface FrameFormat {
 	 * rather than ending its header with the size.
 	 */
 	lengthFirst?: boolean;
+	/**
+	 * Whether the stream is in metadata mode (lite-07): each frame carries its `Payload Length` and
+	 * timestamp, and no inflated size or payload follows.
+	 */
+	meta?: boolean;
 }
 
 /**
@@ -107,7 +128,12 @@ export interface FrameFormat {
  * Lite-07 leads with the size plus one, where stream end ends the group; before it the size ends
  * the header, and stream end at the frame's first field ends the group.
  */
-export function frameDecoder({ scale, compress = false, lengthFirst = false }: FrameFormat): (c: Cursor) => WireFrame {
+export function frameDecoder({
+	scale,
+	compress = false,
+	lengthFirst = false,
+	meta = false,
+}: FrameFormat): (c: Cursor) => WireFrame {
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = 0n;
 	return (c) => {
@@ -119,6 +145,11 @@ export function frameDecoder({ scale, compress = false, lengthFirst = false }: F
 			size = length - 1;
 		}
 		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
+		if (meta) {
+			prevTs += delta;
+			const timestamp = timescale === undefined ? undefined : new Time.Timestamp(toNumber(prevTs), timescale);
+			return { size, timestamp, meta: true };
+		}
 		const inflated = compress ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this.
@@ -170,6 +201,13 @@ export async function readFrames(
 		if (frame === undefined && ingest?.partial)
 			throw malformed("a continuation ended before completing the frame it resumed");
 		if (!frame || frame instanceof Error) return;
+		if (frame.meta) {
+			// A continuation re-sends the headers the group holds; a header is never cut short.
+			if (ingest && ingest.index++ < hooks.groupFrameCount(producer)) continue;
+			const timestamp = Time.received(frame.timestamp, producer.sequence);
+			hooks.writeGroupHeader(producer, { size: frame.size, timestamp });
+			continue;
+		}
 		if (ingest) {
 			const index = ingest.index++;
 			const held = hooks.groupFrameCount(producer);

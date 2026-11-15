@@ -365,6 +365,15 @@ export interface Subscription {
 	 * fresh. Each subscriber's own publisher still serves it in its own order.
 	 */
 	order?: Order;
+	/**
+	 * Read each group's frame progress without its payload: every group it reads has `meta` set,
+	 * and its frames carry their timestamp and declared size. Defaults to
+	 * `false`. Needs moq-lite 07; an older session refuses it as unsupported.
+	 *
+	 * Aggregated across every live subscriber: the publisher sends payload if any of them wants it.
+	 * Clearing it with {@link Subscriber.update} asks for the payload of the groups read as metadata.
+	 */
+	meta?: boolean;
 }
 
 /**
@@ -381,8 +390,8 @@ export type Order = "ascending" | "descending";
 /** Constructors for {@link Subscription}. */
 export const Subscription: {
 	/**
-	 * The default subscription, used when none is passed: priority `0`, descending order, and
-	 * a {@link Delay} of zero that skips a superseded group at once. Mirrors the Rust
+	 * The default subscription, used when none is passed: priority `0`, descending order, the
+	 * payload, and a {@link Delay} of zero that skips a superseded group at once. Mirrors the Rust
 	 * `Subscription::default()`. Spread it to change one field and keep the rest:
 	 * `{ ...Subscription.default(), priority: 2 }`.
 	 */
@@ -392,6 +401,7 @@ export const Subscription: {
 		priority: DEFAULT_PRIORITY,
 		delay: { min: Duration.ZERO, max: Duration.ZERO },
 		order: "descending",
+		meta: false,
 	}),
 };
 
@@ -414,7 +424,14 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 		},
 		order: orderOf(subscription.order),
 		ranges: subscription.ranges === undefined ? [{}] : rangesOf(subscription.ranges),
+		meta: metaOf(subscription.meta),
 	};
+}
+
+// A plain JS caller can pass anything, and reading a truthy string as metadata would hide it.
+function metaOf(meta: boolean | undefined): boolean {
+	if (meta !== undefined && typeof meta !== "boolean") throw new TypeError(`meta must be a boolean: ${String(meta)}`);
+	return meta === true;
 }
 
 // A plain JS caller can pass anything, and silently serving a typo as descending would hide it.
@@ -451,6 +468,8 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		// One live subscriber held behind another's backlog is worse than a backlog sent late.
 		combined.order =
 			combined.order === "ascending" && subscription.order === "ascending" ? "ascending" : "descending";
+		// Metadata only while every subscriber wants just that: one payload reader needs the bytes.
+		combined.meta = combined.meta === true && subscription.meta === true;
 
 		// A range above the live edge never hides the latest group from a merged live subscriber.
 		combined.ranges = [...(combined.ranges ?? []), ...(subscription.ranges ?? [])];
@@ -869,7 +888,9 @@ function removeStart(starts: Start[], sequence: bigint): void {
 }
 
 // A fresh read handle on a group the producer still caches; assigned in its static block.
-let cachedMirror: (producer: Producer, sequence: bigint, from: number) => GroupConsumer | undefined;
+let cachedMirror: (producer: Producer, sequence: bigint, from: number, meta?: boolean) => GroupConsumer | undefined;
+// Read a sink's unread groups again in its current mode, after its subscription changed it.
+let remode: (producer: Producer, sink: TrackState) => void;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: bigint) => boolean;
 // Whether group `sequence` is cached as a copy from frame 0 that has not written it yet, so its
@@ -1168,7 +1189,9 @@ export class Producer {
 			},
 			holds: (sequence) => {
 				const entry = this.#cached.get(sequence);
-				if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
+				// A metadata copy holds none of what a fill brings.
+				if (entry === undefined || entry.group.closed.peek() instanceof Error || hooks.groupMeta(entry.group))
+					return false;
 				return hooks.groupHeadless(entry.group) ? "headless" : true;
 			},
 			closed: () => this.#state.closed.peek() !== undefined,
@@ -1301,12 +1324,18 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { sequence, start, fill }) => producer.#createGroup(sequence, start, fill);
-		hooks.arrivingGroup = (producer, sequence) => {
+		hooks.receiveGroup = (producer, { sequence, start, fill, meta }) =>
+			producer.#createGroup(sequence, start, fill, meta);
+		hooks.arrivingGroup = (producer, sequence, meta = false) => {
 			const group = producer.#cached.get(sequence)?.group;
-			if (!group || group.closed.peek() !== undefined) return undefined;
+			if (!group || group.closed.peek() !== undefined || hooks.groupMeta(group) !== meta) return undefined;
 			return { settled: group.closed, release: hooks.holdGroup(group) };
 		};
+		hooks.cachedMeta = (producer, start, end) =>
+			cachedIn(producer, start, end).filter((sequence) => {
+				const group = producer.#cached.get(sequence)?.group;
+				return group !== undefined && hooks.groupMeta(group);
+			});
 		hooks.arrivingIn = (producer, start, end) =>
 			cachedIn(producer, start, end).filter(
 				(sequence) => producer.#cached.get(sequence)?.group.closed.peek() === undefined,
@@ -1370,10 +1399,12 @@ export class Producer {
 			}
 			return [...producer.#cached.keys()].filter((sequence) => sequence >= start && sequence < end);
 		};
-		cachedMirror = (producer, sequence, from) => {
+		cachedMirror = (producer, sequence, from, meta = false) => {
 			const entry = producer.#cached.get(sequence);
 			if (!entry || entry.group.closed.peek() instanceof Error) return undefined;
-			const mirror = entry.group.mirror();
+			// A metadata copy never serves a payload reader.
+			if (hooks.groupMeta(entry.group) && !meta) return undefined;
+			const mirror = entry.group.mirror(meta);
 			if (hooks.groupIndex(mirror) > from) {
 				mirror.close();
 				return undefined;
@@ -1391,6 +1422,7 @@ export class Producer {
 				producer.#mirror(entry, sink);
 			}
 		};
+		remode = (producer, sink) => producer.#remode(sink);
 		reofferSequences = (producer, sink, sequences) => {
 			const held = new Set(sink.groups.peek().map((group) => group.sequence));
 			for (const sequence of sequences) {
@@ -1631,7 +1663,10 @@ export class Producer {
 
 			// Forward subscription updates from the sink's Subscriber to the producer's own
 			// state, which the wire layer (or the serving application) watches.
-			const forward = sink.update.subscribe(() => this.#updateSubscription());
+			const forward = sink.update.subscribe(() => {
+				this.#remode(sink);
+				this.#updateSubscription();
+			});
 			this.#updateSubscription();
 
 			// Drop the sink once its consumer goes away, closing its mirrors so source
@@ -1702,7 +1737,11 @@ export class Producer {
 	// reference. Tracked on the entry so eviction can drop it from the sink.
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		if (entry.fetched && entry.group.closed.peek() instanceof Error) return;
-		const dst = entry.group.mirror();
+		// A payload reader is never handed a metadata copy: for it, the group has yet to arrive. A
+		// metadata reader reads a payload copy's headers.
+		const meta = sink.update.peek()?.meta === true;
+		if (hooks.groupMeta(entry.group) && !meta) return;
+		const dst = entry.group.mirror(meta);
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
@@ -1712,6 +1751,28 @@ export class Producer {
 		sink.latest = max(sink.latest ?? 0n, dst.sequence);
 		sink.received.set(max(sink.received.peek(), dst.sequence + 1n));
 		sink.groups.mutate((groups) => bufferInsert(groups, dst));
+	}
+
+	// Read `sink`'s unread groups again in the mode its subscription now asks for: a metadata reader
+	// reads headers, and a payload reader drops a metadata copy until the payload arrives. A group
+	// already handed out keeps the mode it was read in.
+	#remode(sink: TrackState): void {
+		const meta = sink.update.peek()?.meta === true;
+		// A snapshot: each re-read takes its group out of the buffer and puts the new read back.
+		for (const mirror of [...sink.groups.peek()]) {
+			if (mirror.meta === meta) continue;
+			const entry = this.#cached.get(mirror.sequence);
+			if (!entry || entry.mirrors.get(sink) !== mirror) continue;
+			entry.mirrors.delete(sink);
+			sink.groups.mutate((groups) => {
+				const index = groups.indexOf(mirror);
+				if (index >= 0) groups.splice(index, 1);
+			});
+			const at = timelineIndex(sink.timeline, mirror.sequence);
+			if (sink.timeline[at] === mirror) sink.timeline.splice(at, 1);
+			hooks.releaseGroupReader(mirror, undefined);
+			this.#mirror(entry, sink);
+		}
 	}
 
 	// Drop a cached group's mirror from every sink so no consumer can pin it, the cache pool
@@ -2148,7 +2209,7 @@ export class Producer {
 		return this.#createGroup(sequence, 0);
 	}
 
-	#createGroup(sequence: bigint, start: number, fetched = false): GroupProducer {
+	#createGroup(sequence: bigint, start: number, fetched = false, meta = false): GroupProducer {
 		this.#writable(sequence);
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
@@ -2156,7 +2217,21 @@ export class Producer {
 		const existing = this.#cached.get(sequence);
 		let kept: Map<TrackState, GroupConsumer> | undefined;
 		const failed = existing?.group.closed.peek() instanceof Error ? existing.group : undefined;
-		if (existing && !failed && start === 0 && hooks.groupHeadless(existing.group)) {
+		const existingMeta = existing !== undefined && hooks.groupMeta(existing.group);
+		if (existing && !failed && meta && !existingMeta) {
+			// A metadata copy adds nothing to a payload one: it is read to its end and discarded.
+			const discarded = new GroupProducer(sequence);
+			hooks.startGroup(discarded, start);
+			hooks.metaGroup(discarded);
+			return discarded;
+		}
+		if (existing && !failed && existingMeta && !meta) {
+			// The payload replaces a metadata copy. A reader that took the metadata copy keeps it, and
+			// its record of what it handed out keeps it from taking the payload too, unless it asked
+			// for the payload since.
+			this.#unlink(existing);
+			this.#uncache(existing);
+		} else if (existing && !failed && start === 0 && hooks.groupHeadless(existing.group)) {
 			// A copy from frame 0, a fill a bounded reader asked or the feed's own, replaces one that
 			// can't serve its head. One still arriving keeps arriving for the readers already holding
 			// it, outside the cache.
@@ -2181,6 +2256,7 @@ export class Producer {
 		const group = new GroupProducer(sequence);
 		// Mirrors copy the absolute indices, so set them before publishing to any sink.
 		hooks.startGroup(group, start);
+		if (meta) hooks.metaGroup(group);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group, fetched, failed && { failed, kept });
@@ -2616,6 +2692,11 @@ export class Subscriber {
 	// Every group sequence this reader handed out, so a re-created group or one a second route
 	// delivers is handed out once.
 	#delivered = new Delivered();
+	// The sequences it handed out as metadata, which a promotion to the payload hands out again.
+	// Only those a promotion could still serve are kept: see #pruneMeta.
+	#metaHanded: Run[] = [];
+	// At most how many runs #metaHanded holds before it is pruned again.
+	#metaBound = 1;
 	// Cached groups the arrival cursor skipped as stale, each with the budget it was judged
 	// under, so a wider budget offers them again. Only a widening reverses a stale verdict, and
 	// an entry is kept only while its group is cached, since nothing could offer it again.
@@ -2946,7 +3027,11 @@ export class Subscriber {
 
 	// Record `sequence` as handed out. An ordered read never goes back, and any reader stops
 	// expecting what is past its budget, so only the gaps within it cost memory.
-	#handOut(sequence: bigint, ordered: boolean): void {
+	#handOut(sequence: bigint, ordered: boolean, meta = false): void {
+		if (meta) {
+			insertRun(this.#metaHanded, sequence, sequence + 1n);
+			if (this.#metaHanded.length > this.#metaBound) this.#pruneMeta();
+		}
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
@@ -2965,6 +3050,47 @@ export class Subscriber {
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
 		if (forgot > floor) this.#stoppedReading(floor, forgot);
 		if (sequence >= forgot) this.#stoppedReading(sequence, sequence + 1n);
+	}
+
+	// Forget the groups handed out as metadata that a promotion could no longer serve: stale under the
+	// budget, or no longer cached on a direct reader. Pruned again only once the record doubled, so
+	// it costs O(1) per hand-out amortized.
+	#pruneMeta(): void {
+		const drift = this.#drift();
+		const producer = this.#state.producer;
+		const kept: Run[] = [];
+		for (const run of this.#metaHanded) {
+			for (let sequence = run.start; sequence < run.end; sequence++) {
+				// A run is cut only where it is stale, which sequences never undo going up.
+				if (this.#staleAt(sequence, drift)) continue;
+				const cached = producer ? cachedIn(producer, sequence, run.end) : undefined;
+				if (cached?.length === 0) break;
+				insertRun(kept, sequence, run.end);
+				break;
+			}
+		}
+		this.#metaHanded = kept;
+		this.#metaBound = Math.max(1, kept.length * 2);
+	}
+
+	// The payload is asked for again from `payload` (from every group read as metadata without it):
+	// hand those groups out again, as never delivered, judged as any newly covered group is. A group
+	// below `payload` stays delivered. Mirrors the publisher side of the draft's metadata promotion.
+	#promote(payload: Position | undefined): void {
+		const reopened = removeRun(this.#metaHanded, 0n, payload?.group ?? 0n);
+		this.#metaHanded = [];
+		this.#metaBound = 1;
+		if (reopened.length === 0) return;
+		const reported = this.#reported;
+		const sequences: bigint[] = [];
+		const producer = this.#state.producer;
+		for (const run of reopened) {
+			this.#delivered.remove(run.start, run.end);
+			// The wire was told of them as served; they are owed again.
+			reported.set(run.start, run.end);
+			if (producer) sequences.push(...cachedIn(producer, run.start, run.end));
+		}
+		if (producer && !this.#left) reofferSequences(producer, this.#state, sequences);
 	}
 
 	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
@@ -3251,7 +3377,12 @@ export class Subscriber {
 	// Fresh reads from frame `from` of the cached groups in `[start, end)` this cursor admits and no
 	// longer judges stale, each expiring against the budget, and the runs still given up. A resumed
 	// reader asks its serving route's copy. Mirrors the Rust `reoffer_groups`.
-	#reofferGroups(start: bigint, end: bigint, from = 0): { groups: GroupConsumer[]; givenUp: Run[] } {
+	#reofferGroups(
+		start: bigint,
+		end: bigint,
+		from = 0,
+		meta = this.#state.update.peek()?.meta === true,
+	): { groups: GroupConsumer[]; givenUp: Run[] } {
 		if (this.#resume) return this.#resume.reofferGroups(start, end, from);
 		const groups: GroupConsumer[] = [];
 		let givenUp: Run[] = [{ start, end }];
@@ -3264,7 +3395,7 @@ export class Subscriber {
 		for (const sequence of cached) {
 			const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
 			if (!admitted || this.#staleAt(sequence, drift)) continue;
-			const group = cachedMirror(producer, sequence, from);
+			const group = cachedMirror(producer, sequence, from, meta);
 			if (!group) continue;
 			groups.push(this.#guard(group));
 			givenUp = removeRun(givenUp, sequence, sequence + 1n);
@@ -3926,7 +4057,8 @@ export class Subscriber {
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
-		hooks.reofferGroups = (subscriber, start, end, from) => subscriber.#reofferGroups(start, end, from);
+		hooks.reofferGroups = (subscriber, start, end, from, meta) => subscriber.#reofferGroups(start, end, from, meta);
+		hooks.updateSubscriber = (subscriber, options, payload) => subscriber.#update(options, payload);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
@@ -4454,7 +4586,7 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
-			this.#handOut(group.sequence, false);
+			this.#handOut(group.sequence, false, group.meta);
 			return { kind: "group", group: this.#guard(group) };
 		}
 
@@ -4608,7 +4740,7 @@ export class Subscriber {
 				this.#queueResumedDrop(recv);
 				continue;
 			}
-			if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
+			if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered, recv.group.meta);
 			else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
 			return recv;
 		}
@@ -4828,7 +4960,7 @@ export class Subscriber {
 				continue;
 			}
 			this.#pass(groups, index);
-			this.#handOut(group.sequence, true);
+			this.#handOut(group.sequence, true, group.meta);
 			return { kind: "group", group: this.#guard(group) };
 		}
 
@@ -4944,10 +5076,22 @@ export class Subscriber {
 	 * Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {
+		this.#update(options, undefined);
+	}
+
+	// Update to `options`; a promotion to the payload asks for it from `payload`, the first frame
+	// the peer misses, or from every group read as metadata without one.
+	#update(options: Subscription, payload: Position | undefined) {
 		const subscription = subscriptionDefaults(options);
 		const replaced = !sameRanges(subscription.ranges ?? [], this.#window.ranges);
 		const reordered = subscription.order !== this.#state.update.peek()?.order;
+		const promoted = this.#state.update.peek()?.meta === true && subscription.meta !== true;
+		const remoded = (this.#state.update.peek()?.meta === true) !== (subscription.meta === true);
 		this.#state.update.set(subscription);
+		// The unread groups follow the new mode at once, before a read can take one in the old.
+		const producer = this.#state.producer;
+		if (remoded && producer) remode(producer, this.#state);
+		if (promoted) this.#promote(payload);
 		if (replaced) this.#resolve();
 		// A fill's order follows its readers, so its handler wakes to serve the new first group.
 		else if (reordered) this.#fillsMoved();
