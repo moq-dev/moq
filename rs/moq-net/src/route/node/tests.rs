@@ -139,6 +139,74 @@ fn the_narrowest_live_route_is_primary() {
 	assert_eq!(origin.forward(1, 1, &p("live/x"), &Path::empty()), Some(Via::Here));
 }
 
+/// A scoped neighbour is asked for one prefix per region, so it answers at each region
+/// and no route wider than a region is filed onto another's key. A region inside both a
+/// broad and a narrow route of one node stays online through whichever still lives, and
+/// goes offline only once both ended.
+#[test]
+fn a_region_inside_two_routes_stays_online_through_either() {
+	let instance = Instance::random();
+	let (origin, relay, leaf) = (
+		Node::new(1, 1, clock()),
+		Node::new(2, 2, clock()),
+		Node::new(3, 3, clock()),
+	);
+	let wide = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
+	let narrow = origin.answer(peer(2, 2), Link::default(), p("live")).unwrap();
+	let via_wide = relay.receive(peer(1, 1), Link::default()).unwrap();
+	let via_narrow = relay.receive(peer(2, 1), Link::default()).unwrap();
+	origin.own(p("live/a/x"), Some(claim(&instance, 0)));
+	// The relay serves what it hears, and so forwards it.
+	let hear = || {
+		pump(&wide, &via_wide);
+		pump(&narrow, &via_narrow);
+		serve_all(&via_wide);
+		serve_all(&via_narrow);
+	};
+	hear();
+
+	// The leaf confines the relay to two regions, and asks it for each.
+	let regions = vec![p("live/a"), p("live/b")];
+	let scope = crate::route::Scope {
+		regions: regions.clone(),
+		qualify: crate::route::qualifier([7; 32]),
+	};
+	let link = Link {
+		scope: Some(scope),
+		..Default::default()
+	};
+	let up = leaf.connect(peer(3, 2), link).unwrap();
+	let asked = std::iter::from_fn(|| up.try_output())
+		.find_map(|output| match output {
+			Output::Ask(edit) => Some(edit),
+			_ => None,
+		})
+		.expect("the leaf asks the relay");
+	assert_eq!(asked.add, regions);
+	let answering = Link {
+		interest: Default::default(),
+		..Default::default()
+	};
+	let down = relay.connect(peer(3, 3), answering).unwrap();
+	down.edit(asked).unwrap();
+	up.edited();
+	pump(&down, &up);
+	let online = || {
+		(leaf.shown().iter()).any(|((_, path), (_, available))| *path == p("live/a/x") && *available)
+	};
+	assert!(online(), "{:?}", leaf.shown());
+
+	// The origin ends the narrow route: the broad one still covers the region.
+	via_narrow.route(1, p("live"), None);
+	serve_all(&via_wide);
+	pump(&down, &up);
+	assert!(online(), "the broad route still reaches the region: {:?}", leaf.shown());
+
+	via_wide.route(1, Path::empty(), None);
+	pump(&down, &up);
+	assert!(!online(), "{:?}", leaf.shown());
+}
+
 /// A request a peer sends follows the route this node offered it under the prefix it names.
 #[test]
 fn a_forwarded_request_follows_the_route_it_names() {

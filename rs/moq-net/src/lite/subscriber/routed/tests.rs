@@ -44,6 +44,36 @@ fn served(routed: &super::Routed) -> Vec<String> {
 	served
 }
 
+/// A peer that withholds its ANNOUNCE_OK still answers the set before the edit, and what
+/// it sends counts against the session's announce cap whatever prefix it answers: the
+/// routes and claims held never pass the cap.
+#[kio::test]
+async fn a_withheld_announce_ok_holds_no_more_than_the_cap() {
+	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	// One route and two claims.
+	subscriber.announces = crate::session::Slots::new(3);
+	let prefix = Path::empty();
+	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
+	let route = Msg::RouteStart {
+		node: 7,
+		prefix: 0,
+		suffix: Path::empty(),
+		offer: offer(),
+	};
+	routed.receive(route).unwrap();
+	routed.receive(start("a/x")).unwrap();
+
+	// The origin now wants less, and the peer never answers the edit.
+	routed.unwant(&prefix);
+	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
+	let requests = routed.outputs(&subscriber);
+	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
+
+	routed.receive(start("b/y")).unwrap();
+	let over = routed.receive(start("b/z")).unwrap_err();
+	assert_eq!(crate::SessionError::from(&over), crate::SessionError::TooManyRequests);
+}
+
 /// A limit narrower than its regions still leaves out the claims it does not
 /// admit, and a change that keeps the regions brings them in and out again.
 #[kio::test]

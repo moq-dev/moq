@@ -379,9 +379,10 @@ Each endpoint MAY open one unidirectional Announce Stream (0x3), on which it sen
 A claim is an announcement that paths under its prefix can be served by one origin node; it claims capability, not inventory, so it never asserts that any specific broadcast exists.
 A route is how the publisher reaches an origin node for the paths under a prefix, and every claim on the stream travels under a route to its origin covering it (see [Routing](#routing)).
 
-An endpoint opens the stream when it first has a message to send and keeps it for the session, so no message it sends about routing overtakes another.
+An endpoint that opens the stream keeps it for the session, so no message it sends about routing overtakes another.
 An endpoint MUST close the session with a PROTOCOL_VIOLATION if its peer opens a second Announce Stream or resets one.
-An endpoint finishes its stream only when it is leaving the session, after a ROUTE_END for each route it sent; the peer then answers none of its prefixes.
+An endpoint finishes its stream only when it is leaving the session, after a ROUTE_END for each route it sent.
+Its peer keeps answering the prefixes the endpoint asked for, which it can no longer edit.
 
 A subscriber sends ANNOUNCE_REQUEST messages, each an edit of the set of prefixes it wants claims for.
 The set starts empty and MAY be empty, no prefix in it is at or below another, and encoded as the Adds of one ANNOUNCE_REQUEST it fits the [Message Length](#message-length) limit.
@@ -436,6 +437,7 @@ When the session closes, an endpoint MUST assume that every route and claim on t
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except in a claim, which it refuses instead (see [Refused Content](#refused-content)), including one resolved by [Compression](#announce-compression).
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher presents, per route, each claim inside the requested prefix the route lies in and only the most specific claim at or above it, at that prefix itself, which is exactly the covered set the subscriber may see.
+Every path on the stream is relative to the session, whichever requested prefix it lies in, so carrying a route over to another prefix (see [Edits](#edits)) changes no claim's path.
 When that most specific covering claim changes, such as when it is withdrawn and a broader one still covers the prefix, the publisher moves the presented claim to the new one with an ANNOUNCE_UPDATE or ANNOUNCE_RESTART, and ends it only when no claim of the route covers the prefix.
 
 ### Edits {#edits}
@@ -457,6 +459,7 @@ A widened route that remains takes the claims of the widened routes that do not,
 A route that stays or widens keeps its Route ID, and its claims keep their Announce IDs.
 Each narrowed route that remains is assigned the next Route ID, in the order above; its claims keep their Announce IDs, except that its claim at its prefix is assigned the next Announce ID when the claim it comes from lies above it.
 The warm routes under a route that does not stay end.
+A route whose Route Suffix the subscriber refused (see [Refused Content](#refused-content)) is carried as one at its requested prefix, so both endpoints assign the same Route IDs.
 The publisher then sends whatever the carried routes lack, and an ANNOUNCE_FLOOR for each widened route.
 
 ### Floors {#floors}
@@ -481,10 +484,10 @@ Once the receiver holds no route covering the prefix, the view's claims go offli
 An ANNOUNCE_START MAY copy the head of its path from a live claim on the same stream, its base.
 `Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
 The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
-The base need not share the new claim's route, but its route lies in the same requested prefix, which both suffixes are relative to.
+The base need not share the new claim's route, nor the requested prefix that route lies in.
 A publisher MAY always send a `Path Base` of 0.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Path Base` names an Announce ID that was never assigned or already retired, or a claim in another requested prefix, or a `Path Keep` is non-zero with a `Path Base` of 0 or exceeds the base's segments.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Path Base` names an Announce ID that was never assigned or already retired, or a `Path Keep` is non-zero with a `Path Base` of 0 or exceeds the base's segments.
 A resolved path that breaks its own rules, or a base whose path the subscriber refused, refuses the claim (see [Refused Content](#refused-content)).
 
 ### Refused Content {#refused-content}
@@ -1513,7 +1516,7 @@ The Hop ID of the node that sent the GOAWAY.
 A publisher sends an ANNOUNCE_START message to advertise a claim of a route's origin node: that paths under a prefix can be served.
 Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
 
-Only the suffix is encoded on the wire, as the full claim prefix can be constructed by prepending the requested prefix its route lies in.
+The claim's prefix is encoded relative to the session.
 
 ~~~
 ANNOUNCE_START Message {
@@ -1535,11 +1538,11 @@ ANNOUNCE_START Message {
 Set to 0x0 to indicate an ANNOUNCE_START message.
 
 **Path Base** and **Path Keep**:
-The suffix begins with the first `Path Keep` segments of the suffix claimed by the base that `Path Base` names (see [Compression](#announce-compression)).
+The claim's prefix begins with the first `Path Keep` segments of the prefix claimed by the base that `Path Base` names (see [Compression](#announce-compression)).
 
 **Claim Prefix Suffix**:
-The remaining segments of the suffix, which is combined with the requested prefix its route lies in to form the claim's full prefix.
-An empty suffix claims the requested prefix itself, which is how a claim covering more than the request presents (see [Announce](#announce)).
+The remaining segments of the claim's prefix.
+A claim covering more than the requested prefix its route lies in presents at that requested prefix (see [Announce](#announce)).
 
 **Route ID**:
 The route the claim travels under: its origin node is the claim's.
@@ -1699,7 +1702,7 @@ The route to the broadcast's origin node: the ordinal implicitly assigned by a p
 A warm route never changes its Route ID.
 
 **Broadcast Path Suffix**:
-Combined with the requested prefix its route lies in to form the broadcast's path.
+The broadcast's path, relative to the session.
 
 **Instance** and **Minted**:
 The Instance of the copy the publisher carries, as defined for [ANNOUNCE_START](#announce-start).
@@ -2607,7 +2610,7 @@ An application-specific payload.
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session.
-- ANNOUNCE_REQUEST (0x10) edits a set of prefixes, none at or below another, one edit at a time, and ANNOUNCE_OK (0x11) marks where each edit takes effect. Both endpoints carry the routes and claims that both sets cover over to the new set, so none is sent again. ROUTE_START and SYNCED name the requested prefix by its Prefix ID.
+- ANNOUNCE_REQUEST (0x10) edits a set of prefixes, none at or below another, one edit at a time, and ANNOUNCE_OK (0x11) marks where each edit takes effect. Both endpoints carry the routes and claims that both sets cover over to the new set, so none is sent again. ROUTE_START and SYNCED name the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix. A finished Announce Stream means its endpoint is leaving.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, for the paths under a prefix, with an additive metric and a down-only bit. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin and prefix rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
 - ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
 - ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x4) and priority, which rank before its metric.

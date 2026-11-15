@@ -24,8 +24,10 @@ const LINGERED: Duration = Duration::from_secs(3);
 /// The first byte of a moq-lite ANNOUNCE stream.
 const ANNOUNCE: u8 = 1;
 
-/// The first byte of a lite-07 Announce Stream, and its ANNOUNCE_REQUEST message.
+/// The first byte of a lite-07 Announce Stream, and its ANNOUNCE_START and
+/// ANNOUNCE_REQUEST messages.
 const ANNOUNCE_STREAM: u8 = 3;
+const ANNOUNCE_START: u64 = 0;
 const ANNOUNCE_REQUEST: u64 = 16;
 
 /// A lite-07 varint off the front of `buf`: as many leading ones as bytes follow.
@@ -42,24 +44,29 @@ fn varint(buf: &mut &[u8]) -> Option<u64> {
 	Some(value)
 }
 
+/// How many messages of `kind` `transport`'s side has sent on its lite-07 Announce Stream.
+fn sent(transport: &support::mock::MockSession, kind: u64) -> usize {
+	let mut count = 0;
+	for stream in transport.uni_writes(ANNOUNCE_STREAM) {
+		let mut buf = stream.as_slice();
+		while let (Some(typ), Some(size)) = (varint(&mut buf), varint(&mut buf)) {
+			let Some(rest) = buf.get(size as usize..) else {
+				break;
+			};
+			buf = rest;
+			count += usize::from(typ == kind);
+		}
+	}
+	count
+}
+
 /// How many requests `transport`'s side has made of its peer: the announce streams it
 /// opened, or on lite-07 the edits it sent on its one Announce Stream.
 fn requests(transport: &support::mock::MockSession) -> usize {
 	let streams = (transport.bidi_types().into_iter())
 		.filter(|kind| *kind == ANNOUNCE)
 		.count();
-	let mut edits = 0;
-	for stream in transport.uni_writes(ANNOUNCE_STREAM) {
-		let mut buf = stream.as_slice();
-		while let (Some(kind), Some(size)) = (varint(&mut buf), varint(&mut buf)) {
-			let Some(rest) = buf.get(size as usize..) else {
-				break;
-			};
-			buf = rest;
-			edits += usize::from(kind == ANNOUNCE_REQUEST);
-		}
-	}
-	streams + edits
+	streams + sent(transport, ANNOUNCE_REQUEST)
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -297,6 +304,38 @@ async fn a_broader_request_holds_a_lingering_narrower_open() {
 		kio::clock::sleep(LINGERED).await;
 		assert!(!lazy.routes("a/x").await, "{version}");
 	}
+}
+
+/// Lite-07 swaps a narrower request for a broader one, and back, in one edit each. The
+/// claim both sets cover is never retracted and never sent again, and the narrowing
+/// drops only what it uncovers.
+#[kio::test]
+async fn a_swap_edit_keeps_what_both_sets_cover() {
+	let lazy = Lazy::new("moq-lite-07-wip").await;
+	let server = &lazy.pair.server_transport;
+	let mut narrower = lazy.watch("a");
+	assert_eq!(synced(&mut narrower).await, ["x"]);
+	assert_eq!(lazy.requests(), 1);
+	assert_eq!(sent(server, ANNOUNCE_START), 1);
+
+	let mut root = lazy.watch("");
+	assert_eq!(synced(&mut root).await, ["a/x", "b/y"]);
+	assert_eq!(lazy.requests(), 2, "one edit swaps the narrower prefix for the broader");
+	assert_eq!(sent(server, ANNOUNCE_START), 2, "only b/y is new");
+	assert!(narrower.try_next().is_none(), "nothing retracted");
+
+	// The broader request holds the narrower one open, and lingers out first.
+	drop(narrower);
+	kio::clock::sleep(LINGERED).await;
+	assert!(root.try_next().is_none(), "nothing retracted");
+	drop(root);
+	kio::clock::sleep(LINGERED).await;
+	assert_eq!(lazy.requests(), 3, "one edit swaps back");
+	assert!(!lazy.routes("b/y").await);
+	assert!(lazy.routes("a/x").await);
+	assert_eq!(sent(server, ANNOUNCE_START), 2, "nothing is sent again");
+	assert_eq!(lazy.pair.client_transport.close_reason(), None);
+	assert_eq!(server.close_reason(), None);
 }
 
 /// A broadcast resolved through a discovered route keeps it discovered after the

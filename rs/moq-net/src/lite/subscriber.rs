@@ -10049,21 +10049,21 @@ mod tests {
 	/// session's route layer.
 	enum Announcing {
 		Prefix(AnnouncePrefix),
-		Routes(Box<route_stream::RouteStream>),
+		Routes(Box<route_stream::RouteStream>, Subscriber),
 	}
 
 	impl Announcing {
 		fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 			match self {
 				Self::Prefix(prefix) => prefix.poll(waiter),
-				Self::Routes(routes) => routes.poll(waiter).map(Err),
+				Self::Routes(routes, _) => routes.poll(waiter).map(Err),
 			}
 		}
 
 		fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 			match self {
 				Self::Prefix(prefix) => prefix.poll_run(waiter),
-				Self::Routes(routes) => routes.poll_run(waiter),
+				Self::Routes(routes, _) => routes.poll_run(waiter),
 			}
 		}
 	}
@@ -10107,9 +10107,70 @@ mod tests {
 		subscriber.peer_setup.set(lite::Setup::default()).unwrap();
 		let recv = crate::transport::boxed::RecvStream::new(session.recv());
 		let _ = subscriber.announce_streams.try_push(route_stream::Reader::new(recv, version));
-		let mut routes = route_stream::RouteStream::new(subscriber, route_stream::Publish::idle());
+		let mut routes = route_stream::RouteStream::new(subscriber.clone(), route_stream::Publish::idle());
 		routes.want(Path::empty(), snapshot);
-		(Announcing::Routes(Box::new(routes)), consumer)
+		(Announcing::Routes(Box::new(routes), subscriber), consumer)
+	}
+
+	/// A lite-07 peer keeps one Announce Stream for the session: a second one closes the
+	/// session, and so does one it resets. One it finishes means it is leaving, which
+	/// ends its routes and keeps the session.
+	#[kio::test]
+	async fn a_lite07_peer_keeps_one_announce_stream() {
+		const VERSION: Version = Version::Lite07;
+		use crate::lite::test_transport::{Close, ScriptedSession};
+		let script = || {
+			announce_script(
+				VERSION,
+				&[
+					&announce_ok(VERSION, 0),
+					&route_start(7),
+					&announce_start(VERSION, "room"),
+					&floor(0, Some(0)),
+				],
+			)
+		};
+		let waiter = kio::Waiter::noop();
+
+		let session = ScriptedSession::new(script());
+		let (mut routes, consumer) = root_prefix(VERSION, session.clone());
+		let mut cursor = consumer.routes();
+		assert!(routes.poll(&waiter).is_pending());
+		cursor.assert_next_active("room");
+		let Announcing::Routes(_, subscriber) = &routes else {
+			unreachable!("lite-07 runs the route layer");
+		};
+		let second = crate::transport::boxed::RecvStream::new(session.recv());
+		let _ = (subscriber.announce_streams).try_push(route_stream::Reader::new(second, VERSION));
+		let result = routes.poll(&waiter);
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+			"a second stream: {result:?}"
+		);
+		assert_eq!(
+			session.log.closes()[0].0,
+			crate::SessionError::ProtocolViolation.to_code()
+		);
+
+		let session = ScriptedSession::new(script());
+		let (mut routes, _consumer) = root_prefix(VERSION, session.clone());
+		assert!(routes.poll(&waiter).is_pending());
+		session.close(Close::ResetStream(7));
+		let result = routes.poll(&waiter);
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+			"a reset stream: {result:?}"
+		);
+
+		let session = ScriptedSession::new(script());
+		let (mut routes, consumer) = root_prefix(VERSION, session.clone());
+		let mut cursor = consumer.routes();
+		assert!(routes.poll(&waiter).is_pending());
+		cursor.assert_next_active("room");
+		session.close(Close::Fin);
+		assert!(routes.poll(&waiter).is_pending());
+		assert!(session.log.closes().is_empty(), "{:?}", session.log.closes());
+		cursor.expect_next_offline("room").await;
 	}
 
 	/// A peer streaming announces gets a budget of them read per poll, so the session's
