@@ -59,7 +59,7 @@ CONSTANTS
     MaxRev,       \* the publisher's claim changes
     MaxFlaps,     \* session opens and closes
     MaxEdits,     \* changes of what a relay watches
-    Patient       \* TRUE: a doubt lifts only once no news about its node is in flight
+    Patient       \* TRUE: a timer fires only once no news or stale offer about its node is in flight
 
 Relays == Nodes \ {Origin}
 \* The links whose sessions open and close. A config may narrow them to the
@@ -783,18 +783,29 @@ Deliver(d) ==
        /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>
 
+\* The hops a message names: an offer's path, or a DEAD's hop and moved paths.
+MsgHops(m) ==
+    CASE m.t = "offer" -> {m.path[i] : i \in DOMAIN m.path}
+      [] m.t = "dead" -> {m.hop} \cup UNION {{mv[2][i] : i \in DOMAIN mv[2]} : mv \in m.moved}
+      [] OTHER -> {}
+\* The session hop `h` names has closed.
+Severed(h) == h[1] # h[2] /\ ~({h[1], h[2]} \in up /\ gen[{h[1], h[2]}] = h[3])
+\* Some message in flight names a hop `P` picks.
+InFlight(P(_)) == \E d \in Dirs : \E i \in DOMAIN q[d] : \E h \in MsgHops(q[d][i]) : P(h)
+
 \* The timer node n started on x fires: the doubt on x lifts, and the dead hops
-\* whose session ended at x may be forgotten. With `Patient`, only once no DEAD
-\* about such a hop, and no DRAIN of x, is in flight: a timer long enough for
-\* the news to cross the mesh.
+\* whose session ended at x may be forgotten. With `Patient`, only once no
+\* message naming such a hop, and no DRAIN of x, is in flight: a timer long
+\* enough for the news to cross the mesh outlasts the DEAD and every stale
+\* offer sent before the news reached its sender.
 Lift(n, x) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.doubt = @ \ {x}, !.wait = @ \ {x},
                                      !.since = IF x = Origin THEN None ELSE @,
                                      !.expiry = {h \in @ : h[2] # x}],
                                      OV, up, gen, ended[n], NoReport, Claims)]
     IN /\ x \in st[n].wait
-       /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] :
-                        ~(q[d][i].t = "dead" /\ q[d][i].hop[2] = x) /\ ~(q[d][i].t = "drain" /\ q[d][i].node = x)
+       /\ Patient => /\ ~InFlight(LAMBDA h : h[2] = x /\ Severed(h))
+                     /\ \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "drain" /\ q[d][i].node = x)
        /\ Commit(rs, q)
        /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>
@@ -805,7 +816,7 @@ Expire(n, hop) ==
     LET rs == [y \in {n} |-> Update(n, [st[n] EXCEPT !.expiry = @ \ {hop}],
                                      OV, up, gen, ended[n], NoReport, Claims)]
     IN /\ hop \in st[n].expiry
-       /\ Patient => \A d \in Dirs : \A i \in DOMAIN q[d] : ~(q[d][i].t = "dead" /\ q[d][i].hop = hop)
+       /\ Patient => ~InFlight(LAMBDA h : h = hop)
        /\ Commit(rs, q)
        /\ Internal(Sent(rs))
        /\ UNCHANGED <<up, gen, rev, own, hist, flaps, edits>>

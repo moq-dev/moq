@@ -1377,9 +1377,9 @@ rec {
       };
       "arc-swap" = rec {
         crateName = "arc-swap";
-        version = "1.9.3";
+        version = "1.9.4";
         edition = "2018";
-        sha256 = "0vmfc2wjnn7gyjfawvnq6a5pxsbiq1rbzzmra0p6969vv6rn429q";
+        sha256 = "14ng7i12wxxm5bl8z53j5lrzdbkr7ydjiqqv71fww3spgbsr8k6v";
         libName = "arc_swap";
         authors = [
           "Michal 'vorner' Vaner <vorner@vorner.cz>"
@@ -17554,10 +17554,7 @@ rec {
             name = "moq-crypto";
             packageId = "moq-crypto";
             usesDefaultFeatures = false;
-            features = [
-              "serde"
-              "cpu"
-            ];
+            features = [ "cpu" ];
           }
           {
             name = "moq-pattern";
@@ -17649,7 +17646,6 @@ rec {
           {
             name = "url";
             packageId = "url";
-            features = [ "serde" ];
           }
         ];
         devDependencies = [
@@ -46313,9 +46309,9 @@ rec {
       };
       "sonora" = rec {
         crateName = "sonora";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "0l4jmha9pgmc8jzxzxkrwh9czr0bsb72r3vv0v295cswmd1f871f";
+        sha256 = "1n7d0zlpd1nkz8g1fw103xijiz9rasya91wkj4l8fbqimp4ycqfl";
         dependencies = [
           {
             name = "sonora-aec3";
@@ -46355,9 +46351,9 @@ rec {
       };
       "sonora-aec3" = rec {
         crateName = "sonora-aec3";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "1nw04daixh0k83hs34hhvhafah3n9gniarzzia1zf2bd4lqhwa2h";
+        sha256 = "1zngbgqshmp2lxczwanssdag54y409ndn39dqbm1vxqkv8zrr07j";
         libName = "sonora_aec3";
         dependencies = [
           {
@@ -46377,9 +46373,9 @@ rec {
       };
       "sonora-agc2" = rec {
         crateName = "sonora-agc2";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "17qbg7hspxjwhixcglkr801ccnkjks51si7vlxhkx8vkhgxak4ws";
+        sha256 = "1alnggn4dzlbgc0g1mkrz0zryhiayb7338b4vj1wkj5xz39ms6sh";
         libName = "sonora_agc2";
         dependencies = [
           {
@@ -46413,9 +46409,9 @@ rec {
       };
       "sonora-common-audio" = rec {
         crateName = "sonora-common-audio";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "1k1kp0bcd7z87c6kdkd6r8h0csrb56qhf25djfncw1s8n9hvqdb6";
+        sha256 = "041lm1rg7qiap5k9skrdi7qsrlmahxdjrkjihx4whkf102ixy19c";
         libName = "sonora_common_audio";
         dependencies = [
           {
@@ -46432,17 +46428,23 @@ rec {
       };
       "sonora-fft" = rec {
         crateName = "sonora-fft";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "04m0bfxwp72fl4v5fqw5czpn73szq0c1ipc2agxkldil1z3p5qi7";
+        sha256 = "09pxlan23gdk20wkh8mzqvg6kzm313x3yh6rhp61m3vlrzr2jdgc";
         libName = "sonora_fft";
+        dependencies = [
+          {
+            name = "sonora-simd";
+            packageId = "sonora-simd";
+          }
+        ];
 
       };
       "sonora-ns" = rec {
         crateName = "sonora-ns";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "0vx8nz8f1k3x208yldc72wfaj6qngl45aiaw4inp2b1h37pzw4fm";
+        sha256 = "1f980jgv2v4hni7mrlb8i8lqrk8y7ja0374wpx6ig6j1g0padh1i";
         libName = "sonora_ns";
         dependencies = [
           {
@@ -46454,9 +46456,9 @@ rec {
       };
       "sonora-simd" = rec {
         crateName = "sonora-simd";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "0s6q6apwxlvqja7skmacml70hhrhyla3051f4ri5aakmwh20ikx7";
+        sha256 = "1yn8b1v55b8k1s95nxaqhgr85lz3ql4pnk99amssl2ra7bkdhfgr";
         libName = "sonora_simd";
         dependencies = [
           {

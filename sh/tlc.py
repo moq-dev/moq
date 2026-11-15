@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Model-check one TLA+ spec with TLC: `sh/tlc.py <spec.tla> [tlc args...]`.
 
+`sh/tlc.py --identity` prints the Java and the classpath instead, whose store
+paths change with TLC, so sh/tla.sh can tell when a result is stale.
+
 The `tla` recipes run every model through here, so a run shares the host:
 TLC runs at the lowest priority on 4 workers, which Nightly's runners have and
 the `verify-*` skills' times assume; core-seconds stay near flat from 2 to 24
@@ -87,7 +90,10 @@ def release(base, meta):
 
 def main(argv):
     if not argv:
-        sys.exit("usage: sh/tlc.py <spec.tla> [tlc args...]")
+        sys.exit("usage: sh/tlc.py <spec.tla> [tlc args...] | --identity")
+    if argv == ["--identity"]:
+        print(*classpath(), sep="\n")
+        return 0
     spec, args = argv[0], argv[1:]
     java, cp = classpath()
     base = ROOT / ".tmp/tlc"

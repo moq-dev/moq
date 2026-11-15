@@ -145,8 +145,9 @@ impl Metrics for Untracked {}
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
 /// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes counted against the shared `connection` window, so the session pauses only
-/// as many streams as fit in half of it; the rest keep reading. See
+/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
+/// against the shared `connection` window, so the session pauses only as many streams as fit
+/// in half of it; the rest keep reading. See
 /// [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

@@ -7022,17 +7022,6 @@ fn leased(pair: &mut Pair, server_ch: ConnectionHandle) -> usize {
 	pair.server_conn_mut(server_ch).stats().credit.leased as usize
 }
 
-/// Lease what has arrived on `s`, read `n` bytes of it, and release their credit, returning
-/// whether the peer finished the stream right after the leased bytes.
-fn consume(pair: &mut Pair, server_ch: ConnectionHandle, s: StreamId, n: usize) -> bool {
-	let mut recv = pair.server_recv(server_ch, s);
-	let mut lease = recv.lease(0).unwrap();
-	let fin = lease.is_fin();
-	lease.advance(n);
-	recv.release(lease);
-	fin
-}
-
 /// Write what the client can of `msg` up to `until`, finishing at its end, and lease what the
 /// server can, without consuming, until neither makes progress. Returns the bytes newly leased.
 fn pump_leased(
@@ -7071,20 +7060,18 @@ fn pump_leased(
 	}
 }
 
-/// Leases keep replenishing a stream window much smaller than the connection's, while the
-/// connection window stays spent until the bytes are consumed. A consume below the usual
-/// `MAX_DATA` threshold still unblocks the peer once it nears its limit, without relying on its
-/// DATA_BLOCKED.
-///
-/// The peer never spends the whole window: a lease held then would be evicted, since nothing
-/// could free it.
+/// A reader that leases without taking holds one stream window, however large the
+/// connection's: stream credit returns as bytes are taken, and connection credit once they are
+/// released. So a reader that stops taking, as moq-net's ingest does to pace a slow reader,
+/// never spends the connection window, which would get its stream evicted.
 #[test]
-fn lease_spends_connection_window_only() {
+fn leases_hold_one_stream_window() {
 	const WINDOW: usize = 4000;
+	const STREAM: usize = 1000;
 	let _guard = subscribe();
 	let mut transport = transport::Config::default();
 	transport.limits.receive_window = NonZeroU64::new(WINDOW as u64);
-	transport.limits.stream_receive_window = NonZeroU64::new(1000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
 	let mut pair = Pair::new(
 		Default::default(),
 		server::Config {
@@ -7099,26 +7086,106 @@ fn lease_spends_connection_window_only() {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	let msg = vec![0xAB; WINDOW + 50];
+	let all = msg.len();
 	let mut sent = 0;
 
-	// Three stream windows' worth, all leased and none consumed.
-	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, 3000), &mut sent), 3000);
+	// Leased and never taken: one stream window.
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), STREAM);
 	let stats = pair.server_conn_mut(server_ch).stats().credit;
-	assert_eq!((stats.leased, stats.available), (3000, 1000));
+	assert_eq!(
+		(stats.leased, stats.available),
+		(STREAM as u64, (WINDOW - STREAM) as u64)
+	);
 
-	// Too little to announce while the peer has room, so the peer blocks at the window, and the
-	// frame that spends the last of its room is what announces it.
-	assert!(!consume(&mut pair, server_ch, s, 100));
-	let all = msg.len();
-	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 1050);
-	assert_eq!(sent, msg.len());
-	assert_eq!(leased(&mut pair, server_ch), WINDOW + 50 - 100);
+	// Taken but restored, as the start of a message is, keeps the connection credit and
+	// returns the stream credit.
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(500);
+	recv.restore(lease);
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 500);
+	let stats = pair.server_conn_mut(server_ch).stats().credit;
+	assert_eq!((stats.leased, stats.available), (1500, (WINDOW - 1500) as u64));
 
-	let all = leased(&mut pair, server_ch);
-	assert!(consume(&mut pair, server_ch, s, all), "finished after the leased bytes");
+	// Taking and releasing everything delivers the rest of the message.
+	let mut read = 500;
+	for _ in 0..all {
+		let mut recv = pair.server_recv(server_ch, s);
+		let mut lease = recv.lease(0).unwrap();
+		let (len, fin) = (lease.remaining(), lease.is_fin());
+		lease.advance(len);
+		recv.release(lease);
+		read += len;
+		if fin {
+			break;
+		}
+		pump_leased(&mut pair, chs, s, (&msg, all), &mut sent);
+	}
+	assert_eq!((sent, read), (all, all));
 	assert_eq!(leased(&mut pair, server_ch), 0);
 	pair.server_recv(server_ch, s).stop(0u32.into()).unwrap();
 	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
+}
+
+/// Lease `want` bytes of `s` once they arrive, driving the pair until they do, and hand them
+/// back unread.
+fn await_unit(
+	pair: &mut Pair,
+	(client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+	s: StreamId,
+	msg: &[u8],
+	sent: &mut usize,
+	want: usize,
+) {
+	for _ in 0..msg.len() {
+		if let Ok(n) = pair.client_send(client_ch, s).write(&mut &msg[*sent..]) {
+			*sent += n;
+		}
+		pair.drive();
+		let mut recv = pair.server_recv(server_ch, s);
+		match recv.lease(want) {
+			Ok(lease) => {
+				assert!(lease.remaining() >= want);
+				recv.restore(lease);
+				return;
+			}
+			Err(err) => assert_eq!(err, recv::Error::Blocked),
+		}
+	}
+	panic!("{want} bytes never arrived: {sent} sent");
+}
+
+/// A reader waiting for a unit larger than its stream window gets room for the unit, and after
+/// taking a few bytes, room for the few more its next unit needs, however far below the usual
+/// update threshold.
+#[test]
+fn a_waiting_reader_gets_room_for_its_unit() {
+	const STREAM: usize = 1000;
+	const UNIT: usize = 3000;
+	let _guard = subscribe();
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(4000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::new(
+		Default::default(),
+		server::Config {
+			transport,
+			..server_config()
+		},
+	);
+	let chs = pair.connect();
+	let s = pair.client_streams(chs.0).open(Dir::Uni, Default::default()).unwrap();
+	let msg = vec![0xAB; UNIT + 10];
+	let mut sent = 0;
+
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+
+	let mut recv = pair.server_recv(chs.1, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(10);
+	recv.release(lease);
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+	assert_eq!(sent, msg.len());
 }
 
 #[test]

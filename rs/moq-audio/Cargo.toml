@@ -102,7 +102,7 @@ rubato = { version = "5.0", default-features = false }
 # 0.2.0 or newer: 0.1.0 panics when the adaptive filter shrinks, which a call
 # whose echo path changes length does reach (dignifiedquire/sonora#14). The
 # `survives_a_moving_echo_delay` test covers that path.
-sonora = "0.2"
+sonora = "0.3"
 # Pure-Rust AAC-LC decoder, ported from NihAV. Decode only: no Rust AAC encoder
 # exists, and the alternatives (libfdk-aac, ffmpeg) are C libraries we would have
 # to link. Limited to AAC-LC mono/stereo, which is what every ingest gateway

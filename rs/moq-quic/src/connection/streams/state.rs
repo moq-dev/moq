@@ -4785,8 +4785,14 @@ mod tests {
 			(Err(recv::Error::TooLarge), false)
 		);
 		assert!(pending.max_stream_data.is_empty());
-		assert_eq!(recv(&mut client, &mut pending, id).peek(0), (Ok(()), true));
-		assert!(pending.max_stream_data.contains(&id));
+		let mut stream = recv(&mut client, &mut pending, id);
+		let mut lease = stream.lease(0).unwrap();
+		lease.advance(64);
+		stream.release(lease);
+		assert!(
+			pending.max_stream_data.contains(&id),
+			"taking the bytes returns their credit"
+		);
 
 		let id = StreamId::new(Side::Server, Dir::Uni, 1);
 		data(&mut client, id, 0, 10, false);
