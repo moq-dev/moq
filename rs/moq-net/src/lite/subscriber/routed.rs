@@ -330,9 +330,6 @@ impl Routed {
 			Msg::Refused { message, reason } => self.refused(prefix, message, reason, decoder)?,
 			// Lite-07 ends a claim by its Announce ID only.
 			Msg::Ended { .. } => return Err(Error::ProtocolViolation),
-			// Only a relay choosing a parent per broadcast uses warm routes, which this
-			// endpoint does not do.
-			Msg::WarmStart { .. } | Msg::WarmUpdate { .. } | Msg::WarmEnd { .. } => {}
 			Msg::Skipped | Msg::Synced => {}
 		}
 		Ok(())
@@ -585,13 +582,6 @@ impl Routed {
 					route.withheld.insert(id);
 				}
 				self.pending(id, None)?;
-			}
-			// Warm routes are ignored here anyway, so refusing one changes nothing.
-			Refusable::WarmStart { route } => {
-				tracing::warn!(route, %reason, "refusing a forwarded warm route");
-			}
-			Refusable::WarmUpdate { id } => {
-				tracing::warn!(warm = id, %reason, "refusing a forwarded warm route");
 			}
 		}
 		self.stats.refuse_route();

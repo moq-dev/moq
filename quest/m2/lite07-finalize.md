@@ -159,7 +159,6 @@ would need a breaking release had it landed right after the cut:
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - removes WARM_* and SUBSCRIBE's `Warm` byte from lite-07
 - [ROUTE's RTT](/quest/m2/route-rtt.md) - removes ROUTE's informational RTT
 - [FETCH Start Byte](/quest/m2/fetch-start-byte.md) - removes FETCH's byte offset into a half-read frame
 - [Yield on relay links](/quest/m2/yield-relay-links.md) - narrows YIELDED from `ietf` sessions to tracks carrying moq-transport records

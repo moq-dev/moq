@@ -146,7 +146,8 @@ proof's proposals:
     neighbor's Node ID. Until the implementation, Rust reads warm routes and
     serves and ignores them, and says unknown; `js/net` says alone, since it
     forwards nothing, and skips the warm types as unknown, which is how an
-    endpoint that does not choose per broadcast ignores them. About 4.5 warm
+    endpoint that does not choose per broadcast ignores them. A later freeze
+    removed the warm wire from lite-07 until the implementation returns it. About 4.5 warm
     messages per reader change across the sweep's churn, which also flaps
     links and advances seqnos; an idle broadcast sends none.
 
@@ -231,10 +232,10 @@ Measured by the proof:
     The wire: WARM_START and WARM_UPDATE carry a copy's Warm Cost, a Flags
     byte whose low bit marks a draining copy, its priority, and its Hops,
     carrier first and the sender last. SUBSCRIBE and SUBSCRIBE_UPDATE end with
-    a `Warm` byte. Rust's codec reads and writes both, and `js/net` the `Warm`
-    byte, which both send as 0 (follow the route) and ignore when read, as
-    `js/net` skips the warm messages; [the implementation](/quest/m3/cache-routing/select.md)
-    acts on them.
+    a `Warm` byte. The proof's codecs and the draft's Warm Routes section were
+    removed from lite-07 again (they stay in git history, at `250a13a17`) until
+    [the implementation](/quest/m3/cache-routing/select.md) acts on them, in the
+    then-current wip version.
 
 Prior art: warm/cold route prices
 ([moq-dev/moq#2925](https://github.com/moq-dev/moq/pull/2925)) were deleted

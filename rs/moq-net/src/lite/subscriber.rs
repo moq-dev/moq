@@ -917,9 +917,6 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteEnd { .. }
 			| lite::AnnounceBroadcast::Dead(_)
 			| lite::AnnounceBroadcast::Floor { .. }
-			| lite::AnnounceBroadcast::WarmStart { .. }
-			| lite::AnnounceBroadcast::WarmUpdate { .. }
-			| lite::AnnounceBroadcast::WarmEnd { .. }
 			| lite::AnnounceBroadcast::Refused { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())

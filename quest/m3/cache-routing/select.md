@@ -44,17 +44,22 @@ and how many moves warm routes caused.
 
 Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)):
 ✅ lite-07 freezes without the warm wire
-([warm routes on the wire](/quest/m2/warm-routes-wire.md)), so this quest
-re-adds WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's `Warm` byte in the
-then-current wip version, and first measures copies and relays crossed
-against plain path routing.
+([moq-dev/moq#8840](https://github.com/moq-dev/moq/pull/8840) stripped it),
+so this quest re-adds WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's
+`Warm` byte in the then-current wip version, and first measures copies and
+relays crossed against plain path routing on an edge/core topology: if the
+only gain is LAN siblings with their own uplinks, the maintainer reopens
+moving the epic downstream. The merge gate no longer runs
+`sweep_cache_routing`; only the nightly `sweep_cache_routing_long` does.
 
 Public API: report any relay configuration added for warm routes. Wire: the
 warm messages and the `Warm` byte return in the then-current wip version,
-with the draft's Warm Routes section.
+with the draft's Warm Routes section, which the freeze deleted: restore its
+text and the codecs in `rs/moq-net/src/lite/announce.rs`,
+`rs/moq-net/src/lite/subscribe.rs`, and `js/net/src/lite/subscribe.ts` from
+commit `250a13a17`.
 
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer driving lite-07 sessions since [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023); its switch to path routes deletes the feasibility distances this rule once read
-- [Warm routes on the wire](/quest/m2/warm-routes-wire.md) - may strip the warm wire from lite-07 or move this epic downstream before this starts
 - [Transient cycles](/quest/m3/cache-routing/transient-cycles.md) - lowers the churn-time pull cycles the rule allows

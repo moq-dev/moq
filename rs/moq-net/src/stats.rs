@@ -725,7 +725,7 @@ pub struct Presence {
 	pub wire_tx: u64,
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
-	/// Cumulative routes, warm routes, and claims a lite-07 session forwarded that this
+	/// Cumulative routes and claims a lite-07 session forwarded that this
 	/// node refused, withdrawing each and keeping the session.
 	pub routes_refused: u64,
 }

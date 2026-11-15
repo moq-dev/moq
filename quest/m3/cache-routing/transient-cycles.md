@@ -31,11 +31,8 @@ cleared within 20 deliveries; the rule it replaced gave 2 per seed, each
 cleared within 2. Explain that rise along with #8732's rate, and measure any
 fix against both the sweep and this fixture.
 
-If [warm routes on the wire](/quest/m2/warm-routes-wire.md) moves the epic
-downstream, this moves with it.
-
 Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ a fix adds no join latency; one that only clears cycles faster comes first (rejected: a carrier waiting for a crossing message before it joins).
 
-Public API: none. Wire: none expected; a rule change that needs one updates
-the draft's Warm Routes section.
+Public API: none. Wire: none expected; a rule change that needs one changes
+the Warm Routes section [select](/quest/m3/cache-routing/select.md) restores.
 
