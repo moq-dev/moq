@@ -2414,7 +2414,8 @@ mod test {
             self.aggregation = Some((range, Pcg32::seed_from_u64(seed)));
         }
 
-        /// Change the bottleneck's bandwidth for packets that reach it from now on.
+        /// Change the bottleneck's bandwidth for packets sent from now on, since `run` schedules
+        /// each packet's bottleneck finish when it is sent.
         fn set_bw(&mut self, bw: f64) {
             self.btl_service_ns = (self.mss as f64 / bw * 1e9).round() as u64;
         }
@@ -2581,26 +2582,23 @@ mod test {
                     while self.flight.front().is_some_and(|p| p.ack_ns == self.now_ns) {
                         burst.extend(self.flight.pop_front());
                     }
-                    let mut ce = None;
                     for p in &burst {
                         self.inflight -= self.mss;
                         let send_at = self.base.saturating_add(Duration::from_nanos(p.send_ns));
                         let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
                         self.bbr
                             .ack_received(now_at, send_at, self.mss, p.pn, received);
-                        if p.ce {
-                            ce = Some(send_at);
-                        }
                     }
                     self.bbr.end_acks(now_at, self.inflight, false);
                     // The ACK's ECN counts report new CE marks, so the transport reports one
-                    // congestion event for the newest marked packet.
-                    if let Some(sent) = ce {
+                    // congestion event, sent when the newest packet the ACK acknowledged was.
+                    let last = burst.last().unwrap();
+                    if burst.iter().any(|p| p.ce) {
+                        let sent = self.base.saturating_add(Duration::from_nanos(last.send_ns));
                         self.bbr.on_ce(Ce { now: now_at, sent });
                     }
 
-                    let last = burst.last().unwrap().pn;
-                    if on_ack(&mut self.bbr, self.now_ns, self.inflight, last).is_break() {
+                    if on_ack(&mut self.bbr, self.now_ns, self.inflight, last.pn).is_break() {
                         return;
                     }
                 } else {
