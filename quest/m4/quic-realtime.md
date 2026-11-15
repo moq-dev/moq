@@ -37,8 +37,8 @@ spike assumed no consumer; teleoperation uplinks are one):
   fitting a trend, as GoogCC does. Reproduce it with `just rs quic-sim`.
 - Bake-off: all three candidates in parallel, each a controller
   in the workspace-only `moq-congestion-lab` (the delay bound stays in
-  `moq-congestion`'s `bbr3/`, its setter hidden); a winner moves into
-  `moq-congestion`. The moq-shaper presets `cellular-step`,
+  `moq-congestion`'s `bbr3/`, its setter behind the `lab` test-support
+  feature); a winner moves into `moq-congestion`. The moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
   delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) brought

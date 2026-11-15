@@ -14,10 +14,12 @@ use std::sync::Arc;
 pub mod bbr3;
 /// CUBIC congestion control.
 pub mod cubic;
-/// Not public API: the token-bucket pacer, shared with the workspace's candidate controllers until
-/// it is published, and changed in any release.
-#[doc(hidden)]
+/// Test support, enabled by the `lab` feature: the token-bucket pacer the candidate controllers
+/// share.
+#[cfg(feature = "lab")]
 pub mod pacer;
+#[cfg(not(feature = "lab"))]
+mod pacer;
 mod rate;
 mod unlimited;
 

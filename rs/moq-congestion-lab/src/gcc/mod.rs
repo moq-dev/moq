@@ -77,10 +77,6 @@ use std::{collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
 
-use moq_congestion::{
-    Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent,
-    pacer::{self, Pacer, Rate},
-};
 use api::{
     transport::{
         NetworkAvailability, NetworkControlUpdate, PacedPacketInfo, PacerConfig, PacketResult,
@@ -88,6 +84,10 @@ use api::{
         TransportPacketsFeedback,
     },
     units::{DataRate, DataSize, TimeDelta, Timestamp},
+};
+use moq_congestion::{
+    Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent,
+    pacer::{self, Pacer, Rate},
 };
 use pacing::BitrateProber;
 
@@ -288,7 +288,7 @@ impl Gcc {
             sent_packet: SentPacket {
                 send_time: timestamp(packet.sent),
                 size: DataSize::from_bytes(packet.bytes.into()),
-                pacing_info: self.cluster(packet.packet.probe_cluster),
+                pacing_info: self.cluster(packet.packet.probe_cluster()),
                 data_in_flight: DataSize::zero(),
             },
             receive_time,
@@ -384,7 +384,7 @@ impl Controller for Gcc {
         });
         self.apply(update);
         let mut packet = Packet::default();
-        packet.probe_cluster = probe_cluster;
+        packet.set_probe_cluster(probe_cluster);
         packet
     }
 
@@ -421,7 +421,7 @@ impl Controller for Gcc {
                 sent_packet: SentPacket {
                     send_time: timestamp(packet.sent),
                     size: DataSize::from_bytes(packet.bytes.into()),
-                    pacing_info: self.cluster(packet.packet.probe_cluster),
+                    pacing_info: self.cluster(packet.packet.probe_cluster()),
                     data_in_flight: DataSize::zero(),
                 },
                 receive_time: Timestamp::plus_infinity(),

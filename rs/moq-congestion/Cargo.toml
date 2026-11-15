@@ -7,6 +7,12 @@ rust-version.workspace = true
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
+[features]
+# Test support for the workspace-only moq-congestion-lab and the comparisons that run its
+# candidates: the pacer, a packet's GCC probe cluster, and BBR3's delay bound. Meant for
+# dev-dependencies; not for applications.
+lab = []
+
 [dependencies]
 kio = { workspace = true }
 rand = { workspace = true }

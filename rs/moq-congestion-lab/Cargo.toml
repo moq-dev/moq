@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 kio = { workspace = true }
-moq-congestion = { workspace = true }
+moq-congestion = { workspace = true, features = ["lab"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

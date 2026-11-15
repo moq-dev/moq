@@ -4,9 +4,7 @@
 //! comparisons in moq-quic and moq-tokio drive it like any other. A winner graduates into
 //! moq-congestion and joins `moq_tokio::quic::CongestionControl` as a new variant.
 
-/// libwebrtc's Google Congestion Control (GoogCC).
 pub mod gcc;
-/// SCReAMv2's delay-based congestion control.
 pub mod scream;
 
 #[cfg(test)]

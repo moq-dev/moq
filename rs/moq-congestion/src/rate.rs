@@ -6,6 +6,7 @@
 //! <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1>
 
 use kio::clock::Instant;
+#[cfg(feature = "lab")]
 use std::num::NonZeroU16;
 use std::time::Duration;
 
@@ -34,10 +35,22 @@ pub struct Packet {
     /// The GCC probe cluster it was sent in, if any. Sixteen bits fit the padding after the
     /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
     /// far more than either starts in the two seconds a cluster is kept.
-    ///
-    /// Not public API: GCC is a candidate outside this crate, and the field may go in any release.
-    #[doc(hidden)]
-    pub probe_cluster: Option<NonZeroU16>,
+    #[cfg(feature = "lab")]
+    probe_cluster: Option<NonZeroU16>,
+}
+
+/// Test support, enabled by the `lab` feature, for the GCC candidate in moq-congestion-lab.
+#[cfg(feature = "lab")]
+impl Packet {
+    /// The GCC probe cluster the packet was sent in, if any.
+    pub fn probe_cluster(&self) -> Option<NonZeroU16> {
+        self.probe_cluster
+    }
+
+    /// Records the GCC probe cluster the packet was sent in.
+    pub fn set_probe_cluster(&mut self, cluster: Option<NonZeroU16>) {
+        self.probe_cluster = cluster;
+    }
 }
 
 /// An empty state, for a controller that keeps none.
@@ -50,6 +63,7 @@ impl Default for Packet {
             lost: 0,
             tx_in_flight: 0,
             is_app_limited: false,
+            #[cfg(feature = "lab")]
             probe_cluster: None,
         }
     }
@@ -124,6 +138,7 @@ impl Sampler {
             lost: self.lost,
             tx_in_flight: sent.in_flight.try_into().unwrap_or(u32::MAX),
             is_app_limited: self.app_limited != 0,
+            #[cfg(feature = "lab")]
             probe_cluster: None,
         }
     }

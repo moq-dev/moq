@@ -16,9 +16,9 @@
 
 use std::sync::Arc;
 
+use kio::clock::Instant;
 use moq_congestion::pacer::{Pacer, Rate};
 use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
-use kio::clock::Instant;
 use std::time::Duration;
 
 /// equivalent to MIN_REF_WND: the smallest reference window, in bytes
