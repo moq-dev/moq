@@ -10469,6 +10469,7 @@ dependencies = [
  "toml_parser",
  "tower",
  "tower-http 0.6.11",
+ "tracing",
  "tracing-core",
  "tracing-subscriber",
  "tungstenite",

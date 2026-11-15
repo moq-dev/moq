@@ -18611,7 +18611,9 @@ rec {
             packageId = "workspace-hack";
           }
         ];
-
+        features = {
+        };
+        resolvedDefaultFeatures = [ "lab" ];
       };
       "moq-congestion-lab" = rec {
         crateName = "moq-congestion-lab";
@@ -18630,6 +18632,7 @@ rec {
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
+            features = [ "lab" ];
           }
           {
             name = "tracing";
@@ -59722,6 +59725,10 @@ rec {
             ];
           }
           {
+            name = "tracing";
+            packageId = "tracing";
+          }
+          {
             name = "tracing-core";
             packageId = "tracing-core";
           }
@@ -61162,6 +61169,10 @@ rec {
               "decompression-gzip"
               "follow-redirect"
             ];
+          }
+          {
+            name = "tracing";
+            packageId = "tracing";
           }
           {
             name = "tracing-core";
