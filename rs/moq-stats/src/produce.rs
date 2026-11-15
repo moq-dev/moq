@@ -463,6 +463,8 @@ struct Snapshot<T> {
 	largest: Option<u64>,
 	/// The interval the newest group opened in, which the next group has to pass.
 	opened: Option<u64>,
+	/// The track's name is new, so nothing comes before its first group, and it says so.
+	fresh: bool,
 	deltas: bool,
 	/// The newest snapshot payload written, and what the last update wrote
 	/// (zero when nothing). Bench builds only.
@@ -481,11 +483,20 @@ impl<T: Serialize> Snapshot<T> {
 			group: None,
 			largest: None,
 			opened: None,
+			fresh: false,
 			#[cfg(feature = "bench")]
 			held: 0,
 			#[cfg(feature = "bench")]
 			wrote: 0,
 		}
+	}
+
+	/// Declare every start below the first group skipped, for a track whose name no earlier
+	/// run used: a reader then knows the first group it reads opens the track
+	/// ([`moq_net::track::Subscriber::is_skipped`]).
+	fn fresh(mut self) -> Self {
+		self.fresh = true;
+		self
 	}
 
 	fn demand(&self) -> moq_net::track::Demand {
@@ -542,6 +553,9 @@ impl<T: Serialize> Snapshot<T> {
 			}
 			if let Some(group) = self.group.take() {
 				group.close()?;
+			}
+			if self.fresh && self.largest.is_none() {
+				self.track.skip_groups(0..start);
 			}
 			self.group = Some(self.track.append_group(start)?);
 			self.largest = Some(start);
@@ -622,7 +636,7 @@ impl<V: Serialize> Output<V> {
 
 	fn new(track: track::Producer) -> Self {
 		Self {
-			snapshot: Snapshot::new(track, config()),
+			snapshot: Snapshot::new(track, config()).fresh(),
 			frame: Frame::default(),
 		}
 	}
@@ -908,7 +922,7 @@ impl BucketTrack {
 		let track = broadcast.create_track(name.as_str(), info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, config()),
+			snapshot: Snapshot::new(track, config()).fresh(),
 			body: BucketBody {
 				epoch,
 				tiers: Frame::default(),
@@ -3168,7 +3182,7 @@ mod tests {
 		let registry = producer.registry();
 		let (_, broadcast) = announced(&origin).await;
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		// The listed run's name, and the start of its first group.
+		// The listed run's name, and the start of its first group, which nothing comes before.
 		let run = async |broadcast: &moq_net::broadcast::Consumer| {
 			let name = crate::listed_bucket_track(broadcast, &moq_net::Path::from_static("acme")).await;
 			let mut track = subscribe(broadcast, &name).await;
@@ -3177,7 +3191,9 @@ mod tests {
 				let start = group.unwrap().unwrap().start;
 				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
-			(name, first)
+			let first = first.expect("a run's first group is listed");
+			assert!(track.is_skipped(0..first), "a run says nothing precedes its first group");
+			(name, Some(first))
 		};
 
 		let session =

@@ -10793,6 +10793,12 @@ impl Ordered {
 		self.inner.poll_largest(waiter)
 	}
 
+	/// Whether the publisher declared every start in `groups` skipped; see
+	/// [`Subscriber::is_skipped`].
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+		self.inner.is_skipped(groups)
+	}
+
 	/// Whether `other` reads the same underlying track state.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.inner.is_clone(&other.inner)
