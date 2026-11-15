@@ -12,7 +12,7 @@ use moq_video::decode::{Lane, Next, Selector};
 use super::buffer::Buffer;
 use super::output::Output;
 use super::window::Event;
-use moq_mux::sync::{Producer as Presentation, Transition};
+use moq_mux::sync::Producer as Presentation;
 
 /// A few surfaces, independent of the requested playout delay. A codec batch
 /// that overflows it waits beside the queue rather than pushing out pictures
@@ -28,7 +28,8 @@ enum Step {
 	Decode,
 	/// The track ended: drain what the codec still holds.
 	Flush,
-	Resume,
+	/// The front segment drained: start the next one.
+	Next,
 }
 
 /// When the window's queue has room for another picture, or `None` if it does
@@ -98,34 +99,6 @@ impl Decoder for moq_video::decode::Sink {
 	}
 }
 
-/// One encoder segment's media, and the transition it resumes when it
-/// replaces the segment before it.
-#[derive(Default)]
-struct Segment {
-	media: Buffer,
-	resumes: Option<Transition>,
-	/// When its first picture arrived.
-	arrived: Option<Instant>,
-	/// The group of the end it replaced: its media is in later groups only.
-	after: Option<u64>,
-	/// The group of its own declared end, once read.
-	until: Option<u64>,
-}
-
-impl std::ops::Deref for Segment {
-	type Target = Buffer;
-
-	fn deref(&self) -> &Buffer {
-		&self.media
-	}
-}
-
-impl std::ops::DerefMut for Segment {
-	fn deref_mut(&mut self) -> &mut Buffer {
-		&mut self.media
-	}
-}
-
 /// The earlier deadline, where `None` is no deadline.
 /// The later of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no `Ord`.
 fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
@@ -137,20 +110,20 @@ fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
 	if b < a { b } else { a }
 }
 
-/// A timestamp on the broadcast timeline, ordered by time.
+/// A presentation timestamp, ordered by time.
 ///
 /// [`moq_net::Timestamp`] has no `Ord`, since an unscaled one orders against no scaled one.
-/// The presentation's `map` only returns scaled timestamps, and scaled ones order totally.
+/// Video timestamps are scaled, and scaled ones order totally.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Mapped(moq_net::Timestamp);
+struct Ordered(moq_net::Timestamp);
 
-impl Ord for Mapped {
+impl Ord for Ordered {
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 		self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
 	}
 }
 
-impl PartialOrd for Mapped {
+impl PartialOrd for Ordered {
 	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
 		Some(self.cmp(other))
 	}
@@ -193,15 +166,11 @@ impl<O: Output> Video<O> {
 		// Wakes the max-delay decoder when the clock, the segments, or the selector change.
 		let wake = tokio::sync::Notify::new();
 		let closed = std::sync::atomic::AtomicBool::new(false);
-		let advancing = std::sync::atomic::AtomicBool::new(false);
-		let revision = std::sync::atomic::AtomicU64::new(0);
-		// The first group the clock's mapping covers: the first the min-delay decoder
-		// read, then the one after each end it resumed past. A gap keeps the mapping,
-		// so this outlives the buffers it replaces.
-		let origin: Mutex<Option<u64>> = Mutex::new(None);
-		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
-		// Signalled when a segment held behind a resume becomes the front.
-		let advanced = tokio::sync::Notify::new();
+		// One buffer per encoder between declared ends, oldest first. The codec drains
+		// each before decoding the next, which a fresh encoder opens with a keyframe.
+		// The front never holds the rest back for long: no picture is due later than
+		// one shared delay after it arrived, since the reference is the earliest arrival.
+		let buffers = Mutex::new(VecDeque::from([Buffer::default()]));
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
 		let receive = async {
 			// Video has no jitter estimate, so its target is the encoder delay alone,
@@ -229,34 +198,11 @@ impl<O: Output> Video<O> {
 				}
 			};
 			follow(&mut track, &mut held, shared);
-			// The group of a declared end whose restart waits for a later group, so the
-			// media buffered before the end still plays out, and the transition that
-			// later group resumes.
+			// The group of a declared end no later group has followed yet. The media
+			// buffered before the end still plays out.
 			let mut end = None;
 
 			loop {
-				// Stop reading while media queued behind a resume arrived more than the age
-				// budget ago, so the subscription evicts the excess instead of the queue
-				// growing a segment per restart without bound.
-				while buffers
-					.lock()
-					.unwrap()
-					.iter()
-					.skip(1)
-					.filter(|segment| segment.oldest().is_some())
-					.filter_map(|segment| segment.arrived)
-					.min()
-					.is_some_and(|arrived| arrived.elapsed() > self.max_delay + held)
-				{
-					tokio::select! {
-						() = advanced.notified() => {}
-						Ok(()) = encoder.changed() => target(*encoder.borrow_and_update()),
-						delay = role.delay_changed(shared) => {
-							shared = delay;
-							follow(&mut track, &mut held, shared);
-						}
-					}
-				}
 				let read = tokio::select! {
 					read = track.read() => read?,
 					Ok(()) = encoder.changed() => {
@@ -270,90 +216,47 @@ impl<O: Output> Video<O> {
 					}
 				};
 				let mut buffers = buffers.lock().unwrap();
-				let active = buffers.len() == 1 && !advancing.load(std::sync::atomic::Ordering::Relaxed);
 				let before = buffers.front().unwrap().generation;
 				let ended = match read {
 					Some(Read::Frame { group, frame }) => {
-						if let Some((ended, transition)) = end.take_if(|(end, _)| *end != group) {
+						// Only a group later than a declared end's starts the next encoder, as
+						// in `@moq/watch`: the stopped encoder's own group may still follow it.
+						if end.take_if(|end| group > *end).is_some() {
 							// A superseded segment never receives another picture, so one that
-							// eviction emptied can never resume.
+							// eviction emptied has nothing left to decode.
 							let mut index = 1;
 							while index < buffers.len() {
 								if buffers[index].oldest().is_some() {
 									index += 1;
-								} else if let Some(skipped) = buffers.remove(index).and_then(|skipped| skipped.resumes)
-								{
-									role.abandon(skipped);
+								} else {
+									buffers.remove(index);
 								}
 							}
-							role.plan(transition, frame.timestamp, None);
-							buffers.push_back(Segment {
-								resumes: Some(transition),
-								after: Some(ended),
-								..Default::default()
-							});
+							buffers.push_back(Buffer::default());
+							// Another timeline: its arrivals stop holding the clock until this one.
+							role.reset();
 						}
-						if active && buffers.len() == 1 && role.received(role.map(frame.timestamp)?, Instant::now()) {
+						if role.received(frame.timestamp, Instant::now()) {
 							self.output.send(Event::Wake);
 						}
-						let back = buffers.back_mut().unwrap();
-						// The first segment's mapping starts where this decoder joined, so an
-						// end before the join needs no resume.
-						if back.resumes.is_none() && back.after.is_none() {
-							origin.lock().unwrap().get_or_insert(group);
-						}
-						back.push(frame, self.max_delay + held);
-						back.arrived.get_or_insert_with(Instant::now);
+						buffers.back_mut().unwrap().push(frame, self.max_delay + held);
 						false
 					}
-					// Applied in delivery order, so the restart lands before the frame after it.
-					// An end declared before the loss still holds, as on the audio side: what
-					// follows comes from the replacement encoder and resumes the latest
-					// transition, while the media lost with the gap is discarded.
+					// Lost media discards every picture still buffered. An end declared
+					// before the loss still holds, as on the audio side: a later group comes
+					// from the replacement encoder.
 					Some(Read::Gap { .. }) => {
-						// The mapping is unchanged, so the front keeps its groups.
-						let (after, until) = buffers.front().map(|front| (front.after, front.until)).unwrap();
-						let mut queued: Vec<_> = buffers
-							.iter()
-							.filter_map(|buffer| Some((buffer.resumes?, buffer.after)))
-							.collect();
-						let resumes = queued.pop();
-						for (transition, _) in queued {
-							role.abandon(transition);
-						}
-						revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-						role.gap();
 						buffers.clear();
-						buffers.push_back(Segment {
-							after,
-							until,
-							..Default::default()
-						});
+						buffers.push_back(Buffer::default());
 						let front = buffers.front_mut().unwrap();
-						front.clear();
 						front.generation = before + 1;
-						front.ended = resumes.is_some() || end.is_some();
-						if let Some((transition, after)) = resumes {
-							buffers.push_back(Segment {
-								resumes: Some(transition),
-								after,
-								..Default::default()
-							});
-						}
+						front.ended = end.is_some();
 						role.reset();
 						false
 					}
-					Some(Read::End { group, end: endpoint }) => {
-						if let Some((_, transition)) = end.take() {
-							role.abandon(transition);
-						}
-						end = Some((group, role.declare()));
-						buffers.back_mut().unwrap().until = Some(group);
+					Some(Read::End { group, .. }) => {
+						end = Some(group);
 						buffers.back_mut().unwrap().ended = true;
-						buffers.back_mut().unwrap().end = Some(endpoint);
-						if active {
-							role.end(endpoint)?;
-						}
 						false
 					}
 					None => {
@@ -387,7 +290,7 @@ impl<O: Output> Video<O> {
 			let mut held = BTreeSet::new();
 			// Decoded pictures waiting for room in the window's queue.
 			let mut pending = VecDeque::new();
-			let drained = loop {
+			loop {
 				wake.notify_one();
 				let (current, oldest, ended, last, floor) = {
 					let buffers = buffers.lock().unwrap();
@@ -397,7 +300,6 @@ impl<O: Output> Video<O> {
 				};
 				// A codec may return pictures it held across the keyframe that
 				// resumed a skipped timeline. Those pictures no longer have a slot.
-				let floor = floor.map(|floor| role.map(floor)).transpose()?;
 				if generation.is_some_and(|generation| generation != current) {
 					// Whatever the codec still holds sits below the new floor, so it is
 					// filtered on the way out and owes the window nothing.
@@ -472,8 +374,7 @@ impl<O: Output> Video<O> {
 						// Every access unit up to the earliest picture still owed must be
 						// decoded before that picture is due, however deep the stream
 						// reorders or the codec holds pictures back.
-						let oldest = role.map(oldest)?;
-						let owed = held.first().map_or(oldest, |held: &Mapped| earlier(oldest, held.0));
+						let owed = held.first().map_or(oldest, |held: &Ordered| earlier(oldest, held.0));
 						let at = presentation
 							.due(owed)
 							.and_then(|at| at.checked_sub(DECODE_AHEAD))
@@ -491,21 +392,10 @@ impl<O: Output> Video<O> {
 					} else if select.is_some() || (last && !done) {
 						// The segment's last pictures are still owed to the window.
 						Step::Wait(select)
+					} else if closed.load(std::sync::atomic::Ordering::Relaxed) && buffers.lock().unwrap().len() == 1 {
+						break;
 					} else {
-						// A new encoder waits for every old picture to be presented. A closed
-						// track hands its last due time to whatever resumes after it.
-						if closed.load(std::sync::atomic::Ordering::Relaxed) && buffers.lock().unwrap().len() == 1 {
-							break queue.back().and_then(|frame| presentation.due(frame.timestamp));
-						} else if !queue.is_empty() {
-							Step::Wait(
-								queue
-									.back()
-									.and_then(|frame| presentation.due(frame.timestamp))
-									.filter(|at| *at > now),
-							)
-						} else {
-							Step::Resume
-						}
+						Step::Next
 					}
 				};
 				match step {
@@ -521,16 +411,15 @@ impl<O: Output> Video<O> {
 						continue;
 					}
 					Step::Decode => {
-						let mut frame = buffers
+						let frame = buffers
 							.lock()
 							.unwrap()
 							.front_mut()
 							.unwrap()
 							.pop()
 							.expect("no await since inspecting the buffer");
-						frame.timestamp = role.map(frame.timestamp)?;
 						generation = Some(current);
-						held.insert(Mapped(frame.timestamp));
+						held.insert(Ordered(frame.timestamp));
 						{
 							let mut edge = edge.lock().unwrap();
 							*edge = Some(edge.map_or(frame.timestamp, |edge| later(edge, frame.timestamp)));
@@ -540,51 +429,26 @@ impl<O: Output> Video<O> {
 						// joined receiver continues observing arrivals during this await.
 						decoder.decode(frame).await?;
 					}
-					Step::Resume => {
-						// Read under the same lock as the pop: a gap replaces the buffers and
-						// bumps the revision while holding it.
+					Step::Next => {
 						let next = {
 							let mut buffers = buffers.lock().unwrap();
 							// Eviction can empty a replacement until its next keyframe; one a
 							// later replacement already follows never gets another.
 							while buffers.len() > 2 && buffers[1].oldest().is_none() {
-								if let Some(transition) = buffers.remove(1).and_then(|skipped| skipped.resumes) {
-									role.abandon(transition);
-								}
+								buffers.remove(1);
 							}
-							match buffers.get(1).and_then(|next| Some((next.oldest()?, next.resumes?))) {
-								Some((start, transition)) => {
-									advancing.store(true, std::sync::atomic::Ordering::Relaxed);
-									buffers.pop_front();
-									advanced.notify_one();
-									Some((start, transition, revision.load(std::sync::atomic::Ordering::Relaxed)))
-								}
-								None => None,
+							let next = buffers.get(1).is_some_and(|next| next.oldest().is_some());
+							if next {
+								buffers.pop_front();
 							}
+							next
 						};
-						let Some((start, transition, before)) = next else {
+						if !next {
 							if closed.load(std::sync::atomic::Ordering::Relaxed) {
-								break None;
+								break;
 							}
 							self.changed.notified().await;
-							continue;
-						};
-						let mapping = role.resume(transition, start, None).ready().await?;
-						let buffers = buffers.lock().unwrap();
-						if revision.load(std::sync::atomic::Ordering::Relaxed) != before {
-							advancing.store(false, std::sync::atomic::Ordering::Relaxed);
-							continue;
 						}
-						role.apply(transition, mapping);
-						*origin.lock().unwrap() = buffers.front().unwrap().after.map(|after| after + 1);
-						if let Some(end) = buffers.front().unwrap().end {
-							role.end(end)?;
-						}
-						advancing.store(false, std::sync::atomic::Ordering::Relaxed);
-						for frame in &buffers.front().unwrap().frames {
-							role.received(role.map(frame.timestamp)?, Instant::now());
-						}
-						self.output.send(Event::Wake);
 						continue;
 					}
 					Step::Flush => {
@@ -606,11 +470,11 @@ impl<O: Output> Video<O> {
 					held.retain(|held| held.0 > frame.timestamp);
 					selector.push(Lane::Min, Decoded::Frame(frame), now);
 				}
-			};
-			Ok::<_, anyhow::Error>(drained)
+			}
+			Ok::<_, anyhow::Error>(())
 		};
 		// Pushes the max-delay decoder's pictures to the selector. It never moves the
-		// clock, and it only decodes media the min-delay decoder's segment maps.
+		// clock.
 		let refresh = async {
 			let Some(Refresh {
 				track: mut refresh,
@@ -635,9 +499,6 @@ impl<O: Output> Video<O> {
 			// point reference media this decoder never had.
 			let mut recover = true;
 			let mut leading = None;
-			// The group of the last end this decoder read. Its own subscription may
-			// deliver the replacement before the min-delay decoder reads that end.
-			let mut fence = None;
 			let schedule = self.presentation.consume();
 			let mut shared = schedule.delay();
 			let mut held = Duration::ZERO;
@@ -658,8 +519,8 @@ impl<O: Output> Video<O> {
 						continue;
 					}
 				};
-				let (group, mut frame) = match read {
-					Some(Read::Frame { group, frame }) => (group, frame),
+				let frame = match read {
+					Some(Read::Frame { frame, .. }) => frame,
 					Some(Read::Gap { .. }) => {
 						codec.flush().await?;
 						push(&mut codec)?;
@@ -667,10 +528,9 @@ impl<O: Output> Video<O> {
 						continue;
 					}
 					// A fresh encoder has no preceding GOP to reference, so no recovery.
-					Some(Read::End { group, .. }) => {
+					Some(Read::End { .. }) => {
 						codec.flush().await?;
 						push(&mut codec)?;
-						fence = Some(group);
 						continue;
 					}
 					None => {
@@ -688,48 +548,23 @@ impl<O: Output> Video<O> {
 				if leading.is_some_and(|floor| frame.timestamp < floor) {
 					continue;
 				}
-				// Wait until the frame is in the segment the clock maps and due to decode:
-				// not ahead of the min-delay decoder, nor of the decode lead.
-				let mapped = loop {
+				// Wait until the frame is due to decode: not ahead of the min-delay
+				// decoder, nor of the decode lead.
+				loop {
 					let woken = wake.notified();
-					let at = {
-						let buffers = buffers.lock().unwrap();
-						let front = buffers.front().unwrap();
-						// A segment the clock already moved past.
-						if front.after.is_some_and(|after| group <= after) {
-							break None;
-						}
-						// A segment the clock has not mapped yet.
-						let ahead = front.until.is_some_and(|until| group > until)
-							|| fence.is_some_and(|fence| {
-								group > fence && origin.lock().unwrap().is_none_or(|origin| origin <= fence)
-							}) || advancing.load(std::sync::atomic::Ordering::Relaxed);
-						if ahead {
-							// Nor ever will: the track closed without resuming it.
-							if buffers.len() == 1 && closed.load(std::sync::atomic::Ordering::Relaxed) {
-								break None;
-							}
-							None
-						} else {
-							drop(buffers);
-							// Before the segment's mapped start, so the clock moved past it too.
-							let Ok(mapped) = role.map(frame.timestamp) else {
-								break None;
-							};
-							if !selector.lock().unwrap().wants(Lane::Max) {
-								None
-							} else if edge.lock().unwrap().is_some_and(|edge| mapped <= edge) {
-								break Some(mapped);
-							} else {
-								let due = self.presentation.due(mapped);
-								match due
-									.and_then(|at| at.checked_sub(DECODE_AHEAD))
-									.filter(|at| *at > Instant::now())
-								{
-									None => break Some(mapped),
-									at => at,
-								}
-							}
+					let at = if !selector.lock().unwrap().wants(Lane::Max) {
+						None
+					} else if edge.lock().unwrap().is_some_and(|edge| frame.timestamp <= edge) {
+						break;
+					} else {
+						match self
+							.presentation
+							.due(frame.timestamp)
+							.and_then(|at| at.checked_sub(DECODE_AHEAD))
+							.filter(|at| *at > Instant::now())
+						{
+							None => break,
+							at => at,
 						}
 					};
 					// A delay rise while parked must grow this subscription's budget now,
@@ -748,11 +583,7 @@ impl<O: Output> Video<O> {
 							follow(&mut refresh, &mut held, shared);
 						}
 					}
-				};
-				let Some(mapped) = mapped else {
-					continue;
-				};
-				frame.timestamp = mapped;
+				}
 				// Never race a codec call: cancelling Sink::decode poisons it.
 				codec.decode(frame).await?;
 				push(&mut codec)?;
@@ -764,8 +595,7 @@ impl<O: Output> Video<O> {
 				Err(err) = refresh => Err(err),
 			}
 		};
-		let (_, drained) = tokio::try_join!(receive, decode)?;
-		role.retire(drained);
+		tokio::try_join!(receive, decode)?;
 		Ok(())
 	}
 }
@@ -1377,7 +1207,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_closed_track_holds_its_end_until_its_last_picture_is_due() {
+	async fn a_closed_track_queues_its_tail_without_waiting_for_it() {
 		tokio::time::pause();
 		let delay = Duration::from_millis(200);
 		let media = media(delay);
@@ -1414,82 +1244,6 @@ mod tests {
 			.due(moq_net::Timestamp::from_millis(66).unwrap())
 			.unwrap();
 		assert!(Instant::now() < last, "the track closed after its tail was due");
-		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
-		let transition = audio.declare();
-		let _mapping = audio
-			.resume(transition, moq_net::Timestamp::ZERO, None)
-			.ready()
-			.await
-			.unwrap();
-		// It maps one delay early, so its first write plays as the tail ends.
-		assert!(
-			Instant::now() >= last.checked_sub(delay).unwrap(),
-			"audio resumed over the video tail"
-		);
-	}
-
-	#[tokio::test]
-	async fn a_held_video_resume_leaves_the_excess_to_the_subscription() {
-		tokio::time::pause();
-		let delay = Duration::from_millis(200);
-		let media = media(delay);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let source = broadcast
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		let subscriber = source
-			.consume()
-			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
-			)
-			.await
-			.unwrap();
-		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut producer = Some(moq_mux::container::Producer::new(source, format()));
-		let mut _finished = None;
-		let track = moq_mux::container::Consumer::new(subscriber, format());
-		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
-		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
-		// Two-picture segments, one per restart, published live for two seconds
-		// while audio's end holds the first replacement back.
-		const SEGMENTS: u64 = 50;
-		let mut shown = 0;
-		// Presents until the track drains, which replaying every queued segment would
-		// take far longer than this bound.
-		for at in 0..60_000u64 {
-			if task.is_finished() {
-				break;
-			}
-			if at < 60 && at % 20 == 0 {
-				producer.as_mut().unwrap().write(frame(at, at == 0)).unwrap();
-			} else if at == 60 {
-				audio.declare();
-				audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
-			}
-			if (60..60 + SEGMENTS * 40).contains(&at) && at % 20 == 0 {
-				if at % 40 == 20 {
-					producer.as_mut().unwrap().discontinuity().unwrap();
-				}
-				producer.as_mut().unwrap().write(frame(at, at % 40 == 20)).unwrap();
-			} else if at == 60 + SEGMENTS * 40 {
-				_finished = producer.take().map(|producer| producer.finish().unwrap());
-			}
-			tokio::task::yield_now().await;
-			if media
-				.output
-				.present(&media)
-				.is_some_and(|picture| picture.as_millis().unwrap() >= 60)
-			{
-				shown += 1;
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-		}
-		task.await.unwrap().unwrap();
-		assert!(shown > 0, "the replacements played");
-		assert!(
-			shown < SEGMENTS,
-			"pictures held behind the resume past the age budget were queued, not evicted: {shown}"
-		);
 	}
 
 	#[tokio::test]
@@ -1514,10 +1268,6 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(source, format());
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
-		// Audio's end two seconds out holds every replacement back.
-		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
-		audio.declare();
-		audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
 		producer.write(frame(0, true)).unwrap();
 		// Each replacement is one GOP longer than the age budget, so eviction
 		// takes its only keyframe and leaves it empty.
@@ -1530,24 +1280,11 @@ mod tests {
 					.unwrap();
 			}
 		}
-		tokio::time::advance(Duration::from_millis(500)).await;
-		tokio::task::yield_now().await;
-		media.output.present(&media);
-		// Once the old tail drained, audio must pair with the surviving replacement,
-		// rather than a discarded segment that still has a transition or a plan.
-		tokio::time::advance(Duration::from_secs(3)).await;
-		tokio::task::yield_now().await;
-		let start = moq_net::Timestamp::from_millis(3_000).unwrap();
-		let transition = audio.declare();
-		audio.plan(transition, start, Some(delay));
+		// The emptied segments must give way to the one after them, rather than
+		// leave the decoder waiting on media that never comes.
+		producer.discontinuity().unwrap();
 		producer.write(frame(3_040, true)).unwrap();
 		let _finished = producer.finish().unwrap();
-		audio.apply(
-			transition,
-			audio.resume(transition, start, Some(delay)).ready().await.unwrap(),
-		);
-		let first = audio.map(start).unwrap();
-		audio.received(first, Instant::now());
 		let mut shown = None;
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
@@ -1555,14 +1292,11 @@ mod tests {
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
-		assert_eq!(
-			shown.map(|shown| Duration::try_from(shown).unwrap()),
-			Some(Duration::try_from(first).unwrap() + Duration::from_millis(40))
-		);
+		assert_eq!(shown.map(|shown| shown.as_millis().unwrap()), Some(3_040));
 	}
 
 	#[tokio::test]
-	async fn a_waiting_resume_leaves_the_decoders_wakeup_alone() {
+	async fn an_idle_decoder_wakes_for_the_next_picture() {
 		tokio::time::pause();
 		let delay = Duration::from_millis(200);
 		let media = media(delay);
@@ -1598,17 +1332,7 @@ mod tests {
 			}
 		};
 		step(3).await;
-		// Audio waits on an end ten seconds out while the decoder idles.
-		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
-		let transition = audio.declare();
-		audio.end(moq_net::Timestamp::from_secs(10).unwrap()).unwrap();
-		let resume = tokio::spawn(async move {
-			audio
-				.resume(transition, moq_net::Timestamp::ZERO, None)
-				.ready()
-				.await
-				.map(|_| ())
-		});
+		// The decoder idles.
 		for _ in 0..200 {
 			tokio::task::yield_now().await;
 			media.output.present(&media);
@@ -1624,7 +1348,6 @@ mod tests {
 			sent.elapsed()
 		);
 		let _finished = producer.finish().unwrap();
-		resume.abort();
 		for _ in 0..500 {
 			tokio::task::yield_now().await;
 			media.output.present(&media);
@@ -1634,7 +1357,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_quick_resume_flushes_and_plays_every_old_picture_first() {
+	async fn a_declared_end_flushes_and_plays_every_old_picture_first() {
 		tokio::time::pause();
 		let delay = Duration::from_millis(200);
 		let media = media(delay);
@@ -1681,7 +1404,7 @@ mod tests {
 		task.await.unwrap().unwrap();
 		assert_eq!(&shown[..3], [0, 33_000, 66_000]);
 		assert_eq!(shown.len(), 6);
-		assert!(shown[3] > shown[2], "the resumed segment follows every old picture");
+		assert!(shown[3] > shown[2], "the next segment follows every old picture");
 		assert_eq!(shown[4] - shown[3], 33_000);
 		assert_eq!(shown[5] - shown[4], 33_000);
 		assert_eq!(
@@ -1889,8 +1612,7 @@ mod tests {
 	}
 
 	/// A join right after an encoder restart starts the max-delay decoder on the end,
-	/// a group before the min-delay one. The clock already maps the replacement, so
-	/// that end holds nothing back.
+	/// a group before the min-delay one. That end holds nothing back.
 	#[tokio::test]
 	async fn a_join_right_after_a_restart_still_hands_over() {
 		tokio::time::pause();
@@ -1957,10 +1679,11 @@ mod tests {
 	}
 
 	/// The max-delay decoder reads its own subscription, so it can see an encoder
-	/// restart before the min-delay decoder does. It holds the replacement until the
-	/// clock maps it rather than placing it on the old encoder's timeline.
+	/// restart before the min-delay decoder does. Timestamps run on through the end,
+	/// so it plays the replacement when the shared clock says it is due, without
+	/// waiting for the min-delay decoder to read the end.
 	#[tokio::test]
-	async fn a_restart_the_max_delay_decoder_reads_first_waits_for_the_clock() {
+	async fn a_restart_the_max_delay_decoder_reads_first_plays_on_the_clock() {
 		tokio::time::pause();
 		let delay = Duration::from_millis(200);
 		let media = media(delay);
@@ -2034,9 +1757,12 @@ mod tests {
 		let timestamps: Vec<_> = shown.iter().map(|(at, _)| *at).collect();
 		assert_eq!(&timestamps[..3], [0, 33, 66], "{shown:?}");
 		assert_eq!(timestamps.len(), 6, "{shown:?}");
-		assert!(
-			shown[3].1 >= late,
-			"the replacement played before the clock mapped it: {shown:?}"
+		// The old pictures all arrived at once, so the clock holds the newest: 66 ms
+		// played at the delay.
+		assert_eq!(
+			shown[3].1,
+			delay + Duration::from_millis(1_000 - 66),
+			"the replacement missed its due time: {shown:?}"
 		);
 		assert_eq!(timestamps[4] - timestamps[3], 33, "{shown:?}");
 		assert_eq!(timestamps[5] - timestamps[4], 33, "{shown:?}");
