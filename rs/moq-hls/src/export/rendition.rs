@@ -33,7 +33,7 @@ const MIN_SEGMENT_GROUPS: u64 = 1024;
 
 /// The most groups one segment request ever fetches, whatever interval the catalog declares: see
 /// [`Rendition::max_groups`]. 20 ms audio groups fill it in about 22 minutes.
-const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
+pub(crate) const MAX_SEGMENT_GROUPS: u64 = 1 << 16;
 
 /// DASH timelines are in milliseconds.
 const TIMESCALE: u32 = 1000;

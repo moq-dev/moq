@@ -44,44 +44,62 @@ pub(crate) fn segment_length(interval: Duration) -> Duration {
 /// A segment's groups, by start, oldest first.
 ///
 /// Starts are timestamps, so the groups a segment holds are listed rather than spanned: the keys
-/// between two groups name none.
+/// between two groups name none. A segment holding more groups than any request fetches (see
+/// [`Rendition::max_groups`](super::rendition::Rendition::max_groups)) is never served, so past
+/// that its groups are only counted: groups whose pts stalls in one segment cost no memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Groups(Vec<u64>);
+pub(crate) struct Groups {
+	starts: Vec<u64>,
+	/// The groups past [`MAX_LISTED`] it holds, counted rather than listed.
+	unlisted: usize,
+}
+
+/// The most starts a segment lists: one more than any request fetches.
+const MAX_LISTED: usize = super::rendition::MAX_SEGMENT_GROUPS as usize + 1;
 
 impl Groups {
 	/// The one group starting at `start`.
 	pub fn one(start: u64) -> Self {
-		Self(vec![start])
+		Self {
+			starts: vec![start],
+			unlisted: 0,
+		}
 	}
 
 	/// The first group's start, or `None` for a gap.
 	pub fn first(&self) -> Option<u64> {
-		self.0.first().copied()
+		self.starts.first().copied()
 	}
 
-	/// The last group's start, or `None` for a gap.
+	/// The last group's start listed, or `None` for a gap.
 	pub fn last(&self) -> Option<u64> {
-		self.0.last().copied()
+		self.starts.last().copied()
 	}
 
-	/// How many groups the segment holds.
+	/// How many groups the segment holds, listed or not.
 	pub fn len(&self) -> usize {
-		self.0.len()
+		self.starts.len() + self.unlisted
 	}
 
 	/// The groups starting at or below `last`.
 	pub fn through(&self, last: u64) -> Self {
-		Self(self.0.iter().copied().take_while(|start| *start <= last).collect())
+		Self {
+			starts: self.starts.iter().copied().take_while(|start| *start <= last).collect(),
+			unlisted: 0,
+		}
 	}
 
 	/// Each group's start, oldest first.
 	pub fn starts(&self) -> std::vec::IntoIter<u64> {
-		self.0.clone().into_iter()
+		self.starts.clone().into_iter()
 	}
 
-	/// Add a group starting after every one held.
+	/// Add a group starting after every one held, counting it once the list is full.
 	fn push(&mut self, start: u64) {
-		self.0.push(start);
+		match self.starts.len() < MAX_LISTED {
+			true => self.starts.push(start),
+			false => self.unlisted += 1,
+		}
 	}
 }
 
@@ -366,6 +384,19 @@ impl Grid {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	/// A segment that piles up more groups than any request fetches counts the rest, so its
+	/// memory stays bounded however long its groups' pts stalls, and it still reads as too long.
+	#[test]
+	fn an_overfull_segment_counts_its_groups_past_the_list() {
+		let mut groups = Groups::one(0);
+		for start in 1..(MAX_LISTED as u64 + 10) {
+			groups.push(start);
+		}
+		assert_eq!(groups.len(), MAX_LISTED + 10);
+		assert_eq!(groups.starts.len(), MAX_LISTED);
+		assert!(groups.len() as u64 > super::super::rendition::MAX_SEGMENT_GROUPS);
+	}
 
 	fn ms(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
