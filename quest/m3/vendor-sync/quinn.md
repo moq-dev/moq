@@ -26,7 +26,7 @@ disposition. Start there, and record the new heads in the same place.
 Checked 2026-11-14 (/quest-plan): quinn#2481 force-pushed to
 [`0ebaf7e2`](https://github.com/quinn-rs/quinn/pull/2481/commits/0ebaf7e2c9932e432ef5e7caf916291b02d8277e),
 a rebase onto `c7b46a96` whose BBR3 commits match `01b8848d`, so it has
-nothing to port. Of the nine `main` commits since `aea1e538`, check
+nothing to port; recorded in the ledger. Of the nine `main` commits since `aea1e538`, check
 [`aa61ce99`](https://github.com/quinn-rs/quinn/commit/aa61ce996b97b21c63731a84fac1346c2d70852b) (late
 ACK-only packets are not spurious losses) against BBR3's spurious-loss undo
 first. The [BBR3 references epic](/quest/m1/bbr3-references/README.md) adds

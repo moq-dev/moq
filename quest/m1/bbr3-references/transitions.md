@@ -18,7 +18,9 @@ probes no more often than Linux's minimum of a few rounds.
   two rounds, and DOWN can end before draining the probe's queue. Linux's
   target goes through `bbr_inflight`, floored by the quantization budget
   ([tcp_bbr.c:1010-1015](https://github.com/google/bbr/blob/90210de4b779d40496dee0b89081780eeddf2a60/net/ipv4/tcp_bbr.c#L1010-L1015)).
-  Floor it at `max(bdp, offload budget, min_pipe_cwnd)` and round up.
+  Floor the BDP at `max(bdp, offload budget, min_pipe_cwnd)`, round up,
+  then cap it at cwnd as Linux's `bbr_target_inflight` does, so a cwnd cut
+  by congestion still shortens the wait.
   Application-limited flows are unaffected, since their UP lasts until loss.
 
 Test each. Caused by [moq-dev/moq#4921](https://github.com/moq-dev/moq/pull/4921),

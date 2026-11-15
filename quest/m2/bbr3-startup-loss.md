@@ -25,8 +25,9 @@ a tail-drop bottleneck test.
 
 In m2, apart from [its epic](/quest/m1/bbr3-references/README.md):
 removing `Lost::new_burst` changes moq-congestion's public API, which the
-cut publishes for the first time. Public API: removes `Lost::new_burst`.
-Wire: none.
+cut publishes for the first time. Decided 2026-11-15 (maintainer,
+/quest-complete): ✅ keep it in m2 (rejected: m3, keeping the API).
+Public API: removes `Lost::new_burst`. Wire: none.
 
 ## Related
 

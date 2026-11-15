@@ -23,8 +23,11 @@ The application-limited ProbeRTT skip stays. Decided 2026-11-14 (agent pick
 after the maintainer answered "I don't know", for review), keeping the
 skip's benefit for media:
 
-- ✅ Spurious-loss undo clears `probe_rtt_skip_congested`, since a loss
-  proven spurious was not congestion.
+- ✅ Spurious-loss undo restores `probe_rtt_skip_congested` to its value
+  when the episode began, since a loss proven spurious was not congestion,
+  while a CE or real loss earlier in the interval still denies the skip.
+  Save it with the other undo state in `enter_recovery`; restarting the
+  interval clears the saved value too.
 - ✅ A skipped expiry adopts the expired window's lowest RTT sample as
   `min_rtt` instead of only refreshing its stamp, so a base RTT that rose
   is learned without running ProbeRTT; an application-limited sender's
