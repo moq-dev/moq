@@ -37,8 +37,12 @@ breaking work).
   maintainer first.
 - `@moq/watch` drops every Opus `description`, so Chromium refuses Opus past
   stereo ("description is required for multi-channel Opus"). Passing the
-  catalog's OpusHead, as the Rust importers intend, is part of this quest,
-  since the ambisonic decode needs it.
+  catalog's OpusHead to both the support probe and the decoder, as the Rust
+  importers intend, is part of this quest, since the ambisonic decode needs
+  it. Chromium then trims the header's pre-skip itself, again after every
+  flush (measured: 648 of 960 frames), so WebCodecs gets a copy with the
+  pre-skip zeroed and the decoder's `Terminal` stays its one owner, gap
+  resumes included.
 - The harness publishes the fixture through `moq import fmp4`, so it proves
   the importer's side too, and runs nightly in `interop.yml` beside the
   portrait harness, outside the merge gate.
