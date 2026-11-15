@@ -21,23 +21,21 @@ export async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		console.warn(`audio: opus advertised at ${config.sampleRate}Hz, which some browsers cannot decode`);
 	}
 
-	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
+	// For Opus this is the OpusHead; the init segment never yields Opus's dOps in its place.
 	let description: Uint8Array | undefined;
-	if (config.codec !== "opus") {
-		if (config.description) {
-			description = Util.Hex.toBytes(config.description);
-		} else if (config.container.kind === "cmaf") {
-			try {
-				const Cmaf = await import("@moq/hang/cmaf");
-				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
-			} catch (err) {
-				// A malformed init segment means we can't extract the codec
-				// description, so we can't probe support reliably. Reject the
-				// track rather than letting isConfigSupported pass on a
-				// description-less config and then having decode() fail later.
-				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
-				return false;
-			}
+	if (config.description) {
+		description = Util.Hex.toBytes(config.description);
+	} else if (config.container.kind === "cmaf") {
+		try {
+			const Cmaf = await import("@moq/hang/cmaf");
+			description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+		} catch (err) {
+			// A malformed init segment means we can't extract the codec
+			// description, so we can't probe support reliably. Reject the
+			// track rather than letting isConfigSupported pass on a
+			// description-less config and then having decode() fail later.
+			console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
+			return false;
 		}
 	}
 	// Install the WebCodecs polyfill before probing, since playback would decode through it where

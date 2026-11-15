@@ -687,13 +687,8 @@ export class Decoder {
 				this.#ring.peek()?.dropped();
 			});
 
-			// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
-			const description =
-				config.codec === "opus"
-					? undefined
-					: config.description
-						? Util.Hex.toBytes(config.description)
-						: undefined;
+			// For Opus this is the OpusHead, whose channel mapping a stream past stereo cannot decode without.
+			const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 			const decoderConfig: AudioDecoderConfig = {
 				codec: config.codec,
 				sampleRate: config.sampleRate,
@@ -759,14 +754,9 @@ export class Decoder {
 				.min(DELAY_MAX)
 				.asMicros(),
 		);
-		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
-		// The dOps box from the init segment is not a valid OGG Identification Header.
-		const description =
-			config.codec === "opus"
-				? undefined
-				: config.description
-					? Util.Hex.toBytes(config.description)
-					: init.description;
+		// The init segment's description stands in for a catalog without one. It never carries Opus's
+		// dOps, which is not the OpusHead WebCodecs takes.
+		const description = config.description ? Util.Hex.toBytes(config.description) : init.description;
 
 		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
