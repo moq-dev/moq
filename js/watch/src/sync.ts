@@ -95,9 +95,10 @@ export type SyncOutput = {
 /**
  * What a track holds from the opening of its timeline, and how long its output takes to sound the
  * opening once released, which counts toward the delay and holds the opening's turn back as long.
+ * `complete` once the publisher finished the track, so nothing extends it and it is ready however short.
  * @internal
  */
-export type Span = { start: Duration; end: Duration; lead?: Duration };
+export type Span = { start: Duration; end: Duration; lead?: Duration; complete?: boolean };
 
 /** What a track holds in the shared clock. @internal */
 export type TrackProps = {
@@ -511,7 +512,7 @@ export class Sync {
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
-			ready.some(({ span }) => span.end.add(lead(span)).saturatingSub(span.start).lt(delay))
+			ready.some(({ span }) => !span.complete && span.end.add(lead(span)).saturatingSub(span.start).lt(delay))
 		) {
 			clock.phase.set("starting");
 			return;

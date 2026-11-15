@@ -1699,13 +1699,15 @@ mod tests {
 		let mut source_demand = source._track.demand();
 		while source_demand.wanted_changed().await.unwrap().is_none() {}
 		// What the hop upstream acts on: a superseded group is still worth
-		// delivering, so its tail is not given up just because the next one began.
+		// delivering, so its tail is not given up just because the next one began,
+		// but the publisher's history is not: a cold start begins at the live edge.
 		let asked = source._track.subscription().expect("the feed's subscription");
 		assert_ne!(
 			asked.delay.max,
 			Some(std::time::Duration::ZERO),
 			"the feed gives up every superseded group"
 		);
+		assert!(asked.delay.max.is_some(), "the feed asks for its publisher's history");
 
 		// The live path opens output group 0 on the source's first frame.
 		let mut lost = source._track.create_group(0u64.into()).unwrap();

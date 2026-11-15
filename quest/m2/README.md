@@ -41,7 +41,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   [key budget](/quest/m2/mesh-device-bounds.md), since `moq_auth::mesh`
   publishes for the first time at this cut;
   auth key validation; the
-  [RTMPS connect](/quest/m2/rtmp-rtmps-tcurl.md) signature;
+  RTMPS connect signature;
   usage's derived settings; and two
   API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md) and
   the capture selections. None

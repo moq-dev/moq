@@ -4,12 +4,14 @@
 members = [
     "rs/*",
     "rs/kio/macros",
+    "rs/moq-auth/fuzz",
     "rs/moq-mux/fuzz",
     "rs/moq-net/fuzz",
     "rs/moq-quic/fuzz",
     "rs/moq-rtmp/fuzz",
     "rs/moq-sock/fuzz",
     "rs/moq-uring/fuzz",
+    "rs/qmux/fuzz",
 ]
 default-members = [
     "rs/bench-harness",
