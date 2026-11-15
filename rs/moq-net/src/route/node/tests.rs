@@ -755,3 +755,49 @@ fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
 		"the release closes with the sealed floor"
 	);
 }
+
+/// The floor a held-back claim's release closes with is the newest batch's, whatever
+/// order the reader reads the older batches in: reading a batch sealed before the one
+/// that held the claim back does not take the release's floor back.
+#[test]
+fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
+	let offer = Offer {
+		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+		rtt: None,
+	};
+	let instance = Instance::random();
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let key = (1, Path::empty());
+	let awaits = |path: &Path, _: &Claim| Some(*path == p("live/y"));
+	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
+	let x = vec![(p("live/x"), Some(claim(&instance, 0)))];
+	outbox.batch(7, key.clone(), (x, Some(5)), awaits, &mut waiting);
+	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
+	let y = vec![(p("live/y"), Some(claim(&instance, 0)))];
+	outbox.batch(7, key.clone(), (y, Some(6)), awaits, &mut waiting);
+	outbox.dead(7, Dead::Draining { node: 2 }, &mut waiting);
+
+	// The reader reads up to the first DEAD, and live/y is confirmed only then.
+	let mut read = Vec::new();
+	while let Some(output) = outbox.pop() {
+		let first = matches!(output, Output::Dead(Dead::Draining { node: 1 }));
+		read.push(output);
+		if first {
+			break;
+		}
+	}
+	outbox.release(&key, &p("live/y"));
+	read.extend(std::iter::from_fn(|| outbox.pop()));
+	let last = (read.into_iter()).rev().find_map(|output| match output {
+		Output::Batch { changes, floor, .. } => {
+			Some((changes.into_iter().map(|(path, _)| path).collect::<Vec<_>>(), floor))
+		}
+		_ => None,
+	});
+	assert_eq!(last, Some((vec![p("live/y")], Some(6))));
+}

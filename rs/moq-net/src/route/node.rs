@@ -186,7 +186,7 @@ struct Outbox {
 	/// instance, by route, with the route's last floor, which certifies nothing while any
 	/// is held. Bounded like the segments: one per claim. The node's `waiting` indexes
 	/// them.
-	withheld: HashMap<RouteId, (Held, Option<Rev>)>,
+	withheld: HashMap<RouteId, (Held, HeldFloor)>,
 	/// What the segments a DEAD closed hold unread: each DEAD, its moved routes, and the
 	/// changes queued ahead of it for routes the reader still holds once everything
 	/// queued is read. A route that ends is read once and gone, so from then on its
@@ -194,6 +194,23 @@ struct Outbox {
 	sealed: usize,
 	/// Each route's entries sealed while it counted in `sealed`, in the order they are read.
 	sealing: HashMap<RouteId, Sealing>,
+}
+
+/// The floor a route's last batch closed with while claims of it were held back, which
+/// their release closes with, and when that batch first queued: only a later batch
+/// replaces it, whether sealed by a DEAD or read.
+#[derive(Clone, Copy, Default)]
+struct HeldFloor {
+	rev: Option<Rev>,
+	seq: u64,
+}
+
+impl HeldFloor {
+	fn set(&mut self, rev: Option<Rev>, seq: u64) {
+		if seq >= self.seq {
+			*self = Self { rev, seq };
+		}
+	}
 }
 
 /// One route's entries that count in [`Outbox::sealed`]: those sealed, those read, and
@@ -488,7 +505,7 @@ impl Outbox {
 		let Some(item) = held.remove(path) else {
 			return;
 		};
-		let floor = *floor;
+		let floor = floor.rev;
 		if held.is_empty() {
 			self.withheld.remove(key);
 		}
@@ -538,7 +555,7 @@ impl Outbox {
 		self.segment();
 		let segment = self.segments.back_mut().expect("just opened");
 		let mut sealed = 1 + moved(&dead);
-		for (key, (_, pending)) in &mut segment.pending {
+		for (key, (seq, pending)) in &mut segment.pending {
 			pending.sealed = self.known.contains_key(key);
 			if pending.sealed {
 				self.sealing.entry(key.clone()).or_default().sealed += 1;
@@ -549,7 +566,7 @@ impl Outbox {
 			if let Some((_, last)) = self.withheld.get_mut(key) {
 				pending.uncertified = true;
 				if let Some((_, floor)) = &pending.batch {
-					*last = *floor;
+					last.set(*floor, *seq);
 				}
 			}
 		}
@@ -586,7 +603,7 @@ impl Outbox {
 			};
 			match segment.order.pop_first() {
 				Some((_, key)) => {
-					let (_, pending) = segment.pending.remove(&key).expect("every queued route is pending");
+					let (seq, pending) = segment.pending.remove(&key).expect("every queued route is pending");
 					if pending.sealed {
 						let sealing = self.sealing.get_mut(&key).expect("a sealed entry is counted");
 						sealing.read += 1;
@@ -597,7 +614,7 @@ impl Outbox {
 							self.sealing.remove(&key);
 						}
 					}
-					self.take(key, pending);
+					self.take(key, seq, pending);
 				}
 				None => {
 					let segment = self.segments.pop_front().expect("matched above");
@@ -612,7 +629,7 @@ impl Outbox {
 	}
 
 	/// Queue one route's pending entry to read, as the router would have sent it.
-	fn take(&mut self, (id, prefix): RouteId, pending: Pending) {
+	fn take(&mut self, (id, prefix): RouteId, seq: u64, pending: Pending) {
 		if pending.ended {
 			if let Some((changes, floor)) = pending.closing {
 				self.ready.push_back(Output::Batch {
@@ -646,7 +663,7 @@ impl Outbox {
 			// What is held back leaves the floor certifying nothing until it goes.
 			let floor = match self.withheld.get_mut(&(id, prefix.clone())) {
 				Some((_, last)) => {
-					*last = floor;
+					last.set(floor, seq);
 					None
 				}
 				None if pending.uncertified => None,
