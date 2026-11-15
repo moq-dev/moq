@@ -3,7 +3,7 @@ import * as Util from "@moq/hang/util";
 import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { supportCacheKey } from "../support-probe";
-import { decoderConfigKey } from "./config";
+import { decoderConfigKey, decoderDescription } from "./config";
 
 /** Whether the WebCodecs audio decoder can play this config. */
 export async function supported(config: Catalog.AudioConfig): Promise<boolean> {
@@ -43,7 +43,7 @@ export async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	await Util.Libav.polyfill(hosted.url);
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
-		description,
+		description: decoderDescription(config.codec, description),
 	});
 	return res.supported ?? false;
 }
