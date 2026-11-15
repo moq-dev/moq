@@ -557,7 +557,7 @@ Its priority is the lowest local priority of a session on its Path: a receiver t
 A node ranks its usable routes to an origin node at a prefix: one that is not draining first, then the highest priority, then the lowest metric.
 Extending a route never clears its drain, never raises its priority, and always raises its metric, so no node ranks a route above how the neighbour it came from ranked it, and selection converges.
 A node selects its best-ranked usable route at once.
-A route is unusable while its Path names the node, it is held, a hop on its Path is dead, a node on its Path is in doubt (see [Dead Hops](#dead-hops)) unless it is the route the node already uses, it arrived with 32 hops, or its metric overflows.
+A route is unusable while its Path names the node, it is held, a hop on its Path is dead, the doubt keeps the node off it (see [Dead Hops](#dead-hops)), it arrived with 32 hops, or its metric overflows.
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its down-only flag set; a node sends a down-only route with the flag set, and never on an upstream session.
 
@@ -568,7 +568,7 @@ An origin never advertises a Revision of 2^64-1: a change that would reach it in
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it, and the Route Depth of the route it follows: how many leading segments of its Broadcast Path make up the route's prefix.
 A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node and Route Depth of the route it selected or was given.
-A relay forwards a request naming an origin node only along the route it sent the requester to that node at that prefix, or a SUBSCRIBE through the neighbor [Warm Routes](#warm-routes) chooses for its broadcast, and resets it with UNROUTABLE when that route is no longer usable or its Path names the requester, so the request never reaches another origin or loops.
+A relay forwards a request naming an origin node only along the route it sent the requester to that node at that prefix, or a SUBSCRIBE through the neighbor [Warm Routes](#warm-routes) chooses for its broadcast, and resets it with UNROUTABLE when that route is no longer usable or its Path names the requester, so the request never reaches another origin, and loops only briefly after an origin on three or more relays leaves them all at once (see [Dead Hops](#dead-hops)).
 
 Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
@@ -589,7 +589,9 @@ Then every route through the hop is dead, whoever sent it: the sender's routes c
 The receiver remembers the dead hop, so a route through it that arrives late stays unusable.
 
 A closed session also casts doubt on the node at its far end, since a dead relay is reported one neighbour at a time: a neighbour that has not heard yet may still offer a stale route through it.
-A receiver doubts the far node for one second, during which it moves onto no route through that node; the route it already uses stays usable.
+A receiver doubts the far node for one second, during which it moves onto no route whose Path names that node after the origin node's hop, and onto no route the doubted node originates whose Path is that node's hop alone, received on a session that opened since the doubt began; the route it already uses stays usable.
+Any other route the doubted node originates stays usable, since a route cannot loop through its own origin: an origin on several relays stays reachable through the others while its session to one of them flaps, and a session that reopens waits out the doubt, which damps the flaps.
+A node cannot tell an origin leaving from its session to one relay closing, so an origin on three or more relays that leaves them all at once can send a request round them, each relay on a neighbour's route that the neighbour's own close made stale, until that neighbour's DEAD arrives.
 Nothing on the wire carries the doubt.
 A node that sees a session close doubts its far end in the same way.
 
@@ -2615,7 +2617,7 @@ An application-specific payload.
 - ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
 - ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x4) and priority, which rank before its metric.
 - Added ROUTE_HOLD (0xB), which holds a route while it may recover, for at most 10 seconds; ROUTE_END lets it go. Neither withdraws the origin's claims.
-- Added DEAD (0xF): a node that loses a session names that hop once to each neighbour it sent a route through it, counting the routes that moved, each a ROUTE_UPDATE right behind it, and every node drops every route through the hop and doubts the node at the far end for a second; a DRAIN names a node that sent a GOAWAY, whose routes rank draining. The path, the dead hop, holds, and the doubt keep routes free of loops and stale copies, with no distance, sequence number, route request, or echo. On a scoped session a DEAD applies only to the routes heard there.
+- Added DEAD (0xF): a node that loses a session names that hop once to each neighbour it sent a route through it, counting the routes that moved, each a ROUTE_UPDATE right behind it, and every node drops every route through the hop and doubts the node at the far end for a second, keeping nodes off routes through it but not off one it originates, except over a session to it opened since; a DRAIN names a node that sent a GOAWAY, whose routes rank draining. The path, the dead hop, holds, and the doubt keep routes free of stale copies, and of loops except briefly when an origin on three or more relays leaves them all at once, with no distance, sequence number, route request, or echo. On a scoped session a DEAD applies only to the routes heard there.
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the route's prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
 - A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.

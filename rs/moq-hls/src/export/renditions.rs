@@ -514,12 +514,13 @@ impl Producer {
 			.map(|_| ())
 	}
 
-	/// Resolve once an enabled video rendition is [advertised](Rendition::is_advertised), or, while
-	/// none is left that listings do not refuse, once any enabled rendition is, so a master playlist
-	/// can list it.
+	/// Resolve once every enabled video rendition that listings do not refuse is
+	/// [advertised](Rendition::is_advertised), or, while none is left, once any enabled rendition
+	/// is, so a master playlist can list them.
 	///
-	/// A player keeps the variants of the first master it loads, and audio lists a segment before
-	/// video finishes its first GOP, so a master answered on audio alone would never play video.
+	/// A player keeps the variants of the first master it loads. Audio lists a segment before video
+	/// finishes its first GOP, and one rung of a ladder before another, so a master answered on
+	/// audio or one rung alone would never switch to the rest.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
@@ -536,7 +537,7 @@ impl Producer {
 					})
 					.peekable();
 				let ready = if video.peek().is_some() {
-					video.any(advertised)
+					video.all(advertised)
 				} else {
 					current.renditions.values().any(advertised)
 				};

@@ -42,7 +42,7 @@ An agent that enqueues carries that approval in its own task; one relayed to it 
 `quest merge --land` enqueues the pinned head, or arms auto-merge bound to it while its checks are pending; a push removes it from the queue. A head GitHub refuses to enqueue, for a conflict or failing checks, fails the command: fix it and request landing again.
 Local and hosted checks select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
 Repository tooling tests run whole files in `just gh test`, listed explicitly in
-`.github/justfile`. Slow fixtures live in separate `*.slow.test.py` files;
+`.github/justfile`; the merge gate runs them only when a path they read changes (the `tooling` module in `sh/dispatch.sh`), and `just gate` runs them always. Slow fixtures live in separate `*.slow.test.py` files;
 `just gh test-integration` runs those files and selector timing nightly.
 To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
