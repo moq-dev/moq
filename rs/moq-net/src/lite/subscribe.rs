@@ -1590,7 +1590,8 @@ mod test {
 		msg.meta = true;
 		let lite07 = encode(&msg, Version::Lite07).unwrap();
 		assert_eq!(lite07.last(), Some(&1));
-		let decoded = crate::coding::decode_from(&mut lite07.as_slice(), Version::Lite07, Subscribe::decode_msg).unwrap();
+		let decoded =
+			crate::coding::decode_from(&mut lite07.as_slice(), Version::Lite07, Subscribe::decode_msg).unwrap();
 		assert!(decoded.meta);
 
 		let mut bad = lite07.clone();
@@ -1600,7 +1601,8 @@ mod test {
 		assert!(matches!(encode(&msg, Version::Lite06), Err(EncodeError::Version)));
 		msg.meta = false;
 		let lite06 = encode(&msg, Version::Lite06).unwrap();
-		let decoded = crate::coding::decode_from(&mut lite06.as_slice(), Version::Lite06, Subscribe::decode_msg).unwrap();
+		let decoded =
+			crate::coding::decode_from(&mut lite06.as_slice(), Version::Lite06, Subscribe::decode_msg).unwrap();
 		assert!(!decoded.meta);
 	}
 

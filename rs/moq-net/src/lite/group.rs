@@ -204,7 +204,9 @@ mod test {
 
 		// Any other byte is malformed.
 		*buf.last_mut().unwrap() = 2;
-		assert!(crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| Group::decode_msg(r, v)).is_err());
+		assert!(
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| Group::decode_msg(r, v)).is_err()
+		);
 
 		let mut buf = Vec::new();
 		assert!(

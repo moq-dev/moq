@@ -5654,7 +5654,8 @@ mod tests {
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription.clone());
 			// The original copy, still arriving: one frame in, no end yet.
-			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { start: 3 }, 0, false) else {
+			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { start: 3 }, 0, false)
+			else {
 				panic!("the first copy opens");
 			};
 			first

@@ -78,6 +78,7 @@ impl Delivered {
 
 	/// Forget that the keys in `groups` were handed out, so each is handed out again once a
 	/// copy of it arrives.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn remove_run(&mut self, groups: std::ops::Range<u64>) {
 		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
@@ -87,7 +88,11 @@ impl Delivered {
 			.range(..=groups.start)
 			.next_back()
 			.map_or(groups.start, |(start, _)| *start);
-		let touched: Vec<(u64, u64)> = self.runs.range(from..=last).map(|(start, end)| (*start, *end)).collect();
+		let touched: Vec<(u64, u64)> = self
+			.runs
+			.range(from..=last)
+			.map(|(start, end)| (*start, *end))
+			.collect();
 		for (start, end) in touched {
 			if end < groups.start {
 				continue;

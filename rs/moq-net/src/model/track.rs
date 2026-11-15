@@ -4317,8 +4317,7 @@ impl Producer {
 		}
 		let track = state.info.clone().unwrap();
 		state.displace(info.start);
-		let mut group =
-			group::Producer::new_meta(info, track, state.cache.clone()).with_meter(state.ingress.meter());
+		let mut group = group::Producer::new_meta(info, track, state.cache.clone()).with_meter(state.ingress.meter());
 		if start != 0 {
 			group.bound(group::Bounds { start, end: None })?;
 		}
@@ -17832,7 +17831,8 @@ mod test {
 				continue;
 			}
 			let start = if case == "past" { 2 } else { 0 };
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start, false) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start, false)
+			else {
 				panic!("the re-offer takes the group");
 			};
 			drop(hold);
@@ -18057,7 +18057,8 @@ mod test {
 			first.abort(Error::Cancel).unwrap();
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_finished(&waiter).is_pending(), "{start}: waits on the hold");
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start, false) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start, false)
+			else {
 				panic!("the re-offer takes the group");
 			};
 			drop(hold);
@@ -21763,7 +21764,8 @@ mod test {
 			let state = producer.state.read();
 			Window::new(&replay().ranges, None, &*state).unwrap()
 		};
-		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0, &window, false) {
+		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0, &window, false)
+		{
 			walked.push(group.start);
 			index = next + 1;
 		}

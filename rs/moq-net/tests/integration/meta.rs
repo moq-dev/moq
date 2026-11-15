@@ -50,10 +50,7 @@ impl Chain {
 
 	/// Publish the track `data` in the broadcast `room`.
 	fn publish(&self) -> (origin::Route, track::Producer) {
-		let route = self
-			.publisher
-			.route("room", origin::RouteOptions::hidden())
-			.unwrap();
+		let route = self.publisher.route("room", origin::RouteOptions::hidden()).unwrap();
 		let track = route.broadcast().create_track("data", timed()).unwrap();
 		route.announce().unwrap();
 		(route, track)
@@ -61,11 +58,14 @@ impl Chain {
 
 	/// Subscribe to `data` at the subscriber's end of the chain.
 	async fn subscribe(&self, subscription: Subscription) -> track::Subscriber {
-		let remote = kio::clock::timeout(TIMEOUT, self.subscriber.consume().follow("room", None).unwrap().available())
-			.await
-			.expect("resolve timeout")
-			.expect("broadcast resolves")
-			.unwrap();
+		let remote = kio::clock::timeout(
+			TIMEOUT,
+			self.subscriber.consume().follow("room", None).unwrap().available(),
+		)
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
 		kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
@@ -219,7 +219,10 @@ async fn mixed_demand_serves_each_reader_its_mode() {
 	let mut full = chain.subscribe(from_start(false)).await;
 	subscribed(&track).await;
 	settle().await;
-	assert!(!asked(&track).await.meta, "a payload reader's demand asks for the payload");
+	assert!(
+		!asked(&track).await.meta,
+		"a payload reader's demand asks for the payload"
+	);
 
 	write_group(&track, 0, 2);
 	assert_eq!(frames(&mut full, 0).await, vec![big(0, 0), big(0, 1)]);
@@ -278,11 +281,14 @@ async fn older_versions_refuse_metadata_only() {
 	for version in ["moq-lite-06", "moq-transport-18"] {
 		let chain = Chain::new(version.parse().unwrap()).await;
 		let (_route, _track) = chain.publish();
-		let remote = kio::clock::timeout(TIMEOUT, chain.subscriber.consume().follow("room", None).unwrap().available())
-			.await
-			.expect("resolve timeout")
-			.expect("broadcast resolves")
-			.unwrap();
+		let remote = kio::clock::timeout(
+			TIMEOUT,
+			chain.subscriber.consume().follow("room", None).unwrap().available(),
+		)
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
 		let res = kio::clock::timeout(TIMEOUT, async {
 			let mut sub = remote.track("data").unwrap().subscribe(from_start(true)).await?;
 			sub.recv_group().await.map(|_| ())
