@@ -9,8 +9,9 @@
 //! unavailable, until the neighbours that learned the route from it answer, or for
 //! [`HOLD`] at most.
 
-use crate::route_change::{link, produce_origin};
+use crate::route_change::{link, next, payload, produce_origin, read, timed};
 use crate::support;
+use support::{AppendNext, AtStart};
 
 use std::time::Duration;
 
@@ -166,6 +167,48 @@ async fn a_detour_through_the_far_end_waits_out_the_doubt() {
 		.find(|seen| seen.available)
 		.expect("B's route serves in the end");
 	assert!(usable.at >= held.at + DOUBT, "not before the doubt lifts: {seen:?}");
+}
+
+/// `P` is on `A` and `B`, which peer with each other, and `W` is behind both. `P`'s session
+/// to `A` closes and reopens every half doubt. Doubt about `P` keeps no relay off `B`'s
+/// route, which begins at `P`, so `W` shows the claim available throughout and its
+/// subscriber reads each group at once. The reopened session waits out the doubt.
+#[kio::test]
+async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
+	let version = lite07();
+	let [p, a, b, w] = [1, 2, 3, 4].map(produce_origin);
+	let live = publish(&p, "live");
+	let track = live.broadcast().create_track("video", timed()).unwrap();
+	let mut p_a = peer(version, &p, &a).await;
+	let _p_b = peer(version, &p, &b).await;
+	let _a_b = peer(version, &a, &b).await;
+	let _a_w = peer(version, &a, &w).await;
+	let _b_w = peer(version, &b, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let broadcast = w.consume().request("live", None).await.unwrap();
+	let mut rx = read(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
+	let start = kio::clock::now();
+	for flap in 0..8 {
+		match flap % 2 {
+			0 => cut(&p_a),
+			_ => p_a = peer(version, &p, &a).await,
+		}
+		let sent = kio::clock::now();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), payload(flap, 0)).unwrap();
+		group.close().unwrap();
+		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");
+		let late = kio::clock::now().saturating_duration_since(sent);
+		assert!(late < DOUBT / 2, "flap {flap}: read {late:?} after it was written");
+		kio::clock::sleep(DOUBT / 2).await;
+	}
+	let seen = watch.seen(start);
+	assert!(
+		seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"available throughout: {seen:?}"
+	);
 }
 
 /// `X` is `P`'s only way out and neighbours `R1`, `R2` and `R3`, which mesh with each other.
