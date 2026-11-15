@@ -19,7 +19,6 @@ use crate::{
 		self, node,
 		path::{Dead, Hop, Moved, Offer, Reach},
 	},
-	transport::{Metrics as _, poll::Session as _},
 };
 
 use super::{AnnouncedRoute, Subscriber};

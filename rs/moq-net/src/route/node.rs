@@ -24,7 +24,6 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use kio::clock::{Deadlines, Instant};

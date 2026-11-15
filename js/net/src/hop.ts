@@ -7,7 +7,6 @@
  *
  * @module
  */
-import type { Duration } from "@moq/clock";
 import type { Credential } from "./auth.ts";
 import type * as Instance from "./instance.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";

@@ -516,19 +516,6 @@ impl Sim {
 		self.flush();
 	}
 
-	/// The last finite route `node` sent `peer` for `id` covering `prefix`, while it
-	/// stands.
-	pub fn offer(&self, node: Node, peer: Node, id: Id, prefix: &Path) -> Option<&path::Offer> {
-		self.offered.get(&(node, peer, id, prefix.clone()))
-	}
-
-	/// The streams `node` sends a finite route for `id` on.
-	pub fn sending(&self, node: Node, id: Id) -> usize {
-		(self.offered.keys())
-			.filter(|(from, _, key, _)| *from == node && *key == id)
-			.count()
-	}
-
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
 	}
