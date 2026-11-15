@@ -215,6 +215,10 @@ pub(super) struct Front {
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
 	parked: BTreeSet<(Instant, Arc<str>)>,
+	/// Tracks whose route lost them, by the source that failed or refused them as unroutable,
+	/// which judges the route, not the track. Each waits for another source, or for the
+	/// table to move, rather than ask that source again at once or end.
+	stranded: BTreeMap<Arc<str>, u64>,
 	/// Immutable track metadata, fixed by the first copy of each track. Every
 	/// source of the broadcast must serve the same content.
 	info: BTreeMap<Arc<str>, track::Info>,
@@ -242,6 +246,7 @@ impl Front {
 			resolved: false,
 			tracks: BTreeMap::new(),
 			parked: BTreeSet::new(),
+			stranded: BTreeMap::new(),
 			info: BTreeMap::new(),
 			linger,
 			armed: None,
@@ -341,6 +346,7 @@ impl Front {
 			Event::Unwanted { track, now } => self.unwanted(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
 			Event::Forgotten { track } => {
+				self.stranded.remove(&track);
 				self.tracks.remove(&track);
 			}
 			Event::Held => {
@@ -389,9 +395,11 @@ impl Front {
 		}
 		let serving_route = self.serving.map(|(_, serving)| serving.route);
 		match best {
-			// The serving route is still the best one.
+			// The serving route is still the best one. The table moved, which is the
+			// evidence a track it lost waits for: ask it again.
 			Some(candidate) if Some(candidate.route) == serving_route => {
 				self.upstream = None;
+				self.unstrand(actions);
 			}
 			// Already asking through it.
 			Some(candidate) if self.upstream.is_some_and(|upstream| upstream.route == candidate.route) => {}
@@ -534,6 +542,7 @@ impl Front {
 			Ok(()) => {
 				track.draining = None;
 				track.lost = None;
+				self.stranded.remove(&name);
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
@@ -592,6 +601,15 @@ impl Front {
 				track.lost = Some(err);
 				self.redispatch(name, actions);
 			}
+			// The route lost the content, which another route of the instance continues:
+			// wait for one rather than ask this route again, which can only refuse.
+			Err(err)
+				if delivered && err.unroutable() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
+			{
+				track.state = TrackState::Idle;
+				track.lost = Some(err);
+				self.stranded.insert(name, source);
+			}
 			// A content verdict survives every copy. Under a minted instance, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
@@ -625,6 +643,15 @@ impl Front {
 		if closing {
 			return;
 		}
+		// A route that lost the content says nothing of the track: wait for another of its
+		// instance, keeping a draining copy meanwhile. A minted instance has no other.
+		if refusal.0.unroutable() && self.serving.is_some_and(|(_, candidate)| candidate.carried) {
+			if let Some(draining) = track.draining {
+				track.state = TrackState::Spliced { source: draining };
+			}
+			self.stranded.insert(name, source);
+			return;
+		}
 		track.refused.insert(source);
 		track.refusal = Some(match track.lost.take() {
 			Some(lost) => (lost, None),
@@ -647,7 +674,7 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.wanted || track.ended || track.state != TrackState::Idle {
+		if !track.wanted || track.ended || track.state != TrackState::Idle || self.stranded.get(&name) == Some(&source) {
 			return;
 		}
 		if track.refused.contains(&source) {
@@ -665,6 +692,21 @@ impl Front {
 		}
 		track.state = TrackState::Querying { source };
 		actions.push(Action::Query { track: name, source });
+	}
+
+	/// Ask the serving source again for every track it lost as unroutable.
+	fn unstrand(&mut self, actions: &mut Vec<Action>) {
+		let Some((source, _)) = self.serving else {
+			return;
+		};
+		let stranded: Vec<_> = (self.stranded.iter())
+			.filter(|(_, by)| **by == source)
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in stranded {
+			self.stranded.remove(&name);
+			self.redispatch(name, actions);
+		}
 	}
 
 	fn wanted(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
@@ -1224,8 +1266,6 @@ mod tests {
 				Error::from(crate::StreamError::MalformedTrack),
 				Error::App(7),
 				Error::NotFound,
-				Error::Unroutable,
-				Error::from(crate::StreamError::Unroutable),
 				Error::Unsupported,
 			] {
 				let mut front = serving(candidate, 100);
@@ -1245,6 +1285,104 @@ mod tests {
 				);
 				assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
 			}
+		}
+	}
+
+	/// A route losing the content judges the route, not the track: whether its copy fails
+	/// unroutable after delivering or it refuses the track so, the track waits for another
+	/// source rather than end, and asks the same one again only once the table moves.
+	#[test]
+	fn an_unroutable_route_strands_the_track_until_the_table_moves() {
+		for err in [Error::Unroutable, Error::from(crate::StreamError::Unroutable)] {
+			let mut front = serving(remote(1), 100);
+			let lost = Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(err.clone()),
+				delivered: true,
+			};
+			assert_actions(front.step(lost), &[]);
+			// The table moved while the same route still wins: ask it again.
+			let query = [Action::Query {
+				track: name("video"),
+				source: 100,
+			}];
+			let same = Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			};
+			assert_actions(front.step(same.clone()), &query);
+			// Refused the same way: still waiting, and a reader returning asks nothing.
+			let refused = Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(err.clone()),
+				retry: None,
+			};
+			assert_actions(front.step(refused), &[]);
+			assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
+			// Another route serves it.
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			assert_actions(
+				front.step(Event::Resolved {
+					route: 2,
+					result: Ok(200),
+				}),
+				&[
+					Action::Detach {
+						source: 100,
+						drain: false,
+					},
+					Action::Query {
+						track: name("video"),
+						source: 200,
+					},
+				],
+			);
+			assert!(!front.ended());
+			// With no route left the front ends, and the track with the route's loss.
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(err.clone()),
+				retry: None,
+			});
+			assert_actions(
+				front.step(Event::Selected {
+					best: None,
+					serving_closing: false,
+				}),
+				&[Action::End { err: Error::Unroutable }],
+			);
+			assert_eq!(front.lost("video").map(|err| err.to_string()), Some(err.to_string()));
+
+			// A minted instance has no other route, so its refusal ends the track.
+			let minted = Candidate {
+				route: 1,
+				local: false,
+				carried: false,
+			};
+			let mut front = querying(minted, 100);
+			assert_actions(
+				front.step(Event::TrackInfo {
+					track: name("video"),
+					source: 100,
+					closing: false,
+					result: Err(err.clone()),
+					retry: None,
+				}),
+				&[Action::Abort {
+					track: name("video"),
+					err,
+					retry: None,
+				}],
+			);
 		}
 	}
 

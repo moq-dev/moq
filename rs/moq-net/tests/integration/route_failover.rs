@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Error, Pattern, Patterns, StreamError, Timestamp, group, origin, stats, track};
+use moq_net::{Error, Pattern, Patterns, Timestamp, group, origin, stats, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer_with_latency};
 
@@ -538,22 +538,17 @@ async fn live_mesh_withdraw_retracts_once_without_latency() {
 /// Ports moq-dev/moq#4644's `live_link_failure_fails_over`, which bounded the longest any
 /// relay went without a path by two hold-downs. Proves every relay serves the broadcast
 /// again with at most one retraction and one re-announcement each (no hunting), and every
-/// reader on a relay whose route stayed usable gets every frame but the pinned ones below.
+/// reader on a relay whose route stayed usable gets every frame, once and in order.
 ///
 /// Every route left begins at the publisher's relay, the far end of each closed link, so
 /// doubt keeps no relay off one. A relay whose own link closed moves onto a neighbour's
 /// direct route, which may be stale too, until the news arrives. Measured over the five
-/// publishers: 18 relays retracted and announced again, most within milliseconds, and 6
-/// readers lost their subscription.
+/// publishers: 18 relays retracted and announced again, most within milliseconds, and the
+/// readers on 3 of them lost their subscription.
 ///
-/// Pins behaviour the contract's continuity goal contradicts, owned by the request-loop
-/// quest: a reader on a relay that stayed available may end with `Unroutable` (3 readers,
-/// all for publisher 22, listed in [`UNROUTABLE`]). The replaced doubt rule, which held
-/// those relays instead, ended none of them.
-/// The (publisher, relay) readers [`live_mesh_link_failure_keeps_presence`] pins as ending
-/// with `Unroutable` though their relay stayed available.
-const UNROUTABLE: [(usize, usize); 3] = [(22, 17), (22, 24), (22, 31)];
-
+/// A stale route resets a subscription `Unroutable` before its withdrawal arrives (3
+/// readers' relays, all for publisher 22). That judges the route, not the track, so those
+/// readers wait for the next route rather than end.
 #[kio::test]
 async fn live_mesh_link_failure_keeps_presence() {
 	let version = lite07();
@@ -636,11 +631,8 @@ async fn live_mesh_link_failure_keeps_presence() {
 			let live = Liveness::of(rx, &feed);
 			if !live.seamless() {
 				lost_readers += 1;
-				// Pinned: only these readers end with `Unroutable` on a relay that stayed available.
-				let pinned = UNROUTABLE.contains(&(publisher, *relay))
-					&& matches!(live.ended, Some(Error::Stream(StreamError::Unroutable)));
 				assert!(
-					dark.contains(relay) || pinned,
+					dark.contains(relay),
 					"publisher {publisher}: relay {relay} kept a usable route but its reader got {live:?}"
 				);
 			}
