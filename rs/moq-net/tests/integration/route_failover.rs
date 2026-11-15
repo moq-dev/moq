@@ -281,6 +281,28 @@ impl Links {
 		connect_mock(options).await
 	}
 
+	/// Frames each link sent, by name.
+	fn frames(&self) -> BTreeMap<String, u64> {
+		let mut frames = BTreeMap::new();
+		for (tier, role, traffic) in self.registry.snapshot().traffic() {
+			if role == stats::Role::Publisher {
+				*frames.entry(tier.as_str().to_string()).or_default() += traffic.frames;
+			}
+		}
+		frames
+	}
+
+	/// Track subscriptions each link served, by name.
+	fn subscriptions(&self) -> BTreeMap<String, u64> {
+		let mut subscriptions = BTreeMap::new();
+		for (tier, role, traffic) in self.registry.snapshot().traffic() {
+			if role == stats::Role::Publisher {
+				*subscriptions.entry(tier.as_str().to_string()).or_default() += traffic.subscriptions_started;
+			}
+		}
+		subscriptions
+	}
+
 	/// Announce-stream messages each link sent, by name.
 	fn sent(&self) -> BTreeMap<String, u64> {
 		let mut sent = BTreeMap::new();
@@ -773,4 +795,83 @@ async fn an_upstream_flapping_faster_than_its_news_strands_no_reader() {
 		assert!(live.worst > Duration::from_secs(2), "{node} read through U: {live:?}");
 	}
 	drop(broadcast);
+}
+
+/// `P` publishes `live` to `A` and `B`, and the relay `R` reads it through `A`. A cheaper
+/// link from `B` then moves `R`'s route to `B` while the publisher pauses for `pause`
+/// between two groups, so the new route has nothing new to deliver for that long.
+///
+/// Proves the move's cost is bounded by evidence, not time: `R` keeps `A`'s copy until
+/// `B`'s delivers a group the reader lacks, however long that takes, and then `A`'s stops.
+/// The two routes overlap by at most the group in progress and the one after, each on its
+/// own link, so no frame crosses a link twice, and the reader gets every frame once, in
+/// order.
+#[kio::test]
+async fn a_move_overlaps_the_routes_until_the_new_one_delivers() {
+	for pause in [Duration::ZERO, Duration::from_secs(30)] {
+		let links = Links::new();
+		let [p, a, b, r] = [1, 2, 3, 4].map(produce_origin);
+		let broadcast = p.route("live", origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
+		let _p_a = links.link("p-a", &p, &a, 1).await;
+		let _p_b = links.link("p-b", &p, &b, 1).await;
+		let _a_r = links.link("a-r", &a, &r, 10).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let start = kio::clock::now();
+		let mut feed = Feed::new(track, start, STEP);
+		let mut rx = reader(&r, "live", start).await;
+		// Into the third group, so the move lands mid-group.
+		feed.run(2 * FRAMES + 2).await;
+		let _b_r = links.link("b-r", &b, &r, 1).await;
+		feed.run(FRAMES - 2).await;
+		kio::clock::sleep(pause).await;
+		feed.run(4 * FRAMES).await;
+		let overlap = links.frames();
+		feed.run(4 * FRAMES).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let frames = links.frames();
+		let live = Liveness::of(&mut rx, &feed);
+		println!("a move pausing {pause:?}: frames per link {frames:?}, reader {live:?}");
+		assert!(live.seamless(), "{pause:?}: {live:?}");
+		assert_eq!(frames["a-r"], overlap["a-r"], "{pause:?}: A's copy stopped: {frames:?}");
+		let written = feed.written.len() as u64;
+		for link in ["a-r", "b-r"] {
+			assert!(frames[link] <= written, "{pause:?}: {link} carried a frame twice: {frames:?}");
+		}
+		let twice = frames["a-r"] + frames["b-r"] - written;
+		assert!(twice <= 2 * FRAMES, "{pause:?}: {twice} frames on both links: {frames:?}");
+		drop(broadcast);
+	}
+}
+
+/// Pins a duplicate subscription, a decision on moq-dev/moq#8881. A worker `W` claims
+/// `pool` and answers a request for `pool/p` with the exact route, under the claim's
+/// instance; `R` pulls `W`, and `E1`, `E2`, and `E3` pull `R`. `E1` asks for `pool/p`
+/// through the claim, a request naming `W`'s route at depth 1; once the answer's route
+/// arrives, `E1` moves onto it, now naming depth 2, and `R` serves that from another front,
+/// which asks `W` again: one Instance and track, two subscriptions on the one link,
+/// differing only in depth, overlapping as any move does. `E2` and `E3`, asking after the
+/// answer, join the second. A fix serves both depths from one subscription.
+#[kio::test]
+async fn residual_two_depths_of_one_claim_subscribe_twice() {
+	use crate::claim_continues::{Worker, settle};
+	let links = Links::new();
+	let worker = Worker::new(1, "pool", "w");
+	let [r, e1, e2, e3] = [2, 3, 4, 5].map(produce_origin);
+	let _w_r = links.link("w-r", &worker.origin, &r, 1).await;
+	let _r_e1 = links.link("r-e1", &r, &e1, 1).await;
+	let _r_e2 = links.link("r-e2", &r, &e2, 1).await;
+	let _r_e3 = links.link("r-e3", &r, &e3, 1).await;
+	settle().await;
+	let mut subscribed = Vec::new();
+	for node in [&e1, &e2, &e3] {
+		let broadcast = node.consume().request("pool/p", None).await.unwrap();
+		subscribed.push(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
+		settle().await;
+		assert_eq!(links.subscriptions()["w-r"], 2, "{:?}", links.subscriptions());
+	}
+	assert_eq!(worker.served(), 1);
 }
