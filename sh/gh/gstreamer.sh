@@ -2,10 +2,11 @@
 #
 # Run a command inside the pinned gstreamer-ci image (.github/docker/gstreamer),
 # so moq-gst's Linux jobs get Ubuntu's GStreamer without reaching an apt mirror.
-# The checkout, $HOME (rustup's toolchain) and /nix (the Nix tools) are mounted
-# at the same paths and PATH passes through, so the host's tools run against the
-# image's GStreamer. It runs as the caller's user so the files it writes stay
-# theirs. Linux only; log in to ghcr.io first if the image is private.
+# The checkout, $HOME (rustup's toolchain), /nix (the Nix tools) and the CA
+# certificates are mounted at the same paths and PATH passes through, so the
+# host's tools run against the image's GStreamer. It runs as the caller's user
+# so the files it writes stay theirs. Linux only; log in to ghcr.io first if
+# the image is private.
 #
 # Usage:
 #   gstreamer.sh <command> [args...]
@@ -28,6 +29,10 @@ args=(
     -v "$HOME:$HOME" -e HOME -e PATH
     -v "$just:$just:ro"
 )
+# The image has no CA certificates; cargo's git fetches use the host's.
+if [[ -d /etc/ssl/certs ]]; then
+    args+=(-v /etc/ssl/certs:/etc/ssl/certs:ro)
+fi
 if [[ -d /nix ]]; then
     args+=(-v /nix:/nix:ro)
 fi
@@ -35,7 +40,7 @@ fi
 # PKG_CONFIG_ALLOW_SYSTEM_LIBS.
 while read -r name; do
     case "$name" in
-    CARGO_* | RUSTUP_* | RUSTFLAGS | PKG_CONFIG_*) args+=(-e "$name") ;;
+        CARGO_* | RUSTUP_* | RUSTFLAGS | PKG_CONFIG_*) args+=(-e "$name") ;;
     esac
 done < <(compgen -e)
 
