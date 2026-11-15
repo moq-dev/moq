@@ -551,7 +551,7 @@ mod tests {
 	}
 
 	/// A two-program multiplex, each program carrying one private PES stream (carried
-	/// verbatim) and its first PES plus a complete PCR measurement window:
+	/// verbatim) and its first PES plus a PCR window on each program's clock:
 	/// program 1's on PID 0x101, program 2's on 0x201.
 	fn two_programs() -> Bytes {
 		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100), (2, 0x0200)]));
@@ -559,7 +559,7 @@ mod tests {
 		ts.extend_from_slice(&psi_packet(0x0200, &pmt(2, 0x06, 0x0201)));
 		ts.extend_from_slice(&pes_packet(0x0101, 90_000));
 		ts.extend_from_slice(&pes_packet(0x0201, 90_000));
-		// Complete the startup rate window before expecting a live catalog.
+		// A clock for each program.
 		for index in 0..=8u64 {
 			let base = index * 22_500;
 			for pid in [0x0101u16, 0x0201] {
@@ -849,10 +849,11 @@ mod tests {
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
-		// The egress joins the clip's last group, read at once and two seconds long. Under the
-		// default delay its keyframe is stale, and the egress waits on the next one.
+		// The egress joins the clip's last group, read at once and two seconds long, once it has
+		// waited a mux-rate window on a catalog that records no rate. Under a shorter delay the
+		// keyframe is stale by then, and the egress waits on the next one.
 		let options = Options {
-			latency: Duration::from_secs(3),
+			latency: Duration::from_secs(5),
 			..Default::default()
 		};
 		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", options)
@@ -861,7 +862,7 @@ mod tests {
 			.expect("the ingest broadcast is available for SRT egress");
 		let mut output = Vec::new();
 		loop {
-			match timeout(Duration::from_secs(5), subscriber.next()).await {
+			match timeout(Duration::from_secs(10), subscriber.next()).await {
 				Ok(Ok(Some(frame))) => output.extend_from_slice(&frame.payload),
 				Ok(Ok(None)) => break,
 				Ok(Err(err)) => panic!("SRT egress failed: {err}"),
