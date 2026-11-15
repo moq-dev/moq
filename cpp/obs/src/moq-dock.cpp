@@ -1018,7 +1018,9 @@ bool MoQDock::CreateCustomEncoders()
 
 void MoQDock::CreateVideoEncoder(const char *id, obs_data_t *settings)
 {
-	latencySummary = QString::fromUtf8(latencyMode->currentData() == "low" ? ApplyEncoderLatency(id, settings)
+	obs_video_info ovi = {};
+	const double fps = obs_get_video_info(&ovi) && ovi.fps_den ? (double)ovi.fps_num / ovi.fps_den : 0;
+	latencySummary = QString::fromUtf8(latencyMode->currentData() == "low" ? ApplyEncoderLatency(id, settings, fps)
 									       : "Encoder settings unchanged");
 	LOG_INFO("%s", latencySummary.toUtf8().constData());
 	videoEncoder = OBSEncoderAutoRelease(obs_video_encoder_create(id, "moq_dock_video", settings, nullptr));

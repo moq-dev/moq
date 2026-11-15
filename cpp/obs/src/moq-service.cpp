@@ -73,7 +73,9 @@ void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *)
 	// A MoQ group starts at a keyframe, so a viewer joins only as fast as the
 	// keyframe interval, and B-frames or lookahead hold every frame back.
 	const std::string id = ProfileStreamEncoderId();
-	LOG_INFO("Service encoder %s: %s", id.c_str(), ApplyEncoderLatency(id, video_settings));
+	obs_video_info ovi = {};
+	const double fps = obs_get_video_info(&ovi) && ovi.fps_den ? (double)ovi.fps_num / ovi.fps_den : 0;
+	LOG_INFO("Service encoder %s: %s", id.c_str(), ApplyEncoderLatency(id, video_settings, fps));
 }
 
 const char *MoQService::GetConnectInfo(enum obs_service_connect_info type)

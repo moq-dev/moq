@@ -2,7 +2,11 @@
 #pragma once
 
 #include <obs-data.h>
+#include <climits>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <string>
 
 // The longest group a viewer waits through to join, in seconds.
@@ -37,10 +41,27 @@ inline const char *SimpleVideoEncoderId(const char *name)
 	return "obs_x264";
 }
 
+// The last keyframe interval, in frames, that x264 options set: 0 when none does.
+inline long long X264OptionsKeyint(const std::string &options)
+{
+	long long keyint = 0;
+	std::istringstream words(options);
+	for (std::string word; words >> word;) {
+		const size_t assign = word.find('=');
+		const std::string name = word.substr(0, assign);
+		if (assign == std::string::npos || (name != "keyint" && name != "keyint-max" && name != "keyint_max"))
+			continue;
+		const std::string value = word.substr(assign + 1);
+		keyint = value == "infinite" ? LLONG_MAX : std::atoll(value.c_str());
+	}
+	return keyint;
+}
+
 // Tunes the settings of the encoder with this id for low latency: no B-frames or
 // lookahead, and a keyframe at least every 2 s, keeping a shorter interval the user
 // chose. Leaves an encoder it does not know untouched, and says what it did.
-inline const char *ApplyEncoderLatency(const std::string &id, obs_data_t *settings)
+// fps is the output's frame rate, or 0 when unknown.
+inline const char *ApplyEncoderLatency(const std::string &id, obs_data_t *settings, double fps)
 {
 	const char *summary;
 	if (id == "obs_x264") {
@@ -48,6 +69,10 @@ inline const char *ApplyEncoderLatency(const std::string &id, obs_data_t *settin
 		// saved advanced options cannot silently restore lookahead or B-frames.
 		std::string options = obs_data_get_string(settings, "x264opts");
 		options += " tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0";
+		// x264 reads these after keyint_sec too, so a longer saved keyint would win.
+		const long long cap = std::llround(kMoQKeyintSec * fps);
+		if (cap > 0 && X264OptionsKeyint(options) > cap)
+			options += " keyint=" + std::to_string(cap);
 		obs_data_set_string(settings, "tune", "zerolatency");
 		obs_data_set_string(settings, "x264opts", options.c_str());
 		summary = "Low latency: x264 zero-latency tune";

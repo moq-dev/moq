@@ -48,7 +48,7 @@ template<typename T> static T get(const obs_data_t &settings, const char *key)
 static std::set<std::string> keys(const char *id)
 {
 	obs_data_t settings;
-	ApplyEncoderLatency(id, &settings);
+	ApplyEncoderLatency(id, &settings, 30);
 	std::set<std::string> written;
 	for (const auto &entry : settings.values)
 		written.insert(entry.first);
@@ -59,7 +59,7 @@ int main()
 {
 	obs_data_t settings;
 	obs_data_set_string(&settings, "x264opts", "tune=film bframes=4 rc-lookahead=40 sliced-threads=0 crf=20");
-	ApplyEncoderLatency("obs_x264", &settings);
+	ApplyEncoderLatency("obs_x264", &settings, 30);
 	// x264 consumes these after applying its tune; the last value must win.
 	std::map<std::string, std::string> options;
 	std::istringstream input(obs_data_get_string(&settings, "x264opts"));
@@ -75,18 +75,18 @@ int main()
 	settings = {};
 	obs_data_set_int(&settings, "async_depth", 4);
 	obs_data_set_int(&settings, "la_depth", 15);
-	ApplyEncoderLatency("obs_qsv11_v2", &settings);
+	ApplyEncoderLatency("obs_qsv11_v2", &settings, 30);
 	assert(settings.values.count("async_depth") == 0 && settings.values.count("la_depth") == 0);
 	assert(get<std::string>(settings, "latency") == "ultra-low");
 	assert(get<long long>(settings, "bf") == 0);
 
 	settings = {};
-	ApplyEncoderLatency("obs_nvenc_h264_tex", &settings);
+	ApplyEncoderLatency("obs_nvenc_h264_tex", &settings, 30);
 	assert(get<std::string>(settings, "tune") == "ull");
 	assert(get<long long>(settings, "bf") == 0 && get<bool>(settings, "lookahead") == false);
 
 	settings = {};
-	ApplyEncoderLatency("com.apple.videotoolbox.videoencoder.ave.avc", &settings);
+	ApplyEncoderLatency("com.apple.videotoolbox.videoencoder.ave.avc", &settings, 30);
 	assert(get<bool>(settings, "bframes") == false);
 
 	// Each encoder gets only the keys it reads, so none sees another's values.
@@ -106,7 +106,7 @@ int main()
 	for (const char *id : {"third_party_encoder", "", "obs_x265"}) {
 		settings = {};
 		obs_data_set_int(&settings, "keyint_sec", 8);
-		const std::string summary = ApplyEncoderLatency(id, &settings);
+		const std::string summary = ApplyEncoderLatency(id, &settings, 30);
 		assert(settings.values.size() == 1 && get<long long>(settings, "keyint_sec") == 8);
 		assert(summary.find("unavailable") != std::string::npos);
 	}
@@ -115,13 +115,29 @@ int main()
 	for (long long keyint : {0LL, 3LL, 10LL}) {
 		settings = {};
 		obs_data_set_int(&settings, "keyint_sec", keyint);
-		ApplyEncoderLatency("ffmpeg_vaapi_tex", &settings);
+		ApplyEncoderLatency("ffmpeg_vaapi_tex", &settings, 30);
 		assert(get<long long>(settings, "keyint_sec") == kMoQKeyintSec);
 	}
 	settings = {};
 	obs_data_set_int(&settings, "keyint_sec", 1);
-	ApplyEncoderLatency("ffmpeg_vaapi_tex", &settings);
+	ApplyEncoderLatency("ffmpeg_vaapi_tex", &settings, 30);
 	assert(get<long long>(settings, "keyint_sec") == 1);
+
+	// x264 reads its options after keyint_sec: a longer saved keyint is capped at 2 s of
+	// frames, and a shorter one stays.
+	const auto x264Keyint = [](const char *saved, double fps) {
+		obs_data_t x264;
+		obs_data_set_string(&x264, "x264opts", saved);
+		ApplyEncoderLatency("obs_x264", &x264, fps);
+		return X264OptionsKeyint(obs_data_get_string(&x264, "x264opts"));
+	};
+	assert(x264Keyint("keyint=300", 30) == 60);
+	assert(x264Keyint("keyint_max=300", 60) == 120);
+	assert(x264Keyint("keyint=infinite", 29.97) == 60);
+	assert(x264Keyint("keyint=30", 30) == 30);
+	assert(x264Keyint("", 30) == 0);
+	// An unknown frame rate leaves the saved keyint to x264.
+	assert(x264Keyint("keyint=300", 0) == 300);
 
 	// Simple output names resolve to the ids OBS 32.2.2 creates.
 	const std::map<std::string, std::string> simple = {
