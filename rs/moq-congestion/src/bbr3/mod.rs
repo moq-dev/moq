@@ -107,8 +107,8 @@ const FULL_BW_GROWTH: f64 = 1.25;
 /// maximum number of rounds needed before we consider that the pipe is full <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.1.2>
 const MAX_FULL_BW_COUNT: u64 = 3;
 
-/// equivalent to BBRStartupFullLossCnt: the minimum number of discontiguous loss
-/// events observed within a single round trip before the STARTUP high-loss
+/// equivalent to BBRStartupFullLossCnt: the minimum number of lost packets
+/// observed within a single round trip before the STARTUP high-loss
 /// estimator is allowed to exit STARTUP.
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.1.3>
 const STARTUP_FULL_LOSS_CNT: u64 = 6;
@@ -476,10 +476,9 @@ pub(crate) struct Bbr3 {
     /// equivalent to Linux BBRv3's `ecn_in_round`: set when CE marks are reported during the
     /// round, so the short-term model responds to them as it does to loss
     ce_in_round: bool,
-    /// count of discontiguous lost sequence ranges observed in the current round trip, for the
-    /// STARTUP high-loss exit's BBRStartupFullLossCnt criterion, as draft-06 read it. Draft-07's
-    /// BBR.loss_events_in_round counts Fast Recovery loss events instead. Reset at each
-    /// loss-round boundary.
+    /// equivalent to BBR.loss_events_in_round: lost packets in the current loss round trip, for
+    /// the STARTUP high-loss exit's BBRStartupFullLossCnt criterion. Reset at each loss-round
+    /// boundary, with the congestion signals, and by a spurious-loss undo.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.1.3>
     loss_events_in_round: u64,
     /// The time when loss was first detected, causing the connection to enter fast recovery. A
@@ -854,21 +853,35 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRCheckFullBWReached <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.1.2>
+    ///
+    /// The draft checks only the ACK that starts a round, so under ACK aggregation a plateau can
+    /// be three low samples that happened to land on round starts while the ACKs between them
+    /// still grew. As Linux BBRv3 does, any ACK whose sample grew 25% resets the baseline, and
+    /// only round starts count plateau rounds. An application-limited sample neither resets nor
+    /// counts, and only round starts count it toward `app_limited_rounds`.
+    /// <https://github.com/google/bbr/blob/90210de4b779d40496dee0b89081780eeddf2a60/net/ipv4/tcp_bbr.c#L1924-L1948>
     fn check_full_bw_reached(&mut self) {
-        if self.full_bw_now || !self.round_start {
+        if self.full_bw_now {
             return;
         }
         if let Some(rate_sample) = self.rs {
             if rate_sample.is_app_limited {
-                self.app_limited_rounds += 1;
+                if self.round_start {
+                    self.app_limited_rounds += 1;
+                }
                 return;
             }
-            self.app_limited_rounds = 0;
+            if self.round_start {
+                self.app_limited_rounds = 0;
+            }
             if rate_sample.delivery_rate >= self.full_bw * FULL_BW_GROWTH {
                 self.reset_full_bw();
                 self.full_bw = rate_sample.delivery_rate;
                 return;
             }
+        }
+        if !self.round_start {
+            return;
         }
         self.full_bw_count += 1;
         self.full_bw_now = self.full_bw_count >= MAX_FULL_BW_COUNT;
@@ -893,8 +906,8 @@ impl Bbr3 {
 
         // All three criteria of section 5.3.1.3 must hold: at least one full packet-timed round
         // trip spent in fast recovery, a round-trip loss rate above `LOSS_THRESH`
-        // (`is_inflight_too_high`), and at least `STARTUP_FULL_LOSS_CNT` discontiguous lost
-        // sequence ranges within that round trip.
+        // (`is_inflight_too_high`), and at least `STARTUP_FULL_LOSS_CNT` lost packets within
+        // that round trip.
         if self.loss_round_start
             && self.in_recovery_for_a_full_round()
             && self.loss_events_in_round >= STARTUP_FULL_LOSS_CNT
@@ -910,10 +923,6 @@ impl Bbr3 {
             self.inflight_longterm = new_inflight_hi;
             self.full_bw_reached = true;
             self.full_bw_now = true;
-        }
-
-        if self.loss_round_start {
-            self.loss_events_in_round = 0;
         }
     }
 
@@ -1324,6 +1333,7 @@ impl Bbr3 {
         {
             self.bw_latest = rate_sample.delivery_rate;
             self.inflight_latest = rate_sample.delivered;
+            self.loss_events_in_round = 0;
         }
     }
 
@@ -1588,7 +1598,7 @@ impl Bbr3 {
     fn process_lost_packet(&mut self, lost: &Lost, now: Instant) {
         self.rate.on_lost(lost.bytes);
         self.enter_recovery(now, lost.sent);
-        self.note_loss(lost.new_burst);
+        self.note_loss();
         if !self.check_probe_loss {
             return;
         }
@@ -1603,16 +1613,13 @@ impl Bbr3 {
 
     /// equivalent to BBRNoteLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.5.10.2>
     ///
-    /// `loss_events_in_round` counts discontiguous lost sequence ranges, not lost packets, so a
-    /// run of consecutive lost packets is one event. The transport marks where a run starts, and
-    /// the first loss of a round always opens a new range.
+    /// Every lost packet is a loss event: a media sender's tail-drop losses come as one run per
+    /// frame, and counting runs would never reach `STARTUP_FULL_LOSS_CNT`.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.1.3>
-    fn note_loss(&mut self, new_burst: bool) {
+    fn note_loss(&mut self) {
         self.start_congestion_round();
         self.loss_in_round = true;
-        if new_burst || self.loss_events_in_round == 0 {
-            self.loss_events_in_round = self.loss_events_in_round.saturating_add(1);
-        }
+        self.loss_events_in_round = self.loss_events_in_round.saturating_add(1);
     }
 
     /// Opens the loss round on its first congestion signal, loss or CE, as draft-07's NoteLoss
@@ -1758,6 +1765,7 @@ impl Bbr3 {
     /// equivalent to BBRResetCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.5.10.3>
     fn reset_congestion_signals(&mut self) {
         self.loss_in_round = false;
+        self.loss_events_in_round = 0;
         self.ce_in_round = false;
         self.bw_latest = 0.0;
         self.inflight_latest = 0;
@@ -2020,6 +2028,7 @@ impl Controller for Bbr3 {
         // packets declared lost. ProbeRTT's exit restores the rest.
         self.bound_cwnd_for_probe_rtt();
         self.loss_in_round = false;
+        self.loss_events_in_round = 0;
         self.probe_rtt_skip_congested = self.undo_probe_rtt_skip_congested;
         self.reset_full_bw();
         self.prev_probe_too_high = self.undo_prev_probe_too_high;
@@ -2227,8 +2236,6 @@ mod test {
         sent: BTreeMap<u64, Acked>,
         /// The packets the ACK being built acknowledges.
         acked: Vec<Acked>,
-        /// The most recently lost packet number.
-        last_lost: Option<u64>,
     }
 
     impl Driver {
@@ -2243,7 +2250,6 @@ mod test {
                 bbr: Bbr3::new(config, init),
                 sent: BTreeMap::new(),
                 acked: Vec::new(),
-                last_lost: None,
             }
         }
 
@@ -2307,9 +2313,7 @@ mod test {
                 sent: acked.sent,
                 bytes,
                 packet: acked.packet,
-                new_burst: self.last_lost != pn.checked_sub(1),
             };
-            self.last_lost = Some(pn);
             self.bbr.on_loss(Loss {
                 now,
                 packets: &[lost],
@@ -2385,6 +2389,12 @@ mod test {
         timestamps: bool,
         /// each packet's queueing delay at the bottleneck, by when it reached it
         queues: Vec<(u64, u64)>,
+        /// ACK aggregation, as on Wi-Fi and cellular links: the receiver releases ACKs in bursts,
+        /// the gaps between them drawn uniformly from the range by the seeded generator. `None`
+        /// acknowledges each packet as it leaves the bottleneck.
+        aggregation: Option<(std::ops::Range<u64>, Pcg32)>,
+        /// when the receiver next releases its held ACKs
+        release_ns: u64,
     }
 
     impl Sim {
@@ -2406,7 +2416,22 @@ mod test {
                 max_queue_ns: 0,
                 timestamps: false,
                 queues: Vec::new(),
+                aggregation: None,
+                release_ns: 0,
             }
+        }
+
+        /// Aggregate ACKs into bursts released every `gap_ns` on average, varying by half either
+        /// way, drawn from `seed`.
+        fn aggregate(&mut self, gap_ns: u64, seed: u64) {
+            let range = gap_ns / 2..gap_ns * 3 / 2;
+            self.aggregation = Some((range, Pcg32::seed_from_u64(seed)));
+        }
+
+        /// Change the bottleneck's bandwidth for packets sent from now on, since `run` schedules
+        /// each packet's bottleneck finish when it is sent.
+        fn set_bw(&mut self, bw: f64) {
+            self.btl_service_ns = (self.mss as f64 / bw * 1e9).round() as u64;
         }
 
         /// Convert a simulator-nanosecond offset into an `Instant`.
@@ -2529,7 +2554,13 @@ mod test {
                     let service_start = arrival.max(self.btl_free_ns);
                     let finish = service_start + self.btl_service_ns;
                     self.btl_free_ns = finish;
-                    let ack_ns = finish + self.ret_ns;
+                    let mut ack_ns = finish + self.ret_ns;
+                    if let Some((range, rng)) = &mut self.aggregation {
+                        while self.release_ns < finish {
+                            self.release_ns += rng.random_range(range.clone());
+                        }
+                        ack_ns = self.release_ns + self.ret_ns;
+                    }
                     let queue_ns = service_start - arrival;
                     self.max_queue_ns = self.max_queue_ns.max(queue_ns);
                     self.queues.push((arrival, queue_ns));
@@ -2557,24 +2588,31 @@ mod test {
                     if on_send(&mut self.bbr).is_break() {
                         return;
                     }
-                } else if let Some(p) = self.flight.pop_front() {
-                    self.now_ns = self.now_ns.max(p.ack_ns);
-                    self.inflight -= self.mss;
+                } else if let Some(first) = self.flight.pop_front() {
+                    self.now_ns = self.now_ns.max(first.ack_ns);
                     let now_at = self.base.saturating_add(Duration::from_nanos(self.now_ns));
-                    let send_at = self.base.saturating_add(Duration::from_nanos(p.send_ns));
-                    let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
-                    self.bbr
-                        .ack_received(now_at, send_at, self.mss, p.pn, received);
+                    // One ACK covers every packet released at this instant.
+                    let mut burst = vec![first];
+                    while self.flight.front().is_some_and(|p| p.ack_ns == self.now_ns) {
+                        burst.extend(self.flight.pop_front());
+                    }
+                    for p in &burst {
+                        self.inflight -= self.mss;
+                        let send_at = self.base.saturating_add(Duration::from_nanos(p.send_ns));
+                        let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
+                        self.bbr
+                            .ack_received(now_at, send_at, self.mss, p.pn, received);
+                    }
                     self.bbr.end_acks(now_at, self.inflight, false);
-                    // Each ACK covers one packet, so a marked one raises the CE count.
-                    if p.ce {
-                        self.bbr.on_ce(Ce {
-                            now: now_at,
-                            sent: send_at,
-                        });
+                    // The ACK's ECN counts report new CE marks, so the transport reports one
+                    // congestion event, sent when the newest packet the ACK acknowledged was.
+                    let last = burst.last().unwrap();
+                    if burst.iter().any(|p| p.ce) {
+                        let sent = self.base.saturating_add(Duration::from_nanos(last.send_ns));
+                        self.bbr.on_ce(Ce { now: now_at, sent });
                     }
 
-                    if on_ack(&mut self.bbr, self.now_ns, self.inflight, p.pn).is_break() {
+                    if on_ack(&mut self.bbr, self.now_ns, self.inflight, last.pn).is_break() {
                         return;
                     }
                 } else {
@@ -2680,37 +2718,35 @@ mod test {
     }
 
     /// A.2: Exiting STARTUP on loss when application-limited.
-    /// equivalent to: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#name-exiting-startup-on-loss-whe>
+    /// equivalent to: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.1.3>
     ///
-    /// Drives a STARTUP flow whose delivery-rate samples are all app-limited (the
-    /// app keeps only `APP_WINDOW` bytes outstanding, well below cwnd), so
+    /// Drives a STARTUP flow whose delivery-rate samples are all app-limited (a
+    /// media sender bursting one frame at a time, far below cwnd), so
     /// `check_full_bw_reached` bails every round (`rate_sample.is_app_limited`
-    /// short-circuit) and the bandwidth-plateau path can never end STARTUP. Loss
-    /// is then injected above `LOSS_THRESH` (2%), with at least
-    /// `STARTUP_FULL_LOSS_CNT` discontiguous losses per round trip, so
-    /// `check_startup_high_loss` observes the high loss rate and ends STARTUP:
-    /// `full_bw_now`/`full_bw_reached` become true and the flow transitions
-    /// STARTUP -> DRAIN, purely from loss.
+    /// short-circuit) and the bandwidth-plateau path can never end STARTUP. The
+    /// bottleneck is a tail-drop queue that cannot hold a frame: each frame loses
+    /// its last packets as one run, so a round trip sees a few runs but many lost
+    /// packets. Draft-07 counts every lost packet, so
+    /// `check_startup_high_loss` sees at least `STARTUP_FULL_LOSS_CNT` events above
+    /// `LOSS_THRESH` (2%) and ends STARTUP: `full_bw_now`/`full_bw_reached` become
+    /// true and the flow transitions STARTUP -> DRAIN, purely from loss.
     #[test]
     fn startup_exits_to_drain_on_loss_when_app_limited() {
         /// packet size in bytes
         const MSS: u64 = 1200;
-        /// simulated bottleneck bandwidth: 100 Mbit/s in bytes/sec
-        const BW: f64 = 12_500_000.0;
-        /// simulated propagation round-trip time (100ms), matching A.1
-        const RTT_NS: u64 = 100_000_000;
+        /// simulated bottleneck bandwidth: 3 Mbit/s in bytes/sec, what a 50 Mbit/s
+        /// link shrank to
+        const BW: f64 = 375_000.0;
+        /// simulated propagation round-trip time
+        const RTT_NS: u64 = 60_000_000;
         const FWD_NS: u64 = RTT_NS / 2;
         const RET_NS: u64 = RTT_NS / 2;
-        /// application window: bytes the app keeps outstanding. Fixed and well
-        /// below the STARTUP cwnd so the sender is application-limited (never
-        /// cwnd-limited), which blocks the bandwidth-plateau exit and isolates
-        /// the loss path. Sized so a single round trip carries at least
-        /// `STARTUP_FULL_LOSS_CNT` losses at the `LOSS_PERIOD` rate below.
-        const APP_WINDOW: u64 = 200 * MSS;
-        /// drop 1 in every `LOSS_PERIOD` packets -> 4% loss, above `LOSS_THRESH`
-        /// (2%), spread evenly so each round trip carries loss over its full
-        /// sequence range.
-        const LOSS_PERIOD: u64 = 25;
+        /// a 30 fps sender
+        const FRAME_NS: u64 = 33_333_333;
+        /// packets per frame, sent back to back, about 4 Mbit/s offered to the link
+        const FRAME_PACKETS: u64 = 14;
+        /// the tail-drop queue: a packet that arrives with this many queued is dropped
+        const QUEUE_PACKETS: u64 = 6;
 
         // bottleneck serialization time for one MSS-sized packet
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
@@ -2735,6 +2771,9 @@ mod test {
         let mut btl_free_ns: u64 = 0;
         let mut inflight: u64 = 0;
         let mut pn: u64 = 0;
+        let mut next_frame_ns: u64 = 0;
+        // lost packets and the runs they came in
+        let (mut lost_packets, mut lost_runs) = (0u64, 0u64);
 
         // Whether BBRCheckStartupHighLoss ever observed a too-high loss rate
         // (the A.2 signal). Sampled right after each ack is processed.
@@ -2752,34 +2791,42 @@ mod test {
         let mut transition: Option<(u64, bool, bool)> = None;
 
         for _ in 0..1_000_000 {
-            // Application-limited: only send while the (small) app window has
-            // room, independent of cwnd.
-            let can_send = inflight + MSS <= APP_WINDOW.min(bbr.window());
             let next_ack = flight.front().map(|p| p.ack_ns);
 
-            if can_send && next_ack.is_none_or(|ack| now_ns <= ack) {
-                let send_ns = now_ns;
-                // enqueue at the FIFO bottleneck, served at BW
-                let arrival = send_ns + FWD_NS;
-                let service_start = arrival.max(btl_free_ns);
-                let finish = service_start + btl_service_ns;
-                btl_free_ns = finish;
-                let ack_ns = finish + RET_NS;
-                let lost = pn % LOSS_PERIOD == LOSS_PERIOD - 1;
+            if next_ack.is_none_or(|ack| next_frame_ns <= ack) {
+                // The frame leaves at once, whatever the window.
+                now_ns = now_ns.max(next_frame_ns);
+                let mut run = false;
+                for _ in 0..FRAME_PACKETS {
+                    let arrival = now_ns + FWD_NS;
+                    let queued = btl_free_ns.saturating_sub(arrival).div_ceil(btl_service_ns);
+                    let lost = queued >= QUEUE_PACKETS;
+                    let ack_ns = if lost {
+                        // Loss detection waits for what the queue holds ahead of it.
+                        lost_packets += 1;
+                        lost_runs += u64::from(!run);
+                        btl_free_ns + btl_service_ns + RET_NS
+                    } else {
+                        btl_free_ns = arrival.max(btl_free_ns) + btl_service_ns;
+                        btl_free_ns + RET_NS
+                    };
+                    run = lost;
 
-                bbr.send(at(send_ns), MSS as u16, pn);
-                inflight += MSS;
-                flight.push_back(InFlight {
-                    pn,
-                    send_ns,
-                    ack_ns,
-                    lost,
-                });
-                // Emulate MarkConnectionAppLimited. `on_ack` only stamps the marker
-                // when the caller reports app-limited, so drive it here as a genuinely
-                // app-limited quinn connection would.
-                bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
-                pn += 1;
+                    bbr.send(at(now_ns), MSS as u16, pn);
+                    inflight += MSS;
+                    flight.push_back(InFlight {
+                        pn,
+                        send_ns: now_ns,
+                        ack_ns,
+                        lost,
+                    });
+                    // Emulate MarkConnectionAppLimited. `on_ack` only stamps the marker
+                    // when the caller reports app-limited, so drive it here as a genuinely
+                    // app-limited quinn connection would.
+                    bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
+                    pn += 1;
+                }
+                next_frame_ns += FRAME_NS;
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
@@ -2808,11 +2855,11 @@ mod test {
                     transition = Some((bbr.full_bw_count, bbr.full_bw_now, bbr.full_bw_reached));
                     break;
                 }
-            } else {
-                // app window drained and nothing left to ack: advance to next send
-                now_ns += btl_service_ns;
             }
         }
+
+        // A frame's lost tail is one run, so the runs alone never reach the count.
+        assert!(lost_runs > 0 && lost_packets >= 3 * lost_runs);
 
         // Landed on the STARTUP -> DRAIN edge.
         let (full_bw_count, full_bw_now, full_bw_reached) =
@@ -4595,6 +4642,47 @@ mod test {
             err < 0.05,
             "max_bw {max_bw} not within 5% of simulated {BW} (rel err {err})"
         );
+    }
+
+    /// Startup finds a capacity that rises tenfold mid-Startup on a path whose receiver releases
+    /// ACKs in bursts half an RTT apart on average, as Wi-Fi and cellular links do, and still ends
+    /// on the plateau rather than chasing the bursts' noise.
+    #[test]
+    fn startup_finds_capacity_rise_with_ack_aggregation() {
+        const MSS: u64 = 1200;
+        const LOW: f64 = 1_250_000.0;
+        const HIGH: f64 = 12_500_000.0;
+        const RTT_NS: u64 = 40 * MS;
+
+        for seed in 0..4 {
+            let mut sim = Sim::new(Config::default(), MSS, LOW, RTT_NS);
+            sim.aggregate(RTT_NS / 2, seed);
+            sim.run(
+                100_000,
+                |_| ControlFlow::Continue(()),
+                |bbr, _, _, _| match bbr.round_count {
+                    3.. => ControlFlow::Break(()),
+                    _ => ControlFlow::Continue(()),
+                },
+            );
+            assert!(!sim.bbr.full_bw_reached, "seed {seed} ended Startup early");
+
+            sim.set_bw(HIGH);
+            sim.run(
+                1_000_000,
+                |_| ControlFlow::Continue(()),
+                |bbr, _, _, _| match bbr.full_bw_reached {
+                    true => ControlFlow::Break(()),
+                    false => ControlFlow::Continue(()),
+                },
+            );
+            let err = (sim.bbr.max_bw - HIGH).abs() / HIGH;
+            assert!(
+                err < 0.05,
+                "seed {seed}: max_bw {} not near {HIGH}",
+                sim.bbr.max_bw
+            );
+        }
     }
 
     /// A.13: Achieving expected cruise bandwidth on a link with ACK aggregation.
@@ -7533,6 +7621,53 @@ mod test {
         assert!(!sim.bbr.rate.is_app_limited());
     }
 
+    /// Run a round each 20ms that sends `count` packets, doubling each round, whose ACKs arrive
+    /// aggregated: the first packet's alone 10ms later, starting the round with a one-packet
+    /// sample, and the rest 1ms after, carrying the round's growth. Packets after the first are
+    /// sent once the application ran dry when `app_limited`. Returns the round the plateau check
+    /// finished on, if any.
+    fn aggregated_rounds(sim: &mut Sim, mut count: u64, app_limited: bool) -> Option<u64> {
+        for round in 0..6 {
+            let start = sim.now_ns + round * 20 * MS;
+            let first = sim.pn;
+            sim.send(start, 1);
+            if app_limited {
+                sim.starve();
+            }
+            sim.send(start, count - 1);
+            sim.ack(start + 10 * MS, [first], false);
+            sim.ack(start + 11 * MS, first + 1..sim.pn, false);
+            if sim.bbr.full_bw_now {
+                return Some(round);
+            }
+            count *= 2;
+        }
+        None
+    }
+
+    /// Growth on any ACK keeps Startup going, though every round starts on the same one-packet
+    /// sample. An application-limited ACK's growth does not, as it measures the application.
+    #[test]
+    fn startup_grows_between_round_starts() {
+        let mut sim = scripted();
+        assert_eq!(aggregated_rounds(&mut sim, 4, false), None);
+        assert_eq!(sim.bbr.state, BbrState::Startup);
+
+        let mut sim = scripted();
+        assert_eq!(aggregated_rounds(&mut sim, 4, true), Some(3));
+        assert_ne!(sim.bbr.state, BbrState::Startup);
+    }
+
+    /// ProbeBW_UP keeps probing while ACKs between its round starts grow.
+    #[test]
+    fn probe_up_grows_between_round_starts() {
+        let mut sim = probed();
+        sim.now_ns = 10 * MS;
+        sim.bbr.start_probe_bw_up();
+        assert_eq!(aggregated_rounds(&mut sim, 100, false), None);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
+    }
+
     /// Finishing a probe ages the max-bw window once, so cruise rounds keep the probe's maximum,
     /// and a later cruise loss cuts only the short-term model.
     #[test]
@@ -8188,6 +8323,34 @@ mod test {
         sim.send(20 * MS, 1);
         sim.lose(25 * MS, sim.pn - 1);
         assert_eq!(sim.bbr.prior_cwnd, saved);
+    }
+
+    /// Every lost packet is a loss event, even in one run. The count ends with its loss round and
+    /// with an undone recovery, so losses of different rounds never add up to a Startup exit.
+    #[test]
+    fn loss_events_count_packets_and_reset_per_round_and_undo() {
+        let mut sim = scripted();
+        sim.round(0, 10, 10 * MS);
+        let first = sim.pn;
+        sim.send(10 * MS, 10);
+        for i in 0..3 {
+            sim.lose(15 * MS, first + i);
+        }
+        assert_eq!(sim.bbr.loss_events_in_round, 3);
+
+        // The round ends with an ACK of a packet sent after the last delivery before its first loss.
+        sim.ack(20 * MS, first + 3..sim.pn, false);
+        assert_eq!(sim.bbr.loss_events_in_round, 0);
+        assert_eq!(sim.bbr.state, BbrState::Startup);
+
+        let first = sim.pn;
+        sim.send(20 * MS, 3);
+        for i in 0..3 {
+            sim.lose(25 * MS, first + i);
+        }
+        assert_eq!(sim.bbr.loss_events_in_round, 3);
+        sim.bbr.on_spurious_loss();
+        assert_eq!(sim.bbr.loss_events_in_round, 0);
     }
 
     /// Undoing a Startup high-loss exit from within ProbeRTT stays in ProbeRTT, which then

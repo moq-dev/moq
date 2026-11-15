@@ -62,5 +62,5 @@ and the chromium `av_lag` rows
 After #8635 landed, run
 [43601796176](https://github.com/moq-dev/moq/actions/runs/43601796176) still
 failed the firefox resume, now on audio arriving late rather than trailing:
-[Firefox resume audio](/quest/m0/nightly/firefox-resume-audio.md) owns it.
+[moq-dev/moq#8799](https://github.com/moq-dev/moq/pull/8799) fixed that.
 

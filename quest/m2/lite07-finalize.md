@@ -115,7 +115,7 @@ Timestamp provenance landed in
 timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): Required names every quest that may still change lite-07 bytes.
-The explicit `Oldest` anchor rides [time addressing's model](/quest/m2/time-addressing/model.md),
+The explicit `Oldest` anchor rides [time addressing's model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md),
 whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
 
 Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about

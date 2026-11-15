@@ -2167,14 +2167,10 @@ impl Connection {
 					.congestion
 					.filter(|_| info.path_generation == self.path.generation())
 				{
-					let new_burst = packet
-						.checked_sub(1)
-						.is_none_or(|prev| self.spaces[pn_space].lost_packets.get(prev).is_none());
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
 						packet: state,
-						new_burst,
 					});
 				}
 				self.qlog

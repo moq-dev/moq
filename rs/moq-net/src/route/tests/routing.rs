@@ -809,3 +809,34 @@ fn a_route_change_alone_names_its_identity() {
 	router.route(up, 7, p(""), Some(path::Reach::Finite(along(&hops, 2))));
 	assert_eq!(router.changed(), BTreeMap::from([(7, BTreeSet::new())]));
 }
+
+/// A doubt about the publisher begins while this node has a session to it. That session
+/// then files a second stream, as a new permit does, and the first retires. The second
+/// stream is no returning link, so the publisher's own route stays usable on it.
+#[test]
+fn a_later_stream_of_a_session_the_doubt_predates_is_not_doubted() {
+	let (publisher, first, other, later) = (7, 1, 2, 3);
+	let session = |tag| Link {
+		session: tag,
+		..Link::default()
+	};
+	let mut router = path::Router::<Node, u8>::new(99, 1, Doubt::DEFAULT);
+	for (key, tag) in [(first, 5), (other, 6)] {
+		router.connect(key, publisher, session(tag)).unwrap();
+		router.edited(key);
+		router.route(key, publisher, p(""), offer([publisher], 1));
+		router.batch(key, publisher, p(""), vec![(p("live/x"), Some(1))], Some(1));
+	}
+	// The other session to the publisher closes, casting doubt on it.
+	router.disconnect([other], Instant::ZERO);
+	router.connect(later, publisher, session(5)).unwrap();
+	router.edited(later);
+	router.route(later, publisher, p(""), offer([publisher], 1));
+	router.batch(later, publisher, p(""), vec![(p("live/x"), Some(1))], Some(1));
+	router.retire(first);
+	assert_eq!(
+		router.route_for(publisher, &p("")).and_then(path::Route::next),
+		Some(later)
+	);
+	assert!(router.shown()[&(publisher, p("live/x"))].available);
+}

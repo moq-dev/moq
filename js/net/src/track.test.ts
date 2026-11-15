@@ -3461,6 +3461,11 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 	producer.close();
 });
 
+// Write a frame past a group's 32 MiB tail limit, shedding every frame before it.
+function overflowTail(group: GroupProducer): void {
+	group.writeFrame({ payload: new Uint8Array(32 * 1024 * 1024 + 1), timestamp: Timestamp.unscaled(group.sequence) });
+}
+
 // A reader on a received copy that fails waits out a duplicate still held for its group, then
 // continues on it from its frame with nothing repeated or missed. A released hold leaves the
 // failure, even to a reader only watching `closed`, as does a duplicate starting past the reader's
@@ -3551,7 +3556,7 @@ test.each([
 		});
 		await settle();
 		expect(closed).toBeUndefined();
-		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
+		overflowTail(again);
 		await settle();
 		expect(closed).toMatchObject({ code: StreamCode.Evicted });
 		producer.close();
@@ -3605,11 +3610,10 @@ test.each([
 	const again = hooks.receiveGroup(producer, { sequence: 3n, start: kind === "past" ? 2 : 0 });
 	arriving?.release();
 	if (kind === "shed") {
-		// The re-offer drops frames 0 and 1 to cache pressure before the reader reaches it.
+		// The re-offer drops frames 0 and 1 to its tail limit before the reader reaches it.
 		again.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.unscaled(again.sequence) });
 		again.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(again.sequence) });
-		again.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.unscaled(again.sequence) });
-		hooks.shedGroup(again, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, []);
+		overflowTail(again);
 		await reading;
 		expect(read).toMatchObject({ code: StreamCode.Evicted });
 		producer.close();

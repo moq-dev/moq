@@ -325,7 +325,7 @@ async function fetchGroup(
 					// Close the subscription once the caller has read or released the group, not
 					// now: an in-progress group must keep receiving frames for its lifetime
 					// (mirrors Rust poll_fetch), and a failed group's unread frames stay in the
-					// cache's reach, billed and evictable, until the caller lets them go.
+					// cache's reach, expirable, until the caller lets them go.
 					void hooks.groupDone(recv.group).then(() => subscriber.close());
 					return recv.group;
 				case "drop":
