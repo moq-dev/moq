@@ -42,10 +42,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   publishes for the first time at this cut;
   auth key validation; the
   RTMPS connect signature;
-  usage's derived settings; and three
-  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md),
-  the capture selections, and
-  [the acknowledgment hook's trait](/quest/m2/api-ack-hook-trait.md). None
+  usage's derived settings; and two
+  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md) and
+  the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
   path; see the [routes epic](/quest/m2/cluster-routes/README.md).

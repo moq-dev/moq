@@ -932,6 +932,9 @@ mod tests {
 	impl crate::transport::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
 		type Group = crate::transport::poll::Ungrouped;
+		type Offset = ();
+
+		fn offset(&self) -> Self::Offset {}
 
 		fn poll_write(&mut self, _waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
