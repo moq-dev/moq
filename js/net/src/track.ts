@@ -2325,13 +2325,15 @@ export class Producer {
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
 	// boundary it falls just before. Either must carry the same error code. Mirrors the Rust
 	// `finish_at` on a `received()` copy. Only a wire subscription owes a tail below the end: a
-	// FETCH's end leaves nothing in flight, as the Rust `set_end` a fill declares.
+	// FETCH's end leaves nothing in flight, as the Rust `set_end` a fill declares. An end that
+	// lands after the track closed, such as a viewer releasing it while the marker was in
+	// flight, has nothing left to end.
 	#endPending(end: Position, error?: Error): void {
 		const declared = this.#state.end.peek();
 		const code = (err?: Error) => (err === undefined ? undefined : toStreamCode(err));
 		const tail = this.#wire !== undefined;
 		if (declared === undefined) {
-			if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
+			if (this.#state.closed.peek() !== undefined) return;
 			this.#declareEnd(end, error, tail);
 		} else if (code(declared.error) !== code(error)) {
 			throw new ProtocolViolation(`conflicting track end error: ${error}`);
