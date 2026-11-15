@@ -17554,10 +17554,7 @@ rec {
             name = "moq-crypto";
             packageId = "moq-crypto";
             usesDefaultFeatures = false;
-            features = [
-              "serde"
-              "cpu"
-            ];
+            features = [ "cpu" ];
           }
           {
             name = "moq-pattern";
@@ -17649,7 +17646,6 @@ rec {
           {
             name = "url";
             packageId = "url";
-            features = [ "serde" ];
           }
         ];
         devDependencies = [

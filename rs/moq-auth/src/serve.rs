@@ -675,7 +675,6 @@ fn hash(token: &str) -> u64 {
 pub struct Server {
 	policy: Arc<std::sync::RwLock<Arc<Policy>>>,
 	sessions: Arc<Mutex<Sessions>>,
-	mesh: Option<crate::mesh::Coordinator>,
 	secret: Option<Arc<str>>,
 }
 
@@ -687,7 +686,6 @@ impl Server {
 		Ok(Self {
 			policy: Arc::new(std::sync::RwLock::new(Arc::new(Self::validate(policy)?))),
 			sessions: Default::default(),
-			mesh: None,
 			secret: None,
 		})
 	}
@@ -737,13 +735,6 @@ impl Server {
 		self
 	}
 
-	/// Also answer the mesh owner's API under `/mesh` with `coordinator`, behind the same
-	/// [`secret`](Self::with_secret) as `POST /`.
-	pub fn with_mesh(mut self, coordinator: crate::mesh::Coordinator) -> Self {
-		self.mesh = Some(coordinator);
-		self
-	}
-
 	/// The cadence the session table ages out by, or `None` when no limit needs a table.
 	fn cadence(policy: &Policy) -> Option<Duration> {
 		let limits = policy.limits;
@@ -784,14 +775,10 @@ impl Server {
 		}
 	}
 
-	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`], plus the mesh
-	/// owner's API when [`with_mesh`](Self::with_mesh) set one, all behind the
+	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`], behind the
 	/// [`secret`](Self::with_secret) when there is one.
 	pub fn router(&self) -> Router {
-		let mut router = Router::new().route("/", post(handle)).with_state(self.clone());
-		if let Some(mesh) = &self.mesh {
-			router = router.merge(mesh.admin_router());
-		}
+		let router = Router::new().route("/", post(handle)).with_state(self.clone());
 		match &self.secret {
 			Some(secret) => router.layer(axum::middleware::from_fn_with_state(secret.clone(), guard)),
 			None => router,
@@ -1067,15 +1054,12 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn the_secret_guards_every_route() {
-		let key = Key::generate(Algorithm::HS256, None).unwrap();
-		let config = crate::mesh::Config::new("https://mesh.example".parse().unwrap(), key);
+	async fn the_secret_guards_the_route() {
 		let server = Server::new(Policy {
 			public: rules(&["**"], &[]),
 			..Default::default()
 		})
 		.unwrap()
-		.with_mesh(crate::mesh::Coordinator::new(config).unwrap())
 		.with_secret("hunter2:x");
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
@@ -1092,25 +1076,14 @@ mod tests {
 			("relay:hunter2%3Ax@", true),
 			(":hunter2%3Ax@", true),
 		] {
-			let status = |path: &'static str| {
-				let url = format!("http://{userinfo}{addr}{path}");
-				let http = http.clone();
-				async move {
-					match path {
-						"/" => http.post(url).json(&request("/demo")).send().await,
-						_ => http.get(url).send().await,
-					}
-					.unwrap()
-					.status()
-				}
-			};
-			for path in ["/", "/mesh/keys"] {
-				assert_eq!(
-					status(path).await == StatusCode::UNAUTHORIZED,
-					!admitted,
-					"{userinfo}{path}"
-				);
-			}
+			let status = http
+				.post(format!("http://{userinfo}{addr}/"))
+				.json(&request("/demo"))
+				.send()
+				.await
+				.unwrap()
+				.status();
+			assert_eq!(status == StatusCode::UNAUTHORIZED, !admitted, "{userinfo}");
 		}
 
 		// The relay's client sends the secret from its URL's userinfo.
@@ -1124,7 +1097,8 @@ mod tests {
 		let credentials = base64::engine::general_purpose::STANDARD.encode("relay:hunter2:x");
 		for scheme in ["basic", "BASIC", "Basic", "Bearer"] {
 			let status = http
-				.get(format!("http://{addr}/mesh/keys"))
+				.post(format!("http://{addr}/"))
+				.json(&request("/demo"))
 				.header(reqwest::header::AUTHORIZATION, format!("{scheme} {credentials}"))
 				.send()
 				.await

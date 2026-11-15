@@ -12,7 +12,7 @@ stays loop-free under stale state, converges once demand and topology stop
 changing, and sends no per-broadcast message for an idle broadcast.
 
 Non-goals: steering clients to the relay that holds a broadcast; decisions
-from measured load or RTT ([Link quality](/quest/m5/link-quality.md));
+from measured load or RTT (link quality, planned downstream in Kixel);
 browsers serving copies they receive; a relay on neither consumer's cheapest
 route becoming a shared stop; one copy across a multi-hop sparse overlay
 rather than among direct neighbors; and creating links, since routing

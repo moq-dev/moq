@@ -160,5 +160,4 @@ setup after the capabilities land.
 
 - [Routing guide](/quest/m3/routing-guide.md) - concept page and federation setup
 - [Route wakes](/quest/m4/route-wakes.md) - local work follows affected fronts rather than the whole covered table
-- [Link quality](/quest/m5/link-quality.md) - optional measured link cost, distinct from delivery-health failover
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - per-broadcast warm routes ranked against these node routes
