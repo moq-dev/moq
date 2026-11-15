@@ -1275,7 +1275,7 @@ mod tests {
 		const CHUNK: usize = 100_000;
 
 		// An idle reader behind one committed frame, so the writer is paced past the window.
-		let mut group = crate::group::Info { sequence: 0 }.produce();
+		let mut group = crate::group::Info { start: 0 }.produce();
 		let _idle = group.consume();
 		group
 			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"x"))
@@ -1283,7 +1283,7 @@ mod tests {
 		let mut frame = group
 			.create_frame(crate::frame::Info {
 				size: 2 * SEGMENT as u64,
-				timestamp: Some(crate::Timestamp::ZERO),
+				timestamp: crate::Timestamp::ZERO,
 			})
 			.unwrap();
 
