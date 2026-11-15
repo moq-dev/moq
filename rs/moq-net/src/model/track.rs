@@ -34,6 +34,7 @@ use demand::Subscriptions;
 mod fill;
 mod hole;
 mod miss;
+pub(super) use fill::Asking;
 pub use fill::Fill;
 use fill::FillState;
 pub(crate) use hole::Hole;
@@ -3843,7 +3844,8 @@ pub(super) enum Board {
 }
 
 /// Board `reader`'s group at its frame, which the copy it read shed: ride a copy that
-/// admits it, else ask the track's [`Requests`] handlers for a flight from that frame.
+/// admits it, else ask the track's [`Requests`] handlers for a flight from that frame,
+/// with the reader's priority and budget.
 /// `None` when no handler can serve one.
 ///
 /// A compressed group's flight starts at frame 0, since a later frame builds on the ones
@@ -3858,10 +3860,10 @@ pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer)
 	}
 	let fills = state.fills.clone();
 	drop(state);
+	// One group either way, so it never turns a wider fill it joins newest first.
 	let asking = fill::Asking {
-		priority: 0,
-		max_delay: None,
 		order: Order::Ascending,
+		..reader.asking()
 	};
 	let (key, frame) = (reader.start, if compress { 0 } else { reader.index() });
 	let join = fills.lock().fly(&fills, key, frame, asking)?;
@@ -6931,6 +6933,7 @@ impl Fetching {
 			cache,
 			reading: Reading::new(state.clone()),
 			key,
+			priority: self.priority,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		});
@@ -7223,6 +7226,7 @@ struct FetchExpiry {
 	cache: Arc<cache::Track>,
 	reading: Reading,
 	key: u64,
+	priority: i8,
 	max_delay: Option<Duration>,
 	superseded: Superseded,
 }
@@ -7278,9 +7282,18 @@ impl group::Expiry for FetchExpiry {
 			state,
 			cache,
 			key: self.key,
+			priority: self.priority,
 			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		})
+	}
+
+	fn asking(&self) -> Asking {
+		Asking {
+			priority: self.priority,
+			max_delay: self.max_delay,
+			order: Order::Ascending,
+		}
 	}
 
 	fn ended(&self) {
@@ -7325,6 +7338,15 @@ impl group::Expiry for GroupExpiry {
 			key: self.key,
 			superseded: Superseded::default(),
 		})
+	}
+
+	fn asking(&self) -> Asking {
+		let subscription = self.subscription.read();
+		Asking {
+			priority: subscription.priority,
+			max_delay: subscription.delay.max,
+			order: subscription.order,
+		}
 	}
 
 	fn ended(&self) {
@@ -27548,6 +27570,49 @@ mod test {
 			.write_frame(Timestamp::from_millis(100_000).unwrap(), numbered(0))
 			.unwrap();
 		assert!(matches!(late.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	/// A flight asks upstream with its rider's priority and budget, a subscriber's or a
+	/// fetch's, as any other fill does, so a late joiner's replay is not ranked below live
+	/// traffic. It asks oldest first whatever the rider's order, since it holds one group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_flight_asks_with_its_riders_priority() {
+		let budget = Duration::from_secs(10);
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut sub = producer.subscribe(
+			Subscription::default()
+				.with_priority(5)
+				.with_delay(Delay::default().with_max(budget))
+				.with_order(Order::Descending),
+		);
+		let mut live = producer.append_next().unwrap();
+		for index in 0..3_000u32 {
+			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+				.unwrap();
+		}
+		let mut late = sub.recv_group().now_or_never().unwrap().unwrap().expect("group 0");
+		assert_eq!(read_numbered(&mut late), None, "boarding");
+		let fill = asked(&requests).expect("a flight");
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		assert_eq!(fill.priority(), 5);
+		assert_eq!(fill.max_delay(), Some(budget));
+		assert_eq!(fill.order(), Order::Ascending);
+		drop(late);
+		drop(fill);
+
+		let fetch = group::Fetch::default().with_priority(-3).with_max_delay(budget);
+		let mut fetched = producer
+			.consume()
+			.fetch_group(0, fetch)
+			.now_or_never()
+			.expect("cached")
+			.expect("group 0");
+		assert_eq!(read_numbered(&mut fetched), None, "boarding");
+		let fill = asked(&requests).expect("a flight");
+		assert_eq!(fill.priority(), -3);
+		assert_eq!(fill.max_delay(), Some(budget));
 	}
 
 	/// Pool debt sheds a flight even once the cached copy of its group was evicted whole.
