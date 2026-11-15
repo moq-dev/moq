@@ -216,7 +216,7 @@ async fn an_immediate_close_loop_escalates_until_the_timeout() {
 	const TIMEOUT: Duration = Duration::from_secs(2);
 	let peer = url("tcp://peer:1/");
 	let started = kio::clock::now();
-	let mut machine = Reconnect::new(config(INITIAL, Some(TIMEOUT)), vec![peer.clone()], started).unwrap();
+	let mut machine = established(Reconnect::new(config(INITIAL, Some(TIMEOUT)), vec![peer.clone()], started).unwrap());
 	let mut run = Run::default();
 
 	let err = drive(&mut machine, &[(peer, Peer::Close)], &mut run, |_| false)
@@ -299,12 +299,14 @@ async fn an_immediate_redirect_loop_escalates_until_the_timeout() {
 async fn a_zero_initial_redials_at_once() {
 	let peer = url("tcp://peer:1/");
 	let first = kio::clock::now();
-	let mut machine = Reconnect::new(
-		config(Duration::ZERO, Some(Duration::from_secs(1))),
-		vec![peer.clone()],
-		first,
-	)
-	.unwrap();
+	let mut machine = established(
+		Reconnect::new(
+			config(Duration::ZERO, Some(Duration::from_secs(1))),
+			vec![peer.clone()],
+			first,
+		)
+		.unwrap(),
+	);
 	let mut run = Run::default();
 
 	drive(&mut machine, &[(peer, Peer::Close)], &mut run, |run| {
@@ -336,6 +338,57 @@ async fn the_first_walk_fails_fast() {
 	assert_eq!(run.dials, targets, "the walk tried every address once");
 	assert!(run.events.is_empty(), "retried: {:?}", run.events);
 	assert_eq!(kio::clock::now(), started, "gave up without waiting");
+}
+
+/// A first session closed before it was healthy ends the policy with its close reason,
+/// like a failed first walk: it is how a peer refuses a session it already accepted, such
+/// as a rejected credential on moq-lite 03 or later. Tokens replaced since change nothing.
+#[kio::test]
+async fn a_first_session_closed_before_healthy_fails_fast() {
+	let peer = url("tcp://peer:1/");
+	let tokens = auth::Tokens::new(vec!["old".parse().unwrap()]);
+	let started = kio::clock::now();
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], started)
+		.unwrap()
+		.with_tokens(tokens.clone());
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	tokens.set(vec!["new".parse().unwrap()]);
+	kio::clock::sleep(Config::default().backoff.healthy / 2).await;
+	run.servers.remove(0).abort(Error::Unauthorized);
+	let ended = drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |_| false).await;
+	assert!(
+		matches!(ended, Some(Err(TestError::Net(_)))),
+		"the refusal was retried: {ended:?}"
+	);
+	assert_eq!(run.dials.len(), 1, "redialed after the refusal");
+	assert!(run.events.is_empty(), "retried: {:?}", run.events);
+}
+
+/// A session that stayed up past the healthy bar establishes the policy: its close, and
+/// the failed walk after it, back off and retry like any later failure.
+#[kio::test]
+async fn a_healthy_session_establishes_the_policy() {
+	let peer = url("tcp://peer:1/");
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now()).unwrap();
+	let mut run = Run::default();
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+
+	kio::clock::sleep(Config::default().backoff.healthy).await;
+	run.servers.remove(0).abort(Error::Unauthorized);
+	let ended = drive(&mut machine, &[(peer, Peer::Fail(Verdict::Retry))], &mut run, |run| {
+		run.dials.len() == 3
+	})
+	.await;
+	assert!(ended.is_none(), "an established policy gave up");
+	assert_eq!(run.events, ["offline", "retrying"]);
 }
 
 /// A zero window is a real bound, not "unlimited": a retry's failure gives up at once. A
@@ -542,9 +595,9 @@ async fn a_first_settled_answer_fails_fast() {
 async fn an_ended_auth_handle_ends_the_policy() {
 	let peer = url("tcp://peer:1/");
 	let tokens = auth::Tokens::new(Vec::new());
-	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
-		.unwrap()
-		.with_tokens(tokens.clone());
+	let mut machine =
+		established(Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now()).unwrap())
+			.with_tokens(tokens.clone());
 	let mut run = Run::default();
 
 	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
@@ -892,13 +945,14 @@ async fn a_handoff_restart_redials_once_until_the_session_closes() {
 	assert_eq!(run.events, ["offline"]);
 }
 
-/// A session closed for a protocol violation or a refused credential reconnects like any
-/// other close: the policy does not judge the error's kind.
+/// Once established, a session closed for a protocol violation or a refused credential
+/// reconnects like any other close: the policy does not judge the error's kind.
 #[kio::test]
 async fn a_session_closed_for_any_reason_reconnects() {
 	for reason in [Error::ProtocolViolation, Error::Unauthorized, Error::Expired] {
 		let peer = url("tcp://peer:1/");
-		let mut machine = Reconnect::new(Config::default(), vec![peer.clone()], kio::clock::now()).unwrap();
+		let mut machine =
+			established(Reconnect::new(Config::default(), vec![peer.clone()], kio::clock::now()).unwrap());
 		let mut run = Run::default();
 		drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
 			!run.accepts.is_empty()

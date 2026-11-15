@@ -7350,8 +7350,10 @@ async fn session_state_names_a_failing_first_dial() {
 	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
-	session.cancel(0);
-	session.closed().await.unwrap();
+	// The server ended the client's first session before it was healthy, which ends the
+	// client's session too rather than redialing.
+	let closed = kio::clock::timeout(TIMEOUT, session.closed()).await.unwrap();
+	assert!(closed.is_err(), "the refused first session closed cleanly");
 	assert!(matches!(session.state().phase, MoqConnectionPhase::Closed { .. }));
 	accepted.cancel(0);
 	server.cancel();
@@ -7441,6 +7443,8 @@ async fn client_reconnects_and_resumes_announcements() {
 		.await
 		.expect("first session timed out")
 		.expect("accept task gone");
+	// Past the 1s healthy bar, so the drop redials rather than ending the session.
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	first.cancel(0);
 
 	let status = kio::clock::timeout(
@@ -7691,7 +7695,9 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		Ok(status) => panic!("no transition was pending, got {status:?}"),
 	}
 
-	// The transition the abandoned call would have eaten.
+	// The transition the abandoned call would have eaten, once past the 1s healthy bar so
+	// the session redials rather than ends.
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	server_session.cancel(0);
 
 	let status = kio::clock::timeout(TIMEOUT, cs.state_changed(status.revision))

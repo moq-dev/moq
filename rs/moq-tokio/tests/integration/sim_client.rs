@@ -133,6 +133,8 @@ fn reconnect() {
 		announced(&server.origin).await;
 		assert_eq!(connection.connects(), 1);
 
+		// Past the default healthy bar, so the restart is retried rather than ending the loop.
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		server.stop().await;
 		drop(session);
 		let mut server = Server::with_identity(&network, addr, tls).await;

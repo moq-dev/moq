@@ -144,6 +144,8 @@ test("a replacement that closes mid-handover hands back to the draining session"
 		const first = reload.established.peek();
 		const drained = dials[0];
 		if (!drained) throw new Error("no first dial");
+		// Healthy first, so a replacement's close reconnects rather than stopping the URL.
+		await clock.advance(Duration.millis(1000));
 		await goaway(drained.server, "");
 		await elapse(clock, () => reload.established.peek() !== first && reload.established.peek() !== undefined);
 		const replacement = dials[1];
@@ -310,6 +312,8 @@ test("a redirected connection falls back to the configured URL once its target d
 
 	try {
 		await waitUntil(() => handle.status.peek() === "connected");
+		// Healthy first, so the target's death reconnects rather than stopping the URL.
+		await clock.advance(Duration.millis(1000));
 		await goaway(dials[0]?.server as WebTransport, moved.href);
 		await elapse(clock, () => dials.length === 2 && handle.status.peek() === "connected");
 		expect(dials[1]?.url).toBe(moved.href);

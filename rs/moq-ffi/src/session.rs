@@ -194,9 +194,9 @@ pub struct MoqWebSocketConfig {
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// It applies only once a session has been established: a first dial that reaches no
-/// session ends the connection with its error rather than retrying, unless the peer refused
-/// credentials the tokens have replaced since, which earns another dial. The delay starts at
+/// It applies only once a session has stayed up past 1s: until then, a failed dial or a
+/// closed session, such as a refused credential, ends the connection with its error rather
+/// than retrying. The delay starts at
 /// `initial`, multiplies by `multiplier` after each failed attempt, and caps at `max`.
 /// After `timeout` of consecutive failures the connection gives up for good; the window
 /// resets whenever a session stays up past 1s. Each null field uses moq-tokio's default:
@@ -594,10 +594,11 @@ impl MoqClient {
 	///
 	/// Once a session has been established, it automatically reconnects with backoff when
 	/// the transport drops (unless [`MoqClientConfig::once`] is set), and broadcasts
-	/// consumed through it ride out the gap. The first dial fails fast instead: if none of
-	/// the peer's addresses yields a session, [`MoqSession::closed`] resolves with that
-	/// error, so an app started before its relay is reachable must start the session again.
-	/// A refusal of credentials replaced during that dial redials with the new ones instead.
+	/// consumed through it ride out the gap. Until a session has stayed up past 1s it fails
+	/// fast instead: if none of the peer's addresses yields a session, or the peer closes the
+	/// one it accepted, as a relay refusing a credential does, [`MoqSession::closed`] resolves
+	/// with that error, so an app started before its relay is reachable must start the session
+	/// again.
 	/// Read [`MoqSession::state`] and wait with [`MoqSession::state_changed`] for
 	/// reconnects; [`MoqSession::closed`] waits for the terminal result.
 	///

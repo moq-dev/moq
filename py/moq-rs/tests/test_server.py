@@ -139,8 +139,10 @@ async def test_client_reconnects_and_resumes_announcements():
                 assert state.connects == 1
                 assert session.stats().version is not None
 
-                # Kill the transport under the client, like a relay restart.
+                # Kill the transport under the client, like a relay restart, once past
+                # the 1s healthy bar so the drop redials rather than ending the session.
                 await asyncio.wait_for(accepted.wait(), timeout=10)
+                await asyncio.sleep(1)
                 sessions[0].cancel(0)
 
                 # Nothing accepts the redial until the gate opens, so DISCONNECTED
