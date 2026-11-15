@@ -58,10 +58,11 @@ pub struct Config {
 
 	/// Run the relay as the child of a process that stands in for it as a service's
 	/// main process. The stand-in passes SIGTERM and SIGINT on, forwards readiness, and
-	/// exits with the relay; on SIGUSR2 it exits at once and leaves the relay running.
+	/// exits with the relay; on SIGUSR2 it exits at once and leaves the relay running,
+	/// which drains anyway if no successor takes over within `drain_timeout`.
 	/// A systemd unit with `KillMode=process` and `RestartKillSignal=SIGUSR2` then
 	/// restarts by starting the next relay beside this one, which takes over through
-	/// `handoff.socket`. Needs `handoff.socket`.
+	/// `handoff.socket`. Needs `handoff.socket` and a service manager's `NOTIFY_SOCKET`.
 	#[usage(
 		long = "handoff-supervise",
 		env = "MOQ_HANDOFF_SUPERVISE",
@@ -186,6 +187,12 @@ pub(crate) struct Events {
 	pub alone: Option<tokio::sync::oneshot::Sender<()>>,
 	/// Starts this relay's drain.
 	pub drain: crate::shutdown::Trigger,
+	/// SIGUSR2, which a stand-in passes on as it leaves this relay to its successor.
+	#[cfg(unix)]
+	pub left: Option<tokio::signal::unix::Signal>,
+	/// How long a successor has to take over once the stand-in left, before this
+	/// relay drains anyway: `drain_timeout`.
+	pub window: std::time::Duration,
 }
 
 #[cfg(target_os = "linux")]
@@ -565,7 +572,11 @@ mod imp {
 				handed,
 				mut alone,
 				drain,
+				mut left,
+				window,
 			} = events;
+			// When this relay drains if no successor took over since its stand-in left.
+			let mut takeover: Option<kio::clock::Instant> = None;
 			let control = tokio::net::UnixListener::from_std(self.control.try_clone()?)
 				.context("failed to serve the handoff socket")?;
 			let mut predecessor = self.predecessor.as_ref();
@@ -583,6 +594,17 @@ mod imp {
 						if let Err(err) = self.steer(shard::Steer::Alone) {
 							tracing::warn!(%err, "failed to take back the replaced relay's connections");
 						}
+					}
+					Some(()) = signaled(left.as_mut()), if successor.is_none() && takeover.is_none() => {
+						tracing::info!(?window, "left by the stand-in; draining unless a relay takes over first");
+						takeover = Some(kio::clock::Instant::now().saturating_add(window));
+					}
+					() = until(takeover), if successor.is_none() && takeover.is_some() => {
+						// A failed upgrade: the service no longer tracks this relay, so it must not
+						// serve on indefinitely, holding the port the next start needs.
+						tracing::warn!(?window, "no relay took over after the stand-in left; draining");
+						takeover = None;
+						drain.start();
 					}
 					() = closed(successor.as_ref()), if successor.is_some() => {
 						tracing::warn!("the relay that took over exited before this one; taking new handshakes back");
@@ -744,6 +766,22 @@ mod imp {
 	}
 
 	/// Resolve once the relay on `stream` is gone; never without one.
+	/// The next SIGUSR2; never without the handler.
+	async fn signaled(signal: Option<&mut tokio::signal::unix::Signal>) -> Option<()> {
+		match signal {
+			Some(signal) => signal.recv().await,
+			None => std::future::pending().await,
+		}
+	}
+
+	/// Wait for `deadline`; never without one.
+	async fn until(deadline: Option<kio::clock::Instant>) {
+		match deadline {
+			Some(deadline) => kio::clock::sleep_until(deadline).await,
+			None => std::future::pending().await,
+		}
+	}
+
 	async fn closed(stream: Option<&UnixStream>) {
 		let Some(stream) = stream else {
 			return std::future::pending().await;
@@ -763,12 +801,14 @@ mod imp {
 	/// Stand in for the relay as a service's main process, per `handoff.supervise`:
 	/// start the relay as a child with this process's arguments, pass it SIGTERM,
 	/// SIGINT, and SIGUSR1 (a heap profile's), forward its readiness, and return its
-	/// exit code once it exits. On SIGUSR2 return 0 at once and leave it running, to
-	/// drain beside the relay that replaces it.
+	/// exit code once it exits. On SIGUSR2 pass it on and return 0 at once, leaving the
+	/// relay to drain beside the one that replaces it, or on its own once
+	/// `drain_timeout` passes with none taking over. Before the relay is ready, SIGUSR2
+	/// stops it instead, as it serves nothing a successor could take.
 	///
 	/// A service manager takes readiness only from its main process, which the relay
 	/// no longer is; it also takes it from nothing else, so a relay left draining can
-	/// never speak for the service.
+	/// never speak for the service. That needs a service manager's `NOTIFY_SOCKET`.
 	pub async fn supervise(config: &Config) -> anyhow::Result<i32> {
 		use std::os::unix::process::ExitStatusExt;
 
@@ -788,27 +828,29 @@ mod imp {
 		let mut command = tokio::process::Command::new(exe);
 		command
 			.args(super::relay_args(std::env::args_os().skip(1)))
-			.env("MOQ_HANDOFF_SUPERVISE", "false");
+			.env("MOQ_HANDOFF_SUPERVISE", "false")
+			// Its own process group: a signal to the stand-in's group, such as a terminal's
+			// Ctrl-C, reaches the relay once, through `pass`, since a second ends its drain.
+			.process_group(0);
 
-		let notify = match std::env::var_os("NOTIFY_SOCKET") {
-			Some(manager) => {
-				let mut name = path.clone().into_os_string();
-				name.push(format!(".{}.notify", std::process::id()));
-				let name = PathBuf::from(name);
-				let _ = std::fs::remove_file(&name);
-				let socket = tokio::net::UnixDatagram::bind(&name)
-					.with_context(|| format!("failed to bind {}", name.display()))?;
-				command.env("NOTIFY_SOCKET", &name);
-				Some(Notify { name, socket, manager })
-			}
-			None => None,
-		};
+		let manager = std::env::var_os("NOTIFY_SOCKET")
+			.context("handoff.supervise needs a service manager's NOTIFY_SOCKET (systemd Type=notify)")?;
+		let mut name = path.clone().into_os_string();
+		name.push(format!(".{}.notify", std::process::id()));
+		let name = PathBuf::from(name);
+		let _ = std::fs::remove_file(&name);
+		let socket =
+			tokio::net::UnixDatagram::bind(&name).with_context(|| format!("failed to bind {}", name.display()))?;
+		command.env("NOTIFY_SOCKET", &name);
+		let notify = Notify { name, socket, manager };
 
 		let mut child = command.spawn().context("failed to start the relay")?;
 		let pid = child.id().context("the relay exited at once")? as libc::pid_t;
 		tracing::info!(pid, "supervising the relay");
 
 		let mut message = [0; 4096];
+		// Whether the relay reported READY, and so listens for SIGUSR2.
+		let mut ready = false;
 		let code = loop {
 			tokio::select! {
 				status = child.wait() => {
@@ -821,21 +863,24 @@ mod imp {
 				Some(()) = interrupt.recv() => pass(pid, libc::SIGINT),
 				Some(()) = profile.recv() => pass(pid, libc::SIGUSR1),
 				Some(()) = leave.recv() => {
-					tracing::info!(pid, "leaving the relay to drain beside the one replacing it");
-					break 0;
+					if ready {
+						tracing::info!(pid, "leaving the relay to drain beside the one replacing it");
+						pass(pid, libc::SIGUSR2);
+						break 0;
+					}
+					tracing::info!(pid, "restarted before the relay was ready; stopping it");
+					pass(pid, libc::SIGTERM);
 				}
-				Ok(len) = Notify::recv(notify.as_ref(), &mut message) => {
-					if let Some(notify) = &notify
-						&& let Err(err) = notify.forward(&message[..len])
-					{
+				Ok(len) = notify.socket.recv(&mut message) => {
+					let message = &message[..len];
+					ready |= std::str::from_utf8(message).is_ok_and(|text| text.lines().any(|line| line == "READY=1"));
+					if let Err(err) = notify.forward(message) {
 						tracing::warn!(%err, "failed to forward the relay's notification");
 					}
 				}
 			}
 		};
-		if let Some(notify) = notify {
-			let _ = std::fs::remove_file(&notify.name);
-		}
+		let _ = std::fs::remove_file(&notify.name);
 		Ok(code)
 	}
 
@@ -857,14 +902,6 @@ mod imp {
 	}
 
 	impl Notify {
-		/// The next notification's length; never without a socket.
-		async fn recv(notify: Option<&Self>, buf: &mut [u8]) -> io::Result<usize> {
-			match notify {
-				Some(notify) => notify.socket.recv(buf).await,
-				None => std::future::pending().await,
-			}
-		}
-
 		/// Send `message` on to the service manager, as this process's own.
 		fn forward(&self, message: &[u8]) -> io::Result<()> {
 			use std::os::linux::net::SocketAddrExt;

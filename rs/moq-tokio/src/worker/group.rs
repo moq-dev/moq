@@ -93,6 +93,8 @@ impl Workers {
 	/// [`moq_sock::shard::Bound::adopt`]. `server.listen.bind` is replaced with the
 	/// group's address. The group stays reachable through [`Self::sockets`], to
 	/// steer it or hand it on.
+	///
+	/// Fails if a member was already taken with [`moq_sock::shard::Bound::member`].
 	pub fn from_group(mut server: crate::server::Config, mut group: moq_sock::shard::Bound, pin: bool) -> Result<Self> {
 		if server.tls.is_some() && server.listen.tls.configured() {
 			return Err(crate::tls::Error::ConflictingServe.into());
@@ -134,6 +136,19 @@ impl Workers {
 					.certificates()
 			});
 			workers.push(worker);
+		}
+
+		// A member taken before this call has no worker here, yet the group still steers
+		// its share of the port to it.
+		if workers.len() != usize::from(count) {
+			return Err(crate::quic::Error::BindSocket(std::io::Error::new(
+				std::io::ErrorKind::InvalidInput,
+				format!(
+					"{} of the group's {count} members were taken before it was served",
+					usize::from(count) - workers.len()
+				),
+			))
+			.into());
 		}
 
 		tracing::info!(workers = count, pinned = !cores.is_empty(), %addr, "bound QUIC workers");

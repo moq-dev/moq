@@ -324,10 +324,76 @@ async fn the_old_relay_outlives_a_new_one_that_dies() {
 		.unwrap();
 }
 
+/// A stand-in that takes its relay with it when dropped, such as on a failed
+/// assertion; a relay it already left is [`Reap`]'s.
+struct StandIn(tokio::process::Child);
+
+impl Drop for StandIn {
+	fn drop(&mut self) {
+		if let Some(pid) = self.0.id() {
+			for relay in children(pid) {
+				// SAFETY: kill has no memory-safety preconditions.
+				unsafe { libc::kill(relay, libc::SIGKILL) };
+			}
+		}
+	}
+}
+
+impl std::ops::Deref for StandIn {
+	type Target = tokio::process::Child;
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl std::ops::DerefMut for StandIn {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
+	}
+}
+
+/// A relay a stand-in left to this test, killed if the test ends before reaping it.
+struct Reap(Option<libc::pid_t>);
+
+impl Reap {
+	/// Wait for the relay to exit, reaping it so the guard never signals a reused pid.
+	async fn exited(&mut self, what: &str) -> libc::c_int {
+		let relay = self.0.expect("reaped already");
+		let status = tokio::task::spawn_blocking(move || {
+			let mut status = 0;
+			// SAFETY: waitpid writes only to `status`.
+			let reaped = unsafe { libc::waitpid(relay, &mut status, 0) };
+			assert_eq!(reaped, relay);
+			status
+		});
+		let status = kio::clock::timeout(TIMEOUT, status)
+			.await
+			.unwrap_or_else(|_| panic!("{what} kept serving"))
+			.unwrap();
+		self.0 = None;
+		status
+	}
+}
+
+impl Drop for Reap {
+	fn drop(&mut self) {
+		if let Some(relay) = self.0 {
+			// SAFETY: kill has no memory-safety preconditions; the pid is not yet reaped,
+			// so it is still the relay's.
+			unsafe { libc::kill(relay, libc::SIGKILL) };
+		}
+	}
+}
+
 /// Start `moq-relay --handoff-supervise` with its config in the environment, which
 /// is all it reads: the test's own would reach it too.
-fn stand_in(dir: &Path, cert: &Path, key: &Path, notify: &Path) -> tokio::process::Child {
-	tokio::process::Command::new(env!("CARGO_BIN_EXE_moq-relay"))
+fn stand_in(dir: &Path, cert: &Path, key: &Path, notify: &Path) -> StandIn {
+	stand_in_draining(dir, cert, key, notify, "10s")
+}
+
+/// [`stand_in`], with a `drain_timeout` of `drain`.
+fn stand_in_draining(dir: &Path, cert: &Path, key: &Path, notify: &Path, drain: &str) -> StandIn {
+	let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq-relay"))
 		.arg("--handoff-supervise")
 		.env_clear()
 		.env("MOQ_LISTEN", "127.0.0.1:0")
@@ -337,9 +403,51 @@ fn stand_in(dir: &Path, cert: &Path, key: &Path, notify: &Path) -> tokio::proces
 		.env("MOQ_AUTH_PUBLIC", "**")
 		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
 		.env("NOTIFY_SOCKET", notify)
+		.env("MOQ_DRAIN_TIMEOUT", drain)
 		.kill_on_drop(true)
 		.spawn()
-		.expect("start the stand-in")
+		.expect("start the stand-in");
+	StandIn(child)
+}
+
+/// A restart whose next relay never takes over, such as one that fails to start,
+/// leaves the old relay outside the service: it drains once `drain_timeout`
+/// passes with no successor, rather than holding the port forever.
+#[tokio::test]
+async fn a_relay_no_successor_takes_over_from_drains() {
+	kio::clock::host_time(); // real relays in real processes
+	// SAFETY: prctl with these arguments has no memory-safety preconditions.
+	assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) }, 0);
+
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let notify_path = dir.path().join("notify");
+	let notify = tokio::net::UnixDatagram::bind(&notify_path).unwrap();
+
+	let mut stand_in = stand_in_draining(dir.path(), &cert, &key, &notify_path, "1s");
+	ready(&notify).await;
+	let relays = children(stand_in.id().unwrap());
+	assert_eq!(relays.len(), 1, "the stand-in runs one relay: {relays:?}");
+	let mut left = Reap(Some(relays[0]));
+
+	let started = std::time::Instant::now();
+	// SAFETY: kill has no memory-safety preconditions.
+	assert_eq!(
+		unsafe { libc::kill(stand_in.id().unwrap() as libc::pid_t, libc::SIGUSR2) },
+		0
+	);
+	let status = exited(&mut stand_in, "the stand-in").await;
+	assert_eq!(status.code(), Some(0), "{status}");
+
+	let status = left.exited("a relay no successor took over from").await;
+	assert!(
+		libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+		"the relay exited with {status:#x}"
+	);
+	assert!(
+		started.elapsed() >= Duration::from_secs(1),
+		"drained before its window for a successor passed"
+	);
 }
 
 /// Start a relay process with its config in the environment, serving QUIC on `port`
@@ -466,6 +574,7 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 	let relays = children(old.id().unwrap());
 	assert_eq!(relays.len(), 1, "the stand-in runs one relay: {relays:?}");
 	let relay = relays[0];
+	let mut left = Reap(Some(relay));
 
 	// The restart's stop: the stand-in leaves, its relay stays.
 	// SAFETY: kill has no memory-safety preconditions.
@@ -483,17 +592,7 @@ async fn a_restart_starts_the_new_relay_beside_the_old() {
 	// The restart's start: the new relay takes over, and the old one drains.
 	let mut new = stand_in(dir.path(), &cert, &key, &notify_path);
 	ready(&notify).await;
-	let status = tokio::task::spawn_blocking(move || {
-		let mut status = 0;
-		// SAFETY: waitpid writes only to `status`.
-		let reaped = unsafe { libc::waitpid(relay, &mut status, 0) };
-		assert_eq!(reaped, relay);
-		status
-	});
-	let status = kio::clock::timeout(TIMEOUT, status)
-		.await
-		.expect("the old relay kept serving after the new one took over")
-		.unwrap();
+	let status = left.exited("the old relay, after the new one took over,").await;
 	assert!(
 		libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
 		"the old relay exited with {status:#x}"

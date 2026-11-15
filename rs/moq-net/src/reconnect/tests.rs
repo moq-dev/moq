@@ -792,6 +792,26 @@ async fn a_waited_restart_redials_only_once_the_session_closes() {
 	assert_eq!(run.events, ["offline"]);
 }
 
+/// A one-shot policy ends cleanly on a GOAWAY naming no URI, as on any other, under
+/// every restart policy and whether or not the session was healthy.
+#[kio::test]
+async fn a_one_shot_policy_ends_on_a_restart() {
+	for restart in [Restart::Redial, Restart::Wait, Restart::Handoff] {
+		let peer = url("tcp://peer:1/");
+		let mut config = config(INITIAL, Some(Duration::from_secs(1)));
+		config.restart = restart;
+		config.once = true;
+		let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+		let mut run = Run::default();
+		let end = drive(&mut machine, &[(peer, Peer::Goaway(String::new()))], &mut run, |_| {
+			false
+		})
+		.await;
+		assert!(matches!(end, Some(Ok(()))), "{restart:?}: {end:?}");
+		assert_eq!(run.dials.len(), 1, "{restart:?} redialed");
+	}
+}
+
 /// The actions a policy asks for until it only waits, by name.
 async fn settle(machine: &mut Reconnect<Url, TestError>) -> Vec<&'static str> {
 	let mut events = Vec::new();

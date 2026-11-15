@@ -216,10 +216,11 @@ subscriptions go elsewhere when another route serves them, and an existing one
 moves to another route of the same stream if there is one, or else finishes on
 the draining peer. The drain is that relay's
 own state, so it still advertises the routes onward at their real cost. A
-relay redials a peer draining to restart once, at once, which reaches a
-replacement serving beside the draining process ([handoff](/bin/relay/config#handoff)).
-When the draining process answers that redial itself, the relay keeps the new
-session until that process closes it, and redials only then.
+relay whose session to a peer draining to restart has lived past
+`backoff.healthy` redials it once, at once, which reaches a replacement serving
+beside the draining process ([handoff](/bin/relay/config#handoff)). A session
+drained before that, such as the redial when the draining process answered it
+itself, stays until that process closes it, and the relay redials only then.
 
 A route's price is the publisher's production cost plus the link costs it
 crosses. A live publisher seeds 0, and caching never changes it.

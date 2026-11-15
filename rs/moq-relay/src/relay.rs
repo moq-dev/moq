@@ -699,6 +699,15 @@ impl Relay {
 		// one replaces, so a signal caught in between starts the drain at its first
 		// poll, as one just after READY would.
 		let mut handlers = signals.then(shutdown::Signals::new).transpose()?;
+		// Before READY too, which is when a stand-in starts passing SIGUSR2 on.
+		#[cfg(unix)]
+		let left = match signals && handoff.is_some() {
+			true => Some(
+				tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())
+					.context("failed to listen for SIGUSR2")?,
+			),
+			false => None,
+		};
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
@@ -840,6 +849,7 @@ impl Relay {
 
 		let handoff = {
 			let drain = shutdown_trigger.clone();
+			let window = shutdown.drain_timeout;
 			async move {
 				let Some(handoff) = handoff else {
 					return std::future::pending().await;
@@ -848,6 +858,9 @@ impl Relay {
 					handed: handed_tx,
 					alone,
 					drain,
+					#[cfg(unix)]
+					left,
+					window,
 				};
 				match handoff.run(events).await {
 					Ok(never) => match never {},

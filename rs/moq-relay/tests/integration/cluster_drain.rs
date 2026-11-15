@@ -50,6 +50,8 @@ struct Relay {
 	cluster: cluster::Cluster,
 	trigger: shutdown::Trigger,
 	exited: kio::clock::sim::JoinHandle<()>,
+	/// Whether `b` is still this relay's listener, to take down as it exits.
+	owned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	_route: moq_net::origin::Route,
 }
 
@@ -57,17 +59,19 @@ impl Relay {
 	/// The relay serving `b`, which takes the host down as it exits and drops its
 	/// listener.
 	fn up(net: &Net) -> Self {
-		Self::serve(net, true)
+		Self::serve(net)
 	}
 
-	/// A relay taking over `b` from the one serving it, as a handoff does: new dials
-	/// reach it, and the sessions the old one holds stay there.
-	fn beside(net: &Net) -> Self {
+	/// A relay taking over `b` from `old`, as a handoff does: new dials reach it, the
+	/// sessions `old` holds stay there, and the listener is this relay's to drop.
+	fn beside(net: &Net, old: &Self) -> Self {
+		old.owned.store(false, std::sync::atomic::Ordering::SeqCst);
 		net.down("b");
-		Self::serve(net, false)
+		Self::serve(net)
 	}
 
-	fn serve(net: &Net, owned: bool) -> Self {
+	fn serve(net: &Net) -> Self {
+		let owned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 		let cluster = memory::spawn_cluster(net.options(&[]));
 		let route = cluster
 			.origin
@@ -76,9 +80,10 @@ impl Relay {
 		let (trigger, observer) = shutdown::Observer::new(DRAIN);
 		let _accepts = net.relay("b", &cluster, &memory::public(&["**"], &[], &[]), &observer);
 		let net = net.clone();
+		let exits = owned.clone();
 		let exited = kio::clock::sim::spawn(async move {
 			observer.drained().await;
-			if owned {
+			if exits.load(std::sync::atomic::Ordering::SeqCst) {
 				net.down("b");
 			}
 		});
@@ -86,6 +91,7 @@ impl Relay {
 			cluster,
 			trigger,
 			exited,
+			owned,
 			_route: route,
 		}
 	}
@@ -163,7 +169,7 @@ async fn a_relay_beside_the_draining_one_takes_its_peers_inner() {
 	let net = Net::new();
 	let (b, _peers) = mesh(&net).await;
 
-	let b2 = Relay::beside(&net);
+	let b2 = Relay::beside(&net, &b);
 	let started = kio::clock::now();
 	b.trigger.start();
 	within("B exits once its peers leave", DRAIN, b.exited)
@@ -179,4 +185,9 @@ async fn a_relay_beside_the_draining_one_takes_its_peers_inner() {
 	learns("B' learns c", &b2.cluster.origin, "c").await;
 	kio::clock::sim::idle().await;
 	assert_eq!(net.accepted("b"), 4, "a peer dialed B' other than once");
+
+	// B's exit left the address to B': a fresh peer still reaches it.
+	let (_d, _d_route) = peer(&net, "d").await;
+	learns("B' learns d", &b2.cluster.origin, "d").await;
+	assert_eq!(net.accepted("b"), 5, "the fresh peer did not reach B'");
 }

@@ -603,7 +603,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 							Restart::Wait => true,
 							Restart::Handoff => now.saturating_duration_since(live.since) < self.config.backoff.healthy,
 						};
-						if wait && msg.uri().is_empty() {
+						// A one-shot policy ends on any GOAWAY instead, as `once` promises.
+						if wait && !self.config.once && msg.uri().is_empty() {
 							tracing::info!("peer is restarting; serving until it closes the session");
 							live.goaway = None;
 						} else {

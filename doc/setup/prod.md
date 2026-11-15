@@ -75,6 +75,10 @@ sudo cp /usr/share/moq-relay/handoff.conf /etc/systemd/system/moq-relay.service.
 sudo systemctl daemon-reload
 ```
 
+The relay running when you install it started without a stand-in, so the first
+restart after that cuts its sessions as before; every restart after it hands
+off.
+
 ```ini
 [Service]
 ExecStart=
@@ -86,13 +90,21 @@ RuntimeDirectoryPreserve=restart
 ```
 
 `--handoff-supervise` keeps a stand-in as the unit's main process. A restart
-sends it SIGUSR2, and it exits at once, leaving its relay to drain while the
-next relay takes over and reports ready. A stop sends SIGTERM, which the
-stand-in passes to its relay, as it does SIGINT and SIGUSR1 (a heap profile's).
-A relay left draining is not signaled again and exits at the end of its own
-drain, and a restart before then fails until it has, which `Restart=on-failure`
-retries. systemd logs that the old relay "remains running after unit stopped":
-that is the drain.
+sends it SIGUSR2, and it passes that on and exits at once, leaving its relay to
+drain while the next relay takes over and reports ready. A stop sends SIGTERM,
+which the stand-in passes to its relay, as it does SIGINT and SIGUSR1 (a heap
+profile's). A relay left draining is not signaled again and exits at the end of
+its own drain, and a restart before then fails until it has, which
+`Restart=on-failure` retries. systemd logs that the old relay "remains running
+after unit stopped": that is the drain.
+
+If the next relay never takes over, such as on a bad config or a crash at
+startup, the old relay keeps serving outside the unit until `drain_timeout`
+passes, then drains and exits like any other. Until then `systemctl stop`
+cannot reach it and a fresh start cannot bind its port. `systemctl status
+moq-relay` lists it among the unit's processes, and the journal shows the next
+relay's error; fix that and restart to hand off to it, or stop the old relay
+sooner with `kill -TERM <pid>`.
 
 Both relays must run as the same user. `DynamicUser=` adopts an existing system
 user named after the unit, so create one to keep the UID across restarts:
