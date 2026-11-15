@@ -195,6 +195,7 @@ int32_t moq_consume_track_cancel(uint32_t track);
 
 // Sockets: two-way sessions between endpoints sharing an origin
 int32_t moq_socket_create(uint32_t origin, const char *prefix, uintptr_t prefix_len, const char *id, uintptr_t id_len);
+int32_t moq_socket_is_endpoint(const char *path, uintptr_t path_len);  // 1, 0, or a negative code
 int32_t moq_socket_close(uint32_t endpoint);
 int32_t moq_socket_dial_track(uint32_t endpoint, const char *peer, uintptr_t peer_len, const moq_track_info *info, moq_status_callback on_stream, void *user_data);
 int32_t moq_socket_accept_track(uint32_t endpoint, moq_status_callback on_incoming, void *user_data);
