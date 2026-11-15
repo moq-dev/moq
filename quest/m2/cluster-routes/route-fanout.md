@@ -8,6 +8,15 @@ remembered for sessions nothing was learned on.
 
 ## Plan
 
+Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
+multicast](/quest/m2/multicast/README.md)): this waits on the
+[bake-off](/quest/m2/multicast/bakeoff.md). Its first and third findings are
+in `path::Router`'s indexes and its doubts and dead hops, which the new router
+replaces; the second, per-broadcast rewrites in `route/node.rs`, the
+[router](/quest/m2/multicast/router.md) takes as a requirement. If the new
+rule goes ahead, [the switch](/quest/m2/multicast/switch.md) deletes this
+quest with the fixtures that pin it; if it does not, this starts as written.
+
 Kept 2026-11-15 (maintainer, /quest-complete on
 [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
 m2 (rejected: drop; moving it to m3).
@@ -42,6 +51,10 @@ once fixed:
 
 Build on [moq-dev/moq#8734](https://github.com/moq-dev/moq/pull/8734),
 which also edits `path.rs`.
+
+## Required
+
+- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the path router these findings are in remains
 
 ## Related
 
