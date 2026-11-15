@@ -23,6 +23,16 @@ and [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481)'s BBR3 through
 all recorded in `rs/moq-quic/README.md`'s `Upstream` section with every
 disposition. Start there, and record the new heads in the same place.
 
+Checked 2026-11-14 (/quest-plan): quinn#2481 force-pushed to
+[`0ebaf7e2`](https://github.com/quinn-rs/quinn/pull/2481/commits/0ebaf7e2c9932e432ef5e7caf916291b02d8277e),
+a rebase onto `c7b46a96` whose BBR3 commits match `01b8848d`, so it has
+nothing to port. Of the nine `main` commits since `aea1e538`, check
+[`aa61ce99`](https://github.com/quinn-rs/quinn/commit/aa61ce996b97b21c63731a84fac1346c2d70852b) (late
+ACK-only packets are not spurious losses) against BBR3's spurious-loss undo
+first. The [BBR3 references epic](/quest/m1/bbr3-references/README.md) adds
+Google Linux BBRv3, draft-ietf-ccwg-bbr, and QUICHE BBR3 heads to the ledger;
+recheck them with quinn#2481 each run.
+
 Learned: a fix missing from the ledger is often already held, since the fork
 reworked the same code (`stop` under `RESET_STREAM_AT`, the stale-accept
 check under `handshake_timeout`, socket setup in `moq_sock::bind`), so check
