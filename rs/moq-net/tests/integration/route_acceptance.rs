@@ -547,3 +547,53 @@ async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
 		);
 	}
 }
+
+/// First-hop selection across a pool: three members each claim `transcode` through two
+/// hubs, and two edges hang off one hub each, so every edge reaches every member at the
+/// same cost and the tie decides. The tie hashes the path and the member's node rather
+/// than anything local to the edge, so both edges pick the same member for every path,
+/// and the picks spread over the pool.
+#[kio::test]
+async fn pool_ties_agree_on_every_edge() {
+	let version = lite07();
+	let [edge_a, edge_b, hub_a, hub_b] = [1, 2, 3, 4].map(produce_origin);
+	let members = [5, 6, 7].map(produce_origin);
+	let mut pairs = vec![
+		peer(version, &edge_a, &hub_a).await,
+		peer(version, &edge_b, &hub_b).await,
+		peer(version, &hub_a, &hub_b).await,
+	];
+	let mut claims = Vec::new();
+	for member in &members {
+		claims.push(member.claim("transcode", origin::RouteOptions::default()).unwrap());
+		pairs.push(peer(version, member, &hub_a).await);
+		pairs.push(peer(version, member, &hub_b).await);
+	}
+	quiesce().await;
+
+	let instances: Vec<_> = claims.iter().map(|claim| Some(claim.instance())).collect();
+	let mut picked = std::collections::BTreeSet::new();
+	for i in 0..32 {
+		let path = format!("transcode/{i}");
+		let a = edge_a
+			.consume()
+			.request(path.as_str(), None)
+			.await
+			.unwrap()
+			.info()
+			.instance
+			.clone();
+		let b = edge_b
+			.consume()
+			.request(path.as_str(), None)
+			.await
+			.unwrap()
+			.info()
+			.instance
+			.clone();
+		assert_eq!(a, b, "{path}");
+		picked.insert(instances.iter().position(|instance| *instance == a).expect("a member"));
+	}
+	assert!(picked.len() > 1, "every path picked one member: {picked:?}");
+	drop(pairs);
+}
