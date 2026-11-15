@@ -831,14 +831,14 @@ async fn a_covered_bounded_subscription_stays_open() {
 /// A relay whose cache holds only some of a track's history answers one subscription for a
 /// past range wider than it holds plus the live edge, newest or oldest first: it serves what
 /// it caches and fills the rest from the publisher. Every sequence in range is delivered once
-/// or dropped, so the read ends with the track instead of waiting on a hole.
+/// or skipped, so the read ends with the track instead of waiting on a hole.
 #[kio::test]
 async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
 	holes_through_a_relay("moq-lite-07-wip").await;
 }
 
-/// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, where a
-/// hole in range is never settled and the read stalls once the track ends.
+/// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, which marks
+/// no hole, so one is skipped only once the reader's max age rules it out.
 #[kio::test]
 #[ignore = "stalls on a hole until /quest/m3/ietf-hole-stall.md"]
 async fn a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport() {
@@ -852,6 +852,10 @@ async fn holes_through_a_relay(version: &str) {
 	const DROPPED: u64 = 4;
 	const ABSENT: u64 = 7;
 	const WANT: [u64; 8] = [0, 1, 2, 3, 5, 6, 9, 10];
+	// History is stamped within a second, so the whole past range is fresh when read. The
+	// live group lands far past the budget, which then rules both holes out.
+	const BUDGET: Duration = Duration::from_secs(60);
+	const LIVE_MILLIS: u64 = 100_000;
 	let mut failures = Vec::new();
 	for order in [Order::Ascending, Order::Descending] {
 		let name = format!("{version} {order:?}");
@@ -863,7 +867,7 @@ async fn holes_through_a_relay(version: &str) {
 				continue;
 			}
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -889,7 +893,7 @@ async fn holes_through_a_relay(version: &str) {
 		let mut reader = subscribe(
 			&fixture.remote,
 			Subscription::default()
-				.with_delay(Delay::default().with_max(None))
+				.with_delay(Delay::default().with_max(BUDGET))
 				.with_order(order)
 				.with_ranges([Range::groups(0..8), Range::live()]),
 		)
@@ -904,11 +908,11 @@ async fn holes_through_a_relay(version: &str) {
 			.create_group(moq_net::group::Info { sequence: 10 })
 			.unwrap();
 		group
-			.write_frame(Timestamp::from_millis(10_000).unwrap(), b"x".as_slice())
+			.write_frame(Timestamp::from_millis(LIVE_MILLIS).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
 		let _finished = fixture.track.clone().finish().unwrap();
-		// The read ends only once every sequence in range was delivered or dropped.
+		// The read ends only once every sequence in range was delivered or skipped.
 		loop {
 			match kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
 				Ok(Ok(Some(group))) => got.push(group.sequence),
