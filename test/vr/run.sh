@@ -13,6 +13,9 @@ source "$DIR/../lib/harness.sh"
 harness_begin vr 'just test vr'
 cd "$WORKSPACE"
 cargo build --locked -p moq-relay -p moq-cli
+# Staged at once, so a clean elsewhere during the setup below cannot remove them.
+harness_stage bin/moq-relay "$WORKSPACE/target/debug/moq-relay"
+harness_stage bin/moq "$WORKSPACE/target/debug/moq"
 uv run --no-project python sh/js/install.py frozen
 (cd demo/vr && bunx vite build --outDir "$HARNESS_RUN/vr-dist" --emptyOutDir)
 
@@ -29,14 +32,14 @@ uv run --no-project python -I "$DIR/spherical.py" "$HARNESS_RUN/flat.mp4" "$HARN
 harness_port relay
 URL="http://127.0.0.1:$HARNESS_PORT"
 sed "s/4443/$HARNESS_PORT/g" "$DIR/relay.toml" >"$HARNESS_RUN/relay.toml"
-harness_spawn relay "$HARNESS_RUN/relay.log" "$WORKSPACE/target/debug/moq-relay" "$HARNESS_RUN/relay.toml"
+harness_spawn relay "$HARNESS_RUN/relay.log" "$HARNESS_RUN/bin/moq-relay" "$HARNESS_RUN/relay.toml"
 harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"
 # ffmpeg carries st3d and sv3d into each fragmented init segment only past -strict unofficial.
 # shellcheck disable=SC2329 # invoked by harness_spawn
 publish_vr() {
     ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$HARNESS_RUN/vr180.mp4" -c copy -strict unofficial \
         -movflags cmaf+frag_keyframe+empty_moov+default_base_moof -f mp4 - |
-        "$WORKSPACE/target/debug/moq" --connect "$URL" --connect-version moq-lite-07-wip --broadcast vr.hang import fmp4
+        "$HARNESS_RUN/bin/moq" --connect "$URL" --connect-version moq-lite-07-wip --broadcast vr.hang import fmp4
 }
 harness_spawn publisher "$HARNESS_RUN/publisher.log" publish_vr
 cd test/interop/clients/js

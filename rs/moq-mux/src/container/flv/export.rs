@@ -37,6 +37,7 @@ use crate::catalog::Stream;
 use crate::container::consumer::Event;
 use crate::container::declared::DeclaredClock;
 use crate::container::{ExportSource, Frame};
+use moq_net::stats::Bill;
 
 /// Before the header, unbind every track the catalog no longer lists (removed, or disabled) or
 /// moved to another track, so the header declares only what the snapshot offers. A single-track
@@ -171,7 +172,13 @@ struct Tag {
 	/// The codec config record the frame was read under, which a sequence-header tag must
 	/// have announced before it.
 	record: Option<Bytes>,
+	/// Counts its payload once it goes out.
+	bill: Bill,
 }
+
+/// A frame read, with the config record it was read under and the bill of
+/// the source it was read from.
+type Held = (crate::jitter::Arrival<Frame>, Option<Bytes>, Bill);
 
 /// A subscribed rendition feeding the muxer.
 struct FlvTrack {
@@ -180,7 +187,8 @@ struct FlvTrack {
 	/// used when muxing multitrack; a single-track FLV stream carries no id.
 	track_id: u8,
 	source: ExportSource,
-	pending: Option<crate::jitter::Arrival<Frame>>,
+	/// A frame read before the header went out, with the bill of the source it was read from.
+	pending: Option<(crate::jitter::Arrival<Frame>, Bill)>,
 	/// When the source was last empty, bounding the next frame's arrival.
 	empty: kio::clock::Instant,
 	finished: bool,
@@ -194,8 +202,8 @@ struct FlvTrack {
 	/// The video rendition's catalog entry as last listed.
 	config: Option<hang::catalog::VideoConfig>,
 	/// The current group's clock, when its rendition declared `reorder` at the group's start,
-	/// holding each frame with the config record it was read under.
-	declared: Option<DeclaredClock<(crate::jitter::Arrival<Frame>, Option<Bytes>)>>,
+	/// holding each frame with the config record it was read under and its source's bill.
+	declared: Option<DeclaredClock<Held>>,
 	/// How far to run the authored decode clock behind the PTS, in FLV milliseconds.
 	dts_reserve: u32,
 	/// Last authored video DTS, in FLV milliseconds.
@@ -253,7 +261,7 @@ impl FlvTrack {
 			return Ok(());
 		};
 		let released = (|| {
-			while let Some(((mut arrival, record), dts, pts)) = clock.pop(flush)? {
+			while let Some(((mut arrival, record, bill), dts, pts)) = clock.pop(flush)? {
 				// A tie the clock moved presents on the tick it moved to.
 				if arrival.item.timestamp.as_millis() != u128::from(pts) {
 					arrival.item.timestamp = moq_net::Timestamp::from_millis(pts)?;
@@ -262,7 +270,7 @@ impl FlvTrack {
 					arrival.arrived = arrival.arrived.max(settled);
 				}
 				let timestamp = u32::try_from(dts + i128::from(shift)).map_err(|_| Error::TimestampRange)?;
-				self.queue(key, arrival, record, timestamp, shift, jitter)?;
+				self.queue(key, (arrival, record, bill), timestamp, shift, jitter)?;
 			}
 			Ok::<_, crate::Error>(())
 		})();
@@ -270,12 +278,12 @@ impl FlvTrack {
 		released
 	}
 
-	/// Queue `arrival` as a tag decoding at `timestamp`, under the config `record` it was read with.
+	/// Queue `arrival` as a tag decoding at `timestamp`, under the config `record` it was read with,
+	/// counted on the `bill` of the source it was read from.
 	fn queue(
 		&mut self,
 		key: (u8, usize),
-		arrival: crate::jitter::Arrival<Frame>,
-		record: Option<Bytes>,
+		(arrival, record, bill): Held,
 		timestamp: u32,
 		shift: u32,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
@@ -309,6 +317,7 @@ impl FlvTrack {
 					timestamp,
 					presentation,
 					record,
+					bill,
 				},
 			},
 		)?;
@@ -345,7 +354,9 @@ impl<S: Stream> Export<S> {
 	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
 	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
 	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
-	pub fn new(source: crate::Source, catalog: S) -> Self {
+	pub fn new(mut source: crate::Source, catalog: S) -> Self {
+		// The jitter buffer drops what a join trims or what arrives late, so only what goes out counts.
+		source.bill();
 		Self {
 			source,
 			catalog: Some(catalog),
@@ -481,7 +492,7 @@ impl<S: Stream> Export<S> {
 					if !self.header_emitted && track.pending.is_some() {
 						break;
 					}
-					let arrival = if let Some(pending) = track.pending.take() {
+					let (arrival, bill) = if let Some(pending) = track.pending.take() {
 						pending
 					} else {
 						if track.finished {
@@ -508,7 +519,7 @@ impl<S: Stream> Export<S> {
 						if !track.source.header_ready() {
 							continue;
 						}
-						crate::jitter::Arrival {
+						let arrival = crate::jitter::Arrival {
 							arrived: track.empty,
 							read: kio::clock::now(),
 							decode: frame.timestamp.into(),
@@ -517,10 +528,11 @@ impl<S: Stream> Export<S> {
 							leading: false,
 							bytes: frame.payload.len(),
 							item: frame,
-						}
+						};
+						(arrival, track.source.bill())
 					};
 					if !self.header_emitted {
-						track.pending = Some(arrival);
+						track.pending = Some((arrival, bill));
 						break;
 					}
 					let key = (kind, index);
@@ -533,12 +545,12 @@ impl<S: Stream> Export<S> {
 							// Clocked in FLV's milliseconds, so the leading frames step a tag tick apart.
 							let source = arrival.item.timestamp;
 							let arrived = arrival.arrived;
-							clock.push((arrival, record), source.as_millis() as u64, source)?;
+							clock.push((arrival, record, bill), source.as_millis() as u64, source)?;
 							track.release(key, Some(arrived), self.shift, false, &mut self.jitter)?;
 						}
 						None => {
 							let timestamp = track.tag_timestamp(frame_timestamp_ms(&arrival.item, self.shift)?)?;
-							track.queue(key, arrival, record, timestamp, self.shift, &mut self.jitter)?;
+							track.queue(key, (arrival, record, bill), timestamp, self.shift, &mut self.jitter)?;
 						}
 					}
 				}
@@ -795,6 +807,7 @@ impl<S: Stream> Export<S> {
 			timestamp: timestamp_ms,
 			presentation: pts_ms,
 			record,
+			bill,
 		} = tag;
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		let track = match is_video {
@@ -887,6 +900,8 @@ impl<S: Stream> Export<S> {
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_AUDIO, timestamp_ms, &body)?;
 		}
+		// Only once encoding can no longer fail, so a frame the export errors on counts nothing.
+		bill.deliver(frame.payload.len() as u64);
 		Ok(out.freeze())
 	}
 
