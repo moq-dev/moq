@@ -9,8 +9,6 @@ import (
 // without exporting them.
 func init() {
 	bridge.OriginProducer = func(v any) *ffi.MoqOriginProducer { return v.(*OriginProducer).inner }
-	bridge.WrapGroupProducer = func(v *ffi.MoqGroupProducer) any { return &GroupProducer{inner: v} }
-	bridge.WrapGroupConsumer = func(v *ffi.MoqGroupConsumer) any { return &GroupConsumer{inner: v} }
 	bridge.WrapTrackProducer = func(v *ffi.MoqTrackProducer) any { return &TrackProducer{inner: v} }
 	bridge.WrapTrackConsumer = func(v *ffi.MoqTrackConsumer) any { return &TrackConsumer{inner: v} }
 	bridge.TrackInfo = func(v any) (*ffi.MoqTrackInfo, error) { return trackInfoFFI(v.(*TrackInfo)) }

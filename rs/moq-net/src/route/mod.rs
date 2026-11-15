@@ -93,7 +93,7 @@ impl Key for u64 {
 }
 
 /// One side's configuration of a link to a neighbor.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Link {
 	/// Strictly positive: a zero-cost link would leave a route equal to its own
 	/// feasibility distance.
@@ -160,6 +160,21 @@ pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
 /// The most nodes a route crosses, its origin included: the longest hop list a
 /// message carries.
 pub(crate) const MAX_HOPS: usize = 32;
+
+/// Feed `value`'s `Debug` form to `hasher`: how the exhaustive search fingerprints
+/// router state without a `Hash` impl on every type it holds.
+#[cfg(test)]
+pub(crate) fn digest(hasher: &mut impl std::hash::Hasher, value: &impl fmt::Debug) {
+	struct Feed<'a, H>(&'a mut H);
+	impl<H: std::hash::Hasher> fmt::Write for Feed<'_, H> {
+		fn write_str(&mut self, s: &str) -> fmt::Result {
+			self.0.write(s.as_bytes());
+			Ok(())
+		}
+	}
+	fmt::write(&mut Feed(&mut *hasher), format_args!("{value:?}")).expect("Debug never fails");
+	hasher.write_u8(0xff);
+}
 
 /// What a node advertises for one identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -354,6 +369,7 @@ impl<A: Clone + Eq> Heard<A> {
 	}
 }
 
+#[derive(Clone, Debug)]
 struct Peer {
 	link: Link,
 	/// The link's min RTT, which routes learned here add; `None` while unmeasured.
@@ -379,7 +395,7 @@ impl Peer {
 
 /// The claims of an identity changed since it was last recomputed: the ones named,
 /// or any when `all` is set.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct Dirty {
 	all: bool,
 	claims: BTreeSet<Path>,
@@ -400,6 +416,7 @@ struct Ctx<N> {
 }
 
 /// An identity this node serves itself.
+#[derive(Clone, Debug)]
 struct Origin<A> {
 	seqno: Seqno,
 	/// Whether the node declared it, rather than forging it with no claims.
@@ -421,6 +438,7 @@ pub(crate) struct Retained {
 	pub certified: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct Router<N, A> {
 	/// How this node names itself in the hops of a route it forwards. A rotation
 	/// leaves it alone, so a route that crossed this node always says so.
@@ -1173,6 +1191,30 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	}
 
 	#[cfg(test)]
+	/// Whether this node keeps no state at all for `id`, beyond the changes
+	/// [`Self::changed`] has yet to take.
+	pub fn keeps_nothing(&self, id: Id) -> bool {
+		fn none<K: Ord + Copy, V, N: Ord>(map: &BTreeMap<(K, N), V>, id: K) -> bool {
+			!map.keys().any(|(key, _)| *key == id)
+		}
+		!self.origins.contains_key(&id)
+			&& !self.rx.contains_key(&id)
+			&& !self.fd.contains_key(&id)
+			&& !self.advertised.contains_key(&id)
+			&& !self.pending.contains_key(&id)
+			&& !self.views.contains_key(&id)
+			&& !self.current.contains_key(&id)
+			&& !self.dirty.contains_key(&id)
+			&& !self.ctxs.contains_key(&id)
+			&& none(&self.filed, id)
+			&& none(&self.sent, id)
+			&& none(&self.unacked, id)
+			&& none(&self.heard, id)
+			&& none(&self.sent_views, id)
+			&& self.reader.claims(id).next().is_none()
+	}
+
+	#[cfg(test)]
 	/// How many identities this node holds routes to.
 	pub fn identities(&self) -> usize {
 		self.rx.len()
@@ -1211,6 +1253,40 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	#[cfg(test)]
 	pub fn touched(&self) -> usize {
 		self.touched
+	}
+
+	/// Hash what decides this node's future, leaving out the work counter. Its output
+	/// and reader events must already be taken.
+	#[cfg(test)]
+	pub fn fingerprint(&self, hasher: &mut impl std::hash::Hasher) {
+		let Self {
+			hop,
+			neighbors,
+			origins,
+			rx,
+			filed,
+			fd,
+			advertised,
+			sent,
+			unacked,
+			pending,
+			watch,
+			interest,
+			views,
+			current,
+			heard,
+			sent_views,
+			reader,
+			dirty,
+			ctxs,
+			rng,
+			touched: _,
+			out,
+		} = self;
+		debug_assert!(out.is_empty(), "output not taken");
+		digest(hasher, &(hop, neighbors, origins, rx, filed, fd, advertised, sent));
+		digest(hasher, &(unacked, pending, watch, interest, views, current, heard));
+		digest(hasher, &(sent_views, reader, dirty, ctxs, rng));
 	}
 
 	/// What this node's reader sees.
@@ -1556,9 +1632,6 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		#[cfg(test)]
 		{
 			self.touched += ids.len();
-		}
-		for &id in &ids {
-			self.reader.touch(id);
 		}
 		for id in ids {
 			if prune {
@@ -1911,6 +1984,20 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		}
 	}
 
+	/// Assert an incremental reader view, `now` over the dirty claims, matches a full recompute.
+	#[cfg(test)]
+	fn check_shown(&self, id: Id, ctx: &Ctx<N>, dirty: &Dirty, now: &BTreeMap<Path, Option<Shown<A>>>) {
+		if dirty.all {
+			return;
+		}
+		let route = self.selected(id);
+		let mut all: BTreeSet<Path> = self.reader.claims(id).cloned().collect();
+		if let Some(view) = self.adopted(id, route) {
+			all.extend(view.items.keys().cloned());
+		}
+		self.reader.check(id, now, self.shown_now(id, ctx, all.iter()));
+	}
+
 	/// Recompute what this node's reader sees of `id` in `ctx` and log each change:
 	/// only the `dirty` claims, unless any could have changed.
 	fn show(&mut self, id: Id, ctx: &Ctx<N>, dirty: &Dirty) {
@@ -1926,14 +2013,7 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 		};
 		let now = self.shown_now(id, ctx, claims.iter());
 		#[cfg(test)]
-		if !dirty.all {
-			let route = self.selected(id);
-			let mut all: BTreeSet<Path> = self.reader.claims(id).cloned().collect();
-			if let Some(view) = self.adopted(id, route) {
-				all.extend(view.items.keys().cloned());
-			}
-			self.reader.check(id, &now, self.shown_now(id, ctx, all.iter()));
-		}
+		self.check_shown(id, ctx, dirty, &now);
 
 		// A claim no routed neighbor's region covers was let go, not ended, and so
 		// was one the view never certified: only its stream left.

@@ -14,10 +14,6 @@ import (
 var (
 	// OriginProducer returns the handle behind a *moq.OriginProducer.
 	OriginProducer func(any) *ffi.MoqOriginProducer
-	// WrapGroupProducer wraps a socket write half.
-	WrapGroupProducer func(*ffi.MoqGroupProducer) any
-	// WrapGroupConsumer wraps a socket read half.
-	WrapGroupConsumer func(*ffi.MoqGroupConsumer) any
 	// WrapTrackProducer wraps a socket write half.
 	WrapTrackProducer func(*ffi.MoqTrackProducer) any
 	// WrapTrackConsumer retains a socket's subscribed read half.

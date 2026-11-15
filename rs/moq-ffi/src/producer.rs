@@ -969,7 +969,7 @@ impl Drop for MoqGroupProducer {
 }
 
 impl MoqGroupProducer {
-	/// Wrap `group`, for a track's writer or a socket's write half.
+	/// Wrap `group`, for a track's writer.
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
 			sequence: group.sequence,

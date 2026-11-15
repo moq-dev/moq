@@ -120,6 +120,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-auth-fuzz" = rec {
+      packageId = "moq-auth-fuzz";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-auth-fuzz";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-bench" = rec {
       packageId = "moq-bench";
       build = internal.buildRustCrateWithFeatures {
@@ -504,6 +514,16 @@ rec {
       packageId = "qmux 0.7.0";
       build = internal.buildRustCrateWithFeatures {
         packageId = "qmux 0.7.0";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
+    "qmux-fuzz" = rec {
+      packageId = "qmux-fuzz";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "qmux-fuzz";
       };
 
       # Debug support which might change between releases.
@@ -10097,7 +10117,6 @@ rec {
             "dep:js-sys"
           ];
         };
-        resolvedDefaultFeatures = [ "std" ];
       };
       "getrandom 0.4.3" = rec {
         crateName = "getrandom";
@@ -12770,7 +12789,6 @@ rec {
         features = {
           "std" = [ "digest/std" ];
         };
-        resolvedDefaultFeatures = [ "reset" ];
       };
       "hmac 0.13.0" = rec {
         crateName = "hmac";
@@ -17713,8 +17731,42 @@ rec {
           "async"
           "client"
           "default"
+          "fuzz"
           "serve"
         ];
+      };
+      "moq-auth-fuzz" = rec {
+        crateName = "moq-auth-fuzz";
+        version = "0.0.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "jwk";
+            path = "fuzz_targets/jwk.rs";
+            requiredFeatures = [ ];
+          }
+          {
+            name = "token";
+            path = "fuzz_targets/token.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-auth/fuzz;
+        };
+        dependencies = [
+          {
+            name = "libfuzzer-sys";
+            packageId = "libfuzzer-sys";
+          }
+          {
+            name = "moq-auth";
+            packageId = "moq-auth";
+            features = [ "fuzz" ];
+          }
+        ];
+
       };
       "moq-bench" = rec {
         crateName = "moq-bench";
@@ -20456,11 +20508,6 @@ rec {
             ];
           }
           {
-            name = "stun-types";
-            packageId = "stun-types";
-            optional = true;
-          }
-          {
             name = "sysinfo";
             packageId = "sysinfo";
             usesDefaultFeatures = false;
@@ -20605,10 +20652,6 @@ rec {
             features = [ "all" ];
           }
           {
-            name = "stun-types";
-            packageId = "stun-types";
-          }
-          {
             name = "tempfile";
             packageId = "tempfile";
           }
@@ -20661,7 +20704,6 @@ rec {
             "_quic"
             "moq-tokio/quic"
           ];
-          "stun" = [ "dep:stun-types" ];
           "test-support" = [ "moq-tokio/sim" ];
           "uds" = [ "moq-tokio/uds" ];
           "websocket" = [
@@ -20680,7 +20722,6 @@ rec {
           "jemalloc"
           "qlog"
           "quic"
-          "stun"
           "test-support"
           "uds"
           "websocket"
@@ -20784,6 +20825,10 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
+          }
+          {
+            name = "url";
+            packageId = "url";
           }
         ];
         devDependencies = [
@@ -22772,10 +22817,6 @@ rec {
             ];
           }
           {
-            name = "base64ct";
-            packageId = "base64ct";
-          }
-          {
             name = "bytes";
             packageId = "bytes";
           }
@@ -22801,20 +22842,9 @@ rec {
             packageId = "hang";
           }
           {
-            name = "if-addrs";
-            packageId = "if-addrs";
-            optional = true;
-          }
-          {
             name = "kio";
             packageId = "kio";
             features = [ "runtime" ];
-          }
-          {
-            name = "mdns-sd";
-            packageId = "mdns-sd";
-            optional = true;
-            features = [ "async" ];
           }
           {
             name = "moq-crypto";
@@ -22847,12 +22877,6 @@ rec {
             packageId = "once_cell";
           }
           {
-            name = "qmux";
-            packageId = "qmux 0.7.0";
-            optional = true;
-            usesDefaultFeatures = false;
-          }
-          {
             name = "rand";
             packageId = "rand 0.10.3";
           }
@@ -22877,25 +22901,13 @@ rec {
             packageId = "rind-rcgen";
           }
           {
-            name = "rustc-hash";
-            packageId = "rustc-hash 2.1.3";
-          }
-          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];
           }
           {
-            name = "slab";
-            packageId = "slab";
-          }
-          {
             name = "spki";
             packageId = "spki 0.8.1";
-          }
-          {
-            name = "stun-types";
-            packageId = "stun-types";
           }
           {
             name = "subtle";
@@ -22935,10 +22947,6 @@ rec {
           }
         ];
         devDependencies = [
-          {
-            name = "futures";
-            packageId = "futures";
-          }
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
@@ -22981,17 +22989,10 @@ rec {
         ];
         features = {
           "default" = [ "server" ];
-          "p2p" = [
-            "dep:if-addrs"
-            "dep:mdns-sd"
-            "dep:qmux"
-            "moq-tokio/qmux"
-          ];
           "server" = [ "dep:axum" ];
         };
         resolvedDefaultFeatures = [
           "default"
-          "p2p"
           "server"
         ];
       };
@@ -39621,6 +39622,11 @@ rec {
             rename = "criterion";
           }
           {
+            name = "kio";
+            packageId = "kio";
+            features = [ "sim" ];
+          }
+          {
             name = "qmux";
             packageId = "qmux 0.6.5";
             rename = "qmux06";
@@ -39668,6 +39674,12 @@ rec {
             "tls"
             "wss"
           ];
+          "fuzz" = [
+            "tcp"
+            "ws"
+            "kio/sim"
+            "tokio/io-util"
+          ];
           "tcp" = [ "tokio/net" ];
           "tls" = [
             "tcp"
@@ -39688,12 +39700,42 @@ rec {
         };
         resolvedDefaultFeatures = [
           "default"
+          "fuzz"
           "tcp"
           "tls"
           "uds"
           "ws"
           "wss"
         ];
+      };
+      "qmux-fuzz" = rec {
+        crateName = "qmux-fuzz";
+        version = "0.0.0";
+        edition = "2024";
+        crateBin = [
+          {
+            name = "qmux";
+            path = "fuzz_targets/qmux.rs";
+            requiredFeatures = [ ];
+          }
+        ];
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/qmux/fuzz;
+        };
+        dependencies = [
+          {
+            name = "libfuzzer-sys";
+            packageId = "libfuzzer-sys";
+          }
+          {
+            name = "qmux";
+            packageId = "qmux 0.7.0";
+            usesDefaultFeatures = false;
+            features = [ "fuzz" ];
+          }
+        ];
+
       };
       "quick-xml 0.41.0" = rec {
         crateName = "quick-xml";
@@ -39937,7 +39979,7 @@ rec {
           }
           {
             name = "rand_chacha";
-            packageId = "rand_chacha 0.3.1";
+            packageId = "rand_chacha";
             optional = true;
             usesDefaultFeatures = false;
           }
@@ -39979,62 +40021,7 @@ rec {
           "std_rng"
         ];
       };
-      "rand 0.9.5" = rec {
-        crateName = "rand";
-        version = "0.9.5";
-        edition = "2021";
-        sha256 = "0hbvllk8g28mqjld6hqmckk69w296qpzg95whm3didsyg46ivvxr";
-        authors = [
-          "The Rand Project Developers"
-          "The Rust Project Developers"
-        ];
-        dependencies = [
-          {
-            name = "rand_chacha";
-            packageId = "rand_chacha 0.9.0";
-            optional = true;
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "rand_core";
-            packageId = "rand_core 0.9.5";
-            usesDefaultFeatures = false;
-          }
-        ];
-        features = {
-          "default" = [
-            "std"
-            "std_rng"
-            "os_rng"
-            "small_rng"
-            "thread_rng"
-          ];
-          "os_rng" = [ "rand_core/os_rng" ];
-          "serde" = [
-            "dep:serde"
-            "rand_core/serde"
-          ];
-          "std" = [
-            "rand_core/std"
-            "rand_chacha?/std"
-            "alloc"
-          ];
-          "std_rng" = [ "dep:rand_chacha" ];
-          "thread_rng" = [
-            "std"
-            "std_rng"
-            "os_rng"
-          ];
-        };
-        resolvedDefaultFeatures = [
-          "alloc"
-          "os_rng"
-          "std"
-          "std_rng"
-          "thread_rng"
-        ];
-      };
-      "rand_chacha 0.3.1" = rec {
+      "rand_chacha" = rec {
         crateName = "rand_chacha";
         version = "0.3.1";
         edition = "2018";
@@ -40061,46 +40048,6 @@ rec {
           "serde" = [ "dep:serde" ];
           "serde1" = [ "serde" ];
           "std" = [ "ppv-lite86/std" ];
-        };
-        resolvedDefaultFeatures = [ "std" ];
-      };
-      "rand_chacha 0.9.0" = rec {
-        crateName = "rand_chacha";
-        version = "0.9.0";
-        edition = "2021";
-        sha256 = "1jr5ygix7r60pz0s1cv3ms1f6pd1i9pcdmnxzzhjc3zn3mgjn0nk";
-        authors = [
-          "The Rand Project Developers"
-          "The Rust Project Developers"
-          "The CryptoCorrosion Contributors"
-        ];
-        dependencies = [
-          {
-            name = "ppv-lite86";
-            packageId = "ppv-lite86";
-            usesDefaultFeatures = false;
-            features = [ "simd" ];
-          }
-          {
-            name = "rand_core";
-            packageId = "rand_core 0.9.5";
-          }
-        ];
-        devDependencies = [
-          {
-            name = "rand_core";
-            packageId = "rand_core 0.9.5";
-            features = [ "os_rng" ];
-          }
-        ];
-        features = {
-          "default" = [ "std" ];
-          "os_rng" = [ "rand_core/os_rng" ];
-          "serde" = [ "dep:serde" ];
-          "std" = [
-            "ppv-lite86/std"
-            "rand_core/std"
-          ];
         };
         resolvedDefaultFeatures = [ "std" ];
       };
@@ -40143,32 +40090,6 @@ rec {
         resolvedDefaultFeatures = [
           "alloc"
           "getrandom"
-          "std"
-        ];
-      };
-      "rand_core 0.9.5" = rec {
-        crateName = "rand_core";
-        version = "0.9.5";
-        edition = "2021";
-        sha256 = "0g6qc5r3f0hdmz9b11nripyp9qqrzb0xqk9piip8w8qlvqkcibvn";
-        authors = [
-          "The Rand Project Developers"
-          "The Rust Project Developers"
-        ];
-        dependencies = [
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.3.4";
-            optional = true;
-          }
-        ];
-        features = {
-          "os_rng" = [ "dep:getrandom" ];
-          "serde" = [ "dep:serde" ];
-          "std" = [ "getrandom?/std" ];
-        };
-        resolvedDefaultFeatures = [
-          "os_rng"
           "std"
         ];
       };
@@ -43935,7 +43856,7 @@ rec {
           }
           {
             name = "sha1";
-            packageId = "sha1 0.11.0";
+            packageId = "sha1";
           }
           {
             name = "sha2";
@@ -44248,7 +44169,7 @@ rec {
           }
           {
             name = "sha1";
-            packageId = "sha1 0.11.0";
+            packageId = "sha1";
           }
           {
             name = "smallvec";
@@ -45663,49 +45584,7 @@ rec {
           "std"
         ];
       };
-      "sha1 0.10.7" = rec {
-        crateName = "sha1";
-        version = "0.10.7";
-        edition = "2018";
-        sha256 = "1f632d529qzz95yrprr632w1fxqkrv6b6jksjc11vnzl049lay59";
-        authors = [
-          "RustCrypto Developers"
-        ];
-        dependencies = [
-          {
-            name = "cfg-if";
-            packageId = "cfg-if";
-          }
-          {
-            name = "cpufeatures";
-            packageId = "cpufeatures 0.2.17";
-            target =
-              { target, features }:
-              (
-                ("aarch64" == target."arch" or null)
-                || ("x86" == target."arch" or null)
-                || ("x86_64" == target."arch" or null)
-              );
-          }
-          {
-            name = "digest";
-            packageId = "digest 0.10.7";
-          }
-        ];
-        devDependencies = [
-          {
-            name = "digest";
-            packageId = "digest 0.10.7";
-            features = [ "dev" ];
-          }
-        ];
-        features = {
-          "default" = [ "std" ];
-          "oid" = [ "digest/oid" ];
-          "std" = [ "digest/std" ];
-        };
-      };
-      "sha1 0.11.0" = rec {
+      "sha1" = rec {
         crateName = "sha1";
         version = "0.11.0";
         edition = "2024";
@@ -47113,95 +46992,6 @@ rec {
           "maxbachmann <oss@maxbachmann.de>"
         ];
 
-      };
-      "stun-types" = rec {
-        crateName = "stun-types";
-        version = "2.0.4";
-        edition = "2021";
-        sha256 = "0b8r78yzp3n2rpxanzfcjzkzw74bym739dzrimmjaqjxmpjpnkh3";
-        libName = "stun_types";
-        authors = [
-          "Matthew Waters <matthew@centricular.com>"
-        ];
-        dependencies = [
-          {
-            name = "byteorder";
-            packageId = "byteorder";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "crc";
-            packageId = "crc";
-          }
-          {
-            name = "hmac";
-            packageId = "hmac 0.12.1";
-          }
-          {
-            name = "md-5";
-            packageId = "md-5 0.10.6";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "rand";
-            packageId = "rand 0.9.5";
-            usesDefaultFeatures = false;
-            features = [ "os_rng" ];
-          }
-          {
-            name = "sha1";
-            packageId = "sha1 0.10.7";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "sha2";
-            packageId = "sha2 0.10.9";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "smallvec";
-            packageId = "smallvec";
-          }
-          {
-            name = "subtle";
-            packageId = "subtle";
-          }
-          {
-            name = "thiserror";
-            packageId = "thiserror 2.0.21";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "tracing";
-            packageId = "tracing";
-            usesDefaultFeatures = false;
-            features = [ "attributes" ];
-          }
-        ];
-        devDependencies = [
-          {
-            name = "tracing";
-            packageId = "tracing";
-            usesDefaultFeatures = false;
-            features = [
-              "attributes"
-              "std"
-            ];
-          }
-        ];
-        features = {
-          "arbitrary" = [ "dep:arbitrary" ];
-          "default" = [ "std" ];
-          "std" = [
-            "thiserror/std"
-            "rand/thread_rng"
-            "hmac/reset"
-          ];
-        };
-        resolvedDefaultFeatures = [
-          "default"
-          "std"
-        ];
       };
       "subtle" = rec {
         crateName = "subtle";
@@ -51148,7 +50938,7 @@ rec {
           }
           {
             name = "sha1";
-            packageId = "sha1 0.11.0";
+            packageId = "sha1";
             optional = true;
           }
           {
@@ -58760,10 +58550,6 @@ rec {
             features = [ "aarch64_simd" ];
           }
           {
-            name = "byteorder";
-            packageId = "byteorder";
-          }
-          {
             name = "bytes";
             packageId = "bytes";
             features = [ "serde" ];
@@ -59087,12 +58873,6 @@ rec {
             packageId = "hex";
           }
           {
-            name = "hmac";
-            packageId = "hmac 0.12.1";
-            usesDefaultFeatures = false;
-            features = [ "reset" ];
-          }
-          {
             name = "hyper";
             packageId = "hyper";
             features = [ "full" ];
@@ -59265,13 +59045,7 @@ rec {
           }
           {
             name = "md-5";
-            packageId = "md-5 0.10.6";
-            rename = "md-5-93f6ce9d446188ac";
-          }
-          {
-            name = "md-5";
             packageId = "md-5 0.11.0";
-            rename = "md-5-a6292c17cd707f01";
           }
           {
             name = "memchr";
@@ -59672,10 +59446,6 @@ rec {
               "hex"
               "json"
             ];
-          }
-          {
-            name = "sha2";
-            packageId = "sha2 0.10.9";
           }
           {
             name = "siphasher";
@@ -60216,10 +59986,6 @@ rec {
             features = [ "aarch64_simd" ];
           }
           {
-            name = "byteorder";
-            packageId = "byteorder";
-          }
-          {
             name = "bytes";
             packageId = "bytes";
             features = [ "serde" ];
@@ -60563,12 +60329,6 @@ rec {
             packageId = "hex";
           }
           {
-            name = "hmac";
-            packageId = "hmac 0.12.1";
-            usesDefaultFeatures = false;
-            features = [ "reset" ];
-          }
-          {
             name = "hyper";
             packageId = "hyper";
             features = [ "full" ];
@@ -60741,13 +60501,7 @@ rec {
           }
           {
             name = "md-5";
-            packageId = "md-5 0.10.6";
-            rename = "md-5-93f6ce9d446188ac";
-          }
-          {
-            name = "md-5";
             packageId = "md-5 0.11.0";
-            rename = "md-5-a6292c17cd707f01";
           }
           {
             name = "memchr";
@@ -61136,10 +60890,6 @@ rec {
               "hex"
               "json"
             ];
-          }
-          {
-            name = "sha2";
-            packageId = "sha2 0.10.9";
           }
           {
             name = "siphasher";

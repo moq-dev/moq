@@ -41,8 +41,6 @@ fn connect_direct() -> Result<(TestRtc, TestRtc), RtcError> {
 
 	l.direct_api().start_dtls(true)?;
 	r.direct_api().start_dtls(false)?;
-	l.direct_api().start_sctp(true);
-	r.direct_api().start_sctp(false);
 
 	while !l.is_connected() || !r.is_connected() {
 		progress(&mut l, &mut r)?;

@@ -952,7 +952,8 @@ read once on the clock, its threshold both ways is one hop, so the backlog a
 subscription opens on is skipped and playback starts on the clock. Only those
 skips and a ring overflowing its fixed capacity drop received audio; each
 counts as a skip in the player's stats. A finite tail before a declared end
-plays as received, and a playhead behind the clock skips a declared silence by
+is never skipped, though one ahead of the clock still waits for it in silence,
+and a playhead behind the clock skips a declared silence by
 its lag rather than stretching across it, which drops no audio.
 
 After an underrun the player resumes on a cushion of one window and one read,

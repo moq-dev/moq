@@ -53,6 +53,32 @@ this comparison only after both web-transport publishers are frozen
 the last; if a freeze lands later, repeat it.
 This review still runs after m2 lands, over what changed since.
 
+The [feature review](/quest/m3/release/feature-review.md)'s first pass
+(2026-11-14) found exports whose consumer never came or whose premise was
+later removed; judge each here. Recommended: drop each unless a consumer turns
+up.
+
+- moq-ffi's `MoqTrackProducer::largest` and `MoqBroadcastConsumer::closed`,
+  added for browser parity ([moq-dev/moq#7304](https://github.com/moq-dev/moq/pull/7304))
+  just before WASM support was removed
+  ([moq-dev/moq#7475](https://github.com/moq-dev/moq/pull/7475)); only
+  wrappers and tests call them.
+- The byte-stream rung of `MoqMediaProducer`'s simulcast ladder
+  ([moq-dev/moq#7699](https://github.com/moq-dev/moq/pull/7699)), raised by
+  an automated reviewer; nothing passes a stream producer as `lower`, and it
+  changed `lower`'s type in every binding. Recommended: keep, since reverting
+  is another break.
+- `moq_mux` container consumer's `set_wait`, a third delay knob beside
+  `Delay { min, max }`; native audio sets it to the `min` it already passes.
+- `moq_transcode`'s `active::Rendition::applied()` and
+  `moq_video::encode::Applied`, with no caller outside their crates.
+- moq-sock's ICMP error queue, `qmux::Config::fixed_receive_window` (used only
+  by the unconsumed p2p module), moq-webrtc's `p2p` feature, and moq-relay's
+  `stun` feature, none of which a shipped build uses.
+- `moq_tokio`'s `TcpTls::new` under `cfg(all(feature = "tcp", not(feature =
+  "_certs")))`, a cfg that can never hold (`tcp` enables `_certs`) and whose
+  arity no longer matches its caller: delete it.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - the release's code is final before it is reviewed

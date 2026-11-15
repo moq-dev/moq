@@ -21,10 +21,10 @@ run_socket_acceptor() {
 }
 
 run_socket_pair() {
-    local dialer="$1" acceptor="$2" protocol="$3" version="$4" started=$SECONDS from pid dial_pid ready
-    local name="socket-$protocol-$dialer-$acceptor-$version" prefix="socket-$protocol-$dialer-$acceptor-$version-$$-$RANDOM"
+    local dialer="$1" acceptor="$2" version="$3" started=$SECONDS from pid dial_pid ready
+    local name="socket-$dialer-$acceptor-$version" prefix="socket-$dialer-$acceptor-$version-$$-$RANDOM"
     local events="$LOGS/socket-events" ack="$LOGS/socket-ack"
-    local cell=(case="socket $protocol" publisher="$dialer" subscriber="$acceptor" version="$version" log="$LOGS/$name-dial.log")
+    local cell=(case="socket" publisher="$dialer" subscriber="$acceptor" version="$version" log="$LOGS/$name-dial.log")
     if is_broken "$dialer" || is_broken "$acceptor"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
@@ -35,18 +35,18 @@ run_socket_pair() {
     from=$(relay_next_line)
     # Grant each peer only its own endpoint and the other role's endpoints.
     harness_spawn "$name-accept" "$LOGS/$name-accept.log" run_socket_acceptor "$events" "$ack" "$acceptor" accept \
-        "$(token_url --root "$prefix" --publish '.server/acceptor' --subscribe '.client/**')" "$prefix" "$protocol" "$version"
+        "$(token_url --root "$prefix" --publish '.server/acceptor' --subscribe '.client/**')" "$prefix" "$version"
     pid="$HARNESS_PID"
     if IFS= read -r -t "$TIMEOUT" ready <&8 && [[ "$ready" == 'socket ready' ]]; then
         harness_spawn "$name-dial" "$LOGS/$name-dial.log" run_socket_client "$dialer" dial \
-            "$(token_url --root "$prefix" --publish '.client/dialer' --subscribe '.server/**')" "$prefix" "$protocol" "$version"
+            "$(token_url --root "$prefix" --publish '.client/dialer' --subscribe '.server/**')" "$prefix" "$version"
         dial_pid="$HARNESS_PID"
         harness_wait "$dial_pid" || true
-        if grep -qx "socket verified $protocol dial" "$LOGS/$name-dial.log"; then
+        if grep -qx "socket verified dial" "$LOGS/$name-dial.log"; then
             printf 'socket drained\n' >&9
             harness_wait "$pid" || true
-            if grep -qx "socket verified $protocol accept" "$LOGS/$name-accept.log" && check_versions "$name" "$from" "$version"; then
-                echo "  PASS  socket $protocol $dialer -> $acceptor $version"
+            if grep -qx "socket verified accept" "$LOGS/$name-accept.log" && check_versions "$name" "$from" "$version"; then
+                echo "  PASS  socket $dialer -> $acceptor $version"
                 record pass "${cell[@]}" seconds=$((SECONDS - started))
                 exec 8>&- 9>&-
                 rm "$events" "$ack"
@@ -54,7 +54,7 @@ run_socket_pair() {
             fi
         fi
     fi
-    echo "  FAIL  socket $protocol $dialer -> $acceptor $version"
+    echo "  FAIL  socket $dialer -> $acceptor $version"
     record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="socket handshake, payload, or FIN failed"
     overall=1
     harness_reap "$pid"
@@ -65,20 +65,18 @@ run_socket_pair() {
 }
 
 socket_pairs() {
-    local action="$1" runtime protocol
+    local action="$1" runtime
     local version=moq-lite-07-wip
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
-        for protocol in tcp track; do
-            "$action" rust "$runtime" "$protocol" "$version"
-            "$action" "$runtime" rust "$protocol" "$version"
-        done
+        "$action" rust "$runtime" "$version"
+        "$action" "$runtime" rust "$version"
     done
 }
 
 # shellcheck disable=SC2329 # called by socket_pairs
 plan_socket_pair() {
-    record "not run" case="socket $3" publisher="$1" subscriber="$2" version="$4"
+    record "not run" case="socket" publisher="$1" subscriber="$2" version="$3"
 }
 
 plan_js_sockets() {
