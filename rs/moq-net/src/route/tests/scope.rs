@@ -1818,14 +1818,24 @@ fn an_ended_stream_waits_on_a_child_whose_offer_arrives_after_the_end() {
 	reask(&mut router, 1, &[""]).unwrap();
 	reask(&mut router, 2, &["b"]).unwrap();
 	reask(&mut router, 3, &[""]).unwrap();
-	router.route(3, 7, p(""), Some(reach(&[(7, 0), (6, 1), (4, 1), (1, 1), (99, 3), (3, 1)])));
+	router.route(
+		3,
+		7,
+		p(""),
+		Some(reach(&[(7, 0), (6, 1), (4, 1), (1, 1), (99, 3), (3, 1)])),
+	);
 	// Not a child: its path names another node past this one.
 	router.route(2, 7, p("b"), Some(reach(&[(7, 0), (99, 9), (5, 1), (2, 1)])));
 	// The "b" stream to peer 2 ends.
 	router.batch(1, 7, p(""), vec![(p("b/x"), None)], Some(2));
 	router.dead(1, closed(Vec::new(), false), Instant::ZERO);
 	// Peer 2's offer back, sent before the END reached it.
-	router.route(2, 7, p("b"), Some(reach(&[(7, 0), (6, 1), (4, 1), (1, 1), (99, 2), (2, 1)])));
+	router.route(
+		2,
+		7,
+		p("b"),
+		Some(reach(&[(7, 0), (6, 1), (4, 1), (1, 1), (99, 2), (2, 1)])),
+	);
 	router.drain();
 	router.route(3, 7, p(""), None);
 	assert_eq!(sent_to(&mut router, 1), [], "peer 2 still owes an answer");
