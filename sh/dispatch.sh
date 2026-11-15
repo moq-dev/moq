@@ -210,10 +210,10 @@ module gh '' \
     tools='actionlint zizmor bun python3 uv cargo' lane=bun
 # `just gh test`, the repository tooling tests, follow what they run and read,
 # including the selectors under sh/, the release-plz configuration, the nfpm
-# configs, the workspace manifests and lockfile, and the flake that pins their
-# tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
+# configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
+# that pins their tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
 # runs in `gh check` instead. Nightly's full gate runs them whatever changed.
-module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/bench/|flake\.(nix|lock)$)|(^|/)justfile$' \
+module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/(bench/|package\.json$)|package\.json$|bun\.lock$|flake\.(nix|lock)$)|(^|/)justfile$' \
     tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
