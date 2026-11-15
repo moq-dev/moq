@@ -46,6 +46,19 @@ impl Mp4 {
 			.write(true)
 			.open(&path)
 			.with_context(|| format!("failed to open {}", path.display()))?;
+		// Held for the repair's life: an `export mp4` recording holds it until it closes the file,
+		// so a file we can't lock is still being written, and repairing it would corrupt it.
+		// A filesystem without locks refuses too, since the recorder refuses to start there.
+		match file.try_lock() {
+			Ok(()) => {}
+			Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+				"{} is still open by a recorder (or another repair); repair it once that finishes",
+				path.display()
+			),
+			Err(std::fs::TryLockError::Error(err)) => {
+				return Err(err).with_context(|| format!("failed to lock {}", path.display()));
+			}
+		}
 		let (file, finish) = tokio::task::spawn_blocking(move || {
 			let mut file = file;
 			let finish = moq_mux::container::mp4::repair(&mut file);

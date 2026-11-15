@@ -1115,6 +1115,48 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	feeding.abort();
 }
 
+/// `repair mp4` refuses a file something else holds the lock on, as a recorder does while it
+/// writes, and leaves it untouched.
+#[tokio::test]
+async fn repair_refuses_a_locked_recording() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	std::fs::write(&path, b"not scanned: the lock refuses first").unwrap();
+	let recorder = std::fs::File::open(&path).unwrap();
+	recorder.try_lock().unwrap();
+
+	let output = moq_repair(&path).await;
+	assert!(!output.status.success(), "repaired a file a recorder holds");
+	assert!(
+		String::from_utf8_lossy(&output.stderr).contains("still open by a recorder"),
+		"{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+	assert_eq!(std::fs::read(&path).unwrap(), b"not scanned: the lock refuses first");
+
+	// Once the recorder lets go, the file is scanned instead.
+	drop(recorder);
+	let output = moq_repair(&path).await;
+	assert!(
+		!String::from_utf8_lossy(&output.stderr).contains("still open by a recorder"),
+		"{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
+/// Run `moq repair mp4` on the file.
+async fn moq_repair(path: &std::path::Path) -> std::process::Output {
+	let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+		.env_remove("KIO_DENY_HOST_TIMERS")
+		.args(["repair", "mp4"])
+		.arg(path)
+		.output();
+	kio::clock::timeout(TIMEOUT, output)
+		.await
+		.expect("repair never exited")
+		.unwrap()
+}
+
 /// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
 /// it alone once finished.
 #[tokio::test]
@@ -1137,6 +1179,16 @@ async fn a_killed_mp4_recording_is_repaired() {
 	})
 	.await
 	.expect("the recording never grew");
+	// The recorder holds its lock while it writes, so repairing now would corrupt the file.
+	let mid = std::fs::read(&path).unwrap();
+	let refused = moq_repair(&path).await;
+	assert!(!refused.status.success(), "repaired a recording still being written");
+	assert!(String::from_utf8_lossy(&refused.stderr).contains("still open by a recorder"));
+	assert!(
+		std::fs::read(&path).unwrap().starts_with(&mid),
+		"a refused repair rewrote the file"
+	);
+
 	recording.kill().await.unwrap();
 	let killed = std::fs::read(&path).unwrap();
 	assert_eq!(
@@ -1146,15 +1198,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 	);
 
 	let repair = || async {
-		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
-			.env_remove("KIO_DENY_HOST_TIMERS")
-			.args(["repair", "mp4"])
-			.arg(&path)
-			.output();
-		let output = kio::clock::timeout(TIMEOUT, output)
-			.await
-			.expect("repair never exited")
-			.unwrap();
+		let output = moq_repair(&path).await;
 		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 		std::fs::read(&path).unwrap()
 	};
