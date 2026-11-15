@@ -652,3 +652,125 @@ async fn live_mesh_link_failure_keeps_presence() {
 		PUBLISHERS.len()
 	);
 }
+
+/// Seeded random meshes of 5 to 8 relays at random link latencies, the publisher on relay
+/// 0 and a reader on every other, each cut one or two links at once. These are the seeds
+/// a sweep of 400 found with a reader ending on a relay that stayed available.
+///
+/// In each, a relay's front moves as the news of the cut arrives, for a moment onto a
+/// stale route whose next hop already lost its own: that hop refuses the fresh track, or
+/// resets a copy that delivered, `Unroutable`. Proves the refusal judges the route, not the
+/// track: the front waits for the next route, and no reader on a relay that stayed
+/// available ends, nor waits for good on any relay.
+#[kio::test]
+async fn a_stale_route_refusing_a_track_ends_no_reader() {
+	for seed in [13, 17, 92, 114] {
+		stale_route_case(seed).await;
+	}
+}
+
+async fn stale_route_case(seed: u64) {
+	let mut rng = support::Rng(seed);
+	let n = rng.range(5, 8) as usize;
+	let nodes: Vec<_> = (1..=n as u64).map(crate::mesh_withdraw::produce_origin).collect();
+	let mut edges = Vec::new();
+	for i in 1..n {
+		edges.push((rng.pick(i), i));
+	}
+	for _ in 0..rng.range(1, n as u64) {
+		let (a, b) = (rng.pick(n), rng.pick(n));
+		if a != b && !edges.contains(&(a.min(b), a.max(b))) {
+			edges.push((a.min(b), a.max(b)));
+		}
+	}
+	let mut links = Vec::new();
+	for &(a, b) in &edges {
+		let latency = Duration::from_millis(rng.range(1, 80));
+		links.push(Some(peer_with_latency(lite07(), &nodes[a], &nodes[b], latency).await));
+	}
+	let start = kio::clock::now();
+	let broadcast = nodes[0].route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	let mut feed = Feed::new(track, start, MESH_STEP);
+	broadcast.announce().unwrap();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let mut watched: Vec<_> = nodes.iter().map(|node| Watch::new(node, "live", start)).collect();
+	let mut readers = Vec::new();
+	for (relay, node) in nodes.iter().enumerate().skip(1) {
+		readers.push((relay, reader(node, "live", start).await));
+	}
+	feed.run(5).await;
+	for _ in 0..rng.range(1, 2) {
+		if let Some(pair) = links[rng.pick(edges.len())].take() {
+			cut(&pair);
+		}
+	}
+	feed.run(30).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	let dark: Vec<_> = (watched.iter_mut())
+		.map(|watch| {
+			watch.seen()[1..]
+				.iter()
+				.any(|seen| !seen.available || matches!(seen.kind, Kind::End | Kind::Offline))
+		})
+		.collect();
+	for (relay, rx) in &mut readers {
+		let live = Liveness::of(rx, &feed);
+		match &live.ended {
+			// A relay that lost every route may end its readers.
+			Some(_) => assert!(dark[*relay], "seed {seed}: relay {relay} stayed available: {live:?}"),
+			None => assert!(live.seamless(), "seed {seed}: relay {relay}: {live:?}"),
+		}
+	}
+	drop(broadcast);
+}
+
+/// `P` publishes `live` to `U` and `B`, and `D` pulls both, preferring `U`, whose link takes
+/// two seconds each way; `E` pulls `D`. `U`'s link to `P` times out and comes back at once,
+/// and `U` serves `live` again a second later, faster than its news reaches `D`.
+///
+/// `U` resets the subscription below it `Unroutable` only once it lost every route, and it
+/// sends that loss to `D` on the same session as a retraction, which the announce cursor
+/// neither holds nor cancels when `U` announces again. Proves `D`'s front hears the
+/// retraction and moves on, whichever arrives first, so the wait on a stranded track ends:
+/// readers on `D` and on `E`, two hops below `U`, get every frame once, in order.
+#[kio::test]
+async fn an_upstream_flapping_faster_than_its_news_strands_no_reader() {
+	let links = Links::new();
+	let [p, u, b, d, e] = [1, 2, 3, 4, 5].map(produce_origin);
+	let p_u = links.link("p-u", &p, &u, 1).await;
+	let _p_b = links.link("p-b", &p, &b, 1).await;
+	let mut options = links.options("u-d", &u, &d);
+	options.cost = Some(1);
+	options.latency = Duration::from_secs(2);
+	let _u_d = connect_mock(options).await;
+	let _b_d = links.link("b-d", &b, &d, 100).await;
+	let _d_e = links.link("d-e", &d, &e, 1).await;
+	let broadcast = p.route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
+	kio::clock::sleep(Duration::from_secs(10)).await;
+
+	let start = kio::clock::now();
+	let mut at_u = Watch::new(&u, "live", start);
+	let mut feed = Feed::new(track, start, STEP);
+	let mut readers = [("D", reader(&d, "live", start).await), ("E", reader(&e, "live", start).await)];
+	feed.run(MOVE).await;
+	p_u.server.abort(Error::IdleTimeout);
+	p_u.client.abort(Error::IdleTimeout);
+	let _p_u = links.link("p-u2", &p, &u, 1).await;
+	feed.run(MOVE * 4).await;
+	kio::clock::sleep(Duration::from_secs(5)).await;
+
+	let seen = at_u.seen();
+	let kinds: Vec<_> = seen.iter().map(|seen| seen.kind).collect();
+	assert_eq!(kinds, [Kind::Start, Kind::Offline, Kind::Start], "U flapped: {seen:?}");
+	assert!(seen[2].at - seen[1].at < Duration::from_secs(2), "faster than the news: {seen:?}");
+	for (node, rx) in &mut readers {
+		let live = Liveness::of(rx, &feed);
+		assert!(live.seamless(), "{node}: {live:?}");
+		assert!(live.worst > Duration::from_secs(2), "{node} read through U: {live:?}");
+	}
+	drop(broadcast);
+}

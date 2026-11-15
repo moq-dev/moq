@@ -602,13 +602,18 @@ impl Front {
 				self.redispatch(name, actions);
 			}
 			// The route lost the content, which another route of the instance continues:
-			// wait for one rather than ask this route again, which can only refuse.
+			// wait for one rather than ask this route again, which can only refuse. A copy
+			// drained from a replaced source leaves the track to the serving one.
 			Err(err)
 				if delivered && err.unroutable() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
-				self.stranded.insert(name, source);
+				if self.serving.is_some_and(|(serving, _)| serving == source) {
+					self.stranded.insert(name, source);
+				} else {
+					self.redispatch(name, actions);
+				}
 			}
 			// A content verdict survives every copy. Under a minted instance, even a route
 			// failure cannot be retried against the same content.
@@ -1384,6 +1389,48 @@ mod tests {
 				}],
 			);
 		}
+	}
+
+	/// A replaced copy still draining fails unroutable after its replacement refused the
+	/// track so: the track waits on the serving source, the one it asks once the table moves.
+	#[test]
+	fn a_drained_copy_lost_as_unroutable_waits_on_the_serving_source() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		let unroutable = || Error::from(crate::StreamError::Unroutable);
+		let refused = Event::TrackInfo {
+			track: name("video"),
+			source: 200,
+			closing: false,
+			result: Err(unroutable()),
+			retry: None,
+		};
+		assert_actions(front.step(refused), &[]);
+		let drained = Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(unroutable()),
+			delivered: true,
+		};
+		assert_actions(front.step(drained), &[]);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
 	}
 
 	/// Under a minted instance a re-request could reach another stream, so the track ends
