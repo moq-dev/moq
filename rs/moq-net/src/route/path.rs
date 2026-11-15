@@ -663,7 +663,8 @@ struct Rekeyed<T> {
 	routes: BTreeMap<RouteId, T>,
 	/// The keys whose route it no longer carries there.
 	gone: Vec<RouteId>,
-	/// Each route that moved, with its offer, to another key: from, to.
+	/// Each route that moved to another key, as from, to: every route absorbed into
+	/// the key, the one whose offer it keeps first.
 	moved: Vec<(RouteId, RouteId)>,
 }
 
@@ -751,10 +752,12 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 			}
 		}
 		let (from, mut route) = routes.remove(best);
+		let mut absorbed = Vec::new();
 		// The claims of the rest stay, though no floor certifies them.
-		for (_, mut other) in routes {
+		for (other_from, mut other) in routes {
 			let items = std::mem::take(&mut other.view().expect("a carried route").items);
 			route.view().expect("a carried route").items.extend(items);
+			absorbed.push(other_from);
 		}
 		// A route the key already carries stays, unless the sender would reflect this one.
 		let staying = kept.get(&key).filter(|staying| staying.offered().is_some());
@@ -765,6 +768,7 @@ fn rekey<A: Clone + Eq, T: Carried<A>>(
 			gone.push(key.clone());
 		}
 		moved.push((from, key.clone()));
+		moved.extend(absorbed.into_iter().map(|other| (other, key.clone())));
 		kept.insert(key, route);
 	}
 	Rekeyed {
@@ -1327,16 +1331,24 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			self.hear(key, from, heard);
 		}
 		// A route this node used or held through `from` moves with the route it heard,
-		// so a hold or a doubt carries over rather than letting go of its claims.
+		// so a hold or a doubt carries over rather than letting go of its claims. Of
+		// several moving to one key, the one in use goes: only it may stay on a path
+		// through a doubted node.
+		let mut carried: BTreeMap<RouteId, Route<N>> = BTreeMap::new();
 		for (was, now) in rekeyed.moved {
 			let Some(route) = self.routes.get(&was).filter(|route| route.next() == Some(from)) else {
 				continue;
 			};
-			if !self.routes.contains_key(&now) {
-				let route = route.clone();
-				self.scopes.entry(now.0).or_default().insert(now.1.clone());
-				self.routes.insert(now, route);
+			if self.routes.contains_key(&now) {
+				continue;
 			}
+			if carried.get(&now).is_none_or(|kept| !kept.live() && route.live()) {
+				carried.insert(now, route.clone());
+			}
+		}
+		for (now, route) in carried {
+			self.scopes.entry(now.0).or_default().insert(now.1.clone());
+			self.routes.insert(now, route);
 		}
 		for (id, named) in filed {
 			if of(&self.rx, id).any(|(_, routes)| routes.contains_key(&from)) {

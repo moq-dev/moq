@@ -355,3 +355,52 @@ fn a_scope_with_several_regions_asks_for_each() {
 		}]
 	);
 }
+
+/// Widening several prefixes into one keeps the route this node was using at any of
+/// them, though the sender reflects a cheaper one from another prefix there: that
+/// one crosses a node this node doubts, which only a route already in use may stay
+/// on, so carrying no route would take the used prefix's claims offline.
+#[test]
+fn widening_several_prefixes_keeps_the_route_in_use() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	for peer in [2, 3] {
+		router.connect(peer, peer as Id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	router.watch(BTreeSet::from([p("a"), p("b")])).unwrap();
+	router.edited(2);
+	router.route(2, 7, p("b"), Some(path::Reach::Finite(along(&[(7, 0), (2, 1)], 5))));
+	router.batch(2, 7, p("b"), vec![(p("b/x"), Some(1))], Some(1));
+	router.disconnect([3], Instant::ZERO);
+	router.route(
+		2,
+		7,
+		p("a"),
+		Some(path::Reach::Finite(along(&[(7, 0), (3, 4), (2, 1)], 1))),
+	);
+	router.batch(2, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1));
+	assert!(matches!(
+		router.route_for(7, &p("b")),
+		Some(path::Route::Live { next: 2, .. })
+	));
+	assert!(router.route_for(7, &p("a")).and_then(path::Route::offer).is_none());
+	router.events();
+	router.watch(BTreeSet::from([Path::empty()])).unwrap();
+	router.edited(2);
+	assert!(
+		matches!(
+			router.route_for(7, &Path::empty()),
+			Some(path::Route::Live { next: 2, .. })
+		),
+		"{}",
+		router.dump()
+	);
+	assert!(router.shown()[&(7, p("b/x"))].available);
+	let events = router.events();
+	assert!(
+		events
+			.iter()
+			.all(|event| event.claim != p("b/x") || event.kind != Kind::Offline),
+		"{events:?}"
+	);
+}
