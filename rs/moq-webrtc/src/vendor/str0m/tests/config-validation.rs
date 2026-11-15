@@ -249,9 +249,6 @@ fn config_fingerprint_verification_disabled() -> Result<(), RtcError> {
 	l.direct_api().start_dtls(true).unwrap();
 	r.direct_api().start_dtls(false).unwrap();
 
-	l.direct_api().start_sctp(true);
-	r.direct_api().start_sctp(false);
-
 	// Connection should succeed despite corrupted fingerprints
 	loop {
 		if l.is_connected() && r.is_connected() {
@@ -293,7 +290,7 @@ fn config_clone_multiple_instances() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 

@@ -253,7 +253,8 @@ averages over a second, with one second of the rate as a burst. Older relays
 refuse a capped role rather than drop the cap.
 
 Only QUIC and WebTransport on the tokio or io\_uring listener enforce caps.
-WebSocket and HTTP `/fetch` and `/announced` refuse a capped grant,
+Every other transport refuses a capped grant (WebSocket, `tls://` and
+plaintext qmux over TCP, Unix sockets, and HTTP `/fetch` and `/announced`),
 whether it arrives at connect, in band, or at revalidation. When in-band tokens
 add grants to one session, each direction takes the highest cap among them, and
 a grant giving that direction paths without a cap lifts it. A cap changed at

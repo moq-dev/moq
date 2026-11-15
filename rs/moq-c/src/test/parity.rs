@@ -33,31 +33,27 @@ fn next_frame(cb: &Callback) -> Vec<u8> {
 	payload
 }
 
+/// Dial `peer` from `endpoint`, reporting to `cb`.
+fn dial(endpoint: u32, peer: &str, cb: &Callback) -> i32 {
+	unsafe {
+		moq_socket_dial_track(
+			endpoint,
+			peer.as_ptr().cast(),
+			peer.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	}
+}
+
 /// Dial `b` from `a` and accept it, returning (dialed, accepted) stream handles plus the
 /// callbacks that must outlive them.
-fn connect(a: u32, b: u32, track: bool) -> (u32, u32, [Callback; 3]) {
+fn connect(a: u32, b: u32) -> (u32, u32, [Callback; 3]) {
 	let accepts = Callback::new();
-	let _accept = id(unsafe {
-		match track {
-			false => moq_socket_accept_tcp(b, Some(channel_callback), accepts.ptr),
-			true => moq_socket_accept_track(b, Some(channel_callback), accepts.ptr),
-		}
-	});
+	let _accept = id(unsafe { moq_socket_accept_track(b, Some(channel_callback), accepts.ptr) });
 	let dialed = Callback::new();
-	let peer = "b";
-	let _dial = id(unsafe {
-		match track {
-			false => moq_socket_dial_tcp(a, peer.as_ptr().cast(), peer.len(), Some(channel_callback), dialed.ptr),
-			true => moq_socket_dial_track(
-				a,
-				peer.as_ptr().cast(),
-				peer.len(),
-				std::ptr::null(),
-				Some(channel_callback),
-				dialed.ptr,
-			),
-		}
-	});
+	let _dial = dial(a, "b", &dialed);
 
 	let incoming = id(accepts.recv());
 	let (mut claimed, mut session) = (moq_str(""), moq_str(""));
@@ -82,10 +78,10 @@ fn connect(a: u32, b: u32, track: bool) -> (u32, u32, [Callback; 3]) {
 }
 
 #[test]
-fn socket_tcp_round_trip() {
+fn socket_round_trip() {
 	let origin = id(moq_origin_create());
 	let (a, b) = (endpoint(origin, "a"), endpoint(origin, "b"));
-	let (client, server, [accepts, ..]) = connect(a, b, false);
+	let (client, server, [accepts, ..]) = connect(a, b);
 
 	let (mut peer, mut session) = (moq_str(""), moq_str(""));
 	assert_eq!(unsafe { moq_socket_stream_info(client, &mut peer, &mut session) }, 0);
@@ -109,32 +105,26 @@ fn socket_tcp_round_trip() {
 	let writer = id(moq_socket_stream_writer(client));
 	assert!(moq_socket_stream_writer(client) < 0, "the writer is taken once");
 	let frames = Callback::new();
-	let reader = id(unsafe { moq_socket_stream_reader(server, Some(channel_callback), frames.ptr) });
+	let _reader = id(unsafe { moq_socket_stream_reader(server, Some(channel_callback), frames.ptr) });
 	assert!(
 		unsafe { moq_socket_stream_reader(server, Some(ignore_callback), std::ptr::null_mut()) } < 0,
 		"the reader is taken once"
 	);
-	assert_eq!(
-		unsafe { moq_consume_track_update(reader, std::ptr::null()) },
-		MOQ_ERROR_UNSUPPORTED,
-		"a tcp half has no subscription"
-	);
-	// The halves outlive the stream handles. Take the reverse writer first: dropping it
-	// unfinished would reset the session.
-	let reverse = id(moq_socket_stream_writer(server));
+	// The halves outlive the stream handles.
 	assert_eq!(moq_socket_stream_free(server), 0);
 
 	for part in [b"one".as_slice(), b"two"] {
+		let group = id(moq_publish_track_group(writer));
 		assert_eq!(
-			unsafe { moq_publish_group_frame(writer, part.as_ptr(), part.len(), std::ptr::null()) },
+			unsafe { moq_publish_group_frame(group, part.as_ptr(), part.len(), std::ptr::null()) },
 			0
 		);
+		assert_eq!(moq_publish_group_finish(group), 0);
 	}
-	assert_eq!(moq_publish_group_finish(writer), 0);
+	assert_eq!(moq_publish_track_finish(writer), 0);
 	assert_eq!(next_frame(&frames), b"one");
 	assert_eq!(next_frame(&frames), b"two");
 	assert_eq!(frames.recv_terminal(), 0, "a finished writer ends the reader cleanly");
-	assert_eq!(moq_publish_group_finish(reverse), 0);
 
 	assert_eq!(moq_socket_stream_free(client), 0);
 	assert_eq!(moq_socket_close(b), 0);
@@ -148,7 +138,7 @@ fn socket_tcp_round_trip() {
 fn socket_track_round_trip_and_endpoint_close() {
 	let origin = id(moq_origin_create());
 	let (a, b) = (endpoint(origin, "a"), endpoint(origin, "b"));
-	let (client, server, [accepts, ..]) = connect(a, b, true);
+	let (client, server, [accepts, ..]) = connect(a, b);
 
 	let track = id(moq_socket_stream_writer(client));
 	let frames = Callback::new();
@@ -185,19 +175,9 @@ fn socket_finished_tracks_are_not_kept_by_the_endpoint() {
 	let (a, b) = (endpoint(origin, "a"), endpoint(origin, "b"));
 	let accepts = Callback::new();
 	let _accept = id(unsafe { moq_socket_accept_track(b, Some(channel_callback), accepts.ptr) });
-	let peer = "b";
 	for round in 0..3u8 {
 		let dialed = Callback::new();
-		let _dial = id(unsafe {
-			moq_socket_dial_track(
-				a,
-				peer.as_ptr().cast(),
-				peer.len(),
-				std::ptr::null(),
-				Some(channel_callback),
-				dialed.ptr,
-			)
-		});
+		let _dial = id(dial(a, "b", &dialed));
 		let incoming = id(accepts.recv());
 		let accepted = Callback::new();
 		let _accepting =
@@ -239,12 +219,10 @@ fn socket_reject_and_cancel() {
 	let origin = id(moq_origin_create());
 	let (a, b) = (endpoint(origin, "a"), endpoint(origin, "b"));
 	let accepts = Callback::new();
-	let accept = id(unsafe { moq_socket_accept_tcp(b, Some(channel_callback), accepts.ptr) });
+	let accept = id(unsafe { moq_socket_accept_track(b, Some(channel_callback), accepts.ptr) });
 
 	let dialed = Callback::new();
-	let peer = "b";
-	let _dial =
-		id(unsafe { moq_socket_dial_tcp(a, peer.as_ptr().cast(), peer.len(), Some(channel_callback), dialed.ptr) });
+	let _dial = id(dial(a, "b", &dialed));
 	let incoming = id(accepts.recv());
 	assert_eq!(moq_socket_incoming_reject(incoming), 0);
 	assert!(
@@ -257,10 +235,11 @@ fn socket_reject_and_cancel() {
 	let me = "a";
 	assert_eq!(
 		unsafe {
-			moq_socket_dial_tcp(
+			moq_socket_dial_track(
 				a,
 				me.as_ptr().cast(),
 				me.len(),
+				std::ptr::null(),
 				Some(ignore_callback),
 				std::ptr::null_mut(),
 			)
@@ -270,17 +249,8 @@ fn socket_reject_and_cancel() {
 
 	// A pending dial gives up when cancelled.
 	let waiting = Callback::new();
-	let absent = "nobody";
-	let dial = id(unsafe {
-		moq_socket_dial_tcp(
-			a,
-			absent.as_ptr().cast(),
-			absent.len(),
-			Some(channel_callback),
-			waiting.ptr,
-		)
-	});
-	assert_eq!(moq_socket_cancel(dial), 0);
+	let pending = id(dial(a, "nobody", &waiting));
+	assert_eq!(moq_socket_cancel(pending), 0);
 	assert_eq!(waiting.recv_terminal(), 0);
 
 	assert_eq!(moq_socket_cancel(accept), 0);

@@ -13,9 +13,7 @@ by its own milestone. ✅ m3 (rejected: m2, where the cut would wait on it;
 pulling the m2 blocker into m1). It ranks right after m2, when it can start.
 
 The 2026-10-15 release audit kept federation guidance in m1, until the move
-above. Deferred P2P
-owns the later application-selected peer setup and extends this concept page.
-Every feature PR still fixes docs it makes stale.
+above. Every feature PR still fixes docs it makes stale.
 
 Walk an outbound-only local relay through scoped admission, two-way delivery,
 two uplinks, and partition/healing. Explain application-owned connection

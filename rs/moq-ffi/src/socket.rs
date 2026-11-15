@@ -1,16 +1,16 @@
-//! Point-to-point socket endpoints and their two protocol-specific streams.
+//! Point-to-point socket endpoints and their track sessions.
 
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
-use crate::consumer::{MoqGroupConsumer, MoqTrackConsumer};
+use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
 use crate::ffi::{Background, OneShot, Polled};
 use crate::origin::MoqOriginProducer;
-use crate::producer::{MoqGroupProducer, MoqTrackInfo, MoqTrackProducer};
+use crate::producer::{MoqTrackInfo, MoqTrackProducer};
 
 /// A socket endpoint: its first dial announces it as a client, and its first accept as a
-/// server, which takes TCP and track dials separately.
+/// server.
 #[derive(uniffi::Object)]
 pub struct MoqSocketEndpoint {
 	inner: moq_net::socket::Endpoint,
@@ -50,31 +50,6 @@ impl MoqSocketEndpoint {
 		self.inner.close();
 	}
 
-	/// Dial the server `peer` in a new `tcp` session; cancelling this call resets only this dial.
-	pub async fn dial_tcp(&self, peer: String) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
-		self.driver
-			.watch(async {
-				let stream = self.inner.dial_tcp(&peer, 0)?.await?;
-				Ok(Arc::new(MoqSocketTcpStream::new(stream, self.driver.clone())))
-			})
-			.await
-	}
-
-	/// Start accepting `tcp` dials and await the next one, independently of the other protocol.
-	pub async fn accept_tcp(&self) -> Result<Arc<MoqSocketIncomingTcp>, MoqError> {
-		self.driver
-			.watch(async {
-				let inner = self.inner.accept_tcp().await?;
-				Ok(Arc::new(MoqSocketIncomingTcp {
-					peer: inner.peer().into(),
-					session: inner.session().into(),
-					inner: OneShot::new(inner),
-					driver: self.driver.clone(),
-				}))
-			})
-			.await
-	}
-
 	/// Dial the server `peer` in a new `track` session; cancelling this call resets only this dial.
 	pub async fn dial_track(
 		&self,
@@ -92,7 +67,7 @@ impl MoqSocketEndpoint {
 			.await
 	}
 
-	/// Start accepting `track` dials and await the next one, independently of the other protocol.
+	/// Start accepting `track` dials and await the next one.
 	pub async fn accept_track(&self) -> Result<Arc<MoqSocketIncomingTrack>, MoqError> {
 		self.driver
 			.watch(async {
@@ -114,92 +89,10 @@ impl Drop for MoqSocketEndpoint {
 	}
 }
 
-/// An incoming `tcp` dial, consumed by accepting or rejecting it.
-#[derive(uniffi::Object)]
-pub struct MoqSocketIncomingTcp {
-	inner: OneShot<moq_net::socket::Incoming<moq_net::socket::TcpStream>>,
-	peer: String,
-	session: String,
-	driver: Background,
-}
-
-#[uniffi::export]
-impl MoqSocketIncomingTcp {
-	/// The endpoint claiming this dial; accepting verifies it really dialed.
-	pub fn peer(&self) -> String {
-		self.peer.clone()
-	}
-	/// The random id of this session.
-	pub fn session(&self) -> String {
-		self.session.clone()
-	}
-	/// Verify return routability and accept; cancelling resets the dial.
-	pub async fn accept(&self) -> Result<Arc<MoqSocketTcpStream>, MoqError> {
-		self.driver.check()?;
-		let (incoming, answering) = self.inner.take()?;
-		let accepting = Polled::new(incoming.accept(0)).supervised(self.driver.clone());
-		let stream = accepting
-			.wait(|inner, waiter| Poll::Ready(Ok(ready!(inner.poll_ok(waiter))?)))
-			.await;
-		answering.settle(stream.map(|stream| Arc::new(MoqSocketTcpStream::new(stream, self.driver.clone()))))
-	}
-	/// Refuse the dial as not found.
-	pub fn reject(&self) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		self.driver.check()?;
-		self.inner.answer(|incoming| {
-			incoming.reject();
-			Ok(())
-		})
-	}
-}
-
-/// A `tcp` session exposing its existing producer and subscribed consumer handles.
-#[derive(uniffi::Object)]
-pub struct MoqSocketTcpStream {
-	producer: Arc<MoqGroupProducer>,
-	consumer: Arc<MoqGroupConsumer>,
-	peer: String,
-	session: String,
-}
-
-impl MoqSocketTcpStream {
-	fn new(inner: moq_net::socket::TcpStream, driver: Background) -> Self {
-		let peer = inner.peer().into();
-		let session = inner.session().into();
-		Self {
-			producer: Arc::new(MoqGroupProducer::from_inner(inner.producer)),
-			consumer: Arc::new(MoqGroupConsumer::new(inner.consumer, driver)),
-			peer,
-			session,
-		}
-	}
-}
-
-#[uniffi::export]
-impl MoqSocketTcpStream {
-	/// This side's write half.
-	pub fn producer(&self) -> Arc<MoqGroupProducer> {
-		self.producer.clone()
-	}
-	/// The peer's read half, retaining its reliable ascending subscription.
-	pub fn consumer(&self) -> Arc<MoqGroupConsumer> {
-		self.consumer.clone()
-	}
-	/// The peer endpoint's id.
-	pub fn peer(&self) -> String {
-		self.peer.clone()
-	}
-	/// The random id of this session.
-	pub fn session(&self) -> String {
-		self.session.clone()
-	}
-}
-
 /// An incoming `track` dial, consumed by accepting or rejecting it.
 #[derive(uniffi::Object)]
 pub struct MoqSocketIncomingTrack {
-	inner: OneShot<moq_net::socket::Incoming<moq_net::socket::TrackStream>>,
+	inner: OneShot<moq_net::socket::Incoming>,
 	peer: String,
 	session: String,
 	driver: Background,
@@ -306,114 +199,23 @@ mod tests {
 		}
 	}
 
-	async fn tcp(a: &MoqSocketEndpoint, b: &MoqSocketEndpoint) -> (Arc<MoqSocketTcpStream>, Arc<MoqSocketTcpStream>) {
-		let mut incoming = Box::pin(b.accept_tcp());
+	async fn connect(
+		a: &MoqSocketEndpoint,
+		b: &MoqSocketEndpoint,
+	) -> (Arc<MoqSocketTrackStream>, Arc<MoqSocketTrackStream>) {
+		let mut incoming = Box::pin(b.accept_track());
 		pending(incoming.as_mut());
-		let (dialed, accepted) = tokio::join!(a.dial_tcp(b.id()), async { incoming.await.unwrap().accept().await });
-		(dialed.unwrap(), accepted.unwrap())
-	}
-
-	#[tokio::test]
-	async fn tcp_halves_outlive_the_stream_and_preserve_fin() {
-		let (a, b) = endpoints();
-		let (client, server) = tcp(&a, &b).await;
-		assert_eq!((client.peer(), server.peer()), ("b".into(), "a".into()));
-		assert_eq!(client.session(), server.session());
-		let producer = client.producer();
-		let reader = client.consumer();
-		let consumer = server.consumer();
-		drop(client);
-		producer.write_frame(frame(b"one")).unwrap();
-		producer.write_frame(frame(b"two")).unwrap();
-		producer.finish().unwrap();
-		drop(producer);
-		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"one");
-		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"two");
-		assert!(consumer.read_frame().await.unwrap().is_none());
-		server.producer().finish().unwrap();
-		assert!(reader.read_frame().await.unwrap().is_none());
-	}
-
-	#[tokio::test]
-	async fn tcp_reset_is_not_fin_and_does_not_close_another_session() {
-		let (a, b) = endpoints();
-		let (client, server) = tcp(&a, &b).await;
-		let (other, peer) = tcp(&a, &b).await;
-		assert_ne!(client.session(), other.session());
-		client.producer().abort(42).unwrap();
-		let error = server.consumer().read_frame().await.err().unwrap();
-		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::App));
-		other.producer().write_frame(frame(b"independent")).unwrap();
-		other.producer().finish().unwrap();
-		assert_eq!(
-			peer.consumer().read_frame().await.unwrap().unwrap().payload,
-			b"independent"
-		);
-		assert!(peer.consumer().read_frame().await.unwrap().is_none());
-	}
-
-	#[tokio::test]
-	async fn endpoint_close_resets_an_open_tcp_session_as_closed() {
-		let (a, b) = endpoints();
-		let (_client, server) = tcp(&a, &b).await;
-		a.close();
-		let error = server.consumer().read_frame().await.err().unwrap();
-		assert!(matches!(error, MoqError::Closed), "{error:?}");
-	}
-
-	#[tokio::test]
-	async fn dropping_an_unfinished_tcp_writer_resets_with_a_deliberate_cause() {
-		let (a, b) = endpoints();
-		let (client, server) = tcp(&a, &b).await;
-		let consumer = client.consumer();
-		// Keep the read half: dropping the write half must cause the reset itself.
-		drop(client);
-		let error = server.consumer().read_frame().await.err().unwrap();
-		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::Unroutable));
-		drop(consumer);
-	}
-
-	#[tokio::test]
-	async fn cancelled_accept_wait_leaves_the_queue_and_rejection_is_one_shot() {
-		let (a, b) = endpoints();
-		let mut abandoned = Box::pin(b.accept_tcp());
-		pending(abandoned.as_mut());
-		drop(abandoned);
-		let (dialed, ()) = tokio::join!(a.dial_tcp(b.id()), async {
-			let incoming = b.accept_tcp().await.unwrap();
-			assert_eq!(incoming.peer(), "a");
-			incoming.reject().unwrap();
-			assert!(matches!(incoming.reject(), Err(MoqError::AlreadyResponded)));
+		let (dialed, accepted) = tokio::join!(a.dial_track(b.id(), None), async {
+			incoming.await.unwrap().accept(None).await
 		});
-		assert!(matches!(dialed, Err(MoqError::NotFound)));
-		let _ = tcp(&a, &b).await;
-	}
-
-	#[tokio::test]
-	async fn cancelling_a_dial_resets_its_incoming_but_the_endpoint_can_dial_again() {
-		let (a, b) = endpoints();
-		let mut incoming = Box::pin(b.accept_tcp());
-		pending(incoming.as_mut());
-		let mut dial = Box::pin(a.dial_tcp(b.id()));
-		pending(dial.as_mut());
-		let incoming = tokio::select! {
-			incoming = incoming => incoming.unwrap(),
-			_ = &mut dial => panic!("dial resolved without acceptance"),
-		};
-		drop(dial);
-		assert!(incoming.accept().await.is_err());
-		let _ = tcp(&a, &b).await;
+		(dialed.unwrap(), accepted.unwrap())
 	}
 
 	#[tokio::test]
 	async fn track_subscription_survives_stream_release_and_has_no_default_age_limit() {
 		let (a, b) = endpoints();
-		let mut incoming = Box::pin(b.accept_track());
-		pending(incoming.as_mut());
-		let (client, server) = tokio::join!(a.dial_track(b.id(), None), async {
-			incoming.await.unwrap().accept(None).await
-		});
-		let (client, server) = (client.unwrap(), server.unwrap());
+		let (client, server) = connect(&a, &b).await;
+		assert_eq!((client.peer(), server.peer()), ("b".into(), "a".into()));
 		assert_eq!(client.session(), server.session());
 		let producer = client.producer();
 		let reverse = server.producer();
@@ -436,19 +238,65 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn protocols_are_independent_and_endpoint_close_wakes_both_queues() {
+	async fn an_abort_is_not_a_finish_and_does_not_close_another_session() {
 		let (a, b) = endpoints();
-		let mut incoming = Box::pin(b.accept_tcp());
+		let (client, server) = connect(&a, &b).await;
+		let (other, peer) = connect(&a, &b).await;
+		assert_ne!(client.session(), other.session());
+		client.producer().abort(42).unwrap();
+		let error = server.consumer().read_frame().await.err().unwrap();
+		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::App));
+		other.producer().write_frame(frame(b"independent")).unwrap();
+		other.producer().finish().unwrap();
+		assert_eq!(
+			peer.consumer().read_frame().await.unwrap().unwrap().payload,
+			b"independent"
+		);
+		assert!(peer.consumer().read_frame().await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn cancelled_accept_wait_leaves_the_queue_and_rejection_is_one_shot() {
+		let (a, b) = endpoints();
+		let mut abandoned = Box::pin(b.accept_track());
+		pending(abandoned.as_mut());
+		drop(abandoned);
+		let (dialed, ()) = tokio::join!(a.dial_track(b.id(), None), async {
+			let incoming = b.accept_track().await.unwrap();
+			assert_eq!(incoming.peer(), "a");
+			incoming.reject().unwrap();
+			assert!(matches!(incoming.reject(), Err(MoqError::AlreadyResponded)));
+		});
+		assert!(matches!(dialed, Err(MoqError::NotFound)));
+		let _ = connect(&a, &b).await;
+	}
+
+	#[tokio::test]
+	async fn cancelling_a_dial_resets_its_incoming_but_the_endpoint_can_dial_again() {
+		let (a, b) = endpoints();
+		let mut incoming = Box::pin(b.accept_track());
 		pending(incoming.as_mut());
-		tokio::select! {
-			result = a.dial_track(b.id(), None) => assert!(matches!(result, Err(MoqError::Unsupported))),
-			_ = &mut incoming => panic!("track dial arrived in the TCP queue"),
-		}
-		let mut tracks = Box::pin(b.accept_track());
-		pending(tracks.as_mut());
+		let mut dial = Box::pin(a.dial_track(b.id(), None));
+		pending(dial.as_mut());
+		let incoming = tokio::select! {
+			incoming = incoming => incoming.unwrap(),
+			_ = &mut dial => panic!("dial resolved without acceptance"),
+		};
+		drop(dial);
+		assert!(incoming.accept(None).await.is_err());
+		let _ = connect(&a, &b).await;
+	}
+
+	#[tokio::test]
+	async fn endpoint_close_ends_its_sessions_and_wakes_a_pending_accept() {
+		let (a, b) = endpoints();
+		let (_client, server) = connect(&a, &b).await;
+		let mut incoming = Box::pin(b.accept_track());
+		pending(incoming.as_mut());
+		a.close();
+		assert!(server.consumer().read_frame().await.is_err());
 		b.close();
 		assert!(matches!(incoming.await, Err(MoqError::Closed)));
-		assert!(matches!(tracks.await, Err(MoqError::Closed)));
-		assert!(matches!(b.dial_tcp(a.id()).await, Err(MoqError::Closed)));
+		assert!(matches!(b.dial_track(a.id(), None).await, Err(MoqError::Closed)));
 	}
 }

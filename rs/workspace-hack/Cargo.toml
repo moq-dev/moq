@@ -27,7 +27,6 @@ publish = false
 anyhow = { version = "1", features = ["backtrace"] }
 base64 = { version = "0.23" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
-byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -54,13 +53,11 @@ futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
-hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
-md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
-md-5-a6292c17cd707f01 = { package = "md-5", version = "0.11" }
+md-5 = { version = "0.11" }
 memchr = { version = "2" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom-181b0d20215bb231 = { package = "nom", version = "8" }
@@ -84,7 +81,6 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
-sha2 = { version = "0.10" }
 siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
@@ -113,7 +109,6 @@ zeroize = { version = "1", features = ["derive"] }
 anyhow = { version = "1", features = ["backtrace"] }
 base64 = { version = "0.23" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
-byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
@@ -143,13 +138,11 @@ futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
-hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
-md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
-md-5-a6292c17cd707f01 = { package = "md-5", version = "0.11" }
+md-5 = { version = "0.11" }
 memchr = { version = "2" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom-181b0d20215bb231 = { package = "nom", version = "8" }
@@ -175,7 +168,6 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
-sha2 = { version = "0.10" }
 siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }

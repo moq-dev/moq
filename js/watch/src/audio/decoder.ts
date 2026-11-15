@@ -20,7 +20,14 @@ import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feed
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { DELAY_MAX, type Sync, type Track } from "../sync";
 import { AudioBuffer } from "./buffer";
-import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
+import {
+	type DecoderConfig,
+	decoderDescription,
+	frameDuration,
+	type PlaybackIdentity,
+	packetDuration,
+	playbackIdentity,
+} from "./config";
 import { Handover } from "./handover";
 import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
@@ -687,13 +694,10 @@ export class Decoder {
 				this.#ring.peek()?.dropped();
 			});
 
-			// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
-			const description =
-				config.codec === "opus"
-					? undefined
-					: config.description
-						? Util.Hex.toBytes(config.description)
-						: undefined;
+			const description = decoderDescription(
+				config.codec,
+				config.description ? Util.Hex.toBytes(config.description) : undefined,
+			);
 			const decoderConfig: AudioDecoderConfig = {
 				codec: config.codec,
 				sampleRate: config.sampleRate,
@@ -759,14 +763,11 @@ export class Decoder {
 				.min(DELAY_MAX)
 				.asMicros(),
 		);
-		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
-		// The dOps box from the init segment is not a valid OGG Identification Header.
-		const description =
-			config.codec === "opus"
-				? undefined
-				: config.description
-					? Util.Hex.toBytes(config.description)
-					: init.description;
+		// The init segment never yields Opus's dOps, which is not the OpusHead WebCodecs takes.
+		const description = decoderDescription(
+			config.codec,
+			config.description ? Util.Hex.toBytes(config.description) : init.description,
+		);
 
 		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 

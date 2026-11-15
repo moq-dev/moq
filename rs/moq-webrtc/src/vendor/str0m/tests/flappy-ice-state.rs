@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use crate::vendor::str0m::RtcConfig;
+use crate::vendor::str0m::media::{Direction, MediaKind};
 use crate::vendor::str0m::{Event, RtcError};
 use tracing::info_span;
 
@@ -22,7 +23,7 @@ pub fn flappy_ice_lite_state() -> Result<(), RtcError> {
 	r.add_host_candidate((Ipv4Addr::new(2, 2, 2, 2), 2000).into());
 
 	let mut change = l.sdp_api();
-	let _ = change.add_channel("My little channel".into());
+	let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 	let (offer, pending) = change.apply().unwrap();
 
 	let answer = r.rtc.sdp_api().accept_offer(offer)?;

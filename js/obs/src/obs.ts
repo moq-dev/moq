@@ -360,7 +360,9 @@ export class Obs {
 			);
 		}
 
-		// OBS reads these on every StartStream.
+		// OBS reads these on every StartStream. Over RTMP the x264 options are the only tuning; the
+		// MoQ service tunes on its own, but x264 reads these after it, so a keyint left from an
+		// earlier fps would otherwise win.
 		const keyint = Math.round((2 * video.fpsNumerator) / video.fpsDenominator);
 		const options = `tune=zerolatency bframes=0 rc-lookahead=0 sync-lookahead=0 sliced-threads=1 mbtree=0 keyint=${keyint}`;
 		const live: [string, string, string][] = [
@@ -406,8 +408,7 @@ export class Obs {
 		}
 
 		const encoder = (await this.#parameter("SimpleOutput", "StreamEncoder")) ?? "";
-		const ignored: Ignored[] = encoder.startsWith("x264") ? [] : ["bframes", "keyint", "lookahead"];
-		return { profile, encoder, ignored };
+		return { profile, encoder, ignored: ignored(destination.kind, encoder) };
 	}
 
 	/** Starts streaming and resolves once OBS is live, or rejects if the output stops first. */
@@ -581,4 +582,16 @@ function compareVersions(a: string, b: string): number {
 		if (diff !== 0) return diff;
 	}
 	return 0;
+}
+
+// The low-latency settings a Simple output encoder keeps. The MoQ service tunes every encoder
+// Simple output offers and leaves others alone, and VideoToolbox has no lookahead control;
+// over RTMP only x264 takes them.
+function ignored(destination: Destination["kind"], encoder: string): Ignored[] {
+	if (encoder.startsWith("x264")) return [];
+	if (destination === "moq") {
+		if (["nvenc", "qsv", "amd"].some((prefix) => encoder.startsWith(prefix))) return [];
+		if (encoder.startsWith("apple")) return ["lookahead"];
+	}
+	return ["bframes", "keyint", "lookahead"];
 }

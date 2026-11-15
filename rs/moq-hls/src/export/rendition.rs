@@ -107,7 +107,9 @@ struct Run {
 	epoch: u64,
 }
 
-/// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+/// The rendition's normalized catalog config: what its [tag](segments::tag) hashes and every
+/// [`Muxer`] it builds reads, so a segment URL names the same bytes on every edge, whenever the
+/// edge built the rendition. The publisher's live estimates never reach the bytes.
 #[allow(
 	clippy::large_enum_variant,
 	reason = "one per rendition, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
@@ -634,7 +636,7 @@ impl Rendition {
 		self.enabled.load(Ordering::Relaxed)
 	}
 
-	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
+	/// The latest catalog bitrate, preserving `None` for the per-kind default.
 	fn bitrate(&self) -> Option<u64> {
 		*self.bitrate.read().expect("bitrate lock poisoned")
 	}
@@ -661,8 +663,9 @@ impl Rendition {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
+		let normalized = normalize_video(config);
 		Ok(Self {
-			tag: tag(track, interval, &normalize_video(config)),
+			tag: tag(track, interval, &normalized),
 			container,
 			name,
 			kind: Kind::Video,
@@ -672,7 +675,7 @@ impl Rendition {
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
-			config: Config::Video(config.clone()),
+			config: Config::Video(normalized),
 			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
@@ -703,8 +706,9 @@ impl Rendition {
 		let track = config.track(&name);
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
+		let normalized = normalize_audio(config);
 		Ok(Self {
-			tag: tag(track, interval, &normalize_audio(config)),
+			tag: tag(track, interval, &normalized),
 			container,
 			name,
 			kind: Kind::Audio,
@@ -714,7 +718,7 @@ impl Rendition {
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
-			config: Config::Audio(config.clone()),
+			config: Config::Audio(normalized),
 			target_duration: target_duration(grid::segment_length(interval)),
 			overruns: AtomicU64::new(0),
 			interval,
@@ -1385,23 +1389,16 @@ impl Rendition {
 		clock.wall_clock(pts).ok()
 	}
 
-	/// A muxer at the timescale this rendition's config chose, with the latest bitrate.
+	/// A muxer for this rendition's normalized config.
 	///
-	/// Each segment times its last sample from its own row, so no catalog estimate changes
-	/// the media bytes.
+	/// No catalog estimate reaches it: an estimated framerate would pick the timescale and an
+	/// estimated bitrate the AAC descriptor, so edges that built the rendition before and after
+	/// an estimate would serve different bytes under one URL. Each segment times its last sample
+	/// from its own row instead.
 	pub(crate) fn muxer(&self) -> Result<Muxer> {
-		let bitrate = self.bitrate();
 		Ok(match &self.config {
-			Config::Video(config) => {
-				let mut config = config.clone();
-				config.bitrate = bitrate;
-				Muxer::video(&config)?
-			}
-			Config::Audio(config) => {
-				let mut config = config.clone();
-				config.bitrate = bitrate;
-				Muxer::audio(&config)?
-			}
+			Config::Video(config) => Muxer::video(config)?,
+			Config::Audio(config) => Muxer::audio(config)?,
 		})
 	}
 
@@ -1534,12 +1531,12 @@ impl Rendition {
 	/// [generation](super::Broadcaster::set_generation), since a restart reuses segment numbers
 	/// and another run's URL would name different bytes.
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
-		// A predecessor's segments still listed are muxed under its config. A config that returns
-		// gets its tag back, but the instances' segment numbers never overlap.
+		// A predecessor's segments still listed, its cut among them, are muxed under its config. A
+		// config that returns gets its tag back, but the instances' segment numbers never overlap.
 		let owner = self
 			.lineage()
 			.into_iter()
-			.find(|rendition| *rendition.tag == *id.tag && rendition.live.holds(&id.tag, id.at));
+			.find(|rendition| rendition.live.holds(&id.tag, id.at));
 		let owner = owner.as_deref().unwrap_or(self);
 		let Some(mut fetch) = owner.fetch_own(id)? else {
 			return Ok(None);
@@ -2242,7 +2239,12 @@ impl Follow {
 				*whole = true;
 			}
 			claim.next = segment + 1;
-			rendition.push(row(&rendition, slot, *broken));
+			let mut row = row(&rendition, slot, *broken);
+			if last {
+				// Where it stopped reading is this edge's own, so the cut gets a URL of its own.
+				row.tag = segments::cut(&row.tag, row.groups.end, row.end).into();
+			}
+			rendition.push(row);
 			*broken = false;
 			if last {
 				return Some(Ok(()));

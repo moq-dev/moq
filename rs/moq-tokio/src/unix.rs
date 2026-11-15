@@ -266,10 +266,12 @@ fn socket_path(url: &Url) -> Option<PathBuf> {
 /// Listens for incoming qmux connections on a Unix domain socket.
 ///
 /// Credentials are checked against the server's allowlist before the qmux handshake.
-/// The socket file is removed on drop.
+/// The socket file is removed on drop when this listener bound it.
 pub(crate) struct Listener {
 	listener: tokio::net::UnixListener,
 	path: PathBuf,
+	/// Whether this listener bound the socket file, and so removes it on drop.
+	owned: bool,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
 	/// The settings each accepted qmux session starts with.
@@ -299,6 +301,22 @@ impl Listener {
 		Ok(Self {
 			listener,
 			path,
+			owned: true,
+			protocols: Vec::new(),
+			health: crate::accept::Health::new("unix"),
+			session: crate::qmux_default(),
+		})
+	}
+
+	/// Serve a listening socket the caller bound at `path`, such as one taken over
+	/// from the process this one replaces. The path stays the caller's, so it is
+	/// left in place on drop.
+	pub(crate) fn from_std(listener: std::os::unix::net::UnixListener, path: impl AsRef<Path>) -> Result<Self> {
+		listener.set_nonblocking(true)?;
+		Ok(Self {
+			listener: tokio::net::UnixListener::from_std(listener)?,
+			path: path.as_ref().to_path_buf(),
+			owned: false,
 			protocols: Vec::new(),
 			health: crate::accept::Health::new("unix"),
 			session: crate::qmux_default(),
@@ -399,7 +417,9 @@ impl Listener {
 impl Drop for Listener {
 	fn drop(&mut self) {
 		// Best-effort: don't leave a stale socket file behind.
-		let _ = fs::remove_file(&self.path);
+		if self.owned {
+			let _ = fs::remove_file(&self.path);
+		}
 	}
 }
 

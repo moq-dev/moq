@@ -60,8 +60,6 @@ pub mod secret;
 pub mod server;
 #[cfg(all(feature = "sim", feature = "net"))]
 pub mod sim;
-#[cfg(feature = "net")]
-pub mod socket;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;

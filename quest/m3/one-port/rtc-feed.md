@@ -38,6 +38,14 @@ pub enum Socket {
 ```
 
 Build on moq-webrtc's ICE module (split out in #5702) rather than beside it.
+
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+the one-port demux already hands WebRTC its share of the port as
+`moq_tokio::quic::demux::WebRtc` (`rs/moq-tokio/src/quic/demux.rs`), with
+`poll_recv`, `poll_send`, and a `pin` that releases on drop, reached through
+`Relay::webrtc()`; only tests call either today. Consume that handle instead
+of the sketch's `mpsc` channels and new send trait, which `rs/AGENTS.md`'s
+rule against `tokio::sync` in libraries rules out.
 moq-webrtc's `ice::Socket { udp, locals, inbound }` already separates the advertised
 host candidates (`locals`, from `ice_candidates`) from the bound address and
 takes routed datagrams on its `Inbound` queue, and the server mux

@@ -133,7 +133,6 @@
 //!
 //! - `Rtc::handle_input` - feeding a network packet or a timeout
 //! - `Writer::write` / `Writer::request_keyframe` - sending media
-//! - `Channel::write` - sending data channel data
 //! - `SdpApi::apply` / `DirectApi::*` - negotiation
 //! - `Rtc::add_local_candidate` / `Rtc::add_remote_candidate`
 //!
@@ -155,7 +154,7 @@
 //!    packet, or the application wanting to perform a mutation (e.g.
 //!    write media).
 //! 2. **Perform that ONE mutation** - feed `Input` to `handle_input`, or
-//!    call into a writer / channel / SDP API.
+//!    call into a writer / SDP API.
 //! 3. **Poll** `Rtc::poll_output`.
 //! 4. **Handle** the output: `Output::Transmit` is sent on the socket,
 //!    `Output::Event` is dispatched to the application, `Output::Timeout`
@@ -193,7 +192,7 @@
 //!
 //!             // Step 4: hand the event to the application and keep draining.
 //!             // Events are mainly incoming media data from the remote peer,
-//!             // but also data channel data and statistics.
+//!             // but also statistics.
 //!             Output::Event(e) => {
 //!                 if e == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
 //!                     return;
@@ -372,13 +371,13 @@
 //!
 //! Output from the `Rtc` instance can be grouped into three kinds.
 //!
-//! 1. Events (such as receiving media or data channel data).
+//! 1. Events (such as receiving media).
 //! 2. Network output. Data to be sent, typically from a UDP socket.
 //! 3. Timeouts. Indicates when the instance next expects a time input.
 //!
 //! Input to the `Rtc` instance is:
 //!
-//! 1. User operations (such as sending media or data channel data).
+//! 1. User operations (such as sending media).
 //! 2. Network input. Typically read from a UDP socket.
 //! 3. Timeouts. As obtained from the output above.
 //!
@@ -543,7 +542,7 @@
 //! | Peer Connection API      | :x:                | :white_check_mark: |
 //! | SDP                      | :white_check_mark: | :white_check_mark: |
 //! | ICE                      | :white_check_mark: | :white_check_mark: |
-//! | Data Channels            | :white_check_mark: | :white_check_mark: |
+//! | Data Channels            | :x:                | :white_check_mark: |
 //! | Send/Recv Reports        | :white_check_mark: | :white_check_mark: |
 //! | Transport Wide CC        | :white_check_mark: | :white_check_mark: |
 //! | Bandwidth Estimation     | :x:                | :white_check_mark: |
@@ -779,16 +778,10 @@ pub mod bwe {
 	}
 }
 
-mod sctp;
-use sctp::{RtcSctp, SctpEvent, SctpInitData};
-
 mod sdp;
 
 pub mod format;
 use format::CodecConfig;
-
-pub mod channel;
-use channel::{Channel, ChannelData, ChannelHandler, ChannelId};
 
 pub mod media;
 use media::SenderFeedback;
@@ -865,8 +858,6 @@ pub struct Rtc {
 	dtls_connected: bool,
 	dtls_buf: Vec<u8>,
 	next_dtls_timeout: Option<Instant>,
-	sctp: RtcSctp,
-	chan: ChannelHandler,
 	session: Session,
 	remote_fingerprint: Option<Fingerprint>,
 	remote_addrs: Vec<SocketAddr>,
@@ -933,31 +924,6 @@ pub enum Event {
     ///. Currently only covers a change of direction.
     MediaChanged(MediaChanged),
 
-    // =================== Data channel related events ===================
-
-    /// A data channel has opened.
-    ///
-    /// The string is the channel label which is set by the opening peer and can
-    /// be used to identify the purpose of the channel when there are more than one.
-    ///
-    /// The negotiation is to set up an SCTP association via DTLS. Subsequent data
-    /// channels reuse the same association.
-    ///
-    /// Upon this event, the [`Channel`] can be obtained via [`Rtc::channel()`].
-    ///
-    /// For [`SdpApi`]: The first ever data channel results in an SDP
-    /// negotiation, and this events comes at the end of that.
-    ChannelOpen(ChannelId, String),
-
-    /// Incoming data channel data from the remote peer.
-    ChannelData(ChannelData),
-
-    /// A data channel has been closed.
-    ChannelClose(ChannelId),
-
-    /// A data channel's buffered amount has dropped below the configured threshold.
-    ChannelBufferedAmountLow(ChannelId),
-
     // =================== BWE related events ===================
 
     /// A bitrate the remote peer asked for.
@@ -981,7 +947,7 @@ pub enum Event {
     /// Incoming RTP data.
     RtpPacket(RtpPacket),
 
-    /// The remote DTLS connection or SCTP association has closed.
+    /// The remote DTLS connection has closed.
     ///
     /// When this event is emitted, `Rtc` starts local shutdown signals and
     /// remains alive only while [`Rtc::poll_output()`] drains pending local
@@ -1056,16 +1022,6 @@ pub enum Reason {
 	///
 	/// Includes checking candidate pairs and various cleanups.
 	Ice,
-
-	/// The SCTP subsystem.
-	///
-	/// Things like handling retransmissions and keep-alive checks.
-	Sctp,
-
-	/// Data channels.
-	///
-	/// Scheduled when we need to open allocations using SCTP.
-	Channel,
 
 	/// Regular RTP feedback.
 	///
@@ -1179,12 +1135,6 @@ impl Rtc {
              crypto provider that supports certificate generation.",
 			);
 
-		let mut sctp = RtcSctp::new(*mtu.start(), config.sctp_max_message_size);
-		if config.snap_enabled {
-			sctp.enable_snap();
-		}
-		sctp.set_max_buffered_amount(config.sctp_max_buffered_amount);
-
 		Ok(Rtc {
 			state: RtcState::Alive,
 			ice,
@@ -1200,8 +1150,6 @@ impl Rtc {
 			dtls_buf: vec![0; 2000],
 			next_dtls_timeout: None,
 			session,
-			sctp,
-			chan: ChannelHandler::default(),
 			remote_fingerprint: None,
 			remote_addrs: vec![],
 			send_addr: None,
@@ -1227,8 +1175,7 @@ impl Rtc {
 	///
 	/// During shutdown, this remains `true` until [`Rtc::poll_output()`]
 	/// has drained pending local close output. App-facing operations such as
-	/// [`Rtc::writer()`] and [`Rtc::channel()`] are unavailable during that
-	/// closing drain.
+	/// [`Rtc::writer()`] is unavailable during that closing drain.
 	///
 	/// ```ignore
 	/// # use std::time::Instant;
@@ -1433,23 +1380,6 @@ impl Rtc {
 		Ok(())
 	}
 
-	fn try_init_sctp(
-		&mut self,
-		client: bool,
-		sctp_init_data: Option<SctpInitData>,
-		remote_max_message_size: Option<u32>,
-	) -> Result<(), RtcError> {
-		// If we got an m=application line, ensure we have negotiated the
-		// SCTP association with the other side.
-		if self.sctp.is_inited() {
-			return Ok(());
-		}
-
-		self.sctp
-			.init(client, self.last_now, sctp_init_data, remote_max_message_size)?;
-		Ok(())
-	}
-
 	/// Creates a new Mid that is not in the session already.
 	pub(crate) fn new_mid(&self) -> Mid {
 		loop {
@@ -1476,21 +1406,13 @@ impl Rtc {
 	///
 	/// See [`Rtc`] instance documentation for how this is expected to be used in a loop.
 	pub fn poll_output(&mut self) -> Result<Output, RtcError> {
-		// SCTP packets fed into DTLS require another pass. Loop here so a large
-		// batch does not grow the stack with one recursive call per packet.
-		let o = loop {
-			if let Some(o) = self.do_poll_output()? {
-				break o;
-			}
-		};
+		let o = self.do_poll_output()?;
 
 		match &o {
 			Output::Event(e) => match e {
-				Event::ChannelData(_)
-				| Event::MediaData(_)
+				Event::MediaData(_)
 				| Event::RtpPacket(_)
 				| Event::SenderFeedback(_)
-				| Event::ChannelBufferedAmountLow(_)
 				| Event::EgressBitrateEstimate(_)
 				| Event::KeyframeRequest(_) => {
 					trace!("{:?}", e)
@@ -1509,15 +1431,14 @@ impl Rtc {
 		drop(self.readiness.wake());
 	}
 
-	// Returns None when polling must restart after handling an SCTP packet.
-	fn do_poll_output(&mut self) -> Result<Option<Output>, RtcError> {
+	fn do_poll_output(&mut self) -> Result<Output, RtcError> {
 		if self.state == RtcState::Closed {
 			self.last_timeout_reason = Reason::NotHappening;
-			return Ok(Some(Output::Timeout(not_happening())));
+			return Ok(Output::Timeout(not_happening()));
 		}
 
 		if !self.readiness.wants_events() {
-			return Ok(Some(Output::Timeout(self.poll_timeout())));
+			return Ok(Output::Timeout(self.poll_timeout()));
 		}
 
 		while let Some(e) = self.ice.poll_event() {
@@ -1526,7 +1447,7 @@ impl Rtc {
 					//
 				}
 				IceAgentEvent::IceConnectionStateChange(v) => {
-					return Ok(Some(Output::Event(Event::IceConnectionStateChange(v))));
+					return Ok(Output::Event(Event::IceConnectionStateChange(v)));
 				}
 				IceAgentEvent::DiscoveredRecv { proto, source } => {
 					debug!("ICE remote address: {:?}/{:?}", Pii(source), proto);
@@ -1627,8 +1548,9 @@ impl Rtc {
 						return Err(RtcError::RemoteSdp("no a=fingerprint before dtls".into()));
 					}
 				}
+				// SCTP, which this build does not run: application m-lines are rejected.
 				DtlsOutput::ApplicationData(data) => {
-					self.sctp.handle_input(self.last_now, data);
+					trace!("Dropping {} bytes of DTLS application data", data.len());
 				}
 				DtlsOutput::Timeout(t) => {
 					self.next_dtls_timeout = Some(t);
@@ -1636,7 +1558,7 @@ impl Rtc {
 				}
 				DtlsOutput::CloseNotify => {
 					self.start_close()?;
-					return Ok(Some(Output::Event(Event::Closed)));
+					return Ok(Output::Event(Event::Closed));
 				}
 				other => {
 					return Err(RtcError::Dtls(DtlsError::Io(std::io::Error::other(format!(
@@ -1647,98 +1569,20 @@ impl Rtc {
 		}
 
 		if just_connected {
-			return Ok(Some(Output::Event(Event::Connected)));
-		}
-
-		while let Some(e) = self.sctp.poll() {
-			match e {
-				SctpEvent::Transmit { mut packets } => {
-					if let Some(v) = packets.front() {
-						if let Err(e) = self.dtls.handle_input(v) {
-							if is_would_block(&e) {
-								self.sctp.push_back_transmit(packets);
-								break;
-							} else if self.state == RtcState::Closing {
-								debug!("Dropping SCTP transmit while closing after DTLS error: {e}");
-								packets.pop_front();
-								if !packets.is_empty() {
-									self.sctp.push_back_transmit(packets);
-								}
-								return Ok(None);
-							} else {
-								return Err(e.into());
-							}
-						}
-
-						packets.pop_front();
-						// If there are still packets, they are sent on next
-						// poll_output()
-						if !packets.is_empty() {
-							self.sctp.push_back_transmit(packets);
-						}
-
-						// Run again since this would feed the DTLS subsystem
-						// to produce a packet now.
-						return Ok(None);
-					}
-				}
-				SctpEvent::Open { id, label } => {
-					self.chan.ensure_channel_id_for(id);
-					let id = self.chan.channel_id_by_stream_id(id).unwrap();
-					return Ok(Some(Output::Event(Event::ChannelOpen(id, label))));
-				}
-				SctpEvent::Close {
-					id: stream_id,
-					reset_pending,
-				} => {
-					let Some(channel_id) = self.chan.channel_id_by_stream_id(stream_id) else {
-						warn!("Drop ChannelClose event for id: {:?}", stream_id);
-						continue;
-					};
-					// When a reset is outstanding, remove_channel holds the stream id
-					// back from reallocation until the handshake completes.
-					self.chan.remove_channel(channel_id, reset_pending);
-					return Ok(Some(Output::Event(Event::ChannelClose(channel_id))));
-				}
-				SctpEvent::StreamResetComplete { id } => {
-					// The reset handshake completed, the stream id can be used again.
-					self.chan.stream_reset_complete(id);
-					continue;
-				}
-				SctpEvent::AssociationLost => {
-					self.chan.association_lost();
-					self.start_close()?;
-					return Ok(Some(Output::Event(Event::Closed)));
-				}
-				SctpEvent::Data { id, binary, data } => {
-					let Some(id) = self.chan.channel_id_by_stream_id(id) else {
-						warn!("Drop ChannelData event for id: {:?}", id);
-						continue;
-					};
-					let cd = ChannelData { id, binary, data };
-					return Ok(Some(Output::Event(Event::ChannelData(cd))));
-				}
-				SctpEvent::BufferedAmountLow { id } => {
-					let Some(id) = self.chan.channel_id_by_stream_id(id) else {
-						warn!("Drop BufferedAmountLow for id: {:?}", id);
-						continue;
-					};
-					return Ok(Some(Output::Event(Event::ChannelBufferedAmountLow(id))));
-				}
-			}
+			return Ok(Output::Event(Event::Connected));
 		}
 
 		if let Some(ev) = self.session.poll_event() {
-			return Ok(Some(Output::Event(ev)));
+			return Ok(Output::Event(ev));
 		}
 
 		// Some polling needs to bubble up errors.
 		if let Some(ev) = self.session.poll_event_fallible(self.last_now)? {
-			return Ok(Some(Output::Event(ev)));
+			return Ok(Output::Event(ev));
 		}
 
 		if let Some(v) = self.ice.poll_transmit() {
-			return Ok(Some(Output::Transmit(v)));
+			return Ok(Output::Transmit(v));
 		}
 
 		if let Some(send) = &self.send_addr {
@@ -1754,7 +1598,7 @@ impl Rtc {
 					destination: send.destination,
 					contents,
 				};
-				return Ok(Some(Output::Transmit(t)));
+				return Ok(Output::Transmit(t));
 			}
 		} else {
 			// Don't allow accumulated feedback to build up indefinitely
@@ -1763,7 +1607,7 @@ impl Rtc {
 
 		self.readiness.clear_events();
 
-		Ok(Some(Output::Timeout(self.poll_timeout())))
+		Ok(Output::Timeout(self.poll_timeout()))
 	}
 
 	// Called only after the output pipeline has drained.
@@ -1779,9 +1623,7 @@ impl Rtc {
 			let time_and_reason = (None, Reason::NotHappening)
 				.soonest((self.next_dtls_timeout, Reason::DTLS))
 				.soonest((ice_timeout, Reason::Ice))
-				.soonest(self.session.poll_timeout())
-				.soonest((self.sctp.poll_timeout(), Reason::Sctp))
-				.soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel));
+				.soonest(self.session.poll_timeout());
 
 			let time = time_and_reason.0.unwrap_or_else(not_happening);
 			self.cached_timeout = time.max(self.last_now);
@@ -1919,7 +1761,7 @@ impl Rtc {
 
 	/// Starts local shutdown.
 	///
-	/// The `Rtc` instance schedules RTCP BYE, requests SCTP shutdown, and sends
+	/// The `Rtc` instance schedules RTCP BYE and sends
 	/// DTLS close_notify without waiting for remote replies. It enters a closing
 	/// drain state where app-facing operations stop, but [`Rtc::poll_output()`]
 	/// continues polling until pending local close output has drained. Once the
@@ -1939,7 +1781,6 @@ impl Rtc {
 
 		if self.state != RtcState::Closing {
 			self.session.close_rtp();
-			self.sctp.close()?;
 			self.state = RtcState::Closing;
 		}
 
@@ -1987,8 +1828,6 @@ impl Rtc {
 		// independently as each statement ends.
 		let Rtc {
 			ice,
-			sctp,
-			chan,
 			session,
 			readiness,
 			..
@@ -1999,8 +1838,6 @@ impl Rtc {
 		ice.handle_timeout(now);
 		drop(readiness.wake());
 
-		sctp.handle_timeout(now, &mut readiness.wake());
-		chan.handle_timeout(now, sctp, &mut readiness.wake());
 		session.handle_timeout(now, &mut readiness.wake())?;
 
 		Ok(())
@@ -2043,36 +1880,6 @@ impl Rtc {
 		Ok(())
 	}
 
-	/// Obtain handle for writing to a data channel.
-	///
-	/// This is first available when a [`ChannelId`] is advertised via [`Event::ChannelOpen`].
-	/// The function returns `None` also for IDs from [`SdpApi::add_channel()`].
-	///
-	/// Incoming channel data is via the [`Event::ChannelData`] event.
-	///
-	/// ```ignore
-	/// # use std::time::Instant;
-	/// # use crate::vendor::str0m::{Rtc, channel::ChannelId};
-	/// let mut rtc = Rtc::new(Instant::now());
-	///
-	/// let cid: ChannelId = todo!(); // obtain channel id from Event::ChannelOpen
-	/// let channel = rtc.channel(cid).unwrap();
-	/// // TODO write data channel data.
-	/// ```
-	pub fn channel(&mut self, id: ChannelId) -> Option<Channel<'_>> {
-		if self.state != RtcState::Alive {
-			return None;
-		}
-
-		let sctp_stream_id = self.chan.stream_id_by_channel_id(id)?;
-
-		if !self.sctp.is_open(sctp_stream_id) {
-			return None;
-		}
-
-		Some(Channel::new(sctp_stream_id, self))
-	}
-
 	fn is_correct_change_id(&self, change_id: usize) -> bool {
 		self.change_counter == change_id + 1
 	}
@@ -2098,9 +1905,6 @@ impl PartialEq for Event {
 			(Self::IceConnectionStateChange(l0), Self::IceConnectionStateChange(r0)) => l0 == r0,
 			(Self::MediaAdded(m0), Self::MediaAdded(m1)) => m0 == m1,
 			(Self::MediaData(m1), Self::MediaData(m2)) => m1 == m2,
-			(Self::ChannelOpen(l0, l1), Self::ChannelOpen(r0, r1)) => l0 == r0 && l1 == r1,
-			(Self::ChannelData(l0), Self::ChannelData(r0)) => l0 == r0,
-			(Self::ChannelClose(l0), Self::ChannelClose(r0)) => l0 == r0,
 			_ => false,
 		}
 	}
@@ -2146,7 +1950,7 @@ mod test {
 		assert!(n < 530);
 	}
 
-	/// A passive answerer has no DTLS or SCTP timer before the peer speaks, so a
+	/// A passive answerer has no DTLS timer before the peer speaks, so a
 	/// trickled candidate must still start its checks when driven only on the
 	/// timeouts it asks for.
 	#[test]
@@ -2156,7 +1960,7 @@ mod test {
 
 		let mut offerer = Rtc::new(start);
 		let mut change = offerer.sdp_api();
-		change.add_channel("data".into());
+		change.add_media(media::MediaKind::Audio, Direction::SendRecv, None, None, None);
 		let (offer, _pending) = change.apply().unwrap();
 
 		let mut answerer = Rtc::new(start);

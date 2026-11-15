@@ -1,5 +1,6 @@
 /**
- * Point-to-point sessions between server and client endpoints.
+ * Point-to-point `track` sessions between server and client endpoints: each half is a
+ * track, and each message a group.
  *
  * An endpoint's first dial announces its hidden client broadcast, `<prefix>/.client/<id>`,
  * and its first accept its hidden server broadcast, `<prefix>/.server/<id>`, so ordinary
@@ -11,8 +12,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import { NotFound, ProtocolViolation, StreamCode, StreamError } from "./error.ts";
-import * as Group from "./group.ts";
+import { NotFound, StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
 import type * as Origin from "./origin.ts";
 import * as Path from "./path.ts";
@@ -22,15 +22,17 @@ import { isUnrequested as abandoned } from "./util/demand.ts";
 import { fromBytes } from "./util/hex.ts";
 import { wireOf } from "./wire.ts";
 
-type Protocol = "tcp" | "track";
-type Stream = TcpStream | TrackStream;
+/** The protocol segment of a session's track name. */
+const PROTOCOL = "track";
 /** A server accepts dials, and a client dials. */
 type Role = "server" | "client";
 const SEGMENT: Record<Role, string> = { server: ".server", client: ".client" };
-const reliable: Track.Subscription = {
+// Every message, oldest first, from group 0, so a burst written before the answer is kept.
+const reliable = (): Track.Subscription => ({
 	order: "ascending",
 	delay: { max: null },
-};
+	ranges: [{ start: { absolute: 0n } }],
+});
 const cancelled = () => new StreamError(StreamCode.Cancel, { message: "socket operation cancelled" });
 const ended = () => new StreamError(StreamCode.SessionClosed, { message: "socket endpoint closed" });
 // Unsupported has no registered stream code, as in Rust: it maps to Internal.
@@ -92,44 +94,14 @@ export interface Options {
 	signal?: AbortSignal;
 }
 
-/** How a TCP dial or accept reads the peer's half. */
-export interface TcpOptions extends Options {
-	/** Schedules the peer's half against the origin's other subscriptions, as a track subscription's priority: -128 to 127, 0 by default. */
-	priority?: number;
-}
-
-let makeTcp: (parts: Parts, producer: Group.Producer, consumer: Group.Consumer) => TcpStream;
 let makeTrack: (parts: Parts) => TrackStream;
-let makeIncoming: <S extends Stream>(endpoint: Endpoint, protocol: Protocol, request: Track.Request) => Incoming<S>;
+let makeIncoming: (endpoint: Endpoint, request: Track.Request) => Incoming;
 let accept: (
 	endpoint: Endpoint,
-	protocol: Protocol,
 	request: Track.Request,
 	info: Track.InfoInit,
-	options?: TcpOptions,
-) => Promise<Stream>;
-
-/** A TCP session's one group each way; finish is FIN, and abort is RST. */
-export class TcpStream {
-	/** This side's writes, as frames in group zero. */
-	readonly producer: Group.Producer;
-	/** The peer's writes in order; a reader falling behind the unpaced JS tail fails with eviction. */
-	readonly consumer: Group.Consumer;
-	/** The peer endpoint's id. */
-	readonly peer: string;
-	/** The fresh, secret session id chosen by the dialer. */
-	readonly session: string;
-
-	private constructor(parts: Parts, producer: Group.Producer, consumer: Group.Consumer) {
-		this.producer = producer;
-		this.consumer = consumer;
-		this.peer = parts.peer;
-		this.session = parts.session;
-	}
-	static {
-		makeTcp = (parts, producer, consumer) => new TcpStream(parts, producer, consumer);
-	}
-}
+	options?: Options,
+) => Promise<TrackStream>;
 
 /** A track session whose ascending reader skips unavailable groups, with no default publisher max age. */
 export class TrackStream {
@@ -161,40 +133,32 @@ interface Parts {
 }
 
 /** An unverified incoming request to accept (checking its original dial is still open) or reject. */
-export class Incoming<S extends TcpStream | TrackStream> {
+export class Incoming {
 	/** The id the dialer claims; accept verifies that endpoint really dialed this session. */
 	readonly peer: string;
 	/** The claimed session id; only accept verifies that its original dial is still open. */
 	readonly session: string;
 	#endpoint: Endpoint;
-	#protocol: Protocol;
 	#request?: Track.Request;
 
-	private constructor(endpoint: Endpoint, protocol: Protocol, request: Track.Request) {
+	private constructor(endpoint: Endpoint, request: Track.Request) {
 		const name = parse(request.name);
 		if (!name) throw new Error("invalid incoming socket name");
 		this.peer = name.dialer;
 		this.session = name.session;
 		this.#endpoint = endpoint;
-		this.#protocol = protocol;
 		this.#request = request;
 	}
 	static {
-		makeIncoming = (endpoint, protocol, request) => new Incoming(endpoint, protocol, request);
+		makeIncoming = (endpoint, request) => new Incoming(endpoint, request);
 	}
 
-	/** Accept while the original dial stays open; track accepts may describe their outgoing half. */
-	accept(
-		...args: S extends TcpStream ? [options?: TcpOptions] : [info?: Track.InfoInit, options?: Options]
-	): Promise<S> {
+	/** Accept while the original dial stays open; omitted info keeps every message with no publisher max age. */
+	accept(info: Track.InfoInit = { maxAge: null }, options?: Options): Promise<TrackStream> {
 		const request = this.#request;
 		this.#request = undefined;
 		if (!request) return Promise.reject(cancelled());
-		const [info, options] =
-			this.#protocol === "tcp"
-				? [{}, args[0] as TcpOptions | undefined]
-				: [(args[0] as Track.InfoInit) ?? { maxAge: null }, args[1]];
-		return accept(this.#endpoint, this.#protocol, request, info, options) as Promise<S>;
+		return accept(this.#endpoint, request, info, options);
 	}
 
 	/** Refuse this dial as not found; idempotent. */
@@ -205,7 +169,6 @@ export class Incoming<S extends TcpStream | TrackStream> {
 }
 
 class Queue {
-	listening = false;
 	dials = new Signal(new Map<Track.Request, Dispose>());
 	close(): void {
 		for (const [request, dispose] of this.dials.peek()) {
@@ -217,8 +180,7 @@ class Queue {
 }
 
 /**
- * A server, a client, or both: dials servers under the same prefix, and accepts each protocol
- * separately.
+ * A server, a client, or both: dials servers under the same prefix, and accepts their dials.
  *
  * Its first dial announces its client broadcast, which holds its half of each session it dials,
  * and its first accept announces its server broadcast, where peers dial it. A pure client never
@@ -243,7 +205,7 @@ export class Endpoint {
 	#abort = new AbortController();
 	#origin: Origin.Producer;
 	#routes: Partial<Record<Role, Origin.Route>> = {};
-	#queues = { tcp: new Queue(), track: new Queue() };
+	#queue = new Queue();
 	#sessions = new Set<Session>();
 	#unclose: Dispose[] = [];
 	#withheld: Getter<number>;
@@ -271,34 +233,24 @@ export class Endpoint {
 	}
 
 	static {
-		accept = (endpoint, protocol, request, info, options) => endpoint.#accept(protocol, request, info, options);
+		accept = (endpoint, request, info, options) => endpoint.#accept(request, info, options);
 	}
 
-	/** Dial the server peer in a TCP session; waits for its announcement and acceptance until cancelled. */
-	dialTcp(peer: string, options?: TcpOptions): Promise<TcpStream> {
-		return this.#dial("tcp", peer, {}, options) as Promise<TcpStream>;
-	}
-	/** Dial the server peer in a track session; omitted info keeps every message with no publisher max age. */
+	/**
+	 * Dial the server peer in a track session, waiting for its announcement and acceptance until
+	 * cancelled; omitted info keeps every message with no publisher max age.
+	 */
 	dialTrack(peer: string, info: Track.InfoInit = { maxAge: null }, options?: Options): Promise<TrackStream> {
-		return this.#dial("track", peer, info, options) as Promise<TrackStream>;
+		return this.#dial(peer, info, options);
 	}
-	/** Take the next TCP dial; the first call starts queueing TCP dials until close, and the first accept announces the server. */
-	acceptTcp(options?: Options): Promise<Incoming<TcpStream>> {
-		return this.#next<TcpStream>("tcp", options);
-	}
-	/** Take the next track dial; its queue is independent of TCP's. */
-	acceptTrack(options?: Options): Promise<Incoming<TrackStream>> {
-		return this.#next<TrackStream>("track", options);
-	}
-
-	async #next<S extends Stream>(protocol: Protocol, options?: Options): Promise<Incoming<S>> {
+	/** Take the next track dial; the first call starts queueing dials until close, and announces the server. */
+	async acceptTrack(options?: Options): Promise<Incoming> {
 		const abort = new AbortController();
 		const signal = AbortSignal.any([this.#signal(options), abort.signal]);
 		const unwatch = this.#reachable(abort);
 		try {
 			signal.throwIfAborted();
-			const queue = this.#queues[protocol];
-			queue.listening = true;
+			const queue = this.#queue;
 			if (!this.#routes.server) void this.#serve(this.#route("server"));
 			for (;;) {
 				await waitFor(queue.dials, (dials) => dials.size > 0, signal);
@@ -308,7 +260,7 @@ export class Endpoint {
 				const [request, dispose] = first;
 				dispose();
 				queue.dials.mutate((dials) => dials.delete(request));
-				if (!abandoned(request)) return makeIncoming<S>(this, protocol, request);
+				if (!abandoned(request)) return makeIncoming(this, request);
 				request.reject(cancelled());
 			}
 		} finally {
@@ -336,12 +288,12 @@ export class Endpoint {
 					request.reject(new NotFound("socket session"));
 					continue;
 				}
-				if ((name.protocol !== "tcp" && name.protocol !== "track") || !this.#queues[name.protocol].listening) {
+				const queue = this.#queue;
+				if (name.protocol !== PROTOCOL) {
 					// Unsupported has no registered stream code, as in Rust: it maps to Internal.
 					request.reject(new Error("socket protocol is unsupported"));
 					continue;
 				}
-				const queue = this.#queues[name.protocol];
 				const demand = request.demand();
 				const prune = () => {
 					if (!abandoned(request)) return;
@@ -370,12 +322,10 @@ export class Endpoint {
 
 	// Subscribe to the session's half in the peer's broadcast, its server or client one by role.
 	async #remote(
-		protocol: Protocol,
 		role: Role,
 		peer: string,
 		name: string,
 		signal: AbortSignal,
-		priority: number,
 		hold: (following: Origin.Following) => void,
 	): Promise<{ consumer: Track.Subscriber; peer: GetPromise<Error | null> }> {
 		const following = this.#origin.follow(endpointPath(this.prefix, role, peer));
@@ -388,11 +338,7 @@ export class Endpoint {
 			const broadcast = await waitFor(following.active, (active) => active !== undefined, pending);
 			if (!broadcast) throw ended();
 			return {
-				consumer: broadcast.track(name).subscribe({
-					...reliable,
-					priority,
-					ranges: protocol === "track" ? [{ start: { absolute: 0n } }] : undefined,
-				}),
+				consumer: broadcast.track(name).subscribe(reliable()),
 				peer: broadcast.closed,
 			};
 		} finally {
@@ -400,14 +346,14 @@ export class Endpoint {
 		}
 	}
 
-	async #dial(protocol: Protocol, peer: string, info: Track.InfoInit, options?: TcpOptions): Promise<Stream> {
+	async #dial(peer: string, info: Track.InfoInit, options?: Options): Promise<TrackStream> {
 		segment(peer);
 		if (peer === this.id) throw new Error("dialing the same socket endpoint is unsupported");
 		const abort = new AbortController();
 		const signal = AbortSignal.any([this.#signal(options), abort.signal]);
 		signal.throwIfAborted();
 		const session = fromBytes(crypto.getRandomValues(new Uint8Array(16)));
-		const name = `${protocol}/${this.id}/${peer}/${session}`;
+		const name = `${PROTOCOL}/${this.id}/${peer}/${session}`;
 		const answer = hooks.reserveUnlistedTrack(this.#route("client").broadcast, name);
 		let following: Origin.Following | undefined;
 		let consumer: Track.Subscriber | undefined;
@@ -415,17 +361,9 @@ export class Endpoint {
 		let stop: Dispose = () => {};
 		const unreached = this.#reachable(abort);
 		try {
-			const remote = await this.#remote(
-				protocol,
-				"server",
-				peer,
-				name,
-				signal,
-				options?.priority ?? 0,
-				(value) => {
-					following = value;
-				},
-			);
+			const remote = await this.#remote("server", peer, name, signal, (value) => {
+				following = value;
+			});
 			consumer = remote.consumer;
 			stop = hooks.watchSubscriberError(consumer, (error) => abort.abort(error));
 			const serving = waitFor(hooks.requestWanted(answer), (wanted) => wanted, signal).then(() => {
@@ -434,7 +372,7 @@ export class Endpoint {
 			await untilAborted(Promise.all([serving, consumer.info()]), signal);
 			signal.throwIfAborted();
 			if (!producer || !following) throw cancelled();
-			return this.#open(protocol, { producer, consumer, peer, session }, following, remote.peer);
+			return this.#open({ producer, consumer, peer, session }, following, remote.peer);
 		} catch (error) {
 			answer.reject(error instanceof Error ? error : cancelled());
 			consumer?.close();
@@ -447,12 +385,7 @@ export class Endpoint {
 		}
 	}
 
-	async #accept(
-		protocol: Protocol,
-		request: Track.Request,
-		info: Track.InfoInit,
-		options?: TcpOptions,
-	): Promise<Stream> {
+	async #accept(request: Track.Request, info: Track.InfoInit, options?: Options): Promise<TrackStream> {
 		const name = parse(request.name);
 		if (!name) throw cancelled();
 		const abort = new AbortController();
@@ -470,17 +403,9 @@ export class Endpoint {
 		try {
 			check();
 			signal.throwIfAborted();
-			const remote = await this.#remote(
-				protocol,
-				"client",
-				name.dialer,
-				request.name,
-				signal,
-				options?.priority ?? 0,
-				(value) => {
-					following = value;
-				},
-			);
+			const remote = await this.#remote("client", name.dialer, request.name, signal, (value) => {
+				following = value;
+			});
 			consumer = remote.consumer;
 			stopError = hooks.watchSubscriberError(consumer, (error) => abort.abort(error));
 			await untilAborted(consumer.info(), signal);
@@ -488,7 +413,6 @@ export class Endpoint {
 			if (!following) throw cancelled();
 			hooks.keepRequest(request);
 			return this.#open(
-				protocol,
 				{ producer: request.accept(info), consumer, peer: name.dialer, session: name.session },
 				following,
 				remote.peer,
@@ -506,13 +430,13 @@ export class Endpoint {
 		}
 	}
 
-	#open(protocol: Protocol, parts: Parts, following: Origin.Following, peer: GetPromise<Error | null>): Stream {
+	#open(parts: Parts, following: Origin.Following, peer: GetPromise<Error | null>): TrackStream {
 		this.#abort.signal.throwIfAborted();
 		if (following.active.peek()?.closed !== peer) throw ended();
 		const session = new Session(parts, following, peer, () => this.#sessions.delete(session));
 		this.#sessions.add(session);
 		try {
-			return protocol === "tcp" ? session.tcp() : session.track();
+			return session.track();
 		} catch (error) {
 			session.reset(error instanceof Error ? error : cancelled());
 			throw error;
@@ -529,13 +453,13 @@ export class Endpoint {
 		this.#closed.set(error);
 		for (const unclose of this.#unclose) unclose();
 		this.#abort.abort(error ?? ended());
-		for (const queue of Object.values(this.#queues)) queue.close();
+		this.#queue.close();
 		for (const session of this.#sessions) session.reset(ended());
 		for (const route of Object.values(this.#routes)) route.broadcast.close();
 	}
 }
 
-// Owns the routing hold, monitors both halves, and ends the TCP copy on protocol violations.
+// Owns the routing hold and monitors both halves, releasing the session once both end.
 class Session {
 	#parts: Parts;
 	#following: Origin.Following;
@@ -543,8 +467,6 @@ class Session {
 	#done: Dispose;
 	#abort = new AbortController();
 	#stops: Dispose[] = [];
-	#local?: Group.Producer;
-	#outgoing?: Group.Producer;
 	#sent = false;
 	#received = false;
 	constructor(parts: Parts, following: Origin.Following, peer: GetPromise<Error | null>, done: Dispose) {
@@ -593,67 +515,12 @@ class Session {
 		return makeTrack(this.#parts);
 	}
 
-	tcp(): TcpStream {
-		const { producer, consumer } = this.#parts;
-		const outgoing = producer.createGroup(0n);
-		const local = new Group.Producer(0n);
-		const incoming = local.consume();
-		this.#local = local;
-		this.#outgoing = outgoing;
-		this.#monitor();
-		this.#watch(outgoing.closed, () => {
-			producer.finish();
-			this.#sent = true;
-		});
-		this.#watch(producer.closed, () => {});
-		this.#watch(consumer.closed, () => {});
-		const check = () => {
-			if (!local.demand().wanted.peek() && !this.#received) this.reset(cancelled());
-		};
-		this.#hold(local.demand().wanted.subscribe(check));
-		void this.#copy().catch((error) => this.reset(error instanceof Error ? error : cancelled()));
-		void this.#groups().catch((error) => this.reset(error instanceof Error ? error : cancelled()));
-		return makeTcp(this.#parts, outgoing, incoming);
-	}
-
-	async #copy(): Promise<void> {
-		const ordered = this.#parts.consumer.ordered();
-		const group = await ordered.nextGroup();
-		// Even an empty TCP half publishes group 0. The ordered cursor skips lost
-		// groups, so reaching track end without it is loss, not a clean FIN.
-		if (!group) throw new NotFound("TCP session group");
-		try {
-			if (group.sequence !== 0n) throw new ProtocolViolation("second group on a TCP session");
-			for (;;) {
-				const frame = await group.readFrame();
-				if (!frame) break;
-				this.#local?.writeFrame({ payload: frame.payload });
-			}
-		} finally {
-			group.close();
-		}
-		if (this.#abort.signal.aborted) return;
-		this.#received = true;
-		this.#local?.finish();
-		this.#complete();
-	}
-
-	async #groups(): Promise<void> {
-		for (;;) {
-			const largest = await this.#parts.consumer.largest();
-			if (!largest) return;
-			if (largest.group > 0n) throw new ProtocolViolation("second group on a TCP session");
-		}
-	}
-
 	#complete(): void {
 		if (this.#sent && this.#received) this.#close(false);
 	}
 
 	reset(error: Error): void {
 		if (this.#abort.signal.aborted) return;
-		this.#outgoing?.abort(error);
-		this.#local?.abort(error);
 		this.#parts.producer.abort(error);
 		this.#parts.consumer.close(error);
 		this.#close(true);
@@ -667,7 +534,7 @@ class Session {
 		// A settled end retains its cache for existing readers, while releasing the
 		// broadcast's unlisted reservation instead of accumulating completed sessions.
 		this.#parts.producer.close();
-		if (reset || this.#local) this.#parts.consumer.close();
+		if (reset) this.#parts.consumer.close();
 		this.#following.close();
 		this.#done();
 	}

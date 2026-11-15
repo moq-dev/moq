@@ -104,7 +104,7 @@ case "$1" in
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
             -p moq-audio -p moq-mux -p moq-c -p moq-relay -p moq-cli -p moq-ffi \
             --features moq-audio/playback --lib --bin moq \
-            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stun_sources) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
+            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
         ;;
     # Measured Cargo bench targets, all in the bench profile. A paired run builds and
     # measures each group twice, so the groups split across jobs to fit an hour each.
@@ -164,7 +164,6 @@ case "$1" in
         javascript qmux-record just js qmux-record-bench
         javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
-        javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench
