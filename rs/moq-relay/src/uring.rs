@@ -128,10 +128,15 @@ pub struct Workers {
 }
 
 impl Workers {
-	/// Bind one socket per worker on the address `listen` describes.
+	/// Bind one socket per worker on the address `listen` describes, or serve the
+	/// group a handoff carries from the relay this one replaces.
 	///
 	/// Shares one served identity with every member; stream listeners are served separately.
-	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+	pub(crate) fn bind(
+		server: moq_tokio::server::Config,
+		config: moq_tokio::worker::Config,
+		sockets: &mut crate::handoff::Sockets,
+	) -> anyhow::Result<Self> {
 		// Before any TLS loads or socket binds, so a bad `[quic]` has no side effects.
 		server.quic.validate()?;
 		// Every setting by name, so one added to `listen` fails to compile here until
@@ -210,8 +215,11 @@ impl Workers {
 		// concurrently-constructing same-UID group (the bind probe covers one
 		// that already holds it), refuses a size the steering filter could not
 		// address, and binds members in the order the kernel numbers them by.
-		let mut group = moq_sock::shard::bind(requested, config.count)
-			.with_context(|| format!("failed to bind the reuseport group on {requested}"))?;
+		let mut group = match sockets.group(requested, config.count)? {
+			Some(group) => group,
+			None => moq_sock::shard::bind(requested, config.count)
+				.with_context(|| format!("failed to bind the reuseport group on {requested}"))?,
+		};
 		let count = group.count();
 		let mut members = Vec::with_capacity(count as usize);
 		while let Some(member) = group.member().context("failed to clone a reuseport member")? {
@@ -336,7 +344,9 @@ impl Workers {
 		};
 
 		for member in std::mem::take(&mut self.members) {
-			let index = member.shard().index();
+			// The worker's position in this process, not its slot in the group: a
+			// successor serving the second generation counts from zero too.
+			let index = member.worker();
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
 			let stop = Arc::new(Stop::default());
 			let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -556,7 +566,7 @@ struct Spawn {
 /// alone would not notice one, since the parent holds a sender of its own and
 /// the channel therefore never closes.
 fn run_worker(spawn: Spawn) {
-	let index = spawn.member.shard().index();
+	let index = spawn.member.worker();
 	let stop = spawn.stop.clone();
 	let failures = spawn.failures.clone();
 
@@ -592,7 +602,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		start,
 		failures,
 	} = spawn;
-	let index = member.shard().index();
+	let index = member.worker();
 	if let Some(core) = core {
 		if moq_sock::cpu::pin(core) {
 			tracing::debug!(index, core = core.id(), "pinned io_uring QUIC worker");
@@ -976,8 +986,12 @@ mod tests {
 					server.listen.tls.generate = vec!["localhost".into()];
 				}
 				set(&mut server.listen);
-				let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
-					.expect_err("the workers cannot advertise a preferred address");
+				let err = Workers::bind(
+					server,
+					moq_tokio::worker::Config::new(1),
+					&mut crate::handoff::Sockets::disabled(),
+				)
+				.expect_err("the workers cannot advertise a preferred address");
 				assert!(err.to_string().contains(setting), "{err:#}");
 			}
 		}
@@ -991,8 +1005,12 @@ mod tests {
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
 		server.listen.lb.nonce = Some(8);
-		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
-			.expect_err("a QUIC-LB nonce without an id is refused");
+		let err = Workers::bind(
+			server,
+			moq_tokio::worker::Config::new(1),
+			&mut crate::handoff::Sockets::disabled(),
+		)
+		.expect_err("a QUIC-LB nonce without an id is refused");
 		assert!(err.to_string().contains("--listen-quic-lb-nonce"), "{err:#}");
 	}
 
@@ -1084,8 +1102,12 @@ mod tests {
 	fn bind_refuses_an_empty_keylog_path() {
 		let mut server = moq_tokio::server::Config::default();
 		server.quic.keylog = Some(std::path::PathBuf::new());
-		let err =
-			Workers::bind(server, moq_tokio::worker::Config::new(1)).expect_err("an empty keylog path must be refused");
+		let err = Workers::bind(
+			server,
+			moq_tokio::worker::Config::new(1),
+			&mut crate::handoff::Sockets::disabled(),
+		)
+		.expect_err("an empty keylog path must be refused");
 		assert!(
 			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
 			"{err:#}"
@@ -1107,7 +1129,12 @@ mod tests {
 		let mut server = moq_tokio::server::Config::default();
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
-		let workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
+		let workers = Workers::bind(
+			server,
+			moq_tokio::worker::Config::new(2),
+			&mut crate::handoff::Sockets::disabled(),
+		)
+		.unwrap();
 		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let workers = workers
 			.spawn(
