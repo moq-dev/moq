@@ -20352,6 +20352,17 @@ List<String> moqVersions() {
   );
 }
 
+bool moqSocketIsEndpoint({required String path}) {
+  return rustCallWithLifter(
+    (status) => uniffi_moq_ffi_fn_func_moq_socket_is_endpoint(
+      FfiConverterString.lower(path),
+      status,
+    ),
+    FfiConverterBool.lift,
+    moqExceptionErrorHandler,
+  );
+}
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -23799,6 +23810,14 @@ external RustBuffer uniffi_moq_ffi_fn_func_moq_versions(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Int8 Function(RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_func_moq_socket_is_endpoint(
+  RustBuffer path,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<
   Void Function(
     Pointer<Void>,
@@ -24137,6 +24156,9 @@ external int uniffi_moq_ffi_checksum_func_moq_qlog_supported();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_versions();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_func_moq_socket_is_endpoint();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel();
@@ -25030,6 +25052,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_versions() != 28954) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_func_moq_socket_is_endpoint() != 51252) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel() != 62285) {

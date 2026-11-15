@@ -33,13 +33,15 @@ when run concurrently or from different worktrees. The shared
 
 Every run owns three things and touches nothing else.
 
-**A private run directory.** `mktemp -d` under `$TMPDIR/moq-test-<uid>`, mode 700,
-holding every log, generated config, and capture. `HARNESS_RUNS` moves the root.
+**A private run directory.** `mktemp -d` under the checkout's `.tmp/harness/`, mode 700,
+holding every log, generated config, and capture. `HARNESS_RUNS` moves the root. A kept
+run therefore goes away with its worktree and never lands in a small or shared `TMPDIR`.
 Client builds go here too (the Python venv, the staged Go modules, the browser
 page), so two runs from one checkout never rebuild a client the other is running.
 Interop and wire-compat also stage their Cargo executables, headers, static libraries,
 and GStreamer plugin here immediately after building, as hard links or copies across
-filesystems. Every later execution, link, and plugin load uses these run-owned paths,
+filesystems (reflinked where `cp` supports it). Every later execution, link, and plugin
+load uses these run-owned paths,
 so collecting shared Cargo output cannot remove an artifact a running matrix still
 needs. Binary overrides are staged too, including nested wire-compat cells.
 

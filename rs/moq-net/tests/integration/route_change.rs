@@ -230,7 +230,7 @@ pub(super) fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delive
 }
 
 /// Wait for the next frame the reader reports, failing on an error or a hang.
-async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
+pub(super) async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
 	let (group, _, payload) = next_timed(rx).await;
 	(group, payload)
 }
@@ -563,41 +563,6 @@ async fn better_route_restarts(version: &str) {
 	);
 }
 
-/// A route through the far end of a closed link waits out the doubt. `A` loses its
-/// session to `P`, the far end, and `B`'s route names `P` too: `R` cannot tell `P` from a
-/// dead relay whose news is still on its way, so it holds the claim and moves to `B` only
-/// once the doubt lifts. The subscription through `A` ends meanwhile; a new one reads on
-/// through `B`.
-async fn waits_out_the_doubt(version: &str) {
-	let version: Version = version.parse().unwrap();
-	let (mut topology, sub) = Topology::new(version).await;
-	let mut rx = read(sub);
-	topology.standby().await;
-
-	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
-	group.close().unwrap();
-	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
-
-	topology.trigger(Trigger::Unannounce).await;
-	kio::clock::sleep(Duration::from_secs(1)).await;
-	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
-	group.close().unwrap();
-	let remote = topology.subscriber.consume().request("live", None).await.unwrap();
-	let mut fresh = read(remote.track("video").unwrap().subscribe(None).await.unwrap());
-	assert_eq!(next(&mut fresh).await, (1, payload(1, 0)), "{version}: through B");
-	match kio::clock::timeout(Duration::from_secs(10), rx.next())
-		.await
-		.expect("the subscription through A hung")
-	{
-		Some((_, Err(_))) => {}
-		None => panic!("{version}: the subscription through A ended cleanly"),
-		Some((group, Ok(_))) => panic!("{version}: the subscription through A read group {group}"),
-	}
-	assert!(rx.try_recv().is_err(), "{version}: a delivery after the error");
-}
-
 macro_rules! route_change_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -634,11 +599,16 @@ macro_rules! route_change_tests {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
+				/// `B`'s route begins at `P`, the far end of the closed link, so doubt about
+				/// `P` does not keep `R` off it: the subscription moves at once.
 				#[kio::test]
-				async fn unannounce_waits_out_the_doubt() {
-					kio::clock::timeout(TEST_TIMEOUT, waits_out_the_doubt($version))
-						.await
-						.expect("timed out");
+				async fn unannounce_between_groups() {
+					run(Trigger::Unannounce, Position::BetweenGroups).await;
+				}
+
+				#[kio::test]
+				async fn unannounce_mid_group() {
+					run(Trigger::Unannounce, Position::MidGroup).await;
 				}
 
 				#[kio::test]

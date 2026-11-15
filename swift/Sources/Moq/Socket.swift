@@ -4,6 +4,11 @@ import MoqFFI
 public enum Socket {}
 
 extension Socket {
+    /// Whether `path` is an endpoint's broadcast, which only routes sessions and carries no media.
+    public static func isEndpoint(_ path: String) throws -> Bool {
+        try moqSocketIsEndpoint(path: path)
+    }
+
     /// A server, a client, or both: dials or accepts track sessions.
     public final class Endpoint: Sendable {
         let ffi: MoqSocketEndpoint

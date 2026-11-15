@@ -6,6 +6,7 @@ from moq_ffi import (
     MoqSocketEndpoint,
     MoqSocketIncomingTrack,
     MoqSocketTrackStream,
+    moq_socket_is_endpoint,
 )
 
 from ._records import _track_info
@@ -14,7 +15,12 @@ from .publish import TrackProducer
 from .subscribe import TrackConsumer
 from .types import TrackInfo
 
-__all__ = ["Endpoint", "IncomingTrack", "TrackStream"]
+__all__ = ["Endpoint", "IncomingTrack", "TrackStream", "is_endpoint"]
+
+
+def is_endpoint(path: str) -> bool:
+    """Whether ``path`` is an endpoint's broadcast, which only routes sessions and carries no media."""
+    return moq_socket_is_endpoint(path)
 
 
 class Endpoint:

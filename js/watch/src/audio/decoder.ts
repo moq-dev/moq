@@ -921,6 +921,7 @@ export class Decoder {
 			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
+			playhead: this.sync,
 		});
 		effect.cleanup(() => consumer.close());
 		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });

@@ -10043,3 +10043,13 @@ async fn group_calls_wake_ready_after_unlocking() {
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
 }
+
+/// An endpoint's broadcast is told apart from media by path, and a malformed path fails.
+#[test]
+fn socket_is_endpoint() {
+	use crate::socket::moq_socket_is_endpoint;
+	assert!(moq_socket_is_endpoint("room/.server/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room/.client/a".into()).unwrap());
+	assert!(!moq_socket_is_endpoint("room/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room//a".into()).is_err());
+}

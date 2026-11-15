@@ -22,13 +22,25 @@ esac
 
 # BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
 # same machine; `previous-nightly` is the commit of the latest other scheduled Nightly on main.
+# That run kept its bench executables as the BENCH_BUILDS_ARTIFACT artifact. The cache
+# can't hold a linked executable, so reusing them saves relinking every target at the base.
+base_builds=
 if [[ -n ${BENCH_BASE:-} ]]; then
     if [[ $report != rust ]]; then
         echo "nightly: BENCH_BASE applies only to the Rust bench groups" >&2
         exit 2
     fi
     if [[ $BENCH_BASE == previous-nightly ]]; then
-        BENCH_BASE=$(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh")
+        read -r base_run BENCH_BASE < <(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh" --run) || exit 1
+        if [[ -n ${BENCH_BUILDS_ARTIFACT:-} ]]; then
+            base_builds=$(git rev-parse --show-toplevel)/target/bench/base-builds/$1
+            rm -rf "$base_builds"
+            # A previous leg that ended before its builds kept none; the base is built instead.
+            if ! gh run download "$base_run" --name "$BENCH_BUILDS_ARTIFACT" --dir "$base_builds"; then
+                echo "nightly: run $base_run kept no $BENCH_BUILDS_ARTIFACT; building the base" >&2
+                base_builds=
+            fi
+        fi
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
     # FETCH_HEAD, so the base is exported as the commit it resolved to.
@@ -39,9 +51,12 @@ if [[ -n ${BENCH_BASE:-} ]]; then
     export BENCH_BASE=$base
 fi
 
+group=$1
 if [[ -n $report ]]; then
     root=$(git rev-parse --show-toplevel)
     out=${BENCH_RESULTS:-$root/target/bench/nightly/$1}
+    builds=$root/target/bench/builds/$group
+    rm -rf "$builds"
     mkdir -p "$out"
     export BENCH_RUNS="$out/criterion-runs.txt"
     : >"$BENCH_RUNS"
@@ -52,10 +67,15 @@ fi
 # shellcheck source=sh/checks.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
+# Each label keeps its executables for the next Nightly's base, under the directory
+# the workflow uploads.
 criterion() {
     local label=$1
     shift
-    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
+    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" \
+        BENCH_KEEP_BUILDS="$builds/$label" \
+        BENCH_BASE_BUILDS="${base_builds:+$base_builds/$group/$label}" \
+        just gh criterion "$@"
 }
 
 javascript() {

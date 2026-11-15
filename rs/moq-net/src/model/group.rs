@@ -3866,6 +3866,9 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
+
+	/// What the reader asks a fill with, such as the flight it boards.
+	fn asking(&self) -> super::track::Asking;
 }
 
 /// The read cursor over a [`Producer`]'s shared state.
@@ -4067,6 +4070,18 @@ impl Consumer {
 		Idle::disarm(&mut self.idle);
 		self.expiry = Some(expiry);
 		self
+	}
+
+	/// What this reader asks a fill with: its subscription's or fetch's, else the defaults.
+	pub(super) fn asking(&self) -> super::track::Asking {
+		self.expiry.as_ref().map_or(
+			super::track::Asking {
+				priority: 0,
+				max_delay: None,
+				order: super::subscription::Order::Ascending,
+			},
+			|expiry| expiry.asking(),
+		)
 	}
 
 	/// The hand-off of this copy's head, shared by every reader that could resume it
@@ -7961,6 +7976,14 @@ mod test {
 
 		fn for_track(&self, _: &track::Consumer) -> Arc<dyn Expiry> {
 			Arc::new(self.clone())
+		}
+
+		fn asking(&self) -> crate::model::track::Asking {
+			crate::model::track::Asking {
+				priority: 0,
+				max_delay: None,
+				order: crate::model::subscription::Order::Ascending,
+			}
 		}
 	}
 

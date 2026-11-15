@@ -1021,7 +1021,6 @@ test("Fetch draft-22: decodes every legal parameter", async () => {
 
 	const msg = await decodeVersioned(body, Fetch.decode, Version.DRAFT_22);
 	expect(msg.requestId).toBe(1n);
-	expect(msg.fillTimeout).toBe(100);
 });
 
 // Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object is the

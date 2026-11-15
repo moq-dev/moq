@@ -44,6 +44,5 @@ once per recovery episode, Linux's growth check) beside classic ECN. Record the 
 
 ## Related
 
-- [Startup loss counting](/quest/m2/bbr3-startup-loss.md) - draft-07's per-packet loss events, a breaking change before the cut
 - [Probe up to a target bitrate](/quest/m3/probe/README.md) - owns app-limited aging and probe headroom
 - [Realtime QUIC](/quest/m4/quic-realtime.md) - the bake-off for algorithms other than BBR3
