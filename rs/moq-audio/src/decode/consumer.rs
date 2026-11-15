@@ -975,11 +975,11 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
-	/// The first request already states the min delay, and the max plus the warmup: a latest
+	/// The first request already states the max plus the warmup (the min stays local): a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
 	#[tokio::test]
-	async fn the_first_subscription_states_the_min_delay() {
+	async fn the_first_subscription_states_the_max_delay() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))

@@ -1740,10 +1740,10 @@ mod tests {
 		assert!(consumer.lanes.iter().all(|slot| matches!(slot, Slot::Closed)));
 	}
 
-	/// The first request already states the min delay: a latest start waits for the live edge
+	/// The first request already states the max (the min stays local): a latest start waits for the live edge
 	/// with its subscription open, before the container could update it.
 	#[tokio::test]
-	async fn the_first_subscription_states_the_min_delay() {
+	async fn the_first_subscription_states_the_max_delay() {
 		let (broadcast, mut track) = live_track();
 		let delay = Delay {
 			min: Some(std::time::Duration::from_millis(300)),

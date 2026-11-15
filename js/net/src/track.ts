@@ -436,7 +436,6 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.delay = {
 			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
-			min: null,
 		};
 		// One live subscriber held behind another's backlog is worse than a backlog sent late.
 		combined.order =
