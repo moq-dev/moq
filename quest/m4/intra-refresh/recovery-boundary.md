@@ -32,10 +32,11 @@ Decided 2026-10-22 (maintainer): precision is settled; the hang draft rounds a
 fractional-millisecond `warmup` up
 ([#5212](https://github.com/moq-dev/moq/pull/5212)). The draft's `warmup` rule
 is amended so a consumer running a parallel max-delay decoder MAY present
-min-delay pictures before the group start plus `warmup`, which keeps the
-merged dual decoder in `decode::Consumer`
-([#5842](https://github.com/moq-dev/moq/pull/5842)), and the draft now says
-so. Publication ordering for a later, longer sweep remains to settle.
+min-delay pictures before the group start plus `warmup`, and the draft now says
+so. The players have since gone back to one decoder that hides those pictures
+([moq-dev/moq#8857](https://github.com/moq-dev/moq/pull/8857)); the
+[dual decoder](/quest/m4/intra-refresh/dual-decoder.md) quest decides whether a
+second one returns. Publication ordering for a later, longer sweep remains to settle.
 
 Ask the maintainer how the catalog duration stays safe for a longer sweep,
 such as a bound published before the affected content or a fixed bound from

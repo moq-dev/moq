@@ -7,8 +7,8 @@ a stripe of the picture, so a decoder that starts at the beginning of a sweep is
 clean once the sweep completes, and the bitrate never spikes. This questline
 makes such video a first-class hang broadcast on import and playback: streams
 contributed that way import cleanly, and viewers stay live while recovering
-to a clean picture. A cold join or skip may show refresh stripes until the
-second decoder catches up, as the playback decision below permits.
+to a clean picture. A player hides the refresh stripes after a cold join or
+skip, as the playback decision below says.
 
 Measured on 2026-10-06: at fixed quality, a 60s keyframe interval saves
 10-16% against 2s on the 240p-720p rungs and about 10% at 1080p (x264
@@ -35,12 +35,14 @@ make these presentation guarantees true even when sweep lengths change.
   exactly one cycle and relay shedding keeps its meaning.
 - The catalog carries a `warmup` duration per rendition. The transcoder
   decodes enough preceding groups to cover it as history before each group it
-  transcodes. A player uses it only to gate and size its second decoder. That decoder is clean because it joins a whole group
-  earlier, not because of the value, so an imprecise `warmup` only changes how
-  long stripes last. The field is generic: audio gets the same one for Opus convergence.
-- A player stays live, in the browser and in Rust: a min-delay decoder may
-  show stripes after a cold join or skip, and a second decoder with one more
-  sweep of delay takes over once its timestamp catches up. The transcoder
+  transcodes. A player joins that much earlier and hides that much after each
+  join or skip, so an imprecise `warmup` shows stripes or hides clean pictures.
+  The field is generic: audio gets the same one for Opus convergence.
+- A player plays through one decoder, in the browser and in Rust: it joins one
+  group earlier through the container consumer's warmup reach and presents
+  from the group start plus `warmup`, so a cold join stays at the playout delay
+  and a skip freezes for one sweep. Whether a second decoder that shows stripes
+  meanwhile pays for itself is left to measure. The transcoder
   never encodes a partially refreshed picture: every fetched group and every
   group after a skip is preceded by decode-only history. A group that opens on
   a true IDR needs none.
