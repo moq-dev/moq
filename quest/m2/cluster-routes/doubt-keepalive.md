@@ -7,6 +7,20 @@ apart its neighbours notice the death within the keep-alive.
 
 ## Plan
 
+Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
+multicast](/quest/m2/multicast/README.md)): this waits on the
+[bake-off](/quest/m2/multicast/bakeoff.md). The maintainer deferred how the
+doubt covers a silent death on 2026-11-15, "not yet sure about the doubt
+design", and decided the same day that evidence replaces the doubt. If the new
+rule goes ahead, [the switch](/quest/m2/multicast/switch.md) deletes this
+quest with the fixtures that pin it; if it does not, this starts as written.
+
+If the doubt stays, the decision returns to the maintainer: (a) the doubt
+lasts at least the configured idle timeout, so it covers the spread (the
+recommendation: no wire change, and a relay already knows its idle timeout);
+(b) relay keep-alives shorten below the doubt, which costs traffic on every
+relay link; (c) accept the window and keep the test pinning it.
+
 Kept 2026-11-15 (maintainer, /quest-complete on
 [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
 m2 (rejected: drop; moving it to m3).
@@ -21,16 +35,9 @@ dead `X` at 1 s, holds again at 1.5 s, and moves onto `R3`'s route through
 at 3 s. Readers see each move as available for a moment, and a request in
 that window goes to a dead relay. A 1 s doubt does not cover a 3 s spread.
 
-## Waiting
+## Required
 
-- Maintainer: how the doubt covers a silent death. Options: (a) the doubt
-  lasts at least the configured idle timeout, so it covers the spread (the
-  recommendation: no wire change, and a relay already knows its idle
-  timeout); (b) relay keep-alives shorten below the doubt, which costs
-  traffic on every relay link; (c) accept the window and keep the test
-  pinning it. Check with `/quest-grill` or the PR that picks it up. The
-  maintainer deferred this decision on 2026-11-15, not yet sure about the
-  doubt design.
+- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the doubt this sizes remains
 
 ## Related
 

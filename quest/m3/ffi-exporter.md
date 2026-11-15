@@ -109,6 +109,11 @@ dependency, so crates.io moq-ffi still builds (see the
   with an error, which the fork still leaks (moq-ffi's errors hold no
   handles today).
 
+Deferred 2026-11-15 (maintainer, /quest-complete): the `Waiting` decision on
+the generated binding renames stays open, kept out of that run's m0 to m2
+scope, since the binding API changes anyway in the rust2 migration expected
+around 2026-12-15.
+
 Public API: moq-ffi's dependency names change, generated C type names become
 CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
 `MoqAudioEncoderFinish` in every language; wrapper APIs do not change except

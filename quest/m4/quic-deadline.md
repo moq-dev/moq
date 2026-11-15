@@ -36,7 +36,7 @@ Implement in `moq-quic`.
   the congestion window; the probe is a scheduling choice, not extra credit.
 - moq-net cannot call `moq-quic` directly, so the deadline crosses its own
   `transport::poll::SendStream` trait, the way
-  [the ACK hook](/quest/m3/quic-ack-hook.md) does: a method whose default
+  [the ACK hook](/quest/m4/quic-ack-hook.md) does: a method whose default
   reports unsupported, implemented by the moq-tokio and moq-uring adapters
   over `moq-quic`. A backend without it sends as today.
 - moq-net: the per-group `GroupServe` machine in the lite and IETF
@@ -101,4 +101,4 @@ measured.
 
 ## Related
 
-- [ACK hook](/quest/m3/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
+- [ACK hook](/quest/m4/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`

@@ -26,9 +26,14 @@ broadcast feeds that only do intra refresh.
 
 Decisions the quests share:
 
-The recovery-boundary planning prerequisite checks the duration contract
-below before implementation. Its precision and publication ordering must
-make these presentation guarantees true even when sweep lengths change.
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ a catalog `warmup` is a
+hint nothing enforces (rejected: refusing the stream once a sweep exceeds the
+published `warmup`; a bound published before the content it covers; a fixed
+upper bound from importer config). Since
+[moq-dev/moq#8857](https://github.com/moq-dev/moq/pull/8857) plays a `warmup`
+rendition through one decoder, the value only tells a player how early to
+join and how long to hide pictures, so a sweep longer than published shows
+refresh stripes a little longer: a cosmetic cost, not a correctness one.
 
 - One group per refresh cycle. A group starts at the recovery point, the frame
   that begins a sweep, so a viewer joining at any group boundary is clean after

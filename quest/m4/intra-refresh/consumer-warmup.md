@@ -31,7 +31,12 @@ The fix is history rather than a withhold rule:
 
 - History: before decoding group N, decode the K preceding groups as
   decode-only input, where K is the fewest groups whose span covers `warmup`.
-  With one group per sweep that is one group. The history is fed to the
+  With one group per sweep that is one group. `warmup` is a hint nothing
+  enforces (see the [epic](/quest/m4/intra-refresh/README.md)), but a stale
+  value still leaves the history clean: each group opens at a recovery point,
+  and the [H.264 import](/quest/m4/intra-refresh/h264-import.md) refuses a
+  sweep whose recovery picture lands past the next one, so one whole
+  preceding group recovers the decoder. The history is fed to the
   decoder and never forwarded to the encoder, so group N's first picture is
   recovered. A group that opens on a true IDR needs no history: check the first
   slice NAL type (H.264 type 5; H.265 `IDR_W_RADL`, `IDR_N_LP`, the BLA types)
@@ -51,7 +56,3 @@ The fix is history rather than a withhold rule:
   feed start and a feed skip both decode history before forwarding; an IDR
   group needs no history; a rendition without `warmup` fetches and reads
   exactly as today.
-
-## Required
-
-- [Plan: recovery boundaries](/quest/m4/intra-refresh/recovery-boundary.md) - K derives from `warmup`, which must be a safe upper bound

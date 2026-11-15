@@ -9,6 +9,15 @@ cluster with two uplinks, partition, and healing. No bespoke federation router.
 
 ## Plan
 
+Reopened 2026-11-15 (maintainer, /quest-plan on
+[cache-aware multicast](/quest/m2/multicast/README.md)): the CDN relay
+announces the local relay's claims under its own Node ID, with a chain of
+the nodes that did so, and refuses a claim whose chain names it. No route,
+qualified identity, or route key crosses the scoped grant, so the key file
+below goes, and a relay behind the local relay may be scoped too.
+[The switch](/quest/m2/multicast/switch.md) rewrites the paragraphs below
+that say otherwise.
+
 Decided 2026-10-13: this is a required use case, independently shippable from
 peer-to-peer routing. Existing cluster sessions are bidirectional and scoped peer
 admission exists; extend and prove those paths rather than creating a reverse
