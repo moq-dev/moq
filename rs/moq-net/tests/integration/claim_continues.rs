@@ -8,10 +8,12 @@
 //! subscription through the claim sees another broadcast rather than a splice.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Error, Instance, Timestamp, Version, origin, track};
+use moq_net::{Error, Instance, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -69,9 +71,9 @@ impl Worker {
 					)
 					.unwrap();
 				let tag = format!("{name}{}", served.borrow().len());
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, tag.into_bytes()).unwrap();
-				group.finish().unwrap();
+				let mut group = track.append_next().unwrap();
+				group.write_frame(group.at_start(), tag.into_bytes()).unwrap();
+				group.close().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}

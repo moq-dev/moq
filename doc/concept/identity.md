@@ -6,7 +6,7 @@ description: Choose stream instances so restarts, failover, and on-demand work n
 # Identity and recovery
 
 A MoQ name always means the same content. Relays cache groups by broadcast
-path, track name, and group sequence, and a subscriber that loses its route
+path, track name, and group start, and a subscriber that loses its route
 resumes by asking for the first frame it lacks. Both are only safe while every
 source of a name serves the same bytes. This page is the contract publishers,
 players, and relays share to keep that true across restarts, failover, and work
@@ -15,17 +15,18 @@ started on demand. Wire details live in the [moq-lite](/draft/moq-lite) draft.
 ## Identity is a path and an instance
 
 A broadcast's identity is its path plus its **instance**. Every route in an
-origin carries an instance: any non-empty text naming one continuous run of
-group numbers at its path. Within one instance, group sequences never restart
-and never name two different groups, so a reader stitches across every route
+origin carries an instance: any non-empty text naming one continuous timeline
+of groups at its path. A group is addressed by its start timestamp, and within
+one instance starts never go back and never name two different groups, so a
+reader stitches across every route
 and incarnation that shares it. Two instances are two independent streams,
 never stitched together. An instance names a run, not who publishes it: it is
 no credential, and auth decides who may publish the path.
 
 - **A new stream takes a new instance.** A broadcast that names no instance
   generates a random one when it is created and keeps it while it is withdrawn and announced again or
-  reconnects, since its numbering continues. A restarted process, or anything
-  that starts its group numbers over, is a new broadcast with a new instance.
+  reconnects, since its timeline continues. A restarted process, or anything
+  that starts its timestamps over, is a new broadcast with a new instance.
   Replaying a recording is a new stream too: [`moq import archive`](/bin/cli#archive)
   republishes under a new instance.
 - **Replicas share it.** One stream carried through several relays or CDNs
@@ -33,19 +34,19 @@ no credential, and auth decides who may publish the path.
   between them.
 - **A stable instance is a promise.** A publisher may name its own instance
   (`RouteOptions::with_instance(instance, epoch)` in Rust,
-  `origin.route(path, { instance: { id, epoch } })` in JavaScript) only if it continues the sequence space across restarts and
+  `origin.route(path, { instance: { id, epoch } })` in JavaScript) only if its timestamps keep moving forward across restarts and
   announces a higher **epoch** each time, for example a counter persisted on
   disk. Breaking the promise splices unrelated groups into every reader's
   tracks. Two encoders with identical settings fed the same source still
-  number and cut their groups independently, so never derive an instance from
+  cut and stamp their groups independently, so never derive an instance from
   a hash of settings.
 - **Reusing a name is a bug.** Publishing different content under an instance,
-  a track name, or a group sequence that already named something else
+  a track name, or a group start that already named something else
   corrupts every cache that holds the old content, and MoQ has no ETag-style
   invalidation. Use a new instance for a whole new stream, a new track name for
   one rendition whose decoder configuration changes (see
-  [hang](/concept/hang#catalog)), and continue past the old sequence when a
-  track is replaced within one stream.
+  [hang](/concept/hang#catalog)), and keep timestamps moving past the old
+  track's when a track is replaced within one stream.
 
 Think of a cloud instance ID that survives a reboot: the instance stays the
 same, and the epoch counts the boots. The epoch is a counter within one
@@ -59,7 +60,7 @@ one is, so it fences out an older run. Nothing assumes it is a clock.
 | One broadcast, reconnecting | The one it generated | The same stream; subscriptions resume |
 | One stream carried by several relays or CDNs | Shared by every route | Failover resumes from the first missing frame |
 | A restarted or replaced publisher | A fresh one | A restart, then the new stream from its start |
-| A publisher that continues its sequences across restarts | Stable, with a higher epoch each run | The same stream; readers continue without a seam |
+| A publisher whose timestamps continue across restarts | Stable, with a higher epoch each run | The same stream; readers continue without a seam |
 | Independent publishers of one source | One each | Two streams; see [redundant ingest](/setup/redundancy) |
 | A pool of hosts producing paths on demand | One per host, carried by its jobs; a fresh one per restart | See [work on demand](#work-on-demand) |
 
@@ -70,7 +71,7 @@ A route resolving a path is chosen in this order:
 1. The most specific prefix wins.
 2. Within one instance, only its highest epoch is eligible, even over a
    cheaper route. Readers continue across an epoch change without a seam,
-   because the sequence space continues.
+   because the timeline continues.
 3. Among eligible routes: a route from a peer that has not sent GOAWAY
    (a draining peer's routes rank below every other, whatever their preference
    or cost, and serve only as a last resort), then the preferred link, then an
@@ -179,7 +180,7 @@ demand, whose instance changes each time its job restarts.
 A worker can advertise a prefix it serves on demand and answer with a
 broadcast it already holds. This announces no exact route: the answer belongs
 to the claim's instance at that path. Every answer there must continue
-one sequence space with the same bytes. To serve different content at a path
+one timeline with the same bytes. To serve different content at a path
 already served, start a new claim. Its first subscription stays on
 the claim without a restart.
 
@@ -254,7 +255,7 @@ Within one stream, recovery is about which groups are still worth having.
 
 - **Subscriptions and fetches.** A subscription follows the live track and,
   after a route change within its instance, continues from the first frame it
-  lacks. A fetch asks for one group by sequence, which a relay fills upstream
+  lacks. A fetch asks for one group by its start, which a relay fills upstream
   when its cache misses. Both are bound to the instance they resolved.
 - **Publisher max age bounds freshness; reader max delay bounds interest.** A
   track's `max_age` (`maxAge` in JavaScript, `--max-age` on `moq import`) is the
@@ -268,9 +269,9 @@ Within one stream, recovery is about which groups are still worth having.
 - **Arrivals are unordered.** Each group is its own stream, so a lower group
   can land after a higher one, and is still delivered if the reader's range and
   budget cover it. Group order chooses what is sent first, not what is skipped.
-- **Duplicates are dropped.** A reader receives each group sequence once,
+- **Duplicates are dropped.** A reader receives each group start once,
   however many routes deliver it or however often a producer re-creates it. A
-  sequence names one group, so resending one cannot correct it.
+  start names one group, so resending one cannot correct it.
 - **A drop ends the subscription's copy of a group.** Where the wire reports
   drops, the publisher names each group a subscription will not get, and every
   reader of the live copy, even one still arriving, ends with the publisher's

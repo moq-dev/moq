@@ -313,7 +313,7 @@ pub(crate) async fn published<E>(
 			.expect("the importer finished its tracks")
 			.unwrap()
 		{
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		out.insert(name, timestamps);
 	}

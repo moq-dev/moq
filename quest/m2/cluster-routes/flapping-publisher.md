@@ -23,9 +23,8 @@ still run Babel's distance, so what is left waits on the switch:
 - The draft's Routing section: doubt keeps a relay off a route through the
   far end of a closed session, and off that node's own route on a session to
   it opened since, but not off the route it already uses or another route that
-  begins there; a publisher on
-  three or more relays that leaves them all at once can loop a request until
-  the news arrives.
+  begins there; a publisher on three or more relays that leaves them all at
+  once can loop a request until the news arrives.
 
 ## Required
 

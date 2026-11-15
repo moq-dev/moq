@@ -218,7 +218,7 @@ impl Backend for Vaapi {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		// The timestamp rides through the decoder with the picture, so it
 		// survives the DPB reordering a stream with B-frames goes through.
-		let timestamp = timestamp.as_micros() as u64;
+		let timestamp = timestamp.as_micros()? as u64;
 		if let Some(frames) = self.decode_shared(&access_unit, timestamp) {
 			return frames;
 		}
@@ -433,7 +433,7 @@ mod tests {
 		for (i, frame) in decoded.iter().enumerate() {
 			// openh264 encodes IPPP, so the pictures come back in feed order.
 			assert_eq!(
-				frame.timestamp.as_micros(),
+				frame.timestamp.as_micros().unwrap(),
 				i as u128 * 33_333,
 				"timestamp did not ride the picture"
 			);
@@ -564,9 +564,14 @@ mod tests {
 		);
 
 		let flushed = decoder.flush_all().unwrap();
-		let mut timestamps: Vec<Timestamp> = streamed.iter().chain(&flushed).map(|frame| frame.timestamp).collect();
+		// Timestamps have no total order across scales, so they compare as microseconds.
+		let mut timestamps: Vec<u128> = streamed
+			.iter()
+			.chain(&flushed)
+			.map(|frame| frame.timestamp.as_micros().unwrap())
+			.collect();
 		timestamps.sort_unstable();
-		let expected: Vec<Timestamp> = units.iter().map(|unit| unit.timestamp).collect();
+		let expected: Vec<u128> = units.iter().map(|unit| unit.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(timestamps, expected, "the stream lost pictures at its end");
 
 		// A second flush has nothing left to hand back, so the drain is idempotent

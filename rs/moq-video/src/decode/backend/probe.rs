@@ -215,7 +215,7 @@ impl Reorder {
 
 impl Backend for Reorder {
 	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
-		let nanos = u64::try_from(timestamp.as_nanos()).map_err(|err| anyhow::anyhow!("probe: {err}"))?;
+		let nanos = u64::try_from(timestamp.as_nanos()?).map_err(|err| anyhow::anyhow!("probe: {err}"))?;
 		let frame = frame(Timestamp::from_nanos(nanos)?)?;
 		let index = self.held.partition_point(|held| held.timestamp < frame.timestamp);
 		self.held.insert(index, frame);

@@ -226,31 +226,31 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A buffered read plus the timestamp C borrows through a pointer, `None` when untimed.
+/// A buffered read plus the timestamp C borrows through a pointer.
 ///
 /// Boxed because the slab moves its entries as it grows, and the pointer must stay valid
 /// until the read is freed.
 struct Timed<T> {
 	item: T,
-	timestamp: Option<Box<moq_timestamp>>,
+	timestamp: Box<moq_timestamp>,
 }
 
 impl<T> Timed<T> {
-	fn new(item: T, timestamp: Option<moq_net::Timestamp>) -> Self {
+	fn new(item: T, timestamp: moq_net::Timestamp) -> Self {
 		Self {
 			item,
-			timestamp: timestamp.map(|timestamp| Box::new(timestamp.into())),
+			timestamp: Box::new(timestamp.into()),
 		}
 	}
 
-	/// The timestamp pointer handed to C, NULL when untimed.
+	/// The timestamp pointer handed to C, never NULL.
 	fn timestamp(&self) -> *const moq_timestamp {
-		self.timestamp.as_deref().map_or(std::ptr::null(), std::ptr::from_ref)
+		std::ptr::from_ref(&*self.timestamp)
 	}
 }
 
 /// A JSON value pre-serialized to a string, with its frame timestamp.
-fn json_value(value: moq_net::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
+fn json_value(value: moq_json::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
 	Ok(Timed::new(serde_json::to_string(&value.value)?, value.at))
 }
 
@@ -264,7 +264,7 @@ struct JsonWindowEvent {
 
 impl JsonWindowEvent {
 	/// Pre-serialize an event, keeping its frame timestamp.
-	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
+	fn new(event: moq_json::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
 		use moq_json::window::Event;
 
 		let (kind, range, json) = match event.value {
@@ -712,7 +712,7 @@ impl Consume {
 				read = track.read() => match read? {
 					Some(moq_mux::container::Read::Frame { frame, .. }) => {
 						let timestamp = frame.timestamp;
-						Read::Frame(Timed::new(frame, Some(timestamp)))
+						Read::Frame(Timed::new(frame, timestamp))
 					}
 					Some(moq_mux::container::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
 					Some(moq_mux::container::Read::End { end, .. }) => Read::end(end),
@@ -1472,7 +1472,7 @@ mod read_tests {
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
 		let write = |sequence, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			format()
 				.write(
 					&mut group,
@@ -1484,7 +1484,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		let mut ids = Vec::<i32>::new();
 		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
@@ -1504,6 +1504,7 @@ mod read_tests {
 		let micros = |value| moq_timestamp {
 			value,
 			scale: 1_000_000,
+			has_scale: true,
 		};
 		let mut read = std::mem::MaybeUninit::<crate::moq_media_read>::uninit();
 		for (index, id) in ids.into_iter().enumerate() {
@@ -1621,14 +1622,17 @@ mod tests {
 		}
 
 		fn write(&mut self, sequence: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		async fn frame(&self) -> Option<u128> {
@@ -1642,7 +1646,7 @@ mod tests {
 			let Read::Frame(frame) = read else {
 				panic!("expected a frame");
 			};
-			Some(frame.item.timestamp.as_micros())
+			Some(frame.item.timestamp.as_micros().unwrap())
 		}
 
 		async fn cancel(self) {

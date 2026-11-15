@@ -6,11 +6,13 @@
 //! frame never keeps a larger receive allocation alive.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Client, Server, Timestamp, Version, origin, transport::memory};
+use moq_net::{Client, Server, Version, origin, transport::memory};
 use support::harness::{now, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,9 +73,9 @@ async fn frames_cross_without_a_copy() {
 		subscribed(&track).await;
 
 		let payload = Bytes::from(vec![7u8; 64 * 1024]);
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		group.finish().unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), payload.clone()).unwrap();
+		group.close().unwrap();
 
 		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

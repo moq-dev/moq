@@ -54,15 +54,15 @@ async fn main() -> anyhow::Result<()> {
 	let mut reader = stream.consumer.ordered();
 	for i in 0..3 {
 		if dial {
-			stream.producer.write_frame(None, vec![own + i])?;
+			stream.producer.write_frame(key(i), vec![own + i])?;
 		}
 		let mut group = reader.next_group().await?.context("short track half")?;
-		ensure!(group.sequence == u64::from(i), "wrong group sequence");
+		ensure!(group.start == u64::from(i), "wrong group key");
 		let frame = group.read_frame().await?.context("empty track message")?;
 		ensure!(frame.payload.as_ref() == [peer + i], "wrong track frame");
 		ensure!(group.read_frame().await?.is_none(), "extra frame in track message");
 		if !dial {
-			stream.producer.write_frame(None, vec![own + i])?;
+			stream.producer.write_frame(key(i), vec![own + i])?;
 		}
 	}
 	let _finished = stream.producer.finish()?;
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 	let mut reset_reader = reset.consumer.ordered();
 	if dial {
-		reset.producer.write_frame(None, vec![48])?;
+		reset.producer.write_frame(key(0), vec![48])?;
 		ensure!(reset_reader.next_group().await.is_err(), "track RST became FIN");
 		eprintln!("socket reset verified dial");
 	} else {
@@ -115,4 +115,9 @@ async fn accepted(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_ne
 			return Ok(stream);
 		}
 	}
+}
+
+/// Message `i`'s key: a session track is scale-less, so each message's group is keyed by its index.
+fn key(i: u8) -> moq_net::Timestamp {
+	moq_net::Timestamp::unscaled(u64::from(i))
 }

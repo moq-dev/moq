@@ -127,6 +127,35 @@ impl std::ops::DerefMut for Segment {
 }
 
 /// The earlier deadline, where `None` is no deadline.
+/// The later of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no `Ord`.
+fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b > a { b } else { a }
+}
+
+/// The earlier of two timestamps, `a` when they don't compare; see [`later`].
+fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b < a { b } else { a }
+}
+
+/// A timestamp on the broadcast timeline, ordered by time.
+///
+/// [`moq_net::Timestamp`] has no `Ord`, since an unscaled one orders against no scaled one.
+/// The presentation's `map` only returns scaled timestamps, and scaled ones order totally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mapped(moq_net::Timestamp);
+
+impl Ord for Mapped {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+	}
+}
+
+impl PartialOrd for Mapped {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
 fn soonest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -397,7 +426,11 @@ impl<O: Output> Video<O> {
 							loop {
 								match selector.next(now) {
 									Next::Read(Decoded::Frame(frame)) => {
-										if floor.is_none_or(|floor| frame.timestamp.as_micros() >= floor.as_micros()) {
+										// A picture that doesn't compare with the floor isn't known to precede it.
+										let below = floor.is_some_and(
+											|floor| matches!((frame.timestamp.as_micros(), floor.as_micros()), (Ok(at), Ok(floor)) if at < floor),
+										);
+										if !below {
 											pending.push_back(frame);
 										}
 									}
@@ -440,7 +473,7 @@ impl<O: Output> Video<O> {
 						// decoded before that picture is due, however deep the stream
 						// reorders or the codec holds pictures back.
 						let oldest = role.map(oldest)?;
-						let owed = held.first().map_or(oldest, |held| oldest.min(*held));
+						let owed = held.first().map_or(oldest, |held: &Mapped| earlier(oldest, held.0));
 						let at = presentation
 							.due(owed)
 							.and_then(|at| at.checked_sub(DECODE_AHEAD))
@@ -497,10 +530,10 @@ impl<O: Output> Video<O> {
 							.expect("no await since inspecting the buffer");
 						frame.timestamp = role.map(frame.timestamp)?;
 						generation = Some(current);
-						held.insert(frame.timestamp);
+						held.insert(Mapped(frame.timestamp));
 						{
 							let mut edge = edge.lock().unwrap();
-							*edge = Some(edge.map_or(frame.timestamp, |edge| edge.max(frame.timestamp)));
+							*edge = Some(edge.map_or(frame.timestamp, |edge| later(edge, frame.timestamp)));
 						}
 						wake.notify_one();
 						// Never race a codec call: cancelling Sink::decode poisons it. The
@@ -570,7 +603,7 @@ impl<O: Output> Video<O> {
 				while let Some(frame) = decoder.receive()? {
 					// A codec returns display order, so a picture held before one it
 					// returned was dropped rather than delayed.
-					held.retain(|held| *held > frame.timestamp);
+					held.retain(|held| held.0 > frame.timestamp);
 					selector.push(Lane::Min, Decoded::Frame(frame), now);
 				}
 			};
@@ -804,7 +837,7 @@ mod tests {
 			let surface =
 				moq_video::Surface::rgba(&vec![128; size * size * 4], moq_video::Size::new(self.size, self.size))?;
 			self.held.push(moq_video::Frame::new(surface, frame.timestamp));
-			self.held.sort_by_key(|frame| frame.timestamp);
+			self.held.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
 			let bumped = self.held.len().saturating_sub(self.depth);
 			self.ready.extend(self.held.drain(..bumped));
 			Ok(())
@@ -1030,7 +1063,7 @@ mod tests {
 			if let Some(picture) = media.output.present(&media)
 				&& first.is_none()
 			{
-				first = Some((picture.as_millis(), at));
+				first = Some((picture.as_millis().unwrap(), at));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -1108,7 +1141,11 @@ mod tests {
 		task.await.unwrap().unwrap();
 		assert_eq!(*flushed.lock().unwrap(), 1, "decoder tail was not flushed exactly once");
 		let &(timestamp, at) = shown.last().expect("presented video");
-		assert_eq!(timestamp.as_micros(), last.as_micros(), "decoder tail was lost");
+		assert_eq!(
+			timestamp.as_micros().unwrap(),
+			last.as_micros().unwrap(),
+			"decoder tail was lost"
+		);
 		assert!(
 			at.max(last_due).duration_since(at.min(last_due)) <= Duration::from_millis(1),
 			"live edge remained late: {at:?}, expected {last_due:?}"
@@ -1168,7 +1205,7 @@ mod tests {
 		for _ in 0..110 {
 			tokio::task::yield_now().await;
 			if let Some(frame) = media.output.present(&media) {
-				shown.push(frame.as_millis());
+				shown.push(frame.as_millis().unwrap());
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -1224,10 +1261,10 @@ mod tests {
 			.lock()
 			.unwrap()
 			.iter()
-			.map(|frame| frame.timestamp.as_millis())
+			.map(|frame| frame.timestamp.as_millis().unwrap())
 			.collect::<Vec<_>>();
 		assert_eq!(queued, [500], "old decoder output crossed the discontinuity");
-		assert_eq!(media.output.present(&media).unwrap().as_millis(), 500);
+		assert_eq!(media.output.present(&media).unwrap().as_millis().unwrap(), 500);
 	}
 
 	#[tokio::test]
@@ -1248,14 +1285,16 @@ mod tests {
 			.unwrap();
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: Vec<u64>| {
-			let mut group = published.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = published
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.into_iter()
 				.enumerate()
 				.map(|(index, ms)| frame(ms, index == 0))
 				.collect();
 			format.write(&mut group, &frames).unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		};
 		write(10, vec![100, 80, 90, 110]);
 		write(11, vec![200, 180, 190, 210]);
@@ -1284,7 +1323,12 @@ mod tests {
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
-		let got: Vec<_> = decoded.lock().unwrap().iter().map(|(at, _)| at.as_millis()).collect();
+		let got: Vec<_> = decoded
+			.lock()
+			.unwrap()
+			.iter()
+			.map(|(at, _)| at.as_millis().unwrap())
+			.collect();
 		assert_eq!(got, [100, 110, 200, 180, 190, 210, 400, 410]);
 	}
 
@@ -1323,7 +1367,7 @@ mod tests {
 		for _ in 0..2_200 {
 			tokio::task::yield_now().await;
 			if let Some(timestamp) = media.output.present(&media) {
-				shown.push(timestamp.as_millis());
+				shown.push(timestamp.as_millis().unwrap());
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -1434,7 +1478,7 @@ mod tests {
 			if media
 				.output
 				.present(&media)
-				.is_some_and(|picture| picture.as_millis() >= 60)
+				.is_some_and(|picture| picture.as_millis().unwrap() >= 60)
 			{
 				shown += 1;
 			}
@@ -1512,8 +1556,8 @@ mod tests {
 		}
 		task.await.unwrap().unwrap();
 		assert_eq!(
-			shown.map(Duration::from),
-			Some(Duration::from(first) + Duration::from_millis(40))
+			shown.map(|shown| Duration::try_from(shown).unwrap()),
+			Some(Duration::try_from(first).unwrap() + Duration::from_millis(40))
 		);
 	}
 
@@ -1630,7 +1674,7 @@ mod tests {
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
 			if let Some(timestamp) = media.output.present(&media) {
-				shown.push(timestamp.as_micros());
+				shown.push(timestamp.as_micros().unwrap());
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -1689,10 +1733,11 @@ mod tests {
 				// A publisher finishes a group when it starts the next one.
 				self.seal(sequence);
 			}
-			let group = self
-				.groups
-				.entry(sequence)
-				.or_insert_with(|| self.track.create_group(moq_net::group::Info { sequence }).unwrap());
+			let group = self.groups.entry(sequence).or_insert_with(|| {
+				self.track
+					.create_group(moq_net::group::Info { start: sequence })
+					.unwrap()
+			});
 			let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 			format
 				.write(group, &[frame(index * 33, index.is_multiple_of(self.sweep))])
@@ -1703,7 +1748,7 @@ mod tests {
 		fn seal(&mut self, sequence: u64) {
 			let open = self.groups.split_off(&sequence);
 			for (_, group) in std::mem::replace(&mut self.groups, open) {
-				group.finish().unwrap();
+				group.close().unwrap();
 			}
 		}
 
@@ -1755,7 +1800,7 @@ mod tests {
 			}
 			tokio::task::yield_now().await;
 			if let Some(picture) = media.output.present_frame(media) {
-				shown.push((picture.timestamp.as_millis(), picture.size().width));
+				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 			assert!(elapsed < Duration::from_secs(30), "playback never finished");
@@ -1764,7 +1809,7 @@ mod tests {
 		// The window still holds the last pictures the decoder queued.
 		for _ in 0..1_000 {
 			if let Some(picture) = media.output.present_frame(media) {
-				shown.push((picture.timestamp.as_millis(), picture.size().width));
+				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -1891,7 +1936,7 @@ mod tests {
 			}
 			tokio::task::yield_now().await;
 			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis(), picture.size().width));
+				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 			assert!(elapsed < Duration::from_secs(30), "playback never finished: {shown:?}");
@@ -1900,7 +1945,7 @@ mod tests {
 		// The window still holds the last pictures the decoder queued.
 		for _ in 0..1_000 {
 			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis(), picture.size().width));
+				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -1971,7 +2016,7 @@ mod tests {
 			}
 			tokio::task::yield_now().await;
 			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis(), Instant::now() - start));
+				shown.push((picture.timestamp.as_millis().unwrap(), Instant::now() - start));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 			assert!(
@@ -1982,7 +2027,7 @@ mod tests {
 		task.await.unwrap().unwrap();
 		for _ in 0..1_000 {
 			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis(), Instant::now() - start));
+				shown.push((picture.timestamp.as_millis().unwrap(), Instant::now() - start));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
@@ -2023,7 +2068,7 @@ mod tests {
 		assert_eq!(
 			shown
 				.iter()
-				.map(|(timestamp, _)| timestamp.as_millis())
+				.map(|(timestamp, _)| timestamp.as_millis().unwrap())
 				.collect::<Vec<_>>(),
 			expected,
 			"a picture was dropped"

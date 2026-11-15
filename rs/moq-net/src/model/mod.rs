@@ -41,7 +41,6 @@ mod resume;
 mod resume_model;
 mod subscription;
 mod time;
-mod timed;
 mod weak_cache;
 
 use request_queue::RequestQueue;
@@ -49,7 +48,6 @@ use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
 pub use time::*;
-pub use timed::Timed;
 
 /// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {

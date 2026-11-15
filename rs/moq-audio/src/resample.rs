@@ -141,11 +141,10 @@ impl Resampler {
 			.checked_sub(self.output_frames as u128 * self.input_rate as u128)
 			.ok_or_else(|| Error::Resample("output exceeds input duration".into()))?;
 		let held_frames = u64::try_from(held_frames).map_err(|_| Error::Resample("held duration overflow".into()))?;
+		let scale = held.scale().ok_or(moq_net::TimeOverflow)?;
 		let offset = moq_net::Timestamp::from_scale(held_frames, self.input_rate as u64 * self.output_rate as u64)?
-			.convert(held.scale())?;
-		Ok(held
-			.checked_sub(offset)
-			.unwrap_or(moq_net::Timestamp::new(0, held.scale())?))
+			.convert(scale)?;
+		Ok(held.checked_sub(offset).unwrap_or(moq_net::Timestamp::new(0, scale)?))
 	}
 
 	/// Drop everything held, buffered input and filter state alike, returning to
@@ -266,8 +265,9 @@ impl Resampler {
 		// Convert its total consumed duration once to preserve fractional progress.
 		if self.pending.len() < buffered {
 			let consumed = (samples.len() - self.pending.len()) / self.channels;
-			let elapsed =
-				moq_net::Timestamp::from_scale(consumed as u64, self.input_rate as u64)?.convert(at.scale())?;
+			let elapsed = moq_net::Timestamp::from_scale(consumed as u64, self.input_rate as u64)?
+				.convert(at.scale().ok_or(moq_net::TimeOverflow)?)?;
+
 			self.held = Some(at.checked_add(elapsed)?);
 		}
 

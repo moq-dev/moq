@@ -178,9 +178,15 @@ export async function readFrames(
 				continue;
 			}
 		}
-		if (frame.payload) hooks.writeGroupFrame(producer, frame as netGroup.Frame, frame.inflated);
+		if (frame.payload)
+			hooks.writeGroupFrame(
+				producer,
+				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.sequence) },
+				frame.inflated,
+			);
 		else if (ingest) {
-			const open = producer.createFrame({ size: frame.size, timestamp: frame.timestamp });
+			const timestamp = Time.received(frame.timestamp, producer.sequence);
+			const open = producer.createFrame({ size: frame.size, timestamp });
 			// Kept until it completes, so a YIELDED reset cutting it short leaves it for the continuation.
 			ingest.partial = open;
 			if (!(await fillFrame(stream, producer, open))) return;

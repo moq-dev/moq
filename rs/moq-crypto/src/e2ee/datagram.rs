@@ -21,8 +21,9 @@ use crate::e2ee::window::DatagramWindow;
 pub struct Datagram {
 	/// The datagram track's own sequence.
 	pub sequence: u64,
-	/// Presentation timestamp, or `None` when untimed.
-	pub timestamp: Option<moq_net::Timestamp>,
+	/// Presentation timestamp, or [`moq_net::Timestamp::unscaled`] at the sequence when the
+	/// track is scale-less.
+	pub timestamp: moq_net::Timestamp,
 	/// Decrypted application bytes.
 	pub plaintext: Bytes,
 }
@@ -77,11 +78,16 @@ impl Producer {
 
 	/// Encrypt `plaintext` at the next sequence and send it, returning that sequence.
 	///
+	/// A scale-less track has no time, so there `timestamp` is
+	/// [`unscaled`](moq_net::Timestamp::unscaled) at the sequence to write, as with
+	/// [`insert`](Self::insert).
+	///
 	/// # Errors
 	///
-	/// Same as [`Self::insert`], except [`Error::Reuse`].
-	pub fn append(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, plaintext: &[u8]) -> Result<u64> {
-		self.write(None, timestamp.into(), plaintext)
+	/// Same as [`Self::insert`], except [`Error::Reuse`] on a timed track.
+	pub fn append(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<u64> {
+		let sequence = timestamp.scale().is_none().then(|| timestamp.value());
+		self.write(sequence, timestamp, plaintext)
 	}
 
 	/// Encrypt `plaintext` at an explicit sequence, which must be above every sequence this
@@ -95,19 +101,17 @@ impl Producer {
 	///
 	/// [`Error::Reuse`] if `sequence` was already allocated, [`Error::Identity`],
 	/// [`Error::Exhausted`], [`Error::Oversize`], or a net write error.
-	pub fn insert(
-		&mut self,
-		sequence: u64,
-		timestamp: impl Into<Option<moq_net::Timestamp>>,
-		plaintext: &[u8],
-	) -> Result<()> {
-		self.write(Some(sequence), timestamp.into(), plaintext)?;
+	pub fn insert(&mut self, sequence: u64, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
+		self.write(Some(sequence), timestamp, plaintext)?;
 		Ok(())
 	}
 
-	fn write(&mut self, sequence: Option<u64>, timestamp: Option<moq_net::Timestamp>, plaintext: &[u8]) -> Result<u64> {
+	fn write(&mut self, sequence: Option<u64>, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<u64> {
 		// Checked before the sequence is spent.
 		let timestamp = self.inner.info().rescale(timestamp)?;
+		if timestamp.scale().is_none() && sequence != Some(timestamp.value()) {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
 		let (sequence, payload) = self.claim.allocate(sequence, |sequence| {
 			self.claim
 				.key

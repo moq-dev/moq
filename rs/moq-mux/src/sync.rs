@@ -242,10 +242,11 @@ impl State {
 
 	/// Fold an arrival into `kind`'s timeline, reporting whether that moved the schedule.
 	fn received(&mut self, kind: Kind, timestamp: Timestamp, now: Instant) -> bool {
-		let arrival = Anchor {
-			at: now,
-			media: Duration::from(timestamp),
+		// An unscaled key has no media time to anchor on.
+		let Ok(media) = Duration::try_from(timestamp) else {
+			return false;
 		};
+		let arrival = Anchor { at: now, media };
 		let before = self.reference();
 		let half = self.delay() / 2;
 		let part = &mut self.parts[kind as usize];
@@ -315,7 +316,7 @@ impl State {
 
 	/// When `timestamp` should be presented, or `None` before any frame has
 	/// anchored the clock. `None` means as soon as possible: there is nothing
-	/// left to wait for.
+	/// left to wait for, as for an unscaled timestamp, which has no media time.
 	fn due(&self, timestamp: Timestamp) -> Option<Instant> {
 		self.schedule().due(timestamp)
 	}
@@ -346,9 +347,10 @@ impl Schedule {
 		self.delay
 	}
 
-	/// When `timestamp` is due on this schedule, or `None` before the first anchor.
+	/// When `timestamp` is due on this schedule, or `None` before the first anchor or for an
+	/// unscaled timestamp, which has no media time.
 	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
-		let at = self.reference?.at(Duration::from(timestamp))?;
+		let at = self.reference?.at(Duration::try_from(timestamp).ok()?)?;
 		Some(at.checked_add(self.delay).unwrap_or(at))
 	}
 }
@@ -390,7 +392,7 @@ pub struct Mapping {
 
 impl Mapping {
 	fn map(self, source: Timestamp) -> Result<Timestamp> {
-		let source = Duration::from(source);
+		let source = Duration::try_from(source).map_err(|_| Error::Unscaled)?;
 		let target = if source >= self.source {
 			self.target.checked_add(source - self.source).ok_or(Error::Overflow)?
 		} else {
@@ -429,6 +431,8 @@ impl Track {
 	/// A frame arriving earlier than the schedule predicted pulls playback toward
 	/// live; a late one leaves it alone. A move makes every queued frame due
 	/// earlier, so a presenter has to recompute the deadline it is asleep on.
+	/// An [unscaled](Timestamp::unscaled) timestamp has no media time, so it
+	/// moves nothing.
 	pub fn received(&self, timestamp: Timestamp, now: Instant) -> bool {
 		let held = self.mapping.lock().unwrap().held;
 		let now = now.checked_add(held).unwrap_or(now);
@@ -487,7 +491,8 @@ impl Track {
 		}
 	}
 
-	/// Map a source timestamp onto the shared broadcast timeline.
+	/// Map a source timestamp onto the shared broadcast timeline. Refuses an
+	/// [unscaled](Timestamp::unscaled) one with [`Error::Unscaled`].
 	pub fn map(&self, source: Timestamp) -> Result<Timestamp> {
 		self.mapping.lock().unwrap().mapping.map(source)
 	}
@@ -542,23 +547,25 @@ impl Track {
 		let mapping = self.mapping.lock().unwrap().mapping;
 		self.clock.state.lock().unwrap().ends[self.role as usize] = Some(Boundary {
 			starts: mapping.starts,
-			end: Duration::from(mapping.map(source)?),
+			end: Duration::try_from(mapping.map(source)?).expect("a mapped timestamp is in microseconds"),
 		});
 		self.clock.wake();
 		Ok(())
 	}
 
 	/// Record the first replacement media for `transition`, as it arrives.
+	///
+	/// An [unscaled](Timestamp::unscaled) `source` has no media time to plan
+	/// from, so it records nothing and this role maps alone.
 	pub fn plan(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) {
+		let Ok(source) = Duration::try_from(source) else {
+			return;
+		};
 		let arrived = kio::clock::now();
 		let mut state = self.clock.state.lock().unwrap();
 		let delay = delay.unwrap_or(state.delay());
 		if let Some(pending) = state.transition(transition) {
-			pending.plans[self.role as usize] = Some(Plan {
-				source: Duration::from(source),
-				delay,
-				arrived,
-			});
+			pending.plans[self.role as usize] = Some(Plan { source, delay, arrived });
 		}
 		drop(state);
 		self.clock.wake();
@@ -598,7 +605,7 @@ impl Track {
 					.map(media(plan.source))
 					.ok()
 					.zip(reference)
-					.and_then(|(mapped, reference)| reference.at(Duration::from(mapped)))
+					.and_then(|(mapped, reference)| reference.at(Duration::try_from(mapped).ok()?))
 			{
 				held = scheduled.saturating_duration_since(plan.arrived);
 			}
@@ -720,7 +727,7 @@ impl Resume<'_> {
 		let (source, delay, arrived) = match paired {
 			Some(origin) => (origin.source, origin.delay, Some(origin.arrived)),
 			None => (
-				Duration::from(self.source),
+				Duration::try_from(self.source).map_err(|_| Error::Unscaled)?,
 				self.delay.unwrap_or(state.delay()),
 				own_plan.map(|plan| plan.arrived),
 			),
@@ -764,6 +771,9 @@ pub enum Error {
 	/// The requested delay exceeds the system clock.
 	#[error("playback delay exceeds the system clock")]
 	DelayOverflow,
+	/// The timestamp is [unscaled](Timestamp::unscaled), a scale-less track's key with no media time.
+	#[error("timestamp has no timescale")]
+	Unscaled,
 }
 
 /// A result from mapping media onto the playout clock.
@@ -1234,7 +1244,7 @@ mod tests {
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
 		// The data track has no replacement yet, so the others map alone.
-		assert_eq!(video.map(ms(40)).unwrap().as_millis(), 10_100);
+		assert_eq!(video.map(ms(40)).unwrap().as_millis().unwrap(), 10_100);
 		data.plan(transition, ms(20), None);
 		data.apply(transition, data.resume(transition, ms(20), None).ready().await.unwrap());
 		assert_eq!(data.map(ms(40)).unwrap(), video.map(ms(40)).unwrap());
@@ -1256,8 +1266,8 @@ mod tests {
 			transition,
 			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
 		);
-		assert_eq!(audio.map(ms(0)).unwrap().as_millis(), 10_120);
-		assert_eq!(video.map(ms(10_500)).unwrap().as_millis(), 10_500);
+		assert_eq!(audio.map(ms(0)).unwrap().as_millis().unwrap(), 10_120);
+		assert_eq!(video.map(ms(10_500)).unwrap().as_millis().unwrap(), 10_500);
 		assert_eq!(clock.state.lock().unwrap().due(ms(10_500)), unchanged);
 	}
 
@@ -1377,7 +1387,7 @@ mod tests {
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
 		assert_eq!(
-			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			video.map(ms(40)).unwrap().as_millis().unwrap() - audio.map(ms(0)).unwrap().as_millis().unwrap(),
 			40
 		);
 	}
@@ -1408,7 +1418,7 @@ mod tests {
 			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
 		);
 		assert_eq!(
-			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			video.map(ms(40)).unwrap().as_millis().unwrap() - audio.map(ms(0)).unwrap().as_millis().unwrap(),
 			40
 		);
 	}
@@ -1437,7 +1447,7 @@ mod tests {
 			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
 		);
 		assert_eq!(
-			first.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			first.map(ms(40)).unwrap().as_millis().unwrap() - audio.map(ms(0)).unwrap().as_millis().unwrap(),
 			40
 		);
 	}
@@ -1634,7 +1644,7 @@ mod tests {
 				.unwrap(),
 		);
 		assert_eq!(
-			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			video.map(ms(40)).unwrap().as_millis().unwrap() - audio.map(ms(0)).unwrap().as_millis().unwrap(),
 			40
 		);
 		assert_eq!(

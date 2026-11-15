@@ -10,6 +10,7 @@ import { Origin, Path, Socket } from "./index.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
+import { Timestamp } from "./time.ts";
 import type * as Track from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -26,7 +27,9 @@ function time() {
 	clocks.push(clock.install());
 	return clock;
 }
-const bytes = (value: number) => ({ payload: new Uint8Array([value]) });
+// A scale-less frame of `value`, in the group `key` names: a TCP half's only group, or a track
+// message's own group.
+const bytes = (value: number, key = 0n) => ({ payload: new Uint8Array([value]), timestamp: Timestamp.unscaled(key) });
 function setup() {
 	const origin = new Origin.Producer();
 	origins.add(origin);
@@ -144,7 +147,7 @@ test("track halves start reliable and ascending, preserve old messages and accep
 	expect((await local.producer.info()).maxAge).toBeNull();
 	expect(remote.consumer.subscription.peek()?.order).toBe("ascending");
 	expect(remote.consumer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
-	for (let i = 0; i < 3; i++) local.producer.writeFrame(bytes(i));
+	for (let i = 0; i < 3; i++) local.producer.writeFrame(bytes(i, BigInt(i)));
 	local.producer.finish();
 	const reader = remote.consumer.ordered();
 	for (let i = 0; i < 3; i++) {
@@ -165,7 +168,7 @@ test("a track session skips dropped groups and keeps the next message", async ()
 	const reading = reader.readFrame();
 	hooks.dropTrackGroups(local.producer, 0n, 1n, { error: new NotFound("message unavailable") });
 	const group = local.producer.createGroup(1n);
-	group.writeFrame(bytes(7));
+	group.writeFrame(bytes(7, 1n));
 	group.finish();
 	local.producer.finish();
 	await clock.advance(Duration.ZERO);
@@ -507,7 +510,7 @@ test(`a socket preserves an early answer burst over ${Lite.ALPN_07_WIP}`, async 
 		// SUBSCRIBE_OK carries the burst's last position, without a timing race.
 		hooks.keepRequest(request);
 		const staged = hooks.stageRequest(request, { maxAge: null });
-		for (let i = 1; i <= 3; i++) staged.producer.writeFrame(bytes(i));
+		for (let i = 1; i <= 3; i++) staged.producer.writeFrame(bytes(i, BigInt(i - 1)));
 		staged.producer.finish();
 		staged.commit();
 		await clock.advance(Duration.ZERO);

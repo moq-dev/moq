@@ -32,7 +32,8 @@ const FIRST_OBJECT_BIT = 0x40;
 /**
  * Encode an object's Properties block: its Timestamp in `timescale` units, or nothing.
  *
- * Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one.
+ * Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one,
+ * and an unscaled one, a scale-less track's group key, is no time to write.
  * Synchronous, like the rest of an object's header: every object of a timed track pays for it.
  */
 export function encodeObjectExtensions(
@@ -40,7 +41,7 @@ export function encodeObjectExtensions(
 	timescale: Timescale | undefined,
 	version: IetfVersion,
 ): Uint8Array {
-	if (timestamp === undefined || timescale === undefined) {
+	if (timestamp?.scale === undefined || timescale === undefined) {
 		return new Uint8Array();
 	}
 
@@ -460,7 +461,7 @@ export class FetchFrame {
 		timescale: Timescale | undefined,
 		version: IetfVersion,
 	): Promise<void> {
-		const stamped = this.timestamp !== undefined && timescale !== undefined;
+		const stamped = this.timestamp?.scale !== undefined && timescale !== undefined;
 		const previous = position.previousGroup;
 		// Everything before the payload goes out as one write, as in Frame.encode.
 		const header: Uint8Array[] = [];

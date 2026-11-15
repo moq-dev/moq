@@ -17,10 +17,10 @@ export interface Stored {
 
 // Class identity keeps reactive equality from reading the lazy payload getter.
 class SliceFrame implements Frame {
-	readonly timestamp: Timestamp | undefined;
+	readonly timestamp: Timestamp;
 	readonly arrived: Instant | undefined;
 	#read: () => Uint8Array;
-	constructor(timestamp: Timestamp | undefined, arrived: Instant | undefined, read: () => Uint8Array) {
+	constructor(timestamp: Timestamp, arrived: Instant | undefined, read: () => Uint8Array) {
 		this.timestamp = timestamp;
 		this.arrived = arrived;
 		this.#read = read;

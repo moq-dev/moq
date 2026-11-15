@@ -495,7 +495,7 @@ mod tests {
 					assert_eq!(units.len(), 1 + usize::from(lead));
 					let unit = units.last().unwrap();
 					let owner = if prefix.len() == 4 && cut == 1 { 2 } else { 1 };
-					assert_eq!(unit.pts.unwrap().as_secs(), owner, "lead {lead} cut {cut}");
+					assert_eq!(unit.pts.unwrap().as_secs().unwrap(), owner, "lead {lead} cut {cut}");
 					assert_eq!(
 						unit.data.as_ref(),
 						[START_CODE.as_ref(), &[0x65, 0x80, 0xab, 0xcd]].concat()
@@ -555,10 +555,10 @@ mod tests {
 			.push(pending(&staging, &[0, 0, 1, 0x65, 0x80], Some(270_000)))
 			.unwrap();
 		let first = assembly.next(false).unwrap().unwrap();
-		assert_eq!(first.pts.unwrap().as_secs(), 1);
+		assert_eq!(first.pts.unwrap().as_secs().unwrap(), 1);
 		assert_eq!(&first.data[4..], &data[3..]);
 		let second = assembly.next(true).unwrap().unwrap();
-		assert_eq!(second.pts.unwrap().as_secs(), 3);
+		assert_eq!(second.pts.unwrap().as_secs().unwrap(), 3);
 		drop((first, second));
 		assembly.reset();
 		assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);

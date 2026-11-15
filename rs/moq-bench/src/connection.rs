@@ -50,6 +50,8 @@ struct GroupHeader<'a> {
 /// broadcast it didn't publish. Extra fields on the wire are ignored.
 #[derive(Deserialize)]
 struct RecvHeader {
+	/// The publisher's count of its groups, which group starts, being times, don't give.
+	group: u64,
 	fps: u64,
 	frame_size: u64,
 	group_size: u64,
@@ -226,6 +228,12 @@ pub async fn run(ctx: Connection) {
 	}
 }
 
+/// Milliseconds on this process's monotonic clock since its origin, what frames are stamped with.
+fn millis() -> u64 {
+	let elapsed = kio::clock::now().saturating_duration_since(kio::clock::origin().0);
+	u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Produce frames for one track at `fps`, opening a new group every `group_size`
 /// frames. Each group starts with a JSON keyframe; the rest are zeroed.
 async fn produce(
@@ -250,11 +258,15 @@ async fn produce(
 	ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 
 	let mut sequence = 0u64;
+	let mut previous = None;
 	loop {
-		let mut group = track.append_group()?;
-
 		// Keyframe: the JSON header describing this connection's rolled parameters.
 		ticker.tick().await;
+		// A group starts at its keyframe, in the track's milliseconds. Starts strictly increase,
+		// so one landing in the same millisecond as the last starts a millisecond later.
+		let start = previous.map_or(millis(), |previous: u64| millis().max(previous + 1));
+		previous = Some(start);
+		let mut group = track.append_group(start)?;
 		let mut header = GroupHeader {
 			connection,
 			broadcast: &path,
@@ -280,17 +292,17 @@ async fn produce(
 			payload = serde_json::to_vec(&header)?;
 		}
 		let header = Bytes::from(payload);
-		group.write_frame(moq_net::Timestamp::now(), header.clone())?;
+		group.write_frame(moq_net::Timestamp::from_millis(start)?, header.clone())?;
 		stats.frame_sent(header.len());
 
 		// The remaining frames in the group are zeroed payload.
 		for _ in 0..rolled.group_size {
 			ticker.tick().await;
-			group.write_frame(moq_net::Timestamp::now(), zeros.clone())?;
+			group.write_frame(moq_net::Timestamp::from_millis(millis().max(start))?, zeros.clone())?;
 			stats.frame_sent(zeros.len());
 		}
 
-		group.finish()?;
+		group.close()?;
 		if sequence == 0 {
 			published.establish();
 		}
@@ -462,8 +474,9 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 	// `recv_group` yields groups in arrival order, including out of sequence, so we
 	// can spot holes. `next_group` would silently drop late arrivals and hide them.
 	while let Some(mut group) = track.recv_group().await? {
-		let sequence = group.sequence;
-		match read_group(&mut group, &mut learned_shape, stats).await {
+		// Group starts are times, so holes are counted by the number the keyframe header carries.
+		let mut sequence = None;
+		match read_group(&mut group, &mut learned_shape, &mut sequence, stats).await {
 			// Only a group read end to end counts as delivered.
 			Ok(()) => {
 				if established.is_none() {
@@ -474,20 +487,27 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 			// The relay failed this one group: `Error::Lagged` once we fall behind.
 			Err(err) => {
 				gaps.fail(sequence);
-				tracing::debug!(sequence, %err, "group ended early");
+				tracing::debug!(start = group.start, ?sequence, %err, "group ended early");
 			}
 		}
 	}
 	Ok(())
 }
 
-/// Read one group to its end, counting every frame and sampling the keyframe header.
-async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats: &Stats) -> moq_net::Result<()> {
+/// Read one group to its end, counting every frame and sampling the keyframe header, whose
+/// group number lands in `sequence`.
+async fn read_group(
+	group: &mut group::Consumer,
+	learned_shape: &mut bool,
+	sequence: &mut Option<u64>,
+	stats: &Stats,
+) -> moq_net::Result<()> {
 	let mut first = true;
 	while let Some(frame) = group.read_frame().await? {
 		// The first frame of every group is the JSON keyframe. Parse it once to
 		// learn the publisher's shape (we may be watching a peer, not ourselves).
 		if first && let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
+			*sequence = Some(header.group);
 			stats.latency(header.timestamp_ms);
 			if !*learned_shape {
 				tracing::debug!(
@@ -565,13 +585,20 @@ impl<'a> GapTracker<'a> {
 		}
 	}
 
-	fn complete(&mut self, sequence: u64) {
+	/// A group read end to end, numbered `sequence` when its header said.
+	fn complete(&mut self, sequence: Option<u64>) {
 		self.stats.groups_recv.fetch_add(1, Ordering::Relaxed);
-		self.record(sequence, true);
+		if let Some(sequence) = sequence {
+			self.record(sequence, true);
+		}
 	}
 
-	fn fail(&mut self, sequence: u64) {
-		self.record(sequence, false);
+	/// A group that failed. One that failed before its header named it is counted once the
+	/// frontier passes its number instead.
+	fn fail(&mut self, sequence: Option<u64>) {
+		if let Some(sequence) = sequence {
+			self.record(sequence, false);
+		}
 	}
 
 	fn record(&mut self, sequence: u64, complete: bool) {
@@ -707,22 +734,22 @@ mod tests {
 			let stats = stats.clone();
 			tokio::spawn(async move { drain(consumer, Duration::ZERO, &stats).await })
 		};
-		let mut failed = track.append_group().unwrap();
+		let mut failed = track.append_group(0).unwrap();
 		failed
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"{}"))
 			.unwrap();
 		wait_for(&stats.frames_recv, 1).await;
 		assert!(!stats.ready());
 		assert_eq!(stats.subscriptions.load(Ordering::Relaxed), 1);
 		assert_eq!(stats.subscriptions_established.load(Ordering::Relaxed), 0);
 		failed.abort(moq_net::Error::Lagged).unwrap();
-		let mut complete = track.append_group().unwrap();
+		let mut complete = track.append_group(1).unwrap();
 		complete
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), Bytes::from_static(b"{}"))
 			.unwrap();
 		wait_for(&stats.frames_recv, 2).await;
 		assert!(!stats.ready());
-		complete.finish().unwrap();
+		complete.close().unwrap();
 		wait_for(&stats.subscriptions_established, 1).await;
 		assert!(stats.ready());
 		let _track = track.finish().unwrap();
@@ -805,6 +832,18 @@ mod tests {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None)
+	}
+
+	/// A keyframe header numbering its group `group`.
+	fn header(group: u64) -> Bytes {
+		let header = serde_json::json!({
+			"group": group,
+			"fps": 1,
+			"frame_size": 0,
+			"group_size": 0,
+			"timestamp_ms": 0,
+		});
+		Bytes::from(serde_json::to_vec(&header).unwrap())
 	}
 
 	async fn wait_for(counter: &AtomicU64, value: u64) {
@@ -1011,11 +1050,11 @@ mod tests {
 			.route("bench/current/0/0", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let track = peer.broadcast().create_track(TRACK, timed()).unwrap();
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"{}"))
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _track = track.finish().unwrap();
 
 		let announced = discover(&origin, "bench/current");
@@ -1045,7 +1084,7 @@ mod tests {
 			.unwrap();
 		let track = broadcast.broadcast().create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(0).unwrap();
 		let header = serde_json::json!({
 			"fps": 1,
 			"frame_size": 200,
@@ -1053,9 +1092,9 @@ mod tests {
 			"timestamp_ms": 0,
 		});
 		group
-			.write_frame(moq_net::Timestamp::now(), serde_json::to_vec(&header).unwrap())
+			.write_frame(moq_net::Timestamp::ZERO, serde_json::to_vec(&header).unwrap())
 			.unwrap();
-		group.finish().unwrap();
+		group.close().unwrap();
 		let _track = track.finish().unwrap();
 
 		task.await.unwrap().unwrap();
@@ -1070,12 +1109,13 @@ mod tests {
 	/// measured under fewer subscribers than it was asked to serve.
 	#[tokio::test]
 	async fn drain_survives_a_failed_group() {
-		fn write_group(track: &mut track::Producer) {
-			let mut group = track.append_group().unwrap();
+		// Group `n` starts at `n` milliseconds.
+		fn write_group(track: &mut track::Producer, n: u64) {
+			let mut group = track.append_group(n).unwrap();
 			group
-				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+				.write_frame(moq_net::Timestamp::from_millis(n).unwrap(), header(n))
 				.unwrap();
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let stats = Arc::new(Stats::default());
@@ -1084,7 +1124,7 @@ mod tests {
 		let consumer = broadcast.consume();
 
 		// Group 0 lands intact.
-		write_group(&mut track);
+		write_group(&mut track, 0);
 
 		let task = {
 			let stats = stats.clone();
@@ -1098,17 +1138,17 @@ mod tests {
 		// Group 1 opens and is picked up by the drain, then the relay gives up on it.
 		// Aborting a group nobody is reading drops its cached frames, so wait for the
 		// drain to be parked inside it before failing it.
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(1).unwrap();
 		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), header(1))
 			.unwrap();
 		wait_for(&stats.frames_recv, 2).await;
 		group.abort(moq_net::Error::Lagged).unwrap();
 
 		// Groups 2 and 3 land intact, then the publisher is done.
-		write_group(&mut track);
+		write_group(&mut track, 2);
 		wait_for(&stats.groups_recv, 2).await;
-		write_group(&mut track);
+		write_group(&mut track, 3);
 		wait_for(&stats.groups_recv, 3).await;
 		let _track = track.finish().unwrap();
 		broadcast.close();
@@ -1127,13 +1167,15 @@ mod tests {
 	/// asks for the next group, group 1 already trails group 2 by 500ms of media
 	/// time. Timestamps are explicit, so no wall clock is involved.
 	async fn lost_to_an_overtaken_group(max_delay: Duration) -> u64 {
-		fn write_group(track: &mut track::Producer, millis: &[u64]) {
-			let mut group = track.append_group().unwrap();
-			for &millis in millis {
+		// Group `n` starts at its first frame, which carries the header numbering it.
+		fn write_group(track: &mut track::Producer, n: u64, millis: &[u64]) {
+			let mut group = track.append_group(millis[0]).unwrap();
+			for (i, &millis) in millis.iter().enumerate() {
 				let at = moq_net::Timestamp::from_millis(millis).unwrap();
-				group.write_frame(at, Bytes::from_static(b"{}")).unwrap();
+				let payload = if i == 0 { header(n) } else { Bytes::from_static(b"{}") };
+				group.write_frame(at, payload).unwrap();
 			}
-			group.finish().unwrap();
+			group.close().unwrap();
 		}
 
 		let stats = Arc::new(Stats::default());
@@ -1146,18 +1188,18 @@ mod tests {
 			tokio::spawn(async move { drain(consumer, max_delay, &stats).await })
 		};
 
-		let mut first = track.append_group().unwrap();
+		let mut first = track.append_group(1_000).unwrap();
 		let at = moq_net::Timestamp::from_millis(1_000).unwrap();
-		first.write_frame(at, Bytes::from_static(b"{}")).unwrap();
+		first.write_frame(at, header(0)).unwrap();
 		wait_for(&stats.frames_recv, 1).await;
 
-		write_group(&mut track, &[1_100]);
-		write_group(&mut track, &[1_500, 1_600]);
-		first.finish().unwrap();
+		write_group(&mut track, 1, &[1_100]);
+		write_group(&mut track, 2, &[1_500, 1_600]);
+		first.close().unwrap();
 		wait_for(&stats.groups_recv, 2).await;
 
 		// A last group moves the live frontier past group 2, so 1 and 2 are accounted.
-		write_group(&mut track, &[2_000]);
+		write_group(&mut track, 3, &[2_000]);
 		let _track = track.finish().unwrap();
 		broadcast.close();
 
@@ -1213,7 +1255,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 		for seq in [0, 1, 3, 4] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
 		assert_eq!(lost(&stats), 1);
@@ -1227,17 +1269,17 @@ mod tests {
 		let mut gaps = GapTracker::new(&stats);
 
 		for seq in [0, 1, 3, 4] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
 
-		gaps.complete(2);
+		gaps.complete(Some(2));
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
 		assert_eq!((lost(&stats), outstanding(&stats)), (1, 0), "the late group stays lost");
 
 		// 6 is skipped; 8 settles 7, confirming it.
 		for seq in [5, 7, 8] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!((lost(&stats), outstanding(&stats)), (2, 1));
 	}
@@ -1248,7 +1290,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 		for seq in [0, 3, 1, 2, 4] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
 		assert_eq!((lost(&stats), outstanding(&stats)), (0, 0));
@@ -1264,13 +1306,13 @@ mod tests {
 
 		// Joins live at 10; 11 and 12 settle the span from 10.
 		for seq in [10, 11, 12] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 2);
 
 		// Cached history arrives behind the live frontier, leaving 0..=4 and 6 unsent.
 		for seq in [5, 7, 8, 9] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 7);
 		assert_eq!(history(&stats), 4);
@@ -1283,12 +1325,12 @@ mod tests {
 
 		// A skip after the start is still loss: 13 never arrives, 15 settles 14.
 		for seq in [14, 15] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
 
 		// A failed history group is lost wherever it falls.
-		gaps.fail(3);
+		gaps.fail(Some(3));
 		assert_eq!(history(&stats), 4, "a failed group is not history");
 		assert_eq!((lost(&stats), outstanding(&stats)), (2, 2));
 	}
@@ -1302,12 +1344,12 @@ mod tests {
 
 		// 3 is missing, 4 is the live frontier: nothing is settled past 2 yet.
 		for seq in [0, 1, 2, 4] {
-			gaps.complete(seq);
+			gaps.complete(Some(seq));
 		}
 		assert_eq!(lost(&stats), 0);
 
 		// 5 advances the frontier, settling 4 and confirming 3 was skipped.
-		gaps.complete(5);
+		gaps.complete(Some(5));
 		assert_eq!(lost(&stats), 1);
 	}
 
@@ -1317,11 +1359,11 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 
-		gaps.fail(0);
+		gaps.fail(Some(0));
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 0);
 		assert_eq!(lost(&stats), 1);
 
-		gaps.complete(1);
+		gaps.complete(Some(1));
 		assert_eq!(
 			lost(&stats),
 			1,
@@ -1335,12 +1377,12 @@ mod tests {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats);
 
-		gaps.complete(0);
-		gaps.fail(1);
+		gaps.complete(Some(0));
+		gaps.fail(Some(1));
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
 		assert_eq!(lost(&stats), 1);
 
-		gaps.complete(2);
+		gaps.complete(Some(2));
 		assert_eq!(
 			lost(&stats),
 			1,

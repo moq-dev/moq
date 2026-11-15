@@ -2,8 +2,9 @@ import { expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Instance, Origin, Path, type Track } from "@moq/net";
+import { Instance, Origin, Path, Time, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
@@ -42,9 +43,14 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 	const include = publish(origin, "room/extra.hang");
 	const includeCatalog = include.createTrack(Catalog.TRACK);
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: includeCatalog, deltas: false });
-	parent.createTrack("video").writeFrame({ payload: new TextEncoder().encode("source frames") });
+	parent
+		.createTrack("video")
+		.writeFrame({ payload: new TextEncoder().encode("source frames"), timestamp: Time.Timestamp.unscaled(0n) });
 	const includeVideo = include.createTrack("video");
-	includeVideo.writeFrame({ payload: new TextEncoder().encode("include frames") });
+	includeVideo.writeFrame({
+		payload: new TextEncoder().encode("include frames"),
+		timestamp: Time.Timestamp.unscaled(0n),
+	});
 
 	// The include and a source rendition share the ID "video".
 	const root = Catalog.RootSchema.parse({
@@ -59,7 +65,7 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 	});
 	const selection = new Effect();
 	try {
-		catalog.update({ value: { video: { renditions: { video: video("vp8") } } } });
+		catalog.update({ value: { video: { renditions: { video: video("vp8") } } }, at: key() });
 		await settle();
 		expect(source.out.catalog.peek()?.include).toEqual(root.include);
 		// The root selects every include it lists: it reads the catalog, but subscribes no media.
@@ -422,7 +428,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const ladderCatalog = new Json.Snapshot.Producer<Catalog.Root>({ track: ladderTrack, deltas: false });
 	const rung = (name: string) => {
 		const track = ladder.createTrack(name);
-		track.writeFrame({ payload: new TextEncoder().encode(name) });
+		track.writeFrame({ payload: new TextEncoder().encode(name), timestamp: key() });
 		return track;
 	};
 	const [high, low, ladderHd] = [rung("720p"), rung("360p"), rung("hd")];
@@ -455,6 +461,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			// An include's own include needs a selection of its own, so it is never expanded.
 			include: { nested: { broadcast: "./nested.hang" } },
 		}),
+		at: key(),
 	});
 
 	const root = (own: Record<string, Catalog.VideoConfig>) =>
@@ -541,7 +548,7 @@ it("dedupes an include's rendition only against a usable one", async () => {
 			track: broadcast.createTrack(Catalog.TRACK),
 			deltas: false,
 		});
-		catalog.update({ value: Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }) });
+		catalog.update({ value: Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), at: key() });
 		return broadcast;
 	};
 	const old = serve(oldInstance);
@@ -581,6 +588,7 @@ it("takes a missing section's display settings from the include whose renditions
 		new Json.Snapshot.Producer<Catalog.Root>({ track: broadcast.createTrack(Catalog.TRACK), deltas: false }).update(
 			{
 				value,
+				at: key(),
 			},
 		);
 		return broadcast;

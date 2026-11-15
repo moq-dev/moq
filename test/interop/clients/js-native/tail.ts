@@ -71,7 +71,8 @@ function write(track: Moq.Track.Producer) {
 			group.abort(new Error("cut"));
 			continue;
 		}
-		for (const payload of frames(sequence)) group.writeFrame({ payload });
+		for (const payload of frames(sequence))
+			group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.sequence) });
 		group.finish();
 	}
 	track.finish();
@@ -84,14 +85,16 @@ function write(track: Moq.Track.Producer) {
 function serveHistory(track: Moq.Track.Producer) {
 	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
 	const live = track.createGroup(BigInt(GROUPS - 1));
-	for (const payload of frames(GROUPS - 1)) live.writeFrame({ payload });
+	for (const payload of frames(GROUPS - 1))
+		live.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(live.sequence) });
 	live.finish();
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				const group = fill.accept(sequence);
-				for (const payload of frames(Number(sequence))) group.writeFrame({ payload });
+				for (const payload of frames(Number(sequence)))
+					group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.sequence) });
 				group.finish();
 				console.error(`history served ${sequence}`);
 			}
@@ -132,7 +135,7 @@ try {
 				while (track.priority.peek() === undefined) await track.priority.changed();
 				for (let sequence = 0; sequence < GROUPS; sequence++) {
 					assert.equal((await commands.next()).value, `datagram ${sequence}`, "missing datagram command");
-					track.append(undefined, new Uint8Array(900).fill(sequence));
+					track.append(Moq.Time.Timestamp.unscaled(BigInt(sequence)), new Uint8Array(900).fill(sequence));
 				}
 				const ack = await commands.next();
 				assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
@@ -155,18 +158,21 @@ try {
 			let head: Moq.Group.Producer | undefined;
 			if (late) {
 				head = track.appendGroup();
-				for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
+				for (const payload of frames(0).slice(0, LATE_HEAD))
+					head.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(head.sequence) });
 			}
 			broadcastPublication.announce();
 			const lines = createInterface({ input: process.stdin });
 			const commands = lines[Symbol.asyncIterator]();
 			if (head) {
 				assert.equal((await commands.next()).value, "late tail", "subscriber did not read the head");
-				for (const payload of frames(0).slice(LATE_HEAD)) head.writeFrame({ payload });
+				for (const payload of frames(0).slice(LATE_HEAD))
+					head.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(head.sequence) });
 				head.finish();
 				for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
 					const group = track.appendGroup();
-					for (const payload of frames(sequence)) group.writeFrame({ payload });
+					for (const payload of frames(sequence))
+						group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.sequence) });
 					group.finish();
 				}
 				track.finish();

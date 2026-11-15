@@ -212,7 +212,9 @@ Scheduled runs
   The JS subscriber refused the END_OF_TRACK of a withdrawn route after its own
   unsubscribe had released the track, and a protocol violation closes the whole
   session.
-  [moq-dev/moq#8769](https://github.com/moq-dev/moq/pull/8769) tolerates the marker on a released track.
+  [moq-dev/moq#8769](https://github.com/moq-dev/moq/pull/8769) tolerated the marker on a released track,
+  and [moq-dev/moq#8754](https://github.com/moq-dev/moq/pull/8754) moved that into the track's wire end, so a
+  late PUBLISH_DONE or FETCH_OK keeps the session too.
   That is not the whole case: since [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443)
   dropped the Chromium quarantine, `just test media --media-cases replacement`
   at `ce616b52c` failed 4 of 14 local runs (host at load 50), as `live incumbent

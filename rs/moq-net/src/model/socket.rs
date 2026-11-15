@@ -130,7 +130,10 @@ fn subscription() -> Subscription {
 	Subscription::default()
 		.with_order(Order::Ascending)
 		.with_delay(Delay::default().with_max(None))
-		.with_range(0..)
+		.with_ranges([track::Range {
+			start: track::Anchor::Time(0),
+			end: None,
+		}])
 }
 
 /// What an endpoint's handles share.

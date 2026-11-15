@@ -7,6 +7,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks, type Run } from "../internal.ts";
 import { Tail } from "../tail.ts";
+import { Timestamp } from "../time.ts";
 import type { Fill, Producer } from "../track.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
 
@@ -18,7 +19,7 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	const group = track.createGroup(4n);
-	group.writeFrame({ payload: enc.encode("live 4") });
+	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.sequence) });
 	group.finish();
 	const requests = track.requests();
 	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null }, order: "ascending" });

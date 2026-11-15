@@ -50,19 +50,21 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	// Frames are stamped with the wall clock, so the track declares a timescale.
+	// Frames are stamped with this host's wall clock in milliseconds, so the track declares that
+	// timescale.
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let mut track = route.broadcast().create_track("chat", info)?;
 
-	// Create a group.
+	// Create a group, which starts at its first frame's timestamp.
 	// Each group is independent and the newest group(s) will be prioritized.
-	let mut group = track.append_group()?;
+	let hello = now()?;
+	let mut group = track.append_group(hello.value())?;
 
 	// Write frames to the group.
 	// Each frame is dependent on the previous frame, so older frames are prioritized.
-	group.write_frame(moq_net::Timestamp::now(), bytes::Bytes::from_static(b"Hello"))?;
-	group.write_frame(moq_net::Timestamp::now(), bytes::Bytes::from_static(b"World"))?;
-	group.finish()?;
+	group.write_frame(hello, bytes::Bytes::from_static(b"Hello"))?;
+	group.write_frame(hello, bytes::Bytes::from_static(b"World"))?;
+	group.close()?;
 
 	tracing::info!("wrote hello + world");
 
@@ -70,7 +72,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	kio::clock::sleep(tokio::time::Duration::from_secs(10)).await;
 
 	// There's also a helper method to create a group with a single frame.
-	track.write_frame(moq_net::Timestamp::now(), bytes::Bytes::from_static(b"foobarbaz"))?;
+	track.write_frame(now()?, bytes::Bytes::from_static(b"foobarbaz"))?;
 	tracing::info!("wrote foobarbaz");
 
 	// Sleep before exiting and closing the broadcast.
@@ -80,4 +82,10 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	route.broadcast().close();
 
 	Ok(())
+}
+
+/// Milliseconds since the Unix epoch on this host's wall clock: the track's timescale.
+fn now() -> anyhow::Result<moq_net::Timestamp> {
+	let elapsed = kio::clock::wall().saturating_duration_since(kio::clock::Wall::UNIX_EPOCH);
+	Ok(moq_net::Timestamp::from_millis(u64::try_from(elapsed.as_millis())?)?)
 }

@@ -345,7 +345,7 @@ mod tests {
 
 		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
 		assert_eq!(decoded.value(), 96_000);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
+		assert_eq!(decoded.scale(), Some(Timescale::MICRO));
 	}
 
 	/// The value on the wire is in the track's units, not the frame's.
@@ -358,7 +358,7 @@ mod tests {
 
 		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
 		assert_eq!(decoded.value(), 2_000_000);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
+		assert_eq!(decoded.scale(), Some(Timescale::MICRO));
 	}
 
 	/// An object-scope Timescale (which LOC permits) is ignored: the track's units apply.
@@ -376,7 +376,7 @@ mod tests {
 
 		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
 		assert_eq!(decoded.value(), 42);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
+		assert_eq!(decoded.scale(), Some(Timescale::MICRO));
 	}
 
 	/// The track's timescale supplies the units.
@@ -386,7 +386,7 @@ mod tests {
 
 		let decoded = decode_time(&buf, Timescale::MILLI, Version::Draft18).unwrap();
 		assert_eq!(decoded.value(), 1234);
-		assert_eq!(decoded.scale(), Timescale::MILLI);
+		assert_eq!(decoded.scale(), Some(Timescale::MILLI));
 	}
 
 	/// No Timestamp property at all yields None.
