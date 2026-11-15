@@ -430,14 +430,18 @@ fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
 	assert_eq!(router.asks(4), beneath);
 }
 
-/// Swapping a set near the limit for another that shares nothing with it would name
-/// every old prefix's Prefix ID beside every new prefix, past one request: the edit
-/// removes first, and adds once that is answered.
+/// Swapping a set near the limit for another would name every removed prefix's Prefix
+/// ID beside every added prefix, past one request: the edit goes in parts that each fit,
+/// and a prefix narrowed into others is replaced by them in one part, so nothing still
+/// wanted goes unrequested in between.
 #[test]
-fn a_swap_too_large_for_one_request_removes_first() {
+fn a_swap_too_large_for_one_request_goes_in_parts() {
 	let fits = |set: &BTreeSet<Path>| path::ask_bytes(set, &Path::empty()) <= path::ASK_BYTES;
-	let set = |head: &str| -> BTreeSet<Path> { (0..5000).map(|n| p(&format!("{head}/{n:05}"))).collect() };
-	let (old, new) = (set("a"), set("b"));
+	let set = |head: &str, n: usize| -> BTreeSet<Path> { (0..n).map(|i| p(&format!("{head}/{i:05}"))).collect() };
+	let mut old = set("x", 5000);
+	old.insert(p("a"));
+	let narrowed = set("a", 2000);
+	let new: BTreeSet<Path> = narrowed.iter().cloned().chain(set("y", 3000)).collect();
 	assert!(fits(&old) && fits(&new));
 	let asked = |router: &mut path::Router<usize, u8>| -> Vec<path::Edit> {
 		(router.drain().into_iter())
@@ -455,22 +459,30 @@ fn a_swap_too_large_for_one_request_removes_first() {
 	asked(&mut router);
 
 	router.watch(new.clone()).unwrap();
-	let first = asked(&mut router);
-	assert_eq!(first.len(), 1);
-	assert!(first[0].add.is_empty(), "nothing added beside the removes");
-	assert_eq!(first[0].remove.iter().cloned().collect::<BTreeSet<_>>(), old);
-
-	router.edited(1);
-	let second = asked(&mut router);
-	assert_eq!(
-		second,
-		[path::Edit {
-			remove: Vec::new(),
-			add: new.iter().cloned().collect(),
-		}]
-	);
-	router.edited(1);
-	assert!(asked(&mut router).is_empty());
+	let mut requested = old;
+	let mut parts = 0;
+	loop {
+		let edits = asked(&mut router);
+		let [edit] = edits.as_slice() else {
+			assert!(edits.is_empty(), "one edit at a time");
+			break;
+		};
+		parts += 1;
+		let add: BTreeSet<Path> = edit.add.iter().cloned().collect();
+		// Each Prefix ID removed takes at most 4 bytes.
+		assert!(path::ask_bytes(&add, &Path::empty()) + 4 * edit.remove.len() <= path::ASK_BYTES);
+		if edit.remove.contains(&p("a")) {
+			assert_eq!(add.intersection(&narrowed).count(), narrowed.len(), "replaced at once");
+		}
+		for prefix in &edit.remove {
+			requested.remove(prefix);
+		}
+		requested.extend(add);
+		assert!(fits(&requested));
+		router.edited(1);
+	}
+	assert_eq!(parts, 2);
+	assert_eq!(requested, new);
 	assert_eq!(router.asks(1), new);
 }
 

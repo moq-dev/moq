@@ -1,6 +1,7 @@
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, MAX_HOPS, toHop, UNKNOWN_HOP, wireHop } from "../hop.ts";
 import type * as Instance from "../instance.ts";
+import { coveringPrefixes } from "../internal.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, type Reader, type Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -420,21 +421,98 @@ async function decodeRequest(r: Reader): Promise<AnnounceBroadcast> {
 	return { status: "request", remove, add };
 }
 
+/** The bytes the prefixes `add` and the Prefix IDs `remove` take in an ANNOUNCE_REQUEST, beside
+ * its two counts. */
+function editBytes(add: Iterable<Path.Valid>, remove: Iterable<bigint>, version: Version): number {
+	const size = (value: number | bigint) => encodeVarint(value, version).byteLength;
+	const encoder = new TextEncoder();
+	let bytes = 0;
+	for (const id of remove) bytes += size(id);
+	for (const prefix of add) {
+		const length = encoder.encode(Path.encode(prefix)).byteLength;
+		bytes += size(length) + length + 1;
+	}
+	return bytes;
+}
+
 /** Whether the prefixes `set` fit the Adds of one ANNOUNCE_REQUEST, as a subscriber's whole set
  * must, beside the Prefix IDs `remove`. */
 export function requestFits(set: Iterable<Path.Valid>, version: Version, remove: readonly bigint[] = []): boolean {
-	const size = (value: number | bigint) => encodeVarint(value, version).byteLength;
-	const encoder = new TextEncoder();
-	let count = 0;
-	let bytes = size(remove.length);
-	for (const id of remove) bytes += size(id);
-	for (const prefix of set) {
-		const length = encoder.encode(Path.encode(prefix)).byteLength;
-		count += 1;
-		bytes += size(length) + length + 1;
-		if (bytes > MAX_MESSAGE_SIZE) return false;
+	const add = [...set];
+	const counts = encodeVarint(remove.length, version).byteLength + encodeVarint(add.length, version).byteLength;
+	return editBytes(add, remove, version) + counts <= MAX_MESSAGE_SIZE;
+}
+
+/**
+ * The next part of an edit of a subscriber's prefixes that removes `removed` and adds `add`.
+ *
+ * Both sets fit one ANNOUNCE_REQUEST as Adds, but an edit also names each prefix it removes, so a
+ * large swap can pass one request: it then goes in parts, each changing whole groups of a prefix
+ * and those at or inside it, which it replaces at once so nothing still wanted goes unrequested in
+ * between. The groups that shrink the set go first, so every set between the two fits too.
+ * Mirrors `next_edit` in rs/moq-net.
+ *
+ * @internal
+ */
+export function editPart(
+	removed: { id: bigint; path: Path.Valid }[],
+	add: Add[],
+	version: Version,
+): { remove: bigint[]; add: Add[] } {
+	const remove = removed.map(({ id }) => id);
+	if (
+		requestFits(
+			add.map(({ prefix }) => prefix),
+			version,
+			remove,
+		)
+	)
+		return { remove, add };
+
+	// Each side's prefixes lie inside no other, so a group is a prefix of one side and those of
+	// the other at or inside it, keyed by that widest one.
+	const adds = new Set(add.map(({ prefix }) => prefix));
+	const gones = new Set(removed.map(({ path }) => path));
+	const widest = (path: Path.Valid, other: Set<Path.Valid>) => {
+		let top: Path.Valid | undefined;
+		for (const above of coveringPrefixes(path)) if (other.has(above)) top = above;
+		return top ?? path;
+	};
+	const groups = new Map<Path.Valid, { remove: bigint[]; add: Add[]; gone: Path.Valid[] }>();
+	const group = (key: Path.Valid) => {
+		let found = groups.get(key);
+		if (!found) {
+			found = { remove: [], add: [], gone: [] };
+			groups.set(key, found);
+		}
+		return found;
+	};
+	for (const { id, path } of removed) {
+		const found = group(widest(path, adds));
+		found.remove.push(id);
+		found.gone.push(path);
 	}
-	return bytes + size(count) <= MAX_MESSAGE_SIZE;
+	for (const added of add) group(widest(added.prefix, gones)).add.push(added);
+	const sized = [...groups.values()].map((found) => {
+		const paths = found.add.map(({ prefix }) => prefix);
+		const cost = editBytes(paths, found.remove, version);
+		const delta = editBytes(paths, [], version) - editBytes(found.gone, [], version);
+		return { ...found, cost, delta };
+	});
+	sized.sort((a, b) => a.delta - b.delta);
+
+	// The two counts take at most 8 bytes each. Any one group fits: it removes no more prefixes
+	// than one request held beside one add, or adds no more than one request holds beside one
+	// remove.
+	const part: { remove: bigint[]; add: Add[] } = { remove: [], add: [] };
+	let spent = 16;
+	for (const found of sized) {
+		if (spent + found.cost > MAX_MESSAGE_SIZE && spent > 16) break;
+		spent += found.cost;
+		part.remove.push(...found.remove);
+		part.add.push(...found.add);
+	}
+	return part;
 }
 
 /** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or

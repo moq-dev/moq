@@ -11,6 +11,7 @@ import {
 	AnnounceRequest,
 	decodeAnnounceBroadcast,
 	decodeAnnounceBroadcastMaybe,
+	editPart,
 	encodeAnnounceBroadcast,
 	type Offer,
 	ROUTE_MAX_HOPS,
@@ -238,6 +239,42 @@ test("a requested set fits one message", () => {
 	const removes = Array.from({ length: 1000 }, (_, i) => BigInt(i));
 	expect(requestFits([], v, removes)).toBe(true);
 	expect(requestFits(fits, v, removes)).toBe(false);
+});
+
+// A swap too large for one request goes in parts that each fit, and a prefix narrowed into others
+// is replaced by them in one part, so nothing still wanted goes unrequested in between.
+test("a swap too large for one request goes in parts", () => {
+	const v = Version.DRAFT_07;
+	const many = (head: string, n: number) =>
+		Array.from({ length: n }, (_, i) => Path.from(`${head}/${String(i).padStart(9, "0")}`));
+	const narrowed = many("a", 2000);
+	const want = new Set([...narrowed, ...many("y", 2800)]);
+	let asked = new Map<bigint, Path.Valid>([
+		[0n, Path.from("a")],
+		...many("x", 5000).map((path, i) => [BigInt(i + 1), path] as const),
+	]);
+	expect(requestFits(asked.values(), v)).toBe(true);
+	expect(requestFits(want, v)).toBe(true);
+
+	let next = BigInt(asked.size);
+	let parts = 0;
+	for (;;) {
+		const held = new Set(asked.values());
+		const removed = [...asked].filter(([, path]) => !want.has(path)).map(([id, path]) => ({ id, path }));
+		const add = [...want].filter((path) => !held.has(path)).map((prefix) => ({ prefix, hidden: false }));
+		if (removed.length === 0 && add.length === 0) break;
+		const part = editPart(removed, add, v);
+		parts += 1;
+		const added = part.add.map(({ prefix }) => prefix);
+		expect(requestFits(added, v, part.remove)).toBe(true);
+		if (part.remove.includes(0n)) expect(narrowed.every((prefix) => added.includes(prefix))).toBe(true);
+		const gone = new Set(part.remove);
+		asked = new Map([...asked].filter(([id]) => !gone.has(id)));
+		for (const prefix of added) asked.set(next++, prefix);
+		expect(requestFits(asked.values(), v)).toBe(true);
+	}
+	expect(parts).toBe(2);
+	expect(new Set(asked.values())).toEqual(want);
 });
 
 // The draft reserves Hop ID 0 for a responder that was never assigned an id, or that

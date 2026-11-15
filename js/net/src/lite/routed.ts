@@ -24,6 +24,7 @@ import {
 	type Refusal as AnnounceRefusal,
 	type Base,
 	type Dead,
+	editPart,
 	type Offer,
 	type Refusable,
 	ROUTE_MAX_HOPS,
@@ -249,24 +250,17 @@ export class Routed {
 		return { remove, add: [...wanted].map(([prefix, hidden]) => ({ prefix, hidden })) };
 	}
 
+	// The next part of `edit`: see `editPart`.
+	#part(edit: { remove: bigint[]; add: Add[] }): { remove: bigint[]; add: Add[] } {
+		const removed = edit.remove.map((id) => ({ id, path: this.#asked.get(id)?.path ?? Path.empty() }));
+		return editPart(removed, edit.add, this.#session.version);
+	}
+
 	// Ask the peer for what the readers now want, one edit at a time.
 	#ask(): void {
 		if (this.#editing || this.#finished || this.#silent || this.#closing) return;
-		let { remove, add } = this.#edit();
+		const { remove, add } = this.#part(this.#edit());
 		if (remove.length === 0 && add.length === 0) return;
-		// The wanted set fits one request as Adds, but an edit also names each prefix it removes:
-		// one past the limit removes first, as many as fit, and adds once that is answered.
-		const version = this.#session.version;
-		if (
-			!requestFits(
-				add.map(({ prefix }) => prefix),
-				version,
-				remove,
-			)
-		) {
-			add = [];
-			while (!requestFits([], version, remove)) remove = remove.slice(0, Math.ceil(remove.length / 2));
-		}
 		const added: bigint[] = [];
 		for (const { prefix, hidden } of add) {
 			const id = this.#nextPrefix++;
