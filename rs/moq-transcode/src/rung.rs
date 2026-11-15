@@ -7,9 +7,9 @@
 //!   to the source track (mirroring the aggregate subscription) and transcodes
 //!   group for group until the track goes `unused` again. The group open at
 //!   that point is finished first, so a later reader of that sequence gets the
-//!   whole group rather than an aborted one. Under a session budget only a live
-//!   subscriber counts, so a fetch never holds a session its own encode then
-//!   waits behind.
+//!   whole group rather than an aborted one. Under a session budget only a
+//!   subscriber reaching the live edge counts, so a fetch never holds a session
+//!   its own encode then waits behind.
 //! - A fetch of a specific group (`requested_fill`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
@@ -236,11 +236,12 @@ async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net:
 }
 
 /// Who keeps the live path running: any demand on the track, or under a session budget
-/// only a live subscriber. A fetch is demand too, and a live encode it started would hold
-/// the serving session that fetch's own encode then waits behind.
+/// only a subscriber that reaches the live edge. A fetch is demand too, and so is a
+/// subscription over past groups only, which a lite-07 relay sends for a run of fills: a
+/// live encode either started would hold the serving session its fills then wait behind.
 struct Want {
 	demand: moq_net::track::Demand,
-	/// The track, watched for live subscribers, when a budget is set.
+	/// The track, watched for subscribers that reach the live edge, when a budget is set.
 	subscribers: Option<moq_net::track::Producer>,
 }
 
@@ -255,29 +256,44 @@ impl Want {
 	/// Whether the live path is wanted now.
 	fn now(&self) -> bool {
 		match &self.subscribers {
-			Some(track) => track.subscription().is_some(),
+			Some(track) => track.subscription().is_some_and(|sub| reaches_live(&sub, track)),
 			None => self.demand.wanted().is_some(),
 		}
 	}
 
 	/// Wait until the live path is wanted, or not, returning at once if that already holds.
+	///
+	/// Under a budget it wakes on subscription changes, not on the edge moving. The edge only
+	/// grows, which never makes a subscription reach it, and the live loop checks [`Self::now`]
+	/// on every item for one the edge has passed.
 	async fn until(&self, wanted: bool) -> moq_net::Result<()> {
 		let Some(track) = &self.subscribers else {
 			return until_wanted(&self.demand, wanted).await;
 		};
 		// Read through the change cursor alone, so a change after any read is reported. A clone
 		// copies it, and nothing polls the accepted track's, so it starts at no subscriber.
-		let mut track = track.clone();
-		let mut subscribed = false;
+		let mut cursor = track.clone();
+		let mut subscription = None;
 		let noop = kio::Waiter::noop();
-		while let std::task::Poll::Ready(changed) = track.poll_subscription_changed(&noop) {
-			subscribed = changed?.is_some();
+		while let std::task::Poll::Ready(changed) = cursor.poll_subscription_changed(&noop) {
+			subscription = changed?;
 		}
-		while subscribed != wanted {
-			subscribed = track.subscription_changed().await?.is_some();
+		while subscription.as_ref().is_some_and(|sub| reaches_live(sub, track)) != wanted {
+			subscription = cursor.subscription_changed().await?;
 		}
 		Ok(())
 	}
+}
+
+/// Whether `subscription` reaches the live edge, `track`'s newest group: some range is open,
+/// counts back from the latest group, or ends past it. As moq-net judges a copy's feed, ranges
+/// wholly below it read only history, which fills serve. Before any group, every range does.
+fn reaches_live(subscription: &moq_net::track::Subscription, track: &moq_net::track::Producer) -> bool {
+	let edge = track.largest().map(|position| position.group);
+	subscription.ranges.iter().any(|range| match (range.end, edge) {
+		(Some(moq_net::track::Anchor::Absolute(end)), Some(edge)) => end > edge,
+		_ => true,
+	})
 }
 
 /// The live path: wait for demand, attach to the shared decode [`Feed`], and

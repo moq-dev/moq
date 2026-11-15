@@ -875,6 +875,71 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// Under a budget, a subscription over past groups only, as a lite-07 relay sends for a
+	/// run of fills, keeps no live encode once the rung has a newer group, so the fills of
+	/// those groups get the only session rather than waiting behind a live encode it started.
+	#[tokio::test]
+	async fn a_subscriber_over_past_groups_leaves_the_session_to_its_fills() {
+		let source = source_catalog(320, 240);
+		let source_fetches = source._track.requests();
+		// The live edge, which the live path the subscription starts encodes first.
+		let mut live = source._track.create_group(9u64.into()).unwrap();
+		write_keyframe(&mut live);
+		live.finish().unwrap();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			sessions: Sessions::new(std::num::NonZeroUsize::MIN),
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let past = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::groups(3..5)])
+			.with_delay(moq_net::track::Delay::default().with_max(None));
+		let rung = consumer.track("video/120p").unwrap();
+		let _subscriber = rung.subscribe(past).await.unwrap();
+
+		tokio::spawn(async move {
+			while let Ok(request) = source_fetches.requested_fill().await {
+				let sequence = request.start().group;
+				let mut group = request.accept(sequence, None).unwrap();
+				write_keyframe(&mut group);
+				group.finish().unwrap();
+			}
+		});
+
+		// A fill reaches the rung's fetch path like any fetch. A live encode the subscription
+		// kept would hold the session and hang this.
+		let mut fetched = rung.fetch_group(3, None).await.unwrap();
+		while fetched.read_frame().await.unwrap().is_some() {}
+		assert!(fetched.finished().await.unwrap() > 0, "the fill produced no frames");
+		assert!(
+			source._track.subscription().is_none(),
+			"the subscription kept a live encode"
+		);
+
+		transcoder.abort();
+	}
+
 	#[tokio::test]
 	async fn end_to_end() {
 		let source = source_broadcast(2, 5);
