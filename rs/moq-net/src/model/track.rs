@@ -23774,7 +23774,10 @@ mod test {
 		assert_eq!(read, [2, 3]);
 		elapse(&producer, Duration::from_secs(31));
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
-		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the miss asked nothing");
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the miss asked nothing"
+		);
 
 		let mut fetch = producer.consume().fetch_group(1, None);
 		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());

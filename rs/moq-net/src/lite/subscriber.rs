@@ -12383,7 +12383,12 @@ impl FinishedServe {
 			// No linger: a new reader asks upstream afresh rather than reading this cache, which
 			// no subscription keeps. A fetch made afterwards finds a cancelled copy, not a
 			// dropped one.
-			match self.serving.take().expect("checked above").abort_unwanted(Error::Cancel) {
+			match self
+				.serving
+				.take()
+				.expect("checked above")
+				.abort_unwanted(Error::Cancel)
+			{
 				Ok(()) => {
 					tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "finished track released");
 					return Poll::Ready(());

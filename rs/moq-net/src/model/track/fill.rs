@@ -926,7 +926,12 @@ impl Fill {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn is_fetch(&self) -> bool {
 		let inner = &self.inner;
-		inner.fills.read().pending.get(&inner.id).is_some_and(|pending| pending.fetch)
+		inner
+			.fills
+			.read()
+			.pending
+			.get(&inner.id)
+			.is_some_and(|pending| pending.fetch)
 	}
 
 	/// The frame group `key` starts from: [`start`](Self::start)'s frame for the first
