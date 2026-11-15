@@ -154,7 +154,8 @@ export class Scene {
 	// Layout for the picture according to projection and stereo
 	layout(projection?: Projection, stereo?: string) {
 		this.#projection = projection;
-		this.#stereo = stereo && stereo in PACKING ? stereo : "mono";
+		// An unknown packing, inherited names like "constructor" included, plays as mono.
+		this.#stereo = stereo && Object.hasOwn(PACKING, stereo) ? stereo : "mono";
 		this.#build();
 	}
 
