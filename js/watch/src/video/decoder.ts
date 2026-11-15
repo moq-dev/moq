@@ -725,6 +725,7 @@ class DecoderTrack {
 			format,
 			delay: this.#delay,
 			predecessor: this.consumer ?? this.#predecessor,
+			playhead: this.sync,
 		});
 		effect.cleanup(() => consumer.close());
 		this.consumer = consumer;
