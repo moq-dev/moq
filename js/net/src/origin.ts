@@ -281,6 +281,8 @@ interface Resolution {
 	readonly instance?: Instance.Valid;
 	/** The local broadcast or route entry's identity the front came from, when it did. */
 	readonly source?: object;
+	/** Whether the front is the local broadcast, whose word on a track no route news overtakes. */
+	readonly local?: boolean;
 }
 
 /**
@@ -918,7 +920,7 @@ class OriginState {
 			slot.failover = undefined;
 			if (source === local) return;
 			this.retain(path, slot, undefined);
-			slot.route.set({ front: local, instance, source: local });
+			slot.route.set({ front: local, instance, source: local, local: true });
 			return;
 		}
 		if (!entry?.server) {
@@ -1197,7 +1199,12 @@ class OriginState {
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
-			return { front: local, instance: this.advertisedLocal.peek().get(path)?.instance, source: local };
+			return {
+				front: local,
+				instance: this.advertisedLocal.peek().get(path)?.instance,
+				source: local,
+				local: true,
+			};
 		}
 
 		let cached = this.materialized.get(path);
@@ -2402,7 +2409,7 @@ export class Consumer implements Reader {
 			const front = instance === undefined || resolution?.instance === instance ? offered : undefined;
 			if (logical && source?.instance !== undefined && resolution?.instance === source.instance) {
 				// Between routes of the instance, readers wait for the next one to answer.
-				if (front) logical.serve(front);
+				if (front) logical.serve(front, resolution?.local);
 				else logical.park();
 				return handle;
 			}
@@ -2414,7 +2421,7 @@ export class Consumer implements Reader {
 				// route may answer a re-request with another stream, so nothing re-sources it.
 				const carried = resolution?.instance !== undefined && !Instance.isMinted(resolution.instance);
 				logical = front && carried ? new Front() : undefined;
-				logical?.serve(front as broadcast.Consumer);
+				logical?.serve(front as broadcast.Consumer, resolution?.local);
 				handle = logical ? logical.consumer : front?.clone();
 				if (handle) {
 					hooks.stampPath(handle, relative);

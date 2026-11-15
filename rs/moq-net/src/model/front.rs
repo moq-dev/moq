@@ -562,6 +562,7 @@ impl Front {
 		delivered: bool,
 		actions: &mut Vec<Action>,
 	) {
+		let strands = self.strands();
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
@@ -604,9 +605,7 @@ impl Front {
 			// The route lost the content, which another route of the instance continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
 			// drained from a replaced source leaves the track to the serving one.
-			Err(err)
-				if delivered && err.unroutable() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
-			{
+			Err(err) if delivered && err.unroutable() && strands => {
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
 				if self.serving.is_some_and(|(serving, _)| serving == source) {
@@ -641,6 +640,7 @@ impl Front {
 		refusal: (Error, Option<Duration>),
 		actions: &mut Vec<Action>,
 	) {
+		let strands = self.strands();
 		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.state = TrackState::Idle;
 		// A closing source's answer is not a verdict: it is on its way out and
@@ -649,8 +649,8 @@ impl Front {
 			return;
 		}
 		// A route that lost the content says nothing of the track: wait for another of its
-		// instance, keeping a draining copy meanwhile. A minted instance has no other.
-		if refusal.0.unroutable() && self.serving.is_some_and(|(_, candidate)| candidate.carried) {
+		// instance, keeping a draining copy meanwhile.
+		if refusal.0.unroutable() && strands {
 			if let Some(draining) = track.draining {
 				track.state = TrackState::Spliced { source: draining };
 			}
@@ -679,7 +679,8 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.wanted || track.ended || track.state != TrackState::Idle || self.stranded.get(&name) == Some(&source) {
+		if !track.wanted || track.ended || track.state != TrackState::Idle || self.stranded.get(&name) == Some(&source)
+		{
 			return;
 		}
 		if track.refused.contains(&source) {
@@ -697,6 +698,15 @@ impl Front {
 		}
 		track.state = TrackState::Querying { source };
 		actions.push(Action::Query { track: name, source });
+	}
+
+	/// Whether an unroutable end from the serving source judges its route rather than the
+	/// track, so the track waits for the table to move. Only a received route can be stale:
+	/// a local publisher's word is the track's verdict, and no news about it is in flight. A
+	/// minted instance has no other route to wait for.
+	fn strands(&self) -> bool {
+		self.serving
+			.is_some_and(|(_, candidate)| candidate.carried && !candidate.local)
 	}
 
 	/// Ask the serving source again for every track it lost as unroutable.
@@ -1367,27 +1377,41 @@ mod tests {
 			);
 			assert_eq!(front.lost("video").map(|err| err.to_string()), Some(err.to_string()));
 
-			// A minted instance has no other route, so its refusal ends the track.
-			let minted = Candidate {
-				route: 1,
-				local: false,
-				carried: false,
-			};
-			let mut front = querying(minted, 100);
-			assert_actions(
-				front.step(Event::TrackInfo {
+			// A minted instance has no other route, and a local publisher's word is the track's
+			// verdict with no news in flight to overtake it: either refusal ends the track, as
+			// does a local copy failing so.
+			for (local, carried) in [(false, false), (true, true)] {
+				let candidate = Candidate {
+					route: 1,
+					local,
+					carried,
+				};
+				let abort = [Action::Abort {
+					track: name("video"),
+					err: err.clone(),
+					retry: None,
+				}];
+				let mut front = querying(candidate, 100);
+				let refused = Event::TrackInfo {
 					track: name("video"),
 					source: 100,
 					closing: false,
 					result: Err(err.clone()),
 					retry: None,
-				}),
-				&[Action::Abort {
-					track: name("video"),
-					err,
-					retry: None,
-				}],
-			);
+				};
+				assert_actions(front.step(refused), &abort);
+				if local {
+					let mut front = serving(candidate, 100);
+					let lost = Event::TrackEnded {
+						track: name("video"),
+						source: 100,
+						closing: false,
+						result: Err(err.clone()),
+						delivered: true,
+					};
+					assert_actions(front.step(lost), &abort);
+				}
+			}
 		}
 	}
 

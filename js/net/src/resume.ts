@@ -174,11 +174,14 @@ class Source {
 	readonly wire: BroadcastWire;
 	/** The table's handle this was served from, so serving it again is a no-op. */
 	readonly from: broadcast.Consumer;
+	/** The local broadcast rather than a received route: its word on a track is the verdict. */
+	readonly local: boolean;
 	#consumer: broadcast.Consumer;
 	#holds = 0;
 
-	constructor(from: broadcast.Consumer) {
+	constructor(from: broadcast.Consumer, local = false) {
 		this.from = from;
+		this.local = local;
 		this.#consumer = from.clone();
 		this.wire = wireOf(this.#consumer);
 	}
@@ -1015,17 +1018,19 @@ class Reader implements ResumeSource {
 			if (!routeFailed(ended)) return this.#fail(ended);
 			if (route.refusal) return this.#fail(route.refusal);
 			// The route that failed it still serves and is not going away, so no move replaces
-			// the copy. As in the Rust front, a source that lost the route judged the route, not
-			// the track: the read waits for the next route, since asking the same one again could
-			// only replace the withdrawal's cause with a refusal, and that route's news follows
-			// on the same session. Otherwise one that delivered nothing is the route refusing the
-			// track, and one that did is subscribed afresh.
+			// the copy. As in the Rust front, a received route that lost the content judged the
+			// route, not the track: the read waits for the next route, since asking the same one
+			// again could only replace the withdrawal's cause with a refusal, and that route's
+			// news follows on the same session. A local broadcast's word is the track's verdict.
+			// Otherwise one that delivered nothing is the route refusing the track, and one that
+			// did is subscribed afresh.
 			if (serving && route.source === serving.source && !closing(ended)) {
-				if (unroutable(ended)) return { kind: "idle" };
+				if (unroutable(ended) && !serving.source.local) return { kind: "idle" };
 				if (!serving.delivered) {
 					route.refuse(ended);
 					return this.#fail(ended);
 				}
+				if (unroutable(ended)) return this.#fail(ended);
 				route.resubscribe();
 			}
 		}
@@ -1942,9 +1947,9 @@ export class Front {
 	}
 
 	/** Serve every track from `from` from now on, once each copy proves compatible. */
-	serve(from: broadcast.Consumer): void {
+	serve(from: broadcast.Consumer, local = false): void {
 		if (this.#concluded || this.#source?.from === from) return;
-		const source = new Source(from);
+		const source = new Source(from, local);
 		source.retain();
 		const previous = this.#source;
 		this.#source = source;

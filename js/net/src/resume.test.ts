@@ -1263,6 +1263,25 @@ for (const delivered of [true, false]) {
 	});
 }
 
+// A local broadcast's word on a track is its verdict: no route news can overtake it.
+test("a local broadcast failing a track as unroutable ends the read", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume(), true);
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(() => sub.tryRecvGroup()).toThrow();
+
+	front.consumer.close();
+	a.close();
+});
+
 test("between routes a reader keeps reading the copy it has", async () => {
 	const { origin, a, b, active, request, disposeA, close } = await setup();
 	const ta = copy(a);

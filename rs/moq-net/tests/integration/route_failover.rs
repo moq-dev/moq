@@ -807,7 +807,10 @@ async fn an_upstream_flapping_faster_than_its_news_strands_no_reader() {
 	let start = kio::clock::now();
 	let mut at_u = Watch::new(&u, "live", start);
 	let mut feed = Feed::new(track, start, STEP);
-	let mut readers = [("D", reader(&d, "live", start).await), ("E", reader(&e, "live", start).await)];
+	let mut readers = [
+		("D", reader(&d, "live", start).await),
+		("E", reader(&e, "live", start).await),
+	];
 	feed.run(MOVE).await;
 	p_u.server.abort(Error::IdleTimeout);
 	p_u.client.abort(Error::IdleTimeout);
@@ -818,7 +821,10 @@ async fn an_upstream_flapping_faster_than_its_news_strands_no_reader() {
 	let seen = at_u.seen();
 	let kinds: Vec<_> = seen.iter().map(|seen| seen.kind).collect();
 	assert_eq!(kinds, [Kind::Start, Kind::Offline, Kind::Start], "U flapped: {seen:?}");
-	assert!(seen[2].at - seen[1].at < Duration::from_secs(2), "faster than the news: {seen:?}");
+	assert!(
+		seen[2].at - seen[1].at < Duration::from_secs(2),
+		"faster than the news: {seen:?}"
+	);
 	for (node, rx) in &mut readers {
 		let live = Liveness::of(rx, &feed);
 		assert!(live.seamless(), "{node}: {live:?}");
@@ -869,10 +875,16 @@ async fn a_move_overlaps_the_routes_until_the_new_one_delivers() {
 		assert_eq!(frames["a-r"], overlap["a-r"], "{pause:?}: A's copy stopped: {frames:?}");
 		let written = feed.written.len() as u64;
 		for link in ["a-r", "b-r"] {
-			assert!(frames[link] <= written, "{pause:?}: {link} carried a frame twice: {frames:?}");
+			assert!(
+				frames[link] <= written,
+				"{pause:?}: {link} carried a frame twice: {frames:?}"
+			);
 		}
 		let twice = frames["a-r"] + frames["b-r"] - written;
-		assert!(twice <= 2 * FRAMES, "{pause:?}: {twice} frames on both links: {frames:?}");
+		assert!(
+			twice <= 2 * FRAMES,
+			"{pause:?}: {twice} frames on both links: {frames:?}"
+		);
 		drop(broadcast);
 	}
 }
@@ -969,7 +981,10 @@ async fn a_request_into_a_routing_loop_follows_the_routes_out() {
 	let open = links.open();
 	println!("a request into a loop: subscriptions {subscriptions:?}, open {open:?}");
 	for link in ["a-b", "b-a"] {
-		assert!(subscriptions.get(link).is_some_and(|count| *count > 0), "{link} looped: {subscriptions:?}");
+		assert!(
+			subscriptions.get(link).is_some_and(|count| *count > 0),
+			"{link} looped: {subscriptions:?}"
+		);
 		assert_eq!(open[link], 0, "{link} left a request: {open:?}");
 	}
 	for (name, index, rx) in &mut readers {
@@ -1045,7 +1060,9 @@ async fn a_name_announced_back_over_moq_transport_waits_without_retrying() {
 	run(&mut feeds, 10 * MOVE).await;
 
 	assert!(
-		kio::clock::timeout(Duration::from_millis(1), &mut looped).await.is_err(),
+		kio::clock::timeout(Duration::from_millis(1), &mut looped)
+			.await
+			.is_err(),
 		"the looped request stays pending"
 	);
 	assert_eq!(links.control(), control, "nothing sent once the loop formed");
@@ -1056,4 +1073,40 @@ async fn a_name_announced_back_over_moq_transport_waits_without_retrying() {
 		assert!(live.seamless(), "{live:?}");
 	}
 	drop((pairs, live, at_r, at_o));
+}
+
+/// Pins the gap in the wait a stale route's loss starts, a decision on moq-dev/moq#8881. `P`
+/// publishes `live` and `R` pulls it. `P` ends its track `Unroutable`, as moq-ffi does for a
+/// handle released without a finish, while `live` stays announced. A reader at `P` ends at
+/// once: a local publisher's word is the track's verdict. A reader at `R` cannot tell that
+/// from `P` losing its route, so it waits for the table to move, which nothing does until
+/// `live` goes; then it ends. A fix ends a released track with another code, or gives the
+/// wire one for a publisher leaving a track.
+#[kio::test]
+async fn residual_a_track_left_unroutable_while_announced_waits_for_the_route() {
+	let links = Links::new();
+	let [p, r] = [1, 2].map(produce_origin);
+	let broadcast = p.route("live", origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
+	let _p_r = links.link("p-r", &p, &r, 1).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	let start = kio::clock::now();
+	let mut feed = Feed::new(track.clone(), start, STEP);
+	let mut at_p = reader(&p, "live", start).await;
+	let mut at_r = reader(&r, "live", start).await;
+	feed.run(2 * FRAMES).await;
+	track.abort(Error::Unroutable).unwrap();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let ended =
+		|rx: &mut mpsc::UnboundedReceiver<Got>| std::iter::from_fn(|| rx.try_recv().ok()).find_map(|got| got.err());
+	assert!(ended(&mut at_p).is_some(), "the publisher's own reader ends");
+	assert!(ended(&mut at_r).is_none(), "the next relay's reader waits");
+	kio::clock::sleep(Duration::from_secs(60)).await;
+	assert!(ended(&mut at_r).is_none(), "and waits while the route stands");
+
+	drop(broadcast);
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	assert!(ended(&mut at_r).is_some(), "the withdrawal ends the wait");
 }
