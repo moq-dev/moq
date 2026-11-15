@@ -9577,6 +9577,14 @@ impl Control {
 }
 
 impl Subscriber {
+	/// Count the payload of the groups taken from now on only as the caller delivers it,
+	/// through the returned [`stats::Bill`], rather than as it is read. A reader that drops
+	/// some of what it reads, such as a gateway's jitter buffer, takes it before its first
+	/// group, so what it drops counts nothing.
+	pub fn bill(&mut self) -> stats::Bill {
+		self.stats.bill()
+	}
+
 	/// The track's [`Info`], resolved when the subscription was established.
 	///
 	/// Free, unlike [`Consumer::info`]: subscribing already waited for the info

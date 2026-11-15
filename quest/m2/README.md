@@ -42,10 +42,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   publishes for the first time at this cut;
   auth key validation; the
   RTMPS connect signature;
-  usage's derived settings; and three
-  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md),
-  the capture selections, and
-  [the acknowledgment hook's trait](/quest/m2/api-ack-hook-trait.md). None
+  usage's derived settings; and two
+  API fences: [mesh enrollment](/quest/m2/api-mesh-enrollment.md) and
+  the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
   path; see the [routes epic](/quest/m2/cluster-routes/README.md).
@@ -236,7 +235,7 @@ what would need a breaking release had it landed right after the cut:
   start, and lite-07 by start rewords the draft. Rejected for each: staying
   in m2.
 - ✅ Stayed in m2 though not breaking itself:
-  [the interest set](/quest/m2/cluster-routes/interest-set.md), because
+  [the interest set](https://github.com/moq-dev/moq/pull/8728), because
   [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
   The route stream stays because lite-07 would otherwise freeze with one
   router key per announce stream, which the route model doesn't check, and

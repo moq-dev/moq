@@ -190,6 +190,9 @@ pub(crate) struct ExportSource {
 	reached: Option<Duration>,
 	/// Set while continuing another source, until the first sync frame past what it delivered.
 	splice: Option<Splice>,
+	/// Counts the payload of its frames the export emits, once subscribed under a
+	/// [billed](crate::Source::bill) source.
+	bill: moq_net::stats::Bill,
 }
 
 impl ExportSource {
@@ -333,6 +336,7 @@ impl ExportSource {
 			delivered: None,
 			reached: None,
 			splice: None,
+			bill: Default::default(),
 		}
 	}
 
@@ -408,6 +412,12 @@ impl ExportSource {
 			SourceState::Active(active) => Some(active.consumer.group()),
 			_ => None,
 		}
+	}
+
+	/// What counts the payload of a frame read here once the export emits it: nothing unless
+	/// the source is [billed](crate::Source::bill), since the read counted it then.
+	pub(crate) fn bill(&self) -> moq_net::stats::Bill {
+		self.bill.clone()
 	}
 
 	/// Gaps and declared ends this source has advanced past.
@@ -581,7 +591,7 @@ impl ExportSource {
 
 		// Resolve the subscription before reading any frames.
 		if let SourceState::Subscribing { pending, instance, .. } = &self.state {
-			let track = match pending.poll_ok(waiter) {
+			let mut track = match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(track)) => track,
 				Poll::Ready(Err(_)) | Poll::Pending
 					if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) =>
@@ -603,6 +613,10 @@ impl ExportSource {
 			else {
 				unreachable!("just matched Subscribing");
 			};
+			let bill = match self.source.billed() {
+				true => track.bill(),
+				false => Default::default(),
+			};
 			let track = match after {
 				Some(after) => track.with_range((Bound::Excluded(after), Bound::Unbounded)),
 				None => track,
@@ -612,6 +626,7 @@ impl ExportSource {
 				true => consumer.live(),
 				false => consumer,
 			};
+			self.bill = bill;
 			self.state = SourceState::Active(Box::new(Active {
 				consumer,
 				_priority: priority,

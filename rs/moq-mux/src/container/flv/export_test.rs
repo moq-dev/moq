@@ -1895,3 +1895,51 @@ async fn a_retained_group_trims_to_the_delay() {
 	// What is left spans no more than the delay: five 20 ms frames.
 	assert!(export.buffered() <= 5, "{} frames buffered", export.buffered());
 }
+
+/// A viewer joining partway into a group counts only the payload it is sent: not the retained
+/// frames the join trims, the frames before the next keyframe, nor what the delay still holds.
+#[tokio::test(start_paused = true)]
+async fn a_joiner_counts_only_the_payload_it_is_sent() {
+	use crate::container::test_util::{Metered, video_frame};
+	let frame = |index: u64| {
+		let mut frame = video_frame(index * 33_333, index.is_multiple_of(60));
+		let mut payload = bytes::BytesMut::from(frame.payload.as_ref());
+		payload.extend_from_slice(&[0x55; 1000]);
+		frame.payload = payload.freeze();
+		frame
+	};
+	let mut metered = Metered::avc3();
+	for index in 0..45 {
+		metered.live.track.write(frame(index)).unwrap();
+		tokio::time::advance(Duration::from_micros(33_333)).await;
+	}
+	let delay = Duration::from_millis(500);
+	let mut export = open_export(metered.source().await)
+		.await
+		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
+	let mut out = export.next().await.unwrap().unwrap().to_vec();
+	// Only the catalog counts by the header: the frames it read wait to go out.
+	let catalog = metered.billed();
+
+	let mut tick = kio::clock::interval(Duration::from_micros(33_333));
+	tick.tick().await;
+	let mut index = 45;
+	while index < 165 {
+		tokio::select! {
+			chunk = export.next() => out.extend_from_slice(&chunk.unwrap().unwrap()),
+			_ = tick.tick() => {
+				metered.live.track.write(frame(index)).unwrap();
+				index += 1;
+			}
+		}
+	}
+	let sent: usize = (parse_tags(&out).iter())
+		.filter(|tag| tag.tag_type == super::TAG_VIDEO && tag.body[1] == super::AVC_NALU)
+		.map(|tag| tag.body.len() - 5)
+		.sum();
+	assert!(
+		sent > 60 * 1000,
+		"the frames from the second keyframe on go out: {sent} bytes"
+	);
+	assert_eq!(metered.billed() - catalog, sent as u64);
+}

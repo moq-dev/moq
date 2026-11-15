@@ -495,6 +495,10 @@ pub(crate) enum Error {
 	UnknownNeighbor,
 	#[error("no declared identity")]
 	NoIdentity,
+	#[error("one interest prefix inside another")]
+	Nested,
+	#[error("no such interest prefix")]
+	UnknownPrefix,
 }
 
 impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
@@ -2023,8 +2027,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			regions.as_ref().is_some_and(|regions| !within_any(claim, regions))
 				|| !ctx.own && views.get(&id).is_none_or(|view| view.as_of(claim).is_none())
 		};
-		self.reader
-			.apply(id, &self.watch, now, |claim| ctx.live && !uncertified(claim));
+		self.reader.apply(
+			id,
+			|claim| within(claim, &self.watch),
+			now,
+			|claim| ctx.live && !uncertified(claim),
+		);
 	}
 
 	/// How the reader now sees each of `claims` of `id`, in `ctx`.
