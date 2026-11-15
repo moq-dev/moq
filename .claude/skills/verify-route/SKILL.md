@@ -70,7 +70,7 @@ change; faster checkers are separate work.
 
 | Config | Mesh | Bounds | Previous distinct states | Previous run |
 | --- | --- | --- | --- | --- |
-| `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 476,434 | a minute or two |
+| `RouteHandoff.cfg` | The publisher behind relay 1, in a triangle with relays 2 and 3. | 1 claim change, 1 session change | 434,956 | a minute or two |
 | `Early.cfg` | The same, with a timer that fires at any moment. | 1 claim change, 1 session change | 14,220,217 | half an hour |
 | `Twice.cfg` | The same, where two sessions close, as when relay 1 dies. Simulated: `num` counts behaviours per worker. | 1 claim change, 2 session changes | 40,000 behaviours, 4.0M states | a few minutes |
 | `Ring.cfg` | The publisher and three relays in a ring, with a timer that fires at any moment. | 1 claim change, 1 session change | 813,075 | a minute or two |
@@ -89,7 +89,7 @@ change; faster checkers are separate work.
 | `EditWiden.cfg` | The same, where relay 2 watches `"a"` and widens to everything or drops it once. | 1 claim change, 1 session change, 1 edit | 3,655,573 | a quarter of an hour |
 | `Edit.cfg` | The same with two edits, such as widening then narrowing back, or dropping everything then asking again. Before the rekey kept the route the sender would reflect, a widening then a narrowing crossing the close of relay 2's own session kept a route relay 1 learned through it and took a claim offline, breaking `Stable`. Simulated; an exhaustive pass covered every behaviour to depth 18 (10.6M states) before it was stopped. | 1 claim change, 1 session change, 2 edits | 40,000 behaviours, 4.8M states | four minutes |
 | `Flap.cfg` | The publisher on relays 1 and 2, joined to each other, and relay 3 behind both; only the publisher's link to relay 1 opens and closes. Under the replaced rule, where doubt also kept relays off routes beginning at the publisher, `Routed` failed at once. Simulated. | 1 claim change, 4 session changes | 1,000 behaviours per worker, depth 150, seed 1 | about a minute |
-| `TwoHomes.cfg` | The same, where both of the publisher's links open and close. Drops `Stable`: a relay can take an offer older than the timer and drop a claim it showed. Simulated. | 1 claim change, 3 session changes | 1,000 behaviours per worker, depth 150, seed 1 | about a minute |
+| `TwoHomes.cfg` | The same, where both of the publisher's links open and close. Before `Patient` waited for stale offers too, a relay could take an offer naming a hop it had forgotten died and drop a claim it showed, breaking `Stable` within a minute. Simulated. | 1 claim change, 3 session changes | 1,000 behaviours per worker, depth 150, seed 1 | about a minute |
 | `Homes.cfg` | The publisher on each of three relays in a ring that is cheap one way round, leaving all three. `RequestsLoopFree` fails within seconds; checks `LoopsLostThePublisher`. Simulated. | 3 session changes | 1,000 behaviours per worker, depth 150, seed 1 | about a minute |
 | `HoldCycle.cfg` | The publisher on a hub with two open relays, and two relays asking for `"a"` alone, each joined to both open relays and nearer the other's choice. Before a hold followed only the path it was built on, the publisher's session closing left four holds waiting on each other for good, breaking `QuietIsSettled` within seconds. Simulated. | 1 claim change, 1 session change | 2,000 behaviours per worker, depth 200, a new seed each run | a few minutes |
 
