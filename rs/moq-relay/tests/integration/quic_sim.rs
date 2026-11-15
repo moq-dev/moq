@@ -246,8 +246,8 @@ const LITE_07: &str = "moq-lite-07-wip";
 /// waits on `ready` before each frame, and the reader drains at its own pace, slower than
 /// the writer, so every hop has to pace its ingest to that reader rather than shed.
 ///
-/// A paused stream must hold no more than its stream window, or the connection window fills
-/// with bytes nobody takes and the transport evicts the stream.
+/// A paused stream must hold no more than the credit its session reserves for it, or the
+/// connection window fills with bytes nobody takes and the transport evicts the stream.
 #[test]
 fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 	memory::run(|| async {

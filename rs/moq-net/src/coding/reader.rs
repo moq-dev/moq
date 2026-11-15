@@ -26,6 +26,8 @@ pub struct Reader<S: RecvStream, V> {
 	want: usize,
 	/// A contiguous copy of a message that spans transport chunks, empty between decodes.
 	scratch: Vec<u8>,
+	/// Bytes taken into a frame's unsealed segment, whose receive credit returns once it seals.
+	unreleased: u64,
 	stats: crate::stats::Session,
 }
 
@@ -50,9 +52,10 @@ pub(crate) trait Pause {
 		crate::model::pace::AHEAD
 	}
 
-	/// Reserve the credit this stream may hold while paused, returning whether it may pause.
-	/// A stream outside any session always may.
-	fn pause(&mut self) -> bool {
+	/// Reserve the credit this stream may hold while paused, its stream window and the `taken`
+	/// bytes it read whose credit it has yet to return, returning whether it may pause. A
+	/// stream outside any session always may.
+	fn pause(&mut self, _taken: u64) -> bool {
 		true
 	}
 
@@ -65,8 +68,8 @@ impl Pause for crate::transport::boxed::RecvStream {
 		crate::transport::boxed::RecvStream::window(self)
 	}
 
-	fn pause(&mut self) -> bool {
-		crate::transport::boxed::RecvStream::pause(self)
+	fn pause(&mut self, taken: u64) -> bool {
+		crate::transport::boxed::RecvStream::pause(self, taken)
 	}
 
 	fn resume(&mut self) {
@@ -97,6 +100,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			version,
 			want: 0,
 			scratch: Vec::new(),
+			unreleased: 0,
 			stats: Default::default(),
 		}
 	}
@@ -396,7 +400,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				Poll::Ready(Err(err)) => break Err(err),
 				Poll::Pending => Poll::Pending,
 			};
-			let mut lease = match lease {
+			// Moved, so the lease's borrow of the reader ends with it and `unreleased` can count.
+			let mut lease = match { lease } {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();
@@ -430,8 +435,10 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			if complete || chunk.len() == frame.unsealed() {
 				// Every byte of the segment is in hand, so its credit returns.
 				lease.release();
+				self.unreleased = 0;
 			} else {
 				drop(lease);
+				self.unreleased += chunk.len() as u64;
 			}
 
 			if !chunk.is_empty() {
@@ -488,7 +495,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				self.stream.resume();
 				Poll::Ready(Ok(()))
 			}
-			Poll::Pending if self.stream.pause() => {
+			Poll::Pending if self.stream.pause(self.unreleased) => {
 				let err = ready!(self.stream.poll_reset(waiter));
 				Poll::Ready(Err(self.version.transport_error(err)))
 			}
@@ -557,6 +564,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			version,
 			want: self.want,
 			scratch: self.scratch,
+			unreleased: self.unreleased,
 			stats: self.stats,
 		}
 	}
@@ -1145,11 +1153,27 @@ mod tests {
 		chunks: VecDeque<Bytes>,
 		held: usize,
 		released: usize,
+		/// The pacing window, or the cap when zero.
+		window: u64,
+		/// The taken bytes each pause reserved for.
+		paused: Vec<u64>,
 	}
 
 	struct CreditedLease<'a>(&'a mut Credited);
 
-	impl Pause for Credited {}
+	impl Pause for Credited {
+		fn window(&self) -> u64 {
+			match self.window {
+				0 => crate::model::pace::AHEAD,
+				window => window,
+			}
+		}
+
+		fn pause(&mut self, taken: u64) -> bool {
+			self.paused.push(taken);
+			true
+		}
+	}
 
 	impl RecvStream for Credited {
 		type Error = crate::lite::test_transport::SinkError;
@@ -1236,5 +1260,41 @@ mod tests {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read, data);
+	}
+
+	/// A stream paused partway through a segment still holds the credit of what it took of
+	/// it, so the pause reserves that along with the stream window.
+	#[test]
+	fn a_pause_mid_segment_reserves_what_it_took() {
+		use crate::frame::SEGMENT;
+		const CHUNK: usize = 100_000;
+
+		// An idle reader behind one committed frame, so the writer is paced past the window.
+		let mut group = crate::group::Info { sequence: 0 }.produce();
+		let _idle = group.consume();
+		group
+			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"x"))
+			.unwrap();
+		let mut frame = group
+			.create_frame(crate::frame::Info {
+				size: 2 * SEGMENT as u64,
+				timestamp: Some(crate::Timestamp::ZERO),
+			})
+			.unwrap();
+
+		let stream = Credited {
+			window: SEGMENT as u64 / 2,
+			..Default::default()
+		};
+		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
+		for _ in 0..SEGMENT / CHUNK {
+			reader.stream.chunks.push_back(Bytes::from(vec![0u8; CHUNK]));
+		}
+		let noop = &kio::Waiter::noop();
+		assert!(reader.poll_read_frame(noop, &mut frame).is_pending(), "paced mid-frame");
+
+		let stream = &reader.stream;
+		assert!(stream.held > 0 && stream.held < SEGMENT, "{} bytes held", stream.held);
+		assert_eq!(stream.paused, [stream.held as u64], "the pause reserves what it holds");
 	}
 }

@@ -21,7 +21,8 @@ use crate::connection::waits::Wait;
 /// by [`Stream::lease()`].
 ///
 /// Bytes the reader has yet to take keep their stream credit too (see [`Self::untaken`]), so a
-/// reader that stops leasing holds at most its stream window, however much it leased before.
+/// reader that stops leasing holds at most its stream window of them, however much it leased
+/// before, besides what it took and has not released.
 #[derive(Debug, Default)]
 pub(super) struct Leased {
 	chunks: VecDeque<Bytes>,

@@ -149,15 +149,16 @@ pub(super) struct Shared<S: ?Sized> {
 }
 
 impl Shared<dyn ErasedSession> {
-	/// Reserve the credit of one more paused stream, unless it would push the paused total
-	/// over half the connection window, returning how much it reserved. Without a connection
-	/// window a paused stream holds only its own credit, so it reserves nothing.
-	fn reserve(&self) -> Option<u64> {
+	/// Reserve the credit of one more paused stream, its stream window and the `taken` bytes it
+	/// read without returning their credit, unless it would push the paused total over half the
+	/// connection window, returning how much it reserved. Without a connection window a paused
+	/// stream holds only its own credit, so it reserves nothing.
+	fn reserve(&self, taken: u64) -> Option<u64> {
 		let window = self.session.receive_window()?;
 		let Some(connection) = window.connection else {
 			return Some(0);
 		};
-		let charge = window.stream.min(connection.get());
+		let charge = window.stream.saturating_add(taken).min(connection.get());
 		let cap = connection.get() / 2;
 		self.paused
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |paused| {
@@ -465,11 +466,12 @@ impl RecvStream {
 		self.0.window()
 	}
 
-	/// Reserve the receive credit this stream may hold while ingest stops reading it, returning
-	/// whether it may stop: not once the session's paused streams hold half its connection
-	/// window, nor on a transport that reports no window.
-	pub(crate) fn pause(&mut self) -> bool {
-		self.0.pause()
+	/// Reserve the receive credit this stream may hold while ingest stops reading it, its stream
+	/// window and the `taken` bytes read without returning their credit, returning whether it
+	/// may stop: not once the session's paused streams hold half its connection window, nor on
+	/// a transport that reports no window.
+	pub(crate) fn pause(&mut self, taken: u64) -> bool {
+		self.0.pause(taken)
 	}
 
 	/// Return the credit [`Self::pause`] reserved, as ingest reads the stream again.
@@ -612,7 +614,7 @@ trait ErasedRecv: Send + Sync {
 	fn stop(&mut self, code: u32);
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
 	fn window(&self) -> u64;
-	fn pause(&mut self) -> bool;
+	fn pause(&mut self, taken: u64) -> bool;
 	fn resume(&mut self);
 }
 
@@ -826,11 +828,11 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 		})
 	}
 
-	fn pause(&mut self) -> bool {
+	fn pause(&mut self, taken: u64) -> bool {
 		if self.held > 0 {
 			return true;
 		}
-		let Some(held) = self.session.upgrade().and_then(|shared| shared.reserve()) else {
+		let Some(held) = self.session.upgrade().and_then(|shared| shared.reserve(taken)) else {
 			return false;
 		};
 		self.held = held;
@@ -1086,8 +1088,9 @@ mod test {
 		recv
 	}
 
-	/// Each paused stream reserves its stream window, and the session pauses no more than
-	/// fit in half the connection window; a stream resuming or dropped returns its share.
+	/// Each paused stream reserves its stream window and what it took of an unsealed segment,
+	/// and the session pauses no more than fit in half the connection window; a stream
+	/// resuming or dropped returns its share.
 	#[test]
 	fn paused_streams_hold_at_most_half_the_connection_window() {
 		let gate = kio::Producer::new(true);
@@ -1096,22 +1099,31 @@ mod test {
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
 		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
-		assert!(streams[0].pause());
-		assert!(streams[0].pause(), "a paused stream reserves once");
-		assert!(streams[1].pause());
-		assert!(!streams[2].pause(), "a third would hold 60 of 100");
+		assert!(streams[0].pause(0));
+		assert!(streams[0].pause(0), "a paused stream reserves once");
+		assert!(streams[1].pause(0));
+		assert!(!streams[2].pause(0), "a third would hold 60 of 100");
 
 		streams[0].resume();
-		assert!(streams[2].pause(), "a resumed stream returned its share");
+		assert!(streams[2].pause(0), "a resumed stream returned its share");
 		drop(streams.remove(1));
-		assert!(accept(&session).pause(), "so did a dropped one");
+		assert!(accept(&session).pause(0), "so did a dropped one");
+
+		// A stream partway through a segment also holds the credit of what it took of it.
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
+		let mut first = accept(&session);
+		assert!(first.pause(25), "holds 45 of 100");
+		assert!(!accept(&session).pause(0), "a second would hold 65 of 100");
 
 		// Without a connection window nothing is shared, so every stream may pause.
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
 		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
-		assert!(streams.iter_mut().all(|stream| stream.pause()));
+		assert!(streams.iter_mut().all(|stream| stream.pause(0)));
 	}
 
 	/// A stream paces at the credit its session grants it, so a hop holds about what its
@@ -1263,7 +1275,7 @@ mod test {
 	fn an_unbounded_stream_never_pauses() {
 		let gate = kio::Producer::new(true);
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
-		assert!(!accept(&session).pause());
+		assert!(!accept(&session).pause(0));
 
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume())
@@ -1271,6 +1283,6 @@ mod test {
 		);
 		let mut stream = accept(&session);
 		drop(session);
-		assert!(!stream.pause());
+		assert!(!stream.pause(0));
 	}
 }
