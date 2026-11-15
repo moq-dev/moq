@@ -30,7 +30,9 @@ struct TokenCase {
 	claims: Option<Value>,
 }
 
-/// A document under `jwk`, `jwks`, or `grant`, and whether it is accepted.
+/// A document under `jwk`, `jwks`, or `grant`, and whether it is accepted. A key or set
+/// given as a string is its raw text, for what a JSON value cannot spell, such as a
+/// repeated member.
 #[derive(Deserialize)]
 struct Case {
 	name: String,
@@ -97,18 +99,24 @@ fn tokens() {
 	}
 }
 
+/// A document's text: a string as written, anything else serialized.
+fn text(document: Value) -> String {
+	match document {
+		Value::String(text) => text,
+		document => document.to_string(),
+	}
+}
+
 #[test]
 fn documents() {
 	let corpus = corpus();
 	type Parse = fn(Value) -> Result<(), String>;
 	let parsers: [(&str, Vec<Case>, Parse); 3] = [
 		("jwk", corpus.jwk, |jwk| {
-			Key::from_str(&jwk.to_string()).map(drop).map_err(|err| err.to_string())
+			Key::from_str(&text(jwk)).map(drop).map_err(|err| err.to_string())
 		}),
 		("sets", corpus.sets, |jwks| {
-			KeySet::from_str(&jwks.to_string())
-				.map(drop)
-				.map_err(|err| err.to_string())
+			KeySet::from_str(&text(jwks)).map(drop).map_err(|err| err.to_string())
 		}),
 		("grants", corpus.grants, |grant| {
 			let grant: Grant = serde_json::from_value(grant).map_err(|err| err.to_string())?;
