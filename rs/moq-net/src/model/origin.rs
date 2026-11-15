@@ -6094,9 +6094,8 @@ impl RouteTable {
 				.filter(|entry| only(entry))
 				.peekable();
 			if candidates.peek().is_some() {
-				let epochs = Epochs::of(candidates.clone());
-				// The node's most specific candidate speaks for it, serving or not: one
-				// that refuses the path still shadows what is broader.
+				// The node's most specific candidates are the whole answer, serving or not:
+				// one that refuses the path still shadows what is broader.
 				let specificity = candidates
 					.clone()
 					.map(RouteEntry::specificity)
@@ -6105,8 +6104,9 @@ impl RouteTable {
 				if best.is_some_and(|(decided, _)| specificity < decided) {
 					continue;
 				}
-				let found = candidates
-					.clone()
+				let tier = candidates.filter(|entry| entry.specificity() == specificity);
+				let epochs = Epochs::of(tier.clone());
+				let found = tier
 					.filter(|entry| entry.serves(path))
 					.filter(|entry| !epochs.superseded(entry))
 					.min_by_key(|entry| route_order(path, entry));
@@ -10727,6 +10727,38 @@ mod tests {
 			broad.poll_requested(&kio::Waiter::noop()).is_pending(),
 			"the broader claim must not serve what a more specific one covers"
 		);
+	}
+
+	/// A broadcast published here shadows what is beneath it, and so does it against a broader
+	/// claim shown at the same prefix: the broadcast refuses the request, and the request goes
+	/// no further than that refusal.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_broadcast_here_shadows_a_broader_claim_shown_at_its_prefix() {
+		let producer = origin(1).produce();
+		let _broad = producer
+			.forward(
+				"src/a",
+				RouteInfo::new()
+					.with_hops(hops(&[10]))
+					.with_node(Some(10))
+					.with_lane(Lane {
+						above: 1,
+						..Lane::default()
+					}),
+			)
+			.unwrap();
+		let exact = producer.route("src/a", RouteOptions::default()).unwrap();
+		exact.announce().unwrap();
+
+		let table = producer.shared.read();
+		let best =
+			|path: &str| table.best_route(&Path::new(path).unwrap(), Horizon::default(), &HashSet::new(), |_| true);
+		assert!(
+			best("src/a/b").is_none(),
+			"the broadcast at the prefix refuses what is beneath it"
+		);
+		assert!(best("src/a").is_some_and(|entry| entry.source.is_some()));
 	}
 
 	/// A draining route ranks below every other eligible one, even on a preferred link

@@ -1182,6 +1182,8 @@ class OriginState {
 			.map((candidate) => candidate.route.peek());
 		if (superseded(local, rivals)) return false;
 		if (superseded(remote, [local])) return true;
+		// A broadcast exactly here shadows a broader claim shown here, at any cost.
+		if ((remote.above ?? 0n) > 0n) return true;
 		return compareRoutes(local, remote) <= 0;
 	}
 

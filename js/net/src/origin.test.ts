@@ -1242,6 +1242,33 @@ test("a request prefers a cheaper received route over an announced local broadca
 	origin.close();
 });
 
+test("an announced local broadcast shadows a cheaper broader claim shown at its path", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const dispose = serve(
+		origin,
+		path,
+		provider(upstream),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n, above: 1n }),
+	);
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 3n });
+	const local = localRoute.broadcast;
+
+	const request = consumer.request(path);
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+	expect(readsFrom(active as BroadcastConsumer, local)).toBe(true);
+
+	request.close();
+	local.close();
+	dispose();
+	upstream.close();
+	origin.close();
+});
+
 test("the cheapest received route competes with the local broadcast, not the newest", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
