@@ -93,7 +93,7 @@ def run(upstream, output):
     registry = json.loads(original)
     for command in (["docker", "info"], ["docker", "compose", "version"]):
         subprocess.run(command, check=True)
-    _, inventory = matrices(registry)
+    unfiltered, inventory = matrices(registry)
     own = {registry["implementations"][name]["roles"]["client"]["docker"]["image"] for name in OWN}
     missing = set()
     images = {entry["image"] for entry in inventory if entry["status"] == "selected"}
@@ -125,7 +125,7 @@ def run(upstream, output):
             expected = expected_runs(plan)
             if not expected:
                 # Unpublished images can empty the optional matrix; the registry alone must not.
-                if missing:
+                if expected_runs(unfiltered[index]):
                     continue
                 raise ValueError(f"runner matrix {index} has no compatible pairs")
             # The runner exits nonzero on any red pair; the validated summary decides instead.

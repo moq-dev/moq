@@ -158,6 +158,11 @@ class Runner(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertEqual(self.matrices, [runner.REQUIRED | {("new", "moq-dev-rs")}])
 
+    def test_matrix_the_registry_leaves_empty_fails_despite_unrelated_missing_image(self):
+        del self.registry["implementations"]["new"]["roles"]["relay"]
+        with patch("builtins.print"), self.assertRaisesRegex(ValueError, "matrix 1 has no compatible pairs"):
+            self.run_matrices(lambda client, relay, mode: "pass", unpublished={"docker.io/new/client"})
+
     def test_unpublished_own_client_image_fails_before_any_matrix(self):
         def command(args, **kwargs):
             self.assertNotEqual(args[:2], ["bash", "run-interop-tests.sh"])
