@@ -66,6 +66,7 @@ mod replacement;
 mod request_caps;
 mod route_acceptance;
 mod route_change;
+mod route_cluster;
 mod route_failover;
 mod route_health;
 mod routing_contracts;

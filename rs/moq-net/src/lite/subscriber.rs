@@ -2739,6 +2739,15 @@ impl AnnouncePrefix {
 		}
 	}
 
+	/// Let go of this request, all but the claims its route layer serves, which stay in
+	/// the origin until the caller drops them.
+	fn retire(mut self: Box<Self>) -> Option<routed::Retired> {
+		match &mut self.state {
+			PrefixState::Run(step) => step.run.routed.as_mut().map(routed::Routed::retire),
+			_ => None,
+		}
+	}
+
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -2908,17 +2917,23 @@ impl AnnouncePrefix {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
+							// This request now carries what the one it replaces did. The old
+							// stream closes first, so the node hands this one its claims, but
+							// what it served leaves the origin only once this one serves it:
+							// a claim this request files under another route prefix or
+							// identity, such as a region widened to the root, would otherwise
+							// be let go in between.
+							let retired = self.replacing.take().and_then(|old| old.retire());
 							// What the initial set put in the node is served before the
 							// snapshot lets readers see the origin synced.
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
+							drop(retired);
 							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							self.snapshot = None;
-							// This request now carries what the one it replaces did.
-							self.replacing = None;
 							continue;
 						}
 						if run.initial > 0 {
