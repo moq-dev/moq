@@ -538,13 +538,15 @@ impl EndpointInner {
 		respond(transmit, &response_buffer, &self.slot);
 	}
 
-	#[cfg(test)]
-	pub(crate) fn retry(&self, incoming: moq_quic::endpoint::Incoming) -> Result<(), moq_quic::endpoint::RetryError> {
+	/// Answer an unvalidated incoming with a Retry
+	pub(crate) fn retry(&self, incoming: moq_quic::endpoint::Incoming) {
 		let mut state = self.state.lock().unwrap();
 		let mut response_buffer = Vec::new();
-		let transmit = state.inner.retry(incoming, &mut response_buffer)?;
+		let transmit = state
+			.inner
+			.retry(incoming, &mut response_buffer)
+			.expect("an unvalidated address carries no Retry token, so it may be retried");
 		respond(transmit, &response_buffer, &self.slot);
-		Ok(())
 	}
 }
 
