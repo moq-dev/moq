@@ -6083,7 +6083,10 @@ impl RouteTable {
 		// it does not take over.
 		let (above, at) = self.split(path);
 		let mut best: Option<(usize, Option<&RouteEntry>)> = None;
-		for node in above.into_iter().chain(at) {
+		for (depth, node) in above.into_iter().chain(at).enumerate() {
+			// How specific a claim filed at this node is: the node's depth less how far above
+			// it the claim was shown.
+			let specific = |entry: &RouteEntry| depth.saturating_sub(usize::from(entry.lane.above));
 			let mut candidates = node
 				.entries
 				.iter()
@@ -6096,15 +6099,11 @@ impl RouteTable {
 			if candidates.peek().is_some() {
 				// The node's most specific candidates are the whole answer, serving or not:
 				// one that refuses the path still shadows what is broader.
-				let specificity = candidates
-					.clone()
-					.map(RouteEntry::specificity)
-					.max()
-					.unwrap_or_default();
+				let specificity = candidates.clone().map(specific).max().unwrap_or_default();
 				if best.is_some_and(|(decided, _)| specificity < decided) {
 					continue;
 				}
-				let tier = candidates.filter(|entry| entry.specificity() == specificity);
+				let tier = candidates.filter(|entry| specific(entry) == specificity);
 				let epochs = Epochs::of(tier.clone());
 				let found = tier
 					.filter(|entry| entry.serves(path))
