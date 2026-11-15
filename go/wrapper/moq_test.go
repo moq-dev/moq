@@ -306,18 +306,23 @@ func TestAudioConsumerDelay(t *testing.T) {
 		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Audio)
 	}
 
+	// No max delay: a zero one skips a group once its successor is a warmup old by the native
+	// wall clock, so a read that starts late under load never returns.
 	fixedDelay := 80 * time.Millisecond
 	estimate := false
 	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{
 		Format:   moq.AudioSampleFormatF32,
-		Delay:    moq.Delay{Min: fixedDelay},
+		Delay:    moq.Delay{Min: fixedDelay, MaxUnlimited: true},
 		Estimate: &estimate,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fixed.Cancel()
-	estimated, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{Format: moq.AudioSampleFormatF32})
+	estimated, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{
+		Format: moq.AudioSampleFormatF32,
+		Delay:  moq.Delay{MaxUnlimited: true},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

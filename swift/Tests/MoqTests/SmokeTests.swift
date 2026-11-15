@@ -941,13 +941,15 @@ final class SmokeTests: XCTestCase {
         let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.audio["mic"])
 
+        // No max delay: a zero one skips a group once its successor is a warmup old by the
+        // native wall clock, so a read that starts late under load never returns.
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: 0), estimate: false)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: nil), estimate: false)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0, max: nil))
         )
         XCTAssertEqual(fixed.delay, 0.08, accuracy: 1e-9)
         let initial = estimated.delay
