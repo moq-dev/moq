@@ -153,6 +153,10 @@ typedef Datagram = MoqDatagram;
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
 
+/// A frame's payload size, once inflated, and its timestamp, without the payload, as
+/// [MoqGroupConsumer.readInfo] reads it.
+typedef FrameInfo = MoqFrameInfo;
+
 /// An exact media time: `value` units at `scale` units per second.
 ///
 /// A scale-less track has no time, so there `scale` is null and `value` is the
@@ -177,21 +181,28 @@ extension type Delay._(MoqDelay _delay) implements MoqDelay {
     : this._(MoqDelay(min: min, max: max));
 }
 
-/// Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering.
+/// Tunes how a track subscription is delivered: priority, delay, ranges, group ordering, and
+/// whether frames arrive without their payload.
 extension type Subscription._(MoqSubscription _subscription)
     implements MoqSubscription {
   /// An omitted `delay` is a zero [Delay], so a bare `Subscription()` is moq-net's defaults.
+  ///
+  /// `meta` asks for each frame's size and timestamp without its payload: groups arrive as
+  /// metadata, read with [MoqGroupConsumer.readInfo], unless another subscriber of the track
+  /// wants the payload. A peer whose version cannot carry the mode refuses it as unsupported.
   Subscription({
     int priority = 0,
     MoqDelay? delay,
     List<MoqRange>? ranges,
     MoqOrder? order,
+    bool meta = false,
   }) : this._(
          MoqSubscription(
            priority: priority,
            delay: delay ?? Delay(),
            ranges: ranges,
            order: order,
+           meta: meta,
          ),
        );
 }

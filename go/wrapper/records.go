@@ -64,6 +64,11 @@ func TimestampToDuration(t Timestamp) (time.Duration, error) {
 // and receive. On a scale-less track the timestamp is Unscaled at the frame's group key.
 type Frame = ffi.MoqFrame
 
+// FrameInfo is a frame's payload size, once inflated, and its timestamp, without the payload,
+// as GroupConsumer.ReadInfo reads it. On a scale-less track the timestamp is Unscaled at the
+// frame's group key.
+type FrameInfo = ffi.MoqFrameInfo
+
 // Datagram is a best-effort track datagram as received: sequence number, timestamp
 // (Unscaled at the sequence on a scale-less track), and payload.
 type Datagram = ffi.MoqDatagram
@@ -119,8 +124,8 @@ func delayFromFFI(d ffi.MoqDelay) Delay {
 // Subscription holds subscriber-side delivery preferences: priority, the Delay (where a cold
 // join starts and how late a non-latest group may fall before it is skipped), the ranges of
 // the track to deliver (nil for everything Delay.Max still allows, while an empty non-nil
-// slice asks for nothing), and the order the publisher sends pending groups in (nil for
-// newest first).
+// slice asks for nothing), the order the publisher sends pending groups in (nil for
+// newest first), and whether frames arrive without their payload (Meta).
 //
 // The zero Subscription is moq-net's defaults, the same as DefaultSubscription.
 type Subscription struct {
@@ -128,6 +133,10 @@ type Subscription struct {
 	Delay    Delay
 	Ranges   []Range
 	Order    *Order
+	// Meta asks for each frame's size and timestamp without its payload: groups arrive as
+	// metadata, read with GroupConsumer.ReadInfo, unless another subscriber of the track wants
+	// the payload. A peer whose version cannot carry the mode refuses it as unsupported.
+	Meta bool
 }
 
 // DefaultSubscription returns moq-net's defaults, whose zero Delay starts at the newest group
@@ -138,7 +147,7 @@ func DefaultSubscription() Subscription {
 	if d.Ranges != nil {
 		ranges = *d.Ranges
 	}
-	return Subscription{Priority: d.Priority, Delay: delayFromFFI(d.Delay), Ranges: ranges, Order: d.Order}
+	return Subscription{Priority: d.Priority, Delay: delayFromFFI(d.Delay), Ranges: ranges, Order: d.Order, Meta: d.Meta}
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
@@ -152,6 +161,7 @@ func (s Subscription) ffi() (ffi.MoqSubscription, error) {
 		Delay:    delay,
 		Ranges:   ranges,
 		Order:    s.Order,
+		Meta:     s.Meta,
 	}, err
 }
 

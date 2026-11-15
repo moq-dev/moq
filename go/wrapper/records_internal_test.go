@@ -85,4 +85,7 @@ func TestSubscriptionDelay(t *testing.T) {
 	if _, err := (Subscription{Delay: Delay{Max: -time.Second}}).ffi(); err == nil {
 		t.Error("a negative max delay converted")
 	}
+	if got, err := (Subscription{Meta: true}).ffi(); err != nil || !got.Meta {
+		t.Errorf("Subscription{Meta: true}.ffi() = %+v, %v, want Meta set", got, err)
+	}
 }

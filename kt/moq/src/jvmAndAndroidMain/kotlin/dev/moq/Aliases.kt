@@ -188,6 +188,12 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 
 /**
+ * A frame's payload size, once inflated, and its timestamp, without the payload, as
+ * `GroupConsumer.readInfo` reads it.
+ */
+typealias FrameInfo = uniffi.moq.MoqFrameInfo
+
+/**
  * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null
  * `scale` and the group key (a datagram's sequence) as `value`; see [unscaled].
  */
@@ -212,7 +218,12 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
-/** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
+/**
+ * Tunes how a track subscription is delivered: priority, delay, ranges, group ordering, and `meta`,
+ * which asks for each frame's size and timestamp without its payload. Groups then arrive as
+ * metadata, read with `GroupConsumer.readInfo`, unless another subscriber of the track wants the
+ * payload; a peer whose version cannot carry the mode refuses it as unsupported.
+ */
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**

@@ -95,6 +95,18 @@ func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
 	return bridge.Call(ctx, nil, g.inner.ReadFrame)
 }
 
+// IsMeta reports whether the group arrived as metadata, so ReadInfo reads it and ReadFrame
+// fails as unsupported.
+func (g *GroupConsumer) IsMeta() bool {
+	return g.inner.IsMeta()
+}
+
+// ReadInfo returns the next frame's size and timestamp without waiting for its payload, or
+// (nil, nil) when the group ends. A group that arrived as metadata has only these.
+func (g *GroupConsumer) ReadInfo(ctx context.Context) (*FrameInfo, error) {
+	return bridge.Call(ctx, nil, g.inner.ReadInfo)
+}
+
 // All ranges over raw frames until the group ends or the loop breaks.
 func (g *GroupConsumer) All(ctx context.Context) iter.Seq2[*Frame, error] {
 	return bridge.Seq(ctx, g.inner.Cancel, g.ReadFrame)

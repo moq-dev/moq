@@ -221,6 +221,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.Container
    Timestamp
    Frame
+   FrameInfo
    media.MediaFrame
    Datagram
    media.Video

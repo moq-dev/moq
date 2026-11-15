@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from moq_ffi import (
     MoqBroadcastConsumer,
     MoqFrame,
+    MoqFrameInfo,
     MoqGroupConsumer,
     MoqTrackConsumer,
 )
@@ -17,6 +18,7 @@ from ._stream import _Stream
 from .types import (
     FetchGroupOptions,
     Frame,
+    FrameInfo,
     Subscription,
     TrackInfo,
 )
@@ -28,6 +30,10 @@ if TYPE_CHECKING:
 
 def _frame(frame: MoqFrame | None) -> Frame | None:
     return None if frame is None else Frame._from_ffi(frame)
+
+
+def _info(info: MoqFrameInfo | None) -> FrameInfo | None:
+    return None if info is None else FrameInfo._from_ffi(info)
 
 
 class GroupConsumer(_Stream[Frame]):
@@ -47,6 +53,21 @@ class GroupConsumer(_Stream[Frame]):
     async def read_frame(self) -> Frame | None:
         """Read the next raw frame. Returns `None` when the group ends."""
         return _frame(await self._inner.read_frame())
+
+    @property
+    def is_meta(self) -> bool:
+        """Whether the group arrived as metadata.
+
+        :meth:`read_info` reads such a group, while :meth:`read_frame` fails as unsupported.
+        """
+        return self._inner.is_meta()
+
+    async def read_info(self) -> FrameInfo | None:
+        """Read the next frame's size and timestamp, without waiting for its payload.
+
+        A group that arrived as metadata has only these. Returns `None` when the group ends.
+        """
+        return _info(await self._inner.read_info())
 
     def cancel(self) -> None:
         """Cancel reading this group and stop delivering frames."""

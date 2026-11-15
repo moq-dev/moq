@@ -24,6 +24,7 @@ from moq_ffi import (
     MoqDatagram,
     MoqDelay,
     MoqFrame,
+    MoqFrameInfo,
     MoqGrant,
     MoqOrder,
     MoqQuicConfig,
@@ -119,6 +120,23 @@ class Frame:
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
         return Frame(payload=frame.payload, timestamp=Timestamp._from_ffi(frame.timestamp))
+
+
+@dataclass(frozen=True)
+class FrameInfo:
+    """A frame's payload size, once inflated, and its timestamp, without the payload.
+
+    :meth:`~moq.GroupConsumer.read_info` reads it from any group, and it is all a group that
+    arrived as metadata carries. On a scale-less track ``timestamp`` is :meth:`Timestamp.unscaled` at the
+    frame's group key.
+    """
+
+    size: int
+    timestamp: Timestamp
+
+    @staticmethod
+    def _from_ffi(info: MoqFrameInfo) -> FrameInfo:
+        return FrameInfo(size=info.size, timestamp=Timestamp._from_ffi(info.timestamp))
 
 
 @dataclass(frozen=True)
@@ -257,7 +275,10 @@ class Subscription:
     ``delay`` is where a cold join starts and how far a non-latest group may fall behind
     before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
     everything ``delay.max`` still allows. ``order`` is which pending group the publisher
-    sends first, ``None`` for newest first.
+    sends first, ``None`` for newest first. ``meta`` asks for each frame's size and timestamp
+    without its payload: groups then arrive as metadata, read with
+    :meth:`~moq.GroupConsumer.read_info`, unless another subscriber of the track wants the payload,
+    and a peer whose version cannot carry the mode refuses it as unsupported.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
@@ -266,6 +287,7 @@ class Subscription:
     delay: Delay = Delay()
     ranges: Sequence[Range] | None = None
     order: MoqOrder | None = None
+    meta: bool = False
 
     @classmethod
     def default(cls) -> Subscription:
@@ -281,6 +303,7 @@ class Subscription:
             # The FFI defaults never restrict ranges, so there is no record to convert.
             ranges=None,
             order=defaults.order,
+            meta=defaults.meta,
         )
 
     def _ffi(self) -> MoqSubscription:
@@ -289,6 +312,7 @@ class Subscription:
             delay=self.delay._ffi(),
             ranges=None if self.ranges is None else [r._ffi() for r in self.ranges],
             order=self.order,
+            meta=self.meta,
         )
 
 

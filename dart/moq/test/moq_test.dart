@@ -150,7 +150,9 @@ void main() {
     for (final subscription in [defaultSubscription(), Subscription()]) {
       expect(subscription.delay.min, Duration.zero);
       expect(subscription.delay.max, Duration.zero);
+      expect(subscription.meta, isFalse);
     }
+    expect(Subscription(meta: true).meta, isTrue);
     final unset = Delay(min: null, max: null);
     expect(unset.min, isNull);
     expect(unset.max, isNull);

@@ -87,6 +87,18 @@ public final class GroupConsumer: AsyncSequence, Sendable {
         try await ffi.readFrame()
     }
 
+    /// Whether the group arrived as metadata, so `readInfo()` reads it and `readFrame()` throws
+    /// as unsupported.
+    public var isMeta: Bool {
+        ffi.isMeta()
+    }
+
+    /// The next frame's size and timestamp, without waiting for its payload, or `nil` once the
+    /// group ends. A group that arrived as metadata has only these.
+    public func readInfo() async throws -> FrameInfo? {
+        try await ffi.readInfo()
+    }
+
     /// Cancel all current and future reads.
     public func cancel() {
         ffi.cancel()

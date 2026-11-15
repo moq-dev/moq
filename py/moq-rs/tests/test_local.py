@@ -545,6 +545,24 @@ def test_default_subscription_skips_superseded_groups_at_once():
     assert (delay.min, delay.max) == (timedelta(0), timedelta(0))
     delay = moq.Subscription(delay=moq.Delay(min=None, max=None))._ffi().delay
     assert (delay.min, delay.max) == (None, None)
+    assert not moq.Subscription().meta
+    assert moq.Subscription(meta=True)._ffi().meta
+
+
+async def test_group_read_info_maps_size_and_timestamp():
+    """read_info converts the native header into a FrameInfo, then ends with the group."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("info", moq.TrackInfo(max_age=None, timescale=1_000_000))
+    group = track.append_group()
+    consumer = group.consume()
+    group.write_frame(b"ready", moq.Timestamp(12_345, 1_000_000))
+    group.finish()
+
+    assert not consumer.is_meta
+    info = await asyncio.wait_for(consumer.read_info(), timeout=5.0)
+    assert info == moq.FrameInfo(size=5, timestamp=moq.Timestamp(12_345, 1_000_000))
+    assert await consumer.read_info() is None
+    broadcast.close()
 
 
 def test_string_sequences_refuse_a_bare_string():

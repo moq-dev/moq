@@ -13,6 +13,9 @@ public typealias Timestamp = MoqFFI.MoqTimestamp
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
+/// A frame's payload size, once inflated, and its timestamp, without the payload, as
+/// `GroupConsumer.readInfo()` reads it.
+public typealias FrameInfo = MoqFFI.MoqFrameInfo
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
@@ -69,7 +72,10 @@ public typealias Announce = MoqFFI.MoqAnnounce
 /// path over keeps it present: hold a `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
-/// deliver, and group ordering.
+/// deliver, group ordering, and `meta`, which asks for each frame's size and timestamp without
+/// its payload. Groups then arrive as metadata, read with `GroupConsumer.readInfo()`, unless
+/// another subscriber of the track wants the payload; a peer whose version cannot carry the
+/// mode refuses it as unsupported.
 public typealias Subscription = MoqFFI.MoqSubscription
 /// How far behind the live edge a subscriber or decoder plays: `min` is the target latency and
 /// where a cold join starts, `nil` to leave it unstated (a decoder plays it as zero), and `max`,
