@@ -2097,6 +2097,7 @@ Either way the Group Stream accounts for the sequence, and the next SUBSCRIBE_UP
 
 For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 This includes streams reset before their headers were delivered, and streams the subscriber stopped (STOP_SENDING), which it may have discarded unread; such a drop carries the STOP_SENDING's Error Code.
+A drop naming a stopped duplicate of a Group that another Group Stream already completed changes nothing for that Group: its readers keep it whole.
 A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it is YIELDED or answers a STOP_SENDING.
 A [paused](#yield) Group is accounted for only once a continuation completes it, a reset of one other than YIELDED ends it, or a SUBSCRIBE_DROP names it.
 The publisher SHOULD name a sequence as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
