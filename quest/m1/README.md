@@ -36,7 +36,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   staying first in m3). The 2026-11-03 reason to keep them out of m1 was that
   the cut would wait on them; since 2026-11-05 the cut waits on m2 alone, and
   a downstream application builds on them from `main` now. Superseded
-  2026-11-13, below.
+  2026-11-13, below, and 2026-11-14 (maintainer): byte streams moved to Kixel,
+  which builds its own on moq-net's public API, and sockets dropped their
+  `tcp` protocol.
 - ✅ Also moved here: the two reconnect fixes whose bugs came from PRs that
   are on `main` and not on `release`, so the cut would publish them; the Go
   module proxy, since the mirror repository nears 1 GB; and the ashpd bump.

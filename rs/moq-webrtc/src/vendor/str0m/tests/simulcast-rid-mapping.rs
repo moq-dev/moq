@@ -263,7 +263,7 @@ fn assert_all_rids_mapped(
 		}
 		Signalling::Renegotiated { glare } => {
 			let mut change = l.sdp_api();
-			change.add_channel("signaling".into());
+			change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 			let (offer, pending) = change.apply().unwrap();
 			let answer = r.rtc.sdp_api().accept_offer(offer)?;
 			l.rtc.sdp_api().accept_answer(pending, answer)?;

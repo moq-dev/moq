@@ -1,6 +1,6 @@
 ---
 title: Transport
-description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, and WebRTC data channels
+description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, and stream listeners
 ---
 
 # Transport
@@ -87,23 +87,6 @@ publishers use this to avoid UDP and certificate setup. Both listeners
 authenticate through the same JWT and public-access rules as QUIC, and the Unix
 socket can additionally allowlist the connecting process by uid, gid, or pid.
 See [stream listeners](/bin/relay/auth#stream-listeners).
-
-## WebRTC data channels (experimental)
-
-The private workspace P2P transport is exercised by `test/p2p`; it is not a
-published package. Applications in this checkout that negotiate a browser
-`RTCPeerConnection` can pass an
-[`@moq/p2p` transport](https://github.com/moq-dev/moq/tree/main/js/p2p) to
-`@moq/net`'s connect or accept. One reliable ordered data channel carries qmux
-records, with no datagrams. The application supplies signaling and ICE and
-keeps ownership of the peer connection; closing the transport closes only its
-channel. SCTP ordering means one lost packet can hold back every stream.
-
-Native peers can use `moq-webrtc`'s `p2p` feature, which runs its own ICE agent:
-host candidates on every interface, server-reflexive candidates from the STUN
-servers it is given, and mDNS resolution of a browser's `.local` candidates.
-The application still carries the offer, answer, and candidates; the offering
-peer connects as the MoQ client and the answering peer accepts.
 
 ## Custom Rust transports
 

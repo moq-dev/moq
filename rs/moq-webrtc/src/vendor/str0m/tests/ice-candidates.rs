@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::vendor::str0m::RtcConfig;
 use crate::vendor::str0m::RtcError;
 use crate::vendor::str0m::ice::IceCreds;
+use crate::vendor::str0m::media::{Direction, MediaKind};
 use tracing::info_span;
 
 use super::common;
@@ -26,7 +27,7 @@ fn ice_candidate_types_host_only() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -43,156 +44,6 @@ fn ice_candidate_types_host_only() -> Result<(), RtcError> {
 		}
 		progress(&mut l, &mut r)?;
 	}
-
-	Ok(())
-}
-
-/// Test trickle ICE - connect with relay candidates, then trickle in host candidates.
-/// Verifies that ICE switches to the better (host) candidates after they're added.
-#[test]
-fn ice_trickle_incremental_candidates() -> Result<(), RtcError> {
-	use crate::vendor::str0m::{Candidate, Output};
-	use std::net::SocketAddr;
-
-	init_log();
-	init_crypto_default();
-
-	let mut l = TestRtc::new(Peer::Left);
-	let mut r = TestRtc::new(Peer::Right);
-
-	// Define addresses for relay and host candidates
-	// Relay addresses (TURN allocated addresses, lower priority)
-	let l_relay_addr: SocketAddr = (Ipv4Addr::new(10, 0, 0, 1), 10000).into();
-	let r_relay_addr: SocketAddr = (Ipv4Addr::new(10, 0, 0, 2), 20000).into();
-
-	// Local addresses (base addresses for relay candidates)
-	let l_local_addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 1), 1000).into();
-	let r_local_addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 2), 2000).into();
-
-	// Host addresses (higher priority, will be trickled later)
-	let l_host_addr: SocketAddr = (Ipv4Addr::new(1, 1, 1, 1), 1000).into();
-	let r_host_addr: SocketAddr = (Ipv4Addr::new(2, 2, 2, 2), 2000).into();
-
-	// Create relay candidates (lower priority than host)
-	let l_relay = Candidate::relayed(l_relay_addr, l_local_addr, "udp").unwrap();
-	let r_relay = Candidate::relayed(r_relay_addr, r_local_addr, "udp").unwrap();
-
-	// Add relay candidates initially
-	l.rtc.add_local_candidate(l_relay.clone()).unwrap();
-	r.rtc.add_local_candidate(r_relay.clone()).unwrap();
-
-	// Exchange relay candidates
-	l.rtc.add_remote_candidate(r_relay.clone());
-	r.rtc.add_remote_candidate(l_relay.clone());
-
-	// Create offer/answer
-	let (offer, pending) = l.span.in_scope(|| {
-		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
-		change.apply().unwrap()
-	});
-
-	let answer = r.span.in_scope(|| r.rtc.sdp_api().accept_offer(offer))?;
-	l.span.in_scope(|| l.rtc.sdp_api().accept_answer(pending, answer))?;
-
-	// Connect using relay candidates
-	loop {
-		if l.is_connected() && r.is_connected() {
-			break;
-		}
-		if l.duration() > Duration::from_secs(5) {
-			panic!("Failed to connect with relay candidates");
-		}
-		progress(&mut l, &mut r)?;
-	}
-
-	// Get the data channel id
-	let channel_id = l
-		.events
-		.iter()
-		.find_map(|(_, e)| {
-			if let crate::vendor::str0m::Event::ChannelOpen(id, _) = e {
-				Some(*id)
-			} else {
-				None
-			}
-		})
-		.expect("Should have opened a data channel");
-
-	// Send data to trigger a Transmit and capture the source address
-	l.rtc.channel(channel_id).unwrap().write(true, b"test").unwrap();
-
-	let mut initial_send_addr: Option<SocketAddr> = None;
-	l.rtc
-		.handle_input(crate::vendor::str0m::Input::Timeout(l.last))
-		.unwrap();
-	loop {
-		match l.rtc.poll_output() {
-			Ok(Output::Transmit(t)) => {
-				initial_send_addr = Some(t.source);
-				break;
-			}
-			Ok(Output::Timeout(_)) => break,
-			Ok(_) => continue,
-			Err(e) => return Err(e),
-		}
-	}
-
-	let initial_send_addr = initial_send_addr.expect("Should have a Transmit after sending data");
-	assert_eq!(
-		initial_send_addr, l_relay_addr,
-		"Initial send address should be relay candidate"
-	);
-
-	// Now trickle in host candidates (higher priority)
-	let l_host = Candidate::host(l_host_addr, "udp").unwrap();
-	let r_host = Candidate::host(r_host_addr, "udp").unwrap();
-
-	let l_host_added = l.rtc.add_local_candidate(l_host.clone()).unwrap().clone();
-	let r_host_added = r.rtc.add_local_candidate(r_host.clone()).unwrap().clone();
-
-	// Exchange host candidates between peers (simulating trickle ICE signaling)
-	l.rtc.add_remote_candidate(r_host_added);
-	r.rtc.add_remote_candidate(l_host_added);
-
-	// Progress to allow ICE to discover and switch to better candidates
-	for _ in 0..100 {
-		progress(&mut l, &mut r)?;
-	}
-
-	// Send data again and capture the new source address - should have switched to host
-	l.rtc.channel(channel_id).unwrap().write(true, b"test2").unwrap();
-
-	let mut final_send_addr: Option<SocketAddr> = None;
-	l.rtc
-		.handle_input(crate::vendor::str0m::Input::Timeout(l.last))
-		.unwrap();
-	loop {
-		match l.rtc.poll_output() {
-			Ok(Output::Transmit(t)) => {
-				final_send_addr = Some(t.source);
-				break;
-			}
-			Ok(Output::Timeout(_)) => break,
-			Ok(_) => continue,
-			Err(e) => return Err(e),
-		}
-	}
-
-	let final_send_addr = final_send_addr.expect("Should have a Transmit after sending data post-trickle");
-
-	// Verify that ICE switched from relay to host candidates
-	assert_eq!(
-		final_send_addr, l_host_addr,
-		"After trickle, send address should switch to host candidate"
-	);
-
-	// Verify the switch actually happened
-	assert_ne!(
-		initial_send_addr, final_send_addr,
-		"Send address should have changed from relay ({}) to host ({})",
-		initial_send_addr, final_send_addr
-	);
 
 	Ok(())
 }
@@ -225,7 +76,7 @@ fn ice_custom_credentials() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -281,7 +132,7 @@ fn ice_stun_timeout_initial_rto() -> Result<(), RtcError> {
 	// Set up SDP exchange
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -371,7 +222,7 @@ fn ice_stun_timeout_max_rto() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -470,7 +321,7 @@ fn ice_stun_max_retransmits() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 
@@ -543,7 +394,7 @@ fn ice_lite_mode() -> Result<(), RtcError> {
 
 	let (offer, pending) = l.span.in_scope(|| {
 		let mut change = l.rtc.sdp_api();
-		let _ = change.add_channel("test".into());
+		let _ = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
 		change.apply().unwrap()
 	});
 

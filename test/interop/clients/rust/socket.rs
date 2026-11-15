@@ -20,10 +20,7 @@ async fn group(group: &mut moq_net::group::Consumer) -> anyhow::Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
-	ensure!(
-		args.len() == 6,
-		"usage: interop-socket URL PREFIX VERSION tcp|track dial|accept"
-	);
+	ensure!(args.len() == 5, "usage: interop-socket URL PREFIX VERSION dial|accept");
 	let mut config = moq_tokio::connect::Config::default();
 	config.version.push(args[3].parse().map_err(anyhow::Error::msg)?);
 	config.websocket.enabled = Some(false);
@@ -36,67 +33,40 @@ async fn main() -> anyhow::Result<()> {
 		.connect(args[1].parse::<url::Url>()?)
 		.established()
 		.await?;
-	let dial = args[5] == "dial";
-	ensure!(dial || args[5] == "accept", "unknown role");
-	match args[4].as_str() {
-		"tcp" => {
-			let mut stream = if dial {
-				endpoint.dial_tcp("python", 0)?.await?
-			} else {
-				let mut incoming = Box::pin(endpoint.accept_tcp());
-				std::future::poll_fn(|cx| {
-					assert!(incoming.as_mut().poll(cx).is_pending());
-					Poll::Ready(())
-				})
-				.await;
-				println!("listening");
-				incoming.await?.accept(0).await?
-			};
-			ensure!(stream.peer() == "python", "wrong peer");
-			for payload in PAYLOADS {
-				stream.producer.write_frame(None, payload)?;
-			}
-			stream.producer.finish()?;
-			group(&mut stream.consumer).await?;
-			println!("drained");
-			ack().await?;
+	let dial = args[4] == "dial";
+	ensure!(dial || args[4] == "accept", "unknown role");
+	let stream = if dial {
+		endpoint.dial_track("python", None)?.await?
+	} else {
+		let mut incoming = Box::pin(endpoint.accept_track());
+		std::future::poll_fn(|cx| {
+			assert!(incoming.as_mut().poll(cx).is_pending());
+			Poll::Ready(())
+		})
+		.await;
+		println!("listening");
+		incoming.await?.accept(None).await?
+	};
+	ensure!(stream.peer() == "python", "wrong peer");
+	ensure!(stream.consumer.info().max_age.is_none(), "track has an age limit");
+	let producer = stream.producer;
+	let mut consumer = stream.consumer.ordered();
+	for _ in 0..3 {
+		let mut group = producer.append_group()?;
+		for payload in PAYLOADS {
+			group.write_frame(None, payload)?;
 		}
-		"track" => {
-			let stream = if dial {
-				endpoint.dial_track("python", None)?.await?
-			} else {
-				let mut incoming = Box::pin(endpoint.accept_track());
-				std::future::poll_fn(|cx| {
-					assert!(incoming.as_mut().poll(cx).is_pending());
-					Poll::Ready(())
-				})
-				.await;
-				println!("listening");
-				incoming.await?.accept(None).await?
-			};
-			ensure!(stream.peer() == "python", "wrong peer");
-			ensure!(stream.consumer.info().max_age.is_none(), "track has an age limit");
-			let producer = stream.producer;
-			let mut consumer = stream.consumer.ordered();
-			for _ in 0..3 {
-				let mut group = producer.append_group()?;
-				for payload in PAYLOADS {
-					group.write_frame(None, payload)?;
-				}
-				group.finish()?;
-			}
-			let _producer = producer.finish()?;
-			for sequence in 0..3 {
-				let mut next = consumer.next_group().await?.context("short track")?;
-				ensure!(next.sequence == sequence, "wrong group order");
-				group(&mut next).await?;
-			}
-			ensure!(consumer.next_group().await?.is_none(), "extra group");
-			println!("drained");
-			ack().await?;
-		}
-		_ => anyhow::bail!("unknown protocol"),
+		group.finish()?;
 	}
+	let _producer = producer.finish()?;
+	for sequence in 0..3 {
+		let mut next = consumer.next_group().await?.context("short track")?;
+		ensure!(next.sequence == sequence, "wrong group order");
+		group(&mut next).await?;
+	}
+	ensure!(consumer.next_group().await?.is_none(), "extra group");
+	println!("drained");
+	ack().await?;
 	endpoint.close();
 	session.close().await?;
 	Ok(())

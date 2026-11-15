@@ -15,10 +15,6 @@ mod config_validation;
 mod contiguous;
 #[path = "crypto-compliance.rs"]
 mod crypto_compliance;
-#[path = "data-channel.rs"]
-mod data_channel;
-#[path = "data-channel-direct.rs"]
-mod data_channel_direct;
 mod dlrr;
 #[path = "dtls-close.rs"]
 mod dtls_close;
@@ -34,8 +30,6 @@ mod dtls_security;
 mod early_rtx_padding;
 #[path = "flappy-ice-state.rs"]
 mod flappy_ice_state;
-#[path = "handshake-direct.rs"]
-mod handshake_direct;
 #[path = "ice-candidates.rs"]
 mod ice_candidates;
 #[path = "ice-lite-connectivity.rs"]
@@ -63,8 +57,6 @@ mod network_conditions;
 mod no_local_media_added;
 #[path = "no-pre-ice-feedback.rs"]
 mod no_pre_ice_feedback;
-#[path = "partial-init.rs"]
-mod partial_init;
 #[path = "pli-feedback.rs"]
 mod pli_feedback;
 #[path = "poll-scaling.rs"]

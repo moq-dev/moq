@@ -125,15 +125,20 @@ runs:
     # then recompiles, which sh/dart/check.sh refuses. Most of this runner's
     # disk holds data mbx does not own, so those sweeps empty the cache without
     # closing the gap. Sweep once here, before anything builds, and never during
-    # the job. The global config carries the setting because generate.sh and
-    # Dart's build hooks drop MBX_* variables.
+    # the job. The runner's global mbx config carries the setting, since
+    # generate.sh and Dart's build hooks drop MBX_* variables. The runner
+    # provides it, read-only (dotfiles' nixos/modules/ci-runners.nix), so a job
+    # cannot write it: check it instead, with the variables stripped as a hook
+    # strips them, so a runner without it fails here and not mid-build.
     - name: Sweep the cache before building
       if: runner.environment == 'self-hosted'
       shell: bash
       run: |
-        config="$HOME/.config/mbx/config.toml"
-        mkdir -p "${config%/*}"
-        printf '[gc]\nauto = false\n' > "$config"
+        auto=$(env -i HOME="$HOME" PATH="$PATH" mbx settings get gc.auto)
+        if [ "$auto" != "false" ]; then
+          echo "::error::the runner's global mbx config must set gc.auto = false, but it reads '$auto' without MBX_* variables"
+          exit 1
+        fi
         mbx gc
 
     # The action only warns when it cannot reach the remote, which is how a

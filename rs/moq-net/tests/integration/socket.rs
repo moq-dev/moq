@@ -1,17 +1,13 @@
 #![cfg(feature = "async")]
 
 //! Sockets through a relay: endpoints on their own origins, each with a session to a
-//! relay, dialing and accepting `tcp` and `track` sessions over moq-lite-07 and
-//! moq-transport.
+//! relay, dialing and accepting `track` sessions over moq-lite-07 and moq-transport.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use bytes::Bytes;
 use moq_net::broadcast::TracksEvent;
-use moq_net::socket::{Endpoint, TcpStream, TrackStream};
-use moq_net::{Error, StreamError, Version, frame, group, origin, track};
+use moq_net::socket::{Endpoint, TrackStream};
+use moq_net::{Error, StreamError, Version, group, origin, track};
 
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
@@ -78,30 +74,14 @@ impl Fixture {
 	}
 }
 
-/// Start `endpoint` accepting `tcp` dials, which announces its server broadcast, for a
-/// test that dials it by hand.
+/// Start `endpoint` accepting dials, which announces its server broadcast, for a test
+/// that dials it by hand.
 fn listen(endpoint: &Endpoint) {
-	assert!(endpoint.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
+	assert!(endpoint.poll_accept_track(&kio::Waiter::noop()).is_pending());
 }
 
-const MB: usize = 1 << 20;
-
-/// Dial `acceptor` from `dialer` in a `tcp` session while `acceptor` accepts, returning
-/// both ends.
-async fn connect_tcp(dialer: &Endpoint, acceptor: &Endpoint) -> (TcpStream, TcpStream) {
-	let dial = dialer.dial_tcp(acceptor.id(), 0).unwrap();
-	let accept = async {
-		let incoming = acceptor.accept_tcp().await?;
-		assert_eq!(incoming.peer(), dialer.id());
-		incoming.accept(0).await
-	};
-	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
-		.await
-		.expect("connect timeout");
-	(dialed.expect("dial"), accepted.expect("accept"))
-}
-
-/// Dial `acceptor` from `dialer` in a `track` session; see [`connect_tcp`].
+/// Dial `acceptor` from `dialer` in a session while `acceptor` accepts, returning both
+/// ends.
 async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, TrackStream) {
 	let dial = dialer.dial_track(acceptor.id(), None).unwrap();
 	let accept = async {
@@ -115,22 +95,14 @@ async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, 
 	(dialed.expect("dial"), accepted.expect("accept"))
 }
 
-/// Read the next write from a `tcp` session, or `None` once the peer finished.
-async fn read(reader: &mut group::Consumer) -> Result<Option<Vec<u8>>, Error> {
-	kio::clock::timeout(TIMEOUT, reader.read_frame())
-		.await
-		.expect("read timeout")
-		.map(|frame| frame.map(|frame| frame.payload.to_vec()))
-}
-
-/// Write `payload` as one message of a `track` session: one group.
+/// Write `payload` as one message of a session: one group.
 fn send(track: &track::Producer, payload: &'static [u8]) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(None, payload).unwrap();
 	group.finish().unwrap();
 }
 
-/// Read the next message from a `track` session, or `None` once the peer finished.
+/// Read the next message from a session, or `None` once the peer finished.
 async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	kio::clock::timeout(TIMEOUT, async {
 		let Some(mut group) = reader.next_group().await? else {
@@ -143,400 +115,8 @@ async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	.expect("read timeout")
 }
 
-/// Writes flow both ways, in order, over every pairing of moq-lite-07 and moq-transport,
-/// and finishing a half is FIN: the handshake uses neither instances nor track listings.
-#[kio::test]
-async fn tcp_sessions_carry_writes_both_ways() {
-	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE), (IETF, IETF)] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(dialer, "alice").await;
-		let bob = fixture.endpoint(acceptor, "bob").await;
-		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-		assert_eq!(dialed.peer(), "bob");
-		assert_eq!(accepted.peer(), "alice");
-		assert_eq!(dialed.session(), accepted.session());
-
-		for write in [b"one", b"two", b"six"] {
-			dialed.producer.write_frame(None, &write[..]).unwrap();
-		}
-		for write in [b"one", b"two", b"six"] {
-			assert_eq!(
-				read(&mut accepted.consumer).await.unwrap().unwrap(),
-				write,
-				"{dialer} to {acceptor}"
-			);
-		}
-		accepted.producer.write_frame(None, &b"pong"[..]).unwrap();
-		assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), b"pong");
-
-		// FIN, each way.
-		dialed.producer.finish().unwrap();
-		assert_eq!(
-			read(&mut accepted.consumer).await.unwrap(),
-			None,
-			"{dialer} to {acceptor}"
-		);
-		accepted.producer.finish().unwrap();
-		assert_eq!(
-			read(&mut dialed.consumer).await.unwrap(),
-			None,
-			"{dialer} to {acceptor}"
-		);
-	}
-}
-
-/// A long session is one group of many writes, read in order.
-#[kio::test]
-async fn a_long_tcp_session_stays_in_order() {
-	const WRITES: u32 = 2000;
-	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
-	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-
-	let write = async {
-		for i in 0..WRITES {
-			let payload = Bytes::copy_from_slice(&i.to_be_bytes());
-			dialed
-				.producer
-				.ready(&frame::Info {
-					size: 4,
-					timestamp: None,
-				})
-				.await;
-			dialed.producer.write_frame(None, payload).unwrap();
-		}
-		dialed.producer.finish().unwrap();
-	};
-	let read_all = async {
-		for i in 0..WRITES {
-			assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), i.to_be_bytes());
-		}
-		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-	};
-	futures::join!(write, read_all);
-}
-
-/// A write's bytes reach the peer's reader as they arrive, before the write ends, so a
-/// forwarded TCP connection never waits on a whole frame.
-#[kio::test]
-async fn a_tcp_write_is_read_before_it_ends() {
-	for version in [LITE, IETF] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(version, "alice").await;
-		let bob = fixture.endpoint(version, "bob").await;
-		let (dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-		let mut write = dialed
-			.producer
-			.create_frame(frame::Info {
-				size: 8,
-				timestamp: None,
-			})
-			.unwrap();
-		write.write(&b"half"[..]).unwrap();
-
-		let mut frame = kio::clock::timeout(TIMEOUT, accepted.consumer.next_frame())
-			.await
-			.expect("read timeout")
-			.unwrap()
-			.expect("a frame");
-		let chunk = kio::clock::timeout(TIMEOUT, frame.read_chunk())
-			.await
-			.expect("{version}: the half never arrived");
-		assert_eq!(chunk.unwrap().unwrap(), &b"half"[..], "{version}");
-
-		write.write(&b"done"[..]).unwrap();
-		write.finish().unwrap().finish().unwrap();
-		let chunk = kio::clock::timeout(TIMEOUT, frame.read_chunk())
-			.await
-			.expect("read timeout");
-		assert_eq!(chunk.unwrap().unwrap(), &b"done"[..], "{version}");
-		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None, "{version}");
-	}
-}
-
-/// The relay going away, as when it restarts, resets the session for both ends: a read
-/// fails with the cause rather than reading as FIN.
-#[kio::test]
-async fn losing_the_relay_resets_a_tcp_session() {
-	for version in [LITE, IETF] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(version, "alice").await;
-		let bob = fixture.endpoint(version, "bob").await;
-		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-		dialed.producer.write_frame(None, &b"before"[..]).unwrap();
-		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"before");
-
-		for pair in fixture.sessions.drain(..) {
-			drop(pair);
-		}
-		assert!(read(&mut accepted.consumer).await.is_err(), "{version}: read as FIN");
-		assert!(read(&mut dialed.consumer).await.is_err(), "{version}: read as FIN");
-	}
-}
-
-/// Aborting a half is RST: the peer's read fails instead of ending.
-#[kio::test]
-async fn a_reset_tcp_half_fails_the_read() {
-	for version in [LITE, IETF] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(version, "alice").await;
-		let bob = fixture.endpoint(version, "bob").await;
-		let (dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-		let mut producer = dialed.producer;
-		producer.write_frame(None, &b"partial"[..]).unwrap();
-		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"partial");
-		producer.abort(Error::Cancel).unwrap();
-		assert!(
-			read(&mut accepted.consumer).await.is_err(),
-			"{version}: a reset read as FIN"
-		);
-	}
-}
-
-/// A slow reader paces the writer through every hop, and a session longer than a group's
-/// live tail loses nothing: the writer waits instead of running ahead.
-#[kio::test]
-async fn a_slow_tcp_reader_paces_the_writer() {
-	// Well past the 32 MiB a group copy holds, and the window every hop may buffer.
-	const WRITES: usize = 192;
-	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
-	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-
-	let written = Arc::new(AtomicUsize::new(0));
-	let write = {
-		let written = written.clone();
-		async move {
-			for i in 0..WRITES {
-				let payload = Bytes::from(vec![i as u8; MB]);
-				let info = frame::Info {
-					size: MB as u64,
-					timestamp: None,
-				};
-				dialed.producer.ready(&info).await;
-				dialed.producer.write_frame(None, payload).unwrap();
-				written.fetch_add(1, Ordering::SeqCst);
-			}
-			dialed.producer.finish().unwrap();
-		}
-	};
-	let read_all = async {
-		// Not reading for a while: the writer stalls well short of the end.
-		kio::clock::sleep(Duration::from_secs(5)).await;
-		let ahead = written.load(Ordering::SeqCst);
-		assert!(ahead < WRITES, "the writer ran {ahead} writes ahead of an idle reader");
-		for i in 0..WRITES {
-			let frame = read(&mut accepted.consumer).await.unwrap().expect("a write");
-			assert_eq!(frame.len(), MB);
-			assert!(frame.iter().all(|byte| *byte == i as u8), "write {i} out of order");
-			// Slowly.
-			kio::clock::sleep(Duration::from_millis(10)).await;
-		}
-		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-	};
-	kio::clock::timeout(Duration::from_secs(120), async { futures::join!(write, read_all) })
-		.await
-		.expect("session timeout");
-}
-
-/// A `tcp` session carol dialed by hand, as a nonconforming implementation would.
-struct ByHand {
-	/// Bob's end.
-	accepted: TcpStream,
-	/// Carol's half, which she writes groups to as she likes.
-	half: track::Producer,
-	_dialed: track::Subscriber,
-	_endpoint: origin::Route,
-	_carol: origin::Producer,
-}
-
-/// Dial bob by hand from carol in a `tcp` session.
-async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
-	let carol = fixture.client(LITE).await;
-	let endpoint = carol
-		.route("room/.client/carol", moq_net::origin::RouteOptions::hidden())
-		.unwrap();
-	endpoint.announce().unwrap();
-	let mut requests = endpoint.broadcast().requests();
-	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
-	listen(bob);
-	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.server/bob", None))
-		.await
-		.expect("request timeout")
-		.expect("bob's endpoint");
-	let dial = broadcast.track(name).unwrap().subscribe(None);
-
-	let accept = async {
-		let incoming = bob.accept_tcp().await.unwrap();
-		incoming.accept(0).await
-	};
-	let answer = async {
-		let request = kio::wait(|waiter| requests.poll_requested_track(waiter)).await.unwrap();
-		assert_eq!(request.name(), name);
-		request.accept(None)
-	};
-	let (accepted, half, dialed) = kio::clock::timeout(TIMEOUT, async { futures::join!(accept, answer, dial) })
-		.await
-		.expect("connect timeout");
-	ByHand {
-		accepted: accepted.expect("accept"),
-		half,
-		_dialed: dialed.expect("bob's half"),
-		_endpoint: endpoint,
-		_carol: carol,
-	}
-}
-
-/// A `tcp` dial and its accept each subscribe to the peer's half at the priority they
-/// ask, through the relay, which is what schedules that half against other traffic.
-#[kio::test]
-async fn tcp_halves_are_read_at_the_asked_priority() {
-	for version in [LITE, IETF] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(version, "alice").await;
-		let bob = fixture.endpoint(version, "bob").await;
-
-		// Dave's server endpoint, played by hand, sees the priority alice dials with.
-		let dave = fixture.client(version).await;
-		let server = dave
-			.route("room/.server/dave", moq_net::origin::RouteOptions::hidden())
-			.unwrap();
-		server.announce().unwrap();
-		let mut requests = server.broadcast().requests();
-		let mut dial = alice.dial_tcp("dave", 7).unwrap().into_inner();
-		let request = kio::clock::timeout(
-			TIMEOUT,
-			kio::wait(|waiter| {
-				assert!(dial.poll_ok(waiter).is_pending());
-				requests.poll_requested_track(waiter)
-			}),
-		)
-		.await
-		.expect("dial timeout")
-		.unwrap();
-		assert_eq!(request.subscription().unwrap().priority, 7, "{version}");
-
-		// Carol's client endpoint, played by hand, sees the priority bob accepts with.
-		let carol = fixture.client(version).await;
-		let client = carol
-			.route("room/.client/carol", moq_net::origin::RouteOptions::hidden())
-			.unwrap();
-		client.announce().unwrap();
-		let mut requests = client.broadcast().requests();
-		listen(&bob);
-		let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.server/bob", None))
-			.await
-			.expect("request timeout")
-			.expect("bob's endpoint");
-		let _dial = broadcast
-			.track("tcp/carol/bob/0123456789abcdef0123456789abcdef")
-			.unwrap()
-			.subscribe(None);
-		let incoming = kio::clock::timeout(TIMEOUT, bob.accept_tcp())
-			.await
-			.expect("accept timeout")
-			.unwrap();
-		let mut accept = incoming.accept(-3).into_inner();
-		let request = kio::clock::timeout(
-			TIMEOUT,
-			kio::wait(|waiter| {
-				assert!(accept.poll_ok(waiter).is_pending());
-				requests.poll_requested_track(waiter)
-			}),
-		)
-		.await
-		.expect("accept timeout")
-		.unwrap();
-		assert_eq!(request.subscription().unwrap().priority, -3, "{version}");
-	}
-}
-
-/// Write `sequence` as a finished group of one write.
-fn write_group(half: &track::Producer, sequence: u64) {
-	let mut group = half.create_group(group::Info { sequence }).unwrap();
-	group.write_frame(None, &b"data"[..]).unwrap();
-	group.finish().unwrap();
-}
-
-/// A peer that writes a second group in a `tcp` session breaks the protocol: the session
-/// is reset, both halves.
-#[kio::test]
-async fn a_second_tcp_group_resets_the_session() {
-	let mut fixture = Fixture::new();
-	let bob = fixture.endpoint(LITE, "bob").await;
-	// Bound whole, so carol's endpoint and read stay open to the end.
-	let mut session = dial_by_hand(&mut fixture, &bob).await;
-	let (accepted, half) = (&mut session.accepted, &session.half);
-
-	write_group(half, 0);
-	write_group(half, 1);
-	// Bob reads at most the first group's write, then the reset.
-	let mut reads = 0;
-	loop {
-		match read(&mut accepted.consumer).await {
-			Ok(Some(_)) => reads += 1,
-			Ok(None) => panic!("a second group read as FIN"),
-			Err(_) => break,
-		}
-		assert!(reads <= 1, "read past the first group");
-	}
-	// And bob's own half was reset with it.
-	kio::clock::sleep(SETTLE).await;
-	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
-}
-
-/// A second group after the first one finished, and was read to its end, still resets
-/// the half that remains open.
-#[kio::test]
-async fn a_second_tcp_group_after_fin_resets_the_session() {
-	let mut fixture = Fixture::new();
-	let bob = fixture.endpoint(LITE, "bob").await;
-	// Bound whole, so carol's endpoint and read stay open to the end.
-	let mut session = dial_by_hand(&mut fixture, &bob).await;
-	let (accepted, half) = (&mut session.accepted, &session.half);
-
-	write_group(half, 0);
-	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
-	assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-	accepted.producer.write_frame(None, &b"still open"[..]).unwrap();
-
-	write_group(half, 1);
-	kio::clock::sleep(SETTLE).await;
-	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
-}
-
-/// The peer resetting its half after its group finished, and was read to its end, resets
-/// the half that remains open, as a TCP RST after FIN does. Finishing it instead leaves
-/// that half open, as a half-close does.
-#[kio::test]
-async fn a_peer_reset_after_fin_resets_the_session() {
-	for reset in [true, false] {
-		let mut fixture = Fixture::new();
-		let bob = fixture.endpoint(LITE, "bob").await;
-		// Bound whole, so carol's endpoint and read stay open to the end.
-		let session = dial_by_hand(&mut fixture, &bob).await;
-		let ByHand { mut accepted, half, .. } = session;
-
-		write_group(&half, 0);
-		assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
-		assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
-		accepted.producer.write_frame(None, &b"still open"[..]).unwrap();
-
-		if reset {
-			half.abort(Error::Cancel).unwrap();
-		} else {
-			let _half = half.finish().unwrap();
-		}
-		kio::clock::sleep(SETTLE).await;
-		let late = accepted.producer.write_frame(None, &b"late"[..]);
-		assert_eq!(late.is_err(), reset, "reset: {reset}");
-	}
-}
-
 /// Messages flow both ways, in order, over every pairing of moq-lite-07 and
-/// moq-transport.
+/// moq-transport: the handshake uses neither instances nor track listings.
 #[kio::test]
 async fn track_sessions_carry_messages_both_ways() {
 	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE), (IETF, IETF)] {
@@ -545,6 +125,7 @@ async fn track_sessions_carry_messages_both_ways() {
 		let bob = fixture.endpoint(acceptor, "bob").await;
 		let (dialed, accepted) = connect_track(&alice, &bob).await;
 		assert_eq!(dialed.peer(), "bob");
+		assert_eq!(accepted.peer(), "alice");
 		assert_eq!(dialed.session(), accepted.session());
 		let mut reader = accepted.consumer.ordered();
 		let mut replies = dialed.consumer.ordered();
@@ -565,6 +146,22 @@ async fn track_sessions_carry_messages_both_ways() {
 		// Finishing a half closes the pipe that way.
 		let _finished = dialed.producer.finish().unwrap();
 		assert_eq!(recv(&mut reader).await.unwrap(), None);
+	}
+}
+
+/// Aborting a half is an error: the peer's read fails instead of ending.
+#[kio::test]
+async fn an_aborted_half_fails_the_read() {
+	for version in [LITE, IETF] {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(version, "alice").await;
+		let bob = fixture.endpoint(version, "bob").await;
+		let (dialed, accepted) = connect_track(&alice, &bob).await;
+		let mut reader = accepted.consumer.ordered();
+		send(&dialed.producer, b"partial");
+		assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"partial");
+		dialed.producer.abort(Error::Cancel).unwrap();
+		assert!(recv(&mut reader).await.is_err(), "{version}: an abort read as a finish");
 	}
 }
 
@@ -617,27 +214,30 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"two");
 }
 
-/// A pair of endpoints holds several sessions at once in either protocol, each its own
-/// pipe.
+/// A pair of endpoints holds several sessions at once, each its own pipe.
 #[kio::test]
 async fn several_sessions_share_a_pair() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut first, mut first_accepted) = connect_tcp(&alice, &bob).await;
-	let (mut second, mut second_accepted) = connect_tcp(&alice, &bob).await;
-	// Either side may dial, in either protocol.
+	let (first, first_accepted) = connect_track(&alice, &bob).await;
+	let (second, second_accepted) = connect_track(&alice, &bob).await;
+	// Either side may dial.
 	let (third, third_accepted) = connect_track(&bob, &alice).await;
 	assert_ne!(first.session(), second.session());
 
-	second.producer.write_frame(None, &b"second"[..]).unwrap();
-	first.producer.write_frame(None, &b"first"[..]).unwrap();
+	send(&second.producer, b"second");
+	send(&first.producer, b"first");
 	send(&third_accepted.producer, b"third");
-	assert_eq!(read(&mut first_accepted.consumer).await.unwrap().unwrap(), b"first");
-	assert_eq!(read(&mut second_accepted.consumer).await.unwrap().unwrap(), b"second");
+	assert_eq!(
+		recv(&mut first_accepted.consumer.ordered()).await.unwrap().unwrap(),
+		b"first"
+	);
+	assert_eq!(
+		recv(&mut second_accepted.consumer.ordered()).await.unwrap().unwrap(),
+		b"second"
+	);
 	assert_eq!(recv(&mut third.consumer.ordered()).await.unwrap().unwrap(), b"third");
-	first.producer.finish().unwrap();
-	second.producer.finish().unwrap();
 }
 
 /// Rejecting a dial resets it.
@@ -646,9 +246,9 @@ async fn a_rejected_dial_fails() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let dial = alice.dial_tcp("bob", 0).unwrap();
+	let dial = alice.dial_track("bob", None).unwrap();
 	let reject = async {
-		bob.accept_tcp().await.unwrap().reject();
+		bob.accept_track().await.unwrap().reject();
 	};
 	let (dialed, ()) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, reject) })
 		.await
@@ -656,36 +256,28 @@ async fn a_rejected_dial_fails() {
 	assert!(dialed.is_err(), "a rejected dial connected");
 }
 
-/// A dial in a protocol the peer does not accept is reset, while the peer still accepts
-/// the protocol it listens on.
+/// A dial in another protocol than `track` is reset and never surfaces as a dial.
 #[kio::test]
-async fn a_protocol_nobody_accepts_is_reset() {
+async fn an_unknown_protocol_is_reset() {
 	let mut fixture = Fixture::new();
-	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let dial = alice.dial_track("bob", None).unwrap();
-	let accept = async { kio::clock::timeout(SETTLE, bob.accept_tcp()).await };
-	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
-		.await
-		.expect("dial timeout");
-	assert!(dialed.is_err(), "a track dial reached a tcp listener");
-	assert!(accepted.is_err(), "a track dial surfaced as a tcp dial");
-
-	// An unknown protocol is reset too.
+	listen(&bob);
 	let mallory = fixture.client(LITE).await;
 	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/bob", None))
 		.await
 		.expect("request timeout")
 		.expect("bob's endpoint");
-	let unknown = broadcast
-		.track("quic/mallory/bob/0123456789abcdef0123456789abcdef")
-		.unwrap()
-		.subscribe(None);
-	let unknown = async { kio::clock::timeout(TIMEOUT, unknown).await };
-	let accept = async { kio::clock::timeout(SETTLE, bob.accept_tcp()).await };
-	let (unknown, accepted) = futures::join!(unknown, accept);
-	assert!(unknown.expect("unknown timeout").is_err());
-	assert!(accepted.is_err(), "an unknown protocol surfaced as a dial");
+	for protocol in ["tcp", "quic"] {
+		let unknown = broadcast
+			.track(&format!("{protocol}/mallory/bob/0123456789abcdef0123456789abcdef"))
+			.unwrap()
+			.subscribe(None);
+		let unknown = async { kio::clock::timeout(TIMEOUT, unknown).await };
+		let accept = async { kio::clock::timeout(SETTLE, bob.accept_track()).await };
+		let (unknown, accepted) = futures::join!(unknown, accept);
+		assert!(unknown.expect("unknown timeout").is_err(), "{protocol}");
+		assert!(accepted.is_err(), "a {protocol} dial surfaced as a dial");
+	}
 }
 
 /// A dial waits for its peer's endpoint to be announced, and a dial to itself fails.
@@ -693,21 +285,20 @@ async fn a_protocol_nobody_accepts_is_reset() {
 async fn a_dial_waits_for_its_peer() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
-	assert!(matches!(alice.dial_tcp("alice", 0), Err(Error::Unsupported)));
-	let mut dial = alice.dial_tcp("bob", 0).unwrap();
+	assert!(matches!(alice.dial_track("alice", None), Err(Error::Unsupported)));
+	let mut dial = alice.dial_track("bob", None).unwrap();
 	assert!(
 		kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
 		"a dial to nobody resolved"
 	);
 
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let accept = async { bob.accept_tcp().await?.accept(0).await };
+	let accept = async { bob.accept_track().await?.accept(None).await };
 	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
 		.await
 		.expect("connect timeout");
 	let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
 	assert_eq!(dialed.session(), accepted.session());
-	dialed.producer.finish().unwrap();
 }
 
 /// An accept waits for the dialer's endpoint while the dial stays open, since a relay can
@@ -719,19 +310,19 @@ async fn an_accept_waits_for_its_dialer() {
 	let bob = fixture.endpoint(LITE, "bob").await;
 	listen(&bob);
 	let carol = fixture.client(LITE).await;
-	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
+	let name = "track/carol/bob/0123456789abcdef0123456789abcdef";
 	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.server/bob", None))
 		.await
 		.expect("request timeout")
 		.expect("bob's endpoint");
 	let dial = broadcast.track(name).unwrap().subscribe(None);
 
-	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_tcp())
+	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_track())
 		.await
 		.expect("accept timeout")
 		.unwrap();
 	assert_eq!(incoming.peer(), "carol");
-	let mut accept = incoming.accept(0);
+	let mut accept = incoming.accept(None);
 	assert!(
 		kio::clock::timeout(SETTLE, &mut accept).await.is_err(),
 		"bob's accept ended before carol announced"
@@ -767,15 +358,15 @@ async fn an_accept_ends_with_its_dial() {
 		.expect("request timeout")
 		.expect("bob's endpoint");
 	let forged = broadcast
-		.track("tcp/carol/bob/0123456789abcdef0123456789abcdef")
+		.track("track/carol/bob/0123456789abcdef0123456789abcdef")
 		.unwrap()
 		.subscribe(None);
-	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_tcp())
+	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_track())
 		.await
 		.expect("accept timeout")
 		.unwrap();
 	assert_eq!(incoming.peer(), "carol");
-	let mut accept = incoming.accept(0);
+	let mut accept = incoming.accept(None);
 	assert!(
 		kio::clock::timeout(SETTLE, &mut accept).await.is_err(),
 		"bob's accept ended while the dial was open"
@@ -794,7 +385,7 @@ async fn a_replayed_session_never_connects() {
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
 	let carol = fixture.endpoint(LITE, "carol").await;
-	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
+	let (dialed, accepted) = connect_track(&alice, &bob).await;
 	let session = accepted.session().to_string();
 
 	// Replayed from bob's side, which knows the session.
@@ -807,11 +398,11 @@ async fn a_replayed_session_never_connects() {
 
 	// Under the name alice dialed: carol is not its acceptor, so she resets it unheard.
 	let replayed = broadcast
-		.track(&format!("tcp/alice/bob/{session}"))
+		.track(&format!("track/alice/bob/{session}"))
 		.unwrap()
 		.subscribe(None);
 	// Carol accepts first, so the replay reaches her listening.
-	let accept = async { kio::clock::timeout(SETTLE, carol.accept_tcp()).await };
+	let accept = async { kio::clock::timeout(SETTLE, carol.accept_track()).await };
 	let (accepted_by_carol, replayed) = futures::join!(accept, async { kio::clock::timeout(TIMEOUT, replayed).await });
 	assert!(
 		replayed.expect("replay timeout").is_err(),
@@ -821,78 +412,65 @@ async fn a_replayed_session_never_connects() {
 
 	// Renamed for carol: alice never dialed it, so she resets carol's accept.
 	let renamed = broadcast
-		.track(&format!("tcp/alice/carol/{session}"))
+		.track(&format!("track/alice/carol/{session}"))
 		.unwrap()
 		.subscribe(None);
-	let incoming = kio::clock::timeout(TIMEOUT, carol.accept_tcp())
+	let incoming = kio::clock::timeout(TIMEOUT, carol.accept_track())
 		.await
 		.expect("accept timeout")
 		.unwrap();
 	assert_eq!(incoming.peer(), "alice");
 	let (accepted_by_carol, renamed) =
-		kio::clock::timeout(TIMEOUT, async { futures::join!(incoming.accept(0), renamed) })
+		kio::clock::timeout(TIMEOUT, async { futures::join!(incoming.accept(None), renamed) })
 			.await
 			.expect("connect timeout");
 	assert!(accepted_by_carol.is_err(), "carol connected to a replayed session");
 	assert!(renamed.is_err(), "the replayer read carol's half");
 
 	// The real session is untouched.
-	dialed.producer.write_frame(None, &b"still here"[..]).unwrap();
-	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"still here");
+	send(&dialed.producer, b"still here");
+	assert_eq!(
+		recv(&mut accepted.consumer.ordered()).await.unwrap().unwrap(),
+		b"still here"
+	);
 }
 
 /// A third party asking bob for a session in alice's name surfaces at bob as a dial from
 /// alice, but alice never dialed it, so she resets bob's accept, and the forger reads
-/// nothing. The same holds in either protocol.
+/// nothing.
 #[kio::test]
 async fn a_forged_dial_never_connects() {
-	for protocol in ["tcp", "track"] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(LITE, "alice").await;
-		let bob = fixture.endpoint(LITE, "bob").await;
-		let mallory = fixture.client(LITE).await;
-		// Alice is a client, dialing elsewhere, so her client broadcast answers bob.
-		let _elsewhere = alice.dial_tcp("carol", 0).unwrap();
-		listen(&bob);
+	let mut fixture = Fixture::new();
+	let alice = fixture.endpoint(LITE, "alice").await;
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let mallory = fixture.client(LITE).await;
+	// Alice is a client, dialing elsewhere, so her client broadcast answers bob.
+	let _elsewhere = alice.dial_track("carol", None).unwrap();
+	listen(&bob);
 
-		let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/bob", None))
-			.await
-			.expect("request timeout")
-			.expect("bob's endpoint");
-		let forged = broadcast
-			.track(&format!("{protocol}/alice/bob/0123456789abcdef0123456789abcdef"))
-			.unwrap()
-			.subscribe(None);
+	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/bob", None))
+		.await
+		.expect("request timeout")
+		.expect("bob's endpoint");
+	let forged = broadcast
+		.track("track/alice/bob/0123456789abcdef0123456789abcdef")
+		.unwrap()
+		.subscribe(None);
 
-		let (incoming_peer, accepted) = match protocol {
-			"tcp" => {
-				let incoming = kio::clock::timeout(TIMEOUT, bob.accept_tcp())
-					.await
-					.expect("accept timeout")
-					.unwrap();
-				let peer = incoming.peer().to_string();
-				let accepted = kio::clock::timeout(TIMEOUT, incoming.accept(0)).await;
-				(peer, accepted.expect("accept timeout").map(drop))
-			}
-			_ => {
-				let incoming = kio::clock::timeout(TIMEOUT, bob.accept_track())
-					.await
-					.expect("accept timeout")
-					.unwrap();
-				let peer = incoming.peer().to_string();
-				let accepted = kio::clock::timeout(TIMEOUT, incoming.accept(None)).await;
-				(peer, accepted.expect("accept timeout").map(drop))
-			}
-		};
-		assert_eq!(incoming_peer, "alice");
-		assert!(accepted.is_err(), "bob connected to a forged {protocol} dial");
-		let forged = kio::clock::timeout(TIMEOUT, forged).await.expect("forged timeout");
-		assert!(forged.is_err(), "the forger read bob's {protocol} half");
+	let incoming = kio::clock::timeout(TIMEOUT, bob.accept_track())
+		.await
+		.expect("accept timeout")
+		.unwrap();
+	assert_eq!(incoming.peer(), "alice");
+	let accepted = kio::clock::timeout(TIMEOUT, incoming.accept(None))
+		.await
+		.expect("accept timeout");
+	assert!(accepted.is_err(), "bob connected to a forged dial");
+	let forged = kio::clock::timeout(TIMEOUT, forged).await.expect("forged timeout");
+	assert!(forged.is_err(), "the forger read bob's half");
 
-		// Alice never heard of it as a dial either, even accepting.
-		assert!(kio::clock::timeout(SETTLE, alice.accept_tcp()).await.is_err());
-		assert!(kio::clock::timeout(SETTLE, alice.accept_track()).await.is_err());
-	}
+	// Alice never heard of it as a dial either, even accepting.
+	assert!(kio::clock::timeout(SETTLE, alice.accept_track()).await.is_err());
 }
 
 /// A dial dropped before the peer accepts resets the accept.
@@ -901,10 +479,10 @@ async fn a_dropped_dial_resets_the_accept() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let mut dial = alice.dial_tcp("bob", 0).unwrap();
+	let mut dial = alice.dial_track("bob", None).unwrap();
 	// Polled until bob hears of it, then dropped.
 	let incoming = kio::clock::timeout(TIMEOUT, async {
-		match futures::future::select(std::pin::pin!(bob.accept_tcp()), &mut dial).await {
+		match futures::future::select(std::pin::pin!(bob.accept_track()), &mut dial).await {
 			futures::future::Either::Left((incoming, _)) => incoming,
 			futures::future::Either::Right(_) => panic!("the dial resolved unaccepted"),
 		}
@@ -913,7 +491,7 @@ async fn a_dropped_dial_resets_the_accept() {
 	.expect("accept timeout")
 	.unwrap();
 	drop(dial);
-	let accepted = kio::clock::timeout(TIMEOUT, incoming.accept(0))
+	let accepted = kio::clock::timeout(TIMEOUT, incoming.accept(None))
 		.await
 		.expect("accept timeout");
 	assert!(accepted.is_err(), "bob connected to a dropped dial");
@@ -925,30 +503,19 @@ async fn closing_an_endpoint_ends_its_sessions() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut tcp_dialed, mut tcp_accepted) = connect_tcp(&alice, &bob).await;
-	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
+	let (dialed, accepted) = connect_track(&alice, &bob).await;
 
 	bob.close();
 	// Through the relay, bob's close reaches alice as a SESSION_CLOSED reset, as it would
 	// on one origin.
-	let ended = read(&mut tcp_dialed.consumer).await;
+	let ended = recv(&mut dialed.consumer.ordered()).await;
 	assert!(
 		matches!(ended, Err(Error::Stream(StreamError::Session(_)))),
-		"bob's tcp half outlived his endpoint: {ended:?}"
+		"bob's half outlived his endpoint: {ended:?}"
 	);
-	// Both halves of bob's own tcp session end.
-	assert!(read(&mut tcp_accepted.consumer).await.is_err());
-	assert!(tcp_accepted.producer.write_frame(None, &b"late"[..]).is_err());
-	assert!(
-		recv(&mut track_dialed.consumer.ordered()).await.is_err(),
-		"bob's track half outlived his endpoint"
-	);
-	assert!(track_accepted.producer.append_group().is_err());
-	assert!(matches!(bob.accept_tcp().await, Err(Error::Closed)));
+	assert!(accepted.producer.append_group().is_err());
 	assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
-	assert!(matches!(bob.dial_tcp("alice", 0), Err(Error::Closed)));
-	// Alice saw bob's half reset, so she reset hers: the session is gone both ways.
-	assert!(tcp_dialed.producer.finish().is_err());
+	assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));
 }
 
 /// Session tracks are the secret that keeps third parties out, so no listing names them:
@@ -959,13 +526,10 @@ async fn session_tracks_are_never_listed() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
-	let (track_dialed, track_accepted) = connect_track(&alice, &bob).await;
-	dialed.producer.write_frame(None, &b"secret"[..]).unwrap();
-	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"secret");
-	send(&track_dialed.producer, b"secret");
+	let (dialed, accepted) = connect_track(&alice, &bob).await;
+	send(&dialed.producer, b"secret");
 	assert_eq!(
-		recv(&mut track_accepted.consumer.ordered()).await.unwrap().unwrap(),
+		recv(&mut accepted.consumer.ordered()).await.unwrap().unwrap(),
 		b"secret"
 	);
 
@@ -986,7 +550,6 @@ async fn session_tracks_are_never_listed() {
 			"{id} listed a track"
 		);
 	}
-	dialed.producer.finish().unwrap();
 }
 
 /// An endpoint announces only the roles it takes: its first dial its client broadcast,
@@ -997,8 +560,8 @@ async fn an_endpoint_announces_only_its_roles() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let _elsewhere = bob.dial_tcp("carol", 0).unwrap();
-	let mut dial = alice.dial_tcp("bob", 0).unwrap();
+	let _elsewhere = bob.dial_track("carol", None).unwrap();
+	let mut dial = alice.dial_track("bob", None).unwrap();
 	assert!(
 		kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
 		"a dial reached an endpoint that only dials"
@@ -1015,13 +578,12 @@ async fn an_endpoint_announces_only_its_roles() {
 		assert_eq!(matches!(found, Ok(Ok(_))), announced, "{path}");
 	}
 
-	let accept = async { bob.accept_tcp().await?.accept(0).await };
+	let accept = async { bob.accept_track().await?.accept(None).await };
 	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
 		.await
 		.expect("connect timeout");
 	let (dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
 	assert_eq!(dialed.session(), accepted.session());
-	dialed.producer.finish().unwrap();
 	let found = kio::clock::timeout(TIMEOUT, eve.consume().request("room/.server/bob", None)).await;
 	assert!(matches!(found, Ok(Ok(_))), "bob's server broadcast");
 }
@@ -1056,33 +618,6 @@ async fn the_first_burst_survives_a_late_subscribe_answer() {
 	assert_eq!(recv(&mut accepted.consumer.ordered()).await.unwrap(), None);
 }
 
-/// TCP must also recover every frame when FIN overtakes the subscription answer.
-#[kio::test]
-async fn the_first_tcp_writes_survive_a_late_subscribe_answer() {
-	for version in [LITE, IETF, "moq-transport-20", "moq-transport-22"] {
-		let mut fixture = Fixture::new();
-		let alice = fixture.endpoint(version, "alice").await;
-		let bob = fixture.endpoint(version, "bob").await;
-		let dial = alice.dial_tcp("bob", 0).unwrap();
-		let accept = async {
-			let mut stream = bob.accept_tcp().await.unwrap().accept(0).await.unwrap();
-			for payload in [b"first".as_slice(), b"", b"last"] {
-				stream.producer.write_frame(None, payload).unwrap();
-			}
-			(stream.producer.finish().unwrap(), stream.consumer)
-		};
-		let (dialed, accepted) = futures::join!(dial, accept);
-		let mut dialed = dialed.unwrap();
-		let (_finished, mut accepted) = accepted;
-		for payload in [b"first".as_slice(), b"", b"last"] {
-			assert_eq!(read(&mut dialed.consumer).await.unwrap().unwrap(), payload, "{version}");
-		}
-		assert_eq!(read(&mut dialed.consumer).await.unwrap(), None);
-		dialed.producer.finish().unwrap();
-		assert_eq!(read(&mut accepted).await.unwrap(), None);
-	}
-}
-
 /// The moq-lite versions before hidden broadcasts.
 const OLDER: [&str; 2] = ["moq-lite-06", "moq-lite-03"];
 
@@ -1095,18 +630,14 @@ async fn an_older_hop_fails_dials_and_accepts() {
 		let alice = fixture.endpoint(older, "alice").await;
 		let bob = fixture.endpoint(LITE, "bob").await;
 
-		let dialed = kio::clock::timeout(SETTLE, alice.dial_tcp("bob", 0).unwrap()).await;
-		assert!(matches!(dialed, Ok(Err(Error::Unsupported))), "{older} tcp dial");
 		let dialed = kio::clock::timeout(SETTLE, alice.dial_track("bob", None).unwrap()).await;
-		assert!(matches!(dialed, Ok(Err(Error::Unsupported))), "{older} track dial");
-		let accepted = kio::clock::timeout(SETTLE, alice.accept_tcp()).await;
-		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
+		assert!(matches!(dialed, Ok(Err(Error::Unsupported))), "{older} dial");
 		let accepted = kio::clock::timeout(SETTLE, alice.accept_track()).await;
 		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
 
 		// So bob never heard a dial to hold an accept open for.
 		assert!(
-			kio::clock::timeout(SETTLE, bob.accept_tcp()).await.is_err(),
+			kio::clock::timeout(SETTLE, bob.accept_track()).await.is_err(),
 			"{older}: bob heard a dial"
 		);
 	}
@@ -1121,9 +652,9 @@ async fn a_peer_behind_an_older_hop_fails_its_accepts() {
 		let alice = fixture.endpoint(LITE, "alice").await;
 		let bob = fixture.endpoint(older, "bob").await;
 
-		let accepted = kio::clock::timeout(SETTLE, bob.accept_tcp()).await;
+		let accepted = kio::clock::timeout(SETTLE, bob.accept_track()).await;
 		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
-		let mut dial = alice.dial_tcp("bob", 0).unwrap();
+		let mut dial = alice.dial_track("bob", None).unwrap();
 		assert!(
 			kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
 			"{older}: a dial behind an older hop resolved"
@@ -1138,7 +669,7 @@ async fn an_older_hop_fails_a_waiting_dial() {
 	let mut fixture = Fixture::new();
 	let client = fixture.origin();
 	let alice = Endpoint::new(&client, "room", "alice").unwrap();
-	let mut dial = alice.dial_tcp("bob", 0).unwrap();
+	let mut dial = alice.dial_track("bob", None).unwrap();
 	assert!(
 		kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
 		"a dial to nobody resolved"
@@ -1160,7 +691,6 @@ async fn an_older_hop_opted_into_hidden_connects() {
 		.await;
 	let alice = Endpoint::new(&client, "room", "alice").unwrap();
 	let bob = fixture.endpoint(LITE, "bob").await;
-	let (dialed, accepted) = connect_tcp(&alice, &bob).await;
+	let (dialed, accepted) = connect_track(&alice, &bob).await;
 	assert_eq!(dialed.session(), accepted.session());
-	dialed.producer.finish().unwrap();
 }
