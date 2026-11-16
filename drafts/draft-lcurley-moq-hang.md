@@ -60,9 +60,9 @@ informative:
 
 --- abstract
 
-Hang is a real-time conferencing protocol built on top of moq-lite.
-A room consists of multiple participants who publish media tracks.
-All updates are live, such as a change in participants or media tracks.
+Hang is the media format built on top of moq-lite: a catalog describing a broadcast's audio, video, text, and data tracks, and a container framing each media payload with its timestamp.
+It is the format every gateway shares, so media ingested over one protocol can be served over another.
+All updates are live, such as a change in media tracks.
 
 --- note_Note_to_Readers
 
@@ -94,39 +94,6 @@ Hang introduces additional terminology:
 - **Catalog**: A JSON document that describes each available media track, supporting live updates.
 - **Container**: A tiny header in front of each media payload containing the timestamp.
 
-
-# Discovery
-The first requirement for a real-time conferencing application is to discover other participants in the same room.
-Hang does this using moq-lite's ANNOUNCE capabilities.
-
-A room consists of a path.
-Any participants within the room MUST publish a broadcast with the room path as a prefix which SHOULD end with the `.hang` suffix.
-
-For example:
-
-~~~
-/room123/alice.hang
-/room123/bob.hang
-/room456/zoe.hang
-~~~
-
-A participant issues an ANNOUNCE_PLEASE message to discover any other participants in the same room.
-The server (relay) will then respond with an ANNOUNCE message for any matching broadcasts, including their own.
-
-For example:
-
-~~~
-ANNOUNCE_PLEASE prefix=/room/
-ANNOUNCE suffix=alice.hang active=true
-ANNOUNCE suffix=bob.hang   active=true
-~~~
-
-If a participant leaves or is disconnected, their broadcast is unannounced.
-Publishers and subscribers SHOULD terminate any subscriptions once a participant is unannounced.
-
-~~~
-ANNOUNCE suffix=alice.hang active=false
-~~~
 
 # Catalog {#catalog}
 The catalog describes the available media tracks for a single participant.
@@ -164,8 +131,12 @@ type Catalog = {
 }
 ~~~
 
+Each root member this document defines MUST have the shape this document gives it.
+A consumer MUST refuse a catalog in which such a member, or a field within it that this document defines, has another type, is `null`, or is out of range, rather than read the member as absent; only a field this document says to treat as absent is spared.
+A section that silently read as empty would hide a publisher bug.
+
 Additional fields MAY be added based on the application.
-An application SHOULD name its own root sections with a namespaced key, such as a reverse-DNS name (`com.example.telemetry`), so they cannot collide with a section a later version of this specification defines.
+An application MUST NOT carry its own data under a root key this document defines, and SHOULD name its own root sections with a namespaced key, such as a reverse-DNS name (`com.example.telemetry`), so they cannot collide with a section a later version of this specification defines, whose consumers would refuse the catalog.
 The catalog SHOULD be mostly static, delegating any dynamic content to other tracks.
 
 For example, a chat entry should name a chat track, not carry individual chat messages.
@@ -196,8 +167,6 @@ type MediaSchema = {
   "join": JoinSchema | undefined,
 }
 ~~~
-
-A `media` value that is not an object belongs to another application and is ignored.
 
 ### Clock {#clock}
 The `clock` field is the broadcast's one continuous clock:
@@ -232,7 +201,7 @@ The `interval` field promises that every audio and video track starts a group at
 It is the grid an edge numbers HLS and DASH segments on ({{hls}}), so it MUST NOT change for the broadcast.
 A publisher that knows its group duration declares it; one that does not MAY measure each track over its first second or group, whichever is longer, and declare the longest.
 A group longer than the interval is an overrun, which an edge tolerates.
-A consumer that cannot decode `join`, including a zero `interval`, MUST treat it as absent.
+A zero `interval` is out of range.
 Nesting the interval under `join` leaves room for a later join mechanism that is not a fixed grid.
 
 ## Includes {#include}
@@ -630,6 +599,7 @@ type JsonSchema = {
   "mode": Mode,
   "schema": string | undefined,
   "broadcast": string | undefined,
+  "instance": string | undefined,
   "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
@@ -646,6 +616,7 @@ type BinarySchema = {
   "mode": Mode,
   "mime": string | undefined,
   "broadcast": string | undefined,
+  "instance": string | undefined,
   "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
@@ -807,18 +778,22 @@ For example:
 - A fragment or packet batch contributes the media span between its earliest and latest timestamps.
 
 ### delay {#field-delay}
-The maximum amount, in milliseconds, by which a frame's presentation timestamp has trailed one that another rendition of the broadcast had already written.
+How far, in milliseconds, a rendition's frames persistently trail the media other renditions of the broadcast had already written.
 If absent, a consumer SHOULD assume the rendition does not trail the others.
 
-A publisher compares each frame with the highest timestamp written so far by every other rendition on the same clock, and advertises the largest shortfall observed.
+A frame trails by how far the highest timestamp any other rendition on the same clock has written so far is ahead of its presentation timestamp, or by nothing when none is ahead.
+A publisher measures over windows spanning at least a second of its rendition's media, or a group if that is longer, and takes the least any frame of a window trails, so one frame that trails nothing clears the window.
+It advertises the largest of those values among the windows it has closed.
+A constant offset between renditions is in every window, so it shows; lateness that only some frames have, such as B-frame reordering, has a frame trailing nothing in every window, so it never does.
 A rendition alone on the broadcast measures no `delay`, and a frame trailing only its own rendition's earlier frames counts toward `jitter` instead.
 A rendition that ends, or breaks its timeline, stops holding the others back.
 The rounding, `0`, and never-lower rules of `jitter` apply unchanged.
 
 A consumer SHOULD hold at least the largest `delay` plus `jitter` among the renditions it plays together.
-A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
+A consumer MUST NOT subtract one rendition's `delay` from another's: each is measured against whichever rendition was ahead at the time and only ever rises, so two values need not share an origin.
 
-For example, with video at 20 millisecond intervals and audio at 15 written as video 0, video 20, audio 0, audio 15, video 40, audio 30, video 60, audio 45, audio 60, the audio frame at 0 trails video already written at 20, so audio advertises a `delay` of 20 and video none.
+For example, with video and audio both at 20 millisecond intervals, written as video 0, video 20, video 40, audio 0, video 60, audio 20, video 80, audio 40, and so on, every audio frame trails video already written 40 milliseconds ahead of it, so audio advertises a `delay` of 40, and video, never behind audio, none.
+Had audio been written as video 0, audio 0, video 20, audio 20, and so on, some audio frame in every window would trail nothing, and neither would advertise a `delay`.
 
 ### enabled {#field-enabled}
 The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
@@ -842,8 +817,6 @@ Each such broadcast belongs to one soliciting catalog and carries the fixed `fee
 A reader recognizes feedback by the `.echo` suffix on the broadcast's final path segment, so it does not list feedback as playable media.
 The application controls names and publish/subscribe authorization; a report is not authenticated beyond those rights.
 Without `echo`, no feedback is solicited.
-
-An application may already carry its own `stats` or `echo` root key, so a reader MUST treat a `stats` value without a string `track`, or an `echo` value without a string `path`, as absent rather than refuse the catalog.
 
 Both tracks carry JSON snapshots, and a publisher SHOULD publish them compressed ({{compression}}).
 Each group starts with a full snapshot as a UTF-8 JSON frame and MAY continue with RFC 7396 merge patches.
@@ -879,7 +852,7 @@ Every number is a nonnegative integer no larger than 2^53 - 1; malformed or out-
 Unknown fields MUST be ignored; application and container sections MAY be flattened beside `transport` and `renditions`.
 Absent rendition counters mean zero, and zero counters MAY be omitted; JavaScript preserves omission instead of synthesizing fields.
 Unavailable gauges and transport measurements MUST remain absent, and a known zero MUST remain explicit.
-A reader treats JSON `null` in an optional `stats` or `echo` catalog section, gauge, transport measurement, or `arrival` as absent; publishers omit unavailable fields.
+A reader treats JSON `null` in an optional gauge, transport measurement, or `arrival` as absent; publishers omit unavailable fields.
 An `arrival` MUST carry both `timestamp` and `wall`; a reader MUST refuse one missing either.
 Rendition IDs are the unique keys from the soliciting catalog, independent of media kind and wire track name.
 A viewer reports referenced renditions under the IDs in the catalog it read, even when their media comes from another broadcast.
@@ -1136,8 +1109,8 @@ This document has no IANA actions.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
 - Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
-- Added the optional `delay` rendition field: how far a rendition's timestamps trail those other renditions already wrote, never lowered once advertised and never subtracted across renditions.
-- Recommended namespaced keys for application root sections.
+- Added the optional `delay` rendition field: how far a rendition's timestamps persistently trail those other renditions already wrote, the least trail within each window of a second or a group and the largest of those windows, never lowered once advertised and never subtracted across renditions.
+- A root member this draft defines has its shape, or the catalog is refused: a `media`, `text`, `json`, `binary`, `stats`, or `echo` value of the wrong type, or `null`, and a malformed `join`, no longer read as absent. An application keeps its own root data under a namespaced key.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 - Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.

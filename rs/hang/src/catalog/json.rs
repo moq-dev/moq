@@ -23,12 +23,11 @@ pub struct Json {
 	///
 	/// A map rather than an array so it works with JSON Merge Patch, and a `BTreeMap` so keys are
 	/// sorted for *some* deterministic behavior.
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub tracks: BTreeMap<String, JsonConfig>,
 }
 
-impl crate::catalog::Section for Json {
-	const MAP: &'static str = "tracks";
-}
+impl crate::catalog::Entry for JsonConfig {}
 
 impl Json {
 	/// Insert a track config, returning an error if the name already exists.
@@ -105,14 +104,15 @@ pub struct JsonConfig {
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
-	/// The maximum delay between a payload being ready and the publisher flushing it, with the same
-	/// meaning and whole-millisecond encoding as [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
+	/// The largest media span the publisher hands to the transport behind a payload's timestamp,
+	/// with the same meaning and whole-millisecond encoding as
+	/// [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
-	/// How far this track's payloads reach the transport behind the broadcast's earliest
-	/// rendition, with the same meaning and encoding as
+	/// How far this track's payloads persistently trail what the broadcast's other tracks already
+	/// wrote, with the same meaning and encoding as
 	/// [`VideoConfig::delay`](crate::catalog::VideoConfig::delay). Only measured for payloads that
 	/// carry a capture time.
 	#[serde_as(as = "MillisCeil")]
