@@ -207,9 +207,13 @@ impl FrameChannel {
 
 	/// Stop repeating until the next frame, because the last picture no longer
 	/// stands: the source resized or minimized, or freed the buffer it lives in.
+	/// A frame the consumer has not reached yet is the same stale picture, so it
+	/// goes too.
 	#[cfg(any(all(target_os = "linux", feature = "pipewire"), target_os = "windows", test))]
 	pub(super) fn forget(&self) {
-		if let Some(held) = &mut self.state.lock().unwrap().held {
+		let mut state = self.state.lock().unwrap();
+		state.frame = None;
+		if let Some(held) = &mut state.held {
 			held.surface = None;
 		}
 	}
@@ -591,6 +595,8 @@ mod tests {
 		chan.push(frame(1));
 		next(&chan).await;
 		assert_eq!(next(&chan).await, (1, 250));
+		// Pushed but not yet read when the source invalidated it.
+		chan.push(frame(9));
 		chan.forget();
 		assert!(quiet(&chan, std::time::Duration::from_secs(5)).await);
 		chan.push(frame(2));

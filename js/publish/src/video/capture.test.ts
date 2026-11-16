@@ -724,6 +724,54 @@ test("capture parks after its bootstrap and last reader, and cancels while parke
 	expect(open()).toEqual([]);
 });
 
+test("a repeat after a demand gap is stamped past the new reader's replay", async () => {
+	using input = frameSource();
+	const clock = new Manual();
+	const installed = clock.install();
+	clock.jump(Duration.secs(1));
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+	const read = async (reader: ReadableStreamDefaultReader<VideoFrame>) => {
+		const frame = (await clock.drive(reader.read())).value as unknown as Frame;
+		frame.close();
+		return frame.timestamp;
+	};
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_000_000);
+		expect(await read(before)).toBe(1_000_000);
+
+		// The last reader leaves while capture waits on a read, which outlives the park.
+		await flush();
+		first.close();
+		clock.jump(Duration.millis(300));
+		await flush();
+
+		// That read resolves with nobody attached, and capture holds it only once demand returns.
+		input.push(1_400_000);
+		await flush();
+		clock.jump(Duration.secs(60));
+		const after = fanout.subscribe(second).getReader();
+		expect(await read(after)).toBe(61_300_000);
+
+		// The parked frame is older than the replay, so this reader skips it, and the next repeat is
+		// current rather than a minute behind.
+		expect(await read(after)).toBe(61_550_000);
+		expect(clock.now().since(Instant.ZERO).asMicros()).toBe(61_550_000);
+	} finally {
+		first.close();
+		second.close();
+		capture.close();
+		installed.close();
+	}
+
+	expect(open()).toEqual([]);
+});
+
 test("a quiet source repeats its last picture every 250 ms on its own timeline", async () => {
 	using input = frameSource();
 	const clock = new Manual();

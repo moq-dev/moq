@@ -116,10 +116,6 @@ class Frames extends Fanout<VideoFrame> {
 	// Copies handed to new readers and not yet read, released on close like the fanout's own queues.
 	readonly #unread = new Set<VideoFrame>();
 
-	// The latest stamp handed to a new reader. Live frames follow the source's order, but a replay is
-	// stamped here, and a later frame can be held below it.
-	#replayed = 0;
-
 	constructor(source: Source, state: { output: CaptureOutput; native: Signal<number | undefined> }) {
 		// Track capture rewrites timestamps onto our epoch; FrameSource already uses that clock.
 		const stream = "frames" in source ? source.frames : TrackProcessor(normalizeSource(source).track);
@@ -152,7 +148,7 @@ class Frames extends Fanout<VideoFrame> {
 				throw error;
 			}
 		};
-		const held: Held = { at: Instant.ZERO };
+		const held: Held = { at: Instant.ZERO, replayed: 0 };
 		const active = new Signal(0);
 		const reader = stream.getReader();
 		// The first picture supplies dimensions for encoder setup and a replay for still sources.
@@ -188,9 +184,18 @@ class Frames extends Fanout<VideoFrame> {
 							if (!result) {
 								// Every reader left while this waited; park instead of repeating to nobody.
 								if (active.peek() <= 0 || held.frame !== last) continue;
-								// Stamped on the source's own timeline, which can run ahead of the clock.
-								const elapsed = now().since(held.at).asMicros();
-								const timestamp = Math.max(Math.round(last.timestamp + elapsed), last.timestamp + 1);
+								// Stamped on the source's own timeline, which can run ahead of the clock, but never
+								// below the clock or a replay: a frame that resolved while capture was parked is held
+								// with its old stamp, and a reader that attached since drops anything not past its own.
+								const clock = now();
+								const elapsed = clock.since(held.at).asMicros();
+								const timestamp = Math.max(
+									Math.round(
+										Math.max(last.timestamp + elapsed, clock.since(Instant.ZERO).asMicros()),
+									),
+									last.timestamp + 1,
+									held.replayed + 1,
+								);
 								deliver(controller, new VideoFrame(last, { timestamp }));
 								return;
 							}
@@ -250,9 +255,9 @@ class Frames extends Fanout<VideoFrame> {
 		const clock = now();
 		const elapsed = clock.since(this.#held.at).asMicros();
 		const at = Math.round(
-			Math.max(held ? held.timestamp + elapsed : 0, clock.since(Instant.ZERO).asMicros(), this.#replayed),
+			Math.max(held ? held.timestamp + elapsed : 0, clock.since(Instant.ZERO).asMicros(), this.#held.replayed),
 		);
-		this.#replayed = at;
+		this.#held.replayed = at;
 		let first = held ? new VideoFrame(held, { timestamp: at }) : undefined;
 		if (first) this.#unread.add(first);
 		let attached = this.#active.peek() >= 0;
@@ -323,5 +328,6 @@ class Frames extends Fanout<VideoFrame> {
 	}
 }
 
-// The newest frame and when it came through.
-type Held = { frame?: VideoFrame; at: Instant };
+// The newest frame and when it came through, and the latest stamp handed to a new reader. Live frames
+// follow the source's order, but a replay is stamped at the clock, and a later frame can be held below it.
+type Held = { frame?: VideoFrame; at: Instant; replayed: number };
