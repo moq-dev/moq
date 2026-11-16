@@ -490,6 +490,28 @@ async def test_finish_serves_until_closed():
     assert isinstance(await next_route(announced), moq.AnnounceEventAbsent)
 
 
+async def test_abort_unwanted_keeps_a_late_reader():
+    """An idle track ends only once a reader that joined after it went unwanted has left."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status")
+    demand = track.demand()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+
+    late = track.consume()
+    assert track.abort_unwanted(7) is False
+    track.write_frame(b"still serving", moq.Timestamp.unscaled(0))
+    frame = await asyncio.wait_for(late.read_frame(), timeout=5.0)
+    assert frame is not None and frame.payload == b"still serving"
+
+    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    late.cancel()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+    assert track.abort_unwanted(7) is True
+    with pytest.raises(moq.Error.Closed):
+        track.abort_unwanted(7)
+    broadcast.close()
+
+
 def test_publish_lifecycle():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")

@@ -84,6 +84,29 @@ is a decision to list in the PR:
   densely when the set shrinks. `-wip` peers refuse each other by ALPN
   anyway, and the holes freeze otherwise.
 
+Measured 2026-11-15 by the [bake-off](https://github.com/moq-dev/moq/pull/8880),
+and decided 2026-11-16
+([maintainer](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514)),
+for the wire:
+
+- The closed-session message names the session and the node at its far end,
+  and ends every route its sender offered through it, so no end follows per
+  route.
+- A draining node gets a fixed-size message of its own, sent once per
+  neighbour: flagging each route cost 158,462 route messages for one GOAWAY on
+  32 relays, against 1,454 with it and 116 today.
+- A claim's end carries one bit, ended or lost, and a claim carries the lowest
+  link priority to its publisher and a draining bit beside its cost and chain.
+- A claims message with no change still carries its floor.
+- A node offers a route to itself only once it announces a claim, so a relay
+  that has never announced a claim and only forwards or only serves viewers
+  has no route on the wire.
+- A scoped neighbour is sent the node's closest claim per broadcast, and never
+  one that came from that neighbour.
+- Today's rule cost 300,100 route messages when a publisher left two meshes
+  joined by two grants; the chain cost none. Keep that shape in the acceptance
+  fixtures.
+
 Delete with the old rule:
 
 - `rs/moq-net/src/route/proof.rs`, `js/net/src/lite/route_key.ts`,
