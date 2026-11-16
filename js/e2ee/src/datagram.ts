@@ -4,11 +4,11 @@
  * @module
  */
 import { Datagram as NetDatagram, type Time } from "@moq/net";
-import { Pump } from "./pump.ts";
 import { checkGroup } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type { TrackKey } from "./key.ts";
 import { MAX_DATAGRAM_PAYLOAD } from "./limits.ts";
+import { Pump } from "./pump.ts";
 import { DatagramWindow } from "./window.ts";
 
 /** A decrypted datagram. */

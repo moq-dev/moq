@@ -9,7 +9,6 @@ import {
 	StreamCode,
 	Time,
 } from "@moq/net";
-import { Pump } from "./pump.ts";
 import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
 import type * as Datagram from "./datagram.ts";
@@ -29,6 +28,7 @@ import {
 	MAX_PLAINTEXT_BYTES,
 	MAX_U53,
 } from "./limits.ts";
+import { Pump } from "./pump.ts";
 import { Terminal } from "./terminal.ts";
 import type * as Track from "./track.ts";
 

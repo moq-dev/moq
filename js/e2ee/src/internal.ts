@@ -1,7 +1,7 @@
 // Package-private state the public modules share without exporting it.
 import type { Track as NetTrack } from "@moq/net";
-import type { Pump } from "./pump.ts";
 import type { TrackKey } from "./key.ts";
+import type { Pump } from "./pump.ts";
 import type { Terminal } from "./terminal.ts";
 
 /** A track's grouped-frame and datagram keys. */

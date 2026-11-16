@@ -4,12 +4,12 @@
  * @module
  */
 import type { Group as NetGroup, Track as NetTrack } from "@moq/net";
-import { Pump } from "./pump.ts";
 import { checkGroup } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Group from "./group.ts";
 import type { Reader, Writer } from "./internal.ts";
 import type { TrackKey } from "./key.ts";
+import { Pump } from "./pump.ts";
 import { Terminal } from "./terminal.ts";
 
 /**
