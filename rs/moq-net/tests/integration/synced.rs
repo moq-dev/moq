@@ -28,28 +28,30 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// caught at that moment rather than at the next event.
 async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
-	let read = kio::wait(|waiter| loop {
-		let event = match announced.poll_next(waiter) {
-			Poll::Ready(event) => event.expect("the cursor stays open"),
-			Poll::Pending => return announced.poll_synced(waiter),
-		};
-		match event {
-			origin::RouteEvent {
-				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
-				announce,
-			} => {
-				seen.insert(announce.prefix.to_string());
+	let read = kio::wait(|waiter| {
+		loop {
+			let event = match announced.poll_next(waiter) {
+				Poll::Ready(event) => event.expect("the cursor stays open"),
+				Poll::Pending => return announced.poll_synced(waiter),
+			};
+			match event {
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start | origin::RouteKind::Restart,
+					announce,
+				} => {
+					seen.insert(announce.prefix.to_string());
+				}
+				origin::RouteEvent {
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
+					announce,
+				} => {
+					seen.remove(announce.prefix.as_str());
+				}
+				origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					..
+				} => {}
 			}
-			origin::RouteEvent {
-				kind: origin::RouteKind::End | origin::RouteKind::Offline,
-				announce,
-			} => {
-				seen.remove(announce.prefix.as_str());
-			}
-			origin::RouteEvent {
-				kind: origin::RouteKind::Update,
-				..
-			} => {}
 		}
 	});
 	kio::clock::timeout(SETTLE, read).await.expect("synced in time");
@@ -148,7 +150,10 @@ async fn a_redial_syncs_once_the_doubt_lets_its_routes_in() {
 	};
 	let first = connect().await;
 	let mut announced = subscriber.consume().routes();
-	assert_eq!(read_until_synced(&mut announced).await, BTreeSet::from(["a".to_string()]));
+	assert_eq!(
+		read_until_synced(&mut announced).await,
+		BTreeSet::from(["a".to_string()])
+	);
 
 	first.client.abort(moq_net::Error::Cancel);
 	first.server.abort(moq_net::Error::Cancel);
@@ -159,7 +164,10 @@ async fn a_redial_syncs_once_the_doubt_lets_its_routes_in() {
 	assert!(matches!(gone.kind, origin::RouteKind::End | origin::RouteKind::Offline));
 
 	let _second = connect().await;
-	assert_eq!(read_until_synced(&mut announced).await, BTreeSet::from(["a".to_string()]));
+	assert_eq!(
+		read_until_synced(&mut announced).await,
+		BTreeSet::from(["a".to_string()])
+	);
 }
 
 /// A cold relay's empty set is complete before an upstream joins it.
