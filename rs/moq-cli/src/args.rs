@@ -534,7 +534,6 @@ impl MoqSide {
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
-		found.extend(self.auth.deprecated());
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}

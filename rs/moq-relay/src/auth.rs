@@ -83,33 +83,6 @@ pub struct Config {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
-
-	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
-	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
-	#[usage(flatten)]
-	#[serde(skip)]
-	pub(crate) legacy: Legacy,
-
-	// The 0.14 `[auth]` keys #3688 removed, kept only so they refuse with their
-	// replacement named rather than being ignored.
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) key: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) key_dir: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) auth_api: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) domains: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) mtls_tier: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(skip_serializing)]
-	pub(crate) tls: Option<serde::de::IgnoredAny>,
 }
 
 impl std::fmt::Debug for Config {
@@ -130,61 +103,6 @@ impl std::fmt::Debug for Config {
 /// connection, may hold at its decider.
 const VERIFICATIONS: usize = 128;
 
-/// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
-/// deployed through the environment would otherwise ignore them without a word.
-#[derive(Clone, Debug, Default, usage_rs::Args)]
-#[usage(unknown_flags = "error", args_override_self = false)]
-pub(crate) struct Legacy {
-	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
-	key: Option<String>,
-	#[usage(name = "auth-key-dir", long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", hide = true)]
-	key_dir: Option<String>,
-	#[usage(name = "auth-api", long = "auth-api", env = "MOQ_AUTH_API", hide = true)]
-	api: Option<String>,
-	#[usage(
-		name = "auth-public-api",
-		long = "auth-public-api",
-		env = "MOQ_AUTH_PUBLIC_API",
-		hide = true
-	)]
-	public_api: Option<String>,
-	#[usage(name = "auth-domain", long = "auth-domain", env = "MOQ_AUTH_DOMAIN", hide = true)]
-	domain: Vec<String>,
-	#[usage(
-		name = "auth-mtls-tier",
-		long = "auth-mtls-tier",
-		env = "MOQ_AUTH_MTLS_TIER",
-		hide = true
-	)]
-	mtls_tier: Option<String>,
-	#[usage(
-		name = "auth-tls-root",
-		long = "auth-tls-root",
-		env = "MOQ_AUTH_TLS_ROOT",
-		hide = true
-	)]
-	tls_root: Vec<String>,
-	#[usage(
-		name = "auth-tls-cert",
-		long = "auth-tls-cert",
-		env = "MOQ_AUTH_TLS_CERT",
-		hide = true
-	)]
-	tls_cert: Option<String>,
-	#[usage(name = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
-	tls_key: Option<String>,
-	#[usage(
-		name = "auth-tls-disable-verify",
-		long = "auth-tls-disable-verify",
-		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
-		hide = true,
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true
-	)]
-	tls_disable_verify: Option<String>,
-}
-
 impl Config {
 	/// The static grant the public patterns name, or `None` when none is set.
 	///
@@ -194,76 +112,6 @@ impl Config {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
 		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
-	}
-
-	/// The 0.14 settings in use, each paired with what replaced it. A relay refuses
-	/// to start on any: `key` with `public` would otherwise boot with every JWT
-	/// ignored.
-	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
-		let mut found = moq_tokio::cli::Deprecated::default();
-		let legacy = &self.legacy;
-		for (set, flag, env, toml, new) in [
-			(
-				legacy.key.is_some(),
-				"--auth-key",
-				"MOQ_AUTH_KEY",
-				self.key.is_some().then_some("[auth] key"),
-				"--auth-url to `moq auth serve --key`",
-			),
-			(
-				legacy.key_dir.is_some(),
-				"--auth-key-dir",
-				"MOQ_AUTH_KEY_DIR",
-				self.key_dir.is_some().then_some("[auth] key_dir"),
-				"--auth-url to `moq auth serve --key-dir`",
-			),
-			(
-				legacy.api.is_some(),
-				"--auth-api",
-				"MOQ_AUTH_API",
-				self.auth_api.is_some().then_some("[auth] auth_api"),
-				"--auth-url to a server answering the contract",
-			),
-			(
-				legacy.public_api.is_some(),
-				"--auth-public-api",
-				"MOQ_AUTH_PUBLIC_API",
-				None,
-				"--auth-url to a server answering the contract",
-			),
-			(
-				!legacy.domain.is_empty(),
-				"--auth-domain",
-				"MOQ_AUTH_DOMAIN",
-				self.domains.is_some().then_some("[auth] domains"),
-				"an auth server that reads `server_name`",
-			),
-			(
-				legacy.mtls_tier.is_some(),
-				"--auth-mtls-tier",
-				"MOQ_AUTH_MTLS_TIER",
-				self.mtls_tier.is_some().then_some("[auth] mtls_tier"),
-				"--auth-url to `moq auth serve --tier`",
-			),
-			(
-				!legacy.tls_root.is_empty()
-					|| legacy.tls_cert.is_some()
-					|| legacy.tls_key.is_some()
-					|| legacy.tls_disable_verify.is_some(),
-				"--auth-tls-*",
-				"MOQ_AUTH_TLS_*",
-				self.tls.is_some().then_some("[auth.tls]"),
-				"--connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
-			),
-		] {
-			if set {
-				found.flag(flag, Some(env), new);
-			}
-			if let Some(toml) = toml {
-				found.toml(toml, new, None);
-			}
-		}
-		found
 	}
 
 	/// Whether no source is named at all. Such a relay admits nothing on its own:
@@ -277,29 +125,7 @@ impl Config {
 	/// static grant, or that pairs public rules with a client CA, so the question
 	/// of who decides has one answer. `client_ca` is whether any listener verifies
 	/// client certificates, which public rules would grant what they grant anyone.
-	///
-	/// A public pattern without a wildcard is refused too. 0.14 read `anon` as the
-	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
-	/// either silent reading would mislead someone upgrading.
 	pub fn validate(&self, client_ca: bool) -> anyhow::Result<()> {
-		let deprecated = self.deprecated();
-		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		let flags = [
-			("--auth-public", &self.public),
-			("--auth-public-publish", &self.public_publish),
-			("--auth-public-subscribe", &self.public_subscribe),
-		];
-		for (flag, patterns) in flags {
-			for pattern in patterns.iter().filter(|pattern| pattern.is_literal()) {
-				// A literal at the maximum depth is already its own subtree.
-				let subtree = Pattern::subtree(pattern.as_str())?;
-				if subtree != *pattern {
-					anyhow::bail!(
-						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-					);
-				}
-			}
-		}
 		match (&self.url, self.public_grant()) {
 			(Some(_), Some(_)) => anyhow::bail!("--auth-url and --auth-public cannot both be set; the server decides"),
 			(None, None) => anyhow::bail!(
@@ -1807,25 +1633,36 @@ mod tests {
 		assert_eq!(peer.chain, vec![peer.fingerprint.clone(), root]);
 	}
 
-	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
-	/// wildcard-free public pattern refuses to start rather than pick silently.
-	#[test]
-	fn a_public_pattern_without_a_wildcard_refuses_to_start() {
-		for (public, hint) in [("anon", "anon/**"), ("anon/room", "anon/room/**"), ("", "**")] {
-			let err = config(None, &[public]).validate(false).unwrap_err().to_string();
-			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
-		}
-		let split = Config {
-			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
-			..Default::default()
-		};
-		let err = split.validate(false).unwrap_err().to_string();
-		assert!(err.starts_with("--auth-public-subscribe `live`"), "{err}");
-		assert!(config(None, &["anon/*", "*/chat", "**"]).validate(false).is_ok());
+	/// A public pattern without a wildcard names exactly one broadcast, never its subtree.
+	#[tokio::test]
+	async fn a_literal_public_pattern_admits_exactly_that_broadcast() {
+		let auth = config(None, &["anon"])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
 
-		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
-		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(config(None, &[&deepest]).validate(false).is_ok());
+		// Dialed at the broadcast, the grant is the broadcast itself.
+		let lease = auth
+			.admit(auth.request(moq_auth::Transport::Quic, "/anon"))
+			.await
+			.unwrap();
+		assert_eq!(lease.token().root, Path::new("anon").unwrap());
+		assert_eq!(lease.token().publish, patterns(&[""]));
+		assert_eq!(lease.token().subscribe, patterns(&[""]));
+
+		// Dialed above it, the grant reaches only that name.
+		let lease = auth.admit(auth.request(moq_auth::Transport::Quic, "/")).await.unwrap();
+		assert_eq!(lease.token().publish, patterns(&["anon"]));
+
+		// Nothing beneath it, and no other name, is reached.
+		for path in ["/anon/room", "/anonymous", "/other"] {
+			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
+				panic!("{path} was admitted");
+			};
+			assert!(matches!(err, Error::Refused(_)), "{path}: {err}");
+		}
+
+		// The empty pattern names the root broadcast.
+		assert!(config(None, &[""]).validate(false).is_ok());
 	}
 
 	/// The embedder's answer is the session's verdict; an answer that never comes,
