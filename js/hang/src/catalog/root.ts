@@ -184,13 +184,17 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 }
 
 /**
- * Subscribe to a broadcast's catalog and iterate validated root updates.
+ * Subscribe to a broadcast's catalog and iterate validated root updates, each with its timestamp.
+ *
+ * An update takes effect at `at` on the broadcast's media timeline, so a caller holds one it reads
+ * before its media reaches `at`, and applies one read late at once. On a scale-less catalog track
+ * `at` is a group key with no time, so the update applies on arrival.
  *
  * Throws {@link UnsupportedVersion}, {@link DuplicateRendition}, or {@link EscapingBroadcast} on an
  * update that fails validation. `broadcast` references are checked against the handle's `path` and
  * yielded unresolved.
  */
-export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
+export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Moq.Timed<Root>> {
 	const consumer = new Json.Snapshot.Consumer<Root>({
 		track: broadcast.track(TRACK),
 		schema: RootSchema,
@@ -198,9 +202,9 @@ export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<R
 	});
 	try {
 		for (;;) {
-			const root = await consumer.latest();
-			if (!root) return;
-			yield checkResolvable(checkRenditions(root.value), broadcast.path);
+			const next = await consumer.latest();
+			if (!next) return;
+			yield { value: checkResolvable(checkRenditions(next.value), broadcast.path), at: next.at };
 		}
 	} finally {
 		consumer.close();

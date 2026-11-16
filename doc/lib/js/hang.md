@@ -11,7 +11,7 @@ description: The media layer in TypeScript
 The [hang media format](/concept/hang) as TypeScript types and codecs, shared
 by [`@moq/watch`](/lib/js/watch) and [`@moq/publish`](/lib/js/publish).
 
-- **Catalog**: zod schemas for the root, renditions, data tracks, and `archive`. The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own. `Catalog.watch(broadcast)` iterates validated catalog updates, and parsing throws `Catalog.UnsupportedVersion` on a catalog that needs a newer moq-hang draft. `Catalog.Audio.ranked(renditions)` and `Catalog.Video.ranked(renditions)` order renditions best first, with enabled renditions ahead; `<moq-watch>` uses the video order.
+- **Catalog**: zod schemas for the root, renditions, data tracks, and `media`. The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own. `Catalog.watch(broadcast)` iterates validated catalog updates, each with the media timestamp it takes effect at, and parsing throws `Catalog.UnsupportedVersion` on a catalog that needs a newer moq-hang draft. `Catalog.Audio.ranked(renditions)` and `Catalog.Video.ranked(renditions)` order renditions best first, with enabled renditions ahead; `<moq-watch>` uses the video order.
 - **Containers**: `Container.Legacy` producer/consumer and separate `@moq/hang/cmaf` decoding. Import the CMAF module only when reading fMP4.
 - **Utilities**: priority and latency math, a libav polyfill (Opus, plus AAC decoding) for runtimes without native WebCodecs audio, and the browser quirks the media packages work around.
 
@@ -32,7 +32,7 @@ into a `Date`. It takes integer ticks at a timescale, so pass a frame's
 `Duration` timestamp as whole microseconds with `1_000_000`.
 
 ```ts
-for await (const root of Catalog.watch(broadcast)) {
+for await (const { value: root } of Catalog.watch(broadcast)) {
 	const clock = root.media?.clock;
 	if (!clock) continue; // the publisher exposes no clock
 	// `frame` comes from your own `Container.Legacy` consumer.

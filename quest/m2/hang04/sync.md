@@ -34,8 +34,9 @@ Facts found by the audit:
 - The clock times text cues, data tracks, `m2ts` frames, stats `arrival`,
   and the catalog track itself
   (`rs/hang/src/catalog/root.rs`: "snapshots share the broadcast clock with
-  media"), which
-  [catalog at timestamp](/quest/m2/catalog-at-timestamp.md) makes normative.
+  media"), which the draft's Catalog section makes normative: an update
+  takes effect at its frame's timestamp, citing `{{clock}}`, so retarget
+  that reference with the rename.
   The draft's own Clock section calls it "the broadcast's one continuous
   clock".
 - hang-03 and `release` carry `clock` at the root, so a published 0.21
@@ -89,5 +90,4 @@ finds no clock in a new catalog.
 
 ## Related
 
-- [hang applies catalog updates at their timestamp](/quest/m2/catalog-at-timestamp.md) - puts the catalog track itself on this clock
 - [One rule refuses a mis-shaped catalog section](/quest/m2/hang04/shape.md) - the rule this section follows from the start

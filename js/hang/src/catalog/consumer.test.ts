@@ -60,7 +60,7 @@ test("watch yields a catalog with many renditions", async () => {
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ value: catalog(1000), at: Moq.Time.Timestamp.now() });
 	const next = await consumer.next();
-	expect(Object.keys(next.value?.audio?.renditions ?? {})).toHaveLength(1000);
+	expect(Object.keys(next.value?.value.audio?.renditions ?? {})).toHaveLength(1000);
 	producer.finish();
 	broadcast.close();
 });
@@ -113,7 +113,7 @@ test("watch refuses a broadcast reference escaping the requested path", async ()
 
 test("watch accepts a sibling reference under the same root and yields it unresolved", async () => {
 	const root = referencing("./bob");
-	expect(await watchRequested(root)).toMatchObject({ value: root });
+	expect(await watchRequested(root)).toMatchObject({ value: { value: root } });
 });
 
 test("watch on a standalone broadcast refuses any parent reference", async () => {
@@ -127,13 +127,20 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 	broadcast.close();
 });
 
-test("watch subscribes and yields typed catalog updates", async () => {
+test("watch yields each catalog update with the timestamp it takes effect at", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: catalog(1), at: Moq.Time.Timestamp.now() });
-	expect(await consumer.next()).toMatchObject({ value: catalog(1) });
+	for (const [count, ms] of [
+		[1, 1_000],
+		[2, 2_500],
+	]) {
+		producer.update({ value: catalog(count), at: Moq.Time.Timestamp.fromMillis(ms) });
+		const next = await consumer.next();
+		expect(next.value?.value).toEqual(catalog(count));
+		expect(next.value?.at.asMillis()).toBe(ms);
+	}
 	await consumer.return?.();
 	producer.finish();
 	broadcast.close();
@@ -162,5 +169,5 @@ test("watch refuses an echo prefix escaping the requested broadcast root", async
 		watchRequested({ echo: { path: Moq.Path.normalizeRelative("../../viewers") } }),
 	).rejects.toBeInstanceOf(EscapingBroadcast);
 	const root = { echo: { path: Moq.Path.normalizeRelative("viewers") } };
-	expect(await watchRequested(root)).toMatchObject({ value: root });
+	expect(await watchRequested(root)).toMatchObject({ value: { value: root } });
 });

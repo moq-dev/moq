@@ -138,6 +138,11 @@ A participant MAY forgo publishing a catalog if it does not wish to publish any 
 The catalog track consists of multiple groups, one for each update.
 Each group contains a single frame with UTF-8 JSON.
 
+An update takes effect at its frame's timestamp, on the media timeline the broadcast's tracks share ({{clock}}), so the catalog in effect at a media timestamp is the newest one stamped at or before it.
+A rendition added or removed, or any other change, lines up with the media frames stamped alike.
+A consumer that reads an update before the media it presents reaches that timestamp holds the update until it does; one that reads it later applies it at once.
+A catalog track without a timescale has no media time, so a consumer applies each of its updates on arrival.
+
 A publisher MUST NOT write multiple frames to a group until a future specification includes a delta-encoding mechanism (via JSON Patch most likely).
 
 A publisher SHOULD publish the catalog track compressed ({{compression}}).
@@ -1117,6 +1122,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it; an untimed catalog track's updates apply on arrival.
 - Defined AAC payloads without a `description` as ADTS, and payloads with an AudioSpecificConfig as raw AAC.
 - A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, and JSON data tracks SHOULD be compressed.

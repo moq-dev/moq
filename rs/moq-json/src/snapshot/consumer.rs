@@ -84,7 +84,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Get the newest state and its timestamp, discarding superseded groups and intermediate yields.
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
-	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
+	/// a subsequent `next` resumes after it. On a scale-less track `at` is the group key.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, true)

@@ -31,17 +31,20 @@ impl<E: CatalogExt> Consumer<E> {
 
 	/// Get the next catalog update, or `None` once the track ends.
 	///
+	/// Drops the update's timestamp: an exporter applies each catalog as it reads it.
+	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
 	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
 	/// [`Error::Moq`](crate::Error::Moq).
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		self.inner.poll_next(waiter).map_err(|err| match err {
+		self.inner.poll_next(waiter).map(|next| match next {
+			Ok(next) => Ok(next.map(|timed| timed.value)),
 			// Lifted to this crate's variants, which `Source` reports for the same faults.
-			hang::Error::Moq(err) => crate::Error::Moq(err),
-			hang::Error::EscapingBroadcast(rel) => crate::Error::EscapingBroadcast(rel),
-			err => crate::Error::Hang(err),
+			Err(hang::Error::Moq(err)) => Err(crate::Error::Moq(err)),
+			Err(hang::Error::EscapingBroadcast(rel)) => Err(crate::Error::EscapingBroadcast(rel)),
+			Err(err) => Err(crate::Error::Hang(err)),
 		})
 	}
 }

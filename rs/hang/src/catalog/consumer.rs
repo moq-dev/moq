@@ -31,7 +31,11 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 		}
 	}
 
-	/// Get the next catalog update, or `None` when the track ends.
+	/// Get the next catalog update and its timestamp, or `None` when the track ends.
+	///
+	/// The update takes effect at `at` on the broadcast's media timeline, so a caller holds one it
+	/// reads before its media reaches `at`, and applies one read late at once. On a scale-less
+	/// catalog track `at` is a group key with no time, so the update applies on arrival.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference, include, or echo prefix walks above the root. Such a reference names no broadcast, and the
@@ -41,20 +45,19 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	/// that from the operator while the missing rendition surfaces much later as a track that
 	/// never fills.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let value = ready!(self.inner.poll_latest(waiter))
-			.map_err(|err| match err {
-				// A transport failure stays typed so callers can tell a lost source from a bad catalog.
-				moq_json::Error::Net(err) => crate::Error::Moq(err),
-				err => crate::Error::Json(err.to_string()),
-			})?
-			.map(|value| value.value);
-		let catalog = value.map(Catalog::from_value).transpose()?;
-		if let Some(catalog) = catalog.as_ref() {
-			catalog.check_renditions()?;
-			check_resolvable(&self.base, catalog)?;
-		}
-		Poll::Ready(Ok(catalog))
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_json::Timed<Catalog<E>>>>> {
+		let next = ready!(self.inner.poll_latest(waiter)).map_err(|err| match err {
+			// A transport failure stays typed so callers can tell a lost source from a bad catalog.
+			moq_json::Error::Net(err) => crate::Error::Moq(err),
+			err => crate::Error::Json(err.to_string()),
+		})?;
+		let Some(moq_json::Timed { value, at }) = next else {
+			return Poll::Ready(Ok(None));
+		};
+		let catalog = Catalog::from_value(value)?;
+		catalog.check_renditions()?;
+		check_resolvable(&self.base, &catalog)?;
+		Poll::Ready(Ok(Some(moq_json::Timed::new(catalog, at))))
 	}
 }
 
@@ -141,7 +144,7 @@ mod test {
 			group.close().unwrap();
 			let result = consumer.next().await;
 			if accepted {
-				assert!(result.unwrap().unwrap().echo.is_some());
+				assert!(result.unwrap().unwrap().value.echo.is_some());
 			} else {
 				assert!(matches!(result, Err(crate::Error::EscapingBroadcast(_))));
 			}
@@ -149,23 +152,28 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn subscribe_reads_a_typed_root() {
+	async fn subscribe_reads_each_root_with_its_timestamp() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
 			.unwrap();
 		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
-		let mut published = Catalog::default();
-		published.audio.renditions.insert(
-			"audio".into(),
-			crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, 2),
-		);
-		let mut group = track.append_group(0).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::ZERO, published.to_json().unwrap())
-			.unwrap();
-		group.close().unwrap();
-		assert_eq!(consumer.next().await.unwrap(), Some(published));
+		for (channels, ms) in [(1, 1_500), (2, 3_000)] {
+			let mut published = Catalog::default();
+			published.audio.renditions.insert(
+				"audio".into(),
+				crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, channels),
+			);
+			let at = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut group = track.append_group(ms).unwrap();
+			group.write_frame(at, published.to_json().unwrap()).unwrap();
+			group.close().unwrap();
+			assert_eq!(
+				consumer.next().await.unwrap(),
+				Some(moq_json::Timed::new(published, at)),
+				"the update applies at its frame's timestamp"
+			);
+		}
 	}
 
 	#[tokio::test]
