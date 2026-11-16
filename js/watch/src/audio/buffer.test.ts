@@ -322,6 +322,26 @@ describe("Backpressure", () => {
 		});
 	}
 
+	// A ring re-anchored on a retained backlog trails the clock, which a live picture moved on, and
+	// skips onto it. Metered by its playhead, the backlog would come one floor and window per state
+	// report, each skipped as late on arrival.
+	it("releases at once what a ring trailing the clock past its bound skips", () => {
+		const gate = new Backpressure(1000, false, Duration.millis(200), Duration.millis(200));
+		const signal = new AbortController().signal;
+		gate.observe(ms(0), false, ms(0));
+		for (let t = 0; t < 240; t += 20) gate.inserted(ms(t), ms(t + 20));
+		const wait = gate.wait(ms(240), signal);
+		expect(Bun.peek.status(wait)).toBe("pending");
+		// Within the bound the ring stretches onto the clock, playing everything from its playhead.
+		gate.observe(ms(0), false, ms(200));
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.observe(ms(0), true, ms(2000));
+		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		// Released up to a floor and window past where the ring skips to.
+		for (let t = 260; t <= 2020; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2040), signal))).toBe("pending");
+	});
+
 	// The next frame past a hole lies far ahead of the playhead, which never nears it while the ring
 	// drains, so it is released by what the ring holds and the hole plays as silence.
 	it("releases the frame past a hole once the ring runs short", () => {
@@ -598,6 +618,36 @@ describe("AudioBuffer steering", () => {
 				{ type: "clock", timestamp: 2_400_000, time: 2.25 },
 				{ type: "clock", time: 2.5 },
 			]);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// The gate reads the clock where the ring rendered its reported playhead, on the ring's timeline.
+	it("releases the backlog of a ring trailing the clock past its bound", () => {
+		let position = 1000;
+		const clock = started();
+		const { buffer, state, context } = fake(100, {
+			bound: 200,
+			clock: { position: () => position, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		const signal = new AbortController().signal;
+		try {
+			context.currentTime = 1;
+			context.sounding = 1;
+			buffer.insert(ms(1000), [new Float32Array(160)]);
+			state(ms(1000), false, 0, 1);
+			const wait = buffer.wait(ms(1160), signal);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			position = 1200;
+			state(ms(1000), false, 0, 1);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			position = 3000;
+			state(ms(1000), true, 0, 1);
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(ms(2800), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(ms(2950), signal))).toBe("pending");
 		} finally {
 			buffer.close();
 			clock.close();

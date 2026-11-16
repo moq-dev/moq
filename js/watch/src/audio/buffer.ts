@@ -31,7 +31,9 @@ const JUMP = 10_000;
  *     full window to stretch. The frame's own timestamp does not matter: across a hole the next
  *     frame lies far ahead, and the ring plays the hole as silence. A stall keeps releasing by the
  *     playhead: the ring resumes on a cushion and slows down to rebuild, and media past the floor
- *     stays encoded, counted toward the level the ring decides on.
+ *     stays encoded, counted toward the level the ring decides on. A playhead trailing the shared
+ *     clock past the ring's bound counts from the bound behind the clock instead, where the ring
+ *     skips to, so a backlog behind it goes at once rather than a window per state report.
  *
  * The playhead comes from the worklet's state messages.
  *
@@ -54,6 +56,10 @@ export class Backpressure {
 
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: number;
+	// Where the shared clock stood as the ring played the playhead, unset without a clock.
+	#clock?: number;
+	// How far the playhead may trail the clock before the ring skips onto it.
+	#bound = WINDOW;
 	// Whether the ring has played on the current timeline.
 	#started = false;
 
@@ -75,10 +81,10 @@ export class Backpressure {
 
 	#waiters: Array<{ timestamp: number; resolve: () => void }> = [];
 
-	constructor(rate: number, buffered: boolean, delay: Duration) {
+	constructor(rate: number, buffered: boolean, delay: Duration, bound = Duration.ZERO) {
 		this.#rate = rate;
 		this.#buffered = buffered;
-		this.setLatency(delay);
+		this.setLatency(delay, bound);
 	}
 
 	/** The ring's floor in samples: the part of the target held as decoded PCM. */
@@ -91,17 +97,25 @@ export class Backpressure {
 		return this.#offset;
 	}
 
-	/** Split `delay` between the floor and the hold. */
-	setLatency(delay: Duration): void {
+	/**
+	 * Split `delay` between the floor and the hold, and note how far audio may trail the clock before
+	 * the ring skips onto it, at least a stretch window as the ring's own threshold is.
+	 */
+	setLatency(delay: Duration, bound = Duration.ZERO): void {
+		this.#bound = Math.max(bound.asMicros(), WINDOW);
 		this.#floor = ringSamples(this.#rate, delay);
 		this.#headroom = (this.#floor / this.#rate) * 1_000_000;
 		this.#hold = ringHold(delay).asMicros();
 		this.#release();
 	}
 
-	/** Note the ring's playhead and whether it is stalled, and release every frame now due. */
-	observe(playhead: number | undefined, stalled: boolean): void {
+	/**
+	 * Note the ring's playhead, whether it is stalled, and where the shared clock stood as it played
+	 * there, and release every frame now due.
+	 */
+	observe(playhead: number | undefined, stalled: boolean, clock?: number): void {
 		this.#playhead = playhead;
+		this.#clock = clock;
 		if (playhead !== undefined && !stalled) this.#started = true;
 		this.#release();
 	}
@@ -176,6 +190,7 @@ export class Backpressure {
 	/** The ring was flushed for a new timeline: its playhead is unknown until the next frame anchors it. */
 	reset(): void {
 		this.#playhead = undefined;
+		this.#clock = undefined;
 		this.#started = false;
 		this.#decoding = [];
 		this.#inserted = undefined;
@@ -214,7 +229,11 @@ export class Backpressure {
 
 	#due(timestamp: number): boolean {
 		const playhead = this.#playhead;
-		if (this.#started && playhead !== undefined) return this.#reach(playhead) - playhead < this.#headroom + WINDOW;
+		if (this.#started && playhead !== undefined) {
+			// The ring skips audio trailing the clock past its bound, so it plays on from there.
+			const from = this.#clock === undefined ? playhead : Math.max(playhead, this.#clock - this.#bound);
+			return this.#reach(from) - from < this.#headroom + WINDOW;
+		}
 
 		if (!this.#covered(timestamp)) return false;
 		// A live ring holds no more than the hold leaves uncovered, so it fills from everything due. A
@@ -345,7 +364,7 @@ export class AudioBuffer {
 		// The output latency the context already reports, so startup holds only what the ring must.
 		this.#observeOutput();
 		const held = this.held(props.delay);
-		this.#backpressure = new Backpressure(rate, buffered, held);
+		this.#backpressure = new Backpressure(rate, buffered, held, this.#bound);
 
 		const msg: Init = {
 			type: "init",
@@ -375,7 +394,6 @@ export class AudioBuffer {
 				this.#accelerated.set(Duration.millis(data.accelerated));
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
-					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
 					if (clock) {
 						const msg: Clock = {
 							type: "clock",
@@ -383,6 +401,9 @@ export class AudioBuffer {
 						};
 						this.#worklet.port.postMessage(msg);
 					}
+					// The clock as the ring played the reported playhead, on the ring's timeline.
+					const at = this.#offset === undefined ? undefined : this.#offset + data.time * 1_000_000;
+					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled, at);
 				}
 			}
 		});
@@ -505,7 +526,7 @@ export class AudioBuffer {
 	 */
 	setLatency(delay: Duration, bound: Duration = this.#bound): void {
 		this.#bound = bound;
-		this.#backpressure.setLatency(this.held(delay));
+		this.#backpressure.setLatency(this.held(delay), bound);
 		// The clock moves with the delay, so its offset starts over, from a reading sent with the terms.
 		this.#offset = undefined;
 		const sync = this.#sync;
