@@ -52,7 +52,7 @@ Not to be filed:
 - **str0m/dimpl:** the DTLS retry budget runs out before ICE picks a
   path, found in #7379. Not filed while the
   [WebRTC epic](/quest/m3/webrtc/README.md) vendored str0m. Since
-  2026-11-16 moq-webrtc [returns to upstream](/quest/m2/str0m-upstream.md),
+  2026-11-16 moq-webrtc [returns to upstream](https://github.com/moq-dev/moq/pull/8963),
   so this and three more become candidates once their quests show the
   public API cannot do it: [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md),
   [the typed DTLS timeout](/quest/m3/webrtc/dtls-timeout.md),
@@ -60,5 +60,10 @@ Not to be filed:
   NACK hook of [WHEP pacing](/quest/m3/rtc-pacing.md). Each needs the
   maintainer's approval and a read of the repository's AI policy before it
   is filed.
+- **str0m:** no setting refuses an offered data channel, so moq-webrtc
+  takes the `m=application` section out of the offer's text and answers it
+  rejected (`rs/moq-webrtc/src/sdp.rs`, `refuse_channels`). A
+  `RtcConfig` switch that answers it rejected and starts no SCTP would
+  retire that. The switch's PR body holds a draft. Same approval rule.
 
 Public API: none. Wire: none.
