@@ -2697,7 +2697,7 @@ impl RunFill {
 		let stream = match opening {
 			Ok(stream) => stream,
 			Err(err) => {
-				tracing::debug!(err = %Error::from_transport(err), fill = %self.request_id, "fill stream failed to open");
+				tracing::debug!(err = %publisher.version.transport_error(err), fill = %self.request_id, "fill stream failed to open");
 				return Poll::Ready(());
 			}
 		};
@@ -5495,7 +5495,7 @@ impl FetchRespond {
 			waiter,
 			self.rank.as_mut().expect("ranked until opened").options(),
 		))
-		.map_err(Error::from_transport)?;
+		.map_err(|err| self.version.transport_error(err))?;
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
 			Writer::new(Ranked::new(uni, self.rank.take()).lapsing(&self.lapse), self.version);
 		writer.buffer_varint(FetchHeader::TYPE)?;
@@ -7678,7 +7678,7 @@ impl EndOfTrack {
 			object: self.end.frame,
 		});
 		let stream = wait!(Open => serve.session.poll_open_uni(&mut self.open, waiter, rank.options()))
-			.map_err(Error::from_transport)?;
+			.map_err(|err| serve.version.transport_error(err))?;
 		serve.opened.fetch_add(1, Ordering::Relaxed);
 		let stream = Ranked::new(stream, Some(rank)).lapsing(&serve.ranking.lapse);
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
@@ -8011,7 +8011,7 @@ impl GroupServe {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
-				return Poll::Ready(Err(Error::from_transport(err)));
+				return Poll::Ready(Err(self.version.transport_error(err)));
 			}
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);

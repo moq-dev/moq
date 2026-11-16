@@ -9980,8 +9980,8 @@ async fn a_follower_fails_at_once_on_its_own_failure() {
 
 /// A track that lost its route, or whose session ended, says the publisher left even with the
 /// broadcast still announced: the follower waits out the follow for a return, then fails with
-/// that cause. An unregistered moq-transport code names no cause, so it reads as leaving
-/// too.
+/// that cause. moq-transport's PUBLISH_DONE has no code for a lost route, so a relay's copy
+/// reads there as an unregistered one.
 #[tokio::test(start_paused = true)]
 async fn a_follower_waits_out_the_follow_on_a_lost_route() {
 	let causes = [

@@ -172,12 +172,6 @@ impl PublishDone<'_> {
 		match self.status_code {
 			code if code == PublishDoneStatus::TrackEnded.code() => Ok(()),
 			code if code == PublishDoneStatus::Unauthorized.code() => Err(crate::Error::Unauthorized),
-			// moq-transport has no code for a lost route, so a relay that loses its upstream ends
-			// the subscription with INTERNAL_ERROR, where a moq-lite relay resets with UNROUTABLE.
-			// Read the two alike, so a reader asks another route on either wire.
-			code if code == PublishDoneStatus::InternalError.code() => {
-				Err(crate::Error::Stream(crate::StreamError::Unroutable))
-			}
 			// The peer's code, as a moq-lite MALFORMED_TRACK reset reads, so bindings name it.
 			code if code == PublishDoneStatus::MalformedTrack.code() => {
 				Err(crate::Error::Stream(crate::StreamError::MalformedTrack))
@@ -533,10 +527,7 @@ mod tests {
 				"{version:?}"
 			);
 			assert!(
-				matches!(
-					done(0x0).end(version),
-					Err(crate::Error::Stream(crate::StreamError::Unroutable))
-				),
+				matches!(done(0x0).end(version), Err(crate::Error::Remote(0x0))),
 				"{version:?}"
 			);
 			assert!(

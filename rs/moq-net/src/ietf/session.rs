@@ -3,7 +3,7 @@ use crate::origin;
 use crate::transport::poll::Session as _;
 use crate::{
 	Error, Hop, SessionError, StreamError,
-	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
+	coding::{Decode, DecodeError, Encode, Reader, Stream, StreamCodes as _, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
 	util::TaskSet,
@@ -405,6 +405,7 @@ impl Launch {
 		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
 			session: session.clone(),
 			subscriber: subscriber.clone(),
+			version,
 			held: Vec::new(),
 			caught_up: true,
 		});
@@ -675,7 +676,8 @@ impl SetupAccept {
 					self.step = SetupStep::Accept;
 				}
 				SetupStep::Accept => {
-					let recv = ready!(session.poll_accept_uni(waiter)).map_err(Error::from_transport)?;
+					let recv =
+						ready!(session.poll_accept_uni(waiter)).map_err(|err| self.version.transport_error(err))?;
 					self.step = SetupStep::Peek(Reader::new(recv, crate::Version::Ietf(self.version)));
 				}
 				SetupStep::Peek(reader) => {
@@ -890,7 +892,7 @@ impl SendSetup {
 			match &mut self.step {
 				SetupSend::Open(open, _) => {
 					let send = ready!(self.session.poll_open_uni(open, waiter, Default::default()))
-						.map_err(Error::from_transport)?;
+						.map_err(|err| self.version.transport_error(err))?;
 					let SetupSend::Open(_, params) = std::mem::replace(&mut self.step, SetupSend::Done) else {
 						unreachable!("matched above");
 					};
@@ -1073,7 +1075,7 @@ impl Unis {
 				None => match self.session.poll_accept_uni(waiter) {
 					Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::Ietf(self.uni.version)),
 					Poll::Ready(Err(err)) => {
-						self.ended = Some(Error::from_transport(err));
+						self.ended = Some(self.uni.version.transport_error(err));
 						break;
 					}
 					Poll::Pending => break,
@@ -1301,6 +1303,7 @@ fn died_before_header(err: &Error) -> bool {
 struct Datagrams {
 	session: Transport,
 	subscriber: Subscriber,
+	version: Version,
 	/// Unknown aliases held before the source machines run: at most one receive budget.
 	held: Vec<bytes::Bytes>,
 	/// Whether the receive pass read the queue empty rather than yielding to its budget.
@@ -1325,7 +1328,7 @@ impl Datagrams {
 					for payload in std::mem::take(&mut self.held) {
 						self.route(payload, false)?;
 					}
-					return Poll::Ready(Err(Error::from_transport(err)));
+					return Poll::Ready(Err(self.version.transport_error(err)));
 				}
 			};
 			self.route(payload, hold)?;
@@ -2702,6 +2705,25 @@ mod tests {
 		}
 
 		(log, None)
+	}
+
+	/// A session close reads against moq-transport's registry on every path, so a peer closing
+	/// with a code only moq-lite assigns (0x30, NOT_SUPPORTED there) is an unknown code here.
+	#[kio::test]
+	async fn a_session_closed_with_a_moq_lite_code_reads_unknown() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			crate::transport::poll::Session::close(&session, 0x30, "closed by the peer");
+			let (_, result) = drive_unis(version, session, None, None).await;
+			let Some(Err(err)) = result else {
+				panic!("{version:?}: the closed session did not end the accept loop: {result:?}");
+			};
+			assert_eq!(
+				err.session(),
+				Some(&SessionError::Unknown(0x30)),
+				"{version:?}: {err:?}"
+			);
+		}
 	}
 
 	/// A peer opening uni streams at once gets a budget of them accepted per poll, leaving

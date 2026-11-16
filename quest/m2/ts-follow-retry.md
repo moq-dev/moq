@@ -17,15 +17,15 @@ groups, each pinned by a test in `export_test.rs`:
   `Internal`, `Cancel`, `GoingAway`, and `ControlTimeout` are a failed
   delivery to `retry` but the export's own failure to `left`
   (`a_follower_fails_at_once_on_its_own_failure`).
-- `Remote(_)`, an unregistered moq-transport request code, is a verdict to
-  `retry` but a publisher leaving to `left`
-  (`a_follower_waits_out_the_follow_on_a_lost_route`). A relay's lost route
-  no longer arrives this way: PUBLISH_DONE's INTERNAL_ERROR reads as
-  `Unroutable` on both wires.
+- `Remote(_)`, a code moq-lite does not assign, is a verdict to `retry` but a
+  publisher leaving to `left` (`a_follower_waits_out_the_follow_on_a_lost_route`).
+  Over moq-transport a relay's lost upstream and a publisher's own failure both
+  end with PUBLISH_DONE INTERNAL_ERROR (`Remote(0)`), which no reader can tell
+  apart, so `retry` cannot answer for it.
 
 Recommended: adopt `retry`, treating a cancel or GOAWAY reset as the
-publisher leaving as `moqsrc` does, and an unregistered moq-transport code
-as the verdict it is to every other reader.
+publisher leaving as `moqsrc` does, and keep `Remote(_)` as the one case
+`left` still matches, as moq-transport's lost route.
 
 ## Waiting
 

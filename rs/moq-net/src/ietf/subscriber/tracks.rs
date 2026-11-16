@@ -2164,10 +2164,7 @@ mod tests {
 		let version = Version::Draft22;
 		for (status, expected) in [
 			(ietf::PublishDoneStatus::Unauthorized, Error::Unauthorized),
-			(
-				ietf::PublishDoneStatus::InternalError,
-				Error::Stream(crate::StreamError::Unroutable),
-			),
+			(ietf::PublishDoneStatus::InternalError, Error::Remote(0)),
 		] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;

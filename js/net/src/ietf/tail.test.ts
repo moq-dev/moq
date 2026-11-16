@@ -162,12 +162,10 @@ test("a Stream Count of 0 is a hint, so a late stream within the grace is still 
 	expect(await reader.closed).toBeNull();
 });
 
-test("an INTERNAL_ERROR PUBLISH_DONE reads as the lost route a moq-lite relay names", async () => {
+test("a PUBLISH_DONE with an error status aborts the track", async () => {
 	const { reader, done } = await subscribed();
 	await done(INTERNAL_ERROR, 0n);
-	const closed = await reader.closed;
-	expect(closed).toBeInstanceOf(StreamError);
-	expect((closed as StreamError).code).toBe(StreamCode.Unroutable);
+	expect(await reader.closed).toBeInstanceOf(Error);
 });
 
 // SUBSCRIPTION_ENDED ends only the subscription: a later one continues the track past these
