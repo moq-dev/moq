@@ -18,7 +18,7 @@ Precedence is CLI, then env, then file, then defaults.
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
-timeout = "10s"                      # Handshake deadline. "0" waits forever.
+timeout = "30s"                      # Handshake deadline. "0" waits forever.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
