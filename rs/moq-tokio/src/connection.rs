@@ -205,6 +205,13 @@ impl Backoff {
 		if self.resolve().healthy.is_zero() {
 			return Err(Error::BackoffHealthy);
 		}
+		// TODO(next release): delete, with `cli::bound::warn_zero`.
+		let zero: Vec<_> = [("max", self.max), ("timeout", self.timeout)]
+			.into_iter()
+			.filter(|(_, set)| set.and_then(Into::into).is_some_and(|set: Duration| set.is_zero()))
+			.map(|(name, _)| format!("connect.backoff.{name}"))
+			.collect();
+		crate::cli::bound::warn_zero(&zero);
 		Ok(())
 	}
 

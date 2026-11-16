@@ -8,7 +8,7 @@
 //! moq-cli's repeated `--` stage grammar. [`Duration`] parses the human-readable
 //! values used by those flags and TOML keys, and [`Bound`] a limit `none` turns off.
 
-mod bound;
+pub(crate) mod bound;
 #[path = "deprecated.rs"]
 mod deprecated;
 pub(crate) mod duration;

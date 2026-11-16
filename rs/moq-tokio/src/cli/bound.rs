@@ -2,6 +2,22 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// TODO(next release): delete. A zero backoff `max` or `timeout` turned the bound off
+/// until `none` took that job. Set when a flag or config key spells a zero, so
+/// [`warn_zero`] warns a setting written for the old meaning. Parsing runs before
+/// logging is up, so the warning waits for the client; an API caller's deliberate
+/// zero is never parsed and stays quiet.
+static ZERO_PARSED: AtomicBool = AtomicBool::new(false);
+
+/// Warn once per process, if a zero was parsed, that the `zero` keys no longer turn their bound off.
+pub(crate) fn warn_zero(zero: &[String]) {
+	if !zero.is_empty() && ZERO_PARSED.swap(false, Ordering::Relaxed) {
+		let zero = zero.join(" and ");
+		tracing::warn!("a zero {zero} no longer turns the bound off; write \"none\" for no bound");
+	}
+}
 
 /// A limit written as a duration (`5s`, `0s`), or `none` to turn it off.
 ///
@@ -41,12 +57,9 @@ impl FromStr for Bound {
 			"none" => Ok(Self::NONE),
 			value => {
 				let value = humantime::parse_duration(value)?;
-				// TODO(next release): delete. A zero backoff `max` or `timeout` turned the bound
-				// off until `none` took that job, so warn a flag or config written for the old
-				// meaning. Only a written spelling is parsed, so an API caller's deliberate zero
-				// stays quiet.
+				// TODO(next release): delete, with `ZERO_PARSED`.
 				if value.is_zero() {
-					tracing::warn!("a zero connect.backoff bound no longer turns it off; write \"none\" for no bound");
+					ZERO_PARSED.store(true, Ordering::Relaxed);
 				}
 				Ok(value.into())
 			}
