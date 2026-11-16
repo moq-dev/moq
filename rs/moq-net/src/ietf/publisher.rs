@@ -5166,8 +5166,12 @@ impl FetchOpen {
 			until: until.filter(|until| end.is_none_or(|end| *until < end)),
 		};
 		let priority = super::priority::to_wire(info.priority);
+		// Draft-23 has no End Of Track in the answer: the fetch stream says where the Track
+		// or the Group ends, after the last object (section 3.2.2).
+		let tail = (ietf::FetchObject::has_group_end(version) && complete)
+			.then_some(ietf::FetchObject::EndOfGroup { track: end_of_track });
 		let write = match FetchGroupWrite::new(group, key, slice, timescale, version, priority) {
-			Ok(write) => write,
+			Ok(write) => write.ending(tail),
 			Err(err) => return self.reject(&err, &err.to_string()),
 		};
 
@@ -7421,6 +7425,10 @@ struct FetchGroupWrite {
 	state: FetchGroupState,
 	/// Bills the group's payload once the first poll has the stream to bill it on.
 	meter: Option<crate::stats::Meter>,
+	/// What follows the last object once every object is written: see [`Self::ending`].
+	tail: Option<ietf::FetchObject>,
+	/// Every object is written, and only the tail is left to flush.
+	written: bool,
 }
 
 enum FetchGroupState {
@@ -7468,7 +7476,16 @@ impl FetchGroupWrite {
 			buf: arrayvec::ArrayVec::new(),
 			budget: kio::coop::Budget::new(32),
 			state: FetchGroupState::Yield,
+			tail: None,
+			written: false,
 		})
+	}
+
+	/// Follow the last object with `tail`: draft-23 (section 3.2.2) makes a publisher mark
+	/// an object known to end its Group, or the Track. Nothing is written after no object.
+	fn ending(mut self, tail: Option<ietf::FetchObject>) -> Self {
+		self.tail = tail;
+		self
 	}
 
 	/// The cap is the Largest Object snapshot: the group may keep growing, but everything
@@ -7508,13 +7525,36 @@ impl FetchGroupWrite {
 		if let Some(meter) = self.meter.take() {
 			stream.bill(meter);
 		}
-		let res = self.poll_objects(waiter, stream);
+		let res = match self.written {
+			true => Poll::Ready(Ok(())),
+			false => self.poll_objects(waiter, stream),
+		};
+		let res = match res {
+			Poll::Ready(Ok(())) => {
+				self.written = true;
+				self.poll_tail(waiter, stream)
+			}
+			other => other,
+		};
 		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
 		// bill it.
 		if res.is_pending() {
 			stream.poll_settle(waiter);
 		}
 		res
+	}
+
+	/// Write what follows the last object, if anything does, and flush it: the caller
+	/// finishes the stream next, which wants nothing left buffered.
+	fn poll_tail(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
+	) -> Poll<Result<(), Error>> {
+		if let Some(tail) = self.tail.take().filter(|_| self.prior.is_some()) {
+			stream.buffer(&tail)?;
+		}
+		stream.poll_flush(waiter)
 	}
 
 	fn poll_objects(

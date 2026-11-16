@@ -495,21 +495,45 @@ pub enum FetchObject {
 
 	/// An End of Range marker: every Location between the prior Object and this one,
 	/// inclusive, does not exist (`0x8C`), is unknown (`0x10C`), or timed out (`0x20C`).
+	/// Draft-23 adds Gone (`0x40C`).
 	///
-	/// The Group and Object IDs are the same delta fields an [`Self::Object`] carries.
+	/// Through draft-22 the two fields are the Location itself. Draft-23 (section 11.4.2.1)
+	/// encodes them against the prior Object or indicator, as deltas.
 	EndOfRange {
-		/// The raw Serialization Flags, which is which of the three it is.
+		/// The raw Serialization Flags, which is which of them it is.
 		reason: u64,
-		/// The Group ID Delta.
+		/// The Group ID, or from draft-23 the Group ID Delta.
 		group: u64,
-		/// The Object ID Delta.
+		/// The Object ID, or from draft-23 the Object ID Delta.
 		object: u64,
+	},
+
+	/// Draft-23 only (section 11.4.2.2): the prior Object is the last in its Group, or with
+	/// `track` the last in the Track, which ends its Group too. No field follows.
+	EndOfGroup {
+		/// End of Track (`0x81`) rather than End of Group (`0x80`).
+		track: bool,
 	},
 }
 
 impl FetchObject {
 	/// The Serialization Flags values that mark an End of Range instead of an Object.
 	const END_OF_RANGE: &'static [u64] = &[0x8C, 0x10C, 0x20C];
+
+	/// End of Gone Range, which draft-23 adds to [`Self::END_OF_RANGE`].
+	const END_OF_GONE_RANGE: u64 = 0x40C;
+
+	/// The Serialization Flags value for End of Group, from draft-23 on.
+	const END_OF_GROUP: u64 = 0x80;
+
+	/// The Serialization Flags value for End of Track, from draft-23 on.
+	const END_OF_TRACK: u64 = 0x81;
+
+	/// Whether the draft has the End of Group, End of Track and End of Gone Range indicators
+	/// (draft-23 section 11.4.1). Earlier drafts refuse them like any other unnamed value.
+	pub(super) fn has_group_end(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
 
 	/// How far past its own value an Object ID Delta reaches within a group. Through
 	/// draft-22 the Object ID is the prior one plus the delta. Draft-23 (section 11.4.1)
@@ -523,15 +547,25 @@ impl FetchObject {
 }
 
 impl Encode<Version> for FetchObject {
-	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Self::EndOfRange { reason, group, object } => {
-				if !Self::END_OF_RANGE.contains(reason) {
+				let gone = *reason == Self::END_OF_GONE_RANGE && Self::has_group_end(version);
+				if !gone && !Self::END_OF_RANGE.contains(reason) {
 					return Err(EncodeError::InvalidState);
 				}
 				w.varint(*reason)?;
 				w.varint(*group)?;
 				w.varint(*object)?;
+			}
+			Self::EndOfGroup { track } => {
+				if !Self::has_group_end(version) {
+					return Err(EncodeError::InvalidState);
+				}
+				w.varint(match track {
+					true => Self::END_OF_TRACK,
+					false => Self::END_OF_GROUP,
+				})?;
 			}
 			Self::Object {
 				subgroup,
@@ -586,10 +620,17 @@ impl<'a> Decode<'a, Version> for FetchObject {
 	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let flags = buf.varint()?;
 
-		// Anything at or above 128 is a named value rather than a set of flags, and only
-		// the three End of Range markers are defined.
+		// Anything at or above 128 is a named value rather than a set of flags. Through
+		// draft-22 only the three End of Range markers are defined; draft-23 adds a fourth
+		// and the two that end a Group or the Track.
 		if flags >= 0x80 {
-			if !Self::END_OF_RANGE.contains(&flags) {
+			let named = Self::has_group_end(version);
+			if named && (flags == Self::END_OF_GROUP || flags == Self::END_OF_TRACK) {
+				return Ok(Self::EndOfGroup {
+					track: flags == Self::END_OF_TRACK,
+				});
+			}
+			if !Self::END_OF_RANGE.contains(&flags) && !(named && flags == Self::END_OF_GONE_RANGE) {
 				return Err(DecodeError::InvalidValue);
 			}
 			return Ok(Self::EndOfRange {
@@ -786,6 +827,66 @@ mod tests {
 			assert_eq!(FetchObject::object_delta_bias(version), 0, "{version:?}");
 		}
 		assert_eq!(FetchObject::object_delta_bias(Version::Draft23), 2);
+	}
+
+	fn encode_object(object: &FetchObject, version: Version) -> Result<Vec<u8>, EncodeError> {
+		let mut buf = Vec::new();
+		object.encode(&mut Encoder::new(&mut buf, version.into()), version)?;
+		Ok(buf)
+	}
+
+	fn decode_object(bytes: &[u8], version: Version) -> Result<FetchObject, DecodeError> {
+		FetchObject::decode(&mut Decoder::new(bytes, version.into()), version)
+	}
+
+	/// Draft-23 (section 11.4.1) adds End of Group, End of Track and End of Gone Range to the
+	/// named Serialization Flags. Drafts 18 to 22 neither write them nor read them.
+	#[test]
+	fn fetch_stream_indicators_are_draft23_only() {
+		let end_of_group = FetchObject::EndOfGroup { track: false };
+		let end_of_track = FetchObject::EndOfGroup { track: true };
+		let gone = FetchObject::EndOfRange {
+			reason: 0x40C,
+			group: 1,
+			object: 2,
+		};
+
+		let version = Version::Draft23;
+		for object in [&end_of_group, &end_of_track, &gone] {
+			let bytes = encode_object(object, version).unwrap();
+			assert_eq!(&decode_object(&bytes, version).unwrap(), object);
+		}
+		// No field follows End of Group or End of Track, so each is the flags alone.
+		let mut flags = Vec::new();
+		Encoder::new(&mut flags, version.into()).varint(0x80).unwrap();
+		assert_eq!(encode_object(&end_of_group, version).unwrap(), flags);
+
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for object in [&end_of_group, &end_of_track, &gone] {
+				assert!(encode_object(object, version).is_err(), "{version:?} wrote {object:?}");
+				let bytes = encode_object(object, Version::Draft23).unwrap();
+				assert!(
+					matches!(decode_object(&bytes, version), Err(DecodeError::InvalidValue)),
+					"{version:?} read {object:?}"
+				);
+			}
+		}
+
+		// The three earlier End of Range markers read on every draft, and any other value
+		// from 128 up on none.
+		for version in [Version::Draft22, Version::Draft23] {
+			let unknown = FetchObject::EndOfRange {
+				reason: 0x10C,
+				group: 3,
+				object: 4,
+			};
+			let bytes = encode_object(&unknown, version).unwrap();
+			assert_eq!(decode_object(&bytes, version).unwrap(), unknown);
+
+			let mut other = Vec::new();
+			Encoder::new(&mut other, version.into()).varint(0x82).unwrap();
+			assert!(matches!(decode_object(&other, version), Err(DecodeError::InvalidValue)));
+		}
 	}
 
 	/// The head of a draft-22 FETCH up to its Number of Parameters: Request ID 1, Track

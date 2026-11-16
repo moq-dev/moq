@@ -7027,8 +7027,12 @@ impl RunFill {
 		loop {
 			match &mut self.step {
 				FillStep::Header => {
-					let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
-						return Poll::Ready(Ok(()));
+					let object = match ready!(poll_fetch_object(stream, self.first, waiter))? {
+						None => return Poll::Ready(Ok(())),
+						// A fill ends where its subscription starts, which then says where
+						// the group ends.
+						Some(Fetched::End { .. }) => continue,
+						Some(Fetched::Object(object)) => object,
 					};
 					self.first = false;
 					self.step = FillStep::Yield(object);
@@ -7936,6 +7940,9 @@ struct GroupFetchObjects {
 	next: u64,
 	prior_group: Option<u64>,
 	first: bool,
+	/// The prior entry was draft-23's End of Group or End of Track, so the current group
+	/// takes no more objects.
+	ended: bool,
 	/// The object whose payload is being read: its group, its Object ID, and where it goes.
 	payload: Option<(u64, u64, FetchPayloadRead)>,
 }
@@ -7958,6 +7965,7 @@ impl GroupFetchObjects {
 			next: 0,
 			prior_group: None,
 			first: true,
+			ended: false,
 			payload: None,
 		}
 	}
@@ -7987,10 +7995,27 @@ impl GroupFetchObjects {
 				}
 			}
 
-			let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
-				break;
+			let object = match ready!(poll_fetch_object(stream, self.first, waiter))? {
+				None => break,
+				Some(Fetched::End { track }) => {
+					// The publisher knows where the track ends, which a range FETCH downstream
+					// needs. Draft-23 says so here rather than in FETCH_OK.
+					if track && let Some(key) = self.prior_group {
+						let final_key = key.checked_add(1).ok_or(Error::ProtocolViolation)?;
+						writer.fetch.fill.finish_track_at(final_key);
+					}
+					self.ended = true;
+					continue;
+				}
+				Some(Fetched::Object(object)) => object,
 			};
 			self.first = false;
+			// Past an End of Group the prior Object ID is 2^64-1, so only an object that names
+			// another group can follow (draft-23 section 11.4.2.2).
+			if std::mem::take(&mut self.ended) && object.group.is_none() {
+				tracing::warn!("a fetch object continues a group past its End of Group");
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
 			if !object.subgroup_ok && !object.datagram {
 				tracing::warn!("subgroup ID is not supported, dropping group fetch");
 				return Poll::Ready(Err(Error::Unsupported));
@@ -8163,21 +8188,39 @@ struct FetchedObject {
 	properties: Option<Vec<u8>>,
 }
 
+/// One entry on a fetch stream, as its readers act on it.
+enum Fetched {
+	Object(FetchedObject),
+	/// Draft-23's End of Group, or with `track` its End of Track: the prior Object is the
+	/// last in its Group, or in the Track.
+	End {
+		track: bool,
+	},
+}
+
 /// The next fetch object header, or `None` at stream end.
 ///
 /// The `first` object on a stream has no prior to inherit from, so a field it leaves to
-/// the prior object is a protocol violation.
+/// the prior object is a protocol violation, and so is an End of Group with no object
+/// before it.
 fn poll_fetch_object<R: crate::transport::poll::RecvStream>(
 	stream: &mut Reader<R, Version>,
 	first: bool,
 	waiter: &kio::Waiter,
-) -> Poll<Result<Option<FetchedObject>, Error>> {
+) -> Poll<Result<Option<Fetched>, Error>> {
 	Poll::Ready(Ok(
 		match ready!(stream.poll_decode_maybe::<ietf::FetchObject>(waiter))? {
 			None => None,
 			Some(ietf::FetchObject::EndOfRange { .. }) => {
 				tracing::warn!("a fill with an End of Range cannot be stitched");
 				return Poll::Ready(Err(Error::Unsupported));
+			}
+			Some(ietf::FetchObject::EndOfGroup { track }) => {
+				if first {
+					tracing::warn!("a fetch stream starts with an End of Group");
+					return Poll::Ready(Err(Error::ProtocolViolation));
+				}
+				Some(Fetched::End { track })
 			}
 			Some(ietf::FetchObject::Object {
 				subgroup,
@@ -8194,7 +8237,7 @@ fn poll_fetch_object<R: crate::transport::poll::RecvStream>(
 					tracing::warn!("the first fetch object refers to a prior object");
 					return Poll::Ready(Err(Error::ProtocolViolation));
 				}
-				Some(FetchedObject {
+				Some(Fetched::Object(FetchedObject {
 					group,
 					object,
 					datagram: subgroup == ietf::FetchSubgroup::Datagram,
@@ -8203,7 +8246,7 @@ fn poll_fetch_object<R: crate::transport::poll::RecvStream>(
 						ietf::FetchSubgroup::Zero | ietf::FetchSubgroup::Prior | ietf::FetchSubgroup::Explicit(0)
 					),
 					properties,
-				})
+				}))
 			}
 		},
 	))
@@ -15329,10 +15372,31 @@ mod stitch_tests {
 		let hopped = relay_passthrough_via(script, ingress, egress, fetch, None, true).await;
 		let fetch_ok = |bytes: &[u8]| {
 			let mut decoder = Decoder::new(bytes, egress.into());
-			(decoder.varint().ok()? == ietf::FetchOk::ID).then_some(())?;
+			(decoder.varint().ok()? == ietf::FetchOk::id(egress)).then_some(())?;
 			let ok = ietf::FetchOk::decode(&mut decoder, egress).ok()?;
 			Some((ok, bytes[bytes.len() - decoder.remaining()..].to_vec()))
 		};
+		// Draft-23 says where the track ends on the fetch stream, after the last object, so
+		// that is where the hop's answer may differ: End of Group for End of Track.
+		let indicator = |track| {
+			let mut bytes = Vec::new();
+			ietf::FetchObject::EndOfGroup { track }
+				.encode(&mut Encoder::new(&mut bytes, egress.into()), egress)
+				.map(|()| bytes)
+		};
+		if let (Ok(end_of_track), Ok(end_of_group)) = (indicator(true), indicator(false))
+			&& direct.0.ends_with(&end_of_track)
+			&& hopped.0.ends_with(&end_of_group)
+			&& fetch_ok(&direct.0).is_some()
+		{
+			let cut = |bytes: &[u8], tail: &[u8]| bytes[..bytes.len() - tail.len()].to_vec();
+			assert_eq!(
+				cut(&hopped.0, &end_of_group),
+				cut(&direct.0, &end_of_track),
+				"{ingress} -> {egress}: only End of Track may differ"
+			);
+			return direct;
+		}
 		match (fetch_ok(&direct.0), fetch_ok(&hopped.0)) {
 			// A moq-lite FETCH says nothing of the track, so only a subscription tells the
 			// second relay that the track ended. Everything else must match.
@@ -15663,6 +15727,16 @@ mod stitch_tests {
 						assert_eq!(decoder.varint().unwrap(), 1);
 						assert_eq!(decoder.slice(1).unwrap(), &[99]);
 						prior = Some(id);
+					}
+					// Draft-23 follows the group's last object with End of Group, or End of Track.
+					if ietf::FetchObject::has_group_end(version) {
+						assert!(
+							matches!(
+								ietf::FetchObject::decode(&mut decoder, version).unwrap(),
+								ietf::FetchObject::EndOfGroup { .. }
+							),
+							"{version} start={start}"
+						);
 					}
 					assert!(decoder.is_empty());
 					assert!(log.resets().is_empty());
@@ -17505,6 +17579,60 @@ mod stitch_tests {
 			buf.extend_from_slice(payload);
 		}
 		buf.to_vec()
+	}
+
+	/// One of draft-23's indicators, as the fetch stream carries it.
+	fn group_end(track: bool) -> Vec<u8> {
+		let version = Version::Draft23;
+		let mut buf = Vec::new();
+		ietf::FetchObject::EndOfGroup { track }
+			.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		buf
+	}
+
+	/// Draft-23 has no End Of Track in the answer: the fetch stream follows the track's last
+	/// object with End of Track, which declares the track's end as FETCH_OK's flag did. End
+	/// of Group declares nothing about the track.
+	#[kio::test]
+	async fn an_end_of_track_on_a_fetch_stream_ends_the_track() {
+		for track in [false, true] {
+			let objects = [group_fetch_objects(KEY, 0, &[b"a", b"b"]), group_end(track)].concat();
+			let mut run = GroupFetchRun::new(Version::Draft23, objects).await;
+
+			let mut group = run.recv_cached(None, None).await.expect("the group is cached");
+			for _ in 0..2 {
+				assert!(group.read_frame().await.unwrap().is_some());
+			}
+			assert!(group.read_frame().await.unwrap().is_none());
+			assert_eq!(
+				run.track.consume().final_key(),
+				track.then_some(KEY + 1),
+				"End of Track: {track}"
+			);
+		}
+	}
+
+	/// Past an End of Group the group takes no more objects, and a fetch stream cannot
+	/// start with one. Drafts before 23 have no such indicator at all.
+	#[kio::test]
+	async fn an_end_of_group_closes_its_group_to_later_objects() {
+		// Each object written on its own names its group; the second one here does not.
+		let pair = group_fetch_objects(KEY, 0, &[b"a", b"b"]);
+		let first = group_fetch_objects(KEY, 0, &[b"a"]);
+		let second = pair[first.len()..].to_vec();
+		let continued = [first, group_end(false), second].concat();
+		let mut run = GroupFetchRun::new(Version::Draft23, continued).await;
+		let res = run.recv_objects().await;
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+
+		let mut run = GroupFetchRun::new(Version::Draft23, group_end(false)).await;
+		let res = run.recv_objects().await;
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+
+		let ended = [group_fetch_objects(KEY, 0, &[b"a"]), group_end(false)].concat();
+		let mut run = GroupFetchRun::new(VERSION, ended).await;
+		assert!(run.recv_objects().await.is_err(), "draft-22 has no End of Group");
 	}
 
 	/// A group aborted under a stalled fetch stream, as by eviction, ends the run with its
