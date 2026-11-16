@@ -90,9 +90,8 @@ For the PR:
   for free.
 - Rename the remaining `key` parameters that mean a group's start to `start`
   where this PR touches the signature.
-- [JavaScript](/quest/m2/time-addressing/js.md) and
-  [the bindings](/quest/m2/time-addressing/bindings.md) rename `sequence` to
-  `start`; whichever lands second mirrors these shapes, not the Rust they
+- [JavaScript](/quest/m2/time-addressing/js.md) renames `sequence` to `start`
+  and mirrors these shapes, as the bindings already do, not the Rust they
   replaced. Each binding's `MIGRATE.md` note rides this PR's Impact section.
 
 Tests: an empty track's first `append_group(None)` starts at 0 and the next
@@ -107,6 +106,5 @@ handles of moq-ffi and moq-c. Wire: none.
 ## Related
 
 - [@moq/net addresses groups by start](/quest/m2/time-addressing/js.md) - mirrors these names
-- [Bindings address groups by start](/quest/m2/time-addressing/bindings.md) - mirrors these names
 - [Media consumers address groups by start](/quest/m2/time-addressing/consumers.md) - reads what `finish_at` declares
 - [Refresh a track by interval](/quest/m2/refresh-interval.md) - changes `track::Demand` beside these calls

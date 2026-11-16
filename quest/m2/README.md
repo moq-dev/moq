@@ -336,5 +336,5 @@ what would need a breaking release had it landed right after the cut:
   [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
   `Ordered` API waits for the model.
   [Catalog at timestamp](/quest/m2/catalog-at-timestamp.md) no longer waits
-  for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
-  shrink to a rename, since the model already fills each field with the start.
+  for `@moq/net` by start, and the bindings shrank to a rename, since the model
+  already filled each field with the start.

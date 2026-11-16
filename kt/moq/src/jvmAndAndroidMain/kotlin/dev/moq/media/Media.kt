@@ -121,7 +121,7 @@ typealias AudioRendition = uniffi.moq.MoqRendition.Audio
 /** A catalog rendition and live delivery options. */
 typealias TrackConfig = uniffi.moq.MoqMediaTrackConfig
 
-/** A catalog rendition's group sequence and fetch delivery options. */
+/** A catalog rendition's group start and fetch delivery options. */
 typealias GroupConfig = uniffi.moq.MoqMediaGroupConfig
 
 /** The packaging advertised for a media track. */

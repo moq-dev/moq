@@ -205,7 +205,7 @@ mod tests {
 	fn frame(group: &MoqGroupProducer, payload: &[u8]) -> MoqFrame {
 		MoqFrame {
 			payload: payload.into(),
-			timestamp: MoqTimestamp::unscaled(group.sequence()),
+			timestamp: MoqTimestamp::unscaled(group.start()),
 		}
 	}
 

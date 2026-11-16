@@ -75,7 +75,7 @@ type (
 	Order = ffi.MoqOrder
 	// Compression is how a track's frames are compressed on the wire: CompressionDeflate.
 	Compression = ffi.MoqCompression
-	// Position is a location within a track: a group sequence and a frame index in it.
+	// Position is a location within a track: a group start and a frame index in it.
 	Position = ffi.MoqPosition
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
@@ -154,7 +154,7 @@ func NamedEncoder(name string) VideoEncoderKind {
 
 // Order values: which pending group the publisher sends first.
 const (
-	// OrderAscending sends the oldest first, draining a backlog in sequence order.
+	// OrderAscending sends the oldest first, draining a backlog in start order.
 	OrderAscending = ffi.MoqOrderAscending
 	// OrderDescending sends the newest first, so congestion sheds the backlog rather than the live edge.
 	OrderDescending = ffi.MoqOrderDescending

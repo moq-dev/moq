@@ -37,12 +37,12 @@ func (b *BroadcastConsumer) SubscribeTrack(
 	return &TrackConsumer{inner: inner}, nil
 }
 
-// FetchGroup fetches one complete group by track name and group sequence
+// FetchGroup fetches one complete group by track name and group start
 // without holding a live subscription.
 func (b *BroadcastConsumer) FetchGroup(
 	ctx context.Context,
 	name string,
-	sequence uint64,
+	start uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
 	if options != nil {
@@ -50,7 +50,7 @@ func (b *BroadcastConsumer) FetchGroup(
 			return nil, err
 		}
 	}
-	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
+	inner, err := b.inner.FetchGroup(ctx, name, start, options)
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +85,9 @@ type GroupConsumer struct {
 	inner *ffi.MoqGroupConsumer
 }
 
-// Sequence is this group's sequence number within the track.
-func (g *GroupConsumer) Sequence() uint64 {
-	return g.inner.Sequence()
+// Start is this group's start within the track.
+func (g *GroupConsumer) Start() uint64 {
+	return g.inner.Start()
 }
 
 // ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
@@ -111,16 +111,16 @@ type TrackConsumer struct {
 	inner *ffi.MoqTrackConsumer
 }
 
-// RecvGroup returns the next group in arrival order (possibly out of sequence),
+// RecvGroup returns the next group in arrival order (possibly out of start order),
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 	return t.group(ctx, t.inner.RecvGroup)
 }
 
-// NextGroup returns the next group in sequence order, skipping forward if
+// NextGroup returns the next group in start order, skipping forward if
 // behind, or (nil, nil) when the track ends. Prefer this when order matters
-// more than latency. Shares the sequence cursor with ReadFrame: a group one
+// more than latency. Shares the ordered cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 	return t.group(ctx, t.inner.NextGroup)
@@ -162,13 +162,13 @@ func (t *TrackConsumer) Update(subscription Subscription) error {
 	return t.inner.Update(sub)
 }
 
-// Groups ranges over groups in sequence order.
+// Groups ranges over groups in start order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.inner.Cancel, t.NextGroup)
 }
 
 // GroupsAsArrived ranges over groups in arrival order, including
-// out-of-sequence deliveries.
+// out-of-order deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.inner.Cancel, t.RecvGroup)
 }

@@ -133,7 +133,7 @@ print(route.instance());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.sequence())));
+group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.start())));
 group.finish();
 track.finish();
 mine.close(); // ends the route too

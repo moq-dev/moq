@@ -76,7 +76,7 @@ public typealias Subscription = MoqFFI.MoqSubscription
 /// `nil` for no subscriber limit, is how far a non-latest group may fall behind before it is
 /// skipped. A `min` past `max` starts at `max`.
 public typealias Delay = MoqFFI.MoqDelay
-/// Options for fetching one complete group by sequence.
+/// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
@@ -132,7 +132,7 @@ public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 public typealias ProtocolError = MoqFFI.MoqProtocolError
 
-/// A location within a track: a group sequence and a frame index in it.
+/// A location within a track: a group start and a frame index in it.
 public typealias Position = MoqFFI.MoqPosition
 
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`

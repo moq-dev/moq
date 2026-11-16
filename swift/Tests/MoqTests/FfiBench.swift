@@ -60,7 +60,7 @@ final class FfiBench: XCTestCase {
                 name: "call/\(name)", unit: "ns",
                 value: (ProcessInfo.processInfo.systemUptime - start) * 1e9 / Double(calls))
         }
-        results.append(call("sequence") { _ = group.sequence })
+        results.append(call("start") { _ = group.start })
         results.append(try call("info") { _ = consumer.info() })
         try broadcast.close()
         let directory = URL(fileURLWithPath: dir, isDirectory: true)

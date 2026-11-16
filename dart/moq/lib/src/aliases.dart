@@ -135,7 +135,7 @@ typedef TrackRequests = MoqTrackRequests;
 /// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
 typedef TrackDemand = MoqTrackDemand;
 
-/// The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
+/// The read side of a raw track: yields groups in start order, skipping ahead if it falls behind.
 typedef TrackConsumer = MoqTrackConsumer;
 
 /// A run of groups readers miss: accept each group you have and drop the rest.
@@ -210,10 +210,10 @@ typedef Anchor = MoqAnchor;
 /// Which pending group the publisher sends first.
 typedef Order = MoqOrder;
 
-/// A location within a track: a group sequence and a frame index in it.
+/// A location within a track: a group start and a frame index in it.
 typedef Position = MoqPosition;
 
-/// Options for fetching one past group by sequence.
+/// Options for fetching one past group by start.
 typedef FetchGroupOptions = MoqFetchGroupOptions;
 
 /// Delivery settings for a raw track: priority, ordering, latency budget, and timescale.

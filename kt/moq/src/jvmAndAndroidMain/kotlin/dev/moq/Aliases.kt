@@ -161,7 +161,7 @@ typealias TrackRequests = uniffi.moq.MoqTrackRequests
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 
 /**
- * The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
+ * The read side of a raw track: yields groups in start order, skipping ahead if it falls behind.
  */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 
@@ -176,8 +176,7 @@ typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
 /**
- * A datagram payload with its own sequence and timestamp, the [unscaled] sequence on a scale-less
- * track.
+ * A datagram payload with its own start and timestamp, the [unscaled] start on a scale-less track.
  */
 typealias Datagram = uniffi.moq.MoqDatagram
 
@@ -189,7 +188,7 @@ typealias Frame = uniffi.moq.MoqFrame
 
 /**
  * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null
- * `scale` and the group key (a datagram's sequence) as `value`; see [unscaled].
+ * `scale` and the group key (a datagram's start) as `value`; see [unscaled].
  */
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
@@ -258,10 +257,10 @@ typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
 
-/** A location within a track: a group sequence and a frame index in it. */
+/** A location within a track: a group start and a frame index in it. */
 typealias Position = uniffi.moq.MoqPosition
 
-/** Options for fetching one past group by sequence. */
+/** Options for fetching one past group by start. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
@@ -409,7 +408,7 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // (AudioFormat) are fine: entry access through the alias works. Objects
 // (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).
 
-/** Writes live datagrams with an independent sequence counter and no cache. */
+/** Writes live datagrams with an independent start counter and no cache. */
 typealias DatagramProducer = uniffi.moq.MoqDatagramProducer
 
 /** Reads a live datagram track in arrival order from its own cursor. */

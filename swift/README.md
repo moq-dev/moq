@@ -70,7 +70,7 @@ A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carryin
 
 The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastProducer`, `TrackConsumer`, …) and re-exports the plain data records/enums under de-prefixed names via typealias (`Frame`, `Media.Catalog`, `Media.Audio`, `Media.Container`, …). Because the records are typealiased, new fields on the `moq-ffi` side flow through automatically; only new FFI *methods* need a matching wrapper method.
 
-Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in sequence order; use its `groupsAsArrived` property for arrival order.
+Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in start order; use its `groupsAsArrived` property for arrival order.
 
 Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 

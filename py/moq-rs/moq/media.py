@@ -228,14 +228,14 @@ class TrackProducer:
         """
         self._inner.cut()
 
-    def seek(self, sequence: int) -> None:
-        """Draw a group boundary and number the next group ``sequence``.
+    def seek(self, start: int) -> None:
+        """Draw a group boundary and number the next group ``start``.
 
-        :meth:`cut` with an explicit sequence, for a publisher whose group
+        :meth:`cut` with an explicit start, for a publisher whose group
         numbers have to be deterministic: two encoders aligning per GOP so a
         consumer can fail over between them.
         """
-        self._inner.seek(sequence)
+        self._inner.seek(start)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
@@ -265,9 +265,9 @@ class ContainerProducer:
         """
         self._inner.cut()
 
-    def seek(self, sequence: int) -> None:
-        """Start a new segment and number its groups ``sequence``."""
-        self._inner.seek(sequence)
+    def seek(self, start: int) -> None:
+        """Start a new segment and number its groups ``start``."""
+        self._inner.seek(start)
 
     def finish(self) -> None:
         """Finish every track this container publishes."""
@@ -394,18 +394,18 @@ class GroupConsumer(_Stream[MediaFrame]):
         broadcast: BroadcastConsumer,
         id: str,
         rendition: Video | Audio,
-        sequence: int,
+        start: int,
         *,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
         """Fetch and decode one group of the catalog rendition ``id``, following its broadcast and track."""
-        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), sequence=sequence, options=options)
+        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), start=start, options=options)
         return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property
-    def sequence(self) -> int:
-        """The sequence number of this group within the track."""
-        return self._inner.sequence()
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
 
     async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()

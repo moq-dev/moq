@@ -61,7 +61,7 @@ class FfiBench {
         val track = broadcast.publishTrack("calls", null)
         val producer = track.appendGroup()
         val group = producer.consume()
-        call("sequence", results) { group.sequence() }
+        call("start", results) { group.start() }
         val consumer = track.consume(null)
         call("info", results) { consumer.info() }
         listOf(consumer, group, producer, track, broadcast).forEach { it.close() }

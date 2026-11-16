@@ -928,7 +928,7 @@ pub enum moq_anchor_kind {
 pub enum moq_order {
 	/// Newest first, so congestion sheds the backlog rather than the live edge.
 	MOQ_ORDER_DESCENDING = 0,
-	/// Oldest first, draining a backlog in sequence order.
+	/// Oldest first, draining a backlog in start order.
 	MOQ_ORDER_ASCENDING = 1,
 }
 
@@ -1050,9 +1050,9 @@ pub struct moq_route_options {
 	///
 	/// A route keeps its instance for its lifetime, across [moq_route_withdraw] and
 	/// [moq_route_announce], so a new route is a new stream viewers restart onto. Set one only
-	/// for a publisher that continues its group sequences across restarts and raises `epoch`
+	/// for a publisher that continues its group starts across restarts and raises `epoch`
 	/// on each: readers stitch every route of one instance together, so restarting the
-	/// sequences under an old instance splices unrelated groups into their tracks.
+	/// starts under an old instance splices unrelated groups into their tracks.
 	pub instance: u32,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
@@ -2523,7 +2523,7 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 
 /// Serve a held consumer under the claim's instance without announcing an exact route.
 ///
-/// Every answer at this path must continue the same sequences and bytes. Start a new
+/// Every answer at this path must continue the same group starts and bytes. Start a new
 /// claim for different content, or route a job, whose end moves the claim to another
 /// instance.
 /// Consumes the request handle; the consumer remains owned by the caller.
@@ -3134,7 +3134,7 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 	})
 }
 
-/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
+/// Draw a group boundary and start the next group at `start`, in the track's timescale.
 ///
 /// [moq_publish_media_cut] keyed explicitly rather than at the next frame's time, which has to come
 /// after every group the track holds. Groups are keyed by their first frame's time, so two encoders
@@ -3142,10 +3142,10 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_media_seek(media: u32, start: u64) -> i32 {
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
-		State::lock().publish.media_seek(media, sequence)
+		State::lock().publish.media_seek(media, start)
 	})
 }
 
@@ -3269,15 +3269,15 @@ pub extern "C" fn moq_publish_container_cut(container: u32) -> i32 {
 	})
 }
 
-/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+/// Start a new segment whose first group starts at `start`, in its track's timescale, after
 /// every group the track holds.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_container_seek(container: u32, start: u64) -> i32 {
 	ffi::enter(move || {
 		let container = ffi::parse_id(container)?;
-		State::lock().publish.container_seek(container, sequence)
+		State::lock().publish.container_seek(container, start)
 	})
 }
 
@@ -3657,8 +3657,8 @@ unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track
 /// Append a new group to a raw track, returning a group producer.
 ///
 /// Groups are delivered independently and each may contain any number of frames
-/// written via [moq_publish_group_frame]. Sequence numbers auto-increment; read the
-/// group's with [moq_publish_group_sequence].
+/// written via [moq_publish_group_frame]. Each starts after the last group; read the
+/// group's with [moq_publish_group_start].
 ///
 /// Returns a non-zero handle to the group on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3669,14 +3669,14 @@ pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
 	})
 }
 
-/// Create a raw group with an explicit sequence number.
+/// Create a raw group with an explicit start.
 ///
 /// Returns a non-zero group handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_group_at(track: u32, sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_track_group_at(track: u32, start: u64) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_group_at(track, sequence)
+		State::lock().publish.track_group_at(track, start)
 	})
 }
 
@@ -3766,16 +3766,16 @@ pub extern "C" fn moq_publish_track_finish(track: u32) -> i32 {
 	})
 }
 
-/// Declare a raw track's exclusive final group sequence.
+/// Declare a raw track's exclusive final group start.
 ///
-/// Groups below `final_sequence` may still be created. Groups at or above it
+/// Groups below `final_start` may still be created. Groups at or above it
 /// are rejected. The track remains open for groups below the boundary. Call
 /// [moq_publish_track_finish] after producing the remaining groups.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_finish_at(track: u32, final_sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_track_finish_at(track: u32, final_start: u64) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_finish_at(track, final_sequence)
+		State::lock().publish.track_finish_at(track, final_start)
 	})
 }
 
@@ -4025,14 +4025,14 @@ pub extern "C" fn moq_track_request_free(request: u32) -> i32 {
 	})
 }
 
-/// The group sequence a group request asks for.
+/// The group start a group request asks for.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - `dst` must point at a writable `uint64_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64) -> i32 {
+pub unsafe extern "C" fn moq_group_request_start(request: u32, dst: *mut u64) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -4141,7 +4141,7 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 	})
 }
 
-/// Read the sequence of a raw group, which names it within its track.
+/// Read the start of a raw group, which names it within its track.
 ///
 /// On a scale-less track this is the key every [moq_publish_group_frame] timestamp carries
 /// (unscaled, `has_scale` false), including for a group [moq_publish_track_group] numbered.
@@ -4151,11 +4151,11 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 /// # Safety
 /// - `dst` must be a valid pointer to a writable `uint64_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_group_sequence(group: u32, dst: *mut u64) -> i32 {
+pub unsafe extern "C" fn moq_publish_group_start(group: u32, dst: *mut u64) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		*dst = State::lock().publish.group_sequence(group)?;
+		*dst = State::lock().publish.group_start(group)?;
 		Ok(())
 	})
 }
@@ -4884,7 +4884,7 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 ///
 /// This is the counterpart to [moq_publish_track]: no catalog lookup or
 /// container parsing. `on_frame` is called with a positive raw frame ID for each
-/// frame in sequence order, then exactly once more with a terminal code: `0`
+/// frame in start order, then exactly once more with a terminal code: `0`
 /// (closed cleanly) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_frame` is never called again and `user_data` is never touched again, so
 /// release `user_data` there. The terminal callback fires even after

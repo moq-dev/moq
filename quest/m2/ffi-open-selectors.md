@@ -92,4 +92,3 @@ Wire: none.
 ## Related
 
 - [Switch moq's bindings to rust2's exporter](/quest/m3/ffi-exporter.md) - the second binding break, which must keep these shapes
-- [Bindings address groups by start](/quest/m2/time-addressing/bindings.md) - the other binding rename before the cut
