@@ -1294,6 +1294,35 @@ for (const delivered of [true, false]) {
 	});
 }
 
+// Mirrors `an_unroutable_route_strands_the_track_until_the_table_moves` in rs/moq-net/src/model/front.rs:
+// the same route winning again once the table moves asks it afresh.
+test("a read stranded on a route asks it again once the table moves", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const from = a.consume();
+	const first = copy(a);
+	front.serve(from);
+	const sub = front.consumer.track("seq").subscribe();
+	first.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	first.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	const second = copy(a);
+	second.write(1n);
+	front.serve(from);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 // A local broadcast's word on a track is its verdict: no route news can overtake it.
 test("a local broadcast failing a track as unroutable ends the read", async () => {
 	const front = new Front();

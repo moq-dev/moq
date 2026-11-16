@@ -641,6 +641,7 @@ impl Front {
 		actions: &mut Vec<Action>,
 	) {
 		let strands = self.strands();
+		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
 		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.state = TrackState::Idle;
 		// A closing source's answer is not a verdict: it is on its way out and
@@ -649,12 +650,18 @@ impl Front {
 			return;
 		}
 		// A route that lost the content says nothing of the track: wait for another of its
-		// instance, keeping a draining copy meanwhile.
+		// instance, keeping a draining copy meanwhile. A replaced source's loss leaves the
+		// track to the serving one, whose own answer stands.
 		if refusal.0.unroutable() && strands {
 			if let Some(draining) = track.draining {
 				track.state = TrackState::Spliced { source: draining };
+			} else if !serving {
+				self.redispatch(name, actions);
+				return;
 			}
-			track.stranded = Some(source);
+			if serving {
+				track.stranded = Some(source);
+			}
 			return;
 		}
 		track.refused.insert(source);
@@ -1502,6 +1509,44 @@ mod tests {
 		assert_actions(
 			front.step(Event::Wanted { track: name("video") }),
 			&[query[0].clone(), Action::Arm { at: None }],
+		);
+	}
+
+	/// A replaced copy that delivered nothing loses its route after its replacement refused
+	/// the track: the replacement's answer stands, so the track ends with it rather than wait
+	/// on a route nothing serves from.
+	#[test]
+	fn a_drained_copy_lost_as_unroutable_leaves_the_serving_refusal_standing() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		let refused = Event::TrackInfo {
+			track: name("video"),
+			source: 200,
+			closing: false,
+			result: Err(Error::NotFound),
+			retry: None,
+		};
+		assert_actions(front.step(refused), &[]);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::from(crate::StreamError::Unroutable)),
+				delivered: false,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::NotFound,
+				retry: None,
+			}],
 		);
 	}
 

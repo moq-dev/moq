@@ -222,6 +222,8 @@ class Route {
 	 * a replacement failing first leaves it serving. The Rust front only swaps once one delivers.
 	 */
 	incumbent?: Source;
+	/** The serving source a read idles on, having lost the route; cleared once asked again. */
+	#stranded?: Source;
 	/** Bumped on every change above, waking parked reads. */
 	readonly changed = new Signal(0);
 	readonly readers = new Set<Reader>();
@@ -276,6 +278,21 @@ class Route {
 	}
 
 	/** Subscribe every reader afresh to the source that still serves, once its copy failed. */
+	/** A reader idles on `source`, which lost the route: see {@link unstrand}. */
+	strand(source: Source): void {
+		this.#stranded = source;
+	}
+
+	/**
+	 * The table moved while `source` still serves: subscribe afresh a read it lost as unroutable.
+	 * Mirrors the Rust front's `unstrand`.
+	 */
+	unstrand(source: Source): void {
+		if (this.#stranded !== source || this.source !== source) return;
+		this.#stranded = undefined;
+		this.resubscribe();
+	}
+
 	resubscribe(): void {
 		if (!this.source) return;
 		this.generation++;
@@ -1032,7 +1049,10 @@ class Reader implements ResumeSource {
 			// Otherwise one that delivered nothing is the route refusing the track, and one that
 			// did is subscribed afresh.
 			if (serving && route.source === serving.source && !closing(ended)) {
-				if (strands(ended, serving.source)) return { kind: "idle" };
+				if (strands(ended, serving.source)) {
+					route.strand(serving.source);
+					return { kind: "idle" };
+				}
 				if (!serving.delivered) {
 					route.refuse(ended);
 					return this.#fail(ended);
@@ -1955,7 +1975,14 @@ export class Front {
 
 	/** Serve every track from `from` from now on, once each copy proves compatible. */
 	serve(from: broadcast.Consumer, local = false): void {
-		if (this.#concluded || this.#source?.from === from) return;
+		if (this.#concluded) return;
+		// Served again by the same route: the table moved, the evidence a read stranded on it
+		// waits for, so ask it again. Mirrors the Rust front's `unstrand`.
+		const current = this.#source;
+		if (current?.from === from) {
+			for (const route of this.#routes.values()) route.unstrand(current);
+			return;
+		}
 		const source = new Source(from, local);
 		source.retain();
 		const previous = this.#source;
