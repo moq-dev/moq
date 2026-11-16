@@ -99,7 +99,8 @@ for the wire:
   link priority to its publisher and a draining bit beside its cost and chain.
 - A claims message with no change still carries its floor.
 - A node offers a route to itself only once it announces a claim, so a relay
-  that only forwards or only serves viewers has no route on the wire.
+  that has never announced a claim and only forwards or only serves viewers
+  has no route on the wire.
 - A scoped neighbour is sent the node's closest claim per broadcast, and never
   one that came from that neighbour.
 - Today's rule cost 300,100 route messages when a publisher left two meshes
