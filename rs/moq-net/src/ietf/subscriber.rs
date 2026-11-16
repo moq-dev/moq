@@ -7099,6 +7099,7 @@ impl RunFill {
 			(false, Some(delta)) => expected
 				.checked_sub(1)
 				.and_then(|prior| prior.checked_add(delta))
+				.and_then(|id| id.checked_add(ietf::FetchObject::object_delta_bias(self.version)))
 				.ok_or(Error::ProtocolViolation)?,
 			(false, None) => expected,
 			_ => return Err(Error::ProtocolViolation),
@@ -8014,6 +8015,7 @@ impl GroupFetchObjects {
 				(false, Some(delta)) => next
 					.checked_sub(1)
 					.and_then(|prior| prior.checked_add(delta))
+					.and_then(|id| id.checked_add(ietf::FetchObject::object_delta_bias(self.version)))
 					.ok_or(Error::ProtocolViolation)?,
 				(false, None) => next,
 				_ => return Poll::Ready(Err(Error::ProtocolViolation)),
@@ -15612,7 +15614,7 @@ mod stitch_tests {
 
 	#[kio::test]
 	async fn passthrough_fetch_requires_marked_gaps_and_preserves_fields() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			for marked in [false, true] {
 				let properties = if marked { vec![0x3e, 6] } else { vec![] };
 				let second = if marked { vec![0x3e, 1] } else { vec![] };
@@ -15626,13 +15628,15 @@ mod stitch_tests {
 						assert!(decoder.is_empty());
 						continue;
 					}
-					assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID);
+					assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::id(version));
 					let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
 					assert_eq!(
 						ok.end_location.object,
 						if Filter::is_draft20(version) { 8 } else { 9 },
 						"{version} start={start}"
 					);
+					// Draft-23 names the Largest Object the range reaches instead of an End Location.
+					assert_eq!(ok.largest.is_some(), version == Version::Draft23, "{version}");
 					assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
 					ietf::FetchHeader::decode(&mut decoder, version).unwrap();
 					let mut prior = None;
@@ -15648,10 +15652,11 @@ mod stitch_tests {
 						else {
 							panic!("object");
 						};
-						let wire = if version == Version::Draft22 {
-							prior.map_or(id, |prior| id - prior)
-						} else {
-							id
+						// Within a group the delta is the step, less two from draft-23 on.
+						let wire = match version {
+							Version::Draft22 => prior.map_or(id, |prior| id - prior),
+							Version::Draft23 => prior.map_or(id, |prior| id - prior - 2),
+							_ => id,
 						};
 						assert_eq!(object, Some(wire), "{version}");
 						assert_eq!(actual.as_ref(), Some(properties));
@@ -15670,7 +15675,7 @@ mod stitch_tests {
 	/// END_OF_GROUP object, and the next relay fills its cache from that answer.
 	#[kio::test]
 	async fn passthrough_fetch_ends_at_the_last_frame() {
-		for version in [Version::Draft22] {
+		for version in [Version::Draft22, Version::Draft23] {
 			let objects = [
 				(6, &[0x3e, 6][..], None),
 				(8, &[0x3e, 1][..], None),
@@ -15680,9 +15685,14 @@ mod stitch_tests {
 			let (bytes, log) = relay_passthrough(script, version, version, Some((0, 12))).await;
 			assert!(log.resets().is_empty());
 			let mut decoder = Decoder::new(&bytes, version.into());
-			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID, "{version}");
+			assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::id(version), "{version}");
 			let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
-			let last = if Filter::is_draft20(version) { 8 } else { 9 };
+			// Draft-22's End Location is the last frame. Draft-23 names the Largest Object
+			// instead, which here is the END_OF_GROUP object the answer does not carry.
+			let last = match version {
+				Version::Draft22 => 8,
+				_ => 9,
+			};
 			assert_eq!(ok.end_location.object, last, "{version}");
 			assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
 			ietf::FetchHeader::decode(&mut decoder, version).unwrap();

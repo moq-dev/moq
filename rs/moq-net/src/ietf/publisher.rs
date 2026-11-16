@@ -3498,11 +3498,12 @@ impl Publisher {
 				priority: Some(priority),
 				properties,
 			},
-			// Same group and priority; the Object ID is the prior one plus one.
-			FetchPrior::Same(delta) => ietf::FetchObject::Object {
+			// Same group and priority; the Object ID is the prior one plus one, or across a
+			// gap plus the step, which is at least two and which draft-23 writes less two.
+			FetchPrior::Same(step) => ietf::FetchObject::Object {
 				subgroup: ietf::FetchSubgroup::Zero,
 				group: None,
-				object: delta,
+				object: step.map(|step| step - ietf::FetchObject::object_delta_bias(version)),
 				priority: None,
 				properties,
 			},
@@ -14454,7 +14455,10 @@ mod serve_tests {
 				match (prior, group) {
 					(None, group) => (group.unwrap(), object.unwrap()),
 					// No Group ID: the same group, and an absent Object ID Delta is one.
-					(Some((group, prior)), None) => (group, prior + object.unwrap_or(1)),
+					(Some((group, prior)), None) => (
+						group,
+						prior + object.map_or(1, |delta| delta + ietf::FetchObject::object_delta_bias(version)),
+					),
 					(Some((prior, _)), Some(group)) => {
 						let group = match (version, order) {
 							(_, GroupOrder::Descending) => prior - group - 1,

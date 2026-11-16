@@ -510,6 +510,16 @@ pub enum FetchObject {
 impl FetchObject {
 	/// The Serialization Flags values that mark an End of Range instead of an Object.
 	const END_OF_RANGE: &'static [u64] = &[0x8C, 0x10C, 0x20C];
+
+	/// How far past its own value an Object ID Delta reaches within a group. Through
+	/// draft-22 the Object ID is the prior one plus the delta. Draft-23 (section 11.4.1)
+	/// adds two, so a delta is only sent for a gap and zero skips one Object.
+	pub(super) fn object_delta_bias(version: Version) -> u64 {
+		match version {
+			Version::Draft18 | Version::Draft20 | Version::Draft22 => 0,
+			_ => 2,
+		}
+	}
 }
 
 impl Encode<Version> for FetchObject {
@@ -766,6 +776,16 @@ mod tests {
 			decode_message::<FetchOk>(&[1, 0x22, 1], Version::Draft23),
 			Err(DecodeError::InvalidValue)
 		));
+	}
+
+	/// Within a group, draft-23 (section 11.4.1) reads an Object ID Delta as the prior Object
+	/// ID plus the delta plus two; drafts 18 to 22 add the delta alone.
+	#[test]
+	fn object_id_delta_reaches_two_further_at_draft23() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(FetchObject::object_delta_bias(version), 0, "{version:?}");
+		}
+		assert_eq!(FetchObject::object_delta_bias(Version::Draft23), 2);
 	}
 
 	/// The head of a draft-22 FETCH up to its Number of Parameters: Request ID 1, Track
