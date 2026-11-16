@@ -146,6 +146,7 @@ void timestamp_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "timestamp broadcast");
 	moq::TrackInfo timed;
+	timed.max_age = std::chrono::nanoseconds::zero();
 	timed.timescale = 90000;
 	auto track = ok(broadcast->publish_track("timed", timed), "publish timed track");
 	auto consumer = ok(track->consume(std::nullopt), "consume timed track");
@@ -367,6 +368,7 @@ int main()
 	CHECK(route->instance_id() && !route->instance_id()->is_minted());
 	auto broadcast = route->broadcast();
 	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
 	info.timescale = 1000000;
 	auto track = ok(broadcast->publish_track("data", info), "publish_track");
 	ok(route->announce(), "announce");
