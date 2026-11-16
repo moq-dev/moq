@@ -4882,6 +4882,24 @@ export class Subscriber {
 		return true;
 	}
 
+	// Whether a payload read waits, in sequence order, on a metadata copy in `[start, end)` it has
+	// yet to read: its payload replaces it, as after a promotion. Mirrors the Rust ordered read,
+	// which parks at a metadata slot.
+	#waitMeta(start: bigint, end: bigint, drift: Drift): boolean {
+		const producer = this.#state.producer;
+		if (start >= end || !producer || this.#state.update.peek()?.meta === true) return false;
+		const waits = hooks
+			.cachedMeta(producer, start, end)
+			.some(
+				(sequence) =>
+					this.#window.contains(sequence) &&
+					!this.#delivered.has(sequence) &&
+					!this.#staleAt(sequence, drift),
+			);
+		if (waits) this.#state.waitingOrdered = true;
+		return waits;
+	}
+
 	// The lowest buffered candidate in range that the budget spares. An ordered take may
 	// still wait on an owed hole below it, so a resumed reader must keep its place.
 	#peekGroup(ordered: boolean): bigint | undefined {
@@ -4953,6 +4971,7 @@ export class Subscriber {
 				continue;
 			}
 			if (this.#waitOwed(start, group.sequence, drift)) return { kind: "idle" };
+			if (this.#waitMeta(start, group.sequence, drift)) return { kind: "idle" };
 			// A group missing its head comes from the fill asked for it, in its turn.
 			if (this.#lacksHead(group)) {
 				if (this.#askHead(group.sequence)) {

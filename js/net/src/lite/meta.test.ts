@@ -2,6 +2,7 @@
 // track's readers are gated by mode, and the mode across sessions and relays.
 
 import { afterEach, expect, mock, test } from "bun:test";
+import { Duration, sleep } from "@moq/clock";
 import { accept, connect, type Session } from "../connection/index.ts";
 import { ProtocolViolation, Unsupported } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
@@ -314,7 +315,8 @@ test("promoting a reader hands out again the groups it read as metadata, from th
 });
 
 test("an ordered reader reads the groups it passed as metadata again, in order, once promoted", async () => {
-	for (const landed of [false, true]) {
+	// Which payloads land before the reader asks for them: none, all, or only the higher one.
+	for (const early of [[], [0n, 1n], [1n]]) {
 		const track = new TrackProducer("video");
 		track.accept({ timescale: Timescale.MILLI, maxAge: null });
 		const ordered = track.subscribe({ meta: true, delay: { max: null } }).ordered();
@@ -323,13 +325,16 @@ test("an ordered reader reads the groups it passed as metadata again, in order, 
 			const group = await ordered.nextGroup();
 			expect([group?.sequence, group?.meta]).toEqual([sequence, true]);
 		}
-		if (landed) for (const sequence of [0n, 1n]) receive(track, sequence, false, [5]).finish();
+		for (const sequence of early) receive(track, sequence, false, [5]).finish();
 
 		ordered.update({ meta: false, delay: { max: null } });
 		for (const sequence of [0n, 1n]) {
-			if (!landed) receive(track, sequence, false, [5]).finish();
-			const group = await ordered.nextGroup();
-			expect([group?.sequence, group?.meta, landed]).toEqual([sequence, false, landed]);
+			// The read is already waiting when the payload lands.
+			const next = ordered.nextGroup();
+			await sleep(Duration.ZERO);
+			if (!early.includes(sequence)) receive(track, sequence, false, [5]).finish();
+			const group = await next;
+			expect([group?.sequence, group?.meta, early]).toEqual([sequence, false, early]);
 			expect((await group?.readFrame())?.payload.byteLength).toBe(5);
 		}
 		ordered.close();

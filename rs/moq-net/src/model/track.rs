@@ -18258,11 +18258,12 @@ mod test {
 	}
 
 	/// A key-order reader that asks for the payload of groups it already passed as metadata
-	/// reads each again in key order, whether its payload landed before the switch or after.
+	/// reads each again in key order, whichever payloads landed before the switch: none, all,
+	/// or only a higher one, which waits for the lower.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_ordered_promotion_reads_the_groups_it_passed_again() {
-		for landed in [false, true] {
+		for early in [&[][..], &[3, 4], &[4]] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
 			let from_start = || {
@@ -18291,26 +18292,29 @@ mod test {
 				copy.write_meta(at(300 + key), 7).unwrap();
 				copy.close().unwrap();
 				let group = ordered.next_group().await.unwrap().expect("the metadata copy");
-				assert_eq!((group.start, group.is_meta()), (key, true), "landed {landed}");
+				assert_eq!((group.start, group.is_meta()), (key, true), "early {early:?}");
 			}
-			if landed {
-				land(3);
-				land(4);
+			for &key in early {
+				land(key);
 			}
 
 			control.update(from_start()).unwrap();
+			let waiter = kio::Waiter::noop();
 			for key in [3, 4] {
-				if !landed {
+				if !early.contains(&key) {
+					assert!(
+						ordered.poll_next_group(&waiter).is_pending(),
+						"early {early:?}: {key} is next"
+					);
 					land(key);
 				}
 				let mut group = ordered.next_group().await.unwrap().expect("the payload copy");
-				assert_eq!((group.start, group.is_meta()), (key, false), "landed {landed}");
+				assert_eq!((group.start, group.is_meta()), (key, false), "early {early:?}");
 				assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
 			}
-			let waiter = kio::Waiter::noop();
 			assert!(
 				ordered.poll_next_group(&waiter).is_pending(),
-				"landed {landed}: read twice"
+				"early {early:?}: read twice"
 			);
 		}
 	}
