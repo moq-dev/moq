@@ -8,9 +8,8 @@
 -- since the floor files a closed session by relays and orders it by start.
 --
 -- A route at node i is what i would offer: its path names i first, then i's next
--- hop, and so on to the forwarding node it leads to. `extra` carries whether a
--- marked link is on the path and, beside each link, the session the nearer node
--- holds it on. The link from i to j carries what i and j hold about it and what i
+-- hop, and so on to the forwarding node it leads to. `extra` carries, beside each
+-- link, the session the nearer node holds it on. The link from i to j carries what i and j hold about it and what i
 -- knows: closed sessions (floors) and nodes named draining.
 --------------------------------------------------------------------------------
 
@@ -41,22 +40,19 @@ max-hops = 32
 ------------------------------------------------------------------------
 -- What a route carries beyond its rank and path
 
--- A marked link is on the path, and the session beside each link.
+-- The session beside each link.
 Extra : Set
-Extra = Bool × List ℕ
+Extra = List ℕ
 
 OE : Ordered Extra
-OE = lex bool (list nat)
+OE = list nat
 
 e₀ : Extra
-e₀ = false , []
+e₀ = []
 
 e₀-least : ∀ e → Ordered._≤_ OE e₀ e
-e₀-least (m , ss) = lex-≤ bool (list nat) (Bool.≤-minimum m) λ _ → least ss
-  where
-  least : ∀ ss → Ordered._≤_ (list nat) [] ss
-  least []      = base _
-  least (_ ∷ _) = halt
+e₀-least []      = base _
+e₀-least (_ ∷ _) = halt
 
 -- Among equal ranks and lengths, by the neighbour: its relay, then its start.
 -- No two candidates at one node share a neighbour, so the rest of the path
@@ -122,9 +118,9 @@ refuses : Link → Edge → Valid → Bool
 refuses f _ v =
   not (L.up f)
   ∨ (null (path v) ∧ not (L.claimed f))
-  ∨ (proj₁ (extra v) ∧ L.marked-there f)
+  ∨ (marked v ∧ L.marked-there f)
   ∨ (max-hops ≤ᵇ suc (length (path v)))
-  ∨ any (closed (L.floors f)) (zip (path v) (proj₂ (extra v)))
+  ∨ any (closed (L.floors f)) (zip (path v) (extra v))
 
 -- The receiver ranks a route draining when it names a node known draining.
 marks : Link → Edge → Path → Bool
@@ -138,9 +134,10 @@ policy = record
   ; penalty      = L.penalty
   ; drains       = L.drains
   ; marks        = marks
+  ; marked       = L.marked-here
   ; refuses      = refuses
   ; down-refuses = λ _ _ → refl
-  ; tag          = λ f (m , ss) → (m ∨ L.marked-here f) , (L.session f ∷ ss)
+  ; tag          = λ f ss → L.session f ∷ ss
   }
 
 open Rule policy public

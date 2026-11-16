@@ -53,6 +53,7 @@ policy = record
   ; penalty      = S.penalty
   ; drains       = S.drains
   ; marks        = λ _ _ _ → false
+  ; marked       = λ _ → false
   ; refuses      = λ f _ _ → not (S.up f)
   ; down-refuses = λ _ _ → refl
   ; tag          = λ _ _ → tt

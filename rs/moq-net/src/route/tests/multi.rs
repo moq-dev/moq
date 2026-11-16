@@ -183,7 +183,8 @@ impl Here<'_> {
 	}
 }
 
-/// How a candidate route orders, lower first: rank, then the next hop in use
+/// How a candidate route orders, lower first: rank, then one with no marked link
+/// on its path, which more neighbours may be sent, then the next hop in use
 /// (`current`), the shorter path, and the neighbour.
 pub(super) fn order<N: Key>(best: &Best<N>, current: Option<N>) -> Order<N> {
 	let (draining, priority, cost) = best.rank();
@@ -191,6 +192,7 @@ pub(super) fn order<N: Key>(best: &Best<N>, current: Option<N>) -> Order<N> {
 		draining,
 		priority,
 		cost,
+		best.offer.marked,
 		current != Some(best.via),
 		best.offer.path.len(),
 		best.via,
@@ -326,9 +328,9 @@ impl<N> Default for Known<N> {
 	}
 }
 
-/// How candidate routes order, lower first: rank, then the next hop in use, the
-/// shorter path, and the neighbour.
-pub(super) type Order<N> = (bool, Reverse<i8>, Metric, bool, usize, N);
+/// How candidate routes order, lower first: rank, then unmarked, the next hop in
+/// use, the shorter path, and the neighbour.
+pub(super) type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, N);
 
 /// Where a request for a broadcast goes next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -997,6 +999,11 @@ impl<N: Key> Router<N> {
 		out
 	}
 
+	/// Whether it offers a route to itself under `tune.claimed`: it has announced a claim.
+	pub fn announced(&self) -> bool {
+		self.announced
+	}
+
 	/// The route this node uses to `origin`.
 	pub fn best(&self, origin: Id) -> Option<&Best<N>> {
 		self.best.get(&origin)
@@ -1061,7 +1068,8 @@ impl<N: Key> Router<N> {
 		if best.via == peer {
 			return None;
 		}
-		best.offer.onward(self.me, self.peers[&best.via].session, to.id, to.port.upstream)
+		best.offer
+			.onward(self.me, self.peers[&best.via].session, to.id, to.port.upstream)
 	}
 
 	fn advertise_to(&mut self, origin: Id, peer: N) {

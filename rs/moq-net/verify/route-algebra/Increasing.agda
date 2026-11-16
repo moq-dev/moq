@@ -2,13 +2,14 @@
 -- The algebra both levels of the route rule share, and the theorem it buys.
 --
 -- A route is invalid or carries whether it is draining, a penalty (the lowest
--- priority on its path, counted down from the highest), a cost, its path, and
--- whatever else a level carries in `extra`. Routes rank by draining, then
--- penalty, then cost, then the shorter path, then a fixed order on paths, then
--- `extra`. Crossing a link (`extend`) refuses a route whose path does not start
--- at the link's far end or already names its near end, refuses whatever the
--- link's own filter refuses, and otherwise can only make the route draining, raise
--- its penalty, add to its cost, and prepend the link to its path.
+-- priority on its path, counted down from the highest), a cost, whether a marked
+-- link is on its path, its path, and whatever else a level carries in `extra`.
+-- Routes rank by draining, then penalty, then cost, then unmarked before marked,
+-- then the shorter path, then a fixed order on paths, then `extra`. Crossing a
+-- link (`extend`) refuses a route whose path does not start at the link's far end
+-- or already names its near end, refuses whatever the link's own filter refuses,
+-- and otherwise can only make the route draining, raise its penalty, add to its
+-- cost, mark it, and prepend the link to its path.
 --
 -- Any such algebra is an increasing path algebra, so Daggitt and Griffin's
 -- Theorem 5 applies: on every network, from every state, under every schedule
@@ -62,6 +63,7 @@ record Valid : Set where
     draining : Bool
     penalty  : ℕ
     cost     : ℕ
+    marked   : Bool
     path     : Path
     extra    : E
 
@@ -73,7 +75,7 @@ data Weight : Set where
 
 -- The route a node has to itself.
 trivial : Weight
-trivial = valid (route false 0 0 [] e₀)
+trivial = valid (route false 0 0 false [] e₀)
 
 ------------------------------------------------------------------------
 -- What crossing a link does
@@ -90,6 +92,8 @@ record Policy : Set₁ where
     -- Whether the receiver ranks the route draining, from the link (near end,
     -- far end) and the path as offered.
     marks    : Link → Edge → Path → Bool
+    -- Whether the link marks every route that crosses it.
+    marked   : Link → Bool
     -- Whether the link refuses the route, from the link and the route as offered.
     refuses  : Link → Edge → Valid → Bool
     down-refuses : ∀ e v → refuses down e v ≡ true
@@ -113,6 +117,7 @@ module Rule (P : Policy) where
     (draining v ∨ drains f ∨ marks f (i , j) (path v))
     (P.penalty f ⊔ penalty v)
     (P.cost f + cost v)
+    (marked v ∨ P.marked f)
     ((i , j) ∷ path v)
     (tag f (extra v)))
 
@@ -120,18 +125,19 @@ module Rule (P : Policy) where
   -- The order
 
   private
-    key : Valid → Bool × ℕ × ℕ × Path × E
-    key v = draining v , penalty v , cost v , path v , extra v
+    key : Valid → Bool × ℕ × ℕ × Bool × Path × E
+    key v = draining v , penalty v , cost v , marked v , path v , extra v
 
-    O₄ = lex (shortlex OP) OE
+    O₅ = lex (shortlex OP) OE
+    O₄ = lex bool O₅
     O₃ = lex nat O₄
     O₂ = lex nat O₃
 
-    OK : Ordered (Bool × ℕ × ℕ × Path × E)
+    OK : Ordered (Bool × ℕ × ℕ × Bool × Path × E)
     OK = lex bool O₂
 
   OV : Ordered Valid
-  OV = keyed key (λ eq → cong (λ (d , q , c , p , x) → route d q c p x) eq) OK
+  OV = keyed key (λ eq → cong (λ (d , q , c , m , p , x) → route d q c m p x) eq) OK
 
   private
     module OV = Ordered OV
@@ -211,6 +217,7 @@ module Rule (P : Policy) where
     (lex-≤ bool O₂ (Bool.≤-minimum (draining w)) λ _ →
      lex-≤ nat O₃ z≤n λ _ →
      lex-≤ nat O₄ z≤n λ _ →
+     lex-≤ bool O₅ (Bool.≤-minimum (marked w)) λ _ →
      lex-≤ (shortlex OP) OE ([]-least (path w)) λ _ →
      e₀-least (extra w))
 
@@ -231,6 +238,7 @@ module Rule (P : Policy) where
     (lex-≤ bool O₂ (≤-∨ (draining v) _) λ _ →
      lex-≤ nat O₃ (ℕ.m≤n⊔m (P.penalty f) (penalty v)) λ _ →
      lex-≤ nat O₄ (ℕ.m≤n+m (cost v) (P.cost f)) λ _ →
+     lex-≤ bool O₅ (≤-∨ (marked v) _) λ _ →
      lex-≤ (shortlex OP) OE (shortlex-∷ OP (i , j) (path v)) λ eq →
      contradiction eq p≉i∷p)
 

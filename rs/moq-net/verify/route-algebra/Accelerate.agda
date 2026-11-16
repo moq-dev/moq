@@ -102,8 +102,8 @@ module _ {n : ℕ} (A : AdjacencyMatrix algebra n) where
 
   Sound : Weight → Set
   Sound invalid   = ⊤
-  Sound (valid x) = length (proj₂ (extra x)) ≡ length (path x) ×
-                    All (Holds (draining x)) (zip (path x) (proj₂ (extra x)))
+  Sound (valid x) = length (extra x) ≡ length (path x) ×
+                    All (Holds (draining x)) (zip (path x) (extra x))
 
   private
     weaken : ∀ {d d′} → (d ≡ true → d′ ≡ true) → ∀ {z} → Holds d z → Holds d′ z
@@ -180,13 +180,13 @@ module _ {n : ℕ} (A : AdjacencyMatrix algebra n) where
       ... | false = named-drained i k p ss (ℕ.suc-injective len) hs named
 
     -- A link of A refuses a sound route exactly when `plain` does.
-    same-refusal : ∀ i k x → All (Holds (draining x)) (zip (path x) (proj₂ (extra x))) →
+    same-refusal : ∀ i k x → All (Holds (draining x)) (zip (path x) (extra x)) →
                    refuses (A i k) (toℕ i , toℕ k) x ≡ refuses (plain i k) (toℕ i , toℕ k) x
-    same-refusal i k x holds = trans (cong prefix (floors-silent i k _ holds)) (sym (cong prefix (no-floor (zip (path x) (proj₂ (extra x))))))
+    same-refusal i k x holds = trans (cong prefix (floors-silent i k _ holds)) (sym (cong prefix (no-floor (zip (path x) (extra x)))))
       where
       prefix : Bool → Bool
       prefix b = not (Link.up (A i k)) ∨ (null (path x) ∧ not (Link.claimed (A i k)))
-        ∨ (proj₁ (extra x) ∧ Link.marked-there (A i k)) ∨ (max-hops ≤ᵇ suc (length (path x))) ∨ b
+        ∨ (marked x ∧ Link.marked-there (A i k)) ∨ (max-hops ≤ᵇ suc (length (path x))) ∨ b
 
     -- One step across a link of A takes a sound route as `plain` does.
     neutral : ∀ i k w → Sound w → extend (A i k) (toℕ i , toℕ k) w ≡ extend (plain i k) (toℕ i , toℕ k) w
@@ -197,7 +197,7 @@ module _ {n : ℕ} (A : AdjacencyMatrix algebra n) where
     ... | yes _ | yes _ = refl
     ... | yes _ | no  _ rewrite same-refusal i k x holds with refuses (plain i k) (toℕ i , toℕ k) x in eq
     ...   | true  = refl
-    ...   | false rewrite no-drain (map proj₂ (path x)) = cong (λ d → valid (route d _ _ _ _)) drained
+    ...   | false rewrite no-drain (map proj₂ (path x)) = cong (λ d → valid (route d _ _ _ _ _)) drained
       where
       up = refuses-up (plain i k) (toℕ i , toℕ k) x eq
       -- What the drains add, given the route is already draining where they would.

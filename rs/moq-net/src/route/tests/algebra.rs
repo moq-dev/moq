@@ -374,7 +374,7 @@ fn weight(offer: Option<&Offer>) -> String {
 		write!(sessions, "{} ∷ ", pair[1].session).unwrap();
 	}
 	format!(
-		"valid (route {} {} {} ({path}[]) ({} , {sessions}[]))",
+		"valid (route {} {} {} {} ({path}[]) ({sessions}[]))",
 		offer.draining,
 		penalty(offer.priority),
 		offer.cost,
@@ -466,13 +466,16 @@ fn vectors() -> String {
 		// Half the pairs offer the same route over the same kind of link, so only the
 		// neighbour breaks the tie.
 		let two = match rng.one_in(2) {
-			true => (Held { node: b, ..one.0.clone() }, one.1.clone()),
+			true => (
+				Held {
+					node: b,
+					..one.0.clone()
+				},
+				one.1.clone(),
+			),
 			false => (held(&mut rng, b), link(&mut rng)),
 		};
-		let picked = pick(&[
-			(a, cross(&state, &one.1, &one.0)),
-			(b, cross(&state, &two.1, &two.0)),
-		]);
+		let picked = pick(&[(a, cross(&state, &one.1, &one.0)), (b, cross(&state, &two.1, &two.0))]);
 		write!(
 			out,
 			"\n_ : {}\n  ⊕ {}\n  ≡ {}\n_ = refl\n",
