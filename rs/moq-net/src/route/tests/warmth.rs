@@ -924,6 +924,8 @@ fn churn(arm: Arm, cases: std::ops::Range<usize>, shape: fn(&mut XorShift) -> Sh
 		let mut pick = XorShift(0x5eed_0002 + case as u64);
 		let shape = shape(&mut script);
 		let mut sim = shape.build(arm, 0x5eed_0003 + case as u64);
+		// Far beyond what any mesh here settles in, so only a storm that keeps growing.
+		sim.budget = Some(1_000_000);
 		let (sent, watch) = (sim.sent, sim.watch);
 		for _ in 0..2 {
 			let relay = script.next(shape.relays as u64) as usize;
@@ -1188,13 +1190,12 @@ fn unequal() -> Shape {
 	}
 }
 
-/// The drone shape's last phase closes the uplink the arm settled on.
+/// The drone shape's last phase closes the uplink the arm settled on, or the first
+/// reader's where the arm keeps more than one, as path joins keep one per drone.
 fn takeover(arm: Arm) -> Case {
 	let mut phases = drone_phases(5, false);
-	let holder = uplinked(&run(&drones(5), arm, &phases, 4));
-	if let Some(holder) = holder {
-		phases.push(phase("its_uplink_closes", vec![Step::Close(0, holder)]));
-	}
+	let holder = uplinked(&run(&drones(5), arm, &phases, 4)).unwrap_or(1);
+	phases.push(phase("its_uplink_closes", vec![Step::Close(0, holder)]));
 	case("drones_lose_the_uplink", drones(5), phases)
 }
 

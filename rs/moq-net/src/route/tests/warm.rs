@@ -146,12 +146,14 @@ impl Price {
 	}
 }
 
-/// What a relay offers a neighbour: its summed cost and, with [`Arm::hops`], the relays
-/// the data crossed, the publisher's own relay first.
+/// What a relay offers a neighbour: its summed cost, with [`Arm::hops`] the relays the
+/// data crossed, the publisher's own relay first, and whether the data came over a link
+/// its receiver marked upstream, the bit a route's offer carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Signal {
 	pub cost: Metric,
 	pub path: Vec<Node>,
+	pub marked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,7 +210,8 @@ enum Msg {
 }
 
 /// The stream a message travels on: each subscription and query is a stream of its
-/// own, unordered against the rest, and adverts share a session's announce stream.
+/// own, unordered against the rest, and adverts share a session's announce stream,
+/// in order with the route layer's messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Lane {
 	Pull,
@@ -443,7 +446,9 @@ pub(super) struct WarmSim {
 	adjacent: Vec<BTreeSet<Node>>,
 	casts: Vec<Broadcast>,
 	carry: Vec<BTreeMap<usize, Carry>>,
-	queues: BTreeMap<Key, VecDeque<(usize, Msg)>>,
+	/// Each message with the route layer's clock when it was queued: an advert keeps its
+	/// place among the route messages on the same session's announce stream.
+	queues: BTreeMap<Key, VecDeque<(u64, usize, Msg)>>,
 	streams: u64,
 	/// What must react before the next delivery: a relay and broadcast whose inputs
 	/// changed. Nothing else can act, so nothing else is asked to.
@@ -458,6 +463,9 @@ pub(super) struct WarmSim {
 	circling: BTreeMap<usize, (bool, bool)>,
 	pub sent: Sent,
 	pub watch: Watch,
+	/// The deliveries [`WarmSim::settle`] may spend before it gives up, if bounded: a
+	/// storm that only grows would cost unbounded work.
+	pub budget: Option<usize>,
 	pub round: usize,
 	order: XorShift,
 	/// Rounds each reader waited for its first frame.
@@ -490,6 +498,7 @@ impl WarmSim {
 			circling: BTreeMap::new(),
 			sent: Sent::default(),
 			watch: Watch::default(),
+			budget: None,
 			round: 0,
 			order: XorShift(seed | 1),
 			waits: Vec::new(),
@@ -599,10 +608,31 @@ impl WarmSim {
 			| Msg::Told { stream, .. } => *stream as usize,
 			Msg::Advert(_) => usize::MAX,
 		};
+		let at = self.net.stamp();
 		self.queues
 			.entry((from, to, lane, stream))
 			.or_default()
-			.push_back((cast, msg));
+			.push_back((at, cast, msg));
+	}
+
+	/// When the next advert from `from` to `to` was queued, if one waits.
+	fn advert(&self, from: Node, to: Node) -> Option<u64> {
+		let queue = self.queues.get(&(from, to, Lane::Announce, usize::MAX))?;
+		queue.front().map(|&(at, ..)| at)
+	}
+
+	/// Whether `key`'s next message waits behind an older route message: adverts and
+	/// routes share the session's one announce stream.
+	fn blocked(&self, key: Key) -> bool {
+		let (from, to, lane, _) = key;
+		let route = self.net.head(from, to);
+		lane == Lane::Announce && route.is_some_and(|route| self.advert(from, to).is_some_and(|at| route < at))
+	}
+
+	/// Whether the next route message from `from` to `to` waits behind an older advert.
+	fn behind(&self, from: Node, to: Node) -> bool {
+		let route = self.net.head(from, to);
+		route.is_some_and(|route| self.advert(from, to).is_some_and(|at| at < route))
 	}
 
 	// --- What a relay knows ---
@@ -637,6 +667,7 @@ impl WarmSim {
 			return Some(Signal {
 				cost: 0,
 				path: Vec::new(),
+				marked: false,
 			});
 		}
 		let signal = self.live(node, cast)?;
@@ -652,7 +683,8 @@ impl WarmSim {
 			true => signal.path.iter().copied().chain([node]).collect(),
 			false => Vec::new(),
 		};
-		Some(Signal { cost, path })
+		let marked = signal.marked || self.upstream.contains(&(node, carry.up.as_ref()?.via));
+		Some(Signal { cost, path, marked })
 	}
 
 	/// The warm signal `node` gives `peer`: its offer, while it has demand besides `peer`.
@@ -1088,17 +1120,6 @@ impl WarmSim {
 		}
 	}
 
-	/// Whether `node`'s copy, which `signal` offers, came over a link its receiver marked
-	/// upstream: the route layer passes no such route on to another marked neighbour.
-	fn crossed(&self, node: Node, cast: usize, signal: &Signal) -> bool {
-		let up = self.carry(node, cast).and_then(|carry| carry.up.as_ref());
-		up.is_some_and(|pull| self.upstream.contains(&(node, pull.via)))
-			|| signal
-				.path
-				.windows(2)
-				.any(|hop| self.upstream.contains(&(hop[1], hop[0])))
-	}
-
 	/// Whether `audience` lets `node` advertise `signal` to `peer`.
 	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
 		let price = signal.cost + self.price(node, peer).cold;
@@ -1119,7 +1140,7 @@ impl WarmSim {
 			Audience::NotNext => matches!(heard, Some((cost, false)) if price <= cost),
 			Audience::NotDown | Audience::NotDownAsk | Audience::NotDownAskUp | Audience::NotDownQuery => {
 				!self.upstream.contains(&(peer, node))
-					&& !(self.upstream.contains(&(node, peer)) && self.crossed(node, cast, signal))
+					&& !(self.upstream.contains(&(node, peer)) && signal.marked)
 					&& useful()
 			}
 			Audience::Shared => self.carry(node, cast).is_some_and(|carry| {
@@ -1297,6 +1318,7 @@ impl WarmSim {
 	/// Deliver everything queued now, in a seeded random order: a hop of delay. False
 	/// if nothing was.
 	pub fn round(&mut self) -> bool {
+		#[derive(Clone, Copy)]
 		enum Queue {
 			Route(Node, Node),
 			Data(Key),
@@ -1315,22 +1337,40 @@ impl WarmSim {
 		for i in (1..ready.len()).rev() {
 			ready.swap(i, self.order.next(i as u64 + 1) as usize);
 		}
-		for (queue, count) in ready {
-			for _ in 0..count {
-				match queue {
-					Queue::Route(from, to) => {
-						self.net.deliver(from, to);
-						self.stir(to);
+		// A queue whose next message waits behind an older one on the same announce
+		// stream takes its turn on a later pass, once that one is delivered.
+		loop {
+			let mut moved = false;
+			for (queue, count) in &mut ready {
+				while *count > 0 {
+					let blocked = match *queue {
+						Queue::Route(from, to) => self.behind(from, to),
+						Queue::Data(key) => self.blocked(key),
+					};
+					if blocked {
+						break;
 					}
-					Queue::Data(key) => {
-						let Some((cast, msg)) = self.pop(key) else {
-							break;
-						};
-						self.recv(key.0, key.1, cast, msg);
+					*count -= 1;
+					moved = true;
+					match *queue {
+						Queue::Route(from, to) => {
+							self.net.deliver(from, to);
+							self.stir(to);
+						}
+						Queue::Data(key) => {
+							let Some((cast, msg)) = self.pop(key) else {
+								*count = 0;
+								break;
+							};
+							self.recv(key.0, key.1, cast, msg);
+						}
 					}
+					self.step();
+					self.observe();
 				}
-				self.step();
-				self.observe();
+			}
+			if !moved {
+				break;
 			}
 		}
 		self.net.flush();
@@ -1343,16 +1383,21 @@ impl WarmSim {
 	/// The next message on a queue, dropping the queue once empty.
 	fn pop(&mut self, key: Key) -> Option<(usize, Msg)> {
 		let queue = self.queues.get_mut(&key)?;
-		let next = queue.pop_front();
+		let next = queue.pop_front().map(|(_, cast, msg)| (cast, msg));
 		if queue.is_empty() {
 			self.queues.remove(&key);
 		}
 		next
 	}
 
-	/// Deliver in rounds until nothing is left. False if that never happens.
+	/// Deliver in rounds until nothing is left. False if that never happens, or once
+	/// it spends [`WarmSim::budget`].
 	pub fn settle(&mut self) -> bool {
+		let start = self.watch.steps;
 		for _ in 0..2_000 {
+			if self.budget.is_some_and(|budget| self.watch.steps - start > budget) {
+				return false;
+			}
 			if !self.round() {
 				return true;
 			}
@@ -1362,9 +1407,11 @@ impl WarmSim {
 
 	/// Deliver one message from a queue `pick` chooses, as churn does. False if none waits.
 	pub fn deliver(&mut self, pick: &mut XorShift) -> bool {
-		let routes = self.net.ready();
+		let routes: Vec<_> = (self.net.ready().into_iter())
+			.filter(|&((from, to), _)| !self.behind(from, to))
+			.collect();
 		let data: Vec<Key> = (self.queues.iter())
-			.filter(|(_, queue)| !queue.is_empty())
+			.filter(|&(&key, queue)| !queue.is_empty() && !self.blocked(key))
 			.map(|(&key, _)| key)
 			.collect();
 		let total = routes.len() + data.len();
