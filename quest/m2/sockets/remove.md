@@ -63,9 +63,15 @@ What exists only for sockets, to check before deleting:
 - `track::Producer::weak` and `TrackWeak` (`rs/moq-net/src/model/track.rs`),
   `pub(super)`: the endpoint keeps a weak handle to each open session's
   track (`socket.rs:236`) so closing the endpoint aborts its sessions
-  without holding them open. Kixel's port needs the same cleanup. Make them
-  public too, or name the public API that already does it, such as holding
-  producers and pruning each on its close, and record which in the PR.
+  without holding them open, then aborts what is left before withdrawing
+  its broadcasts, so subscribers see a cancel rather than an unroutable
+  route. Kixel's port needs the same cleanup. Holding strong producers is no
+  substitute: a held producer never auto-closes, which is what the pruning
+  watches for. Recommended: publish a narrow non-owning handle that reports
+  whether its track closed and cancels it, rather than `TrackWeak` whole;
+  its cancel keeps the listing contract `Producer::abort` has (unlist first),
+  or works only on unlisted tracks. Tests pin that a held handle keeps no
+  dropped track alive.
 - `origin::Consumer::hidden_withheld` and the hold a pre-lite-07 client
   session takes on it (`rs/moq-net/src/lite/session.rs:311-315`), which make
   a dial fail `Unsupported` while a hop cannot carry hidden broadcasts.
@@ -97,7 +103,7 @@ For the PR:
 - Run `just test interop --all` (moq-ffi changes) and `just api-diff`.
 
 Public API: breaking for `main`-only API in every language; nothing on
-`release` has sockets. Adds `reserve_unlisted_track`, and `TrackWeak` with `track::Producer::weak` unless the PR names a public alternative. Wire: none
+`release` has sockets. Adds `reserve_unlisted_track` and a non-owning track cancellation handle. Wire: none
 (sockets were a path and track naming convention).
 
 ## Required
