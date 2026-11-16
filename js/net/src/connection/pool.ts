@@ -232,6 +232,7 @@ export class Connection {
 	readonly #allocator = new Signal<Handle | undefined>(undefined);
 	readonly #viewers = new Signal<Pick<Viewers, "watch" | "setTarget" | "target"> | undefined>(undefined);
 	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
+	readonly #loop = new Signal<Reload | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
 
@@ -289,6 +290,7 @@ export class Connection {
 			effect.set(this.#allocator, lease.connection.allocator, undefined);
 			effect.set(this.#viewers, lease.connection.viewers, undefined);
 			effect.set(this.#auth, lease.connection.auth, undefined);
+			effect.set(this.#loop, lease.connection, undefined);
 
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
@@ -341,6 +343,7 @@ export class Connection {
 				effect.set(this.#allocator, loop.allocator, undefined);
 				effect.set(this.#viewers, loop.viewers, undefined);
 				effect.set(this.#auth, loop.auth, undefined);
+				effect.set(this.#loop, loop, undefined);
 			});
 			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
@@ -395,6 +398,39 @@ export class Connection {
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */
 	async stats(): Promise<StatsType | undefined> {
 		return this.#established.peek()?.stats();
+	}
+
+	/**
+	 * Resolve once the peer first answers the latest {@link ConnectionProps.tokens}, as Rust's
+	 * `Tokens::poll_answered` does: each token the latest set newly presented, or the initial
+	 * ones before any set, is granted in band, or is the connection credential a dial carried and
+	 * the peer accepted. A token the set kept, the connection credential included, counts only
+	 * once the peer refuses it, and nothing is re-checked after the answer. A set replaced before
+	 * its answer moves the wait to the new one, and a connection with no tokens answers at once.
+	 *
+	 * An app that re-signs its credential for each dial can end the connection on a refusal by
+	 * aborting its {@link auth} handle, which makes the loop give up with that error.
+	 *
+	 * Waits while no connection is held, such as before a URL is set.
+	 *
+	 * @throws The peer's refusal, an `Unsupported` error when the session cannot carry a token in
+	 * band, or the connection's end, such as an abort of its auth handle.
+	 */
+	async answered(): Promise<void> {
+		for (;;) {
+			const closed = this.#closed.peek();
+			if (closed !== undefined) throw closed ?? new Error("connection closed");
+			const loop = this.#loop.peek();
+			// A new loop, such as one a version change built, restarts the wait.
+			const { promise: moved, resolve } = Promise.withResolvers<"moved">();
+			const stop = this.#loop.changed(() => resolve("moved"));
+			try {
+				const answered = loop?.answered().then(() => "answered" as const);
+				if ((await Promise.race(answered ? [answered, moved] : [moved])) === "answered") return;
+			} finally {
+				stop();
+			}
+		}
 	}
 
 	/**

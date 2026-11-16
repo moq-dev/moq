@@ -1,0 +1,204 @@
+import { expect, test } from "bun:test";
+import { Duration } from "@moq/clock";
+import { Signal } from "@moq/signals";
+import type { Request } from "../auth.ts";
+import { SessionCode, SessionError } from "../error.ts";
+import * as Lite from "../lite/index.ts";
+import { createMockTransportPair, manual, waitFor } from "../mock.ts";
+import * as Path from "../path.ts";
+import { wireOf } from "../wire.ts";
+import { accept as acceptSession } from "./index.ts";
+import { Connection } from "./pool.ts";
+import { Reload } from "./reload.ts";
+
+const URL_ = new URL("https://example.com/");
+const DELAY = { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null };
+
+/** The token a server's request carries as text, where the connection's own credential is "connection". */
+function named(request: Request): string {
+	return request.token.byteLength === 0 ? "connection" : new TextDecoder().decode(request.token);
+}
+
+/** Grants everything and refuses nothing. */
+const GRANT = { publish: new Path.Patterns([Path.Pattern.all()]), subscribe: new Path.Patterns() };
+
+/**
+ * A lite-07 relay that answers each token itself: `decide` accepts or rejects the request, and
+ * may hold it, such as a token a test answers later.
+ */
+function relay(decide: (token: string, request: Request) => void) {
+	const stub = function StubWebTransport(target: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		void acceptSession({ transport: pair.server, url: new URL(target) }).then(async (session) => {
+			const requests = session.auth.requests();
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				decide(named(request), request);
+			}
+		});
+		return pair.client;
+	};
+	return stub as unknown as typeof WebTransport;
+}
+
+/**
+ * A lite-06 relay, which has no AUTH: it accepts any credential but `refused`, whose session it
+ * closes once `release` resolves, before its SETUP.
+ */
+function closing(refused: string, release: Promise<void>) {
+	const stub = function StubWebTransport(target: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const url = new URL(target);
+		if (url.searchParams.get("jwt") === refused) {
+			void release.then(() => pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }));
+		} else {
+			void acceptSession({ transport: pair.server, url });
+		}
+		return pair.client;
+	};
+	return stub as unknown as typeof WebTransport;
+}
+
+function loop(versions: string[], tokens: Signal<readonly string[]>) {
+	return new Reload({ url: URL_, versions, websocket: { enabled: false }, tokens, delay: DELAY });
+}
+
+/** Whether `promise` rejected with a session close of `code`, once everything pending has run. */
+async function refusal(promise: Promise<unknown>): Promise<SessionError | undefined> {
+	try {
+		await promise;
+	} catch (err) {
+		return err instanceof SessionError ? err : undefined;
+	}
+	return undefined;
+}
+
+test("a set granted in band answers, and a later set the peer refuses answers with its refusal", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = relay((token, request) => {
+		if (token === "revoked") request.reject(SessionCode.Unauthorized, "no");
+		else request.accept(GRANT);
+	});
+	const tokens = new Signal<readonly string[]>(["connection", "a"]);
+	const reload = loop(["moq-lite-07-wip"], tokens);
+	try {
+		await clock.drive(reload.answered());
+
+		tokens.set(["connection", "revoked"]);
+		const err = await clock.drive(refusal(reload.answered()));
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a close that refuses the connection credential answers a session without AUTH", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const { promise: release, resolve } = Promise.withResolvers<void>();
+	globalThis.WebTransport = closing("old", release);
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = loop(["moq-lite-06"], tokens);
+	try {
+		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		const waiting = refusal(reload.answered());
+		resolve();
+		const err = await clock.drive(waiting);
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+
+		// The replacement is accepted by the server's SETUP, which is the answer without AUTH.
+		tokens.set(["new"]);
+		await clock.drive(reload.answered());
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a kept credential counts only once the peer refuses it", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const issued: { revoke(code: SessionCode, reason: string): void }[] = [];
+	globalThis.WebTransport = relay((token, request) => {
+		const grant = request.accept(GRANT);
+		if (token === "connection") issued.push(grant);
+	});
+	const tokens = new Signal<readonly string[]>(["connection", "a", "b"]);
+	const reload = loop(["moq-lite-07-wip"], tokens);
+	try {
+		await clock.drive(reload.answered());
+
+		// Nothing new to grant, and the credential still stands.
+		tokens.set(["connection", "a"]);
+		await clock.drive(reload.answered());
+
+		issued[0]?.revoke(SessionCode.Unauthorized, "removed");
+		const session = reload.established.peek();
+		if (!session) throw new Error("not connected");
+		await clock.drive(waitFor(wireOf(session).auth.credential, (verdict) => verdict instanceof Error));
+		tokens.set(["connection"]);
+		const err = await clock.drive(refusal(reload.answered()));
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a set replaced before its answer moves the wait to the replacement", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = relay((token, request) => {
+		// "slow" is never answered.
+		if (token !== "slow") request.accept(GRANT);
+	});
+	const tokens = new Signal<readonly string[]>(["connection"]);
+	const reload = loop(["moq-lite-07-wip"], tokens);
+	try {
+		await clock.drive(reload.answered());
+
+		tokens.set(["connection", "slow"]);
+		let answered = false;
+		const waiting = reload.answered().then(() => {
+			answered = true;
+		});
+		await clock.advance(Duration.millis(10));
+		expect(answered).toBe(false);
+
+		tokens.set(["connection", "fast"]);
+		await clock.drive(waiting);
+		expect(answered).toBe(true);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a connection answers once its loop ends with the abort's error", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = relay((token, request) => {
+		if (token !== "slow") request.accept(GRANT);
+	});
+	const tokens = new Signal<readonly string[]>(["connection", "slow"]);
+	const connection = new Connection({
+		url: URL_,
+		versions: ["moq-lite-07-wip"],
+		websocket: { enabled: false },
+		tokens,
+		delay: DELAY,
+	});
+	try {
+		await clock.advance(Duration.millis(10));
+		const waiting = refusal(connection.answered());
+		connection.auth.peek()?.abort(new SessionError(SessionCode.Unauthorized));
+		const err = await clock.drive(waiting);
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+	} finally {
+		connection.close();
+		globalThis.WebTransport = original;
+	}
+});

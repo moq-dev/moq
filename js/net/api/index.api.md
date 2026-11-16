@@ -241,6 +241,7 @@ export class Connection {
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	answered(): Promise<void>;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
 	static readonly checkVersions: (versions: readonly string[]) => string[];
