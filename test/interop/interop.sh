@@ -2312,8 +2312,8 @@ run_matrix() {
     done
 
     # The relay refuses a token that is not a JWT, and Chromium has to read the close code and
-    # reason it sends. WebSocket must redial the refused session within its retry window, then
-    # surface MalformedAuthToken.
+    # reason it sends. WebSocket must stop at the refused session without redialing, and surface
+    # MalformedAuthToken.
     # Chromium is the strict peer here, so no Rust client stands in for it. The relay refuses
     # before any version is negotiated, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then

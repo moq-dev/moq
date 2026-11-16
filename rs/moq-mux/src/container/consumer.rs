@@ -318,9 +318,8 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Er
 /// A [`Consumer`]'s [`Delay`] and the catalog rendition's warmup, applied together.
 ///
 /// The warmup is how much media a decoder needs before its output is clean, such as an Opus
-/// decoder or an intra-refresh video decoder: pass the catalog rendition's
-/// `warmup`. Subscribe with [`subscription`](Self::subscription), then build the consumer with
-/// [`consumer`](Self::consumer).
+/// decoder's pre-roll: pass the catalog audio rendition's `warmup`. Subscribe with
+/// [`subscription`](Self::subscription), then build the consumer with [`consumer`](Self::consumer).
 ///
 /// The subscription carries the max delay plus the warmup, since the publisher and the transport
 /// skip what falls outside that budget, while the consumer skips at the max delay alone.

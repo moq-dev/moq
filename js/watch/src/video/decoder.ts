@@ -19,7 +19,7 @@ import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-import { DELAY_MAX, type Sync, type Track } from "../sync";
+import type { Sync, Track } from "../sync";
 import { type DecoderConfig, hardwareAcceleration, type PlaybackIdentity, playbackIdentity } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
@@ -572,14 +572,7 @@ interface RenditionProps {
 	key: Key;
 }
 
-/**
- * One rendition's playback through one WebCodecs decoder.
- *
- * A rendition with a catalog `warmup` (intra refresh, so no keyframes) joins that much earlier,
- * through the container consumer's reach, and decodes from the group start without presenting the
- * warmup that follows each join or gap, so its first picture is clean. Rust players do the same in
- * `moq_video::decode::Consumer`.
- */
+/** One rendition's playback through one WebCodecs decoder. */
 class Rendition {
 	error = new Signal<Error | undefined>(undefined);
 	sync: Sync;
@@ -596,15 +589,9 @@ class Rendition {
 	timestamp = new Signal<Duration | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
-	// The catalog `warmup`, capped like the delay so a publisher cannot hold the viewer without bound.
-	#warmup: Duration;
-	// The playout delay is where a cold join starts, and the shared max delay how late it may fall. The
-	// consumer's warmup reaches the start further back; the subscription widens its max by the same
-	// warmup, since the publisher skips what falls outside it.
+	// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
+	// Its subscription and its consumer take the same delay.
 	#delay: Getter<Moq.Track.Delay>;
-	#subscription: Getter<Moq.Track.Delay>;
-	// The running codec's join and gap state: which leading pictures to refuse, and which still warm up.
-	#recovery = new Recovery();
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
@@ -621,8 +608,6 @@ class Rendition {
 	#codec?: string;
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
-	// Whether the next chunk opens the codec, after a configure or a reset.
-	#opening = false;
 
 	// A timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
@@ -663,12 +648,7 @@ class Rendition {
 		this.stats = props.stats;
 		this.tally = props.tally;
 		this.key = props.key;
-		this.#warmup = Duration.millis(this.config.warmup ?? 0).min(DELAY_MAX);
 		this.#delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max }));
-		this.#subscription = new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({
-			min,
-			max: max.add(this.#warmup),
-		}));
 		this.#predecessor = props.predecessor;
 
 		this.#signals.run(this.#run.bind(this));
@@ -682,8 +662,7 @@ class Rendition {
 
 	// Count a frame read from the track: its bytes even when rejected, and whether an accepted one
 	// arrived too late for playout. Classifies ingress before decoder backpressure changes the
-	// delivery clock. A warming frame anchors no later playhead: the live frames behind it skip the
-	// clock to within the max delay, and buffered startup anchors on the first picture shown.
+	// delivery clock.
 	#receive(frame: Container.ReceivedFrame, accepted: boolean): void {
 		const timestamp = frame.timestamp as Duration;
 		const late = accepted && this.clock.received(timestamp, frame.arrival);
@@ -704,7 +683,6 @@ class Rendition {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			delay: this.#delay,
-			warmup: this.#warmup,
 			predecessor: this.consumer ?? this.#predecessor,
 			// The one decoder drives the clock, so it skips a hole once the clock passed it.
 			playhead: this.sync,
@@ -724,13 +702,9 @@ class Rendition {
 			broadcast: this.broadcast,
 			track: this.name,
 			priority: Catalog.PRIORITY.video,
-			delay: this.#subscription,
+			delay: this.#delay,
 		});
 		if (!sub) return;
-
-		// Each codec joins afresh.
-		const recovery = new Recovery(this.#warmup);
-		this.#recovery = recovery;
 
 		// Keep output tied to this codec lifetime even if the effect opens another run.
 		const signal = effect.abort;
@@ -743,8 +717,6 @@ class Rendition {
 					this.#count({ decoded: 1 });
 					const timestamp = Duration.micros(frame.timestamp);
 					const generation = this.#generation;
-					// Still warming up after a join or gap: decoded for its references alone.
-					if (recovery.warming(timestamp)) return;
 					if (this.#late(timestamp)) {
 						// Late frame, don't render it.
 						return;
@@ -837,7 +809,7 @@ class Rendition {
 
 		let previous: Duration | undefined;
 		let latest: bigint | undefined;
-		const recovery = this.#recovery;
+		const recovery = new Recovery();
 
 		this.#spawn(effect, async () => {
 			for (;;) {
@@ -915,7 +887,7 @@ class Rendition {
 
 		let previous: Duration | undefined;
 		let latest: bigint | undefined;
-		const recovery = this.#recovery;
+		const recovery = new Recovery();
 
 		this.#spawn(effect, async () => {
 			for (;;) {
@@ -1029,7 +1001,6 @@ class Rendition {
 		this.first.set(undefined);
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
-		this.#recovery.restart();
 		// Restarts video's timeline, leaving audio's.
 		this.clock.reset();
 		this.#resetPending = true;
@@ -1054,23 +1025,13 @@ class Rendition {
 	// Feed `frame` to the codec, noting the newest timestamp it holds.
 	#submit(decoder: VideoDecoder, frame: Container.ReceivedFrame): void {
 		this.#submitted = this.#submitted?.max(frame.timestamp) ?? frame.timestamp;
-		decoder.decode(this.#chunk(frame));
-	}
-
-	// The chunk for `frame`, run through the opening rewrite when it opens the codec.
-	#chunk(frame: Container.ReceivedFrame): EncodedVideoChunk {
-		let data = frame.payload;
-		if (this.#opening) {
-			this.#opening = false;
-			if (frame.keyframe && !this.#warmup.isZero() && isH264(this.config.codec)) {
-				data = insertRecoveryPoint(data, this.#description);
-			}
-		}
-		return new EncodedVideoChunk({
-			type: frame.keyframe ? "key" : "delta",
-			data,
-			timestamp: frame.timestamp.asMicros(),
-		});
+		decoder.decode(
+			new EncodedVideoChunk({
+				type: frame.keyframe ? "key" : "delta",
+				data: frame.payload,
+				timestamp: frame.timestamp.asMicros(),
+			}),
+		);
 	}
 
 	// Whether a picture at `timestamp` is behind the one already rendered.
@@ -1092,7 +1053,6 @@ class Rendition {
 
 	#configure(decoder: VideoDecoder): void {
 		if (this.#codec === undefined) throw new Error("video: configured before the codec was accepted");
-		this.#opening = true;
 		this.#submitted = undefined;
 		decoder.configure({
 			codec: this.#codec,
@@ -1146,77 +1106,4 @@ class Rendition {
 			return undefined;
 		});
 	}
-}
-
-function isH264(codec: string): boolean {
-	return codec.startsWith("avc1.") || codec.startsWith("avc3.");
-}
-
-// An SEI NAL unit (type 6) holding one recovery point message (payload type 6, one byte):
-// recovery_frame_cnt = 0, exact_match_flag = 0, broken_link_flag = 0, changing_slice_group_idc = 0,
-// then payload alignment and the RBSP trailing bits. It needs no emulation prevention.
-const RECOVERY_SEI = new Uint8Array([0x06, 0x06, 0x01, 0x84, 0x80]);
-
-/**
- * Insert an SEI recovery point with `recovery_frame_cnt = 0` before the first slice of an H.264
- * access unit that has no IDR, so a codec can open on it. `description` is the avcC record when the
- * payload is length-prefixed, and absent for Annex B. An IDR, a payload without a slice, or one that
- * does not parse comes back unchanged.
- *
- * Chromium's WebCodecs checks the chunk that opens a codec, after `configure()` or `reset()`: an
- * H.264 chunk sent as `key` must hold an IDR, or an SEI recovery point with `recovery_frame_cnt ==
- * 0` (`AnalyzeAnnexB` in `media/formats/mp4/avc.cc`). Otherwise `decode()` throws "A key frame is
- * required". An intra-refresh group opens on a recovery point that counts a whole sweep, so every
- * join and skip of a `warmup` rendition would fail. The extra message declares that one picture
- * recovered, which is what a `warmup` rendition already accepts: the decoder hides the pictures
- * after a join or skip until the warmup passes. The slices are unchanged; the message goes right before the first one, after any SEI the stream carries.
- * @internal
- */
-export function insertRecoveryPoint(payload: Uint8Array, description?: Uint8Array): Uint8Array {
-	if (description) {
-		// lengthSizeMinusOne, in the low two bits of the avcC record's fifth byte.
-		if (description.byteLength < 5) return payload;
-		const size = (description[4] & 0x03) + 1;
-		for (let offset = 0; offset + size <= payload.byteLength; ) {
-			let length = 0;
-			for (let i = 0; i < size; i++) length = length * 256 + payload[offset + i];
-			const start = offset + size;
-			if (length === 0 || start + length > payload.byteLength) return payload;
-			const type = payload[start] & 0x1f;
-			if (type === 5) return payload;
-			if (type >= 1 && type <= 4) {
-				const prefix = new Uint8Array(size);
-				for (let i = 0, n = RECOVERY_SEI.byteLength; i < size; i++, n = Math.floor(n / 256)) {
-					prefix[size - 1 - i] = n % 256;
-				}
-				return splice(payload, offset, prefix, RECOVERY_SEI);
-			}
-			offset = start + length;
-		}
-		return payload;
-	}
-
-	// Annex B: each NAL unit follows a 00 00 01 start code, with an optional leading zero byte.
-	for (let i = 0; i + 3 < payload.byteLength; i++) {
-		if (payload[i] !== 0 || payload[i + 1] !== 0 || payload[i + 2] !== 1) continue;
-		const type = payload[i + 3] & 0x1f;
-		if (type === 5) return payload;
-		if (type >= 1 && type <= 4) return splice(payload, i, new Uint8Array([0, 0, 1]), RECOVERY_SEI);
-		i += 2;
-	}
-	return payload;
-}
-
-// `payload` with `parts` inserted at `at`.
-function splice(payload: Uint8Array, at: number, ...parts: Uint8Array[]): Uint8Array {
-	const length = parts.reduce((sum, part) => sum + part.byteLength, payload.byteLength);
-	const out = new Uint8Array(length);
-	out.set(payload.subarray(0, at), 0);
-	let offset = at;
-	for (const part of parts) {
-		out.set(part, offset);
-		offset += part.byteLength;
-	}
-	out.set(payload.subarray(at), offset);
-	return out;
 }
