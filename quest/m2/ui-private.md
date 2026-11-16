@@ -76,4 +76,3 @@ gains one export. Wire: none.
 ## Related
 
 - [Claim the new @moq npm names](/quest/m3/release/npm-first-publish.md) - no longer claims `@moq/ui`
-- [Browser package names](/quest/m2/browser-packages.md) - the other browser package changes before the cut

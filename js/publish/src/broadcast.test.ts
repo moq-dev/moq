@@ -993,16 +993,16 @@ test("an unsubscribed stats track writes nothing", async () => {
 	}
 });
 
-test("echo solicits feedback in the catalog unless it walks above the root", async () => {
-	const echo = new Signal<Path.Relative | undefined>(Path.normalizeRelative("viewers"));
+test("echoPath solicits feedback in the catalog unless it walks above the root", async () => {
+	const echoPath = new Signal<Path.Relative | undefined>(Path.normalizeRelative("viewers"));
 	const name = new Signal(Path.from("room/live.hang"));
-	const broadcast = new Broadcast({ enabled: true, name, echo });
+	const broadcast = new Broadcast({ enabled: true, name, echoPath });
 	try {
 		await settle();
 		expect((await readCatalog(broadcast))?.echo as unknown).toEqual({ path: "viewers" });
 
 		// From `room/live.hang`, `../../viewers` walks above the root, which every viewer refuses.
-		echo.set(Path.normalizeRelative("../../viewers"));
+		echoPath.set(Path.normalizeRelative("../../viewers"));
 		await settle();
 		expect((await readCatalog(broadcast))?.echo).toBeUndefined();
 
@@ -1011,7 +1011,7 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 		await settle();
 		expect((await readCatalog(broadcast))?.echo as unknown).toEqual({ path: "../../viewers" });
 
-		echo.set(undefined);
+		echoPath.set(undefined);
 		await settle();
 		expect((await readCatalog(broadcast))?.echo).toBeUndefined();
 	} finally {

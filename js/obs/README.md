@@ -19,7 +19,7 @@ console.log(obs.version.obs, obs.plugin); // "32.2.2", true when the MoQ plugin 
 
 // A dedicated "MoQ" profile, tuned for low latency, with three simulcast renditions.
 const { ignored } = await obs.configure({
-	destination: { kind: "moq", url: "https://relay.example.com/anon", broadcast: "me.hang", layers: 3 },
+	destination: { kind: "moq", url: "https://relay.example.com/anon", broadcast: "me.hang", renditions: 3 },
 	video: { size: { width: 1920, height: 1080 }, fps: 30, bitrate: 6000 },
 });
 if (ignored.length > 0) console.warn("this encoder keeps its own", ignored);
