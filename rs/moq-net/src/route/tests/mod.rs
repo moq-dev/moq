@@ -119,6 +119,10 @@ impl crate::route::Item for Item {
 	fn lowered(&self, _: u64) -> Self {
 		*self
 	}
+
+	fn epoch(&self) -> u64 {
+		self.epoch.map_or(0, u64::from)
+	}
 }
 
 /// `peer` replaces everything it asks `router` for with `prefixes`, in one edit.

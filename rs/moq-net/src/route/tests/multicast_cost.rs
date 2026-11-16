@@ -5,7 +5,9 @@
 //! asking for the whole tree or for a prefix no claim falls under. A sweep holds the other
 //! axes fixed and counts the measured relay's work and messages, so an event that visits
 //! what it did not change fails here rather than only timing slower: `cost.rs` for the
-//! rule the switch puts lite-07 sessions on.
+//! rule the switch puts lite-07 sessions on. The events: a claim announced, a route the
+//! relay does not use breaking, the one it uses going round dearer, a downstream session
+//! leaving, and a copy of a forwarding node's claims overtaking the relay's.
 
 use crate::route::relay;
 
@@ -43,6 +45,9 @@ const BASE: Shape = Shape {
 	watchers: 2,
 	watched: true,
 };
+
+/// `BASE` with no watcher asking for any claim, so a route's cost reaches nobody's view.
+const QUIET: Shape = Shape { watched: false, ..BASE };
 
 /// What one event cost the measured relay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,7 +107,10 @@ impl Bed {
 			}
 		}
 		for up in 0..shape.upstream {
-			bed.sim.link(ME, bed.up(up), 1, Tie::Peer);
+			// The first is so much cheaper that the measured relay keeps to it even when
+			// its route goes round.
+			let cost = if up == 0 { 1 } else { 8 };
+			bed.sim.link(ME, bed.up(up), cost, Tie::Peer);
 			for origin in 0..shape.origins {
 				bed.sim.link(bed.up(up), bed.origin(origin), 1, Tie::Peer);
 			}
@@ -149,10 +157,21 @@ impl Bed {
 		self.measure(|bed| bed.sim.claim(publisher, &claim, true))
 	}
 
-	/// The first upstream relay's session to the first forwarding node closes, then
-	/// reopens unmeasured.
+	/// The last upstream relay's session to the first forwarding node closes, then reopens
+	/// unmeasured: a route the measured relay does not use breaks.
 	fn cut(&mut self) -> Cost {
-		let (up, origin) = (self.up(0), self.origin(0));
+		self.sever(self.shape.upstream - 1)
+	}
+
+	/// The first upstream relay's session to the first forwarding node closes, then
+	/// reopens unmeasured: the route the measured relay uses goes round through another
+	/// forwarding node, dearer, on the same next hop.
+	fn detour(&mut self) -> Cost {
+		self.sever(0)
+	}
+
+	fn sever(&mut self, up: usize) -> Cost {
+		let (up, origin) = (self.up(up), self.origin(0));
 		let cost = self.measure(|bed| bed.sim.close(up, origin));
 		self.sim.open(up, origin);
 		quiesce(&mut self.sim);
@@ -172,17 +191,23 @@ impl Bed {
 /// The cost of `event` on meshes shaped as `BASE` with one axis set to each size,
 /// measured after one warm-up event so first-time effects are left out.
 fn sweep(axis: fn(&mut Shape, usize), sizes: [usize; 3], event: fn(&mut Bed) -> Cost) -> [Cost; 3] {
-	sweep_at(axis, sizes, event, true)
+	sweep_at(BASE, axis, sizes, event, true)
+}
+
+/// [`sweep`] from `QUIET`.
+fn sweep_quiet(axis: fn(&mut Shape, usize), sizes: [usize; 3], event: fn(&mut Bed) -> Cost) -> [Cost; 3] {
+	sweep_at(QUIET, axis, sizes, event, true)
 }
 
 fn sweep_at<const N: usize>(
+	base: Shape,
 	axis: fn(&mut Shape, usize),
 	sizes: [usize; N],
 	event: fn(&mut Bed) -> Cost,
 	checked: bool,
 ) -> [Cost; N] {
 	sizes.map(|size| {
-		let mut shape = BASE;
+		let mut shape = base;
 		axis(&mut shape, size);
 		let mut bed = Bed::new(shape, checked);
 		event(&mut bed);
@@ -221,6 +246,8 @@ fn unwatched(shape: &mut Shape, n: usize) {
 
 /// One of each, a few, and many.
 const FLAT: [usize; 3] = [1, 4, 16];
+/// From two forwarding nodes, so a route that breaks has another to go round through.
+const AROUND: [usize; 3] = [2, 4, 16];
 /// Doublings, for axes that may grow linearly. Two upstream at least, so a cut leaves the
 /// measured relay a route.
 const LINEAR: [usize; 3] = [4, 8, 16];
@@ -257,17 +284,81 @@ fn an_announce_costs_the_sessions_it_reaches() {
 	assert_linear("watchers it reaches", sweep(watched, LINEAR, Bed::announce));
 }
 
-/// A neighbour's route that breaks costs the relay the neighbours offering the same
-/// route, which it ranks, and nothing per other forwarding node, publisher, broadcast, or
-/// session it sends to.
+/// A neighbour's route that breaks, one the relay does not use, costs it the neighbours
+/// offering the same route, which it ranks, and nothing per other forwarding node,
+/// publisher, broadcast, or session it sends to.
 #[test]
 fn a_cut_costs_the_neighbours_offering_the_route() {
-	assert_flat("forwarding nodes", sweep(origins, FLAT, Bed::cut));
+	assert_flat("forwarding nodes", sweep(origins, AROUND, Bed::cut));
 	assert_flat("publishers", sweep(publishers, FLAT, Bed::cut));
 	assert_flat("broadcasts", sweep(broadcasts, FLAT, Bed::cut));
 	assert_flat("downstream", sweep(downstream, FLAT, Bed::cut));
 	assert_flat("watchers", sweep(watched, FLAT, Bed::cut));
 	assert_linear("upstream", sweep(upstream, LINEAR, Bed::cut));
+}
+
+/// A route the relay uses that grows dearer costs it the neighbours offering the route
+/// and the ones it tells, and the claims behind it only where the cost reaches a view:
+/// nothing per publisher or broadcast while no watcher is shown them, and each broadcast
+/// once per watcher shown its new cost.
+#[test]
+fn a_detour_costs_the_claims_whose_cost_is_shown() {
+	assert_flat("forwarding nodes", sweep_quiet(origins, AROUND, Bed::detour));
+	assert_flat("publishers", sweep_quiet(publishers, FLAT, Bed::detour));
+	assert_flat("broadcasts", sweep_quiet(broadcasts, FLAT, Bed::detour));
+	assert_flat("watchers it misses", sweep_quiet(unwatched, FLAT, Bed::detour));
+	assert_linear("upstream", sweep_quiet(upstream, LINEAR, Bed::detour));
+	assert_linear("downstream", sweep_quiet(downstream, LINEAR, Bed::detour));
+	assert_flat("forwarding nodes, watched", sweep(origins, AROUND, Bed::detour));
+	assert_linear("publishers, watched", sweep(publishers, LINEAR, Bed::detour));
+	assert_linear("broadcasts, watched", sweep(broadcasts, LINEAR, Bed::detour));
+	assert_linear("watchers it reaches", sweep(watched, LINEAR, Bed::detour));
+}
+
+/// A neighbour's copy of a forwarding node's claims that overtakes the relay's own, as
+/// when the neighbour it heard them from lags, costs what the two copies hold, never
+/// their product: every claim replaced, read back from the snapshot a new neighbour
+/// sends.
+#[test]
+fn an_overtaking_copy_costs_the_claims_it_holds() {
+	assert_linear("claims", [8, 16, 32].map(overtake));
+}
+
+fn overtake(claims: usize) -> Cost {
+	const R: Node = 0;
+	const LAGGING: Node = 1;
+	const ORIGIN: Node = 2;
+	const FRESH: Node = 3;
+	const PUBLISHER: Node = 4;
+	let mut sim = RelaySim::new(5, relay::debounce(HOP));
+	sim.client(PUBLISHER);
+	sim.publish(PUBLISHER, PUBLISHER as Id);
+	sim.link(R, LAGGING, 1, Tie::Peer);
+	sim.link(LAGGING, ORIGIN, 1, Tie::Peer);
+	sim.link(FRESH, ORIGIN, 1, Tie::Peer);
+	sim.link(PUBLISHER, ORIGIN, 1, Tie::Peer);
+	for index in 0..claims {
+		sim.claim(PUBLISHER, &format!("old{index}"), true);
+	}
+	quiesce(&mut sim);
+	sim.hold(LAGGING, R);
+	for index in 0..claims {
+		sim.claim(PUBLISHER, &format!("old{index}"), false);
+		sim.claim(PUBLISHER, &format!("new{index}"), true);
+	}
+	quiesce(&mut sim);
+	let router = |sim: &RelaySim| sim.router(R).expect("the measured relay").work_done();
+	let sent = |sim: &RelaySim| sim.sent.get(&R).copied().unwrap_or(0);
+	let (work, was) = (router(&sim), sent(&sim));
+	sim.link(R, FRESH, 1, Tie::Peer);
+	quiesce(&mut sim);
+	let new = format!("new{}", claims - 1);
+	let shown = sim.router(R).expect("the measured relay").shown();
+	assert!(shown.contains_key(&(PUBLISHER as Id, p(&new))), "the newer copy won");
+	Cost {
+		work: router(&sim) - work,
+		sent: sent(&sim) - was,
+	}
 }
 
 /// A downstream session that closes costs the relay the routes it was sent, one per
@@ -296,14 +387,20 @@ fn benchmark_relay_event_work() {
 		("watched", watched),
 		("unwatched", unwatched),
 	];
-	type Event = (&'static str, fn(&mut Bed) -> Cost);
-	let events: [Event; 3] = [("announce", Bed::announce), ("cut", Bed::cut), ("leave", Bed::leave)];
+	type Event = (&'static str, Shape, fn(&mut Bed) -> Cost);
+	let events: [Event; 5] = [
+		("announce", BASE, Bed::announce),
+		("cut", BASE, Bed::cut),
+		("detour", BASE, Bed::detour),
+		("detour_quiet", QUIET, Bed::detour),
+		("leave", BASE, Bed::leave),
+	];
 	println!("event,axis,size,work,sent");
-	for (event, run) in events {
+	for (event, base, run) in events {
 		for (axis, set) in axes {
 			let sizes = [2, 16, 128];
 			// A mesh this large checks itself in the gate's sweeps instead.
-			for (size, cost) in sizes.into_iter().zip(sweep_at(set, sizes, run, false)) {
+			for (size, cost) in sizes.into_iter().zip(sweep_at(base, set, sizes, run, false)) {
 				println!("{event},{axis},{size},{},{}", cost.work, cost.sent);
 			}
 		}

@@ -34,7 +34,10 @@
 //! Each neighbour asks for a set of prefixes edited in place, as under the path rule: a
 //! routing neighbour forwards for the whole domain, so it asks for the whole tree, and
 //! an endpoint or scoped neighbour is told the closest claim per broadcast within what it
-//! asks, a broader claim presented at the prefix it asks for.
+//! asks, a broader claim presented at the prefix it asks for. A request follows the most
+//! specific claim covering its path that a route reaches. Among the claims of one
+//! Instance at one path, the newest epoch wins whatever it costs, then the best rank, and
+//! a route or claim whose cost a link would carry past the metric is never used.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,
 //! `epoch`, `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it
@@ -390,8 +393,10 @@ pub(crate) struct Router<N, I, A> {
 	sources: BTreeMap<Broadcast<I>, N>,
 	/// The forwarding nodes claiming each broadcast, by path.
 	claimants: BTreeMap<Path, BTreeMap<I, BTreeSet<NodeId>>>,
-	/// Per forwarding node, how many of its broadcasts another node claims too.
-	shared: BTreeMap<NodeId, usize>,
+	/// Per forwarding node, the broadcasts its route's rank reaches past whether a reader
+	/// can reach them: one another node claims too, whose closest claim the rank decides,
+	/// and one an endpoint or scoped neighbour is shown, which is told the claim's cost.
+	ranked: BTreeMap<NodeId, BTreeSet<Broadcast<I>>>,
 	/// The endpoints and scoped neighbours asking for each prefix.
 	askers: BTreeMap<Path, BTreeSet<N>>,
 	/// Broadcasts whose last removal was the publisher's own withdrawal.
@@ -477,7 +482,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			givers: BTreeMap::new(),
 			sources: BTreeMap::new(),
 			claimants: BTreeMap::new(),
-			shared: BTreeMap::new(),
+			ranked: BTreeMap::new(),
 			askers: BTreeMap::new(),
 			ended: BTreeSet::new(),
 			dirty: BTreeSet::new(),
@@ -546,6 +551,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for (instance, claims) in due {
 			self.reader.apply(instance, |_| true, claims, |_| false);
 		}
+		// As in `refresh`: nothing reads which claims the reader recomputed.
+		self.reader.changed();
 	}
 
 	// --- Sessions ---
@@ -732,7 +739,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		let added: Vec<Path> = new.difference(&old).cloned().collect();
 		for prefix in &added {
-			self.askers.entry(prefix.clone()).or_default().insert(peer);
+			let askers = self.askers.entry(prefix.clone()).or_default();
+			askers.insert(peer);
+			if askers.len() == 1 {
+				self.rewatch(prefix);
+			}
 			// Every broadcast within it, at its own path.
 			let inside: Vec<(Path, I)> = (self.claimants.get_key_value(prefix).into_iter())
 				.chain(below(&self.claimants, prefix))
@@ -1136,6 +1147,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			{
 				continue;
 			}
+			// A route no link could extend is past every other, so it is never used.
+			let Some(cost) = offer.cost.checked_add(peer.port.cost) else {
+				continue;
+			};
 			let draining =
 				offer.draining || peer.draining || offer.path.iter().any(|hop| self.draining.contains(&hop.node));
 			let mine = Best {
@@ -1144,7 +1159,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					path: offer.path.clone(),
 					draining,
 					priority: offer.priority.min(peer.port.priority),
-					cost: offer.cost + peer.port.cost,
+					cost,
 					marked: offer.marked || peer.port.upstream,
 				},
 			};
@@ -1175,15 +1190,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
 		};
-		// Whether its claims are reachable follows the route, and so does their cost,
-		// which an endpoint or scoped neighbour is told and which may move the closest
-		// claim of a broadcast another node claims too.
-		let exported = !self.askers.is_empty() || self.shared.get(&origin).is_some_and(|count| *count > 0);
-		if (flipped || (moved && exported))
-			&& let Some(known) = self.known.get(&origin)
-		{
+		// Whether its claims are reachable follows the route, and so does the rank of each
+		// that the rank reaches.
+		if flipped && let Some(known) = self.known.get(&origin) {
 			self.count(known.items.len());
 			self.dirty.extend(known.items.keys().cloned());
+		} else if moved && let Some(ranked) = self.ranked.get(&origin) {
+			self.count(ranked.len());
+			self.dirty.extend(ranked.iter().cloned());
 		}
 		self.stale.insert(origin);
 	}
@@ -1357,13 +1371,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					.collect();
 				// What the newer copy lacks is lost, unless this message says its
 				// publisher ended it.
-				let ended = |broadcast: &Broadcast<I>| {
-					(changes.iter()).any(|(named, change)| named == broadcast && *change == Change::Ended)
-				};
+				let ended: BTreeSet<&Broadcast<I>> = (changes.iter())
+					.filter(|(_, change)| *change == Change::Ended)
+					.map(|(broadcast, _)| broadcast)
+					.collect();
 				diff.extend(
 					(known.items.keys())
 						.filter(|broadcast| !heard.items.contains_key(*broadcast))
-						.map(|broadcast| match ended(broadcast) {
+						.map(|broadcast| match ended.contains(broadcast) {
 							true => (broadcast.clone(), Change::Ended),
 							false => (broadcast.clone(), Change::Lost),
 						}),
@@ -1419,50 +1434,88 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
-	fn claim(&mut self, (path, instance): &Broadcast<I>, origin: NodeId) {
+	fn claim(&mut self, broadcast: &Broadcast<I>, origin: NodeId) {
+		let (path, instance) = broadcast;
 		let origins = (self.claimants.entry(path.clone()).or_default())
 			.entry(instance.clone())
 			.or_default();
 		if !origins.insert(origin) {
 			return;
 		}
-		if origins.len() == 2 {
-			let other = *origins.iter().find(|other| **other != origin).expect("another");
-			*self.shared.entry(other).or_default() += 1;
+		let shared = origins.len() >= 2;
+		// The claimant it now shares the broadcast with ranks it too.
+		let other = (origins.len() == 2).then(|| *origins.iter().find(|other| **other != origin).expect("another"));
+		if shared || self.watched(path) {
+			self.rank(origin, broadcast, true);
 		}
-		if origins.len() >= 2 {
-			*self.shared.entry(origin).or_default() += 1;
+		if let Some(other) = other {
+			self.rank(other, broadcast, true);
 		}
 	}
 
-	fn unclaim(&mut self, (path, instance): &Broadcast<I>, origin: NodeId) {
+	fn unclaim(&mut self, broadcast: &Broadcast<I>, origin: NodeId) {
+		let (path, instance) = broadcast;
 		let Some(claims) = self.claimants.get_mut(path) else {
 			return;
 		};
 		let Some(origins) = claims.get_mut(instance) else {
 			return;
 		};
-		let shared = origins.len() >= 2;
 		if !origins.remove(&origin) {
 			return;
 		}
-		let mut unshare = |node: NodeId| {
-			let count = self.shared.get_mut(&node).expect("a shared count");
-			*count -= 1;
-			if *count == 0 {
-				self.shared.remove(&node);
-			}
-		};
-		if shared {
-			unshare(origin);
-		}
-		if origins.len() == 1 {
-			unshare(*origins.first().expect("one"));
-		}
+		let left = (origins.len() == 1).then(|| *origins.first().expect("one"));
 		if origins.is_empty() {
 			claims.remove(instance);
 			if claims.is_empty() {
 				self.claimants.remove(path);
+			}
+		}
+		self.rank(origin, broadcast, false);
+		// The one claimant left ranks it only if it is shown.
+		if let Some(left) = left {
+			let watched = self.watched(path);
+			self.rank(left, broadcast, watched);
+		}
+	}
+
+	/// File `broadcast` among the ones `origin`'s rank reaches, or not.
+	fn rank(&mut self, origin: NodeId, broadcast: &Broadcast<I>, ranked: bool) {
+		self.visit();
+		match ranked {
+			true => {
+				self.ranked.entry(origin).or_default().insert(broadcast.clone());
+			}
+			false => {
+				if let Some(set) = self.ranked.get_mut(&origin) {
+					set.remove(broadcast);
+					if set.is_empty() {
+						self.ranked.remove(&origin);
+					}
+				}
+			}
+		}
+	}
+
+	/// Whether an endpoint or scoped neighbour is shown the claims at `path`: one asks at
+	/// or above it, or below it, where the most specific claim above is presented.
+	fn watched(&self, path: &Path) -> bool {
+		ancestors(path).any(|above| self.askers.contains_key(&above)) || below(&self.askers, path).next().is_some()
+	}
+
+	/// `prefix` gained its first asker or lost its last: file again every broadcast whose
+	/// claims it is shown, at, below, or above it.
+	fn rewatch(&mut self, prefix: &Path) {
+		let near: Vec<Broadcast<I>> = (ancestors(prefix).filter_map(|above| self.claimants.get_key_value(&above)))
+			.chain(below(&self.claimants, prefix))
+			.flat_map(|(path, claims)| claims.keys().map(move |instance| (path.clone(), instance.clone())))
+			.collect();
+		for broadcast in near {
+			let (path, instance) = &broadcast;
+			let origins: Vec<NodeId> = self.claimants[path][instance].iter().copied().collect();
+			let ranked = origins.len() >= 2 || self.watched(path);
+			for origin in origins {
+				self.rank(origin, &broadcast, ranked);
 			}
 		}
 	}
@@ -1483,8 +1536,13 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for (broadcast, change) in changes {
 			self.visit();
 			let change = match change {
-				// A claim that already crossed this relay came round a ring of grants.
-				Change::Live(claim) if claim.chain.contains(&self.me.relay) => Change::Lost,
+				// A claim that already crossed this relay came round a ring of grants, and
+				// one the link would make dearer than the metric holds is never used.
+				Change::Live(claim)
+					if claim.chain.contains(&self.me.relay) || claim.cost.checked_add(cost).is_none() =>
+				{
+					Change::Lost
+				}
 				Change::Live(mut claim) => {
 					claim.cost += cost;
 					claim.priority = claim.priority.min(priority);
@@ -1533,8 +1591,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				claim.draining |= self.peers.get(&peer).is_some_and(|peer| peer.draining);
 				(claim, peer)
 			})
+			// The newest epoch whatever it costs, as `closest` takes it.
 			.min_by_key(|(claim, peer)| {
 				(
+					Reverse(claim.item.epoch()),
 					claim.draining,
 					Reverse(claim.priority),
 					claim.cost,
@@ -1576,19 +1636,29 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	// --- Requests ---
 
-	/// The forwarding node a request for `broadcast` names from here: the closest claim.
-	pub fn pick(&self, broadcast: &Broadcast<I>) -> Option<NodeId> {
-		self.closest(broadcast).map(|(origin, _)| origin)
+	/// The forwarding node a request for `broadcast` names from here: the closest of the
+	/// most specific claims covering it that one can reach, as a neighbour asking for its
+	/// path is shown.
+	pub fn pick(&self, (path, instance): &Broadcast<I>) -> Option<NodeId> {
+		(ancestors(path).rev())
+			.find_map(|above| self.closest(&(above, instance.clone())))
+			.map(|(origin, _)| origin)
 	}
 
 	/// Where a request for `broadcast` naming `origin` goes from here. `None` fails it.
-	pub fn step(&self, origin: NodeId, broadcast: &Broadcast<I>) -> Option<Next<N>> {
+	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> Option<Next<N>> {
 		match origin == self.me {
-			true => self.sources.get(broadcast).copied().map(Next::Local),
+			// The neighbour behind the most specific of this node's claims covering it.
+			true => (ancestors(path).rev())
+				.find_map(|above| self.sources.get(&(above, instance.clone())).copied())
+				.map(Next::Local),
 			false => self.best.get(&origin).map(|best| Next::Via(best.via)),
 		}
 	}
 
+	/// The claim of `broadcast` a request takes from here, with its claimant: the newest
+	/// epoch, then the best rank of the route and the claim together, a claim no link would
+	/// make dearer than the metric holds.
 	fn closest(&self, (path, instance): &Broadcast<I>) -> Option<(NodeId, &Claim<A>)> {
 		let origins = self.claimants.get(path)?.get(instance)?;
 		let broadcast = (path.clone(), instance.clone());
@@ -1603,14 +1673,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						(
 							draining || claim.draining,
 							Reverse(priority.min(claim.priority)),
-							cost + claim.cost,
+							cost.checked_add(claim.cost)?,
 						)
 					}
 				};
-				Some(((rank, claim.chain.len(), origin), claim))
+				Some(((Reverse(claim.item.epoch()), rank, claim.chain.len(), origin), claim))
 			})
 			.min_by(|(a, _), (b, _)| a.cmp(b))
-			.map(|((_, _, origin), claim)| (origin, claim))
+			.map(|((_, _, _, origin), claim)| (origin, claim))
 	}
 
 	// --- Readers, endpoints, and scoped neighbours ---
@@ -1673,6 +1743,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			let ended = |claim: &Path| lost_ends || ended.contains(&(claim.clone(), instance.clone()));
 			reader.apply(instance.clone(), |_| true, claims, ended);
 		}
+		// A request finds its way by `pick` and `step`, never by which claims the reader
+		// recomputed, so nothing keeps that list.
+		reader.changed();
 		for broadcast in &dirty {
 			self.exports(broadcast);
 		}
@@ -1772,7 +1845,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let route = &self.best[&origin].offer;
 		Some(Claim {
 			item: claim.item.clone(),
-			cost: claim.cost + route.cost,
+			cost: claim.cost.checked_add(route.cost)?,
 			priority: claim.priority.min(route.priority),
 			draining: claim.draining || route.draining,
 			chain: claim.chain.clone(),
@@ -1784,6 +1857,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			peers.remove(&peer);
 			if peers.is_empty() {
 				self.askers.remove(prefix);
+				self.rewatch(prefix);
 			}
 		}
 	}
@@ -1925,7 +1999,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			givers: _,
 			sources,
 			claimants: _,
-			shared: _,
+			ranked: _,
 			askers: _,
 			ended,
 			dirty,
@@ -2023,16 +2097,21 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				claims.entry(instance.clone()).or_default().insert(*origin);
 			}
 		}
-		let mut shared: BTreeMap<NodeId, usize> = BTreeMap::new();
-		for origins in claimants.values().flat_map(BTreeMap::values) {
-			if origins.len() >= 2 {
-				for origin in origins {
-					*shared.entry(*origin).or_default() += 1;
+		let mut ranked: BTreeMap<NodeId, BTreeSet<Broadcast<I>>> = BTreeMap::new();
+		for (path, claims) in &claimants {
+			for (instance, origins) in claims {
+				if origins.len() >= 2 || self.watched(path) {
+					for origin in origins {
+						ranked
+							.entry(*origin)
+							.or_default()
+							.insert((path.clone(), instance.clone()));
+					}
 				}
 			}
 		}
 		assert_eq!(self.claimants, claimants, "claimants");
-		assert_eq!(self.shared, shared, "shared claims");
+		assert_eq!(self.ranked, ranked, "ranked claims");
 		let deadlines: BTreeSet<(Instant, Broadcast<I>)> = (self.waiting.iter())
 			.map(|(broadcast, at)| (*at, broadcast.clone()))
 			.collect();
@@ -2081,7 +2160,7 @@ mod tests {
 	}
 
 	/// Connect `peer` and exchange asks, as the session's first messages do.
-	fn open(router: &mut Relay, peer: usize, role: Role) {
+	fn open<A: Item>(router: &mut Router<usize, u64, A>, peer: usize, role: Role) {
 		router.connect(peer, port(role.clone())).unwrap();
 		router.recv(peer, Msg::Edited).unwrap();
 		let ask = match role {
@@ -2109,6 +2188,153 @@ mod tests {
 			draining: false,
 			chain: Vec::new(),
 		})
+	}
+
+	/// A route from routing neighbour `via`, as `node(via)`, to forwarding node `origin`.
+	fn route(origin: Id, via: Id, cost: Metric) -> Msg<u64, Epoch> {
+		let path = vec![
+			Hop {
+				node: node(origin),
+				session: 0,
+			},
+			Hop {
+				node: node(via),
+				session: 1,
+			},
+		];
+		Msg::Route {
+			origin: node(origin),
+			offer: Some(Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost,
+				marked: false,
+			}),
+		}
+	}
+
+	/// Attributes with an epoch, as a restarted publisher's claims carry.
+	#[derive(Clone, Debug, PartialEq, Eq)]
+	struct Epoch(u64);
+
+	impl Item for Epoch {
+		fn lowered(&self, _: u64) -> Self {
+			self.clone()
+		}
+
+		fn epoch(&self) -> u64 {
+			self.0
+		}
+	}
+
+	fn claim(epoch: u64, cost: Metric) -> Change<Epoch> {
+		Change::Live(Claim {
+			item: Epoch(epoch),
+			cost,
+			priority: i8::MAX,
+			draining: false,
+			chain: Vec::new(),
+		})
+	}
+
+	/// A request for a path under a claim follows the most specific claim covering it, as
+	/// a neighbour asking for that path is shown.
+	#[test]
+	fn a_request_follows_the_claim_covering_it() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Endpoint);
+		open(&mut router, 3, Role::Endpoint);
+		let announce = |path: &str| Msg::Announce {
+			changes: vec![((p(path), 7), live(0))],
+		};
+		router.recv(2, announce("live")).unwrap();
+		router.recv(3, announce("live/a")).unwrap();
+		let me = router.me();
+		for (path, endpoint) in [("live", 2), ("live/b/x", 2), ("live/a", 3), ("live/a/x", 3)] {
+			let broadcast = (p(path), 7);
+			assert_eq!(router.pick(&broadcast), Some(me), "{path}");
+			assert_eq!(router.step(me, &broadcast), Some(Next::Local(endpoint)), "{path}");
+		}
+		for broadcast in [(p("other"), 7), (p("live/a"), 8)] {
+			assert_eq!(router.pick(&broadcast), None, "{broadcast:?}");
+			assert_eq!(router.step(me, &broadcast), None, "{broadcast:?}");
+		}
+	}
+
+	/// A claim at a newer epoch wins over an older one of the same Instance however much
+	/// cheaper the older is, among a node's endpoints and among forwarding nodes alike.
+	#[test]
+	fn a_newer_epoch_wins_whatever_it_costs() {
+		let mut router = Router::<usize, u64, Epoch>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Endpoint);
+		open(&mut router, 3, Role::Endpoint);
+		let broadcast = (p("live"), 7);
+		let announce = |change| Msg::Announce {
+			changes: vec![(broadcast.clone(), change)],
+		};
+		router.recv(2, announce(claim(1, 0))).unwrap();
+		router.recv(3, announce(claim(2, 9))).unwrap();
+		let me = router.me();
+		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
+		assert_eq!(router.own().1[&broadcast].item, Epoch(2));
+		assert_eq!(router.shown()[&(7, p("live"))].item, Epoch(2));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(4, route(5, 4, 1)).unwrap();
+		let claims = |change, floor| Msg::Claims {
+			origin: node(5),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		router.recv(4, claims(claim(1, 0), 1)).unwrap();
+		assert_eq!(router.pick(&broadcast), Some(me), "an older claim, however close");
+		router.recv(4, claims(claim(3, 100), 2)).unwrap();
+		assert_eq!(router.pick(&broadcast), Some(node(5)), "a newer claim, however far");
+		assert_eq!(router.shown()[&(7, p("live"))].item, Epoch(3));
+	}
+
+	/// A route or claim whose cost a link would carry past the metric is never used, and
+	/// never wraps round to a cheap one.
+	#[test]
+	fn a_cost_past_the_metric_is_never_used() {
+		let mut router = Router::<usize, u64, Epoch>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(5, 2, Metric::MAX)).unwrap();
+		assert_eq!(router.best(node(5)), None);
+		router.recv(2, route(5, 2, 1)).unwrap();
+		assert!(router.best(node(5)).is_some());
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![((p("far"), 7), claim(0, Metric::MAX - 1))],
+			floor: 1,
+		};
+		router.recv(2, claims).unwrap();
+		assert!(!router.shown()[&(7, p("far"))].available, "shown, never reachable");
+		assert_eq!(router.pick(&(p("far"), 7)), None);
+		open(&mut router, 3, Role::Endpoint);
+		let announce = Msg::Announce {
+			changes: vec![((p("near"), 7), claim(0, Metric::MAX))],
+		};
+		router.recv(3, announce).unwrap();
+		assert!(router.own().1.is_empty(), "an endpoint's claim past what its link adds");
+	}
+
+	/// The reader keeps nothing of claims that came and went, ended or lost.
+	#[test]
+	fn a_claim_that_went_leaves_nothing_in_the_reader() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Endpoint);
+		let announce = |path: &str, change| Msg::Announce {
+			changes: vec![((p(path), 7), change)],
+		};
+		router.recv(2, announce("ended", live(0))).unwrap();
+		router.recv(2, announce("ended", Change::Ended)).unwrap();
+		router.recv(2, announce("lost", live(0))).unwrap();
+		router.recv(2, announce("lost", Change::Lost)).unwrap();
+		router.timeout(router.deadline().expect("a debounce"));
+		router.events();
+		assert!(router.shown().is_empty());
+		assert!(router.reader.changed().is_empty(), "nothing reads which claims changed");
 	}
 
 	/// A claim outside what this node asked a scoped neighbour for is refused whole.

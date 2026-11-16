@@ -75,6 +75,10 @@ impl super::Item for Claim {
 			..self.clone()
 		}
 	}
+
+	fn epoch(&self) -> u64 {
+		self.epoch
+	}
 }
 
 /// A shown claim as the origin serves it through one live route.
