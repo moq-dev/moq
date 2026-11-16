@@ -52,7 +52,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { keyOf, Timescale, type Timestamp } from "./time.ts";
+import { keyOf, Timescale, Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
@@ -313,9 +313,19 @@ export interface Delay {
 	 * means `0`; `null` means not stated, which only a peer whose wire cannot carry it (moq-lite
 	 * before 07, moq-transport) sends. A media consumer reads an unstated minimum as `0`.
 	 *
-	 * The aggregate across subscribers is the smallest stated one, so an unstated minimum never
-	 * pulls it to zero, and it is forwarded upstream as is. A publisher may use it, such as to
-	 * start a cold join that far back; nothing reads it there yet.
+	 * A join that follows the live edge from the latest or the oldest group starts this far behind
+	 * it: at the newest group that began at or before the live edge minus this, so a player's
+	 * buffer arrives full instead of filling in real time, and no fuller. The hop serving it
+	 * measures from what it holds: in media time from the newest frame on a timed track, and by
+	 * arrival on its own clock on a scale-less one. With no such group held it starts at the
+	 * oldest one, and never fetches upstream for more. {@link Delay.max} still skips what has gone
+	 * stale. A start naming a group or a count back, a range with an end, and a resumed
+	 * subscription ignore it, and changing it later moves nothing already started. Zero or
+	 * unstated asks for no reach back, so the range alone decides where to start.
+	 *
+	 * The aggregate across subscribers is the largest stated one, which a relay forwards upstream,
+	 * so the copy it fills reaches back for the reader that buffers most; each reader's own
+	 * minimum then bounds what it reads of that copy.
 	 */
 	min?: Duration | null;
 	/**
@@ -424,11 +434,11 @@ function orderOf(order: Order | undefined): Order {
 	return order;
 }
 
-// The smaller of two minimums, ignoring one that went unstated (`null`).
-function smallest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
+// The larger of two minimums, ignoring one that went unstated (`null`).
+function largest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
 	if (a === null || a === undefined) return b ?? null;
 	if (b === null || b === undefined) return a;
-	return a.min(b);
+	return a.max(b);
 }
 
 // Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
@@ -445,8 +455,8 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.delay = {
 			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
-			// Only stated minimums count, so one that went unstated never pulls the smallest to zero.
-			min: smallest(combined.delay?.min, subscription.delay?.min),
+			// The largest stated, so an upstream starts far enough back for the reader that buffers most.
+			min: largest(combined.delay?.min, subscription.delay?.min),
 		};
 		// One live subscriber held behind another's backlog is worse than a backlog sent late.
 		combined.order =
@@ -3288,7 +3298,13 @@ export class Subscriber {
 
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
-		this.#window = new Window(this.#state.update.peek()?.ranges ?? [{}], this.#latestGroup(), this.#holdings());
+		const update = this.#state.update.peek();
+		this.#window = new Window(
+			update?.ranges ?? [{}],
+			this.#latestGroup(),
+			this.#holdings(),
+			update?.delay?.min ?? undefined,
+		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
 		this.#moved();
@@ -3343,7 +3359,35 @@ export class Subscriber {
 			complete: () => state.closed.peek() !== undefined,
 			// A received copy's handler is its session, which fetches by group alone.
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
+			reachBack: (_latest, min) => this.#reachBack(min),
 		};
+	}
+
+	// Where a live join holding `min` behind the live edge starts, as {@link Holdings.reachBack}
+	// says: in media time from the newest frame held, or on a scale-less track, by arrival on this
+	// hop's clock, as expiry measures it. Mirrors the Rust `TrackState::reach_back`.
+	#reachBack(min: Duration): { anchor?: Anchor } | undefined {
+		const timeline = this.#state.timeline;
+		// The newest group held for which `f` holds, failed ones aside.
+		const newest = (f: (group: GroupConsumer) => boolean) => timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
+		const info = this.#state.info.peek();
+		if (info?.timescale == null) {
+			if (!newest(() => true)) return undefined;
+			const at = now();
+			const aged = newest((group) => at.since(hooks.groupArrived(group)).ge(min));
+			return aged ? { anchor: { absolute: aged.sequence } } : {};
+		}
+		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
+		const started = stamped && hooks.groupTimestamp(stamped);
+		if (!stamped || !started) return undefined;
+		const target = Math.max(0, (hooks.groupLatest(stamped) ?? started).asMicros() - min.asMicros());
+		// moq-transport promises no timestamps that never rewind, so its starts go unindexed and a
+		// time anchor can't name a group: take the newest whose first frame presented by then.
+		if (info.ietf !== undefined) {
+			const first = newest((group) => (hooks.groupTimestamp(group)?.asMicros() ?? Infinity) <= target);
+			return first ? { anchor: { absolute: first.sequence } } : {};
+		}
+		return { anchor: { time: Timestamp.fromMicros(target) } };
 	}
 
 	// Resolve what the groups now held settle: a relative anchor waiting on a first group once

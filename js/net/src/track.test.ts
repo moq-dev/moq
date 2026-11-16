@@ -610,17 +610,18 @@ test("multiple subscriber options aggregate like Rust", async () => {
 		delay: { min: Duration.millis(50), max: Duration.millis(250) },
 		ranges: [{ start: { absolute: 5n } }],
 	});
-	// A minimum that went unstated, as a legacy peer's does, never pulls the smallest to zero.
+	// A minimum that went unstated, as a legacy peer's does, counts for nothing.
 	const legacy = producer.subscribe({
 		delay: { min: null, max: Duration.millis(0) },
 		ranges: [{ start: { absolute: 5n } }],
 	});
 
 	// One descending subscriber makes the aggregate descending, so a live reader is never held
-	// behind another's backlog.
+	// behind another's backlog. The largest minimum wins, so an upstream reaches back far enough
+	// for the reader that buffers most.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
-		delay: { min: Duration.millis(50), max: Duration.millis(250) },
+		delay: { min: Duration.millis(400), max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 5n } }],
 	});
@@ -858,6 +859,80 @@ test("a time range reads the groups containing its times, settling its end as gr
 	four.writeFrame(textFrame("4", Timestamp.fromMillis(4000)));
 	expect(read()).toEqual([]);
 	expect(hooks.servingEnd(reader)).toBe(4n);
+});
+
+// Every group `reader` can take now, in delivery order.
+function readable(reader: ReturnType<TrackProducer["subscribe"]>): bigint[] {
+	const got: bigint[] = [];
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.sequence);
+	return got;
+}
+
+// A timed track of 500 ms groups 0 through 10, each presenting at its start.
+function halfSecondGroups(): TrackProducer {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	for (let sequence = 0n; sequence <= 10n; sequence++) appendHalfSecond(producer, sequence);
+	return producer;
+}
+
+function appendHalfSecond(producer: TrackProducer, sequence: bigint): void {
+	const group = producer.createGroup(sequence);
+	group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(Number(sequence) * 500)));
+	group.finish();
+}
+
+test("a live join reaches back by its min age, from the latest or the oldest group", () => {
+	for (const ranges of [[LIVE], [{}]]) {
+		const producer = halfSecondGroups();
+		const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges });
+		// The newest frame presents at 5 s, so the join starts at the group containing 3 s.
+		expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+		appendHalfSecond(producer, 11n);
+		expect(readable(reader)).toEqual([11n]);
+	}
+});
+
+test("a join without a min age, or with zero, starts where its range says", () => {
+	const producer = halfSecondGroups();
+	const all = Array.from({ length: 11 }, (_, sequence) => BigInt(sequence));
+	for (const min of [null, Duration.ZERO]) {
+		const live = producer.subscribe({ delay: { min, max: Duration.secs(30) }, ranges: [LIVE] });
+		expect(readable(live)).toEqual([10n]);
+		const oldest = producer.subscribe({ delay: { min, max: Duration.secs(30) } });
+		expect(readable(oldest)).toEqual(all);
+	}
+	// Past everything held, it starts at the oldest group; a named start ignores it.
+	const far = producer.subscribe({ delay: { min: Duration.secs(60), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(far)).toEqual(all);
+	const named = producer.subscribe({
+		delay: { min: Duration.secs(2), max: Duration.secs(30) },
+		ranges: [{ start: { relative: 1n } }],
+	});
+	expect(readable(named)).toEqual([9n, 10n]);
+});
+
+test("a scale-less join reaches back by arrival", () => {
+	const clock = manualTime(0);
+	try {
+		const producer = new TrackProducer("test");
+		producer.accept({ maxAge: null });
+		// Group N arrives N seconds in, and the join comes at 5 s.
+		for (let sequence = 0n; sequence < 5n; sequence++) {
+			const group = producer.createGroup(sequence);
+			group.writeFrame(textFrame(`${sequence}`, Timestamp.unscaled(sequence)));
+			group.finish();
+			clock.set(Number(sequence + 1n) * 1000);
+		}
+		const reader = producer.subscribe({
+			delay: { min: Duration.millis(2500), max: Duration.secs(30) },
+			ranges: [LIVE],
+		});
+		expect(readable(reader)).toEqual([2n, 3n, 4n]);
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
 });
 
 // A reached end leaves a held group that may still start, so a time start still waits on it.

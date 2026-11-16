@@ -9,6 +9,7 @@
  * @module
  */
 
+import type { Duration } from "@moq/clock";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Anchor, Range } from "./track.ts";
 import { max, min, saturatingSub, UNBOUNDED } from "./util/sequence.ts";
@@ -364,6 +365,14 @@ export interface Holdings {
 	 * history, as the Rust `Holdings::looks_up` says. Absent for none.
 	 */
 	looksUp?(): boolean;
+	/**
+	 * Where a live join holding `min` behind the live edge starts, `latest` being the latest group:
+	 * a time that far behind the newest frame held, a group that starts at or before it, or with no
+	 * anchor, the oldest group, when none held does. Undefined while nothing held can measure it,
+	 * so the join waits for a group as a relative start does. Absent where the hop leaves its ranges
+	 * to the copies it follows. Mirrors the Rust `Holdings::reach_back`.
+	 */
+	reachBack?(latest: bigint, min: Duration): { anchor?: Anchor } | undefined;
 }
 
 /**
@@ -568,13 +577,19 @@ export class Window {
 	 * The ranges, by index, whose time start waits on a group starting, so they read nothing yet,
 	 * with the latest group their relative end counts back from.
 	 */
-	#waiting: { index: number; latest: bigint | undefined }[] = [];
+	#waiting: { index: number; latest: bigint | undefined; start: Anchor | undefined }[] = [];
 	/** Nothing is left to resolve as groups arrive and start. */
 	#settled = false;
+	/** The subscriber's Min Age, which reaches a live join back from the live edge. */
+	readonly #min: Duration | undefined;
 
-	/** Resolve `ranges`, counting relative anchors back from `latest` and time anchors from `holdings`. */
-	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD) {
+	/**
+	 * Resolve `ranges`, counting relative anchors back from `latest` and time anchors from
+	 * `holdings`, and reaching a live join back by `min` (see {@link joins}).
+	 */
+	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD, min?: Duration) {
 		this.ranges = ranges;
+		this.#min = min;
 		this.#place(latest, holdings);
 	}
 
@@ -603,8 +618,8 @@ export class Window {
 		this.#waiting = [];
 		// A relative end counts back from the latest group when asked, or the first observed
 		// group on an empty track, even while the time start waits.
-		for (const { index, latest } of waiting) {
-			if (this.#span(index, latest, holdings)) moved = true;
+		for (const { index, latest, start } of waiting) {
+			if (this.#span(index, latest, holdings, { anchor: start })) moved = true;
 		}
 		for (const span of this.#spans) {
 			if (span.end === "open" || !("time" in span.end)) continue;
@@ -775,8 +790,9 @@ export class Window {
 		this.#rebuild();
 	}
 
-	// Resolve range `index` into a span, or note what it waits on. Returns whether it resolved.
-	#span(index: number, latest: bigint | undefined, holdings: Holdings): boolean {
+	// Resolve range `index` into a span, or note what it waits on, starting at `reached` when a
+	// join's reach back already chose it. Returns whether it resolved.
+	#span(index: number, latest: bigint | undefined, holdings: Holdings, reached?: { anchor?: Anchor }): boolean {
 		const range = this.ranges[index];
 		if (isEmpty(range)) return false;
 		const until = endOf(range.end, latest);
@@ -784,9 +800,19 @@ export class Window {
 			this.#pending = true;
 			return false;
 		}
-		const start = startOf(range.start, latest, holdings);
+		const min = joins(range, this.#min, holdings);
+		if (!reached && min !== undefined) {
+			reached = latest === undefined ? undefined : holdings.reachBack?.(latest, min);
+			// Nothing to measure the live edge by yet.
+			if (!reached) {
+				this.#pending = true;
+				return false;
+			}
+		}
+		const anchor = reached ? reached.anchor : range.start;
+		const start = startOf(anchor, latest, holdings);
 		if (start === "waiting") {
-			this.#waiting.push({ index, latest });
+			this.#waiting.push({ index, latest, start: anchor });
 			return false;
 		}
 		if (start === undefined) {
@@ -795,9 +821,11 @@ export class Window {
 		}
 		let end: End = until === "open" || "before" in until ? until : { time: new TimeEnd(until.pts, start.group) };
 		// A time start the groups held can't place reads nothing until its lookup answers, and its
-		// time end walks from where that puts it.
-		const pts = time(range.start);
-		const below = pts === undefined ? undefined : unresolved(start.group, start.floored, holdings);
+		// time end walks from where that puts it. A join's reach back never looks one up: it starts
+		// from what this hop holds.
+		const pts = time(anchor);
+		const asked = time(range.start) !== undefined;
+		const below = pts === undefined || !asked ? undefined : unresolved(start.group, start.floored, holdings);
 		if (pts !== undefined && below !== undefined) {
 			this.#spans.push({ index, start: start.group, end, floored: start.floored, looking: { pts, below } });
 			return true;
@@ -843,6 +871,17 @@ function intersect(runs: readonly Run[], from: bigint, end: bigint): Run[] {
 		out.push({ start: max(run.start, from), end: min(run.end, end) });
 	}
 	return out;
+}
+
+/**
+ * The Min Age a live join reaches back by: a nonzero `min`, for a range that follows the live edge
+ * from the latest or the oldest group, where the hop resolves its own ranges. A start naming a
+ * group or a count back wins, as does a range with an end. A zero or unstated minimum asks for no
+ * reach back, so the range alone decides. Mirrors the Rust `joins`.
+ */
+function joins(range: Range, min: Duration | undefined, holdings: Holdings): Duration | undefined {
+	const live = (range.start === undefined || relative(range.start) === 0n) && range.end === undefined;
+	return live && min !== undefined && !min.isZero() && holdings.reachBack ? min : undefined;
 }
 
 /**
