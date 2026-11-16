@@ -66,7 +66,8 @@ State plainly what the theorem does not give, and where each is covered:
 - No loop at every instant: [requests](https://github.com/moq-dev/moq/pull/8881) fail
   closed instead.
 - A cost that depends on who subscribed:
-  [warmth](/quest/m2/multicast/warmth.md) argues it separately.
+  [cache-aware routing](/quest/m3/cache-routing/select.md) argues it
+  separately, and [warmth](https://github.com/moq-dev/moq/pull/8903) swept it.
 - Liveness under churn that never stops.
 - That the tree is loop-free once routes settle: one paragraph, since next
   hops toward one origin node at a fixed point cannot cycle and a request

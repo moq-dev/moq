@@ -1,5 +1,5 @@
 //! Three ways to find a warm copy, measured on [`WarmSim`] over the multicast
-//! prototype's route rule (`quest/m2/multicast/warmth.md`).
+//! prototype's route rule, for the pick `quest/m3/cache-routing/select.md` builds.
 //!
 //! Each shape is built under every [`Arm`], then a script of reader changes and link
 //! closes runs in phases, each settled before the next: what each broadcast's tree
@@ -94,7 +94,6 @@ fn phase(name: &'static str, steps: Vec<Step>) -> Phase {
 #[derive(Clone, Debug)]
 struct Row {
 	phase: &'static str,
-	settled: bool,
 	right: Result<(), String>,
 	trees: Vec<Tree>,
 	/// The cheapest tree per broadcast.
@@ -102,7 +101,6 @@ struct Row {
 	sent: Sent,
 	/// Reader starts and stops in the phase.
 	changes: usize,
-	rounds: usize,
 	/// Rounds each new reader waited for its first frame.
 	waits: Vec<usize>,
 	watch: Watch,
@@ -128,7 +126,7 @@ fn run(shape: &Shape, arm: Arm, phases: &[Phase], seed: u64) -> Vec<Row> {
 	let mut sim = shape.build(arm, seed);
 	let mut rows = Vec::new();
 	for phase in phases {
-		let (sent, watch, round, waits) = (sim.sent, sim.watch, sim.round, sim.waits.len());
+		let (sent, watch, waits) = (sim.sent, sim.watch, sim.waits.len());
 		let mut changes = 0;
 		for &step in &phase.steps {
 			match step {
@@ -144,21 +142,18 @@ fn run(shape: &Shape, arm: Arm, phases: &[Phase], seed: u64) -> Vec<Row> {
 				}
 			}
 		}
-		let settled = sim.settle();
+		let right = match sim.settle() {
+			true => sim.check(),
+			false => Err("never settled".into()),
+		};
 		let casts = 0..sim.casts();
 		rows.push(Row {
 			phase: phase.name,
-			settled,
-			right: if settled {
-				sim.check()
-			} else {
-				Err("never settled".into())
-			},
+			right,
 			trees: casts.clone().map(|cast| sim.tree(cast)).collect(),
 			cheapest: casts.clone().map(|cast| sim.cheapest(cast)).collect(),
 			sent: sim.sent - sent,
 			changes,
-			rounds: sim.round - round,
 			waits: sim.waits[waits..].to_vec(),
 			watch: sim.watch.since(watch),
 			carriers: casts.map(|cast| sim.carriers(cast)).collect(),
@@ -554,17 +549,16 @@ fn churn(arm: Arm, cases: std::ops::Range<usize>, shape: fn(&mut XorShift) -> Sh
 			true => sim.check(),
 			false => Err("never settled".into()),
 		};
-		if right.is_err() && std::env::var("WARM_DUMP").is_ok() {
-			println!("{} case {case} on {shape:?}\n{}", arm.name(), sim.dump());
-		}
 		if let Err(err) = right {
 			out.failed += 1;
-			out.first.get_or_insert(format!("case {case}: {err}"));
+			out.first
+				.get_or_insert_with(|| format!("case {case}: {err} on {shape:?}\n{}", sim.dump()));
 		}
 		out.cases += 1;
 		out.watch.steps += seen.steps;
 		out.watch.cycles += seen.cycles;
 		out.watch.starved += seen.starved;
+		out.watch.merged += seen.merged;
 		out.watch.longest = out.watch.longest.max(seen.longest);
 		out.watch.unfed += seen.unfed;
 		out.watch.extra += seen.extra;
@@ -587,6 +581,46 @@ fn every_arm_settles_after_churn() {
 			let out = churn(arm, 0..12, shape);
 			assert_eq!(out.failed, 0, "{}: {:?}", arm.name(), out.first);
 		}
+	}
+}
+
+/// One viewer per broadcast on CDN tiers: a join that follows its route costs no
+/// message beyond its subscriptions, and both ways to hear of warmth spend some on
+/// every first viewer.
+#[test]
+fn a_first_viewer_costs_warm_messages_unless_joins_follow_the_route() {
+	let case = cases()
+		.into_iter()
+		.find(|case| case.name == "tiers_one_viewer")
+		.expect("the case");
+	for arm in [PATH, ASK, ADVERTISE] {
+		let rows = run(&case.shape, arm, &case.phases, 7);
+		settles(&rows, &arm.name());
+		for row in &rows {
+			match arm.mode {
+				Mode::Path => assert_eq!(row.sent.warm(), 0, "{}", arm.name()),
+				_ => assert!(row.sent.warm() > 0, "{}", arm.name()),
+			}
+		}
+	}
+}
+
+/// On CDN tiers two edges under one core cost the same, and a merge between them
+/// leaves the core with one child, whose offer then rises: without hops to tell a
+/// sibling the merge undoes itself for good. With them it settles on a cheaper tree.
+#[test]
+fn a_merge_settles_on_tiers_once_offers_name_their_hops() {
+	let case = cases()
+		.into_iter()
+		.find(|case| case.name == "tiers_crowd")
+		.expect("the case");
+	for (alone, merged) in [(ASK, ASK_MERGE), (ADVERTISE, ADVERTISE_MERGE)] {
+		let cost = |arm: Arm| {
+			let rows = run(&case.shape, arm, &case.phases, 7);
+			settles(&rows, &arm.name());
+			rows.iter().map(Row::cost).sum::<Metric>()
+		};
+		assert!(cost(merged) <= cost(alone), "{}", merged.name());
 	}
 }
 
@@ -734,19 +768,20 @@ fn benchmark_warmth_cases() {
 #[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_warmth_churn() {
 	println!(
-		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,settle_rounds,failed"
+		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,settle_rounds,failed"
 	);
 	let cases: usize = std::env::var("MOQ_WARMTH_CASES").map_or(400, |cases| cases.parse().expect("MOQ_WARMTH_CASES"));
 	for (name, shape) in [("random", random as fn(&mut XorShift) -> Shape), ("drones", flying)] {
 		for arm in arms() {
 			let out = churn(arm, 0..cases, shape);
 			println!(
-				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 				arm.name(),
 				out.cases,
 				out.watch.steps,
 				out.watch.cycles,
 				out.watch.starved,
+				out.watch.merged,
 				out.watch.longest,
 				out.watch.unfed,
 				out.watch.extra,

@@ -1,6 +1,6 @@
 //! A data plane over the multicast prototype ([`MultiSim`]), to measure how a relay
 //! learns that a neighbour already has demand for a broadcast
-//! (`quest/m2/multicast/warmth.md`). Nothing here ships; `warmth.rs` holds the
+//! (`quest/m3/cache-routing/select.md`). Nothing here ships; `warmth.rs` holds the
 //! shapes, the pins, and the tables.
 //!
 //! A relay has demand for a broadcast while it has a reader or a neighbour's payload
@@ -118,6 +118,8 @@ struct Pull {
 	via: Node,
 	stream: u64,
 	state: State,
+	/// The merge made it, so a cycle through it is one the merge added.
+	merged: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +248,8 @@ pub(super) struct Watch {
 	pub cycles: usize,
 	/// Of those, deliveries after which a reader's pulls led into it.
 	pub starved: usize,
+	/// Of those, deliveries after which a cycle ran through a pull the merge made.
+	pub merged: usize,
 	/// The most deliveries in a row a cycle lasted.
 	pub longest: usize,
 	run: usize,
@@ -263,6 +267,7 @@ impl Watch {
 			steps: self.steps - was.steps,
 			cycles: self.cycles - was.cycles,
 			starved: self.starved - was.starved,
+			merged: self.merged - was.merged,
 			longest: self.longest,
 			run: 0,
 			unfed: self.unfed - was.unfed,
@@ -310,8 +315,9 @@ pub(super) struct WarmSim {
 	pub net: MultiSim,
 	relays: usize,
 	nodes: usize,
-	/// Each publisher's endpoint node.
+	/// Each publisher's endpoint node, and the relay it joined.
 	endpoints: BTreeMap<Id, Node>,
+	homes: BTreeMap<Id, Node>,
 	prices: BTreeMap<(Node, Node), Price>,
 	open: BTreeSet<(Node, Node)>,
 	casts: Vec<Broadcast>,
@@ -336,6 +342,7 @@ impl WarmSim {
 			relays,
 			nodes,
 			endpoints: BTreeMap::new(),
+			homes: BTreeMap::new(),
 			prices: BTreeMap::new(),
 			open: BTreeSet::new(),
 			casts: Vec::new(),
@@ -367,6 +374,7 @@ impl WarmSim {
 		let id = 100 + index as Id;
 		self.net.client(node);
 		self.endpoints.insert(id, node);
+		self.homes.insert(id, home);
 		self.prices.insert(pair(node, home), Price::flat(1));
 		self.open.insert(pair(node, home));
 		self.net.link(node, home, 1, Tie::Peer);
@@ -599,6 +607,7 @@ impl WarmSim {
 			via,
 			stream,
 			state: State::Pending,
+			merged: false,
 		}
 	}
 
@@ -644,6 +653,7 @@ impl WarmSim {
 			}
 			return;
 		};
+		let moving = carry.next.as_ref().map(|next| next.via);
 		let target = match &up.state {
 			// Nothing flows yet, so a better source replaces it outright.
 			State::Pending => {
@@ -673,36 +683,60 @@ impl WarmSim {
 					let own = signal.cost + self.price(up.via, node).warm;
 					let back = signal.cost + self.price(up.via, node).cold;
 					let merge = self.merge(node, cast, &options, own, back);
-					match best {
-						Some(best) if best.cost < own => Some(best.via),
-						_ => merge.or(Some(up.via)),
+					// A move under way stays while it is no dearer: its own subscription
+					// shares the old parent, which lowers what staying costs, and dropping
+					// it for that would raise it again.
+					let moving = (moving)
+						.and_then(|via| options.iter().find(|choice| choice.via == via))
+						.filter(|choice| choice.cost <= own)
+						.map(|choice| choice.via);
+					match (best, merge) {
+						(Some(best), _) if best.cost < own => Some(best.via),
+						(_, Some(merge)) => {
+							self.toward(node, cast, merge, true);
+							return;
+						}
+						_ => moving.or(Some(up.via)),
 					}
 				}
 			},
 			// Lost, or fed through itself: anything usable beats it.
 			_ => best.map(|best| best.via),
 		};
-		self.toward(node, cast, target.unwrap_or(up.via));
+		self.toward(node, cast, target.unwrap_or(up.via), false);
 	}
 
 	/// The relay `node` merges onto: a warm neighbour whose copy costs what its own does,
-	/// with a higher hash, once nothing else, its old parent included, is cheaper.
+	/// with a higher hash, once nothing else, its old parent included, is cheaper. With
+	/// [`Arm::hops`], never a sibling under a parent other than the publisher's relay:
+	/// leaving that parent raises its offer to the sibling, which the merge relied on.
 	fn merge(&self, node: Node, cast: usize, options: &[Choice], own: Metric, back: Metric) -> Option<Node> {
 		if !self.arm.merge {
 			return None;
 		}
 		let mine = self.hash(cast, node);
 		let up = self.carry(node, cast)?.up.as_ref()?.via;
+		let home = self.home(cast);
+		let carry = self.carry(node, cast)?;
+		let sibling = |via: Node| {
+			let signal = match self.arm.mode {
+				Mode::Ask(_) => carry.asks.get(&via).cloned().flatten(),
+				_ => carry.heard.get(&via).cloned(),
+			};
+			up != home && signal.is_some_and(|signal| signal.path.contains(&up))
+		};
 		let target = (options.iter())
 			.filter(|choice| choice.via != up && choice.offered == Some(own) && self.hash(cast, choice.via) > mine)
+			.filter(|choice| !sibling(choice.via))
 			.max_by_key(|choice| self.hash(cast, choice.via))?;
 		let after = own + self.price(target.via, node).warm;
-		let stays = after < back && (options.iter()).all(|choice| choice.via == target.via || after < choice.cost);
+		let stays = after <= back && (options.iter()).all(|choice| choice.via == target.via || after <= choice.cost);
 		stays.then_some(target.via)
 	}
 
-	/// Move toward `target` unless already there or on the way.
-	fn toward(&mut self, node: Node, cast: usize, target: Node) {
+	/// Move toward `target` unless already there or on the way, marking a new pull the
+	/// merge asked for.
+	fn toward(&mut self, node: Node, cast: usize, target: Node, merged: bool) {
 		let carry = self.entry(node, cast);
 		let up = carry.up.as_ref().map(|pull| pull.via);
 		let next = carry.next.as_ref().map(|pull| pull.via);
@@ -716,7 +750,10 @@ impl WarmSim {
 		}
 		let old = self.entry(node, cast).next.take();
 		self.unsubscribe(node, cast, old);
-		let pull = self.subscribe(node, cast, target);
+		let pull = Pull {
+			merged,
+			..self.subscribe(node, cast, target)
+		};
 		self.entry(node, cast).next = Some(pull);
 	}
 
@@ -1049,6 +1086,30 @@ impl WarmSim {
 		true
 	}
 
+	/// Whether the cycle `node`'s pulls for `cast` run into holds a pull the merge made.
+	fn merged(&self, node: Node, cast: usize) -> bool {
+		let mut at = node;
+		for _ in 0..=self.nodes {
+			match self.parent(at, cast) {
+				Some(next) => at = next,
+				None => return false,
+			}
+		}
+		let start = at;
+		loop {
+			let Some(pull) = self.carry(at, cast).and_then(|carry| carry.up.as_ref()) else {
+				return false;
+			};
+			if pull.merged {
+				return true;
+			}
+			at = pull.via;
+			if at == start {
+				return false;
+			}
+		}
+	}
+
 	fn readers(&self) -> Vec<(Node, usize)> {
 		(0..self.relays)
 			.flat_map(|node| {
@@ -1065,7 +1126,11 @@ impl WarmSim {
 		self.watch.steps += 1;
 		let cycle = (0..self.casts.len()).any(|cast| (0..self.relays).any(|node| self.circles(node, cast)));
 		let starved = cycle && self.readers().into_iter().any(|(node, cast)| self.circles(node, cast));
+		let merged = cycle
+			&& (0..self.casts.len())
+				.any(|cast| (0..self.relays).any(|node| self.circles(node, cast) && self.merged(node, cast)));
 		self.watch.cycles += usize::from(cycle);
+		self.watch.merged += usize::from(merged);
 		self.watch.starved += usize::from(starved);
 		self.watch.run = if cycle { self.watch.run + 1 } else { 0 };
 		self.watch.longest = self.watch.longest.max(self.watch.run);
@@ -1148,8 +1213,7 @@ impl WarmSim {
 
 	/// The relay publishing `cast` is joined to.
 	pub fn home(&self, cast: usize) -> Node {
-		let endpoint = self.endpoints[&self.casts[cast].0];
-		self.peers(endpoint)[0]
+		self.homes[&self.casts[cast].0]
 	}
 
 	pub fn tree(&self, cast: usize) -> Tree {
@@ -1204,13 +1268,13 @@ impl WarmSim {
 			if mask.count_ones() < 2 {
 				continue;
 			}
-			for at in 0..n {
-				let mut sub = (mask - 1) & mask;
-				while sub > 0 {
-					let joined = tree[sub][at] + tree[mask ^ sub][at];
-					tree[mask][at] = tree[mask][at].min(joined);
-					sub = (sub - 1) & mask;
+			let mut sub = (mask - 1) & mask;
+			while sub > 0 {
+				let joined: Vec<Metric> = tree[sub].iter().zip(&tree[mask ^ sub]).map(|(a, b)| a + b).collect();
+				for (slot, joined) in tree[mask].iter_mut().zip(joined) {
+					*slot = (*slot).min(joined);
 				}
+				sub = (sub - 1) & mask;
 			}
 			let row = tree[mask].clone();
 			for at in 0..n {
