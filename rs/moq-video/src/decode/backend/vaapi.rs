@@ -120,14 +120,14 @@ impl Vaapi {
 			other => return Err(Error::codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
 		};
 		if let Some((profile, name)) = required
-			&& offered(codec, config.vaapi.as_deref(), profile) == Some(false)
+			&& offered(codec, config.device.render(), profile) == Some(false)
 		{
 			return Err(Error::UnsupportedCodec(format!("no VA-API driver here decodes {name}")));
 		}
 
 		let vaapi = VaapiConfig {
 			codec,
-			device: vaapi::device(codec, config.vaapi.as_deref()),
+			device: vaapi::device(codec, config.device.render()),
 		};
 		let decoder = Decoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 

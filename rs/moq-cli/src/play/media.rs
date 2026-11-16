@@ -284,14 +284,7 @@ impl<O: Output> Media<O> {
 						// that imports none.
 						let mut decode = moq_video::decode::Config::new();
 						decode.output = self.output.render().await;
-						#[cfg(all(target_os = "linux", feature = "vaapi"))]
-						{
-							decode.vaapi = self.args.vaapi_device.clone();
-						}
-						#[cfg(all(target_os = "linux", feature = "v4l2"))]
-						{
-							decode.v4l2 = self.args.v4l2_decoder.clone();
-						}
+						decode.device = crate::device(&self.args.vaapi_device, &self.args.v4l2_decoder);
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let delay = moq_net::track::Delay {
 							min: Some(self.args.video_delay()),
@@ -2132,9 +2125,7 @@ mod tests {
 			args: Args {
 				catalog_format: None,
 				metrics: None,
-				#[cfg(all(target_os = "linux", feature = "vaapi"))]
 				vaapi_device: None,
-				#[cfg(all(target_os = "linux", feature = "v4l2"))]
 				v4l2_decoder: None,
 				delay: Delay::Fixed(delay),
 				stretch: Duration::ZERO.into(),

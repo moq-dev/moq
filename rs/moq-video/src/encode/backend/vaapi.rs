@@ -93,7 +93,7 @@ impl Vaapi {
 			Codec::H265 => moq_vaapi::Codec::H265,
 		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device(codec, config.vaapi.as_deref()),
+			device: vaapi::device(codec, config.device.render()),
 			color: vaapi::color(color)?,
 			codec,
 			..VaapiConfig::new(
