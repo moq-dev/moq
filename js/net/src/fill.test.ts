@@ -1200,85 +1200,6 @@ test("fill: a stale run that does not settle the reader keeps its pending refusa
 	await first.catch(() => undefined);
 });
 
-// The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.
-function judgedTwice() {
-	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { maxAge: null });
-	hooks.receiveTrack(track);
-	const requests = track.requests();
-	hooks.supersedeStale(track, [
-		{ start: 0n, end: 2n },
-		{ start: 4n, end: 6n },
-	]);
-	hooks.dropTrackGroups(track, 0n, 2n, staleHole(500));
-	hooks.dropTrackGroups(track, 4n, 6n, staleHole(500));
-	const reader = (ranges: [bigint, bigint][]) =>
-		track.subscribe({
-			ranges: ranges.map(([start, end]) => ({ start: { absolute: start }, end: { absolute: end } })),
-			delay: { max: Duration.millis(500) },
-		});
-	return { broadcast, requests, reader };
-}
-
-// A stale verdict settles a reader that reads every range the upstream judged it against, however
-// many there are, with nothing received and no fill asked. Mirrors Rust.
-test("fill: a stale verdict settles a reader of every range it judged", async () => {
-	const { broadcast, requests, reader: subscribe } = judgedTwice();
-	const reader = subscribe([
-		[0n, 2n],
-		[4n, 6n],
-	]);
-	expect(hooks.tryDrop(reader)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
-	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 6n, stale: 500 });
-	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "done" });
-	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
-	expect(fill).toBeUndefined();
-
-	reader.close();
-	requests.close();
-	broadcast.close();
-});
-
-// A reader whose ranges only partly overlap the ones a stale verdict was judged against is settled
-// where it reads every judged group above the run, and asks a fill for the rest, even with nothing
-// received: no update brings it, since its ranges add nothing to the upstream's terms. Mirrors Rust.
-test("fill: a stale verdict settles a partly overlapping reader only where it reads above", async () => {
-	const { broadcast, requests, reader: subscribe } = judgedTwice();
-	// Reads every judged group above each run, and more past them: settled.
-	const wider = subscribe([
-		[1n, 2n],
-		[4n, 8n],
-	]);
-	expect(hooks.tryDrop(wider)).toMatchObject({ start: 1n, end: 2n, stale: 500 });
-	expect(hooks.tryDrop(wider)).toMatchObject({ start: 4n, end: 6n, stale: 500 });
-	expect(hooks.tryDrop(wider)).toBeUndefined();
-	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)])).toBeUndefined();
-	// Stops at 4, which the upstream judged against 5: its own newest, which no verdict convicts.
-	// Both runs are unknown to it, and asked for.
-	const narrower = subscribe([
-		[0n, 2n],
-		[4n, 5n],
-	]);
-	expect(hooks.tryRecvGroup(narrower, false)).toEqual({ kind: "idle" });
-	expect(hooks.tryDrop(narrower)).toBeUndefined();
-	const asked: bigint[][] = [];
-	for (;;) {
-		const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
-		if (!fill) break;
-		asked.push([fill.start, fill.end]);
-	}
-	asked.sort((a, b) => Number(a[0] - b[0]));
-	expect(asked).toEqual([
-		[0n, 2n],
-		[4n, 5n],
-	]);
-
-	wider.close();
-	narrower.close();
-	requests.close();
-	broadcast.close();
-});
-
 test("fill: a cache-miss fetch of a dynamic track serves the one track the broadcast already has", async () => {
 	const broadcast = new BroadcastProducer();
 	// Pulled first, so the broadcast serves tracks on demand.
@@ -1455,7 +1376,7 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	expect(hooks.tryDrop(later)).toMatchObject({ kind: "drop", start: 0n, end: 3n, stale: 10_000 });
 	expect(await asked()).toEqual([]);
 
-	expect(hooks.supersedeStale(track, undefined)).toEqual([{ start: 0n, end: 3n }]);
+	hooks.supersedeStale(track);
 	const again = track.subscribe(terms);
 	expect(again.tryRecvGroup()?.sequence).toBe(3n);
 	again.tryRecvGroup();

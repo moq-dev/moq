@@ -722,9 +722,6 @@ class TrackState {
 	drops = new DropSet();
 	// The runs this sink's own fills refused, which it reads as given up beside `drops`.
 	refused = new Signal<readonly DropRun[]>([]);
-	// Every group the ranges of a received copy's current upstream terms name, which its stale runs
-	// were judged against; undefined when unknown, which counts as every group.
-	judged?: readonly Run[];
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -964,29 +961,18 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
 }
 
 /**
- * Whether `run` settles a reader judging under `budget` with `coverage`, on a track whose upstream
- * judged stale runs against ranges naming the groups in `judged` (undefined for every group). Any
- * run but a received stale one does. A stale verdict holds for a reader no wider than the budget it
- * was judged under that reads every group the upstream's ranges name above the run's start: its
- * own successor and edge are then no older than those the verdict was judged against, since a
- * group's verdict looks only above it. Mirrors the Rust `settles`.
+ * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
+ * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
+ * that reads every group above the run's start, past the live edge: its own successor and edge are
+ * then no older than those the verdict was judged against, since a group's verdict looks only
+ * above it. Mirrors the Rust `settles`.
  */
-function settles(run: DropRun, budget: number, coverage: Coverage, judged: readonly Run[] | undefined): boolean {
+function settles(run: DropRun, budget: number, coverage: Coverage): boolean {
 	if (run.stale === undefined) return true;
-	if (budget > run.stale || coverage === undefined) return false;
+	if (budget > run.stale || coverage === undefined || coverage.cap !== undefined) return false;
 	const above = run.start + 1n;
-	// Whether the reader reads every group from `start` up to the exclusive `end`, `UNBOUNDED`
-	// past the live edge.
-	const reads = (start: bigint, end: bigint): boolean => {
-		if (coverage.cap !== undefined && (end === UNBOUNDED || end > coverage.cap)) return false;
-		const held = coverage.runs.find((run) => run.start <= start && start < run.end);
-		return held !== undefined && held.end >= end;
-	};
-	for (const range of judged ?? [{ start: 0n, end: UNBOUNDED }]) {
-		if (range.end <= above) continue;
-		if (!reads(max(range.start, above), range.end)) return false;
-	}
-	return true;
+	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
+	return held !== undefined && held.end >= UNBOUNDED;
 }
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;
@@ -1329,13 +1315,9 @@ export class Producer {
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
-		hooks.supersedeStale = (producer, judged) => {
-			const held = producer.#state.drops.all
-				.filter((run) => run.stale !== undefined)
-				.map(({ start, end }) => ({ start, end }));
-			for (const state of [producer.#state, ...producer.#sinks]) state.judged = judged;
+		hooks.supersedeStale = (producer) => {
+			const held = producer.#state.drops.all.filter((run) => run.stale !== undefined);
 			for (const run of held) producer.#setDrops(run.start, run.end);
-			return held;
 		};
 		hooks.dropAnchors = (producer) => {
 			for (const state of [producer.#state, ...producer.#sinks]) state.dropsAnchors.set(true);
@@ -1464,10 +1446,10 @@ export class Producer {
 			for (const [sequence, entry] of this.#cached) {
 				const closed = entry.group.closed.peek();
 				if (sequence < start || sequence >= end || closed instanceof Error) continue;
-				// A lite-07 publisher may serve a group after its stale drop, and the group's stream
-				// may land first. A final drop ends a group still arriving, but one that finished here
-				// stays whole, as a re-sent copy the subscriber refused leaves it: naming it given up
-				// would hide it from every reader.
+				// A final drop ends a group still arriving, but one that finished here stays whole, as a
+				// re-sent copy the subscriber refused leaves it: naming it given up would hide it from
+				// every reader. A stale drop settles only the readers its budget covers, so it leaves a
+				// group arriving too, which another subscription sharing the copy may be delivering.
 				if (hole.stale === undefined && closed === undefined) arriving.push(entry.group);
 				else runs = removeRun(runs, sequence, sequence + 1n);
 			}
@@ -1477,8 +1459,8 @@ export class Producer {
 		if (hole.stale === undefined) this.#fills.dropped(start, end);
 		for (const run of runs) this.#setDrops(run.start, run.end, hole);
 		for (const group of arriving) group.abort(hole.error);
-		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
-		// terms may supersede it, leaving those groups unknown again, as in Rust.
+		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: a new
+		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
 		if (hole.stale === undefined) this.#arrive(start, end);
 		// Giving up the last sequences below the end reaches it, as writing them would.
 		this.#endLargest();
@@ -1670,7 +1652,6 @@ export class Producer {
 		// Full, unlike a write's bounded scan, so the subscriber gets no group already idled out.
 		this.#evictExpired(true);
 		for (const entry of this.#cache) this.#mirror(entry, sink);
-		sink.judged = this.#state.judged;
 
 		sink.received.set(this.#received);
 		sink.end.set(this.#state.end.peek());
@@ -2503,48 +2484,23 @@ type Superseded = { successor?: Successor };
 // the oldest held.
 type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undefined };
 
-// A run a reader already reported, and how: dropped for good (or stale until its group was handed
-// out, so no update reopens it), dropped as stale, which an update reopens, or skipped, which
-// replaces a drop. `received` when an upstream's stale run decided it, which is the upstream's to
-// judge again then. Mirrors the Rust `Report`.
 /**
  * How a reader reported a run, and what its wire was told. Mirrors the Rust `record::Report`:
- * `settled` is a group served, or a drop on a version whose drops are all final.
+ * `settled` is a group served, or a drop on a version whose drops are all final, and a skip
+ * replaces a drop.
  *
  * @internal
  */
 export interface Reported extends Run {
-	kind: "settled" | "dropped" | "stale" | "skip";
-	/** A stale run an upstream decided, which is the upstream's to judge again. */
-	received?: boolean;
-	/** A stale run whose Group Stream expired, or that went out OLD for good: its publisher drops it again under each update. */
-	expired?: boolean;
-	/** A stale run whose group was handed out after the drop, which the group won: no update reopens it. */
-	taken?: boolean;
+	kind: "settled" | "dropped" | "skip";
 }
 
-const sameReport = (a: Reported, b: Reported) =>
-	a.kind === b.kind && !a.received === !b.received && !a.expired === !b.expired && !a.taken === !b.taken;
+const sameReport = (a: Reported, b: Reported) => a.kind === b.kind;
 
-// Whether `reported` settles its run for good, so a fold may forget it.
-const finalReport = (reported: Reported) => reported.kind !== "stale" || reported.taken === true;
-
-// Whether an update reopens `reported`: a stale drop nothing settled since.
-const reopens = (reported: Reported) => reported.kind === "stale" && !reported.expired && !reported.taken;
-
-// Whether `reported` stops `hole` going out over it: a skip goes out over a drop, and a final
-// drop over a stale one, since each replaces what it goes out over. An OLD drop never goes out
-// over a stale one, which already said OLD. Mirrors the Rust `Report::blocks`.
+// Whether `reported` stops `hole` going out over it: only a skip goes out over a drop, which it
+// replaces. Mirrors the Rust `Report::blocks`.
 function blocksHole(reported: Reported, hole: Hole): boolean {
-	switch (reported.kind) {
-		case "settled":
-		case "skip":
-			return true;
-		case "dropped":
-			return !hole.skip;
-		case "stale":
-			return reported.taken ? !hole.skip : !hole.skip && toStreamCode(hole.error) === StreamCode.Old;
-	}
+	return reported.kind !== "dropped" || !hole.skip;
 }
 
 /**
@@ -2557,18 +2513,12 @@ function blocksHole(reported: Reported, hole: Hole): boolean {
 export interface WireRecord {
 	/** Whether the wire was told of `sequence`: served, or given up. */
 	told(sequence: bigint): boolean;
-	/** Whether `sequence` went out as a stale drop, which a group still replaces. */
-	toldStale(sequence: bigint): boolean;
 	/** The parts of `[start, end)` the wire was told nothing of. */
 	untold(start: bigint, end: bigint): Run[];
 	/** Record that the wire was told `report` of `[start, end)`. */
 	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
-	/** Forget what the wire was told of `[start, end)` that an update may reopen, which is owed again. */
+	/** Forget what was recorded of `[start, end)` without going out on the wire. */
 	untell(start: bigint, end: bigint): void;
-	/** Forget the drops of `[start, end)` the wire was told, which a verdict or group replaces. */
-	replaceDrops(start: bigint, end: bigint): void;
-	/** The runs each update drops again: stale ones whose stream expired, or that went out OLD for good. */
-	expired(): Run[];
 }
 
 /**
@@ -2666,7 +2616,6 @@ export class Subscriber {
 		revision: number;
 		budget: number;
 		coverage?: Coverage;
-		judged?: readonly Run[];
 	};
 	#reported = new Runs<Reported>(sameReport);
 	// The group the frame-level helpers are currently draining, acquired through the
@@ -2703,7 +2652,6 @@ export class Subscriber {
 		producer: Producer;
 		budget: number;
 		coverage: Coverage;
-		judged: readonly Run[] | undefined;
 		opened: number;
 		drops: number;
 		edge: bigint;
@@ -2712,7 +2660,6 @@ export class Subscriber {
 	// under; see #unknownRuns.
 	#unknown?: {
 		drops: number;
-		judged: readonly Run[] | undefined;
 		budget: number;
 		coverage: Coverage;
 		runs: DropRun[];
@@ -2951,11 +2898,6 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
 		this.#skipped.delete(sequence);
-		// The group won over any stale report on it, so no update reopens it. A resumed reader
-		// retires its own.
-		const stale = this.#reported.at(sequence);
-		if (stale?.kind === "stale")
-			this.#reported.set(sequence, sequence + 1n, { ...stale, start: sequence, end: sequence + 1n, taken: true });
 		// Another copy of it buffered here is never handed out.
 		this.#judge(sequence, sequence + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -3112,164 +3054,28 @@ export class Subscriber {
 		const reported = this.#reported;
 		return {
 			told: (sequence) => reported.at(sequence) !== undefined,
-			toldStale: (sequence) => reported.at(sequence)?.kind === "stale",
 			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
 			tell: (start, end, report) => {
-				if (start >= end) return;
-				// A stale report keeps the parts an upstream decided, which stay its to judge again.
-				const received =
-					report.kind === "stale" && !report.received
-						? reported.overlapping(start, end).filter((run) => run.kind === "stale" && run.received)
-						: [];
-				reported.set(start, end, { ...report, start, end } as Reported);
-				for (const run of received) {
-					const from = max(run.start, start);
-					const to = min(run.end, end);
-					reported.set(from, to, { ...report, start: from, end: to, received: true } as Reported);
-				}
+				if (start < end) reported.set(start, end, { ...report, start, end });
 			},
 			untell: (start, end) => {
-				// A final report stays: nothing reopens it, and a stale verdict must never go out over it.
-				const reopened = reported.overlapping(start, end).filter((run) => !finalReport(run));
-				for (const run of reopened) reported.set(max(run.start, start), min(run.end, end));
+				if (start < end) reported.set(start, end);
 			},
-			replaceDrops: (start, end) => {
-				const drops = reported
-					.overlapping(start, end)
-					.filter((run) => run.kind === "dropped" || run.kind === "stale");
-				for (const run of drops) reported.set(max(run.start, start), min(run.end, end));
-			},
-			expired: () =>
-				reported.all
-					.filter((run) => run.kind === "stale" && run.expired)
-					.map(({ start, end }) => ({ start, end })),
 		};
 	}
 
-	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
-	// verdict. A group still cached is offered again as a widened skip is, a missing one is missed
-	// again (asked of a fill, or dropped as not found when none can serve it), and whatever is
-	// still stale under the new terms is given up and reported again. Returns the runs taken back. A
-	// resumed reader takes back what it queued and what its serving route's copy reported.
-	#reofferStale(): Run[] {
-		if (this.#resume) {
-			const taken = this.#resume.reofferStale();
-			// A stale run this reader queued and has yet to report is owed again too, as the plain
-			// path below takes back its own: the new terms judge it anew. Mirrors Rust.
-			for (const run of this.#pending) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
-			this.#pending = this.#pending.filter((run) => run.stale === undefined);
-			return taken;
-		}
-		const taken: Run[] = [];
-		const received: Run[] = [];
-		const stale = this.#reported.all.filter(reopens);
-		for (const run of stale) {
-			insertRun(taken, run.start, run.end);
-			if (run.received) insertRun(received, run.start, run.end);
-		}
-		this.#reported.clear(stale);
-		for (const run of this.#pending) {
-			if (run.stale === undefined) continue;
-			insertRun(taken, run.start, run.end);
-			if (run.received) insertRun(received, run.start, run.end);
-		}
-		this.#pending = this.#pending.filter((run) => run.stale === undefined);
-		// A received stale run is folded in again by the next scan, if the track still holds it.
-		this.#dropsSeen = undefined;
+	// A fresh read from frame `from` of group `sequence`, if the cache still holds it from there and
+	// this cursor admits it and does not judge it stale, expiring against the budget: a lite-07
+	// continuation of a group whose stream yielded. A resumed reader asks its serving route's copy.
+	#continueGroup(sequence: bigint, from: number): GroupConsumer | undefined {
+		if (this.#resume) return this.#resume.continueGroup(sequence, from);
 		const producer = this.#state.producer;
-		const sequences: bigint[] = [];
-		for (const sequence of this.#skipped.keys()) {
-			if (!taken.some((run) => run.start <= sequence && sequence < run.end)) continue;
-			// A skip whose group left the cache can never be offered again: forgotten, so the
-			// run is judged again below, as the Rust `prune_skipped` forgets it first.
-			if (producer && !cachedHolds(producer, sequence)) this.#skipped.delete(sequence);
-			else sequences.push(sequence);
-		}
-		// What no skip offers again, such as a group written off at the track's max age bound,
-		// which no budget reverses, is still stale under the new terms: reported again, as is a
-		// missing group they still convict. What an
-		// upstream's stale run decided is the upstream's to judge again: the scan above folds it
-		// in again if the track still holds it, and it stays owed if new terms superseded it.
-		// Mirrors Rust.
-		let kept: Run[] = taken.map((run) => ({ ...run }));
-		for (const sequence of sequences) kept = removeRun(kept, sequence, sequence + 1n);
-		for (const decided of received) kept = removeRun(kept, decided.start, decided.end);
-		if (kept.length > 0) {
-			const drift = this.#drift();
-			const stale = staleHole(drift.budget);
-			for (const run of kept) {
-				for (const part of this.#missed(run)) {
-					// A miss the new terms still convict is stale again; one a fill can still bring
-					// stays owed, asked afresh; the rest no copy left here can serve.
-					if (!part.missed || this.#staleAt(part.end - 1n, drift)) {
-						this.#pending = insertDrop(this.#pending, part.start, part.end, stale);
-					} else if (!this.#retry(part)) {
-						const hole = { error: new StreamError(StreamCode.NotFound, { message: "group not found" }) };
-						this.#pending = insertDrop(this.#pending, part.start, part.end, hole);
-					}
-				}
-			}
-		}
-		if (sequences.length > 0 && producer && !this.#left) reofferSequences(producer, this.#state, sequences);
-		return taken;
-	}
-
-	// `run` split into its cached groups, which no skip offers again and so stay stale, and the
-	// gaps between them, which the cache no longer holds: misses, judged as the Rust `Misses`
-	// judges a gap, by its newest sequence.
-	#missed(run: Run): (Run & { missed: boolean })[] {
-		const producer = this.#state.producer;
-		if (!producer) return [{ ...run, missed: false }];
-		const parts: (Run & { missed: boolean })[] = [];
-		let next = run.start;
-		// A failed copy holds nothing to read, so it is missed like an evicted one.
-		const held = cachedIn(producer, run.start, run.end).filter((sequence) => cachedHolds(producer, sequence));
-		for (const sequence of held.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
-			if (next < sequence) parts.push({ start: next, end: sequence, missed: true });
-			parts.push({ start: sequence, end: sequence + 1n, missed: false });
-			next = sequence + 1n;
-		}
-		if (next < run.end) parts.push({ start: next, end: run.end, missed: true });
-		return parts;
-	}
-
-	// Ask a fill again for `run`, which an update reopened: no longer judged, so the next read
-	// asks it or gives it up afresh, as the Rust `Misses::retry`. False when no fill can answer.
-	#retry(run: Run): boolean {
-		const producer = this.#state.producer;
-		if (!producer || this.#left) return false;
-		const fills = fillsOf(producer);
-		if (!fills.serving && !fills.active) return false;
-		this.#givenUp = removeRun(this.#givenUp, run.start, run.end);
-		this.#heads = removeRun(this.#heads, run.start, run.end);
-		this.#asked = removeRun(this.#asked, run.start, run.end);
-		this.#refilled = removeRun(this.#refilled, run.start, run.end);
-		insertRun(this.#unjudged, run.start, run.end);
-		return true;
-	}
-
-	// Fresh reads from frame `from` of the cached groups in `[start, end)` this cursor admits and no
-	// longer judges stale, each expiring against the budget, and the runs still given up. A resumed
-	// reader asks its serving route's copy. Mirrors the Rust `reoffer_groups`.
-	#reofferGroups(start: bigint, end: bigint, from = 0): { groups: GroupConsumer[]; givenUp: Run[] } {
-		if (this.#resume) return this.#resume.reofferGroups(start, end, from);
-		const groups: GroupConsumer[] = [];
-		let givenUp: Run[] = [{ start, end }];
-		const producer = this.#state.producer;
-		if (!producer) return { groups, givenUp };
-		const drift = this.#drift();
+		if (!producer) return undefined;
 		const cap = this.#cursor.peek().end;
-		// Only what the cache holds, so a long run of groups long gone costs nothing.
-		const cached = cachedIn(producer, start, end).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-		for (const sequence of cached) {
-			const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
-			if (!admitted || this.#staleAt(sequence, drift)) continue;
-			const group = cachedMirror(producer, sequence, from);
-			if (!group) continue;
-			groups.push(this.#guard(group));
-			givenUp = removeRun(givenUp, sequence, sequence + 1n);
-		}
-		return { groups, givenUp };
+		const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
+		if (!admitted || this.#staleAt(sequence, this.#drift())) return undefined;
+		const group = cachedMirror(producer, sequence, from);
+		return group && this.#guard(group);
 	}
 
 	private constructor(name: string, state: TrackState) {
@@ -3534,7 +3340,7 @@ export class Subscriber {
 				for (let i = runsFrom(unknown, over); i < unknown.length && unknown[i].start < to; i++) {
 					const dropped = unknown[i];
 					const span = { ...dropped, start: max(dropped.start, over), end: min(dropped.end, to) };
-					if (span.start < span.end && !settles(span, budget, coverage, this.#state.judged)) spans.push(span);
+					if (span.start < span.end && !settles(span, budget, coverage)) spans.push(span);
 				}
 				// Only what the window lets a miss ask for: none below the oldest group held for a time
 				// start reaching back past it.
@@ -3542,12 +3348,11 @@ export class Subscriber {
 				for (const run of missable.flatMap((span) => this.#wants(span.start, span.end))) {
 					const gone = [...accounted];
 					for (const dropped of givenUp(drops, refused.peek(), run.start, run.end, (run) =>
-						settles(run, budget, coverage, this.#state.judged),
+						settles(run, budget, coverage),
 					)) {
 						// Judged from where it meets the asked run, as the reader would read it.
 						const clipped = { ...dropped, start: max(dropped.start, run.start) };
-						if (settles(clipped, budget, coverage, this.#state.judged))
-							insertRun(gone, clipped.start, dropped.end);
+						if (settles(clipped, budget, coverage)) insertRun(gone, clipped.start, dropped.end);
 					}
 					for (const open of runGaps(gone, run.start, run.end)) {
 						let next = open.start;
@@ -3608,7 +3413,6 @@ export class Subscriber {
 			at.producer !== producer ||
 			at.budget !== budget ||
 			!sameCoverage(at.coverage, coverage) ||
-			at.judged !== state.judged ||
 			at.opened !== opened
 		) {
 			this.#unjudged = [{ start: 0n, end: UNBOUNDED }];
@@ -3636,7 +3440,6 @@ export class Subscriber {
 			producer,
 			budget,
 			coverage,
-			judged: state.judged,
 			opened,
 			drops: state.drops.revision,
 			edge,
@@ -3651,15 +3454,11 @@ export class Subscriber {
 	// reader to read, so a run that settles here settles clipped too. Mirrors the Rust
 	// `Misses::unknown`.
 	#unknownRuns(budget: number, coverage: Coverage): readonly DropRun[] {
-		const { drops, judged } = this.#state;
-		const unsettled = (run: DropRun) => !settles(run, budget, coverage, judged);
+		const { drops } = this.#state;
+		const unsettled = (run: DropRun) => !settles(run, budget, coverage);
 		const memo = this.#unknown;
 		const removed =
-			memo &&
-			memo.judged === judged &&
-			memo.budget === budget &&
-			sameCoverage(memo.coverage, coverage) &&
-			drops.removedSince(memo.drops);
+			memo && memo.budget === budget && sameCoverage(memo.coverage, coverage) && drops.removedSince(memo.drops);
 		if (memo && removed) {
 			if (memo.drops === drops.revision) return memo.runs;
 			// Updated in place: its one caller is done with the last answer.
@@ -3680,7 +3479,7 @@ export class Subscriber {
 			return runs;
 		}
 		const runs = drops.all.filter(unsettled);
-		this.#unknown = { drops: drops.revision, judged, budget, coverage, runs };
+		this.#unknown = { drops: drops.revision, budget, coverage, runs };
 		return runs;
 	}
 
@@ -3826,14 +3625,14 @@ export class Subscriber {
 			for (const gap of gaps) {
 				// Each run judged from where it meets the gap, as the reader would read it.
 				const overlapping = givenUp(all, refused.peek(), gap.start, gap.end, (run) =>
-					settles(run, budget, coverage, this.#state.judged),
+					settles(run, budget, coverage),
 				).map((run) => ({
 					...run,
 					start: max(run.start, gap.start),
 					end: min(run.end, gap.end),
 				}));
-				const drops = overlapping.filter((run) => settles(run, budget, coverage, this.#state.judged));
-				const unknown = overlapping.filter((run) => !settles(run, budget, coverage, this.#state.judged));
+				const drops = overlapping.filter((run) => settles(run, budget, coverage));
+				const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
 				for (const open of runGaps(drops, gap.start, gap.end)) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
 					// Not received yet, so it may still arrive.
@@ -3925,8 +3724,7 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
-		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
-		hooks.reofferGroups = (subscriber, start, end, from) => subscriber.#reofferGroups(start, end, from);
+		hooks.continueGroup = (subscriber, sequence, from) => subscriber.#continueGroup(sequence, from);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
@@ -3967,14 +3765,14 @@ export class Subscriber {
 			return held;
 		};
 		hooks.givenUp = (subscriber, sequence) => {
-			const { drops, refused, judged } = subscriber.#state;
+			const { drops, refused } = subscriber.#state;
 			const drop = drops.at(sequence);
 			const own = dropAt(refused.peek(), sequence);
 			// As in `givenUp`: only a drop that settles the reader hides its own refusal.
 			const wins =
 				drop &&
 				(own === undefined ||
-					settles({ ...drop, start: sequence }, subscriber.#drift().budget, subscriber.#coverage(), judged));
+					settles({ ...drop, start: sequence }, subscriber.#drift().budget, subscriber.#coverage()));
 			return {
 				error: wins ? drop.error : own,
 				changed: [drops.version, refused],
@@ -4473,7 +4271,7 @@ export class Subscriber {
 
 	// The first part of `[from, to)` this cursor has not reported yet within its window, now
 	// reported, with why.
-	#report(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
+	#report(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
 			const dropped = this.#reportRun(run.start, run.end, hole);
@@ -4484,18 +4282,13 @@ export class Subscriber {
 
 	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
 	// replacing what it goes out over. Mirrors the Rust `Record::report`.
-	#reportRun(from: bigint, to: bigint, hole: Hole & { received?: boolean }): (Recv & { kind: "drop" }) | undefined {
+	#reportRun(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
 		const start = from;
 		if (start >= to) return undefined;
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
 		if (!gap) return undefined;
-		const kind = hole.skip ? "skip" : hole.stale !== undefined ? "stale" : "dropped";
-		this.#reported.set(gap.start, gap.end, {
-			...gap,
-			kind,
-			...(kind === "stale" && hole.received ? { received: true } : {}),
-		});
+		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
 
@@ -4522,7 +4315,6 @@ export class Subscriber {
 		const revision = this.#revision;
 		const { budget } = this.#drift();
 		const coverage = this.#coverage();
-		const judged = this.#state.judged;
 		const seen = this.#dropsSeen;
 		const full =
 			!seen ||
@@ -4531,8 +4323,7 @@ export class Subscriber {
 			seen.end !== end ||
 			seen.revision !== revision ||
 			seen.budget !== budget ||
-			!sameCoverage(seen.coverage, coverage) ||
-			seen.judged !== judged;
+			!sameCoverage(seen.coverage, coverage);
 		const changed: Run[] = full ? [{ start, end: end ?? UNBOUNDED }] : drops.since(seen.drops);
 		if (full) this.#pending = this.#pending.filter((run) => !run.received);
 		this.#dropsSeen = {
@@ -4543,7 +4334,6 @@ export class Subscriber {
 			revision,
 			budget,
 			coverage,
-			judged,
 		};
 		for (const span of changed) {
 			const from = max(span.start, start);
@@ -4553,14 +4343,14 @@ export class Subscriber {
 				this.#pending = this.#pending.flatMap((run) => (run.received ? removeRun([run], from, to) : [run]));
 			}
 			// The reader's own refusals too: clearing the span above took out those it covered.
-			const folded = givenUp(drops, refused.peek(), from, to, (run) => settles(run, budget, coverage, judged));
+			const folded = givenUp(drops, refused.peek(), from, to, (run) => settles(run, budget, coverage));
 			const received: DropRun[] = [];
 			for (const dropped of folded) {
 				// Judged from where it meets this cursor's span, as Rust clips it.
 				const run = { ...dropped, start: max(dropped.start, from), end: min(dropped.end, to) };
 				if (run.start >= run.end) continue;
 				// A received stale run that does not settle this reader is unknown to it.
-				if (!settles(run, budget, coverage, judged)) continue;
+				if (!settles(run, budget, coverage)) continue;
 				received.push({ ...run, received: true });
 			}
 			// Sorted and disjoint: the settling drops and the refusals they leave never overlap.
@@ -4572,7 +4362,7 @@ export class Subscriber {
 			if (run.received) {
 				const folded = run;
 				const held = givenUp(drops, refused.peek(), run.start, run.end, (run) =>
-					settles(run, budget, coverage, judged),
+					settles(run, budget, coverage),
 				).find((given) => sameVerdict(given, folded));
 				if (!held) continue;
 				if (held.end < run.end) this.#pending.unshift({ ...run, start: held.end });
