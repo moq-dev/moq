@@ -15319,6 +15319,12 @@ mod stitch_tests {
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		let direct = relay_passthrough_via(script.clone(), ingress, egress, fetch, None, false).await;
 		let hopped = relay_passthrough_via(script, ingress, egress, fetch, None, true).await;
+		// The bytes alone would pass a hop that wrote them and then reset the stream.
+		assert_eq!(
+			hopped.1.resets(),
+			direct.1.resets(),
+			"{ingress} -> {egress}: the moq-lite hop changed the resets"
+		);
 		let fetch_ok = |bytes: &[u8]| {
 			let mut decoder = Decoder::new(bytes, egress.into());
 			(decoder.varint().ok()? == ietf::FetchOk::ID).then_some(())?;

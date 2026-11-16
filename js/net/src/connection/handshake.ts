@@ -42,6 +42,7 @@ export async function exchangeSetup(
 	control: Stream;
 	early: Reader[];
 	solicit: boolean | undefined;
+	declaredSolicit: boolean;
 	hidden: boolean;
 	maxAge: boolean;
 	activeCount: boolean;
@@ -82,6 +83,7 @@ export async function exchangeSetup(
 		control: new Stream({ writer, reader: received.reader }),
 		early: received.early,
 		solicit: received.solicit,
+		declaredSolicit: solicit,
 		hidden: received.hidden,
 		maxAge: received.maxAge,
 		activeCount: received.activeCount,

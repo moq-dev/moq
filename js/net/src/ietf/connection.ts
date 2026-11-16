@@ -89,6 +89,8 @@ export class Connection implements Session {
 
 	// What the peer declared about being solicited; see {@link Ietf.solicitFromSetup}.
 	#solicit: boolean | undefined;
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unasked announce a fault.
+	#declaredSolicit: boolean;
 
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
@@ -119,6 +121,7 @@ export class Connection implements Session {
 		client,
 		publish,
 		solicit,
+		declaredSolicit = true,
 		hidden = false,
 		maxAge = false,
 		activeCount = false,
@@ -140,6 +143,8 @@ export class Connection implements Session {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/** Whether our own SETUP declared MoQ Solicit; `false` only in a test acting as a peer without it. */
+		declaredSolicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
 		/** Whether the peer accepts subscriber max age. */
@@ -203,6 +208,7 @@ export class Connection implements Session {
 			auth: this.#auth,
 		});
 		this.#solicit = solicit;
+		this.#declaredSolicit = declaredSolicit;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
 			maxAge,
@@ -401,13 +407,14 @@ export class Connection implements Session {
 				const msg = await this.#request(stream, "publish_namespace", decoded);
 				if (!msg) break;
 
-				// We declare that advertisements to us must be solicited (MoQ Solicit), and
-				// writing the option at all proves the peer implements the extension,
-				// whichever value it chose. It also cannot have
+				// Unless a test declined it, we declare that advertisements to us must be
+				// solicited (MoQ Solicit), and writing the option at all proves the peer
+				// implements the extension, whichever value it chose. It also cannot have
 				// advertised before reading our SETUP, since our SETUP is what says whether
 				// advertising unasked is allowed. So this is a bug in the peer, and a
-				// silent one on both sides if we tolerate it.
-				if (this.#solicit !== undefined) {
+				// silent one on both sides if we tolerate it. Without our declaration an
+				// unasked announce is what we invited.
+				if (this.#declaredSolicit && this.#solicit !== undefined) {
 					throw new ProtocolViolation(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);

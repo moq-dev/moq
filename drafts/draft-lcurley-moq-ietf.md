@@ -26,6 +26,7 @@ informative:
 
 This document defines an extension for moq-lite {{moql}} that carries the object state of MoQ Transport {{moqt}} across a moq-lite session between two relays.
 A track a MoQ Transport publisher sends through relay A, then over moq-lite to relay B, reaches a MoQ Transport subscriber of relay B as it would through one relay: with its Object IDs, gaps, properties, and END_OF_GROUP status.
+A datagram track keeps only what moq-lite carries.
 
 --- note_Note_to_Readers
 

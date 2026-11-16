@@ -1,5 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
+import { Connection } from "../ietf/connection.ts";
 import { PublishNamespace } from "../ietf/publish_namespace.ts";
+import { RequestOk } from "../ietf/request.ts";
 import { ALPN, Version } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -49,5 +51,26 @@ test("a peer that implements MoQ Solicit may not announce unasked", async () => 
 	} finally {
 		logged.mockRestore();
 		connection.close();
+	}
+});
+
+test("a side that declined MoQ Solicit takes an unasked announce", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const [peer, setup] = await Promise.all([
+		exchangeSetup(pair.client, VERSION, "test", { client: true }),
+		exchangeSetup(pair.server, VERSION, "test", { client: false, solicit: false }),
+	]);
+	const connection = new Connection({ url: URL_, quic: pair.server, version: VERSION, client: false, ...setup });
+	try {
+		const stream = await Stream.open(pair.client, { version: VERSION });
+		await stream.writer.u53(PublishNamespace.id);
+		await new PublishNamespace({
+			requestId: 0n,
+			trackNamespace: Path.from("room"),
+			params: { cluster: { hops: [peer.cluster.self], cost: 0n } },
+		}).encode(stream.writer, VERSION);
+		expect(await stream.reader.u53()).toBe(RequestOk.id);
+	} finally {
+		await connection.close();
 	}
 });
