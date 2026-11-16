@@ -101,5 +101,4 @@ above are removed or hidden, and `rescale` moves from `Datagram` to
 
 ## Related
 
-- [@moq/net requests are awaitable](/quest/m2/js-net-api.md) - the other `@moq/net` API changes before the cut
 - [Broadcast requests](/quest/m4/net-broadcast-requests.md) - republishes `Track.Request` with its accessor

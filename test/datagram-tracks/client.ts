@@ -147,7 +147,8 @@ try {
 		for (const [i, want] of EVENTS.entries()) {
 			const got = eventsGot[i];
 			assert.equal(got.sequence, want.sequence, "events sequence");
-			assert.equal(got.timestamp, undefined, "an untimed datagram has no timestamp");
+			assert.equal(got.timestamp.scale, undefined, "an untimed datagram's timestamp is unscaled");
+			assert.equal(got.timestamp.value, Number(want.sequence), "an unscaled timestamp is its sequence");
 			assert.deepEqual([...got.payload], want.payload, "events payload");
 		}
 		const group = await track.recvGroup();
