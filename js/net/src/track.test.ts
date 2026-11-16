@@ -956,6 +956,19 @@ test("a live join reaches back by ticks rounded up, at any timestamp the track a
 	expect(readable(reader)).toEqual([0n, 1n, 2n]);
 });
 
+test("a live join measures timestamps between ticks, floored", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	for (const [sequence, ms] of [0.5, 1.5, 2.5].entries()) {
+		const group = producer.createGroup(BigInt(sequence));
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(ms)));
+		group.finish();
+	}
+	// The edge floors to 2 ms, so 1 ms back is the group starting by 1 ms.
+	const reader = producer.subscribe({ delay: { min: Duration.millis(1), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(reader)).toEqual([1n, 2n]);
+});
+
 test("a scale-less join reaches back by arrival", () => {
 	const clock = manualTime(0);
 	try {

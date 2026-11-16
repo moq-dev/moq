@@ -52,7 +52,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { keyOf, Timescale, type Timestamp } from "./time.ts";
+import { floorAt, keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
@@ -3390,12 +3390,13 @@ export class Subscriber {
 		// In the track's own scale, which holds every timestamp it accepted. The Min Age rounds up
 		// to whole ticks, so the start is never newer than it allows.
 		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
-		const edge = BigInt((hooks.groupLatest(stamped) ?? started).as(scale));
+		// Floored exactly, as Rust's `Timestamp::convert`: an accepted timestamp may sit between ticks.
+		const edge = BigInt(floorAt(hooks.groupLatest(stamped) ?? started, scale));
 		const target = edge > back ? edge - back : 0n;
 		return held(
 			newest((group) => {
 				const start = hooks.groupTimestamp(group);
-				return start !== undefined && BigInt(start.as(scale)) <= target;
+				return start !== undefined && BigInt(floorAt(start, scale)) <= target;
 			}),
 		);
 	}

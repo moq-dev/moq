@@ -1061,14 +1061,14 @@ impl Holdings for TrackState {
 		self.outcome.is_final()
 	}
 
-	/// In media time, from the newest frame held, or the latest group's start when it is
-	/// newer; on a scale-less track, by arrival on this hop's clock, as expiry measures it.
+	/// In media time, from the newest frame held, or the newest group still served when it
+	/// starts later, never a group given up; on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
 	/// Always a group this hop holds: the newest one starting at or before the target, or the
 	/// oldest one when none does, so a copy never asks its upstream for the prefix it lacks.
 	/// Groups keyed by their start are found by key; on a copy whose wire keys groups
 	/// otherwise, by when each one's first frame presented. Pending until a group is held.
-	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
+	fn reach_back(&self, _latest: u64, min: Duration) -> Option<Anchor> {
 		let oldest = || self.walked(..).next().map(|(&key, _)| Anchor::Time(key));
 		let Some(scale) = self.info.as_ref()?.timescale else {
 			let key = self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
@@ -1087,7 +1087,8 @@ impl Holdings for TrackState {
 		)
 		.unwrap_or(u64::MAX);
 		if self.anchors != Anchors::Refused && !self.starts_at_keys {
-			let edge = newest.map_or(latest, |newest| newest.max(latest));
+			let held = self.walked(..).next_back().map(|(&key, _)| key);
+			let edge = newest.max(held)?;
 			let target = edge.saturating_sub(back);
 			let key = self.walked(..=target).next_back();
 			return key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest);
@@ -12397,6 +12398,17 @@ mod test {
 		}
 		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_micros(1500)));
 		assert_eq!(ready_groups(&mut reader), vec![0, 1, 2]);
+	}
+
+	/// A newest group given up does not move the live edge: the join measures from the content
+	/// still held, so it keeps the buffering prefix.
+	#[test]
+	fn a_live_join_measures_from_groups_still_held() {
+		let producer = half_second_groups();
+		let aborted = producer.create_group(group::Info { start: 10_000 }).unwrap();
+		aborted.abort(Error::Cancel).unwrap();
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(ready_groups(&mut reader)[0], 3000);
 	}
 
 	/// A lite-07 copy reaches back only to groups it holds, so the join starts at once and
