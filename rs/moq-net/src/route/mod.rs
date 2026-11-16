@@ -20,6 +20,8 @@ pub(crate) mod node;
 pub(crate) mod path;
 mod proof;
 mod reader;
+#[cfg_attr(not(test), allow(dead_code, reason = "driven only by tests until the switch"))]
+pub(crate) mod relay;
 mod view;
 
 #[cfg(test)]
@@ -208,9 +210,11 @@ pub(crate) enum Kind {
 	Unavailable,
 }
 
+/// A change the reader sees: `id` is the publisher a path router keys claims by, or
+/// the Instance under [`relay::Router`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Event<A> {
-	pub id: Id,
+pub(crate) struct Event<A, K = Id> {
+	pub id: K,
 	pub claim: Path,
 	pub kind: Kind,
 	pub item: A,
@@ -233,4 +237,16 @@ pub(crate) enum Error {
 	Nested,
 	#[error("no such interest prefix")]
 	UnknownPrefix,
+	#[error("a neighbor connected twice")]
+	Duplicate,
+	#[error("a routing neighbor asked for part of the tree")]
+	Partial,
+	#[error("a claim outside what was asked, or anything before the answer began")]
+	Unasked,
+	#[error("claims or news about no route the neighbor offered")]
+	Unrouted,
+	#[error("a route or chain the rule never builds")]
+	Malformed,
+	#[error("a message the neighbor's role never sends")]
+	Role,
 }
