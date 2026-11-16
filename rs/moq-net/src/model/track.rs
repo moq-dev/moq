@@ -10913,21 +10913,26 @@ impl Ordered {
 				match self.lowest_gap() {
 					// The gap lies wholly below it, or around it: the part below goes first.
 					Some((at, span)) if span.start < key => {
-						let (end, error) = self.gaps.remove(&at).expect("the lowest gap is held");
-						if end > key.saturating_add(1) {
-							self.gaps.insert(key + 1, (end, error.clone()));
-						}
+						// What lies above the group, or above the run when it ends before it, waits.
+						let resume = if span.end <= key {
+							span.end
+						} else {
+							key.saturating_add(1)
+						};
+						let below = span.start..span.end.min(key);
+						let item = self.take_gap(at, below, resume);
 						self.held = Some(Box::new(group));
-						Poll::Ready(Ok(Some(self.give(span.start..span.end.min(key), error))))
+						Poll::Ready(Ok(Some(item)))
 					}
 					// A group handed out is no gap, even one a drop also named, as a cut group is.
 					lowest => {
 						if let Some((at, span)) = lowest
 							&& span.start == key
 						{
+							let resume = key.saturating_add(1);
 							let (end, error) = self.gaps.remove(&at).expect("the lowest gap is held");
-							if end > key.saturating_add(1) {
-								self.gaps.insert(key + 1, (end, error));
+							if end > resume {
+								self.gaps.insert(resume, (end, error));
 							}
 						}
 						self.at = self.at.max(key.saturating_add(1));
@@ -10942,7 +10947,10 @@ impl Ordered {
 			},
 			// Every gap is returned before the end.
 			Poll::Ready(end) => match self.lowest_gap() {
-				Some((at, span)) => Poll::Ready(Ok(Some(self.take_gap(at, span)))),
+				Some((at, span)) => {
+					let resume = span.end;
+					Poll::Ready(Ok(Some(self.take_gap(at, span, resume))))
+				}
 				None => Poll::Ready(end.map(|_| None)),
 			},
 		}
@@ -10970,21 +10978,25 @@ impl Ordered {
 		read
 	}
 
-	/// The lowest gap the ranges cover now, as its key in `gaps` and the keys of it they cover,
-	/// since they may have moved since it was found. Disjoint ranges leave the span from the
-	/// first run to the last. A gap they exclude waits, in case they widen again.
+	/// The lowest run of a gap the ranges cover now, as the gap's key in `gaps` and the keys of
+	/// it that run covers, since the ranges may have moved since the gap was found. A gap they
+	/// exclude waits, in case they widen again.
 	fn lowest_gap(&mut self) -> Option<(u64, ops::Range<u64>)> {
 		let gaps: Vec<_> = self.gaps.iter().map(|(start, (end, _))| (*start, *end)).collect();
 		gaps.into_iter().find_map(|(start, end)| {
 			let runs = self.inner.runs_in_range(start, end);
-			Some((start, runs.first()?.start..runs.last()?.end))
+			Some((start, runs.into_iter().next()?))
 		})
 	}
 
-	/// Take the gap `lowest_gap` found, as an item.
-	fn take_gap(&mut self, at: u64, span: ops::Range<u64>) -> Item {
-		let (_, error) = self.gaps.remove(&at).expect("the lowest gap is held");
-		self.give(span, error)
+	/// Take `given` from the gap `lowest_gap` found, as an item. What lies from `resume` on stays
+	/// a gap, to be clipped and returned later.
+	fn take_gap(&mut self, at: u64, given: ops::Range<u64>, resume: u64) -> Item {
+		let (end, error) = self.gaps.remove(&at).expect("the lowest gap is held");
+		if end > resume {
+			self.gaps.insert(resume, (end, error.clone()));
+		}
+		self.give(given, error)
 	}
 
 	/// Look for every drop recorded, in whatever order they come.
@@ -11009,7 +11021,8 @@ impl Ordered {
 	fn next_gap(&mut self) -> Option<Item> {
 		let (at, span) = self.lowest_gap()?;
 		let ready = span.start <= self.at || self.inner.next_in_range(self.at).is_none_or(|owed| owed >= span.start);
-		ready.then(|| self.take_gap(at, span))
+		let resume = span.end;
+		ready.then(|| self.take_gap(at, span, resume))
 	}
 
 	/// A gap as an item, which the read has now moved past.
@@ -18932,6 +18945,32 @@ mod test {
 			items(&mut ordered),
 			["group 3", "pending"],
 			"a floor raised over the held group passes it"
+		);
+	}
+
+	/// A gap a moved range only partly covers returns that part, and the rest stays for the
+	/// range to widen over.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_moved_range_returns_a_buffered_gap_by_the_part_it_covers() {
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 2, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
+		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
+		ordered.set_range(..4);
+		assert_eq!(
+			items(&mut ordered),
+			["group 2", "gap 3..4 (delivery timeout)", "pending"],
+			"capped inside the gap"
+		);
+		ordered.set_range(..);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 4..6 (delivery timeout)", "pending"],
+			"widening returns the rest"
 		);
 	}
 
