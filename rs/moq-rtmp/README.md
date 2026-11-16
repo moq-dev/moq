@@ -15,13 +15,6 @@ or ffmpeg dependency.
 
 ## Library
 
-RTMPS (`Server::with_tls`) is the only optional piece; drop it with
-`default-features = false` for a plaintext-only build:
-
-```toml
-moq-rtmp = { version = "0.0.1", default-features = false }
-```
-
 ### `Server` / `Request`
 
 Drive the `Server` against your own origin. `accept` runs the handshake and the

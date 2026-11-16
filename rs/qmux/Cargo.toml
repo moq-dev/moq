@@ -30,7 +30,7 @@ kio = { workspace = true, features = ["runtime"] }
 moq-crypto = { workspace = true, features = ["provider"] }
 moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
-moq-quic = { workspace = true, features = ["mux"] }
+moq-quic = { workspace = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 thiserror = { workspace = true }

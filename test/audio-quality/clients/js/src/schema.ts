@@ -316,7 +316,7 @@ export type Arrival = [at: Ms, timestamp: Ms, group: number, duration: Ms];
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 3;
+	version: 4;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
@@ -325,6 +325,11 @@ export type Trace = {
 	transport: string;
 	/** The smallest round trip the connection's PROBE reported, retained as a diagnostic. */
 	rtt: Ms | null;
+	/**
+	 * The publisher's largest group as the subscription began, which a wire subscriber learns from the
+	 * publisher's answer: the replay's consumer judges a group it skips unread as join backlog against it.
+	 */
+	largest: number;
 	/** The audio rendition, as the catalog advertised it. */
 	config: {
 		codec: string;
@@ -467,6 +472,8 @@ export type Environment = {
 	jitter?: Ms;
 	/** The full audio configuration needed to replay a captured live row. */
 	config?: Trace["config"];
+	/** With `--capture`, the publisher's largest group as the observer's subscription began, which a replayed row needs. */
+	largest?: number;
 	/** The AudioContext's rate, Hz, which the render clock counts in. Natively, the output device's. */
 	contextRate?: number;
 };

@@ -140,13 +140,13 @@ Public entry points:
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The default features are `nvidia`, `vaapi`, and `mediacodec`, so a default
+The default features are `nvidia`, `v4l2`, `vaapi`, and `mediacodec`, so a default
 build has no software encoder. `openh264` adds the software H.264 fallback, the
 only H.264 encoder on a GPU-less host, at the cost of compiling vendored C++;
 enable it wherever that fallback is expected. `nvidia` and `vaapi` are
 Linux-only, `dlopen` their drivers at runtime, and need no build-time toolkit
-(`moq-vaapi` checks its libva bindings in). `v4l2` is opt-in only by
-convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
+(`moq-vaapi` checks its libva bindings in). `v4l2` is Linux-only and needs
+no build-time toolkit, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
 libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
 the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
 consumers do not compile wgpu.

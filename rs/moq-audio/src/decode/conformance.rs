@@ -16,7 +16,6 @@ struct Errors {
 
 // Each bound is the next binary power above the largest measured reference
 // difference, including the consumer's preroll-trimmed result. See test_data/README.md.
-#[cfg(feature = "aac")]
 const AAC: Errors = Errors {
 	rms: 1.0 / (1u64 << 24) as f64,
 	peak: 1.0 / (1u64 << 20) as f64,
@@ -46,7 +45,6 @@ struct Vector {
 }
 
 const VECTORS: &[Vector] = &[
-	#[cfg(feature = "aac")]
 	Vector {
 		name: "aac-speech",
 		container: Container::Cmaf(include_bytes!("test_data/aac-speech.mp4")),
@@ -55,7 +53,6 @@ const VECTORS: &[Vector] = &[
 		channels: 1,
 		errors: AAC,
 	},
-	#[cfg(feature = "aac")]
 	Vector {
 		name: "aac-44100-stereo",
 		container: Container::Cmaf(include_bytes!("test_data/aac-44100-stereo.mp4")),
@@ -64,7 +61,6 @@ const VECTORS: &[Vector] = &[
 		channels: 2,
 		errors: AAC,
 	},
-	#[cfg(feature = "aac")]
 	Vector {
 		name: "aac-48000-stereo",
 		container: Container::Cmaf(include_bytes!("test_data/aac-48000-stereo.mp4")),

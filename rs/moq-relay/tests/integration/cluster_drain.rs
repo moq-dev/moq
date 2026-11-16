@@ -8,9 +8,10 @@
 
 use std::time::Duration;
 
+use moq_relay::sim::Net;
 use moq_relay::{cluster, shutdown};
 
-use crate::memory::{self, Net};
+use crate::memory;
 
 /// How long B drains before it force-closes what is left.
 const DRAIN: Duration = Duration::from_secs(30);
@@ -72,7 +73,7 @@ impl Relay {
 
 	fn serve(net: &Net) -> Self {
 		let owned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-		let cluster = memory::spawn_cluster(net.options(&[]));
+		let cluster = memory::spawn_cluster(net.options("b", &[]));
 		let route = cluster
 			.origin
 			.route("b", moq_net::origin::RouteOptions::default())
@@ -99,7 +100,7 @@ impl Relay {
 
 /// A peer relay publishing `name` and dialing B.
 async fn peer(net: &Net, name: &str) -> (cluster::Cluster, moq_net::origin::Route) {
-	let cluster = memory::start(memory::spawn_cluster(net.options(&["b"])), Default::default()).await;
+	let cluster = memory::start(memory::spawn_cluster(net.options(name, &["b"])), Default::default()).await;
 	let route = cluster
 		.origin
 		.route(name, moq_net::origin::RouteOptions::default())
@@ -190,4 +191,33 @@ async fn a_relay_beside_the_draining_one_takes_its_peers_inner() {
 	let (_d, _d_route) = peer(&net, "d").await;
 	learns("B' learns d", &b2.cluster.origin, "d").await;
 	assert_eq!(net.accepted("b"), 5, "the fresh peer did not reach B'");
+}
+
+#[test]
+fn a_partitioned_peer_rejoins_once_the_link_heals() {
+	memory::run(a_partitioned_peer_rejoins_once_the_link_heals_inner);
+}
+
+/// A partition between A and B cuts their session and refuses every redial across it,
+/// leaving C's alone; once it heals, A rejoins over one session. A crash then cuts every
+/// session B holds, so both peers reach its replacement.
+async fn a_partitioned_peer_rejoins_once_the_link_heals_inner() {
+	let net = Net::new();
+	let (_b, _peers) = mesh(&net).await;
+
+	net.link_down("a", "b");
+	kio::clock::sleep(RECONNECT).await;
+	assert_eq!(net.accepted("b"), 2, "a dial crossed the partition");
+
+	net.link_up("a", "b");
+	kio::clock::sleep(RECONNECT).await;
+	kio::clock::sim::idle().await;
+	assert_eq!(net.accepted("b"), 3, "A rejoined other than once");
+
+	net.crash("b");
+	let b2 = Relay::up(&net);
+	learns("B' learns a", &b2.cluster.origin, "a").await;
+	learns("B' learns c", &b2.cluster.origin, "c").await;
+	kio::clock::sim::idle().await;
+	assert_eq!(net.accepted("b"), 5, "a peer reached the replacement other than once");
 }

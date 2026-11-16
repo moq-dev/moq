@@ -879,7 +879,6 @@ impl Iter {
 	}
 
 	/// The payload past the frames parsed so far, so the mux can interleave its own frame types
-	#[cfg(feature = "mux")]
 	pub(crate) fn into_rest(self) -> Bytes {
 		self.bytes
 	}
