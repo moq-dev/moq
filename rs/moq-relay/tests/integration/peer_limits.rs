@@ -1,7 +1,6 @@
 //! A session admitted as a cluster peer widens its QUIC limits before SETUP OK,
 //! while a viewer opens to the `--quic-*` ones, on the tokio listener and the
 //! io_uring workers alike.
-#![cfg(feature = "quic")]
 
 use std::time::Duration;
 
@@ -352,7 +351,7 @@ async fn tokio_worker_peer_session_widens_quic_limits() {
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_peer_session_widens_quic_limits() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();

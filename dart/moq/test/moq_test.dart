@@ -522,7 +522,7 @@ void main() {
           keepAlive: Duration.zero,
           gso: false,
           mtuDiscovery: true,
-          congestionControl: CongestionControl.loss,
+          congestionControl: CongestionControl.loss(),
           keylog: false,
         ),
         once: true,
@@ -1081,9 +1081,11 @@ void main() {
     ).timeout(timeout);
     final rendition = (await catalogs.next().timeout(timeout))!.audio['mic']!;
 
+    // No max delay: a zero one skips a group once its successor is a warmup old by the
+    // native wall clock, so a read that starts late under load never returns.
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: Delay(min: Duration(milliseconds: 80)),
+      delay: Delay(min: Duration(milliseconds: 80), max: null),
       estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(
@@ -1096,7 +1098,10 @@ void main() {
       broadcast: consumer,
       id: 'mic',
       catalogAudio: rendition,
-      output: moq_audio.DecoderOutput(format: moq_audio.SampleFormat.f32),
+      output: moq_audio.DecoderOutput(
+        format: moq_audio.SampleFormat.f32,
+        delay: Delay(max: null),
+      ),
     ).timeout(timeout);
     expect(fixed.delay(), const Duration(milliseconds: 80));
     final initial = estimated.delay();

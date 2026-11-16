@@ -101,7 +101,7 @@ mod v4l2;
 
 pub use color::Color;
 pub use error::Error;
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};
 pub use frame::{Frame, I420, Surface};
 pub use frame_rate::{FrameRate, FrameRateError, MAX_FRAMES_PER_SECOND};

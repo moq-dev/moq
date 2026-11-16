@@ -12,11 +12,18 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut): ✅ pointer
 stubs for renames, deprecation for removals (rejected: deprecation only;
 doing nothing).
 
-- Pointer stub, as `libmoq` has: `moq-rtc` (renamed to `moq-webrtc` in
-  [moq-dev/moq#8122](https://github.com/moq-dev/moq/pull/8122)) and
-  `moq-e2ee`. crates.io's newest `moq-e2ee` is a full 0.0.25 crate published
-  2026-11-11, not the stub an earlier plan assumed (the stub was 0.0.22), so
-  the pointer publishes above 0.0.25.
+- Pointer stub: `moq-rtc` (renamed to `moq-webrtc` in
+  [moq-dev/moq#8122](https://github.com/moq-dev/moq/pull/8122)).
+- Not retired (decided 2026-11-16, maintainer, /quest-plan of the pre-cut
+  audit, replacing the pointer this list planned for both):
+  - `moq-e2ee` is a crate again and stays unpublished until
+    [its finished format](/quest/m3/e2ee-format.md) publishes it, so it gets
+    no pointer. crates.io keeps the full 0.0.25 (2026-11-11) as its newest
+    until then; don't publish a stub over it.
+  - `libmoq` is the name the hand-written C API ships under at 0.22
+    ([the C crate's name](/quest/m2/libmoq-name.md)), so it gets no pointer
+    at this cut. Its pointer at `moq-c` comes when the generated package
+    publishes ([c-retire](/quest/m3/release/c-retire.md)).
 - Deprecate with a message: `moq-room` and `moq-native`
   ([moq-dev/moq#8450](https://github.com/moq-dev/moq/pull/8450)),
   `moq-binary`, and `moq-boy` with `@moq/boy`, which

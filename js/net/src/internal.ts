@@ -8,7 +8,7 @@
 import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Reader as CacheReader, Charge, Pool } from "./cache.ts";
+import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -111,6 +111,8 @@ export function presented(
 	prefix: Path.Valid,
 	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
+	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
+	keepAbove = false,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
@@ -126,7 +128,13 @@ export function presented(
 			);
 			if (!snap) continue;
 			rootLen = covered.length;
-			out.set(Path.empty(), snap);
+			const above = BigInt(Path.parts(prefix).length - Path.parts(covered).length);
+			out.set(
+				Path.empty(),
+				keepAbove && above > 0n
+					? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
+					: snap,
+			);
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
@@ -525,11 +533,6 @@ export interface ResumeSource {
 	 * route change keeps, and those the serving copy reported.
 	 */
 	reofferStale(): Run[];
-	/**
-	 * The bill for the reader's record on the serving copy's account: `current` while it bills that
-	 * account, or else a new one. `current` without a serving copy.
-	 */
-	bill(current: CacheReader | undefined): CacheReader | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -613,8 +616,6 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
-	/** How many runs a track's arrivals hold, for tests. Assigned by `track.ts`. */
-	arrivalRuns: (producer: Producer) => number;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -798,17 +799,6 @@ export const hooks: {
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
-	 * Open a bill against a track's cache account for what a session keeps for it beside the
-	 * cache, such as its tail's record of finished streams, billed as a reader's record is, so
-	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
-	 */
-	billTrack: (producer: Producer) => CacheReader;
-	/**
-	 * The bill on the account of the track `subscriber` reads: `current` while it bills that account,
-	 * or else a new one; undefined while it has none.
-	 */
-	billSubscriber: (subscriber: Subscriber, current: CacheReader | undefined) => CacheReader | undefined;
-	/**
 	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
 	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
 	 * taken back, which are owed again. Mirrors the Rust crate-private
@@ -891,13 +881,8 @@ export const hooks: {
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
-	/** Bill a cached group's bytes to `charge` from now on, or stop billing them with undefined. */
+	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
 	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
-	/**
-	 * Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most,
-	 * and end the `readers` its track holds that lost a shed frame; returns the bytes freed.
-	 */
-	shedGroup: (group: GroupProducer, debt: number, cap: number, readers: Iterable<GroupConsumer>) => number;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
@@ -962,10 +947,9 @@ export const hooks: {
 	holdGroup: (group: GroupProducer) => () => void;
 	/**
 	 * Hand `next` the readers `failed` kept open while held, teeing each from the frame it reached.
-	 * Fails those `next` cannot serve. Returns the bytes of `failed`'s frames they still hold.
-	 * Assigned by `group.ts`.
+	 * Fails those `next` cannot serve. Assigned by `group.ts`.
 	 */
-	succeedGroup: (next: GroupProducer, failed: GroupProducer) => number;
+	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
@@ -1034,9 +1018,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
-	arrivalRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1139,12 +1120,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {
-		throw new Error("track.ts not loaded");
-	},
-	billTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
-	billSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {
@@ -1265,9 +1240,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	chargeGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	shedGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFrameCount: () => {
@@ -1457,6 +1429,32 @@ export function bestCandidate<T>(
 	return best;
 }
 
+/**
+ * What `pick` finds at the most specific claim covering `path`: it picks at each covering prefix,
+ * deepest first, and a claim shown above its own prefix counts for the shallower prefix it is
+ * really at. Of claims as specific as each other the deepest prefix wins. Mirrors
+ * `RouteTable::best_route` in rs/moq-net.
+ */
+export function mostSpecific<T>(
+	path: Path.Valid,
+	pick: (prefix: Path.Valid) => T | undefined,
+	route: (found: T) => WireRoute,
+): T | undefined {
+	let best: T | undefined;
+	let bestSpecificity = -1;
+	let depth = Path.parts(path).length;
+	for (const prefix of coveringPrefixes(path)) {
+		const found = pick(prefix);
+		const specificity = found === undefined ? 0 : depth - Number(route(found).above ?? 0n);
+		if (found !== undefined && specificity > bestSpecificity) {
+			best = found;
+			bestSpecificity = specificity;
+		}
+		depth--;
+	}
+	return best;
+}
+
 /** Covering prefixes, most specific first, including the empty root. */
 export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
 	for (;;) {
@@ -1477,25 +1475,33 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
 }
 
 /**
- * The highest epoch each instance reaches among a set of routes, built in one pass so ranking
- * N routes stays linear. Only epochs above 0 are kept, since nothing is below 0: the common
- * case, where every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net.
+ * The highest epoch each instance reaches among a set of routes, per claim: a claim is its prefix
+ * and how far above it was shown, so a broader claim shown at a prefix is another claim than the
+ * one made there, and its epoch supersedes nothing of it. Built in one pass so ranking N routes
+ * stays linear. Only epochs above 0 are kept, since nothing is below 0: the common case, where
+ * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
+ * are all of one prefix here.
  */
 export class Epochs {
-	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
+	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
 
 	constructor(routes: Iterable<WireRoute>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			const highest = this.#highest.get(route.instance);
-			if (highest === undefined || epoch > highest) this.#highest.set(route.instance, epoch);
+			let above = this.#highest.get(route.instance);
+			if (!above) {
+				above = new Map();
+				this.#highest.set(route.instance, above);
+			}
+			const highest = above.get(route.above ?? 0n);
+			if (highest === undefined || epoch > highest) above.set(route.above ?? 0n, epoch);
 		}
 	}
 
-	/** Whether a route carries `route`'s instance at a higher epoch. */
+	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance);
+		const highest = this.#highest.get(route.instance)?.get(route.above ?? 0n);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
@@ -1525,7 +1531,9 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
  * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const order = compareRoutes(a, b) || routeHops(a) - routeHops(b);
+	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
+	const above = (a.above ?? 0n) - (b.above ?? 0n);
+	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
 	const [a1, a2] = routeKey(path, a);
 	const [b1, b2] = routeKey(path, b);

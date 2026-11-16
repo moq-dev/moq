@@ -1377,9 +1377,9 @@ rec {
       };
       "arc-swap" = rec {
         crateName = "arc-swap";
-        version = "1.9.3";
+        version = "1.9.4";
         edition = "2018";
-        sha256 = "0vmfc2wjnn7gyjfawvnq6a5pxsbiq1rbzzmra0p6969vv6rn429q";
+        sha256 = "14ng7i12wxxm5bl8z53j5lrzdbkr7ydjiqqv71fww3spgbsr8k6v";
         libName = "arc_swap";
         authors = [
           "Michal 'vorner' Vaner <vorner@vorner.cz>"
@@ -1505,16 +1505,16 @@ rec {
       };
       "ashpd" = rec {
         crateName = "ashpd";
-        version = "0.14.0";
+        version = "0.13.13";
         edition = "2024";
-        sha256 = "1k6b47cr1yy1fbc83j8515c68ld4q3kziw90fa874f8yzgqpg8wb";
+        sha256 = "04gilshi52djppigiy1y65iz05cvcs5japvk4spmyjk4m6m2317v";
         authors = [
           "Bilal Elmoussaoui <bil.elmoussaoui@gmail.com>"
         ];
         dependencies = [
           {
-            name = "bitflags";
-            packageId = "bitflags 2.13.2";
+            name = "enumflags2";
+            packageId = "enumflags2";
           }
           {
             name = "futures-util";
@@ -1544,11 +1544,6 @@ rec {
             name = "zbus";
             packageId = "zbus";
             usesDefaultFeatures = false;
-            features = [
-              "proxy"
-              "service"
-              "object-manager"
-            ];
           }
         ];
         devDependencies = [
@@ -1563,7 +1558,7 @@ rec {
         ];
         features = {
           "async-io" = [
-            "zbus/default-rt"
+            "zbus/async-io"
             "futures-util/io"
           ];
           "backend" = [ "dep:async-trait" ];
@@ -2086,6 +2081,37 @@ rec {
         ];
 
       };
+      "async-broadcast" = rec {
+        crateName = "async-broadcast";
+        version = "0.7.2";
+        edition = "2021";
+        sha256 = "0ckmqcwyqwbl2cijk1y4r0vy60i89gqc86ijrxzz5f2m4yjqfnj3";
+        libName = "async_broadcast";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+          "Yoshua Wuyts <yoshuawuyts@gmail.com>"
+          "Zeeshan Ali Khan <zeeshanak@gnome.org>"
+        ];
+        dependencies = [
+          {
+            name = "event-listener";
+            packageId = "event-listener";
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+        ];
+
+      };
       "async-compression" = rec {
         crateName = "async-compression";
         version = "0.4.48";
@@ -2224,6 +2250,43 @@ rec {
           "default"
           "std"
         ];
+      };
+      "async-recursion" = rec {
+        crateName = "async-recursion";
+        version = "1.2.0";
+        edition = "2018";
+        sha256 = "0lg4v61ax9wnfb5b5m11895qddcmq5a6h57cihf6n9mdp89br2jg";
+        procMacro = true;
+        libName = "async_recursion";
+        authors = [
+          "Robert Usher <266585+dcchut@users.noreply.github.com>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.6";
+            usesDefaultFeatures = false;
+            features = [
+              "full"
+              "visit-mut"
+              "parsing"
+              "printing"
+              "proc-macro"
+              "clone-impls"
+            ];
+          }
+        ];
+
       };
       "async-trait" = rec {
         crateName = "async-trait";
@@ -8792,6 +8855,65 @@ rec {
         ];
 
       };
+      "enumflags2" = rec {
+        crateName = "enumflags2";
+        version = "0.7.12";
+        edition = "2018";
+        sha256 = "1vzcskg4dca2jiflsfx1p9yw1fvgzcakcs7cpip0agl51ilgf9qh";
+        authors = [
+          "maik klein <maikklein@googlemail.com>"
+          "Maja Kądziołka <maya@compilercrim.es>"
+        ];
+        dependencies = [
+          {
+            name = "enumflags2_derive";
+            packageId = "enumflags2_derive";
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "serde" = [ "dep:serde" ];
+        };
+        resolvedDefaultFeatures = [ "serde" ];
+      };
+      "enumflags2_derive" = rec {
+        crateName = "enumflags2_derive";
+        version = "0.7.12";
+        edition = "2018";
+        sha256 = "09rqffacafl1b83ir55hrah9gza0x7pzjn6lr6jm76fzix6qmiv7";
+        procMacro = true;
+        authors = [
+          "maik klein <maikklein@googlemail.com>"
+          "Maja Kądziołka <maya@compilercrim.es>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 2.0.119";
+            usesDefaultFeatures = false;
+            features = [
+              "parsing"
+              "printing"
+              "derive"
+              "proc-macro"
+            ];
+          }
+        ];
+
+      };
       "equivalent" = rec {
         crateName = "equivalent";
         version = "1.0.2";
@@ -8916,7 +9038,10 @@ rec {
           "portable-atomic" = [ "event-listener/portable-atomic" ];
           "std" = [ "event-listener/std" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [
+          "default"
+          "std"
+        ];
       };
       "fallible-iterator" = rec {
         crateName = "fallible-iterator";
@@ -9688,6 +9813,68 @@ rec {
         };
         resolvedDefaultFeatures = [
           "default"
+          "std"
+        ];
+      };
+      "futures-lite" = rec {
+        crateName = "futures-lite";
+        version = "2.6.1";
+        edition = "2021";
+        sha256 = "1ba4dg26sc168vf60b1a23dv1d8rcf3v3ykz2psb7q70kxh113pp";
+        libName = "futures_lite";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+          "Contributors to futures-rs"
+        ];
+        dependencies = [
+          {
+            name = "fastrand";
+            packageId = "fastrand";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            optional = true;
+          }
+          {
+            name = "parking";
+            packageId = "parking";
+            optional = true;
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+        ];
+        features = {
+          "default" = [
+            "race"
+            "std"
+          ];
+          "fastrand" = [ "dep:fastrand" ];
+          "futures-io" = [ "dep:futures-io" ];
+          "memchr" = [ "dep:memchr" ];
+          "parking" = [ "dep:parking" ];
+          "race" = [ "fastrand" ];
+          "std" = [
+            "alloc"
+            "fastrand/std"
+            "futures-io"
+            "parking"
+          ];
+        };
+        resolvedDefaultFeatures = [
+          "alloc"
+          "fastrand"
+          "futures-io"
+          "parking"
           "std"
         ];
       };
@@ -12215,11 +12402,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [
-              "quic"
-              "websocket"
-            ];
           }
           {
             name = "tokio";
@@ -17374,7 +17556,6 @@ rec {
           {
             name = "ringbuf";
             packageId = "ringbuf";
-            optional = true;
           }
           {
             name = "rubato";
@@ -17388,12 +17569,10 @@ rec {
           {
             name = "symphonia-codec-aac";
             packageId = "symphonia-codec-aac";
-            optional = true;
           }
           {
             name = "symphonia-core";
             packageId = "symphonia-core";
-            optional = true;
           }
           {
             name = "thiserror";
@@ -17461,18 +17640,8 @@ rec {
           }
         ];
         features = {
-          "aac" = [
-            "dep:symphonia-codec-aac"
-            "dep:symphonia-core"
-          ];
-          "aec" = [
-            "capture"
-            "playback"
-          ];
-          "bus" = [ "dep:ringbuf" ];
           "capture" = [
             "dep:cpal"
-            "dep:ringbuf"
             "dep:tokio"
             "dep:tracing"
             "dep:block2"
@@ -17484,23 +17653,15 @@ rec {
             "dep:objc2-foundation"
             "dep:objc2-screen-capture-kit"
           ];
-          "default" = [
-            "aac"
-            "bus"
-          ];
           "pipewire" = [ "cpal?/pipewire" ];
           "playback" = [
             "dep:cpal"
-            "dep:ringbuf"
             "dep:tokio"
             "dep:tracing"
           ];
           "pulseaudio" = [ "cpal?/pulseaudio" ];
         };
         resolvedDefaultFeatures = [
-          "aac"
-          "aec"
-          "bus"
           "capture"
           "default"
           "pipewire"
@@ -17554,10 +17715,7 @@ rec {
             name = "moq-crypto";
             packageId = "moq-crypto";
             usesDefaultFeatures = false;
-            features = [
-              "serde"
-              "cpu"
-            ];
+            features = [ "cpu" ];
           }
           {
             name = "moq-pattern";
@@ -17649,7 +17807,6 @@ rec {
           {
             name = "url";
             packageId = "url";
-            features = [ "serde" ];
           }
         ];
         devDependencies = [
@@ -17818,7 +17975,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [ "net" ];
           }
           {
             name = "procfs";
@@ -17879,22 +18035,7 @@ rec {
             packageId = "workspace-hack";
           }
         ];
-        features = {
-          "default" = [
-            "quic"
-            "websocket"
-            "tcp"
-          ];
-          "quic" = [ "moq-tokio/quic" ];
-          "tcp" = [ "moq-tokio/tcp" ];
-          "websocket" = [ "moq-tokio/websocket" ];
-        };
-        resolvedDefaultFeatures = [
-          "default"
-          "quic"
-          "tcp"
-          "websocket"
-        ];
+
       };
       "moq-boy" = rec {
         crateName = "moq-boy";
@@ -17960,7 +18101,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [ "net" ];
           }
           {
             name = "moq-video";
@@ -18010,21 +18150,12 @@ rec {
           }
         ];
         features = {
-          "default" = [
-            "quic"
-            "websocket"
-          ];
           "jemalloc" = [ "moq-tokio/jemalloc" ];
           "openh264" = [ "moq-video/openh264" ];
-          "quic" = [ "moq-tokio/quic" ];
-          "websocket" = [ "moq-tokio/websocket" ];
         };
         resolvedDefaultFeatures = [
-          "default"
           "jemalloc"
           "openh264"
-          "quic"
-          "websocket"
         ];
       };
       "moq-c" = rec {
@@ -18063,7 +18194,6 @@ rec {
             name = "moq-audio";
             packageId = "moq-audio";
             usesDefaultFeatures = false;
-            features = [ "aac" ];
           }
           {
             name = "moq-json";
@@ -18083,12 +18213,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "quic"
-              "websocket"
-              "tcp"
-              "uds"
-            ];
           }
           {
             name = "moq-video";
@@ -18244,7 +18368,6 @@ rec {
             packageId = "moq-audio";
             optional = true;
             usesDefaultFeatures = false;
-            features = [ "aac" ];
           }
           {
             name = "moq-auth";
@@ -18292,11 +18415,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "tcp"
-              "uds"
-              "watch"
-            ];
           }
           {
             name = "moq-transcode";
@@ -18480,12 +18598,9 @@ rec {
             "moq-video/capture"
             "moq-audio/capture"
           ];
-          "cluster-lan" = [ "moq-relay/cluster-lan" ];
           "default" = [
-            "cluster-lan"
-            "quic"
-            "websocket"
             "nvidia"
+            "v4l2"
             "vaapi"
             "s3"
             "gcs"
@@ -18519,8 +18634,6 @@ rec {
             "dep:winit"
           ];
           "pulseaudio" = [ "moq-audio?/pulseaudio" ];
-          "qlog" = [ "moq-tokio/qlog" ];
-          "quic" = [ "moq-tokio/quic" ];
           "s3" = [
             "object_store/aws-base"
             "object_store/reqwest"
@@ -18539,12 +18652,10 @@ rec {
             "moq-transcode?/vaapi"
           ];
           "vpx" = [ "moq-video?/vpx" ];
-          "websocket" = [ "moq-tokio/websocket" ];
         };
         resolvedDefaultFeatures = [
           "azure"
           "capture"
-          "cluster-lan"
           "default"
           "gcs"
           "jemalloc"
@@ -18553,14 +18664,11 @@ rec {
           "pipewire"
           "play"
           "pulseaudio"
-          "qlog"
-          "quic"
           "s3"
           "transcode"
           "v4l2"
           "vaapi"
           "vpx"
-          "websocket"
         ];
       };
       "moq-congestion" = rec {
@@ -18588,6 +18696,7 @@ rec {
           {
             name = "tracing";
             packageId = "tracing";
+            optional = true;
           }
         ];
         devDependencies = [
@@ -18609,7 +18718,10 @@ rec {
             packageId = "workspace-hack";
           }
         ];
-
+        features = {
+          "lab" = [ "dep:tracing" ];
+        };
+        resolvedDefaultFeatures = [ "lab" ];
       };
       "moq-crypto" = rec {
         crateName = "moq-crypto";
@@ -18743,7 +18855,7 @@ rec {
           "async" = [ "kio?/async" ];
           "cpu" = [ "dep:rind" ];
           "default" = [
-            "sign"
+            "endpoint"
             "e2ee"
           ];
           "e2ee" = [
@@ -18756,28 +18868,26 @@ rec {
             "dep:uuid"
             "dep:zeroize"
           ];
+          "endpoint" = [
+            "dep:moq-net"
+            "dep:rind"
+            "dep:zeroize"
+          ];
           "provider" = [
             "cpu"
             "dep:rind-rustls"
             "dep:rustls"
           ];
           "serde" = [ "dep:serde" ];
-          "sign" = [
-            "dep:bytes"
-            "dep:kio"
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
         };
         resolvedDefaultFeatures = [
           "async"
           "cpu"
           "default"
           "e2ee"
+          "endpoint"
           "provider"
           "serde"
-          "sign"
         ];
       };
       "moq-ffi" = rec {
@@ -18819,9 +18929,7 @@ rec {
           {
             name = "moq-audio";
             packageId = "moq-audio";
-            optional = true;
             usesDefaultFeatures = false;
-            features = [ "aac" ];
           }
           {
             name = "moq-json";
@@ -18840,11 +18948,11 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
+            usesDefaultFeatures = false;
           }
           {
             name = "moq-video";
             packageId = "moq-video";
-            optional = true;
             usesDefaultFeatures = false;
             features = [
               "nvidia"
@@ -18854,7 +18962,6 @@ rec {
           {
             name = "pollster";
             packageId = "pollster";
-            optional = true;
           }
           {
             name = "uniffi";
@@ -18904,10 +19011,6 @@ rec {
             features = [ "openh264" ];
           }
           {
-            name = "pollster";
-            packageId = "pollster";
-          }
-          {
             name = "test-env";
             packageId = "test-env";
           }
@@ -18922,26 +19025,12 @@ rec {
           }
         ];
         features = {
-          "audio" = [ "dep:moq-audio" ];
-          "default" = [
-            "audio"
-            "video"
-          ];
-          "openh264" = [ "moq-video?/openh264" ];
-          "qlog" = [ "moq-tokio/qlog" ];
+          "openh264" = [ "moq-video/openh264" ];
           "testing" = [ "kio/manual" ];
-          "video" = [
-            "dep:moq-video"
-            "dep:pollster"
-          ];
         };
         resolvedDefaultFeatures = [
-          "audio"
-          "default"
           "openh264"
-          "qlog"
           "testing"
-          "video"
         ];
       };
       "moq-gst" = rec {
@@ -19001,6 +19090,7 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
+            usesDefaultFeatures = false;
           }
           {
             name = "tokio";
@@ -19206,11 +19296,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [
-              "tcp"
-              "quic"
-            ];
           }
           {
             name = "mp4-atom";
@@ -20116,7 +20201,6 @@ rec {
           {
             name = "qlog";
             packageId = "qlog";
-            optional = true;
           }
           {
             name = "rand";
@@ -20189,9 +20273,9 @@ rec {
             ];
           }
           {
-            name = "moq-quic";
-            packageId = "moq-quic";
-            features = [ "mux" ];
+            name = "moq-congestion";
+            packageId = "moq-congestion";
+            features = [ "lab" ];
           }
           {
             name = "proptest";
@@ -20239,13 +20323,10 @@ rec {
             "dep:arbitrary"
             "sim"
           ];
-          "qlog" = [ "dep:qlog" ];
         };
         resolvedDefaultFeatures = [
           "default"
           "fuzz"
-          "mux"
-          "qlog"
           "sim"
         ];
       };
@@ -20381,7 +20462,6 @@ rec {
           {
             name = "hyper";
             packageId = "hyper";
-            optional = true;
           }
           {
             name = "hyper-util";
@@ -20416,7 +20496,7 @@ rec {
             name = "moq-crypto";
             packageId = "moq-crypto";
             usesDefaultFeatures = false;
-            features = [ "sign" ];
+            features = [ "endpoint" ];
           }
           {
             name = "moq-net";
@@ -20441,17 +20521,13 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "watch"
-              "tcp"
-            ];
           }
           {
             name = "moq-uring";
             packageId = "moq-uring";
-            optional = true;
             usesDefaultFeatures = false;
             target = { target, features }: ("linux" == target."os" or null);
+            features = [ "quic" ];
           }
           {
             name = "prometheus-client";
@@ -20460,9 +20536,7 @@ rec {
           {
             name = "qmux";
             packageId = "qmux 0.7.0";
-            optional = true;
             usesDefaultFeatures = false;
-            features = [ "ws" ];
           }
           {
             name = "rand";
@@ -20534,7 +20608,6 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            optional = true;
             usesDefaultFeatures = false;
             features = [
               "connect"
@@ -20569,7 +20642,6 @@ rec {
           {
             name = "web-transport-proto";
             packageId = "web-transport-proto";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
           }
         ];
@@ -20630,12 +20702,6 @@ rec {
             packageId = "pem 4.0.0";
           }
           {
-            name = "qmux";
-            packageId = "qmux 0.7.0";
-            usesDefaultFeatures = false;
-            features = [ "tcp" ];
-          }
-          {
             name = "rcgen";
             packageId = "rcgen";
             usesDefaultFeatures = false;
@@ -20682,52 +20748,15 @@ rec {
           }
         ];
         features = {
-          "_uring" = [
-            "dep:moq-uring"
-            "dep:web-transport-proto"
-          ];
-          "cluster-lan" = [ "moq-tokio/mdns" ];
-          "default" = [
-            "cluster-lan"
-            "quic"
-            "websocket"
-            "uds"
-          ];
-          "io-uring" = [
-            "_uring"
-            "moq-tokio/driver"
-            "moq-uring/quic"
-          ];
           "jemalloc" = [ "moq-tokio/jemalloc" ];
-          "qlog" = [
-            "moq-tokio/qlog"
-            "moq-uring?/qlog"
-          ];
-          "quic" = [
-            "_quic"
-            "moq-tokio/quic"
-          ];
-          "test-support" = [ "moq-tokio/sim" ];
-          "uds" = [ "moq-tokio/uds" ];
-          "websocket" = [
-            "moq-tokio/websocket"
-            "dep:qmux"
-            "dep:hyper"
-            "dep:tokio-tungstenite"
+          "test-support" = [
+            "kio/sim"
+            "moq-tokio/sim"
           ];
         };
         resolvedDefaultFeatures = [
-          "_quic"
-          "_uring"
-          "cluster-lan"
-          "default"
-          "io-uring"
           "jemalloc"
-          "qlog"
-          "quic"
           "test-support"
-          "uds"
-          "websocket"
         ];
       };
       "moq-rtmp" = rec {
@@ -20796,7 +20825,6 @@ rec {
           {
             name = "rustls";
             packageId = "rustls";
-            optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
           }
@@ -20822,7 +20850,6 @@ rec {
           {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
@@ -20848,8 +20875,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [ "net" ];
           }
           {
             name = "rind-rustls";
@@ -20870,17 +20895,8 @@ rec {
           }
         ];
         features = {
-          "default" = [ "tls" ];
-          "tls" = [
-            "dep:rustls"
-            "dep:tokio-rustls"
-          ];
         };
-        resolvedDefaultFeatures = [
-          "default"
-          "fuzz"
-          "tls"
-        ];
+        resolvedDefaultFeatures = [ "fuzz" ];
       };
       "moq-rtmp-fuzz" = rec {
         crateName = "moq-rtmp-fuzz";
@@ -21435,7 +21451,6 @@ rec {
           {
             name = "dns-lookup";
             packageId = "dns-lookup";
-            optional = true;
           }
           {
             name = "futures";
@@ -21448,12 +21463,10 @@ rec {
           {
             name = "http";
             packageId = "http";
-            optional = true;
           }
           {
             name = "httparse";
             packageId = "httparse";
-            optional = true;
           }
           {
             name = "humantime";
@@ -21484,13 +21497,11 @@ rec {
           {
             name = "mdns-sd";
             packageId = "mdns-sd";
-            optional = true;
             features = [ "async" ];
           }
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
-            optional = true;
           }
           {
             name = "moq-crypto";
@@ -21501,12 +21512,11 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
-            optional = true;
+            features = [ "async" ];
           }
           {
             name = "moq-quic";
             packageId = "moq-quic";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
@@ -21516,18 +21526,11 @@ rec {
           {
             name = "notify";
             packageId = "notify";
-            optional = true;
           }
           {
             name = "qmux";
             packageId = "qmux 0.7.0";
-            optional = true;
             usesDefaultFeatures = false;
-            features = [
-              "wss"
-              "tls"
-              "tcp"
-            ];
           }
           {
             name = "rand";
@@ -21536,13 +21539,11 @@ rec {
           {
             name = "rcgen";
             packageId = "rcgen";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "reqwest";
             packageId = "reqwest";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
@@ -21553,12 +21554,10 @@ rec {
           {
             name = "rind-rcgen";
             packageId = "rind-rcgen";
-            optional = true;
           }
           {
             name = "rustc-hash";
             packageId = "rustc-hash 2.1.3";
-            optional = true;
           }
           {
             name = "rustls";
@@ -21576,7 +21575,6 @@ rec {
           {
             name = "rustls-webpki";
             packageId = "rustls-webpki";
-            optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
           }
@@ -21620,13 +21618,11 @@ rec {
           {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            optional = true;
             usesDefaultFeatures = false;
             features = [ "handshake" ];
           }
@@ -21661,7 +21657,6 @@ rec {
           {
             name = "web-transport-proto";
             packageId = "web-transport-proto";
-            optional = true;
           }
           {
             name = "webpki-roots";
@@ -21703,6 +21698,7 @@ rec {
           {
             name = "moq-congestion";
             packageId = "moq-congestion";
+            features = [ "lab" ];
           }
           {
             name = "moq-shaper";
@@ -21771,91 +21767,18 @@ rec {
           }
         ];
         features = {
-          "_certs" = [
-            "dep:rcgen"
-            "dep:rind-rcgen"
-            "dep:rustls-webpki"
-          ];
-          "_transport" = [
-            "net"
-            "dep:moq-quic"
-          ];
-          "default" = [
-            "net"
-            "quic"
-            "websocket"
-            "tcp"
-            "uds"
-          ];
-          "driver" = [
-            "_certs"
-            "dep:moq-congestion"
-            "dep:moq-quic"
-            "dep:rustc-hash"
-          ];
           "jemalloc" = [
             "dep:tikv-jemallocator"
             "dep:tikv-jemalloc-ctl"
           ];
-          "mdns" = [ "dep:mdns-sd" ];
-          "net" = [
-            "dep:moq-net"
-            "moq-net/async"
-            "_certs"
-          ];
-          "qlog" = [ "moq-quic?/qlog" ];
-          "qmux" = [
-            "_transport"
-            "dep:qmux"
-          ];
-          "quic" = [
-            "_transport"
-            "driver"
-            "dep:http"
-            "dep:web-transport-proto"
-            "dep:reqwest"
-            "watch"
-            "dep:dns-lookup"
-          ];
           "sim" = [
             "kio/sim"
-            "moq-quic?/sim"
-          ];
-          "tcp" = [
-            "qmux"
-            "dep:dns-lookup"
-            "dep:tokio-rustls"
-          ];
-          "uds" = [
-            "tcp"
-            "qmux/uds"
-          ];
-          "watch" = [ "dep:notify" ];
-          "websocket" = [
-            "qmux"
-            "watch"
-            "dep:dns-lookup"
-            "dep:httparse"
-            "dep:tokio-rustls"
-            "dep:tokio-tungstenite"
+            "moq-quic/sim"
           ];
         };
         resolvedDefaultFeatures = [
-          "_certs"
-          "_transport"
-          "default"
-          "driver"
           "jemalloc"
-          "mdns"
-          "net"
-          "qlog"
-          "qmux"
-          "quic"
           "sim"
-          "tcp"
-          "uds"
-          "watch"
-          "websocket"
         ];
       };
       "moq-transcode" = rec {
@@ -21947,11 +21870,6 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [
-              "quic"
-              "websocket"
-            ];
           }
           {
             name = "moq-video";
@@ -21982,6 +21900,7 @@ rec {
         features = {
           "default" = [
             "nvidia"
+            "v4l2"
             "vaapi"
           ];
           "nvidia" = [ "moq-video/nvidia" ];
@@ -22169,9 +22088,7 @@ rec {
           {
             name = "moq-tokio";
             packageId = "moq-tokio";
-            usesDefaultFeatures = false;
             target = { target, features }: ("linux" == target."os" or null);
-            features = [ "quic" ];
           }
           {
             name = "moq-uring";
@@ -22259,7 +22176,6 @@ rec {
           "_manual" = [ "kio/manual" ];
           "default" = [ "quic" ];
           "fuzz" = [ "moq-sock/fuzz" ];
-          "qlog" = [ "moq-quic?/qlog" ];
           "quic" = [
             "dep:moq-congestion"
             "dep:moq-crypto"
@@ -22272,7 +22188,6 @@ rec {
           "_probe"
           "default"
           "fuzz"
-          "qlog"
           "quic"
         ];
       };
@@ -22463,7 +22378,6 @@ rec {
           {
             name = "libc";
             packageId = "libc";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
           }
           {
@@ -22480,7 +22394,6 @@ rec {
           {
             name = "linux-raw-sys";
             packageId = "linux-raw-sys 0.12.1";
-            optional = true;
             target = { target, features }: ("linux" == target."os" or null);
             features = [ "ioctl" ];
           }
@@ -22702,6 +22615,10 @@ rec {
             packageId = "pollster";
           }
           {
+            name = "test-env";
+            packageId = "test-env";
+          }
+          {
             name = "tokio";
             packageId = "tokio";
             features = [ "test-util" ];
@@ -22717,7 +22634,6 @@ rec {
         ];
         features = {
           "capture" = [
-            "dep:libc"
             "dep:moq-v4l"
             "dep:x11rb"
             "dep:zune-jpeg"
@@ -22725,11 +22641,8 @@ rec {
           "default" = [
             "mediacodec"
             "nvidia"
+            "v4l2"
             "vaapi"
-          ];
-          "dmabuf" = [
-            "dep:libc"
-            "dep:linux-raw-sys"
           ];
           "mediacodec" = [ "dep:ndk" ];
           "nvidia" = [
@@ -22744,12 +22657,10 @@ rec {
           ];
           "pipewire" = [
             "capture"
-            "dmabuf"
             "dep:pipewire"
             "dep:ashpd"
           ];
           "render" = [
-            "dmabuf"
             "dep:ash"
             "dep:bytemuck"
             "dep:wgpu"
@@ -22758,20 +22669,13 @@ rec {
             "objc2-core-video/CVMetalTextureCache"
             "objc2-core-video/objc2-metal"
           ];
-          "v4l2" = [
-            "dep:moq-v4l"
-            "dep:libc"
-          ];
-          "vaapi" = [
-            "dmabuf"
-            "dep:moq-vaapi"
-          ];
+          "v4l2" = [ "dep:moq-v4l" ];
+          "vaapi" = [ "dep:moq-vaapi" ];
           "vpx" = [ "dep:libvpx-native-sys" ];
         };
         resolvedDefaultFeatures = [
           "capture"
           "default"
-          "dmabuf"
           "mediacodec"
           "nvidia"
           "openh264"
@@ -22954,10 +22858,6 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [
-              "net"
-              "tcp"
-            ];
           }
           {
             name = "pcap-file";
@@ -23654,9 +23554,9 @@ rec {
       };
       "notify" = rec {
         crateName = "notify";
-        version = "8.2.1";
+        version = "8.2.2";
         edition = "2021";
-        sha256 = "0x2651clb8sbwaifxv7lk2a7xgi597h89y6k2rad6xdw5xq15y42";
+        sha256 = "1aq5088m1j07fs25yb5j35hq344zsz96sa2pqqn35ycxynjh86n4";
         authors = [
           "Félix Saparelli <me@passcod.name>"
           "Daniel Faust <hessijames@gmail.com>"
@@ -39541,7 +39441,6 @@ rec {
           {
             name = "futures";
             packageId = "futures";
-            optional = true;
           }
           {
             name = "kio";
@@ -39567,18 +39466,15 @@ rec {
             name = "moq-quic";
             packageId = "moq-quic";
             usesDefaultFeatures = false;
-            features = [ "mux" ];
           }
           {
             name = "rustls";
             packageId = "rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "rustls-native-certs";
             packageId = "rustls-native-certs";
-            optional = true;
           }
           {
             name = "thiserror";
@@ -39587,21 +39483,21 @@ rec {
           {
             name = "tokio";
             packageId = "tokio";
+            features = [ "net" ];
           }
           {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
-            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            optional = true;
             usesDefaultFeatures = false;
             features = [
               "connect"
               "handshake"
+              "rustls-tls-native-roots"
             ];
           }
           {
@@ -39673,43 +39569,12 @@ rec {
           }
         ];
         features = {
-          "default" = [
-            "tls"
-            "wss"
-          ];
           "fuzz" = [
-            "tcp"
-            "ws"
             "kio/sim"
             "tokio/io-util"
           ];
-          "tcp" = [ "tokio/net" ];
-          "tls" = [
-            "tcp"
-            "dep:tokio-rustls"
-            "dep:rustls"
-          ];
-          "uds" = [ "tokio/net" ];
-          "ws" = [
-            "dep:tokio-tungstenite"
-            "dep:futures"
-          ];
-          "wss" = [
-            "ws"
-            "dep:rustls-native-certs"
-            "dep:rustls"
-            "tokio-tungstenite/rustls-tls-native-roots"
-          ];
         };
-        resolvedDefaultFeatures = [
-          "default"
-          "fuzz"
-          "tcp"
-          "tls"
-          "uds"
-          "ws"
-          "wss"
-        ];
+        resolvedDefaultFeatures = [ "fuzz" ];
       };
       "qmux-fuzz" = rec {
         crateName = "qmux-fuzz";
@@ -42061,9 +41926,9 @@ rec {
       };
       "rind" = rec {
         crateName = "rind";
-        version = "0.3.1";
+        version = "0.3.2";
         edition = "2024";
-        sha256 = "1f6gajqygj5qif4nj1nm6hs9p4al4bfq3dd99ay3kam7gfg5a6sv";
+        sha256 = "1mbh8981cvpbzr5pllrxd94hisqcp35p6fqcigks5pw3av76l1af";
         dependencies = [
           {
             name = "cfg-if";
@@ -42205,9 +42070,9 @@ rec {
       };
       "rind-jsonwebtoken" = rec {
         crateName = "rind-jsonwebtoken";
-        version = "11.0.2";
+        version = "11.0.3";
         edition = "2024";
-        sha256 = "1sxp9gf64z3gsgxhza9czm6a5afdbbdx6cgwv2j386jsd7afjd6x";
+        sha256 = "1y0wqd87lb4wp1y7vihwlqfw3fsfwjr5pi2i7ak2fa9l3n6y1r09";
         libName = "rind_jsonwebtoken";
         dependencies = [
           {
@@ -42238,9 +42103,9 @@ rec {
       };
       "rind-object-store" = rec {
         crateName = "rind-object-store";
-        version = "0.14.2";
+        version = "0.14.3";
         edition = "2024";
-        sha256 = "1ma4s650h61wcsdnnnagyn6njh5f5g91r5vargh8k1vg98kw6l4i";
+        sha256 = "1fjx4m3rin3sx8sh7nb5dn6vlpkjgvjv8qwwq1rnnlh2v9z0jdxa";
         libName = "rind_object_store";
         dependencies = [
           {
@@ -42276,9 +42141,9 @@ rec {
       };
       "rind-rcgen" = rec {
         crateName = "rind-rcgen";
-        version = "0.14.2";
+        version = "0.14.3";
         edition = "2024";
-        sha256 = "1pyz4ggxa52610077dq4al2754aysqsc41frhzsxxxxnacs86acc";
+        sha256 = "0nzlda9vpd75b5wxr3yszx9d5wa6p6y8f1ha2nl666wy4bd3wr1r";
         libName = "rind_rcgen";
         dependencies = [
           {
@@ -42311,9 +42176,9 @@ rec {
       };
       "rind-rustls" = rec {
         crateName = "rind-rustls";
-        version = "0.23.2";
+        version = "0.23.3";
         edition = "2024";
-        sha256 = "0lk7rzkkkxdcc0b932p8kss51hrfipmdp0plh8kxalzn2pnwg4cg";
+        sha256 = "1pdx5pjjqnkrxqrw77lyvzfvcw83f4m1mqj6kmsm29rh5l4in8wi";
         libName = "rind_rustls";
         dependencies = [
           {
@@ -46313,9 +46178,9 @@ rec {
       };
       "sonora" = rec {
         crateName = "sonora";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "0l4jmha9pgmc8jzxzxkrwh9czr0bsb72r3vv0v295cswmd1f871f";
+        sha256 = "1n7d0zlpd1nkz8g1fw103xijiz9rasya91wkj4l8fbqimp4ycqfl";
         dependencies = [
           {
             name = "sonora-aec3";
@@ -46355,9 +46220,9 @@ rec {
       };
       "sonora-aec3" = rec {
         crateName = "sonora-aec3";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "1nw04daixh0k83hs34hhvhafah3n9gniarzzia1zf2bd4lqhwa2h";
+        sha256 = "1zngbgqshmp2lxczwanssdag54y409ndn39dqbm1vxqkv8zrr07j";
         libName = "sonora_aec3";
         dependencies = [
           {
@@ -46377,9 +46242,9 @@ rec {
       };
       "sonora-agc2" = rec {
         crateName = "sonora-agc2";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "17qbg7hspxjwhixcglkr801ccnkjks51si7vlxhkx8vkhgxak4ws";
+        sha256 = "1alnggn4dzlbgc0g1mkrz0zryhiayb7338b4vj1wkj5xz39ms6sh";
         libName = "sonora_agc2";
         dependencies = [
           {
@@ -46413,9 +46278,9 @@ rec {
       };
       "sonora-common-audio" = rec {
         crateName = "sonora-common-audio";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "1k1kp0bcd7z87c6kdkd6r8h0csrb56qhf25djfncw1s8n9hvqdb6";
+        sha256 = "041lm1rg7qiap5k9skrdi7qsrlmahxdjrkjihx4whkf102ixy19c";
         libName = "sonora_common_audio";
         dependencies = [
           {
@@ -46432,17 +46297,23 @@ rec {
       };
       "sonora-fft" = rec {
         crateName = "sonora-fft";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "04m0bfxwp72fl4v5fqw5czpn73szq0c1ipc2agxkldil1z3p5qi7";
+        sha256 = "09pxlan23gdk20wkh8mzqvg6kzm313x3yh6rhp61m3vlrzr2jdgc";
         libName = "sonora_fft";
+        dependencies = [
+          {
+            name = "sonora-simd";
+            packageId = "sonora-simd";
+          }
+        ];
 
       };
       "sonora-ns" = rec {
         crateName = "sonora-ns";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "0vx8nz8f1k3x208yldc72wfaj6qngl45aiaw4inp2b1h37pzw4fm";
+        sha256 = "1f980jgv2v4hni7mrlb8i8lqrk8y7ja0374wpx6ig6j1g0padh1i";
         libName = "sonora_ns";
         dependencies = [
           {
@@ -46454,9 +46325,9 @@ rec {
       };
       "sonora-simd" = rec {
         crateName = "sonora-simd";
-        version = "0.2.0";
+        version = "0.3.0";
         edition = "2024";
-        sha256 = "0s6q6apwxlvqja7skmacml70hhrhyla3051f4ri5aakmwh20ikx7";
+        sha256 = "1yn8b1v55b8k1s95nxaqhgr85lz3ql4pnk99amssl2ra7bkdhfgr";
         libName = "sonora_simd";
         dependencies = [
           {
@@ -48610,6 +48481,14 @@ rec {
             optional = true;
           }
           {
+            name = "tracing";
+            packageId = "tracing";
+            optional = true;
+            usesDefaultFeatures = false;
+            target = { target, features }: (target."tokio_unstable" or false);
+            features = [ "std" ];
+          }
+          {
             name = "windows-sys";
             packageId = "windows-sys 0.61.2";
             optional = true;
@@ -48732,6 +48611,7 @@ rec {
           "test-util"
           "time"
           "tokio-macros"
+          "tracing"
           "windows-sys"
         ];
       };
@@ -51481,9 +51361,9 @@ rec {
       };
       "uuid" = rec {
         crateName = "uuid";
-        version = "1.29.1";
+        version = "1.29.2";
         edition = "2021";
-        sha256 = "1p3b7vh4jvpj5q64q1qrvlrd15c5h1wkwzdgpg3rn03bhn5g01ja";
+        sha256 = "0z161qj1jw91fz64pmz1vqs9l1y7dpbf8yziwp7vbjfsywwr3ndy";
         dependencies = [
           {
             name = "getrandom";
@@ -51493,7 +51373,7 @@ rec {
               { target, features }:
               (
                 !(
-                  ("wasm32" == target."arch" or null)
+                  (builtins.elem "wasm" target."family")
                   && (("unknown" == target."os" or null) || ("none" == target."os" or null))
                 )
               );
@@ -51506,7 +51386,7 @@ rec {
             target =
               { target, features }:
               (
-                ("wasm32" == target."arch" or null)
+                (builtins.elem "wasm" target."family")
                 && (("unknown" == target."os" or null) || ("none" == target."os" or null))
                 && (builtins.elem "atomics" targetFeatures)
               );
@@ -51525,7 +51405,7 @@ rec {
             target =
               { target, features }:
               (
-                ("wasm32" == target."arch" or null)
+                (builtins.elem "wasm" target."family")
                 && (("unknown" == target."os" or null) || ("none" == target."os" or null))
               );
           }
@@ -51537,7 +51417,7 @@ rec {
             target =
               { target, features }:
               (
-                ("wasm32" == target."arch" or null)
+                (builtins.elem "wasm" target."family")
                 && (("unknown" == target."os" or null) || ("none" == target."os" or null))
               );
           }
@@ -58706,6 +58586,26 @@ rec {
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
+            name = "event-listener";
+            packageId = "event-listener";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener";
+            packageId = "event-listener";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
             name = "fastrand";
             packageId = "fastrand";
             features = [ "js" ];
@@ -59523,6 +59423,20 @@ rec {
             ];
           }
           {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [ "tracing" ];
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [ "tracing" ];
+          }
+          {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
             usesDefaultFeatures = false;
@@ -59666,6 +59580,10 @@ rec {
             ];
           }
           {
+            name = "tracing";
+            packageId = "tracing";
+          }
+          {
             name = "tracing-core";
             packageId = "tracing-core";
           }
@@ -59675,15 +59593,6 @@ rec {
             features = [
               "env-filter"
               "local-time"
-            ];
-          }
-          {
-            name = "tungstenite";
-            packageId = "tungstenite";
-            usesDefaultFeatures = false;
-            features = [
-              "__rustls-tls"
-              "handshake"
             ];
           }
           {
@@ -60160,6 +60069,26 @@ rec {
             name = "errno";
             packageId = "errno";
             target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "event-listener";
+            packageId = "event-listener";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener";
+            packageId = "event-listener";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
           }
           {
             name = "fastrand";
@@ -60965,6 +60894,20 @@ rec {
             ];
           }
           {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+            features = [ "tracing" ];
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
+            features = [ "tracing" ];
+          }
+          {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
             usesDefaultFeatures = false;
@@ -61108,6 +61051,10 @@ rec {
             ];
           }
           {
+            name = "tracing";
+            packageId = "tracing";
+          }
+          {
             name = "tracing-core";
             packageId = "tracing-core";
           }
@@ -61117,15 +61064,6 @@ rec {
             features = [
               "env-filter"
               "local-time"
-            ];
-          }
-          {
-            name = "tungstenite";
-            packageId = "tungstenite";
-            usesDefaultFeatures = false;
-            features = [
-              "__rustls-tls"
-              "handshake"
             ];
           }
           {
@@ -62265,55 +62203,69 @@ rec {
       };
       "zbus" = rec {
         crateName = "zbus";
-        version = "6.3.0";
+        version = "5.19.0";
         edition = "2024";
-        sha256 = "1r40ynds0b86mfxyb1gqyywyzkdjp8d46qnrpvm7r4i31dsawjkb";
+        sha256 = "01sram5sgwsg3x8mghx77cjbsfa2c10mar7fnzj23d2w0xybxd2x";
         authors = [
           "Zeeshan Ali Khan <zeeshanak@gnome.org>"
         ];
         dependencies = [
           {
+            name = "async-broadcast";
+            packageId = "async-broadcast";
+          }
+          {
+            name = "async-recursion";
+            packageId = "async-recursion";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "async-recursion";
+            packageId = "async-recursion";
+            target = { target, features }: (target."windows" or false);
+          }
+          {
             name = "async-trait";
             packageId = "async-trait";
-            optional = true;
           }
           {
-            name = "bitflags";
-            packageId = "bitflags 2.13.2";
-            optional = true;
+            name = "enumflags2";
+            packageId = "enumflags2";
+            features = [ "serde" ];
           }
           {
-            name = "endi";
-            packageId = "endi";
+            name = "event-listener";
+            packageId = "event-listener";
           }
           {
             name = "futures-core";
             packageId = "futures-core";
-            optional = true;
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "hex";
             packageId = "hex";
-            optional = true;
           }
           {
             name = "libc";
             packageId = "libc";
-            optional = true;
             usesDefaultFeatures = false;
             target = { target, features }: (target."unix" or false);
           }
           {
             name = "ordered-stream";
             packageId = "ordered-stream";
-            optional = true;
           }
           {
             name = "rustix";
             packageId = "rustix 1.1.6";
-            optional = true;
             usesDefaultFeatures = false;
-            target = { target, features }: ((target."unix" or false) || ("wasi" == target."os" or null));
+            target = { target, features }: (target."unix" or false);
             features = [
               "net"
               "process"
@@ -62328,13 +62280,6 @@ rec {
           {
             name = "serde_repr";
             packageId = "serde_repr";
-            optional = true;
-          }
-          {
-            name = "socket2";
-            packageId = "socket2 0.6.5";
-            optional = true;
-            target = { target, features }: (!("wasi" == target."os" or null));
           }
           {
             name = "tokio";
@@ -62342,34 +62287,33 @@ rec {
             optional = true;
             features = [
               "rt"
+              "rt-multi-thread"
               "net"
               "time"
+              "fs"
+              "io-util"
+              "process"
               "sync"
+              "tracing"
             ];
           }
           {
-            name = "tokio";
-            packageId = "tokio";
-            optional = true;
-            target = { target, features }: ("macos" == target."os" or null);
-            features = [ "process" ];
+            name = "tracing";
+            packageId = "tracing";
           }
           {
             name = "uds_windows";
             packageId = "uds_windows";
-            optional = true;
             target = { target, features }: (target."windows" or false);
           }
           {
             name = "uuid";
             packageId = "uuid";
-            optional = true;
             features = [ "serde" ];
           }
           {
             name = "windows-sys";
             packageId = "windows-sys 0.61.2";
-            optional = true;
             target = { target, features }: (target."windows" or false);
             features = [
               "Win32_Foundation"
@@ -62391,42 +62335,18 @@ rec {
           {
             name = "zbus_macros";
             packageId = "zbus_macros";
-            usesDefaultFeatures = false;
           }
           {
-            name = "zbus_utils";
-            packageId = "zbus_utils";
+            name = "zbus_names";
+            packageId = "zbus_names";
           }
           {
-            name = "zcheapstr";
-            packageId = "zcheapstr";
-            features = [ "serde" ];
-          }
-          {
-            name = "zruntime";
-            packageId = "zruntime";
-            optional = true;
-            usesDefaultFeatures = false;
+            name = "zvariant";
+            packageId = "zvariant";
+            features = [ "enumflags2" ];
           }
         ];
         devDependencies = [
-          {
-            name = "bitflags";
-            packageId = "bitflags 2.13.2";
-          }
-          {
-            name = "libc";
-            packageId = "libc";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "serde_repr";
-            packageId = "serde_repr";
-          }
-          {
-            name = "socket2";
-            packageId = "socket2 0.6.5";
-          }
           {
             name = "tokio";
             packageId = "tokio";
@@ -62443,102 +62363,52 @@ rec {
           }
         ];
         features = {
-          "arrayvec" = [ "dep:arrayvec" ];
+          "async-executor" = [ "dep:async-executor" ];
+          "async-io" = [
+            "dep:async-io"
+            "async-executor"
+            "async-fs"
+            "async-task"
+            "async-lock"
+            "async-process"
+            "blocking"
+          ];
+          "async-lock" = [ "dep:async-lock" ];
+          "async-process" = [ "dep:async-process" ];
+          "async-task" = [ "dep:async-task" ];
+          "blocking" = [ "dep:blocking" ];
+          "blocking-api" = [ "zbus_macros/blocking-api" ];
           "bus-impl" = [ "p2p" ];
-          "camino" = [ "dep:camino" ];
-          "chrono" = [ "dep:chrono" ];
-          "comms" = [
-            "dep:bitflags"
-            "zbus_macros/comms"
-            "dep:serde_repr"
-            "dep:futures-core"
-            "dep:hex"
-            "dep:ordered-stream"
-            "dep:zruntime"
-            "zruntime/broadcast"
-            "zruntime/lock"
-            "zruntime/unblock"
-            "dep:async-trait"
-            "dep:rustix"
-            "dep:libc"
-            "dep:windows-sys"
-            "dep:uds_windows"
-            "dep:socket2"
-            "dep:uuid"
-          ];
+          "camino" = [ "zvariant/camino" ];
+          "chrono" = [ "zvariant/chrono" ];
           "default" = [
-            "default-rt"
-            "proxy"
-            "service"
-            "object-manager"
-            "tracing"
+            "async-io"
+            "blocking-api"
           ];
-          "default-rt" = [
-            "comms"
-            "zruntime/runtime"
-            "zruntime/helper"
-            "zruntime/tcp"
-            "zruntime/unix"
-            "zruntime/process"
-          ];
-          "handover" = [
-            "comms"
-            "dep:zoter"
-          ];
-          "heapless" = [ "dep:heapless" ];
-          "ibus" = [
-            "comms"
-            "tokio?/process"
-          ];
-          "jiff" = [ "dep:jiff" ];
-          "object-manager" = [ "service" ];
-          "p2p" = [
-            "comms"
-            "uuid?/v4"
-          ];
-          "proxy" = [
-            "comms"
-            "zbus_macros/proxy"
-          ];
-          "serde_bytes" = [ "dep:serde_bytes" ];
-          "service" = [
-            "comms"
-            "zbus_macros/service"
-          ];
-          "time" = [ "dep:time" ];
-          "tokio" = [
-            "comms"
-            "dep:tokio"
-          ];
-          "tokio-multithread" = [
+          "heapless" = [ "zvariant/heapless" ];
+          "option-as-array" = [ "zvariant/option-as-array" ];
+          "p2p" = [ "uuid/v4" ];
+          "serde_bytes" = [ "zvariant/serde_bytes" ];
+          "time" = [ "zvariant/time" ];
+          "tokio" = [ "dep:tokio" ];
+          "tokio-vsock" = [
+            "dep:tokio-vsock"
             "tokio"
-            "tokio/rt-multi-thread"
           ];
-          "tracing" = [
-            "dep:tracing"
-            "tokio?/tracing"
-            "zruntime?/tracing"
+          "url" = [ "zvariant/url" ];
+          "uuid" = [ "zvariant/uuid" ];
+          "vsock" = [
+            "dep:vsock"
+            "async-io"
           ];
-          "unixexec" = [
-            "comms"
-            "tokio?/process"
-          ];
-          "url" = [ "dep:url" ];
-          "uuid" = [ "dep:uuid" ];
         };
-        resolvedDefaultFeatures = [
-          "comms"
-          "object-manager"
-          "proxy"
-          "service"
-          "tokio"
-        ];
+        resolvedDefaultFeatures = [ "tokio" ];
       };
       "zbus_macros" = rec {
         crateName = "zbus_macros";
-        version = "6.3.0";
+        version = "5.19.0";
         edition = "2024";
-        sha256 = "0ac5ddzd38b4vy6kdp8kxm5fb1nsa0pqc0i9rdpw2igix95xvj9p";
+        sha256 = "0h4gr26kyhdyn503rgg8h44sjxm8d6n8qbzpd0cdzrmd15fn7419";
         procMacro = true;
         authors = [
           "Marc-André Lureau <marcandre.lureau@redhat.com>"
@@ -62546,6 +62416,10 @@ rec {
         ];
         dependencies = [
           {
+            name = "proc-macro-crate";
+            packageId = "proc-macro-crate";
+          }
+          {
             name = "proc-macro2";
             packageId = "proc-macro2";
           }
@@ -62560,69 +62434,56 @@ rec {
               "extra-traits"
               "full"
               "extra-traits"
+              "fold"
               "full"
             ];
           }
           {
-            name = "zbus_utils";
-            packageId = "zbus_utils";
+            name = "zbus_names";
+            packageId = "zbus_names";
+          }
+          {
+            name = "zvariant";
+            packageId = "zvariant";
+          }
+          {
+            name = "zvariant_utils";
+            packageId = "zvariant_utils";
           }
         ];
         features = {
-          "comms" = [ "syn/fold" ];
-          "default" = [
-            "comms"
-            "proxy"
-            "service"
+          "gvariant" = [
+            "zvariant/gvariant"
+            "zvariant_utils/gvariant"
           ];
-          "proxy" = [ "comms" ];
-          "service" = [ "comms" ];
         };
-        resolvedDefaultFeatures = [
-          "comms"
-          "proxy"
-          "service"
-        ];
+        resolvedDefaultFeatures = [ "default" ];
       };
-      "zbus_utils" = rec {
-        crateName = "zbus_utils";
-        version = "6.1.0";
+      "zbus_names" = rec {
+        crateName = "zbus_names";
+        version = "4.3.5";
         edition = "2024";
-        sha256 = "1ivfwwc94f6ff00kc814gbljh3h23wiaxg25ihv1nccml8nyamdg";
+        sha256 = "1pc8w0m4g8k6f13c2by67fvnc06xib84gw58ivhmjymd9sz14al1";
         authors = [
           "Zeeshan Ali Khan <zeeshanak@gnome.org>"
-          "turbocooler <turbocooler@cocaine.ninja>"
         ];
         dependencies = [
-          {
-            name = "proc-macro2";
-            packageId = "proc-macro2";
-          }
-          {
-            name = "quote";
-            packageId = "quote";
-          }
           {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];
           }
           {
-            name = "syn";
-            packageId = "syn 3.0.6";
-            features = [
-              "extra-traits"
-              "full"
-            ];
-          }
-          {
             name = "winnow";
             packageId = "winnow 1.0.4";
           }
+          {
+            name = "zvariant";
+            packageId = "zvariant";
+            features = [ "enumflags2" ];
+          }
         ];
-        features = {
-        };
-        resolvedDefaultFeatures = [ "default" ];
+
       };
       "zcheapstr" = rec {
         crateName = "zcheapstr";
@@ -63008,91 +62869,6 @@ rec {
           "no-panic" = [ "dep:no-panic" ];
         };
       };
-      "zruntime" = rec {
-        crateName = "zruntime";
-        version = "0.2.3";
-        edition = "2024";
-        sha256 = "0wmw1rgivpaljiq7hi43vi08rzh8jmvrcyqgldsh8xi1ypa5asnf";
-        authors = [
-          "Zeeshan Ali Khan <zeeshanak@gnome.org>"
-        ];
-        dependencies = [
-          {
-            name = "futures-core";
-            packageId = "futures-core";
-            optional = true;
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "futures-io";
-            packageId = "futures-io";
-            optional = true;
-          }
-        ];
-        features = {
-          "broadcast" = [
-            "event"
-            "dep:futures-core"
-          ];
-          "default" = [
-            "runtime"
-            "event"
-            "tracing"
-          ];
-          "fs" = [
-            "dep:futures-io"
-            "dep:futures-core"
-          ];
-          "helper" = [ "runtime" ];
-          "lock" = [ "event" ];
-          "mpmc" = [
-            "event"
-            "dep:futures-core"
-          ];
-          "process" = [
-            "runtime"
-            "unblock"
-            "rustix?/process"
-            "windows-sys?/Win32_Foundation"
-            "windows-sys?/Win32_System_Threading"
-          ];
-          "runtime" = [
-            "dep:rustix"
-            "dep:windows-sys"
-            "dep:futures-core"
-            "dep:futures-io"
-          ];
-          "signal" = [
-            "runtime"
-            "dep:errno"
-            "dep:libc"
-            "windows-sys?/Win32_Foundation"
-            "windows-sys?/Win32_System_Console"
-          ];
-          "tcp" = [
-            "runtime"
-            "dep:socket2"
-            "rustix?/net"
-          ];
-          "tracing" = [ "dep:tracing" ];
-          "udp" = [ "runtime" ];
-          "unblock" = [
-            "dep:futures-io"
-            "dep:futures-core"
-          ];
-          "unix" = [
-            "runtime"
-            "dep:socket2"
-            "rustix?/net"
-          ];
-        };
-        resolvedDefaultFeatures = [
-          "broadcast"
-          "event"
-          "lock"
-          "unblock"
-        ];
-      };
       "zune-core" = rec {
         crateName = "zune-core";
         version = "0.5.3";
@@ -63135,6 +62911,149 @@ rec {
           "std"
           "x86"
         ];
+      };
+      "zvariant" = rec {
+        crateName = "zvariant";
+        version = "5.15.1";
+        edition = "2024";
+        sha256 = "1dzvl7la92pc8qyaw9pgfpxgqhy6rn285yscnsn03dm4srn6vgw0";
+        authors = [
+          "Zeeshan Ali Khan <zeeshanak@gnome.org>"
+        ];
+        dependencies = [
+          {
+            name = "endi";
+            packageId = "endi";
+          }
+          {
+            name = "enumflags2";
+            packageId = "enumflags2";
+            optional = true;
+            features = [ "serde" ];
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            features = [ "derive" ];
+          }
+          {
+            name = "winnow";
+            packageId = "winnow 1.0.4";
+          }
+          {
+            name = "zcheapstr";
+            packageId = "zcheapstr";
+            features = [ "serde" ];
+          }
+          {
+            name = "zvariant_derive";
+            packageId = "zvariant_derive";
+          }
+          {
+            name = "zvariant_utils";
+            packageId = "zvariant_utils";
+          }
+        ];
+        features = {
+          "arrayvec" = [ "dep:arrayvec" ];
+          "camino" = [ "dep:camino" ];
+          "chrono" = [ "dep:chrono" ];
+          "enumflags2" = [ "dep:enumflags2" ];
+          "gvariant" = [
+            "zvariant_derive/gvariant"
+            "zvariant_utils/gvariant"
+          ];
+          "heapless" = [ "dep:heapless" ];
+          "ostree-tests" = [ "gvariant" ];
+          "serde_bytes" = [ "dep:serde_bytes" ];
+          "time" = [ "dep:time" ];
+          "url" = [ "dep:url" ];
+          "uuid" = [ "dep:uuid" ];
+        };
+        resolvedDefaultFeatures = [
+          "default"
+          "enumflags2"
+        ];
+      };
+      "zvariant_derive" = rec {
+        crateName = "zvariant_derive";
+        version = "5.15.1";
+        edition = "2024";
+        sha256 = "0va8dm4k7rk2iar573lkzfap8g2v2dinw4zcxasm9jx1dd2p49pg";
+        procMacro = true;
+        authors = [
+          "Zeeshan Ali Khan <zeeshanak@gnome.org>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro-crate";
+            packageId = "proc-macro-crate";
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.6";
+            features = [
+              "extra-traits"
+              "full"
+            ];
+          }
+          {
+            name = "zvariant_utils";
+            packageId = "zvariant_utils";
+          }
+        ];
+        features = {
+          "gvariant" = [ "zvariant_utils/gvariant" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
+      };
+      "zvariant_utils" = rec {
+        crateName = "zvariant_utils";
+        version = "4.2.0";
+        edition = "2024";
+        sha256 = "18q80094ci64myzvcp0g2l3c6mnx7b3hsii8lfabc853c51jkl5s";
+        authors = [
+          "Zeeshan Ali Khan <zeeshanak@gnome.org>"
+          "turbocooler <turbocooler@cocaine.ninja>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            features = [ "derive" ];
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.6";
+            features = [
+              "extra-traits"
+              "full"
+            ];
+          }
+          {
+            name = "winnow";
+            packageId = "winnow 1.0.4";
+          }
+        ];
+        features = {
+        };
+        resolvedDefaultFeatures = [ "default" ];
       };
     };
 

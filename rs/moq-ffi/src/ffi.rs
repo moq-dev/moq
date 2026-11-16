@@ -925,7 +925,6 @@ impl<T: Send + 'static> Task<T> {
 		}
 	}
 
-	#[cfg(any(feature = "audio", feature = "video"))]
 	pub fn supervised(mut self, driver: Background) -> Self {
 		self.driver = driver;
 		self

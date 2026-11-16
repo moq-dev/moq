@@ -105,10 +105,9 @@ type QUICConfig struct {
 	GSO *bool
 	// MTUDiscovery toggles path MTU discovery.
 	MTUDiscovery *bool
-	// CongestionControl picks the congestion control family.
+	// CongestionControl picks the congestion control family; nil leaves the choice to the backend.
 	CongestionControl *CongestionControl
-	// Qlog is a directory, which must exist, to write qlog traces into. Dial
-	// fails unless QlogSupported.
+	// Qlog is a directory, which must exist, to write qlog traces into.
 	Qlog string
 	// Keylog writes TLS session secrets to the file SSLKEYLOGFILE names, for
 	// decrypting a capture. Without SSLKEYLOGFILE the dial fails.
@@ -185,7 +184,7 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 			KeepAlive:         c.QUIC.KeepAlive,
 			Gso:               c.QUIC.GSO,
 			MtuDiscovery:      c.QUIC.MTUDiscovery,
-			CongestionControl: c.QUIC.CongestionControl,
+			CongestionControl: optional(c.QUIC.CongestionControl),
 			Qlog:              str(c.QUIC.Qlog),
 			Keylog:            keylog,
 		},

@@ -15,6 +15,12 @@ itself stays on NVIDIA; the stand-in proves the bridge elsewhere.
 
 ## Plan
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the CARLA
+demo stays in this repository for now, because moq.dev hosts it as a demo
+(rejected: moving it to Kixel, where AGENTS.md sends robotics work). The
+bridge therefore stays a consumer of moq-video's external Vulkan images
+(`frame::vulkan`).
+
 moq-video owns the surface, the backend selection, the Vulkan Video backend,
 and its hardware tests. This quest only removes what the bridge still pins.
 

@@ -31,9 +31,9 @@
 
 use std::borrow::Cow;
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 use moq_net::Timestamp;
@@ -90,11 +90,11 @@ impl Frame {
 ///
 /// The four bytes are the kernel DRM fourcc, kept as a newtype so a stride,
 /// PipeWire format id, or another bare integer cannot be passed accidentally.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DrmFormat(u32);
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DrmFormat {
 	/// Semi-planar 8-bit 4:2:0 YUV: one luma plane, one interleaved Cb/Cr plane.
 	pub const NV12: Self = Self::from_bytes(*b"NV12");
@@ -121,14 +121,14 @@ impl DrmFormat {
 }
 
 /// One plane within a Linux DMA-BUF allocation.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DmaBufPlane {
 	offset: u32,
 	stride: u32,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBufPlane {
 	/// Describe a plane's byte offset and row stride.
 	pub const fn new(offset: u32, stride: u32) -> Self {
@@ -151,7 +151,7 @@ impl DmaBufPlane {
 /// Keep this value alive for as long as an external device may read from the
 /// descriptor returned by [`as_fd`](Self::as_fd). Dropping it releases the
 /// producer's buffer when no other frame or export still owns that lease.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub struct DmaBufExport {
 	fd: OwnedFd,
 	#[cfg_attr(
@@ -170,10 +170,10 @@ pub struct DmaBufExport {
 /// it here. A screen frame's fence signals within a frame time; anything past
 /// this is a wedged compositor, and the caller's CPU fallback beats blocking a
 /// render thread forever.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 const DMA_BUF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 	let mut event = libc::pollfd {
 		fd: fd.as_raw_fd(),
@@ -217,7 +217,7 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBufExport {
 	/// Borrow the exported descriptor without separating it from its producer lease.
 	pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
@@ -232,14 +232,14 @@ impl DmaBufExport {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl std::os::fd::AsFd for DmaBufExport {
 	fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
 		std::os::fd::AsFd::as_fd(&self.fd)
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl std::fmt::Debug for DmaBufExport {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("DmaBufExport").finish_non_exhaustive()
@@ -253,7 +253,7 @@ impl std::fmt::Debug for DmaBufExport {
 /// consumer is ready to import it, avoiding one open fd for every buffered
 /// frame. Dropping the last clone or [`DmaBufExport`] releases the producer's
 /// buffer.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub struct DmaBuf {
 	format: DrmFormat,
@@ -265,7 +265,7 @@ pub struct DmaBuf {
 	inner: Arc<dyn DmaBufFrame>,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl std::fmt::Debug for DmaBuf {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("DmaBuf")
@@ -278,7 +278,7 @@ impl std::fmt::Debug for DmaBuf {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBuf {
 	/// Retain an external DMA-BUF and its producer's release guard.
 	///
@@ -368,7 +368,7 @@ impl DmaBuf {
 }
 
 /// The format, tiling, and plane layout of an external DMA-BUF.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 pub(crate) struct DmaBufLayout {
 	/// DRM fourcc describing the pixel format.
@@ -383,7 +383,7 @@ pub(crate) struct DmaBufLayout {
 	pub(crate) color: Option<Color>,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl DmaBufLayout {
 	/// Describe linear planes and set optional tiling and color fields afterward.
 	#[cfg(test)]
@@ -398,13 +398,13 @@ impl DmaBufLayout {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 struct ExternalDmaBuf<T: Send + Sync + 'static> {
 	fd: OwnedFd,
 	_owner: T,
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 impl<T: Send + Sync + 'static> DmaBufFrame for ExternalDmaBuf<T> {
 	fn export(&self) -> std::io::Result<OwnedFd> {
 		self.fd.try_clone()
@@ -420,7 +420,7 @@ impl<T: Send + Sync + 'static> DmaBufFrame for ExternalDmaBuf<T> {
 ///
 /// Kept private to the crate so backend lifetimes and download mechanisms do
 /// not become public implementable API. [`DmaBuf`] is the stable consumer seam.
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 pub(crate) trait DmaBufFrame: Send + Sync {
 	fn export(&self) -> std::io::Result<OwnedFd>;
 	fn download_i420(&self) -> Result<I420, Error>;
@@ -461,7 +461,7 @@ pub enum Surface {
 	#[cfg(target_os = "linux")]
 	Vulkan(vulkan::Frame),
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	DmaBuf(DmaBuf),
 	/// Zero-copy GPU buffer (Android `AHardwareBuffer`, 4:2:0 8-bit). Produced
 	/// only by the MediaCodec decoder.
@@ -483,7 +483,7 @@ impl Surface {
 			Surface::Cuda(c) => c.width,
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(v) => v.width(),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => d.width,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => b.width,
@@ -502,7 +502,7 @@ impl Surface {
 			Surface::Cuda(c) => c.height,
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(v) => v.height(),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => d.height,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => b.height,
@@ -703,7 +703,7 @@ impl Surface {
 			Surface::Cuda(c) => c.color(),
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => None,
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => d.color,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => b.color,
@@ -727,7 +727,7 @@ impl Surface {
 			Surface::Cuda(cuda) => &mut cuda.color,
 			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => return,
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(buffer) => &mut buffer.color,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(buffer) => &mut buffer.color,
@@ -756,7 +756,7 @@ impl Surface {
 			Surface::Vulkan(_) => Err(Error::Unsupported(
 				"External Vulkan surfaces have no CPU mapping or download fallback".into(),
 			)),
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
 			Surface::HardwareBuffer(b) => Ok(Cow::Owned(b.download_i420()?)),
@@ -3043,7 +3043,7 @@ mod tests {
 		assert!(matches!(surface.to_i420().unwrap(), Cow::Borrowed(_)));
 	}
 
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	#[test]
 	fn to_i420_owns_downloaded_native_pixels() {
 		use std::borrow::Cow;
@@ -3427,7 +3427,7 @@ mod tests {
 	}
 }
 
-#[cfg(all(test, target_os = "linux", feature = "dmabuf"))]
+#[cfg(all(test, target_os = "linux"))]
 mod external_dmabuf_tests {
 	use super::*;
 	use std::sync::atomic::{AtomicUsize, Ordering};

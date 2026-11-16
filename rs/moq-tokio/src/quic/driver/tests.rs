@@ -1,5 +1,3 @@
-#![cfg(feature = "_certs")]
-
 use rind_rustls::default_provider;
 
 use std::{
@@ -2147,8 +2145,9 @@ async fn dropped_connection_cleans_up() {
 	endpoint.wait_idle().await;
 }
 
-/// Leases keep the connection window spent until consumed, while a stream window far smaller
-/// than it keeps replenishing; a lease outlives its stream.
+/// Leases keep the connection window spent until consumed, while a reader waiting for more than
+/// a stream window far smaller than it gets room for what it waits on; a lease outlives its
+/// stream.
 #[tokio::test]
 async fn leases_spend_the_connection_window() {
 	const WINDOW: usize = 32 * 1024;

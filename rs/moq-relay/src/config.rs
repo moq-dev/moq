@@ -329,7 +329,6 @@ impl Config {
 		self.check_runtime()?;
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
-		#[cfg(feature = "cluster-lan")]
 		self.check_lan()?;
 
 		self.quic
@@ -364,18 +363,8 @@ impl Config {
 		);
 		#[cfg(not(target_os = "linux"))]
 		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
-		#[cfg(all(target_os = "linux", not(feature = "_uring")))]
-		anyhow::ensure!(
-			!io_uring,
-			"runtime.io_uring needs moq-relay built with the `io-uring` feature"
-		);
 		// Refused rather than ignored: a group is the whole point of the setting, and
 		// silently serving from the shared runtime instead would look like it worked.
-		#[cfg(not(feature = "_quic"))]
-		anyhow::ensure!(
-			io_uring || !workers,
-			"runtime.workers needs moq-relay built with the `quic` feature"
-		);
 		Ok(())
 	}
 
@@ -390,8 +379,7 @@ impl Config {
 		if self.handoff.socket.is_none() {
 			return Ok(());
 		}
-		#[cfg(not(target_os = "linux"))]
-		anyhow::bail!("handoff.socket is Linux-only");
+		anyhow::ensure!(cfg!(target_os = "linux"), "handoff.socket is Linux-only");
 		// Static and API peers share one dial socket on a fixed port, bound at startup and
 		// not handed on: a successor could not bind it beside the relay it replaces.
 		anyhow::ensure!(
@@ -408,17 +396,15 @@ impl Config {
 	}
 
 	/// Refuse LAN discovery this relay cannot advertise or dial.
-	#[cfg(feature = "cluster-lan")]
 	fn check_lan(&self) -> anyhow::Result<()> {
 		if !self.cluster.lan.enabled {
 			return Ok(());
 		}
 		// The io_uring workers always bind QUIC (`check_runtime` requires their bind). The
-		// tokio listener and workers need the `quic` feature, and the workers bind the
-		// default address when `--listen` is unset.
+		// tokio workers bind the default address when `--listen` is unset.
 		let tokio = self.listen.serves_quic() || self.runtime.workers().is_some();
 		anyhow::ensure!(
-			self.runtime.io_uring() || (cfg!(feature = "_quic") && tokio),
+			self.runtime.io_uring() || tokio,
 			"--cluster-lan needs a QUIC listener (--listen) to advertise. See https://doc.moq.dev/bin/relay/cluster."
 		);
 		// A fingerprint is advertised only for a certificate generated or supplied in memory.
@@ -907,7 +893,7 @@ root = ["ca.pem"]
 			"[handoff]\nsupervise = true\n",
 			"handoff.supervise needs handoff.socket",
 		);
-		#[cfg(all(target_os = "linux", feature = "_quic"))]
+		#[cfg(target_os = "linux")]
 		{
 			// The QUIC port is handed on as a worker group, which the shared listener is not.
 			let quic = "[listen]\nbind = \"127.0.0.1:0\"\n";
@@ -942,7 +928,7 @@ root = ["ca.pem"]
 	}
 
 	/// LAN discovery needs a QUIC port and an identity to advertise.
-	#[cfg(all(feature = "cluster-lan", feature = "uds", unix))]
+	#[cfg(unix)]
 	#[test]
 	fn lan_discovery_needs_something_to_advertise() {
 		let refuse = |body: &str, needle: &str| {
@@ -955,18 +941,12 @@ root = ["ca.pem"]
 			&format!("{node}[listen.unix]\nbind = \"relay.sock\"\n"),
 			"needs a QUIC listener",
 		);
-		// The default listener is QUIC only in a build with a QUIC backend for it.
-		#[cfg(not(feature = "_quic"))]
-		refuse(node, "needs a QUIC listener");
-		#[cfg(feature = "_quic")]
-		{
-			refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
-			let workers = format!("{node}[listen.unix]\nbind = \"relay.sock\"\n[runtime]\nworkers = 1\n");
-			let config: Config = toml::from_str(&workers).expect("parse");
-			config.resolve().expect("workers serve QUIC on the default address");
-			let config: Config = toml::from_str(node).expect("parse");
-			config.resolve().expect("a node URL and the default QUIC listener");
-		}
+		refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
+		let workers = format!("{node}[listen.unix]\nbind = \"relay.sock\"\n[runtime]\nworkers = 1\n");
+		let config: Config = toml::from_str(&workers).expect("parse");
+		config.resolve().expect("workers serve QUIC on the default address");
+		let config: Config = toml::from_str(node).expect("parse");
+		config.resolve().expect("a node URL and the default QUIC listener");
 	}
 
 	/// The canonical top-level table, which is what the demo configs use.
@@ -1099,7 +1079,6 @@ io_uring = false
 ws = false
 
 "#;
-		#[cfg(feature = "websocket")]
 		let toml = format!("{toml}\n[connect.websocket]\nenabled = false\n");
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("runtime-toml-wins.toml");
@@ -1118,7 +1097,6 @@ ws = false
 			"TOML's runtime.io_uring=false must survive the merge"
 		);
 		assert!(!config.web.ws, "TOML's web.ws=false must survive the merge");
-		#[cfg(feature = "websocket")]
 		assert_eq!(
 			config.connect.websocket.enabled,
 			Some(false),
@@ -1131,14 +1109,12 @@ ws = false
 			std::ffi::OsString::from("--runtime-pin=true"),
 			std::ffi::OsString::from("--runtime-workers=auto"),
 			std::ffi::OsString::from("--web-ws=true"),
-			#[cfg(feature = "websocket")]
 			std::ffi::OsString::from("--connect-websocket-enabled=true"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.runtime.pin);
 		assert_eq!(config.runtime.workers, crate::runtime::Workers::Auto);
 		assert!(config.web.ws);
-		#[cfg(feature = "websocket")]
 		assert_eq!(config.connect.websocket.enabled, Some(true));
 	}
 
@@ -1535,7 +1511,7 @@ ws = false
 				check: |config| assert_eq!(config.listen.preferred_v4, Some("192.0.2.1:443".parse().unwrap())),
 				source: "preferred_v4",
 			},
-			#[cfg(all(feature = "uds", unix))]
+			#[cfg(unix)]
 			Case {
 				name: "int-list-from-file",
 				toml: "[listen.unix]\nbind = \"/run/moq/internal.sock\"\n\n[listen.unix.allow]\nuid = [1001]\n",
@@ -1550,7 +1526,6 @@ ws = false
 				},
 				source: "uid",
 			},
-			#[cfg(feature = "cluster-lan")]
 			Case {
 				name: "newtype-from-file",
 				toml: "[cluster.lan]\nenabled = true\napp = \"custom\"\n",
@@ -1729,7 +1704,6 @@ ws = false
 			"requires --listen-quic-lb-id",
 		);
 
-		#[cfg(feature = "quic")]
 		{
 			let dir = tempfile::tempdir().unwrap();
 			let path = dir.path().join("typed.toml");

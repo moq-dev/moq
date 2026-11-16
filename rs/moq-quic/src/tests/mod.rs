@@ -1194,7 +1194,7 @@ fn deferred_accept_uses_handshake_idle_timeout() {
 	pair.time = start.saturating_add(Duration::from_secs(3));
 	assert!(pair.server.try_accept(delayed, pair.time).is_ok());
 
-	pair.time = start.saturating_add(Duration::from_secs(10));
+	pair.time = start.saturating_add(transport::Config::default().handshake_timeout);
 	assert_matches!(pair.server.try_accept(late, pair.time), Err(ConnectionError::TimedOut));
 }
 
@@ -6207,7 +6207,6 @@ fn application_close_in_initial_is_rejected() {
 	);
 }
 
-#[cfg(feature = "qlog")]
 #[test]
 fn qlog_packet_lost_trigger() {
 	use qlog::events::{EventData, quic::PacketLostTrigger};
@@ -6269,7 +6268,6 @@ fn qlog_packet_lost_trigger() {
 	);
 }
 
-#[cfg(feature = "qlog")]
 #[test]
 fn qlog_pacing_rate_is_bits_per_second() {
 	use qlog::events::EventData;
@@ -6566,7 +6564,8 @@ fn gso_train_fits_one_udp_send() {
 }
 
 /// A congestion callback, as the transport reported it. Packets are named by send time, which
-/// several packets can share.
+/// several packets can share. `LossDone` and `AckDone` end each loss and ACK callback, with its
+/// `now`.
 #[derive(Debug, Clone, Copy)]
 enum PacketEvent {
 	Sent { at: Instant },
@@ -6574,6 +6573,8 @@ enum PacketEvent {
 	Lost { sent: Instant },
 	Congestion { sent: Instant, ecn: bool },
 	AppLimited { in_flight: u64 },
+	LossDone { now: Instant },
+	AckDone { now: Instant },
 }
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
@@ -6606,6 +6607,7 @@ impl Controller for PacketRecorder {
 		for acked in ack.packets {
 			self.push(PacketEvent::Acked { sent: acked.sent });
 		}
+		self.push(PacketEvent::AckDone { now: ack.now });
 	}
 
 	fn on_loss(&mut self, loss: congestion::Loss<'_>) {
@@ -6617,6 +6619,7 @@ impl Controller for PacketRecorder {
 			sent: newest.sent,
 			ecn: false,
 		});
+		self.push(PacketEvent::LossDone { now: loss.now });
 	}
 
 	fn on_ce(&mut self, ce: congestion::Ce) {
@@ -6711,7 +6714,7 @@ fn check_packet_resolution(log: &PacketLog) -> Vec<PacketEvent> {
 					assert_eq!(Some(at), last_lost, "loss congestion names another packet");
 				}
 			}
-			PacketEvent::AppLimited { .. } => {}
+			PacketEvent::AppLimited { .. } | PacketEvent::LossDone { .. } | PacketEvent::AckDone { .. } => {}
 		}
 	}
 	events
@@ -6786,6 +6789,62 @@ fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, Pac
 	// The client builds its controller before the server hears of it.
 	let log = factory.logs.lock().unwrap()[0].clone();
 	(pair, client_ch, log)
+}
+
+/// An ACK that reveals losses reports them to the controller before itself, as RFC 9002's
+/// OnAckReceived orders them, so the loss response shapes that ACK's processing.
+#[test]
+fn ack_reports_its_losses_first() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, log) = recorded_pair(Default::default());
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 16 * 1024][..]).unwrap();
+	pair.drive_client();
+	// Drop the first of the flight, so the ACK of the rest declares it lost by packet threshold.
+	assert!(
+		pair.server.inbound.len() > 4,
+		"too few packets for a packet-threshold loss"
+	);
+	pair.server.inbound.pop_front();
+	// The server takes the rest a microsecond apart, so each ACK it sends arrives at its own
+	// instant, which then names the ACK a loss was found by.
+	for (i, (arrival, ..)) in pair.server.inbound.iter_mut().enumerate() {
+		*arrival = arrival.saturating_add(Duration::from_micros(i as u64));
+	}
+	while let Some(&(arrival, ..)) = pair.server.inbound.front() {
+		pair.time = pair.time.max(arrival);
+		pair.drive_server();
+	}
+	assert!(pair.client.inbound.len() > 1, "too few ACKs to tell apart");
+	pair.drive();
+
+	let events = check_packet_resolution(&log);
+	let losses: Vec<_> = events
+		.iter()
+		.enumerate()
+		.filter_map(|(i, e)| match e {
+			PacketEvent::LossDone { now } => Some((i, *now)),
+			_ => None,
+		})
+		.collect();
+	assert!(!losses.is_empty(), "no loss reported");
+	for (i, now) in losses {
+		assert!(
+			!events[..i]
+				.iter()
+				.any(|e| matches!(e, PacketEvent::AckDone { now: at } if *at == now)),
+			"the ACK that revealed a loss was reported before it"
+		);
+		assert!(
+			events[i..]
+				.iter()
+				.any(|e| matches!(e, PacketEvent::AckDone { now: at } if *at == now)),
+			"the ACK that revealed a loss was never reported"
+		);
+	}
 }
 
 /// Counts the congestion events one controller's log reports for CE marks.
@@ -7022,17 +7081,6 @@ fn leased(pair: &mut Pair, server_ch: ConnectionHandle) -> usize {
 	pair.server_conn_mut(server_ch).stats().credit.leased as usize
 }
 
-/// Lease what has arrived on `s`, read `n` bytes of it, and release their credit, returning
-/// whether the peer finished the stream right after the leased bytes.
-fn consume(pair: &mut Pair, server_ch: ConnectionHandle, s: StreamId, n: usize) -> bool {
-	let mut recv = pair.server_recv(server_ch, s);
-	let mut lease = recv.lease(0).unwrap();
-	let fin = lease.is_fin();
-	lease.advance(n);
-	recv.release(lease);
-	fin
-}
-
 /// Write what the client can of `msg` up to `until`, finishing at its end, and lease what the
 /// server can, without consuming, until neither makes progress. Returns the bytes newly leased.
 fn pump_leased(
@@ -7071,20 +7119,18 @@ fn pump_leased(
 	}
 }
 
-/// Leases keep replenishing a stream window much smaller than the connection's, while the
-/// connection window stays spent until the bytes are consumed. A consume below the usual
-/// `MAX_DATA` threshold still unblocks the peer once it nears its limit, without relying on its
-/// DATA_BLOCKED.
-///
-/// The peer never spends the whole window: a lease held then would be evicted, since nothing
-/// could free it.
+/// A reader that leases without taking holds one stream window, however large the
+/// connection's: stream credit returns as bytes are taken, and connection credit once they are
+/// released. So a reader that stops taking, as moq-net's ingest does to pace a slow reader,
+/// never spends the connection window, which would get its stream evicted.
 #[test]
-fn lease_spends_connection_window_only() {
+fn leases_hold_one_stream_window() {
 	const WINDOW: usize = 4000;
+	const STREAM: usize = 1000;
 	let _guard = subscribe();
 	let mut transport = transport::Config::default();
 	transport.limits.receive_window = NonZeroU64::new(WINDOW as u64);
-	transport.limits.stream_receive_window = NonZeroU64::new(1000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
 	let mut pair = Pair::new(
 		Default::default(),
 		server::Config {
@@ -7099,26 +7145,106 @@ fn lease_spends_connection_window_only() {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	let msg = vec![0xAB; WINDOW + 50];
+	let all = msg.len();
 	let mut sent = 0;
 
-	// Three stream windows' worth, all leased and none consumed.
-	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, 3000), &mut sent), 3000);
+	// Leased and never taken: one stream window.
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), STREAM);
 	let stats = pair.server_conn_mut(server_ch).stats().credit;
-	assert_eq!((stats.leased, stats.available), (3000, 1000));
+	assert_eq!(
+		(stats.leased, stats.available),
+		(STREAM as u64, (WINDOW - STREAM) as u64)
+	);
 
-	// Too little to announce while the peer has room, so the peer blocks at the window, and the
-	// frame that spends the last of its room is what announces it.
-	assert!(!consume(&mut pair, server_ch, s, 100));
-	let all = msg.len();
-	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 1050);
-	assert_eq!(sent, msg.len());
-	assert_eq!(leased(&mut pair, server_ch), WINDOW + 50 - 100);
+	// Taken but restored, as the start of a message is, keeps the connection credit and
+	// returns the stream credit.
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(500);
+	recv.restore(lease);
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 500);
+	let stats = pair.server_conn_mut(server_ch).stats().credit;
+	assert_eq!((stats.leased, stats.available), (1500, (WINDOW - 1500) as u64));
 
-	let all = leased(&mut pair, server_ch);
-	assert!(consume(&mut pair, server_ch, s, all), "finished after the leased bytes");
+	// Taking and releasing everything delivers the rest of the message.
+	let mut read = 500;
+	for _ in 0..all {
+		let mut recv = pair.server_recv(server_ch, s);
+		let mut lease = recv.lease(0).unwrap();
+		let (len, fin) = (lease.remaining(), lease.is_fin());
+		lease.advance(len);
+		recv.release(lease);
+		read += len;
+		if fin {
+			break;
+		}
+		pump_leased(&mut pair, chs, s, (&msg, all), &mut sent);
+	}
+	assert_eq!((sent, read), (all, all));
 	assert_eq!(leased(&mut pair, server_ch), 0);
 	pair.server_recv(server_ch, s).stop(0u32.into()).unwrap();
 	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
+}
+
+/// Lease `want` bytes of `s` once they arrive, driving the pair until they do, and hand them
+/// back unread.
+fn await_unit(
+	pair: &mut Pair,
+	(client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+	s: StreamId,
+	msg: &[u8],
+	sent: &mut usize,
+	want: usize,
+) {
+	for _ in 0..msg.len() {
+		if let Ok(n) = pair.client_send(client_ch, s).write(&mut &msg[*sent..]) {
+			*sent += n;
+		}
+		pair.drive();
+		let mut recv = pair.server_recv(server_ch, s);
+		match recv.lease(want) {
+			Ok(lease) => {
+				assert!(lease.remaining() >= want);
+				recv.restore(lease);
+				return;
+			}
+			Err(err) => assert_eq!(err, recv::Error::Blocked),
+		}
+	}
+	panic!("{want} bytes never arrived: {sent} sent");
+}
+
+/// A reader waiting for a unit larger than its stream window gets room for the unit, and after
+/// taking a few bytes, room for the few more its next unit needs, however far below the usual
+/// update threshold.
+#[test]
+fn a_waiting_reader_gets_room_for_its_unit() {
+	const STREAM: usize = 1000;
+	const UNIT: usize = 3000;
+	let _guard = subscribe();
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(4000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::new(
+		Default::default(),
+		server::Config {
+			transport,
+			..server_config()
+		},
+	);
+	let chs = pair.connect();
+	let s = pair.client_streams(chs.0).open(Dir::Uni, Default::default()).unwrap();
+	let msg = vec![0xAB; UNIT + 10];
+	let mut sent = 0;
+
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+
+	let mut recv = pair.server_recv(chs.1, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(10);
+	recv.release(lease);
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+	assert_eq!(sent, msg.len());
 }
 
 #[test]

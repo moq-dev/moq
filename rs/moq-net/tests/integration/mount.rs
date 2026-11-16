@@ -176,12 +176,95 @@ async fn relayed(version: &str) {
 	);
 }
 
+/// `W -> R -> V`: `W`'s worker claims `tenant-a`, which covers the mount's target, and
+/// answers a request for `tenant-a/public/cam` with that exact path under the claim's
+/// instance. `V` reads `R` through tenant B's mounted handle, or plain when `mounted` is
+/// false, and asks for the camera by the name its handle gives it.
+///
+/// Proves the answer arrives beneath the mount point exactly as it does unmounted, as
+/// `claim_continues::chain` pins it: the claim starts at the mount point, the answer
+/// starts beneath it under the lent instance, and the first subscription continues on
+/// lite-07 while an older wire's resets once.
+async fn claimed(version: &str, mounted: bool) {
+	use crate::claim_continues::{Worker, drain, kinds, settle, watch};
+
+	let version: Version = version.parse().unwrap();
+	let worker = Worker::new(1, "tenant-a", "w");
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let _upstream = link(version, worker.origin.consume(), &relay).await;
+	let (handle, claim, answer) = match mounted {
+		true => (tenant(&relay, "tenant-b"), "shared", "shared/cam"),
+		false => (relay.consume(), "tenant-a", "tenant-a/public/cam"),
+	};
+	let _downstream = link(version, handle, &viewer).await;
+	settle().await;
+
+	let mut routes = viewer.consume().routes();
+	assert_eq!(
+		kinds(&drain(&mut routes).await),
+		[("start", claim.to_string())],
+		"{version}"
+	);
+
+	let continues = version.to_string() == "moq-lite-07-wip";
+	assert_eq!(watch(continues, &viewer, answer).await, "w0", "{version}");
+	assert_eq!(worker.served(), 1, "{version}");
+
+	let events = drain(&mut routes).await;
+	assert_eq!(kinds(&events), [("start", answer.to_string())], "{version}");
+	if continues {
+		assert_eq!(events[0].2, worker.claim.instance(), "{version}");
+	}
+
+	// A late snapshot starts what stands.
+	let mut late = viewer.consume().routes();
+	assert_eq!(
+		kinds(&drain(&mut late).await),
+		[("start", claim.to_string()), ("start", answer.to_string())],
+		"{version}: a late snapshot"
+	);
+}
+
+/// A claim above the mount's target covers all of the mount, so a reader of the mounted handle
+/// takes it over a claim at the mount point's parent: the handle resolves the mount point's
+/// paths through the target, whichever claims are above the mount point.
+///
+/// `W1`'s claim at the origin's root covers the target `tenant-a/public` and is shown at it, two
+/// segments above. Renamed beneath the mount point `tenant-b/x/shared` it is three deep, and
+/// carried as two above would rank below `W2`'s exact claim at `tenant-b/x`, which the handle
+/// never resolves a path beneath the mount through.
+#[kio::test]
+async fn a_claim_above_the_target_outranks_a_claim_above_the_mount_point() {
+	use crate::claim_continues::{Worker, settle, watch};
+
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let root = Worker::new(1, "", "root");
+	let rival = Worker::new(3, "tenant-b/x", "rival");
+	let relay = produce_origin(2);
+	let viewer = produce_origin(4);
+	let _roots = link(version, root.origin.consume(), &relay).await;
+	let _rivals = link(version, rival.origin.consume(), &relay).await;
+	let handle = relay
+		.mount("tenant-b/x/shared", "tenant-a/public")
+		.unwrap()
+		.scope("", &Patterns::from(Pattern::all()))
+		.unwrap()
+		.with_proxy(true)
+		.consume();
+	let _downstream = link(version, handle, &viewer).await;
+	settle().await;
+
+	assert_eq!(watch(true, &viewer, "tenant-b/x/shared/cam").await, "root0");
+	assert_eq!(rival.served(), 0, "the claim above the mount point was asked");
+}
+
 macro_rules! mounted_tests {
-	($($name:ident: $test:ident, $version:literal,)*) => {
+	($($name:ident: $test:ident($($arg:expr),*),)*) => {
 		$(
 			#[kio::test]
 			async fn $name() {
-				kio::clock::timeout(TEST_TIMEOUT, $test($version))
+				kio::clock::timeout(TEST_TIMEOUT, $test($($arg),*))
 					.await
 					.expect("timed out");
 			}
@@ -190,10 +273,14 @@ macro_rules! mounted_tests {
 }
 
 mounted_tests! {
-	mounted_lite06: mounted, "moq-lite-06",
-	mounted_lite07: mounted, "moq-lite-07-wip",
-	rooted_inside_lite06: rooted_inside, "moq-lite-06",
-	rooted_inside_lite07: rooted_inside, "moq-lite-07-wip",
-	relayed_lite06: relayed, "moq-lite-06",
-	relayed_lite07: relayed, "moq-lite-07-wip",
+	mounted_lite06: mounted("moq-lite-06"),
+	mounted_lite07: mounted("moq-lite-07-wip"),
+	rooted_inside_lite06: rooted_inside("moq-lite-06"),
+	rooted_inside_lite07: rooted_inside("moq-lite-07-wip"),
+	relayed_lite06: relayed("moq-lite-06"),
+	relayed_lite07: relayed("moq-lite-07-wip"),
+	claimed_unmounted_lite06: claimed("moq-lite-06", false),
+	claimed_unmounted_lite07: claimed("moq-lite-07-wip", false),
+	claimed_beneath_the_mount_lite06: claimed("moq-lite-06", true),
+	claimed_beneath_the_mount_lite07: claimed("moq-lite-07-wip", true),
 }

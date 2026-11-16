@@ -28,10 +28,18 @@ transport is driven, which is what makes that handoff free here too.
 moq-tokio spawns each qmux `Driver` on its own runtime (`spawn_qmux` in
 `rs/moq-tokio/src/lib.rs`), so its `tcp::Listener::accept`,
 `websocket::Listener::accept`, and `websocket::accept` return only the session.
-A worker must run the driver on its own local task set instead, so this quest
-reshapes `moq_tokio::websocket::accept` (or adds a sibling) to hand the driver
-back; the qmux constructors already return it (decided 2026-11-01, maintainer,
-in [moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)).
+A worker must run the driver on its own local task set instead, so
+`moq_tokio::websocket::accept` must hand the driver back; the qmux
+constructors already return it (decided 2026-11-01, maintainer, in
+[moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)).
+
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ reshape
+`moq_tokio::websocket::accept` itself to return the session and its driver
+(rejected: an additive sibling beside it). That breaks moq-tokio's published
+API, which the lab never touches, so ✅ the reshape is its own m2 quest,
+[WebSocket accept hands back the driver](/quest/m2/websocket-accept-driver.md),
+listed in Required (rejected: landing it here with the rust2 migration).
+This quest keeps only the relay's internal half.
 
 Keep the ops and web listeners' behavior identical: the same routes, the same
 CORS scoping, the same landing-page fallback, and the same
@@ -39,11 +47,8 @@ CORS scoping, the same landing-page fallback, and the same
 to prove a WebSocket session and an HTTP route both work when served from a
 worker.
 
-## Waiting
-
-- Maintainer: how moq-tokio hands a WebSocket session's driver back, since this lab quest must not change a published API without a decision. Options: add an additive sibling beside `moq_tokio::websocket::accept` that returns the session and its driver, or reshape `websocket::accept` itself, which breaks moq-tokio and would have to land before the cut. Recommendation: the additive sibling, so nothing here waits on the cut.
-
 ## Required
 
+- [WebSocket accept hands back the driver](/quest/m2/websocket-accept-driver.md) - the moq-tokio API that returns the qmux driver for a worker to run
 - [Ring TCP](/quest/m9/stream-transports/ring.md) - the module and adapters this
   serves from

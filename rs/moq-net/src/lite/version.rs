@@ -210,15 +210,6 @@ impl Version {
 		)
 	}
 
-	/// Whether FETCH carries a `Start Byte` within its first frame, so a reader cut off
-	/// partway through a frame asks for only the rest of it. Added in lite-07.
-	pub(crate) fn has_byte_start(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether this version's SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO
 	/// carry the retired `Ordered` byte.
 	///
@@ -400,16 +391,6 @@ impl Version {
 	/// carry no Hop ID, and requests name the origin's Node ID and its route's depth.
 	/// Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and
-	/// WARM_END), and SUBSCRIBE and SUBSCRIBE_UPDATE say whether each pull joins the
-	/// publisher's copy. Added in lite-07.
-	pub(crate) fn has_warm(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

@@ -1324,6 +1324,46 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A replaced copy that ran out stays out once the track's end bounds it, so local
+		// bounds below the range end the read with the track.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 0 },
+				Op::Join {
+					reader: 3,
+					spec: spec(false, Budget::Hour, Some((3, 4)), false),
+				},
+				Op::Up { instance: 1, slot: 1 },
+				Op::Bounds {
+					reader: 3,
+					range: Some((0, 1)),
+				},
+			],
+			finish: true,
+		},
+		// A backfill's cap cuts short where it resolves a time range's end, which then says
+		// nothing of where the reader's range ends.
+		Case {
+			ops: vec![
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(7),
+					frames: 2,
+				},
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Down { instance: 0, slot: 0 },
+				Op::Ranges {
+					reader: 2,
+					range: Some((6, 9)),
+				},
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

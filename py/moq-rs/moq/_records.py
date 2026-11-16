@@ -411,7 +411,7 @@ class QuicConfig:
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
     the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
     ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
-    directory, which must exist, for qlog traces when :func:`qlog_supported`.
+    directory, which must exist, for qlog traces.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
     decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
     ``None`` keeps the library default throughout.

@@ -1,8 +1,6 @@
 //! Sessions admission refuses reach `/metrics` by reason, through a real relay
 //! over QUIC and WebSocket.
 
-#![cfg(feature = "_quic")]
-
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -51,10 +49,6 @@ struct Running {
 	stats: moq_net::stats::Registry,
 	origin: moq_net::origin::Consumer,
 	quic: SocketAddr,
-	#[cfg_attr(
-		not(feature = "websocket"),
-		allow(dead_code, reason = "only the `websocket` feature uses it")
-	)]
 	http: SocketAddr,
 	metrics: String,
 	trigger: moq_relay::shutdown::Trigger,
@@ -157,7 +151,6 @@ async fn refused_sessions_are_counted() {
 }
 
 /// The WebSocket path counts a refusal the same way.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_refused_sessions_are_counted() {
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -550,7 +543,7 @@ async fn tokio_refuses_uri_setup_paths() {
 	uri_setup_paths(false).await;
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_refuses_uri_setup_paths() {
 	match moq_uring::Worker::new(Default::default()) {

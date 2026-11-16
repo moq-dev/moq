@@ -2,7 +2,7 @@
 	"name": "@moq/crypto",
 	"type": "module",
 	"version": "0.0.0",
-	"description": "Content signing and end-to-end encryption for MoQ broadcasts.",
+	"description": "End-to-end encryption for MoQ broadcasts.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
 		"type": "git",

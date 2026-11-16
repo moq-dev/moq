@@ -142,21 +142,14 @@ Xcode or Visual Studio 2022, plus Rust and
 [`uniffi-bindgen-cpp`](/lib/cpp/) to build the C++ package in-tree; see
 [`cpp/obs/`](https://github.com/moq-dev/moq/tree/main/cpp/obs).
 
-To capture qlog traces, configure a source build with `-DMOQ_FFI_QLOG=ON`, for
-example `cmake --preset ubuntu-x86_64 -DMOQ_FFI_QLOG=ON` before `just obs build`.
-It builds moq-ffi with its `qlog` feature, which adds a qlog directory to the
-advanced settings. It is off by default, and the prebuilt archives leave it
-out, so configuration fails if the C++ package would come from a release
-archive or `MOQ_FFI_DIR`.
-
 ## Advanced settings
 
 Off by default; the defaults suit a normal relay. They cover what you would
 otherwise pass to `moq` on the command line: pinning a protocol version, the
 local bind address and connect timing, trusting a self-signed relay or private
 CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
-keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
-supports them), and the WebSocket fallback race. A keep-alive interval of 0
+keep-alive, segmentation offload, MTU discovery, and qlog traces), and the
+WebSocket fallback race. A keep-alive interval of 0
 uses the negotiated idle timeout to choose how often to ping. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's

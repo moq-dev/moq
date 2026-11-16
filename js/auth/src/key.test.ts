@@ -150,7 +150,7 @@ test("parse - a field with non-base64 characters is refused, whatever its length
 	expect(() => Key.parse(encodeJwk(invalidKey))).toThrow();
 });
 
-test("parse - accepts a JWK in standard padded base64", () => {
+test("parse - refuses a JWK in standard padded base64, as moq-auth does", () => {
 	// The note survives as "+" and "/" in standard base64, and the kid length forces padding.
 	const json = JSON.stringify({ ...testKey, kid: "key-1", note: "~~~???" });
 	const encoded = Buffer.from(json).toString("base64");
@@ -158,9 +158,9 @@ test("parse - accepts a JWK in standard padded base64", () => {
 	expect(encoded).toMatch(/\//);
 	expect(encoded).toMatch(/=$/);
 
-	const key = Key.parse(encoded);
-	expect(key.kid).toBe("key-1");
-	expect((key as { k?: string }).k).toBe(testKey.k);
+	expect(() => Key.parse(encoded)).toThrow(/invalid base64url/);
+	expect(() => Key.parse(encoded.replace(/=+$/, ""))).toThrow(/invalid base64url/);
+	expect(Key.parse(Buffer.from(json).toString("base64url")).kid).toBe("key-1");
 });
 
 test("generate - an HMAC secret is unpadded base64url that round-trips", async () => {

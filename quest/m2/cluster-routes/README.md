@@ -49,11 +49,13 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
     - A hop names a relay and the session it learned the route on. A relay uses the cheapest route whose path does not name it, at once.
     - A relay that loses a session names that hop, and every relay drops every route through it, whoever offered it. One message per session covers every publisher and lists the routes that moved to another path.
     - A relay with no route left holds its claims, unavailable, until each neighbour that learned the route from it has answered: with another way, or with nothing once those behind it have answered. Then it lets go.
-    - A closed session casts doubt on the node at its far end, since a dead relay is reported one neighbour at a time. No relay moves to a route through that node until a timer lifts the doubt. The route a relay already uses is exempt.
+    - A closed session casts doubt on the node at its far end, since a dead relay is reported one neighbour at a time. No relay moves to a route through that node until a timer lifts the doubt. The route a relay already uses is exempt, and so is a route that begins at that node, unless it comes over a session to that node opened since the doubt began (below).
 
     The maintainer delegated these decisions to the coordinator while away, recorded 2026-11-13: "The user is away; the coordinator takes recommendations on their behalf, open to change in review."
 
     Decided 2026-11-13 (maintainer via the authorized coordinator, `/quest-afk`, while the maintainer was away, open to change in review): ✅ keep doubt until the one-second timer fires (rejected: early collection, which allows the request loop `Loop.cfg` recorded). The model and CI's path-rule sweeps use this timer baseline. ✅ keep separate claim handling until the switch removes Babel (rejected: requiring one shared claim engine now); `Reader` and `View` remain shared. A fresh publisher's exemption was to be modeled and measured separately; the decision below covers it.
+
+    Decided 2026-11-14 (taken by the agent under `/quest-afk`, for the maintainer's review, on [the flapping publisher](https://github.com/moq-dev/moq/pull/8734)): ✅ **doubt blocks a route through a node, not one that begins at it, except the node's own route on a session to it that opened since the doubt began.** A publisher on two relays whose link to one flaps faster than the timer stays routed through the other: a relay that already hears a route through the other home that does not name it keeps one the whole time, as every relay does in the measured mesh (the two homes joined, a third relay behind both), and a relay whose neighbours all route through it is routed again once one of them re-offers, a round trip after the news, instead of after the timer. A publisher that moves to another relay is routed in 50 ms in a 24-relay clique and 325 ms in a ring, where it waited 1,100 and 1,850 ms. The returning link still waits out the timer, so no relay hears it until the relay it returned to takes it, which keeps the timer's damping of a flapping link: in 400 churn cases (120,000 steps) with the publisher on one relay, the rule costs 3% more route messages than timer-only doubt with no fewer relays routed, and with the publisher on two relays it routes relays 15% more often for 22% more route messages, 6% more claims sent, and 4% more claims taken offline. A relay cannot tell the publisher dying from one of its links closing, so the model shows the cost: a publisher on three or more relays that leaves them all at once can send a request round them, each on a neighbour's direct route that neighbour's own close made stale, until the news arrives one hop later (`Homes.cfg`, `LoopsLostThePublisher`). The two-home churn, which flaps random links and restarts relays but never takes a publisher off three relays, shows a route loop in 51 of its 120,000 steps. With two homes the model finds no loop and no claim dropped (`TwoHomes.cfg`), given a timer that outlasts every stale offer as well as the DEAD (`Patient`). This also settles the fresh-publisher quest, which proposed the opposite exemption and is deleted: its measurements showed that taking a returning link at once costs more traffic and claims offline than it saves. Rejected: keeping timer-only doubt, under which a dual-homed publisher's other link is unusable for the whole timer; sparing every route that begins at the doubted node, which routes relays 67% more often with two homes but costs 121% more route messages, 76% more claims sent, and 69% more claims offline, since each return of a flapping link reaches every relay; sparing only links heard before the doubt began, which keeps the damping but rarely helps a relay whose neighbours had not chosen the other link; exempting the publisher only at relays that heard of the close in a DEAD, which leaves the relay on the flapping link dark; a liveness message the publisher floods along its routes when it loses a session, which keeps requests loop-free but adds a wire message, still leaves relays dark for a round trip, and waited on [the switch](https://github.com/moq-dev/moq/pull/8731); holding under a next hop that has yet to answer a dead route whatever its path, which the router's sweeps showed can hold for good.
 
     Measured on 24 relays (the mesh sweep's sparse shape, 16 seeds), against today's router, with the doubt lasting 4 hops of delay: a detour settles in 12 hops of delay where the distance takes 15.7, and in 6.2 where it does not run through the far end of the closed link; the publisher's relay dying costs 124 route messages where the distance costs 276, with no loop and 6 claims sent again; and a link closing in a clique costs 44 messages with one publisher behind it and 198 with eight, where the distance costs 621 and 5,024. Accepted: a detour through the far end of a closed link waits the timer out; selected routes can loop for a moment when two unrelated things fail at once (32 of 120,000 churn steps), which the distance never does; and holds and doubt have passed sweeps. The model covers both, but its no-stale-route property holds only for one failure and a patient timer; `StaleIsChased` bounds the rest. The timer's length is the model's and the router's to settle, from the maintainer's 1 s. Rejected: Babel's distance; paths with nothing else, which hunt through stale paths (65,219 messages for one publisher leaving a clique of 12); no doubt, which loops when a relay with several neighbours dies; and a doubt lifted by an epoch the node floods, which resolves in a couple of hops but costs a message per session on each relay-to-relay close ("Epoches are a bit scary in terms of messages").
 
@@ -80,6 +82,8 @@ The items below were decided 2026-11-10 (maintainer, /quest-plan on lite-07 rout
 
 30. ✅ Decided 2026-11-12 (maintainer, /quest-audit before the cut), after a survey of BGP, EIGRP, and their successors against item 27: most of the path rule already matches that prior art (AS_PATH loop detection, root-cause withdrawal, graceful restart, End-of-RIB, outbound route filtering, and item 29's Only-To-Customer flag). Three gaps are taken, all in [the switch](https://github.com/moq-dev/moq/pull/8731) and [acceptance](/quest/m2/cluster-routes/acceptance.md): **a dead-hop message on a scoped session applies only to the routes heard on that session and casts no doubt**, since in BGP a neighbour withdraws only what it sent, and a scoped peer (a federated relay, later a browser) could otherwise name a core hop it only read in a path and drop healthy routes outside its scope; **holds are bounded in time**, a neighbour's missing answer counting as nothing after a deadline, and a session whose announce stream has stopped draining is closed, which avoids EIGRP's stuck-in-active and BGP's zombie routes (RFC 9687), and is safe because a hold protects presence, not loop freedom; and **three tests before any design change**: neighbours noticing a dead relay up to the 3 s keep-alive apart (to size the doubt timer, measured in hops of delay today), a three-relay priority dispute wheel (RFC 4264's wedgies, since priority ranks above cost), and a primary that fails and returns. No wire bytes change; the first defines what the dead-hop message means. Rejected: declaring the link relation in SETUP and refusing leaked routes on receipt (RFC 9234), since the accepting side already knows the relation from its grant and it adds wire for a misconfiguration; MRAI and route-flap damping, which exist because BGP delays announcements; link state; per-hop signatures.
 
+31. Reopened 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅ **this rule is the baseline, and [cache-aware multicast](/quest/m2/multicast/README.md) replaces it on lite-07-wip before the cut.** An audit of what is built found requirements the path rule does not meet: its exhaustive checking stops at 3 relays and rests on a timer that outlasts every stale offer, route state follows publishers, nothing prefers a warm copy, and a stalled route is never left. Superseded there: item 18 (every publisher an origin node), item 19 (ROUTE_HOLD), item 26's route per scope, item 27's doubt and remembered dead hops, the Route Key and qualified Node IDs of the contract below, and item 14. Standing: the path with its self-naming rule and the withdrawal that names a dead hop (item 27), revisions and floors, one announce stream per side with its interest set (items 21 to 24), the sticky down-only flag (item 29), and drain, then priority, then cost. This epic's children still land: they are what the [bake-off](https://github.com/moq-dev/moq/pull/8880) measures against. Rejected: repairing this rule in place; freezing lite-07 with it and redesigning in lite-08.
+
 The route layer's core landed in
 [moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676): a
 crate-private, sans-IO `Router` in `rs/moq-net/src/route/`, generic over the
@@ -91,10 +95,11 @@ lite-07 session in Rust and `js/net` drives the path router
 deleted with its distance, seqno requests, and echo. The handoff fixtures,
 both sweeps, and the route-layer fixtures of the contract run against it in
 `route/tests/`, and real sessions with mocked time in
-`tests/integration/path_routes.rs`; the forwarding and first-hop selection
-fixtures still run only on the Babel-era reference model in
-`rs/moq-net/tests/integration/routing_contracts/`, which
-[acceptance](/quest/m2/cluster-routes/acceptance.md) deletes. The children below carry the rest, in order, and land in
+`tests/integration/path_routes.rs`. The forwarding fixtures run on the router
+in `route/tests/forward.rs`, and the topology, failover, and cluster
+acceptance fixtures on real sessions in `tests/integration/route_acceptance.rs`,
+`route_failover.rs`, and `route_cluster.rs`; the Babel-era reference model is
+deleted. The children below carry the rest, in order, and land in
 one release: lite-07 carries the route layer as a whole
 ([lite-07 finalize](/quest/m2/lite07-finalize.md) waits on this epic). This
 README holds the routing contract every child implements.
@@ -121,10 +126,7 @@ Settled by the core, for review:
 
 Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 2026-10-13 [decisions](/quest/m3/cluster-routing/README.md) and the routing
-contract below. The routing contract's remaining model fixtures live in
-`rs/moq-net/tests/integration/routing_contracts/` and run against a small reference model;
-port each topology to the implementation as acceptance, then delete the model.
-The handoff contract below, decided 2026-10-16, settles claim freshness:
+contract below. The handoff contract below, decided 2026-10-16, settles claim freshness:
 
 The lite-07 wire is specified in `drafts/draft-lcurley-moq-lite.md` (Announce,
 Floors, and Routing), and `rs/moq-net/src/lite/announce.rs` encodes and decodes
@@ -194,9 +196,8 @@ the bullets below are the contract it carries.
   id, when the connection's publish grant is scoped, and bare when it is
   unscoped (publish `**` at the root). Its own identity is no exception
   (2026-10-26): the bare exemption relied on the dropped proof, so an
-  unproven own identity could otherwise claim a victim's. Extend the fixture
-  below to a forger declaring the victim's id as its own, and drop the
-  reference model's `proved` exemption. The key has its own hash domain, so
+  unproven own identity could otherwise claim a victim's, as the fixture
+  below's forger does. The key has its own hash domain, so
   it cannot collide with a key-derived identity, and is collision-resistant
   at the identity width, since the forwarder picks `id` and could otherwise
   grind another peer's key. The relay that files it translates it back when
@@ -204,7 +205,7 @@ the bullets below are the contract it carries.
   outside the grant's scope. Routes are shared by all of an identity's
   claims, so otherwise a scoped peer forging an identity, or declaring a
   victim's id as its own, captures claims outside its namespace
-  (`forged_identity_hijacks_claims_outside_the_forgers_scope`); with it, a
+  (`a_forged_identity_is_contained_by_a_scoped_admission`); with it, a
   forger or a misconfigured uplink only affects its own scope. The `peer`
   claim no longer decides transit trust. Legitimate scoped delivery survives
   losing one of two uplinks under one key
@@ -219,7 +220,7 @@ the bullets below are the contract it carries.
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a
   misconfigured uplink comes back and is filed again as a new identity on
-  every lap (`scoped_connections_cannot_requalify_a_qualified_identity`).
+  every lap (`a_qualified_identity_is_never_qualified_again`).
   Nested scoped federation is therefore out: the inner level must be
   unscoped. Revisit with a wire change if a use case appears. Rejected:
   keying a forwarded identity by its bare id and the narrowest scope it
@@ -280,13 +281,14 @@ the bullets below are the contract it carries.
   when its selected route turns down-only, and the first hop re-resolves; no
   request bit goes on the wire. One selection hides a cheaper exportable
   route whenever the preferred route is down-only
-  (`preferred_down_only_route_hides_the_exportable_alternative`); this is
-  accepted, and ranking local peers above a backup uplink avoids it. The
-  two-view model it replaces lost its export restriction one LAN hop after an
-  upstream ingress, and identity-only aggregation deadlocked across views
-  (`cdn_never_reaches_its_own_relay_through_the_lan`,
-  `upstream_ingress_ends_a_request_whose_route_turns_down_only`,
-  `dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
+  (`a_preferred_down_only_route_hides_the_exportable_alternative`); this is
+  accepted, and ranking local peers above a backup uplink avoids it, though a
+  route's priority is the lowest on its path, so it must outrank the whole
+  path. The two-view model it replaces lost its export restriction one LAN hop
+  after an upstream ingress, and identity-only aggregation deadlocked across
+  views (`the_cdn_never_reaches_itself_through_the_lan`,
+  `an_upstream_request_stops_once_the_route_turns_down_only`,
+  `a_dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
   misconfigured uplink that leaks CDN routes back is contained by
   qualified identities rather than a downstream mark
   (`misconfigured_uplink_is_contained_by_qualified_identities`).

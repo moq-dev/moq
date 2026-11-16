@@ -19,7 +19,7 @@
 import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
-import { format, arrivals as readArrivals } from "./capture.ts";
+import { format, joined, arrivals as readArrivals } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
 
 /** How far back the relay may serve a group. Long, so a late group is recorded rather than dropped. */
@@ -30,7 +30,9 @@ export type Recorder = {
 	/** Arrivals since the last drain, `at` on this page's `performance.now()`. */
 	drain(): Arrival[];
 	/** The session and rendition, once subscribed. */
-	info(): { transport: string; rtt: number | null; config: Catalog.AudioConfig } | undefined;
+	info():
+		| { transport: string; rtt: number | null; largest: number | undefined; config: Catalog.AudioConfig }
+		| undefined;
 	/** The failure that stopped recording, if one did. */
 	error(): string | undefined;
 };
@@ -65,6 +67,7 @@ async function record(): Promise<void> {
 	const connection = await Moq.Connection.connect({ url: new URL(required("url")), consume: origin });
 
 	let rtt: number | null = null;
+	let largest: number | undefined;
 	connection.probe.subscribe((probe) => {
 		if (probe.rtt === undefined) return;
 		const sample = probe.rtt.asMillis();
@@ -96,12 +99,22 @@ async function record(): Promise<void> {
 		get rtt() {
 			return rtt;
 		},
+		get largest() {
+			return largest;
+		},
 		config,
 	};
+	const tuned = Promise.withResolvers<void>();
+	joined(track, tuned.promise)
+		.then((n) => {
+			largest = n;
+		})
+		.catch(fail);
 
 	for (;;) {
 		const group = await track.recvGroup();
 		if (!group) throw new Error("the track ended");
+		tuned.resolve();
 		(async () => {
 			for await (const arrival of readArrivals(group, { decoder, config })) arrivals.push(arrival);
 		})().catch(fail);

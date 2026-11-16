@@ -211,7 +211,7 @@ pub(crate) struct Rate {
     /// smoothed RTT, sped up by 5/4.
     pub window: u64,
     /// Bytes per second, which takes precedence over the window when present.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#name-pacing-rate-cpacing_rate>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#name-pacing-rate-cpacing_rate>
     pub pacing_rate: Option<u64>,
 }
 

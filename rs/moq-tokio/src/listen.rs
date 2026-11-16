@@ -15,7 +15,6 @@ pub enum Bind {
 
 impl Bind {
 	/// The socket address this names, resolving a host now.
-	#[cfg(feature = "quic")]
 	pub fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
@@ -101,16 +100,14 @@ pub struct Config {
 	#[usage(skip)]
 	pub(crate) listen: Option<String>,
 
-	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS). Requires the
-	/// `tcp` feature.
-	#[cfg(feature = "tcp")]
+	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS).
 	#[usage(flatten)]
 	#[serde(default)]
 	pub tcp: crate::tcp::Config,
 
 	/// Plaintext qmux Unix-socket listener (`--listen-unix-bind`) with an optional
-	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
-	#[cfg(all(feature = "uds", unix))]
+	/// peer-credential allowlist. Unix-only.
+	#[cfg(unix)]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub unix: crate::unix::Config,
@@ -156,7 +153,7 @@ pub struct Config {
 	/// Maximum time for one accepted connection to finish its handshake: the
 	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, whatever the
 	/// server runs under (admission, say), until the session is accepted. Defaults to
-	/// 10 seconds; set to 0 to wait forever.
+	/// 30 seconds; set to 0 to wait forever.
 	///
 	/// A peer that connects and then never speaks would otherwise hold its
 	/// connection open indefinitely, since keep-alives count as activity. The
@@ -291,7 +288,6 @@ pub struct Resolved {
 ///
 /// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
 /// forms a group here, and callers do not need its raw serving handles.
-#[cfg(feature = "_transport")]
 pub(crate) use moq_sock::shard::Socket;
 
 /// The `--server-*` flags from before the accept side was named `listen`.
@@ -421,20 +417,17 @@ impl Config {
 			found.toml("[server.quic]", "[quic]", Some("now applies to both directions"));
 		}
 		found.extend(self.tls.deprecated());
-		#[cfg(feature = "tcp")]
 		found.extend(self.tcp.deprecated());
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		found.extend(self.unix.deprecated());
 		found
 	}
 
-	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		#[cfg(feature = "tcp")]
 		if self.tcp.tls == Some(true) && self.tcp.bind.is_none() {
 			return Err(crate::Error::NoBackend("--listen-tcp-tls requires --listen-tcp-bind"));
 		}
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		if !self.unix.allow.is_empty() && self.unix.bind.is_none() {
 			return Err(crate::Error::NoBackend(
 				"--listen-unix-allow-* requires --listen-unix-bind",
@@ -477,16 +470,9 @@ impl Config {
 	}
 
 	/// Refuse what only the QUIC listener reads, for a server that has none.
-	#[cfg(feature = "_transport")]
 	pub(crate) fn validate_stream_only(&self) -> crate::Result<()> {
-		#[cfg(feature = "tcp")]
 		let tcp_tls = self.tcp.tls == Some(true);
-		#[cfg(not(feature = "tcp"))]
-		let tcp_tls = false;
-		#[cfg(feature = "_certs")]
 		let identity = self.tls.identity.is_some();
-		#[cfg(not(feature = "_certs"))]
-		let identity = false;
 
 		let refused = [
 			(
@@ -541,7 +527,6 @@ impl Config {
 	/// does. Destructures every field, so a new one fails to compile here until it is
 	/// either carried into [`Resolved`] or named as something a QUIC listener never
 	/// reads.
-	#[cfg(feature = "_transport")]
 	pub fn resolve(&self) -> crate::Result<Resolved> {
 		let deprecated = self.deprecated();
 		if !deprecated.is_empty() {
@@ -561,9 +546,8 @@ impl Config {
 			lb,
 			reset: Reset { secret: reset_secret },
 			// Served by `Server` on the caller's runtime, never by a QUIC listener.
-			#[cfg(feature = "tcp")]
-				tcp: _,
-			#[cfg(all(feature = "uds", unix))]
+			tcp: _,
+			#[cfg(unix)]
 				unix: _,
 			// Refused above as deprecated.
 			listen: _,
@@ -585,7 +569,6 @@ impl Config {
 		})
 	}
 
-	#[cfg(feature = "quic")]
 	/// Return the effective QUIC-LB connection-ID encoding.
 	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
 		let forward = &self.lb.forward;
@@ -730,7 +713,6 @@ mod tests {
 		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
 	}
 
-	#[cfg(feature = "quic")]
 	#[test]
 	fn cli_load_balancer_survives_the_merge_round_trip() {
 		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
@@ -767,7 +749,6 @@ mod tests {
 	}
 
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
-	#[cfg(feature = "quic")]
 	#[test]
 	fn load_balancer_is_a_single_typed_value() {
 		assert_eq!(Config::default().load_balancer(), None);
@@ -845,7 +826,6 @@ peers = "peers.toml"
 
 	/// A stream-only server refuses each setting only QUIC reads rather than
 	/// ignoring it, and accepts them once QUIC lives elsewhere.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn stream_only_refuses_quic_settings() {
 		let stream_only = || Config {
@@ -888,7 +868,7 @@ peers = "peers.toml"
 	}
 
 	/// A Unix allowlist without the Unix listener it gates is refused.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[test]
 	fn unix_allow_requires_unix_bind() {
 		let mut config = Config::default();
@@ -1038,7 +1018,6 @@ pub struct Forward {
 
 impl Forward {
 	/// Whether any forwarding setting is present.
-	#[cfg(feature = "_transport")]
 	pub(crate) fn configured(&self) -> bool {
 		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
 	}

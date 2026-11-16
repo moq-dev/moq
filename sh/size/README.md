@@ -1,8 +1,8 @@
 # Nightly artifact sizes
 
 `just gh size-collect OUTPUT [RUN]` measures what a workflow run's release jobs
-uploaded, plus the builds no release job makes: the minimal-feature FFI library
-and real browser consumer bundles (raw, gzip and Brotli). `just gh size-report
+uploaded, plus the builds no release job makes: real browser consumer bundles
+(raw, gzip and Brotli). `just gh size-report
 OUTPUT [--history HISTORY]` compares the report with its previous report (5%
 growth) and the newest report at least 30 days old (10% growth).
 

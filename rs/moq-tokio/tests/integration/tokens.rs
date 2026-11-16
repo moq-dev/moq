@@ -2,8 +2,6 @@
 //! negotiated version carries one, and in the URL query where it might not. A refused
 //! credential is dialed again only once the client has a new one.
 
-#![cfg(feature = "quic")]
-
 use std::{sync::Arc, time::Duration};
 
 /// What the server saw on one handshake.

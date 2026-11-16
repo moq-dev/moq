@@ -2,8 +2,9 @@
 
 ## Goal
 
-Window capture and system audio work on a Wayland desktop, and app capture has
-a stated answer rather than a runtime error.
+Window capture and system audio work on a Wayland desktop. App capture stays
+macOS-only (decided below), which `Source::App` already reports as
+`Unsupported` here.
 
 ## Plan
 
@@ -31,9 +32,15 @@ unimplemented, because xdg-desktop-portal owns source selection:
 - **System audio** needs a PipeWire monitor node.
   `moq_audio::capture::Source::System` exists but is macOS-only and returns
   `Unsupported` elsewhere. This is independent of the screencast portal.
-- **Applications** have no portal concept behind them, so decide explicitly
-  whether Linux offers app capture rather than leaving a variant that errors at
-  runtime.
+- **Applications** have no portal concept behind them. Decided 2026-11-15
+  (maintainer, /quest-complete, with
+  [Windows capture parity](/quest/m3/capture-windows.md)): ✅ (A) Linux offers
+  window capture only: `Source::App` stays macOS-only and fails with its
+  reason here, and a listing uses apps only to group windows
+  (rejected: (B) build app capture by composing an app's windows). No
+  consumer asks for it, and it matches the
+  [capture listing](/quest/m3/capture-list.md)'s rule that a listed app must
+  not hand out a source that fails at open.
 - **Per-app audio** (decided 2026-10-26, maintainer: yes) captures one
   application's output from its PipeWire stream node, so a creator can stream
   a game without their music. Apps are listed from the nodes present, so only
@@ -42,10 +49,6 @@ unimplemented, because xdg-desktop-portal owns source selection:
   capture follows nodes as the app opens and closes them, matching the
   Windows process tree and the macOS application. The Windows and macOS halves
   share the same `moq_audio::capture` source.
-
-## Waiting
-
-- Maintainer: whether app capture exists off macOS, here and in [Windows capture parity](/quest/m3/capture-windows.md). (A) Linux and Windows offer window capture only: `Source::App` stays macOS-only and fails with its reason elsewhere, and a listing off macOS uses apps only to group windows. (B) Build app capture by composing an app's windows. I recommend A, since no consumer asks for B and it matches the capture listing's rule that a listed app must not hand out a source that fails at open.
 
 ## Related
 

@@ -192,7 +192,6 @@ fn won_key(url: &Url) -> Result<(String, u16)> {
 }
 
 /// Forget that WebSocket won for `url`, giving QUIC its head start again.
-#[cfg(feature = "quic")]
 pub(crate) fn forget(url: &Url) {
 	if let Ok(key) = won_key(url) {
 		WEBSOCKET_WON.lock().unwrap().remove(&key);
@@ -200,13 +199,13 @@ pub(crate) fn forget(url: &Url) {
 }
 
 /// Record that WebSocket won for `url`, as a fallback dial that lands does.
-#[cfg(all(test, feature = "quic"))]
+#[cfg(test)]
 pub(crate) fn remember(url: &Url) {
 	WEBSOCKET_WON.lock().unwrap().insert(won_key(url).unwrap());
 }
 
 /// Whether the next dial to `url` skips QUIC's head start.
-#[cfg(all(test, feature = "quic"))]
+#[cfg(test)]
 pub(crate) fn won(url: &Url) -> bool {
 	won_key(url).is_ok_and(|key| WEBSOCKET_WON.lock().unwrap().contains(&key))
 }
@@ -325,9 +324,7 @@ pub struct Resolved {
 	pub delay: time::Duration,
 }
 
-/// The fallback arm of the QUIC-vs-WebSocket race, so only compiled when there is a
-/// QUIC dial to race against. A WebSocket-only build calls [`connect`] directly.
-#[cfg(feature = "quic")]
+/// The fallback arm of the QUIC-vs-WebSocket race.
 pub(crate) async fn race_handle(
 	config: &Config,
 	tls: &rustls::ClientConfig,
@@ -1329,8 +1326,16 @@ mod timeout_tests {
 			let _stream = kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
-			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;
-			let result = accept.as_mut().now_or_never();
+			// Step a second at a time so QMux keep-alives flow as on a live link: one jump
+			// past their 30s deadline would close the session without a ping.
+			let mut result = None;
+			for _ in 0..timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT).as_secs() {
+				tokio::time::advance(time::Duration::from_secs(1)).await;
+				result = accept.as_mut().now_or_never();
+				if result.is_some() {
+					break;
+				}
+			}
 			if expires {
 				assert!(
 					matches!(result, Some(Err(crate::Error::MoqNet(moq_net::Error::Timeout)))),

@@ -265,10 +265,10 @@ impl Broadcaster {
 		self.renditions.poll_ready(waiter)
 	}
 
-	/// Ready once the [master playlist](Self::master_playlist) lists a video rendition, or at least
-	/// one rendition while no video rendition could still be listed. A player keeps the variants of
-	/// the first master it loads, so answer a master only once this is ready, or after a bounded
-	/// wait: how long is the caller's policy.
+	/// Ready once the [master playlist](Self::master_playlist) lists every video rendition that
+	/// could be listed, or at least one rendition while no video rendition could still be listed. A
+	/// player keeps the variants of the first master it loads, so answer a master only once this is
+	/// ready, or after a bounded wait: how long is the caller's policy.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let own = self.renditions.poll_advertised(waiter);
@@ -1375,20 +1375,23 @@ mod tests {
 		drop((media, catalog, broadcast));
 	}
 
-	/// Audio lists a segment before video closes its first GOP. A player keeps the variants of the
-	/// first master it loads, so the master waits for video instead of answering audio alone.
+	/// Audio lists a segment before video closes its first GOP, and one rung of a ladder lists
+	/// before another. A player keeps the variants of the first master it loads, so the master
+	/// waits for every video rendition instead of answering audio, or one rung, alone.
 	#[tokio::test(start_paused = true)]
-	async fn the_master_waits_for_video_while_audio_lists_first() {
+	async fn the_master_waits_for_every_video_rendition() {
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut video = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut video0 = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut video1 = video(&catalog, broadcast.broadcast(), "video1", video_config());
 		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
-		// Video's first GOP is still open, while audio has cut segments 0 and 1.
-		video.write(vp8_frame(0, true)).unwrap();
+		// Video's first GOPs are still open, while audio has cut segments 0 and 1.
+		video0.write(vp8_frame(0, true)).unwrap();
+		video1.write(vp8_frame(0, true)).unwrap();
 		for micros in [0, 2_000_000, 4_000_000] {
 			let keyframe = audio.needs_keyframe();
 			audio.write(frame(micros, keyframe)).unwrap();
@@ -1410,16 +1413,31 @@ mod tests {
 			"video can still be listed, so audio alone does not answer"
 		);
 
-		video.write(vp8_frame(2_000_000, true)).unwrap();
+		video0.write(vp8_frame(2_000_000, true)).unwrap();
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !broadcaster.rendition(Kind::Video, "video0").unwrap().is_advertised() {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("video0 lists a segment");
+		kio::clock::sleep(Duration::from_millis(10)).await;
+		assert!(
+			!waiting.is_finished(),
+			"video1 can still be listed, so one rung alone does not answer"
+		);
+
+		video1.write(vp8_frame(2_000_000, true)).unwrap();
 		kio::clock::timeout(Duration::from_secs(5), waiting)
 			.await
-			.expect("video listing a segment wakes the master")
+			.expect("the last rung listing a segment wakes the master")
 			.unwrap();
 		let master = broadcaster.master_playlist(None);
 		assert!(master.contains("/video/video0/media.m3u8"), "{master}");
+		assert!(master.contains("/video/video1/media.m3u8"), "{master}");
 		assert!(master.contains("/audio/audio0/media.m3u8"), "{master}");
 
-		drop((video, audio, catalog, broadcast));
+		drop((video0, video1, audio, catalog, broadcast));
 	}
 
 	/// Publish a VP8 rendition with three GOPs, 2s apart, so segments 0 and 1 are listable.
@@ -3994,6 +4012,71 @@ mod tests {
 		test.broadcast.close();
 		test.failed("video0").await;
 		assert!(test.drain_failed("video0").await.is_empty());
+	}
+
+	// A live segment lists once a frame of the group after it passes the next line, not once the
+	// group after that starts: off the grid, that is a whole GOP sooner.
+	#[tokio::test(start_paused = true)]
+	async fn a_segment_lists_once_the_next_group_passes_its_line() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut video0 = test.publish("video0");
+		let frame = |group: &mut moq_net::group::Producer, pts_ms: u64| {
+			let frame = vp8_frame(pts_ms * 1_000, false);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(group)
+			.unwrap();
+		};
+		// Group 0 holds line 2s, so it is segment 1; group 1 may still end before line 4s.
+		video0.at(0, 500);
+		let mut next = video0.open(1, 2_500);
+		frame(&mut next, 3_900);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			test.rendition("video0").snapshot().segments.is_empty(),
+			"group 1 may still end before 4s and join segment 1"
+		);
+
+		frame(&mut next, 4_100);
+		let snapshot = test.listed("video0", 1).await;
+		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
+		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
+		drop(next);
+
+		// A CMAF group carried whole in one fragment passes the line in its first frame.
+		let muxer = moq_mux::container::fmp4::Muxer::video(&video_config()).unwrap();
+		let mut config = video_config();
+		config.container = hang::catalog::Container::Cmaf {
+			init: muxer.init().unwrap().expect("a VP8 init from the coded size"),
+		};
+		let mut catalog = joined();
+		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.video.renditions.insert("video0".to_string(), config);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let test = Groups {
+			renditions: Groups::export(&broadcast, &catalog),
+			broadcast,
+			catalog,
+		};
+		let track = test.broadcast.create_track("video0", timed()).unwrap();
+		// Samples 100ms apart from `pts_ms` up to `last_ms`, in one fragment.
+		let fragment = |sequence: u64, pts_ms: u64, last_ms: u64| {
+			let frames: Vec<_> = (pts_ms..=last_ms)
+				.step_by(100)
+				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
+				.collect();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
+			group.write_frame(frames[0].timestamp, bytes).unwrap();
+			group.close().unwrap();
+		};
+		fragment(0, 500, 2_400);
+		fragment(1, 2_500, 4_400);
+		let snapshot = test.listed("video0", 1).await;
+		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
+		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
 	}
 
 	// A recording refuses a listed segment whose media is gone, but reports a grid slot the

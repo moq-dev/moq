@@ -35,6 +35,7 @@ pub mod passthrough;
 pub mod programs;
 mod psi;
 mod release;
+pub mod republish;
 mod schedule;
 mod si;
 mod step;
@@ -52,6 +53,7 @@ pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
+pub use republish::{Republish, Republished};
 pub use step::{Restart, Step};
 
 pub mod stats;

@@ -9,12 +9,19 @@
 //!
 //! A group spans from its first frame's pts to the next group's. It belongs to one segment: the
 //! first line it contains, so segment N starts at the group containing pts N × length; or, if it
-//! contains none, the line it starts after, `floor(pts / length)`. Groups are never split, since a
-//! segment starting mid-GOP is not independent. A grid slot no group starts a segment in, because
-//! an overrun or a pause skipped it, is listed as a gap, so the numbering never skips: on a 2s grid,
-//! a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous B = [7s, 7.2s)
-//! starts segment 3. An edge joining at B derives that from B's and its successor's timestamps,
-//! without A.
+//! contains none, the line it starts after, `floor(pts / length)`. A group off the grid is placed
+//! once its successor starts, or sooner once one of its own frames passes the next line, since it
+//! then contains that line unless its successor overlaps it; the segment before it completes then,
+//! not a group later. A keyframe may overlap the previous group's last frames (a TS content join
+//! does), so when that overlap straddles a line, an edge that saw the earlier group lists it in the
+//! line's segment while one that joined at the overlapping group lists that segment without it.
+//! That one segment differs across edges, for that broadcast alone (accepted by the maintainer,
+//! 2026-11-15, for listing every off-grid segment up to a group sooner). Groups are never split,
+//! since a segment starting mid-GOP is not independent. A grid slot no group starts a
+//! segment in, because an overrun or a pause skipped it, is listed as a gap, so the numbering never
+//! skips: on a 2s grid, a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous
+//! B = [7s, 7.2s) starts segment 3. An edge joining at B derives that from B's and its successor's
+//! timestamps, without A.
 //!
 //! A segment starts at its first group's pts, or at its line when that group starts after it, as
 //! a group resuming from a pause does, and a gap at its line; its `EXTINF` runs to the next
@@ -139,7 +146,8 @@ pub(crate) enum Slot {
 	Reset,
 }
 
-/// A group seen but not yet placed: placing it needs its end, the next group's pts.
+/// A group seen but not yet placed: placing it needs its end, the next group's pts, unless one of
+/// its frames passes the next line first.
 #[derive(Clone, Copy, Debug)]
 struct Group {
 	start: u64,
@@ -171,7 +179,7 @@ impl Open {
 pub(crate) struct Grid {
 	/// The segment length in nanoseconds, at least one.
 	length: u128,
-	/// The newest group, until the next one bounds it.
+	/// The newest group, until the next one bounds it or a frame past the next line places it.
 	pending: Option<Group>,
 	open: Option<Open>,
 	/// The newest group's pts, which the next must not precede.
@@ -293,6 +301,29 @@ impl Grid {
 			None => self.pending = Some(group),
 		}
 		out
+	}
+
+	/// A frame of the newest group starts at `pts`. Once that is past the line after the group's
+	/// start, the group contains the line, so it is placed in that line's segment now rather than
+	/// when its successor starts: the same segment its successor's pts would give it, which starts
+	/// after all of its frames. Returns the segments it completes.
+	pub fn reach(&mut self, pts: Timestamp) -> Vec<Slot> {
+		let mut out = Vec::new();
+		let Some(pending) = self.pending else {
+			return out;
+		};
+		let slot = super::nanos(pending.pts) / self.length;
+		if super::nanos(pts) > (slot + 1) * self.length {
+			self.pending = None;
+			self.place(pending, slot as u64 + 1, &mut out);
+		}
+		out
+	}
+
+	/// Whether the newest group waits for its end to be placed, which [`reach`](Self::reach) may
+	/// settle early.
+	pub fn pending(&self) -> bool {
+		self.pending.is_some()
 	}
 
 	/// A discontinuity marker at `at` stopped the content: the newest group ends there rather than
@@ -611,7 +642,21 @@ mod test {
 						slots.extend(grid.group(sequence as u64, ms(*start)));
 					}
 					slots.extend(grid.finish(Some(ms(end - 1)), Some(ms(end))));
+					// Frames read before the next group starts, in any order, list the same
+					// segments, only sooner.
+					let mut early = Grid::new(Duration::from_millis(length), 256);
+					let mut early_slots = Vec::new();
+					for (sequence, start) in starts.iter().enumerate().skip(join) {
+						early_slots.extend(early.group(sequence as u64, ms(*start)));
+						let until = starts.get(sequence + 1).copied().unwrap_or(end);
+						for _ in 0..3 {
+							early_slots.extend(early.reach(ms(start + next(until - start))));
+						}
+					}
+					early_slots.extend(early.finish(Some(ms(end - 1)), Some(ms(end))));
+					let early = listed(early_slots);
 					let listed = listed(slots);
+					assert_eq!(early, listed, "{interval} ms: {starts:?}");
 					for (index, (segment, _, start, end)) in listed.iter().enumerate() {
 						let extinf = end - start;
 						let fits = ((extinf as f64) / 1_000.0).round() as u64 <= target;
@@ -655,6 +700,35 @@ mod test {
 			listed(grid.group(4, ms(4500))),
 			[(1, 2..3, 2000, 3500)],
 			"3.5s reaches 4s"
+		);
+
+		// A frame past the next line settles the newest group without its successor.
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		assert!(grid.group(0, ms(500)).is_empty());
+		assert!(
+			grid.reach(ms(1900)).is_empty(),
+			"short of the line, it may still end before it"
+		);
+		assert!(
+			grid.reach(ms(2000)).is_empty(),
+			"its successor may still start on the line"
+		);
+		assert!(
+			grid.reach(ms(2033)).is_empty(),
+			"it opens segment 1, which nothing completes yet"
+		);
+		assert!(!grid.pending());
+		assert!(grid.group(1, ms(2500)).is_empty());
+		assert_eq!(
+			listed(grid.reach(ms(4100))),
+			[(1, 0..1, 500, 2500)],
+			"listed at 4.1s rather than when group 2 starts at 4.5s"
+		);
+		assert!(grid.reach(ms(4200)).is_empty(), "already placed");
+		assert!(grid.group(2, ms(4500)).is_empty());
+		assert_eq!(
+			listed(grid.finish(Some(ms(5000)), Some(ms(5000)))),
+			[(2, 1..3, 2500, 5000)]
 		);
 	}
 

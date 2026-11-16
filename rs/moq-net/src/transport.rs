@@ -145,8 +145,9 @@ impl Metrics for Untracked {}
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
 /// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes counted against the shared `connection` window, so the session pauses only
-/// as many streams as fit in half of it; the rest keep reading. See
+/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
+/// against the shared `connection` window, so the session pauses only as many streams as fit
+/// in half of it; the rest keep reading. See
 /// [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -725,9 +726,10 @@ pub mod poll {
 		/// Poll until the peer acknowledged every byte below `offset`.
 		///
 		/// Errors once those bytes can never be acknowledged: the stream was reset by either
-		/// side or the session closed. A transport that cannot see acknowledgments is ready
-		/// with [`Acked::Unsupported`] immediately, the default, on every stream, so a caller
-		/// can decide once per session. An offset minted by another stream may panic.
+		/// side or the session closed. Bytes already acknowledged stay so after a reset or stop.
+		/// A transport that cannot see acknowledgments is ready with [`Acked::Unsupported`]
+		/// immediately, the default, on every stream, so a caller can decide once per session. An
+		/// offset minted by another stream may panic.
 		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>> {
 			let _ = (waiter, offset);
 			Poll::Ready(Ok(Acked::Unsupported))
@@ -805,35 +807,6 @@ pub mod poll {
 		/// Some implementations do not support FIN acknowledgement, in which case this
 		/// resolves once the FIN is sent.
 		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>>;
-
-		/// Whether the peer has acknowledged every byte written so far, or `None` when the
-		/// transport cannot tell, as a browser's WebTransport cannot.
-		///
-		/// A transport answers for all of its streams or for none. A stream that was reset, or
-		/// that the peer stopped, is never acknowledged.
-		fn acknowledged(&self) -> Option<bool> {
-			None
-		}
-
-		/// How many leading bytes written to this stream the transport delivered, counting each
-		/// once however often it was retransmitted, or `None` when it cannot tell.
-		///
-		/// Delivered means the peer acknowledged it, or on a reliable link such as qmux's, that
-		/// the link took it. It only grows while the stream lives; after a reset it may stop
-		/// answering. Egress stats bill a frame's bytes only once delivered, and fall back to the
-		/// bytes the stream took when this is `None`.
-		fn delivered(&self) -> Option<u64> {
-			None
-		}
-
-		/// Resolves once the transport delivered every byte written so far, so a caller
-		/// tracking [`Self::delivered`] learns of progress without polling for it. It may
-		/// resolve without progress, and stays pending once nothing more will be delivered, as
-		/// after a reset. Never resolves by default.
-		fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-			let _ = waiter;
-			Poll::Pending
-		}
 
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {

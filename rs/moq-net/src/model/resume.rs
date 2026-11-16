@@ -27,10 +27,9 @@
 //!
 //! A group carries on across the switch through its [`Recover`]: once its copy stalls while
 //! a newer route serves, it continues from the serving route's copy of the same group at the
-//! same frame (and byte), found in that copy's cache or fetched from it, which over lite-07
-//! asks only for the bytes of a frame past those already read. Once its copy fails,
-//! any other copy still holding the group continues it first, since a group's name fixes its
-//! content.
+//! same frame, found in that copy's cache or fetched from it, skipping the bytes of a frame
+//! already read. Once its copy fails, any other copy still holding the group continues it
+//! first, since a group's name fixes its content.
 //!
 //! A group is handed out once however many copies deliver it: the reader skips any
 //! key its [`track::Subscriber`] already handed out, the same record that keeps a
@@ -399,6 +398,8 @@ impl Consumer {
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
+				received: RangeSet::new(),
+				received_checked: None,
 				reported_stale: RangeSet::new(),
 				declared: None,
 				declared_error: None,
@@ -573,6 +574,16 @@ impl Copy {
 
 	fn update(&mut self, reader: &Subscription) {
 		self.reopen();
+		let wire = self.wire(reader);
+		self.send(wire);
+	}
+
+	/// Take nothing past `until` from this replaced copy, superseded from now. A bound only
+	/// narrows what it may deliver, so a copy that ran out stays out: reopened, it would be
+	/// waited on with nothing left to wake the reader.
+	fn bound(&mut self, until: Option<u64>, reader: &Subscription) {
+		self.until = Some(until);
+		self.since = Some(self.track.now());
 		let wire = self.wire(reader);
 		self.send(wire);
 	}
@@ -950,8 +961,8 @@ impl Subscriber {
 	/// Take back every stale run this reader queued or the serving route's copy reported;
 	/// see [`track::Subscriber::reoffer_stale`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
-		self.reader().reoffer_stale()
+	pub(super) fn reoffer_stale(&mut self, delivered: &Delivered) -> Vec<std::ops::Range<u64>> {
+		self.reader().reoffer_stale(delivered)
 	}
 
 	/// Poll for keys the serving copy gave up that no copy may still deliver; see
@@ -1115,9 +1126,14 @@ struct Reader {
 	out: Vec<(u64, Weak<()>)>,
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
-	/// Each with whether it is a received stale run the serving copy held, which new terms
-	/// can supersede.
-	drops: RangeMap<u64, (track::Hole, bool)>,
+	drops: RangeMap<u64, track::Hole>,
+	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
+	/// new terms can supersede. Kept apart so a poll costs these runs, not every queued one.
+	received: RangeSet<u64>,
+	/// The serving copy's [`track::Subscriber::stale_revision`] when [`Self::received`] was
+	/// last checked against it, so a poll rechecks those runs only after one may be gone.
+	/// `None` until the serving copy is first checked.
+	received_checked: Option<u64>,
 	/// The stale runs reported since the last [`Reader::reoffer_stale`], whichever copy gave
 	/// them up: an update reopens each, and the copy that reported it may no longer serve.
 	reported_stale: RangeSet<u64>,
@@ -1134,17 +1150,23 @@ impl Reader {
 				break;
 			}
 			let copy = &mut self.copies[index];
-			let capped = copy.end().is_some();
+			let cap = copy.end();
 			let resolved = match &mut copy.sub {
 				Sub::Ready(sub) => sub.resolved_ranges(),
 				Sub::Pending(_) => continue,
 			};
 			// A failover cap at or below where a range starts empties the copy's range, which
-			// then says nothing of where the reader's own range starts.
+			// then says nothing of where the reader's own range starts. One at or below where
+			// it ends cut that end short, so it says nothing of where the reader's range ends.
 			let resolved: Vec<_> = resolved
 				.into_iter()
 				.map(|resolved| {
-					resolved.filter(|resolved| !capped || resolved.end.is_none_or(|end| end > resolved.start))
+					let resolved = resolved
+						.filter(|resolved| cap.is_none() || resolved.end.is_none_or(|end| end > resolved.start))?;
+					Some(Resolved {
+						end: resolved.end.filter(|end| cap.is_none_or(|cap| *end < cap)),
+						..resolved
+					})
 				})
 				.collect();
 			self.resolve(&resolved);
@@ -1253,6 +1275,8 @@ impl Reader {
 		self.generation = Some(generation);
 		// What a former route gave up is no verdict on the one that serves now.
 		self.drops = RangeMap::new();
+		self.received = RangeSet::new();
+		self.received_checked = None;
 		let Some(track) = serving else { return };
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
@@ -1435,12 +1459,9 @@ impl Reader {
 			Some(end) => end.checked_sub(1),
 			None => self.newest.max(serving.track.latest_key()),
 		};
-		let mirrored = &self.mirrored;
 		for copy in &mut self.copies {
 			if copy.replaced && copy.until.is_none() {
-				copy.until = Some(until);
-				copy.since = Some(copy.track.now());
-				copy.update(mirrored);
+				copy.bound(until, &self.mirrored);
 			}
 		}
 		true
@@ -1458,9 +1479,7 @@ impl Reader {
 		let bound = self.newest.max(key.checked_sub(1));
 		for copy in &mut self.copies[..index] {
 			if copy.replaced && copy.until.is_none() {
-				copy.until = Some(bound);
-				copy.since = Some(copy.track.now());
-				copy.update(&self.mirrored);
+				copy.bound(bound, &self.mirrored);
 			}
 		}
 	}
@@ -1831,17 +1850,20 @@ impl Reader {
 	/// judged again: a replaced copy may no longer deliver, so what it gave up is the new
 	/// route's to deliver or give up.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
+	fn reoffer_stale(&mut self, delivered: &Delivered) -> Vec<std::ops::Range<u64>> {
 		let mut runs = std::mem::take(&mut self.reported_stale);
 		let queued: Vec<_> = self
 			.drops
 			.iter()
-			.filter(|(_, (hole, _))| hole.stale_budget().is_some())
+			.filter(|(_, hole)| hole.stale_budget().is_some())
 			.map(|(run, _)| run.clone())
 			.collect();
 		for run in queued {
-			self.drops.remove(run.clone());
-			runs.insert(run);
+			self.remove_drop(run.clone());
+			// A run delivered since it queued is owed nothing; see [`Self::poll_drop`].
+			if !delivered.covers(run.clone()) {
+				runs.insert(run);
+			}
 		}
 		if let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) {
 			runs.extend(sub.reoffer_stale());
@@ -1861,20 +1883,22 @@ impl Reader {
 		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
-		let queued: Vec<_> = self
-			.drops
-			.iter()
-			.filter(|(_, (_, received))| *received)
-			.map(|(run, _)| run.clone())
-			.collect();
 		let mut given_up = Vec::new();
 		let mut superseded = Vec::new();
-		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
+		let ready = matches!(self.poll_serving(waiter), Poll::Ready(Some(_)));
+		// The serving copy's subscription, borrowed apart from the received runs it checks.
+		if let Some(Sub::Ready(sub)) = self.copies.last_mut().filter(|_| ready).map(|copy| &mut copy.sub) {
 			// A received stale run queued here that new terms superseded since is unknown again:
-			// the copy no longer holds it, and its upstream re-offers or drops it again.
-			for run in queued {
-				superseded.extend(sub.stale_held(run.clone()).gaps(&run));
+			// the copy no longer holds it, and its upstream re-offers or drops it again. Checked
+			// only once the copy let a stale run go, never on every poll: each poll reports one
+			// run, so a check per poll would cost the received runs squared to drain them.
+			let current = sub.stale_revision();
+			if self.received_checked != Some(current) {
+				for run in self.received.iter() {
+					superseded.extend(sub.stale_held(run.clone()).gaps(run));
+				}
 			}
+			self.received_checked = Some(current);
 			loop {
 				let polled = match probe {
 					true => sub.poll_drop(waiter),
@@ -1887,21 +1911,24 @@ impl Reader {
 			}
 		}
 		for run in superseded {
-			self.drops.remove(run);
+			self.remove_drop(run);
 		}
 		for (run, hole, received) in given_up {
 			if !Error::Stream(hole.error()).retryable() {
-				self.drops.insert(run, (hole, received));
+				match received {
+					true => self.received.insert(run.clone()),
+					false => self.received.remove(run.clone()),
+				}
+				self.drops.insert(run, hole);
 			}
 		}
-		let covered: Vec<_> = self
-			.drops
-			.iter()
-			.map(|(run, _)| run.clone())
-			.filter(|run| delivered.covers(run.clone()))
-			.collect();
-		for run in covered {
-			self.drops.remove(run);
+		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
+		// each poll reports one run, so such a pass would cost the queue squared to drain it,
+		// and a new reader can be handed one run per cached group and per gap between them.
+		while let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone())
+			&& delivered.covers(run.clone())
+		{
+			self.remove_drop(run);
 		}
 		// The common case: nothing to report on one route, and the serving copy's own poll
 		// above wakes this for the next run it gives up. A replaced copy is still judged:
@@ -1925,7 +1952,12 @@ impl Reader {
 				feeding.insert(from..until);
 			}
 		}
-		let next = self.drops.iter().find_map(|(run, (err, _))| {
+		let mut passed = Vec::new();
+		let next = self.drops.iter().find_map(|(run, err)| {
+			if delivered.covers(run.clone()) {
+				passed.push(run.clone());
+				return None;
+			}
 			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
 			let open = delivered
 				.gaps(run)
@@ -1933,18 +1965,27 @@ impl Reader {
 				.find_map(|gap| feeding.gaps(&gap).next())?;
 			Some((open, err.clone()))
 		});
+		for run in passed {
+			self.remove_drop(run);
+		}
 		let Some((open, err)) = next else {
 			return Poll::Pending;
 		};
 		// Reported once. As on a plain cursor, the report is not final: a miss (a fill given
 		// up) may still land, and is handed out if it does.
-		self.drops.remove(open.clone());
+		self.remove_drop(open.clone());
 		match &err {
 			err if err.stale_budget().is_some() => self.reported_stale.insert(open.clone()),
 			// A skip or final drop is final, so no update reopens a stale report it replaced.
 			track::Hole::Skip | track::Hole::Drop { .. } => self.reported_stale.remove(open.clone()),
 		}
 		Poll::Ready((open, err))
+	}
+
+	/// Forget `run` as queued, received or not.
+	fn remove_drop(&mut self, run: std::ops::Range<u64>) {
+		self.received.remove(run.clone());
+		self.drops.remove(run);
 	}
 
 	/// The serving copy's subscription, once it answered; `None` once the track ended
@@ -2237,15 +2278,13 @@ impl Recover {
 			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
 	}
 
-	/// Poll for the serving route's copy of the group, positioned at frame `index` to read
-	/// it from byte `byte` on: a frame read partway asks only for the rest of it.
+	/// Poll for the serving route's copy of the group, positioned at frame `index`.
 	///
 	/// `failed` is the error the current copy ended with, if it did; a stall is `None`.
 	/// Returns the copy's error when nothing can continue the group.
 	pub(super) fn poll(
 		&mut self,
 		index: u64,
-		byte: u64,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
@@ -2285,7 +2324,7 @@ impl Recover {
 			// fixes its content. A stall only moves to the serving copy, so two stalled copies
 			// never trade the group back and forth.
 			if failed.is_some()
-				&& let Some(replacement) = self.held(index, byte)
+				&& let Some(replacement) = self.held(index)
 			{
 				return Poll::Ready(Ok(replacement));
 			}
@@ -2315,7 +2354,7 @@ impl Recover {
 			if generation == self.generation && failed.is_none() {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, (index, byte), failed, withdrawn.is_none(), waiter);
+			let res = self.poll_serving(generation, &serving, index, failed, withdrawn.is_none(), waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& terminal && copy_failed(&serving)
@@ -2333,8 +2372,8 @@ impl Recover {
 	}
 
 	/// The group from the newest of the reader's other copies that still holds it unfailed,
-	/// positioned at frame `index` to read from byte `byte`.
-	fn held(&self, index: u64, byte: u64) -> Option<Replacement> {
+	/// positioned at frame `index`.
+	fn held(&self, index: u64) -> Option<Replacement> {
 		let reader = self.reader.as_ref()?.upgrade()?;
 		let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		reader.copies.iter().rev().find_map(|copy| {
@@ -2343,7 +2382,8 @@ impl Recover {
 			}
 			let group = copy.track.peek_group(self.key)?;
 			lend_head(&self.handoff, self.key, &copy.track, &group);
-			group.at(index, byte).map(|group| Replacement {
+			let group = group.with_range(index..);
+			(group.index() == index).then(|| Replacement {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
@@ -2357,7 +2397,7 @@ impl Recover {
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
-		(index, byte): (u64, u64),
+		index: u64,
 		failed: Option<&Error>,
 		ask: bool,
 		waiter: &kio::Waiter,
@@ -2368,7 +2408,8 @@ impl Recover {
 		match serving.poll_group(self.key, waiter) {
 			Poll::Ready(Ok(Some(group))) if !same => {
 				lend_head(&self.handoff, self.key, serving, &group);
-				if let Some(group) = group.at(index, byte) {
+				let group = group.with_range(index..);
+				if group.index() == index {
 					return Poll::Ready(Ok(Replacement {
 						group,
 						generation,
@@ -2398,27 +2439,19 @@ impl Recover {
 		{
 			verdict = Some(err);
 		}
-		match self.poll_fetch(
-			generation,
-			serving,
-			(index, byte),
-			failed,
-			ask && verdict.is_none(),
-			waiter,
-		) {
+		match self.poll_fetch(generation, serving, index, failed, ask && verdict.is_none(), waiter) {
 			Poll::Ready(Ok(replacement)) => Poll::Ready(Ok(replacement)),
 			res => verdict.map_or(res, |err| Poll::Ready(Err(err))),
 		}
 	}
 
-	/// Ask `serving` for the rest of the group from byte `byte` of frame `index`, unless told
-	/// not to `ask`, and poll the answer: the group, a refusal that ends a copy that failed,
-	/// or nothing yet.
+	/// Ask `serving` for the rest of the group from frame `index`, unless told not to `ask`, and
+	/// poll the answer: the group, a refusal that ends a copy that failed, or nothing yet.
 	fn poll_fetch(
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
-		(index, byte): (u64, u64),
+		index: u64,
 		failed: Option<&Error>,
 		ask: bool,
 		waiter: &kio::Waiter,
@@ -2431,7 +2464,6 @@ impl Recover {
 			let options = group::Fetch {
 				max_delay: self.max_delay,
 				frame_start: index,
-				byte_start: byte,
 				..Default::default()
 			};
 			self.fetch = Some((
@@ -2449,7 +2481,8 @@ impl Recover {
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(group) => {
 					lend_head(&self.handoff, self.key, serving, &group);
-					if let Some(group) = group.at(index, byte) {
+					let group = group.with_range(index..);
+					if group.index() == index {
 						return Poll::Ready(Ok(Replacement {
 							group,
 							generation,
@@ -3835,122 +3868,6 @@ mod test {
 			b"cd"
 		);
 		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
-	}
-
-	/// A frame read partway when its route dies asks the next route for only the rest of it,
-	/// which a copy starting partway into the frame serves.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_half_read_frame_asks_only_for_the_rest() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, Duration::from_secs(10));
-
-		let open = a.create_group(group::Info { start: 0 }).unwrap();
-		let mut frame = open
-			.create_frame(crate::frame::Info {
-				size: 4,
-				timestamp: ts(0),
-			})
-			.unwrap();
-		frame.write(b"ab".as_ref()).unwrap();
-		let mut reading = recv(&mut sub);
-		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(
-			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
-			b"ab"
-		);
-
-		drop(frame);
-		a.clone().abort(Error::Dropped).unwrap();
-		let b = copy();
-		let dynamic = b.requests();
-		routes.serve(b.consume());
-		assert!(chunks.read_chunk().now_or_never().is_none());
-		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		assert_eq!((request.frame_start(), request.byte_start()), (0, 2));
-
-		// The answer holds the frame from byte 2 only, so a whole read of it finds nothing.
-		let rest = request
-			.accept_from(
-				crate::track::Info::timed(),
-				group::Bounds {
-					start: 0,
-					byte: 2,
-					end: None,
-				},
-			)
-			.unwrap();
-		let mut lead = rest
-			.create_lead(
-				crate::frame::Info {
-					size: 4,
-					timestamp: ts(0),
-				}
-				.into(),
-			)
-			.unwrap();
-		lead.write(b"cd".as_ref()).unwrap();
-		let mut rest = lead.finish().unwrap();
-		rest.write_frame(ts(1), b"e".as_ref()).unwrap();
-		rest.close().unwrap();
-
-		assert_eq!(
-			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
-			b"cd"
-		);
-		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
-		assert_eq!(read(&mut reading), Some(b"e".to_vec()));
-	}
-
-	/// A route that answers a byte ask with whole frames, as moq-transport and app
-	/// handlers do, keeps each frame at its index, and the read skips the bytes it had.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_half_read_frame_continues_from_a_whole_frame_answer() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, Duration::from_secs(10));
-
-		let open = a.create_group(group::Info { start: 0 }).unwrap();
-		let mut frame = open
-			.create_frame(crate::frame::Info {
-				size: 4,
-				timestamp: ts(0),
-			})
-			.unwrap();
-		frame.write(b"ab".as_ref()).unwrap();
-		let mut reading = recv(&mut sub);
-		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(
-			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
-			b"ab"
-		);
-
-		drop(frame);
-		a.clone().abort(Error::Dropped).unwrap();
-		let b = copy();
-		let dynamic = b.requests();
-		routes.serve(b.consume());
-		assert!(chunks.read_chunk().now_or_never().is_none());
-		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		assert_eq!((request.frame_start(), request.byte_start()), (0, 2));
-
-		let mut rest = request.accept(None).unwrap();
-		rest.write_frame(ts(0), b"abcd".as_ref()).unwrap();
-		rest.write_frame(ts(1), b"e".as_ref()).unwrap();
-		rest.close().unwrap();
-
-		assert_eq!(
-			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
-			b"cd"
-		);
-		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
-		assert_eq!(read(&mut reading), Some(b"e".to_vec()));
 	}
 
 	/// A resumed group that the serving route gives up or aborts ends with that route's

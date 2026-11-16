@@ -2,7 +2,6 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import * as cache from "./cache.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -23,6 +22,7 @@ import { overrideBroadcastWire, wireOf } from "./wire.ts";
 const INFO: track.Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
 
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
+const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
 const path = Path.from("live");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -851,6 +851,37 @@ test("a replacement that answers and then aborts before its first group leaves t
 	close();
 });
 
+// Mirrors `a_stranded_track_still_draining_asks_again_when_the_table_moves` in rs/moq-net/src/model/front.rs:
+// a replacement losing its route judged the route, so it refuses nothing the next route serves.
+test("a replacement that loses its route before its first group leaves the next route free to serve", async () => {
+	const front = new Front();
+	const [a, b, c] = [new BroadcastProducer(), new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb, tc] = [copy(a), copy(b), copy(c)];
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	front.serve(c.consume());
+	tc.write(2n);
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b, c]) broadcast.close();
+});
+
 // Mirrors the Rust front: an incumbent that finished cleanly ends the track whoever serves it.
 test("a replacement that aborts before its first group after the incumbent finished ends the track cleanly", async () => {
 	const { a, b, swap, active, close } = await setup();
@@ -1237,19 +1268,368 @@ test("a copy that fails mid-serve on a route still serving is subscribed afresh"
 	close();
 });
 
-// Mirrors `a_copy_verdict_aborts_without_querying_again` in rs/moq-net/src/model/front.rs.
-test("a copy that loses its route mid-serve on a route still serving ends the read", async () => {
-	const { a, active, close } = await setup();
-	const ta = copy(a);
+// Mirrors `an_unroutable_route_strands_the_track_until_the_table_moves` in rs/moq-net/src/model/front.rs.
+for (const delivered of [true, false]) {
+	test(`a copy that loses its route ${delivered ? "mid-serve" : "before delivering"} waits for the next route`, async () => {
+		const { a, b, active, swap, close } = await setup();
+		const ta = copy(a);
+		const sub = active.track("seq").subscribe();
+		if (delivered) {
+			ta.write(0n);
+			expect(drain(sub)).toEqual([0n]);
+		}
+
+		ta.producer.abort(new StreamError(StreamCode.Unroutable));
+		await settle();
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		expect(sub.closed.peek()).toBeUndefined();
+
+		const tb = copy(b);
+		const disposeB = await swap();
+		tb.write(1n);
+		expect(drain(sub)).toEqual([1n]);
+
+		sub.close();
+		disposeB();
+		close();
+	});
+}
+
+// Mirrors `an_unroutable_route_strands_the_track_until_the_table_moves` in rs/moq-net/src/model/front.rs:
+// the same route winning again once the table moves asks it afresh.
+test("a read stranded on a route asks it again once the table moves", async () => {
+	const { origin, a, b, active, request, close } = await setup();
+	const first = copy(a);
 	const sub = active.track("seq").subscribe();
+	first.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	first.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	// The route could serve again, but reading the handle is no news: the read keeps waiting.
+	const second = copy(a);
+	second.write(1n);
+	expect(request.active.peek()).toBe(active);
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	// A dearer route of the instance moves the table while the same route still wins.
+	const disposeB = serve(origin, b, 10n);
+	await settle();
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	sub.close();
+	disposeB();
+	close();
+});
+
+// Mirrors `a_pending_takeover_leaves_a_stranded_track_waiting` in rs/moq-net/src/model/front.rs:
+// the table moving toward a cheaper route that has yet to answer is no news for the stranded one.
+for (const answers of [true, false]) {
+	test(`a read stranded on a route waits out a takeover still pending, until it ${answers ? "answers" : "leaves"}`, async () => {
+		const { origin, a, b, active, close } = await setup();
+		const first = copy(a);
+		const sub = active.track("seq").subscribe();
+		first.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+
+		first.producer.abort(new StreamError(StreamCode.Unroutable));
+		await settle();
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		// The stranded route could serve again, but a cheaper one is announced and has not answered.
+		const second = copy(a);
+		second.write(1n);
+		const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+		const asked = next.requested();
+		await settle();
+		await settle();
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		expect(sub.closed.peek()).toBeUndefined();
+
+		if (answers) {
+			// It answers, and takes over.
+			const tb = copy(b);
+			const { value: pending } = await asked.next();
+			pending.serve(b.consume());
+			await settle();
+			await settle();
+			tb.write(2n);
+			await settle();
+			expect(drain(sub)).toEqual([2n]);
+		} else {
+			// It leaves first: the stranded route wins again, which is the news the read waited for.
+			next.close();
+			await settle();
+			await settle();
+			expect(drain(sub)).toEqual([1n]);
+		}
+
+		sub.close();
+		next.close();
+		close();
+	});
+}
+
+// The same, after another instance won the path: the request leaves the table, and its own
+// instance's takeover leaving is still the news the stranded read waits for.
+test("a read stranded on a route asks it again once a pending takeover leaves, after another instance won", async () => {
+	const { origin, a, active, close } = await setup();
+	const first = copy(a);
+	const sub = active.track("seq").subscribe();
+	first.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	first.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	const second = copy(a);
+	second.write(1n);
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	await settle();
+	const newer = wireOf(origin).receive(path, WireRoute.normalize({ instance: NEWER, cost: 1n }));
+	await settle();
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+
+	// The takeover leaves: the stranded route wins its instance again.
+	next.close();
+	await settle();
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	newer.close();
+	close();
+});
+
+// Mirrors the refusal half of `a_stranded_track_still_draining_asks_again_when_the_table_moves` in
+// rs/moq-net/src/model/front.rs: a replacement refusing the track as unroutable judged its route.
+test("a replacement that refuses a track as unroutable is asked again once the table moves, the replaced copy feeding meanwhile", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
 	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	const requested = wireOf(b).requested();
+	front.serve(b.consume());
+	const request = await requested;
+	if (!request) throw new Error("expected on-demand track request");
+	request.reject(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	const tb = copy(b);
+	tb.write(2n);
+	front.moved();
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// The table moving twice in one turn, the second time toward a cheaper route that has yet to
+// answer: the first move's news is stale by the time the read could act on it.
+test("a read stranded on a route waits out a takeover that went pending in the same turn", async () => {
+	const { origin, a, b, active, close } = await setup();
+	const first = copy(a);
+	const sub = active.track("seq").subscribe();
+	first.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	first.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	const second = copy(a);
+	second.write(1n);
+	// A dearer route moves the table while the stranded one still wins, then a cheaper one does.
+	const dearer = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 10n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	const asked = next.requested();
+	await settle();
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	const tb = copy(b);
+	const { value: pending } = await asked.next();
+	pending.serve(b.consume());
+	await settle();
+	await settle();
+	tb.write(2n);
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+
+	sub.close();
+	dearer.close();
+	next.close();
+	close();
+});
+
+// A concluded front has no route left to move: the copy that serves it losing its route ends the
+// read rather than strand it, even when it serves again after a replacement failed.
+test("a concluded front's copy that loses its route ends the read", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode.Unroutable));
+	front.conclude();
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	let ended: unknown;
+	try {
+		sub.tryRecvGroup();
+	} catch (err) {
+		ended = err;
+	}
+	expect(ended).toBeInstanceOf(StreamError);
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// Mirrors `a_stranded_track_still_draining_asks_again_when_the_table_moves` in rs/moq-net/src/model/front.rs.
+test("a replacement that loses its route is asked again once the table moves, the replaced copy feeding meanwhile", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	const lost = copy(b);
+	front.serve(b.consume());
+	await settle();
+	lost.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	const tb = copy(b);
+	tb.write(2n);
+	front.moved();
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// Mirrors `a_drained_copy_lost_as_unroutable_waits_on_the_serving_source` in rs/moq-net/src/model/front.rs.
+test("a replaced copy that loses its route after its replacement did waits on the serving source", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	const lost = copy(b);
+	front.serve(b.consume());
+	await settle();
+	lost.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	// The serving source could serve again, but reading it is no news: the read keeps waiting.
+	const tb = copy(b);
+	tb.write(1n);
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+
+	front.moved();
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// Mirrors `a_drained_copy_lost_as_unroutable_leaves_the_serving_refusal_standing` in rs/moq-net/src/model/front.rs.
+test("a replaced copy that loses its route leaves its replacement's refusal standing", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+
+	// The replacement has no such track.
+	front.serve(b.consume());
+	await settle();
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	let ended: unknown;
+	try {
+		sub.tryRecvGroup();
+	} catch (err) {
+		ended = err;
+	}
+	expect(ended).toBeInstanceOf(Error);
+	expect(routeFailed(ended as Error)).toBe(false);
+
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// A local broadcast's word on a track is its verdict: no route news can overtake it.
+test("a local broadcast failing a track as unroutable ends the read", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume(), true);
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
 	expect(drain(sub)).toEqual([0n]);
 
 	ta.producer.abort(new StreamError(StreamCode.Unroutable));
-	await expect(sub.recvGroup()).rejects.toMatchObject({ code: StreamCode.Unroutable });
+	await settle();
+	expect(() => sub.tryRecvGroup()).toThrow();
 
-	sub.close();
-	close();
+	front.consumer.close();
+	a.close();
 });
 
 test("between routes a reader keeps reading the copy it has", async () => {
@@ -3738,32 +4118,4 @@ test("a group an inner front hands out already failed still continues on the out
 	inner.consumer.close();
 	a.close();
 	b.close();
-});
-
-// A routed reader's record bills the pool of the copy serving it, and follows a route change: the
-// replaced route's pool stops carrying it, so the pool serving the reader is the one whose debt can
-// fold it.
-test("a routed reader's record bills the serving route's pool across a route change", async () => {
-	const { a, b, active, swap, close } = await setup();
-	const pools = { a: new cache.Pool({ capacity: 1 << 30 }), b: new cache.Pool({ capacity: 1 << 30 }) };
-	const ta = copy(a);
-	const tb = copy(b);
-	hooks.poolTrack(ta.producer, pools.a);
-	hooks.poolTrack(tb.producer, pools.b);
-	const sub = active.track("seq").subscribe({ delay: { max: null } });
-	// Every other group, so the reader's record holds a run per gap.
-	const runs = 64n;
-	for (let group = 0n; group < runs; group++) ta.write(2n * group);
-	expect(drain(sub).length).toBe(Number(runs));
-
-	await swap();
-	tb.write(2n * runs);
-	const before = { a: pools.a.used, b: pools.b.used };
-	expect(drain(sub)).toEqual([2n * runs]);
-	const bill = Number(runs - 1n) * cache.READER_RUN_OVERHEAD;
-	expect(before.a - pools.a.used).toBeGreaterThanOrEqual(bill);
-	expect(pools.b.used - before.b).toBeGreaterThanOrEqual(bill);
-
-	sub.close();
-	close();
 });

@@ -474,7 +474,6 @@ impl StreamsState {
 	/// `None` if `id` cannot receive data now, such as a closed stream or our own
 	/// unidirectional one. On an ordered transport, data at any other offset is a protocol
 	/// violation.
-	#[cfg(feature = "mux")]
 	pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
 		// A peer stream not opened yet starts at offset 0 too
 		if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {
@@ -4785,8 +4784,14 @@ mod tests {
 			(Err(recv::Error::TooLarge), false)
 		);
 		assert!(pending.max_stream_data.is_empty());
-		assert_eq!(recv(&mut client, &mut pending, id).peek(0), (Ok(()), true));
-		assert!(pending.max_stream_data.contains(&id));
+		let mut stream = recv(&mut client, &mut pending, id);
+		let mut lease = stream.lease(0).unwrap();
+		lease.advance(64);
+		stream.release(lease);
+		assert!(
+			pending.max_stream_data.contains(&id),
+			"taking the bytes returns their credit"
+		);
 
 		let id = StreamId::new(Side::Server, Dir::Uni, 1);
 		data(&mut client, id, 0, 10, false);

@@ -163,18 +163,6 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_closed(waiter)
 	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.0.acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.0.delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll_delivered(waiter)
-	}
 }
 
 impl<T: poll::RecvStream> poll::RecvStream for Local<T> {

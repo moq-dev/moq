@@ -18,7 +18,7 @@ Precedence is CLI, then env, then file, then defaults.
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
-timeout = "10s"                      # Handshake deadline. "0" waits forever.
+timeout = "30s"                      # Handshake deadline. "0" waits forever.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
@@ -116,7 +116,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
+congestion_control = "delay"         # "delay" (BBR v3, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.
@@ -125,7 +125,7 @@ mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
 stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
 send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
-qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
+qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 
@@ -219,7 +219,7 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `quic` feature. Every worker and the TLS stream
+worker. Every worker and the TLS stream
 listener serve one shared identity, generated or file-backed, so a certificate
 rotation reaches them together and `/certificate.sha256` stays accurate.
 
@@ -227,9 +227,9 @@ Pinning is off by default because every relay pins its workers to the same
 first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
-`io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
+`io_uring` additionally needs Linux 6.12+; it
 shares the same reloadable TLS identity and serves every configured version
-like the shared runtime. A setting the build or host cannot deliver refuses to
+like the shared runtime. A setting the host cannot deliver refuses to
 start rather than being ignored. Linux 6.14 up to the 7.3 fix (backported to
 stable kernels) charges io\_uring rings to `RLIMIT_MEMLOCK`: if io\_uring workers
 fail to start naming it, raise it (`LimitMEMLOCK=` under systemd).
