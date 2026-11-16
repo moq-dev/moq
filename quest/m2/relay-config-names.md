@@ -92,5 +92,4 @@ key renamed, one nix option renamed. Wire: none.
 
 ## Related
 
-- [The relay refuses dial keys it never uses](/quest/m2/relay-connect-keys.md) - the other config change at this freeze
 - [The switch](/quest/m2/multicast/switch.md) - retires what else reads a hop bound
