@@ -123,13 +123,8 @@ for (const [name, version] of Object.entries<string>(pkg.devDependencies ?? {}))
 
 	const out = join("dist", "bundled", source.slice("../".length));
 	console.log(`📎 Bundling the declarations of ${name} into ${out}...`);
-	execFileSync(
-		process.execPath,
-		["x", "--no-install", "tsc", "-p", `${source}/tsconfig.build.json`, "--outDir", out],
-		{
-			stdio: "inherit",
-		},
-	);
+	const tsc = ["x", "--no-install", "tsc", "-p", `${source}/tsconfig.build.json`, "--outDir", out];
+	execFileSync(process.execPath, tsc, { stdio: "inherit" });
 	const literal = new RegExp(`(["'])${name}(/[^"']*)?\\1`, "g");
 	for (const file of importers) {
 		const body = readFileSync(file, "utf8").replace(literal, (_, quote: string, subpath = "") => {
