@@ -5153,6 +5153,13 @@ impl kio::Task for FrontServe {
 								sub: None,
 							});
 						}
+						Action::Conclude { track: name } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							io.ready.wake_by_ref();
+							io.routes.conclude();
+							io.query = None;
+							io.staged = None;
+						}
 						Action::Splice { track: name, source } => {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };
 							let Some(asked) = io.staged.take() else {
@@ -5452,9 +5459,11 @@ impl kio::Task for FrontServe {
 						continue;
 					}
 					io.wanted = !io.wanted;
-					if !io.wanted {
-						// Nothing will be spliced now: let go of the copies a query
-						// holds, or the source stays subscribed with nobody reading.
+					// Nothing will be spliced now: let go of the copies a query holds, or the
+					// source stays subscribed with nobody reading. An ended track's query is a
+					// reroute for the reads still holding it, which subscribes nothing: finishing
+					// is what closes the track, so its edge may come only after the reroute.
+					if !io.wanted && !io.routes.ended() {
 						io.query = None;
 						io.staged = None;
 					}
