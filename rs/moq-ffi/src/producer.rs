@@ -921,7 +921,9 @@ impl MoqTrackProducer {
 	/// returns null. Releasing or [`abort`](Self::abort)ing it instead fails a reader that
 	/// joined in between. Returns true once the track is closed, including when it already
 	/// was, and this handle's later calls fail with `Closed`. Returns false, leaving the track
-	/// unchanged, when a reader wants it again, so keep serving and wait for the next null.
+	/// unchanged, when a reader wants it again, so keep serving and wait for the next null
+	/// on a fresh `demand()`: one that already returned null misses a reader that came and
+	/// went, and waits on.
 	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();

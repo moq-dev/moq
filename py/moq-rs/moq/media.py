@@ -242,7 +242,8 @@ class TrackProducer:
 
         Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None``.
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
         """
         return self._inner.abort_unwanted(error_code)
 
@@ -323,7 +324,8 @@ class TrackStreamProducer:
 
         Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None``.
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
         """
         return self._inner.abort_unwanted(error_code)
 

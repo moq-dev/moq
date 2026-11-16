@@ -1999,14 +1999,18 @@ async fn abort_unwanted_keeps_a_late_reader() {
 /// Every typed producer ends an idle track with `abort_unwanted`, but keeps it for a reader that
 /// joined since, which reads what is written next; once that reader leaves the abort commits and
 /// the handle is closed.
+///
+/// The reader leaves before the publisher's watcher sees it arrive, so that watcher, still on
+/// null, never wakes: the publisher waits for the next null on a fresh `demand()` instead.
 async fn typed_abort_unwanted(
 	broadcast: &MoqBroadcastProducer,
-	demand: Arc<crate::demand::MoqTrackDemand>,
+	demand: impl Fn() -> Arc<crate::demand::MoqTrackDemand>,
 	abort: impl Fn() -> Result<bool, MoqError>,
 	write: impl FnOnce(),
 ) {
-	let name = demand.name();
-	kio::clock::timeout(TIMEOUT, demand.until_unwanted())
+	let watcher = demand();
+	let name = watcher.name();
+	kio::clock::timeout(TIMEOUT, watcher.until_unwanted())
 		.await
 		.expect("timed out waiting for the track to start unwanted")
 		.unwrap();
@@ -2021,17 +2025,20 @@ async fn typed_abort_unwanted(
 		.unwrap();
 	assert!(group.is_some(), "{name} ended under a reader");
 
-	// The publisher's demand loop sees the reader come and go.
-	kio::clock::timeout(TIMEOUT, demand.until_wanted())
-		.await
-		.expect("timed out waiting for the reader to arrive")
-		.unwrap();
+	// The reader leaves before the publisher's watcher looks again.
 	drop(group);
 	late.cancel();
-	kio::clock::timeout(TIMEOUT, demand.until_unwanted())
+	let fresh = demand();
+	kio::clock::timeout(TIMEOUT, fresh.until_unwanted())
 		.await
 		.expect("timed out waiting for the reader to leave")
 		.unwrap();
+	let stale = std::pin::pin!(watcher.wanted_changed());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(
+		stale.poll(&mut cx).is_pending(),
+		"{name}'s old watcher saw the reader come and go"
+	);
 	assert!(abort().unwrap(), "{name} kept with nobody reading");
 	assert!(matches!(abort(), Err(MoqError::Closed)), "{name} still open");
 }
@@ -2051,7 +2058,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	.unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		media.demand().unwrap(),
+		|| media.demand().unwrap(),
 		|| media.abort_unwanted(7),
 		|| {
 			media
@@ -2079,7 +2086,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	.unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		stream.demand().unwrap(),
+		|| stream.demand().unwrap(),
 		|| stream.abort_unwanted(7),
 		|| {
 			// A second keyframe delimits the first access unit.
@@ -2112,7 +2119,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	.unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		audio.demand().unwrap(),
+		|| audio.demand().unwrap(),
 		|| audio.abort_unwanted(7),
 		|| {
 			audio
@@ -2151,7 +2158,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	.unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		video.demand().unwrap(),
+		|| video.demand().unwrap(),
 		|| video.abort_unwanted(7),
 		|| {
 			// A backend that pipelines readies an earlier frame's output.
@@ -2171,7 +2178,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: true }).unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		snapshot.demand().unwrap(),
+		|| snapshot.demand().unwrap(),
 		|| snapshot.abort_unwanted(7),
 		|| snapshot.update("1".into(), us(0)).unwrap(),
 	)
@@ -2181,7 +2188,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	let log = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		log.demand().unwrap(),
+		|| log.demand().unwrap(),
 		|| log.abort_unwanted(7),
 		|| log.append("1".into(), us(0)).unwrap(),
 	)
@@ -2197,7 +2204,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	.unwrap();
 	typed_abort_unwanted(
 		&broadcast,
-		window.demand().unwrap(),
+		|| window.demand().unwrap(),
 		|| window.abort_unwanted(7),
 		|| window.push("1".into(), us(0)).unwrap(),
 	)
