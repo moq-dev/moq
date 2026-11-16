@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import { Error as NetError, type Timed } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 
 import { frameTime, openGroup } from "../time.ts";
 import { type Config as CodecConfig, Encoder, type Pending } from "./encoder.ts";
@@ -45,7 +45,7 @@ export class Producer<T> {
 	 * is {@link Moq.Time.Timestamp.unscaled} at a group key instead: the first record opens the log's
 	 * group there, and every record carries that group's key.
 	 */
-	append({ value, at }: Timed<T>): void {
+	append(value: T, at: Moq.Time.Timestamp): void {
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// the record stays uncommitted until the write lands.

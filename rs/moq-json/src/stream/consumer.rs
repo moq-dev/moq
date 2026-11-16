@@ -124,10 +124,7 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.append(crate::Timed {
-						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-						at,
-					})
+					.append(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}), at)
 					.unwrap();
 			}
 			let _finished = producer.finish().unwrap();

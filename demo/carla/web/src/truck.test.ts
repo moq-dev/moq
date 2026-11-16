@@ -93,7 +93,7 @@ describe("Truck status", () => {
 			(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
 				broadcast.consume(),
 			);
-			producer.update({ value: status(0.5), at: key() });
+			producer.update(status(0.5), key());
 			expect(await available).toBe("available");
 			expect(truck.status.peek()?.accepted.throttle).toBe(0.5);
 
@@ -125,7 +125,7 @@ describe("Truck status", () => {
 		const { broadcast, producer } = statusBroadcast();
 		const next = async (update: TruckStatus) => {
 			const changed = truck.status.changed();
-			producer.update({ value: update, at: key() });
+			producer.update(update, key());
 			await changed;
 		};
 
@@ -168,7 +168,7 @@ describe("Truck status", () => {
 
 		try {
 			active.set(broadcast.consume());
-			producer.update({ value: status(0.5), at: key() });
+			producer.update(status(0.5), key());
 			while (truck.statusState.peek() !== "available") await truck.statusState.changed();
 
 			const unavailable = truck.statusState.changed();
@@ -202,14 +202,14 @@ describe("Truck status", () => {
 
 		try {
 			active.set(first.broadcast.consume());
-			first.producer.update({ value: status(0.25), at: key() });
+			first.producer.update(status(0.25), key());
 			while (truck.statusState.peek() !== "available") await truck.statusState.changed();
 
 			const transitions: string[] = [];
 			const unsubscribe = truck.statusState.subscribe((state) => transitions.push(state));
 			try {
 				active.set(second.broadcast.consume());
-				second.producer.update({ value: status(0.75), at: key() });
+				second.producer.update(status(0.75), key());
 				while (truck.status.peek()?.accepted.throttle !== 0.75) await truck.status.changed();
 				await Promise.resolve();
 				await Promise.resolve();
@@ -541,14 +541,11 @@ describe("Truck sessions", () => {
 					broadcast.consume(),
 				);
 				producer.update({
-					value: {
 						accepted: { ...REST },
 						autonomy: "manual",
 						estopped: true,
 						estop_by: await handle(dial.session),
-					},
-					at: key(),
-				});
+					}, key());
 				expect(await read(stream, reader)).toBeUndefined();
 			} finally {
 				producer.finish();

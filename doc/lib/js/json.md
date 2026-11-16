@@ -18,10 +18,10 @@ reader will not pick it up.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
 Compression is the track's: create it with `compression: "deflate"`, which JSON benefits
-from, and readers see plain frames either way. Producers take
-a `Timed` value, `{ value, at }`, where `at` is the capture time written as
-the frame timestamp, and the snapshot and stream consumers return the same
-shape. Nothing fills in now: every write takes `at`. On an untimed track (no
+from, and readers see plain frames either way. Every write takes
+`(value, at)`, such as `update(value, at)`, where `at` is the capture time
+written as the frame timestamp, and the consumers return a `Timed` value,
+`{ value, at }`. Nothing fills in now: every write takes `at`. On an untimed track (no
 `timescale`) it is `Time.Timestamp.unscaled(key)`: a snapshot or window
 restatement opens its group at that key, which must pass every group the
 track holds, and a delta or op rides the open group, so it reads back with

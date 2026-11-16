@@ -51,7 +51,7 @@ export class Writer<T, I = T> {
 	update(value: I): void {
 		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
 		try {
-			this.#producer.update({ value: this.#schema.parse(value), at: Moq.Time.Timestamp.unscaled(this.#key++) });
+			this.#producer.update(this.#schema.parse(value), Moq.Time.Timestamp.unscaled(this.#key++));
 		} catch (err) {
 			console.warn("a report track failed; closing it", err);
 			this.#closed = true;

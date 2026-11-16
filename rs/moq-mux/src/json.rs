@@ -218,7 +218,7 @@ impl<T: Serialize> Snapshot<T> {
 	/// The value is written at that timestamp and measures the entry's `jitter` and `delay`; one
 	/// ahead of now measures as zero delay. An unchanged value writes nothing and measures nothing.
 	pub fn update(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		match self.inner.update(Timed::new(value, timestamp))? {
+		match self.inner.update(value, timestamp)? {
 			Some(size) => self.listing.record(size, Some(timestamp)),
 			None => Ok(()),
 		}
@@ -299,7 +299,7 @@ impl<T: Serialize> Stream<T> {
 	/// error publishing the measured bitrate is returned after the record was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		let size = match self.inner.append(Timed::new(value, timestamp)) {
+		let size = match self.inner.append(value, timestamp) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
 			Err(

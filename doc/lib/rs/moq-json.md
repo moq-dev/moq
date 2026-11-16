@@ -21,9 +21,9 @@ The `poll_*` methods work by default. Enable the `async` Cargo feature to await
 - **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
 Compression is the track's: create it with `Info::default().with_compression(Compression::Deflate)`,
-which JSON benefits from, and readers see plain frames either way. Every write is a
-`moq_json::Timed::new(&value, at)`, and `at` must match the track. On a timed track it is the
-capture time. An untimed track has no timescale, so there `at` is `Timestamp::unscaled(key)`:
+which JSON benefits from, and readers see plain frames either way. Every write takes
+`(value, at)`, such as `update(&value, at)`, and `at` must match the track. On a timed track it is
+the capture time. An untimed track has no timescale, so there `at` is `Timestamp::unscaled(key)`:
 a write that opens a group starts it at that key, which must pass every group the track holds,
 and a delta inside the open group carries that group's key. Editing guards take the same
 timestamp when opened, including when they publish on drop.

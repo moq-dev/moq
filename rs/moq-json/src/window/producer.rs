@@ -3,7 +3,6 @@
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
-use crate::Timed;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -71,12 +70,12 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().encoder.range()
 	}
 
-	/// Drop records from the front at `count`'s timestamp (see [`Timed::at`]).
+	/// Drop `count` records from the front at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// A no-op when the window is already empty, and clamped to what it holds, so a caller can trim
 	/// unconditionally.
-	pub fn pop(&mut self, count: Timed<u64>) -> Result<()> {
-		self.inner.lock().unwrap().pop(count)
+	pub fn pop(&mut self, count: u64, at: moq_net::Timestamp) -> Result<()> {
+		self.inner.lock().unwrap().pop(count, at)
 	}
 
 	/// Close the open group, leaving the next edit to open a replacement with a header.
@@ -127,12 +126,9 @@ impl<T> Producer<T> {
 }
 
 impl<T: Serialize> Producer<T> {
-	/// Append a record at its timestamp (see [`Timed::at`]).
-	pub fn push<'a>(&mut self, value: Timed<&'a T>) -> Result<()>
-	where
-		T: 'a,
-	{
-		self.inner.lock().unwrap().push(value)
+	/// Append a record at `at` (see [`Timed::at`](crate::Timed::at)).
+	pub fn push(&mut self, value: &T, at: moq_net::Timestamp) -> Result<()> {
+		self.inner.lock().unwrap().push(value, at)
 	}
 }
 
@@ -143,7 +139,7 @@ impl<T: Serialize> Producer<T> {
 ///
 /// ```compile_fail,E0599
 /// # fn cannot_push(window: moq_json::window::Finished<u32>) {
-/// window.push(&1).unwrap();
+/// window.push(&1, moq_net::Timestamp::unscaled(0)).unwrap();
 /// # }
 /// ```
 #[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
@@ -197,12 +193,12 @@ struct Inner<T> {
 }
 
 impl<T> Inner<T> {
-	fn pop(&mut self, count: Timed<u64>) -> Result<()> {
+	fn pop(&mut self, count: u64, at: moq_net::Timestamp) -> Result<()> {
 		self.ensure_open()?;
-		let at = self.track.rescale(count.at)?;
+		let at = self.track.rescale(at)?;
 		let Inner { track, encoder, .. } = self;
 
-		let Some(frame) = encoder.pop(count.value)? else {
+		let Some(frame) = encoder.pop(count)? else {
 			return Ok(());
 		};
 
@@ -310,12 +306,12 @@ impl<T> Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn push(&mut self, value: Timed<&T>) -> Result<()> {
+	fn push(&mut self, value: &T, at: moq_net::Timestamp) -> Result<()> {
 		self.ensure_open()?;
-		let at = self.track.rescale(value.at)?;
+		let at = self.track.rescale(at)?;
 		let Inner { track, encoder, .. } = self;
 
-		let frame = encoder.push(value.value)?;
+		let frame = encoder.push(value)?;
 		track.write(at, &frame)?;
 		frame.commit();
 		if self.at.is_none_or(|newest| at > newest) {

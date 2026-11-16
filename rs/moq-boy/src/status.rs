@@ -60,7 +60,7 @@ impl StatusPublisher {
 		if let std::task::Poll::Ready(Err(err)) = self.producer.poll_refresh(&kio::Waiter::noop()) {
 			tracing::warn!(%err, "failed to refresh status");
 		}
-		if let Err(err) = self.producer.update(moq_json::Timed::new(status, now())) {
+		if let Err(err) = self.producer.update(status, now()) {
 			tracing::warn!(%err, "failed to publish status");
 		}
 	}

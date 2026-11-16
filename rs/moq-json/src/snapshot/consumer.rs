@@ -242,10 +242,7 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.update(crate::Timed {
-						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-						at,
-					})
+					.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}), at)
 					.unwrap();
 				if n == 1 {
 					producer.cut().unwrap();
@@ -286,10 +283,7 @@ mod timestamps {
 		let waiter = kio::Waiter::noop();
 		for n in 0..3 {
 			producer
-				.update(crate::Timed::new(
-					&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-					moq_net::Timestamp::unscaled(n),
-				))
+				.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}), moq_net::Timestamp::unscaled(n))
 				.unwrap();
 			if n == 0 {
 				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
@@ -307,10 +301,7 @@ mod timestamps {
 		assert!(consumer.poll_next(&waiter).is_pending());
 		let n = 3;
 		producer
-			.update(crate::Timed::new(
-				&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
-				moq_net::Timestamp::unscaled(n),
-			))
+			.update(&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}), moq_net::Timestamp::unscaled(n))
 			.unwrap();
 		let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
 			panic!("missing new state")
