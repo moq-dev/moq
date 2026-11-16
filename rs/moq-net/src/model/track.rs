@@ -1064,17 +1064,15 @@ impl Holdings for TrackState {
 	/// In media time, from the newest frame held, or the latest group's start when it is
 	/// newer; on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
-	/// Where groups are keyed by their start, the time itself, so a received copy resolves it
-	/// as any time start. On a copy whose wire keys groups otherwise, the newest group held
-	/// whose first frame presented at or before it.
+	/// Always a group this hop holds: the newest one starting at or before the target, or the
+	/// oldest one when none does, so a copy never asks its upstream for the prefix it lacks.
+	/// Groups keyed by their start are found by key; on a copy whose wire keys groups
+	/// otherwise, by when each one's first frame presented. Pending until a group is held.
 	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
+		let oldest = || self.live(..).next().map(|(&key, _)| Anchor::Time(key));
 		let Some(scale) = self.info.as_ref()?.timescale else {
 			let key = self.live(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
-			return match key {
-				Some((&key, _)) => Some(Anchor::Time(key)),
-				None if self.lookup.is_empty() => None,
-				None => Some(Anchor::Oldest),
-			};
+			return key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest);
 		};
 		let newest = self
 			.live_edge(&Servable::ALL)
@@ -1086,7 +1084,9 @@ impl Holdings for TrackState {
 			.map_or(u64::MAX, Timestamp::value);
 		if self.anchors != Anchors::Refused && !self.starts_at_keys {
 			let edge = newest.map_or(latest, |newest| newest.max(latest));
-			return Some(Anchor::Time(edge.saturating_sub(back)));
+			let target = edge.saturating_sub(back);
+			let key = self.live(..=target).next_back();
+			return key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest);
 		}
 		let target = newest?.saturating_sub(back);
 		let started = |slot: &Slot| {
@@ -1094,10 +1094,8 @@ impl Holdings for TrackState {
 				.and_then(|start| start.convert(scale).ok())
 				.is_some_and(|start| start.value() <= target)
 		};
-		Some(match self.live(..).rev().find(|(_, slot)| started(slot)) {
-			Some((&key, _)) => Anchor::Time(key),
-			None => Anchor::Oldest,
-		})
+		let key = self.live(..).rev().find(|(_, slot)| started(slot));
+		key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest)
 	}
 
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
@@ -8434,10 +8432,14 @@ impl Cursor {
 	/// ranges, counting relative anchors back from the latest group then, and settled as
 	/// the groups it waits on arrive. Returns whether the window moved.
 	fn sync(&mut self) -> bool {
-		let replaced = {
+		let (replaced, min) = {
 			let preferences = self.subscription.read();
 			let revision = self.subscription.ranges_revision();
-			(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone(), preferences.delay.min))
+			let min = preferences.delay.min;
+			(
+				(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone())),
+				min,
+			)
 		};
 		// A settled window has nothing to read from the track, whose lock every subscriber
 		// of it takes.
@@ -8447,7 +8449,7 @@ impl Cursor {
 		let state = self.state.read();
 		let holdings = &*state;
 		let moved = match replaced {
-			Some((revision, ranges, min)) => {
+			Some((revision, ranges)) => {
 				self.filter.resolved = revision;
 				match Window::new(&ranges, min, state.latest_live(), holdings) {
 					Ok(window) => {
@@ -8462,8 +8464,11 @@ impl Cursor {
 			None if self.filter.window.is_settled() => false,
 			// The live feed had no group when the ranges resolved, so the newest one then was
 			// the first to arrive, or the newest once it went live, however many have arrived
-			// or left since.
-			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), holdings),
+			// or left since. A live join not yet started reaches back by the Min Age stated now.
+			None if self.filter.window.is_pending() => {
+				self.filter.window.set_min(min);
+				self.filter.window.settle(state.first_live(), holdings)
+			}
 			None => self.filter.window.settle(state.latest_live(), holdings),
 		};
 		drop(state);
@@ -12305,6 +12310,49 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![5, 6, 7, 8, 9]);
 		let mut far = producer.subscribe(joining(Range::live(), Duration::from_secs(60)));
 		assert_eq!(ready_groups(&mut far), (0..10).collect::<Vec<_>>());
+	}
+
+	/// A lite-07 copy reaches back only to groups it holds, so the join starts at once and
+	/// leaves no unheld prefix for its upstream to be asked: the newest group held starting at
+	/// or before the target, or the oldest one held when none does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_reaches_back_only_to_groups_it_holds() {
+		let placed =
+			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 5000);
+		let mut short = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(
+			placed(&mut short),
+			Some((5000, true)),
+			"nothing held reaches back further"
+		);
+		assert_eq!(drain(&mut short), vec![5000]);
+
+		write_group(&producer, 3000);
+		let mut held = producer.subscribe(joining(Range::live(), Duration::from_secs(1)));
+		assert_eq!(
+			placed(&mut held),
+			Some((3000, true)),
+			"the newest held at or before 4000"
+		);
+	}
+
+	/// A live join that has not started yet reaches back by the Min Age stated when it starts,
+	/// though the update left its ranges as they were.
+	#[test]
+	fn a_min_age_update_reaches_a_join_not_yet_started() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(1)));
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new());
+		reader.update(joining(Range::live(), Duration::from_secs(2))).unwrap();
+		for _ in (0..=5000).step_by(500) {
+			append_half_second(&mut producer);
+		}
+		assert_eq!(ready_groups(&mut reader), vec![3000, 3500, 4000, 4500, 5000]);
 	}
 
 	/// A relative start taken while the copy is idle counts back from the live feed's

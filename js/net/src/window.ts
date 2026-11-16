@@ -367,9 +367,9 @@ export interface Holdings {
 	looksUp?(): boolean;
 	/**
 	 * Where a live join holding `min` behind the live edge starts, `latest` being the latest group:
-	 * a time that far behind the newest frame held, a group that starts at or before it, or with no
-	 * anchor, the oldest group, when none held does. Undefined while nothing held can measure it,
-	 * so the join waits for a group as a relative start does. Absent where the hop leaves its ranges
+	 * the newest group held that starts at or before the newest frame held less `min`, or the oldest
+	 * group held when none does. Undefined while nothing held can measure it, so the join waits for
+	 * a group as a relative start does. Absent where the hop leaves its ranges
 	 * to the copies it follows. Mirrors the Rust `Holdings::reach_back`.
 	 */
 	reachBack?(latest: bigint, min: Duration): { anchor?: Anchor } | undefined;
@@ -580,8 +580,11 @@ export class Window {
 	#waiting: { index: number; latest: bigint | undefined; start: Anchor | undefined }[] = [];
 	/** Nothing is left to resolve as groups arrive and start. */
 	#settled = false;
-	/** The subscriber's Min Age, which reaches a live join back from the live edge. */
-	readonly #min: Duration | undefined;
+	/**
+	 * The subscriber's Min Age, which reaches a live join back from the live edge. Only a pending
+	 * window reads it, when it places its ranges, so a join already started stays where it started.
+	 */
+	min: Duration | undefined;
 
 	/**
 	 * Resolve `ranges`, counting relative anchors back from `latest` and time anchors from
@@ -589,7 +592,7 @@ export class Window {
 	 */
 	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD, min?: Duration) {
 		this.ranges = ranges;
-		this.#min = min;
+		this.min = min;
 		this.#place(latest, holdings);
 	}
 
@@ -800,7 +803,7 @@ export class Window {
 			this.#pending = true;
 			return false;
 		}
-		const min = joins(range, this.#min, holdings);
+		const min = joins(range, this.min, holdings);
 		if (!reached && min !== undefined) {
 			reached = latest === undefined ? undefined : holdings.reachBack?.(latest, min);
 			// Nothing to measure the live edge by yet.

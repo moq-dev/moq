@@ -224,6 +224,12 @@ impl Window {
 		self.pending
 	}
 
+	/// Take the subscriber's current Min Age. Only a pending window reads it, when it places
+	/// its ranges, so a join already started stays where it started.
+	pub fn set_min(&mut self, min: Option<Duration>) {
+		self.min = min;
+	}
+
 	/// Whether a time start still waits on the groups held to place it.
 	pub fn is_waiting(&self) -> bool {
 		!self.waiting.is_empty()

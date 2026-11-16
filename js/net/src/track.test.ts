@@ -891,6 +891,16 @@ test("a live join reaches back by its min age", () => {
 	expect(readable(reader)).toEqual([11n]);
 });
 
+test("a min age update reaches a live join not yet started", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const reader = producer.subscribe({ delay: { min: Duration.secs(1), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(reader)).toEqual([]);
+	reader.update({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [LIVE] });
+	for (let sequence = 0n; sequence <= 10n; sequence++) appendHalfSecond(producer, sequence);
+	expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+});
+
 test("a live join without a min age starts at the latest group, and the oldest start ignores it", () => {
 	const producer = halfSecondGroups();
 	const all = Array.from({ length: 11 }, (_, sequence) => BigInt(sequence));

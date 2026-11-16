@@ -52,7 +52,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { keyOf, Timescale, Timestamp } from "./time.ts";
+import { keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
@@ -3364,30 +3364,28 @@ export class Subscriber {
 
 	// Where a live join holding `min` behind the live edge starts, as {@link Holdings.reachBack}
 	// says: in media time from the newest frame held, or on a scale-less track, by arrival on this
-	// hop's clock, as expiry measures it. Mirrors the Rust `TrackState::reach_back`.
+	// hop's clock, as expiry measures it. Always a group held: the newest one starting by the
+	// target, or the oldest one when none does, so nothing below what this hop holds is asked for.
+	// Mirrors the Rust `TrackState::reach_back`.
 	#reachBack(min: Duration): { anchor?: Anchor } | undefined {
 		const timeline = this.#state.timeline;
 		// The newest group held for which `f` holds, failed ones aside.
 		const newest = (f: (group: GroupConsumer) => boolean) =>
 			timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
+		const held = (group: GroupConsumer | undefined) => {
+			const at = group ?? timeline.find((g) => !hooks.groupFailed(g));
+			return at && { anchor: { absolute: at.sequence } };
+		};
 		const info = this.#state.info.peek();
 		if (info?.timescale == null) {
-			if (!newest(() => true)) return undefined;
 			const at = now();
-			const aged = newest((group) => at.since(hooks.groupArrived(group)).ge(min));
-			return aged ? { anchor: { absolute: aged.sequence } } : {};
+			return held(newest((group) => at.since(hooks.groupArrived(group)).ge(min)));
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
 		const started = stamped && hooks.groupTimestamp(stamped);
 		if (!stamped || !started) return undefined;
 		const target = Math.max(0, (hooks.groupLatest(stamped) ?? started).asMicros() - min.asMicros());
-		// moq-transport promises no timestamps that never rewind, so its starts go unindexed and a
-		// time anchor can't name a group: take the newest whose first frame presented by then.
-		if (info.ietf !== undefined) {
-			const first = newest((group) => (hooks.groupTimestamp(group)?.asMicros() ?? Infinity) <= target);
-			return first ? { anchor: { absolute: first.sequence } } : {};
-		}
-		return { anchor: { time: Timestamp.fromMicros(target) } };
+		return held(newest((group) => (hooks.groupTimestamp(group)?.asMicros() ?? Infinity) <= target));
 	}
 
 	// Resolve what the groups now held settle: a relative anchor waiting on a first group once
@@ -4993,8 +4991,10 @@ export class Subscriber {
 		const reordered = subscription.order !== this.#state.update.peek()?.order;
 		this.#state.update.set(subscription);
 		if (replaced) this.#resolve();
+		// A live join not yet started reaches back by the Min Age stated when it starts.
+		else this.#window.min = subscription.delay?.min ?? undefined;
 		// A fill's order follows its readers, so its handler wakes to serve the new first group.
-		else if (reordered) this.#fillsMoved();
+		if (!replaced && reordered) this.#fillsMoved();
 	}
 }
 
