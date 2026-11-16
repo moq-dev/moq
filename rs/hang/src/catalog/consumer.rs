@@ -13,20 +13,27 @@ pub struct Consumer<E = ()> {
 	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
 	inner: moq_json::snapshot::Consumer<serde_json::Value>,
 	base: Path,
+	// Whether the reader holds each update until its timestamp, so it reads every one in order.
+	holds: bool,
 	_ext: std::marker::PhantomData<E>,
 }
 
 impl<E: DeserializeOwned + Default> Consumer<E> {
-	/// Read a catalog track, compressed or not.
+	/// Read a catalog track, compressed or not, for a reader playing `delay` behind the live edge.
 	///
-	/// Subscribes to it at [`Catalog::default_subscription`]'s priority, reading only the newest
-	/// catalog; see [`moq_json::snapshot::Consumer::new`].
-	pub fn new(track: moq_net::track::Consumer) -> Self {
+	/// Subscribes to it at [`Catalog::default_subscription`]'s priority. A zero `delay` reads only
+	/// the newest catalog, for a reader that applies each on arrival. A reader that holds each update
+	/// until its media reaches the update's timestamp passes its playout delay instead, and reads
+	/// every update in order that it may still need: an update stays deliverable until it falls
+	/// `delay` behind the live edge. See [`moq_json::snapshot::Consumer::new`].
+	pub fn new(track: moq_net::track::Consumer, delay: std::time::Duration) -> Self {
 		let mut config = moq_json::snapshot::consumer::Config::default();
 		config.priority = Catalog::default_subscription().priority;
+		config.delay = delay;
 		Self {
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, config),
+			holds: !delay.is_zero(),
 			_ext: std::marker::PhantomData,
 		}
 	}
@@ -34,8 +41,9 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	/// Get the next catalog update and its timestamp, or `None` when the track ends.
 	///
 	/// The update takes effect at `at` on the broadcast's media timeline, so a caller holds one it
-	/// reads before its media reaches `at`, and applies one read late at once. On a scale-less
-	/// catalog track `at` is a group key with no time, so the update applies on arrival.
+	/// reads before its media reaches `at`, and applies one read late, or the first it reads, at
+	/// once. On a scale-less catalog track `at` is a group key with no time, so the update applies on
+	/// arrival.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference, include, or echo prefix walks above the root. Such a reference names no broadcast, and the
@@ -46,7 +54,11 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	/// never fills.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_json::Timed<Catalog<E>>>>> {
-		let next = ready!(self.inner.poll_latest(waiter)).map_err(|err| match err {
+		let next = match self.holds {
+			true => ready!(self.inner.poll_next(waiter)),
+			false => ready!(self.inner.poll_latest(waiter)),
+		};
+		let next = next.map_err(|err| match err {
 			// A transport failure stays typed so callers can tell a lost source from a bad catalog.
 			moq_json::Error::Net(err) => crate::Error::Moq(err),
 			err => crate::Error::Json(err.to_string()),
@@ -173,6 +185,44 @@ mod test {
 				Some(moq_json::Timed::new(published, at)),
 				"the update applies at its frame's timestamp"
 			);
+		}
+	}
+
+	/// Updates that arrive together reach a holding reader in order while it may still play them;
+	/// an arrival reader takes only the newest.
+	#[tokio::test]
+	async fn a_holding_reader_reads_every_update_within_its_delay() {
+		// A reader `delay` behind the live edge (3s) plays from `3000 - delay`, so it needs the update
+		// in effect there and every later one.
+		for (delay, expected) in [
+			(0, vec![3_000]),
+			(999, vec![2_000, 3_000]),
+			(1_001, vec![1_000, 2_000, 3_000]),
+		] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
+				.unwrap();
+			let mut consumer = Consumer::<()>::new(
+				broadcast.consume().track(Catalog::DEFAULT_NAME).unwrap(),
+				std::time::Duration::from_millis(delay),
+			);
+			for ms in [1_000, 2_000, 3_000] {
+				let mut catalog = Catalog::<()>::default();
+				catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_millis(ms));
+				let mut group = track.append_group(ms).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::from_millis(ms).unwrap(), catalog.to_json().unwrap())
+					.unwrap();
+				group.close().unwrap();
+			}
+			drop(track.finish().unwrap());
+
+			let mut read = Vec::new();
+			while let Some(update) = consumer.next().await.unwrap() {
+				read.push(update.at.as_millis().unwrap());
+			}
+			assert_eq!(read, expected, "a {delay}ms delay");
 		}
 	}
 

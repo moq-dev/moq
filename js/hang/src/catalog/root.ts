@@ -1,3 +1,4 @@
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
@@ -183,26 +184,39 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 	return root;
 }
 
+/** Options for {@link watch}. */
+export type WatchConfig = {
+	/** The caller's playout delay behind the live edge; omitted reads only the newest catalog. */
+	delay?: Duration;
+};
+
 /**
  * Subscribe to a broadcast's catalog and iterate validated root updates, each with its timestamp.
  *
  * An update takes effect at `at` on the broadcast's media timeline, so a caller holds one it reads
- * before its media reaches `at`, and applies one read late at once. On a scale-less catalog track
- * `at` is a group key with no time, so the update applies on arrival.
+ * before its media reaches `at`, and applies one read late, or the first it reads, at once. On a
+ * scale-less catalog track `at` is a group key with no time, so the update applies on arrival.
+ *
+ * Without a `delay`, it reads only the newest catalog, for a caller that applies each on arrival. A
+ * caller that holds updates passes its playout delay and reads, in order, every update it may still
+ * need: one stays deliverable until it falls `delay` behind the live edge.
  *
  * Throws {@link UnsupportedVersion}, {@link DuplicateRendition}, or {@link EscapingBroadcast} on an
  * update that fails validation. `broadcast` references are checked against the handle's `path` and
  * yielded unresolved.
  */
-export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Moq.Timed<Root>> {
+export async function* watch(broadcast: Moq.Broadcast.Consumer, config?: WatchConfig): AsyncIterable<Moq.Timed<Root>> {
+	const delay = config?.delay ?? Duration.ZERO;
+	const holds = !delay.isZero();
 	const consumer = new Json.Snapshot.Consumer<Root>({
 		track: broadcast.track(TRACK),
 		schema: RootSchema,
 		priority: PRIORITY.catalog,
+		delay,
 	});
 	try {
 		for (;;) {
-			const next = await consumer.latest();
+			const next = await (holds ? consumer.next() : consumer.latest());
 			if (!next) return;
 			yield { value: checkResolvable(checkRenditions(next.value), broadcast.path), at: next.at };
 		}

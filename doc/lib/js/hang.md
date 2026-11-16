@@ -11,7 +11,7 @@ description: The media layer in TypeScript
 The [hang media format](/concept/hang) as TypeScript types and codecs, shared
 by [`@moq/watch`](/lib/js/watch) and [`@moq/publish`](/lib/js/publish).
 
-- **Catalog**: zod schemas for the root, renditions, data tracks, and `media`. The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own. `Catalog.watch(broadcast)` iterates validated catalog updates, each with the media timestamp it takes effect at, and parsing throws `Catalog.UnsupportedVersion` on a catalog that needs a newer moq-hang draft. `Catalog.Audio.ranked(renditions)` and `Catalog.Video.ranked(renditions)` order renditions best first, with enabled renditions ahead; `<moq-watch>` uses the video order.
+- **Catalog**: zod schemas for the root, renditions, data tracks, and `media`. The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own. `Catalog.watch(broadcast, { delay })` iterates validated catalog updates, each with the media timestamp it takes effect at: the newest only, or with a `delay`, every update a reader that far behind the live edge may still need. Parsing throws `Catalog.UnsupportedVersion` on a catalog that needs a newer moq-hang draft. `Catalog.Audio.ranked(renditions)` and `Catalog.Video.ranked(renditions)` order renditions best first, with enabled renditions ahead; `<moq-watch>` uses the video order.
 - **Containers**: `Container.Legacy` producer/consumer and separate `@moq/hang/cmaf` decoding. Import the CMAF module only when reading fMP4.
 - **Utilities**: priority and latency math, a libav polyfill (Opus, plus AAC decoding) for runtimes without native WebCodecs audio, and the browser quirks the media packages work around.
 

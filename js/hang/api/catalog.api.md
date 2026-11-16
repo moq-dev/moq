@@ -819,6 +819,10 @@ export const VideoSchema: ZodMiniObject<{
 	rotation: ZodMiniOptional<ZodMiniNumber<number>>;
 }, $strip>;
 
+export type WatchConfig = {
+	delay?: Net.Clock.Duration;
+};
+
 export function checkRenditions(root: Root): Root;
 
 export function checkResolvable(root: Root, base: Net.Path.Valid): Root;
@@ -849,5 +853,5 @@ export const u8Schema: $ZodBranded<ZodMiniNumber<number>, "u8", "out">;
 
 export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date;
 
-export function watch(broadcast: Net.Broadcast.Consumer): AsyncIterable<Net.Timed<Root>>;
+export function watch(broadcast: Net.Broadcast.Consumer, config?: WatchConfig): AsyncIterable<Net.Timed<Root>>;
 ```

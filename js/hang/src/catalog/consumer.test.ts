@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { TRACK } from "./format";
@@ -144,6 +145,30 @@ test("watch yields each catalog update with the timestamp it takes effect at", a
 	await consumer.return?.();
 	producer.finish();
 	broadcast.close();
+});
+
+test("a holding watcher reads every update it may still play, in order", async () => {
+	// A reader `delay` behind the live edge (3s) plays from `3000 - delay`, so it needs the update in
+	// effect there and every later one; without a delay it takes only the newest.
+	for (const [delay, expected] of [
+		[undefined, [3000]],
+		[Duration.millis(999), [2000, 3000]],
+		[Duration.millis(1001), [1000, 2000, 3000]],
+	] as const) {
+		const broadcast = new Moq.Broadcast.Producer();
+		const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI, maxAge: Duration.secs(30) });
+		const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
+		// Subscribed before the updates land, as a live reader is; all three arrive before it reads.
+		const updates = watch(broadcast.consume(), { delay })[Symbol.asyncIterator]();
+		const first = updates.next();
+		for (const ms of [1000, 2000, 3000])
+			producer.update({ value: catalog(ms / 1000), at: Moq.Time.Timestamp.fromMillis(ms) });
+		producer.finish();
+		const read: number[] = [];
+		for (let next = await first; !next.done; next = await updates.next()) read.push(next.value.at.asMillis());
+		expect(read).toEqual([...expected]);
+		broadcast.close();
+	}
 });
 
 test("echo feedback prefix refuses root escape with the same URL resolution as renditions", () => {

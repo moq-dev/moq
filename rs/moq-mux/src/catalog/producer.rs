@@ -512,13 +512,15 @@ impl<E: CatalogExt> Producer<E> {
 		};
 		catalog.media.clock = clock.wall();
 
-		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive.
-		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive. Fresh as
+		// long as the media, so a reader as far behind holds each update until its timestamp.
+		let info = hang::Catalog::default_track_info().with_max_age(config.max_age);
+		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, info.clone())?;
 		// The MSF track is the same catalog in another encoding, so it takes the same
 		// priority. Leaving it at the default would rank a subscriber reading MSF
 		// below every media track on a relay's upstream leg. It stays uncompressed: MSF is
 		// read by other implementations, which hang's compression decisions don't cover.
-		let msf_info = hang::Catalog::default_track_info().with_compression(moq_net::track::Compression::None);
+		let msf_info = info.with_compression(moq_net::track::Compression::None);
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
@@ -1837,6 +1839,10 @@ mod test {
 		let info = catalog.track_info(hang::catalog::PRIORITY.video);
 		assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
 		assert_eq!(info.timescale, Some(hang::container::TIMESCALE));
+		// The catalog tracks stay fresh as long, for a reader holding each update until its timestamp.
+		for track in [&catalog.outputs.hang_track, &catalog.outputs.msf_track] {
+			assert_eq!(track.info().max_age, Some(std::time::Duration::from_secs(3)));
+		}
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
 		assert_eq!(at.max_age, Some(std::time::Duration::from_secs(3)));

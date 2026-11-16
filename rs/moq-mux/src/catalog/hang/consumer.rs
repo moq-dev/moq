@@ -25,7 +25,7 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Subscribes to the track itself; see [`hang::catalog::Consumer::new`].
 	pub fn new(track: moq_net::track::Consumer) -> Self {
 		Self {
-			inner: hang::catalog::Consumer::new(track),
+			inner: hang::catalog::Consumer::new(track, std::time::Duration::ZERO),
 		}
 	}
 
