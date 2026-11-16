@@ -107,8 +107,7 @@ type QUICConfig struct {
 	MTUDiscovery *bool
 	// CongestionControl picks the congestion control family; nil leaves the choice to the backend.
 	CongestionControl *CongestionControl
-	// Qlog is a directory, which must exist, to write qlog traces into. Dial
-	// fails unless QlogSupported.
+	// Qlog is a directory, which must exist, to write qlog traces into.
 	Qlog string
 	// Keylog writes TLS session secrets to the file SSLKEYLOGFILE names, for
 	// decrypting a capture. Without SSLKEYLOGFILE the dial fails.

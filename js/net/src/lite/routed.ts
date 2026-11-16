@@ -141,7 +141,18 @@ interface Moving {
 }
 
 const same = (a: Claim | undefined, b: Claim | undefined) =>
-	a === b || (!!a && !!b && a.instance === b.instance && a.epoch === b.epoch && a.cost === b.cost);
+	a === b ||
+	(!!a && !!b && a.instance === b.instance && a.epoch === b.epoch && a.cost === b.cost && a.above === b.above);
+
+// The peer's `above` for the claim at `path`, if it can be: a claim is no more than its path's
+// segments broader than the path it is shown at. Mirrors rs/moq-net's `Routed::above`.
+const aboveOf = (path: Path.Valid | undefined, above: bigint | undefined): bigint => {
+	const value = above ?? 0n;
+	if (path === undefined || value === 0n) return value;
+	if (value > BigInt(Path.parts(path).length))
+		throw new ProtocolViolation(`a claim at ${path} cannot be ${value} segments above it`);
+	return value;
+};
 
 const through = (wire: Route, hop: RouteHop) =>
 	wire.path.some((at) => at.node === hop.node && at.session === hop.session);
@@ -383,6 +394,7 @@ export class Routed {
 				node: wire.node,
 				depth: Path.parts(wire.prefix).length,
 				priority: Math.min(0, wire.offer.priority),
+				above: claim.above,
 				draining: wire.offer.draining || wire.drain || undefined,
 				available: !wire.held,
 			}),
@@ -654,6 +666,7 @@ export class Routed {
 		// Every claim's path is relative to the session, whichever requested prefix it lies in.
 		const named = this.#history.start(path);
 		const id = this.#history.next - 1n;
+		if (claim) claim.above = aboveOf(named, claim.above);
 		if (named === undefined) {
 			if (claim) console.warn(`refusing a forwarded claim: route=${routeId} claim=${id} reason=path`);
 			this.#claims.set(id, { route: routeId });
@@ -945,10 +958,15 @@ export class Routed {
 			for (const [path, claim] of carried.claims) {
 				const record = records.get(claim.from);
 				if (!record) throw new Error("a carried claim's record");
+				// A claim now covering a narrower prefix from above is that much more above it.
+				const held =
+					record.claim && claim.lowered > 0n
+						? { ...record.claim, above: record.claim.above + claim.lowered }
+						: record.claim;
 				wire.claims.set(path, claim.id);
-				if (record.claim) wire.view.claims.set(path, record.claim);
+				if (held) wire.view.claims.set(path, held);
 				else wire.withheld.add(claim.id);
-				placed.set(claim.id, { route: wire.id, path, claim: record.claim });
+				placed.set(claim.id, { route: wire.id, path, claim: held });
 				if (claim.id !== claim.from) inserted.push({ id: claim.id, path });
 			}
 			if (carried.kind === "widens") {
@@ -1087,15 +1105,21 @@ export class Routed {
 			case "active": {
 				if (msg.route === undefined) throw new ProtocolViolation("lite-07 claim without a route");
 				if (msg.instance === undefined) throw new ProtocolViolation("lite-07 claim without an instance");
-				const claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+				const claim = {
+					instance: msg.instance,
+					epoch: msg.epoch ?? 0n,
+					cost: msg.cost ?? Cost.zero,
+					above: msg.above ?? 0n,
+				};
 				this.#startClaim(msg.route, msg, claim);
 				break;
 			}
 			case "update": {
 				const live = this.#claim(msg.id);
+				const above = aboveOf(live.path, msg.above);
 				// An update names none of what a refused claim lacks.
 				if (live.claim === undefined || live.path === undefined) break;
-				live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero };
+				live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero, above };
 				this.#change(live.route, live.path, live.claim);
 				break;
 			}
@@ -1104,7 +1128,12 @@ export class Routed {
 				if (msg.instance === undefined) throw new ProtocolViolation("lite-07 restart without an instance");
 				// A claim without a path stays refused, whatever the peer sends for it.
 				if (live.path === undefined) break;
-				live.claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+				live.claim = {
+					instance: msg.instance,
+					epoch: msg.epoch ?? 0n,
+					cost: msg.cost ?? Cost.zero,
+					above: aboveOf(live.path, msg.above),
+				};
 				this.#route(live.route).withheld.delete(msg.id);
 				this.#change(live.route, live.path, live.claim);
 				break;

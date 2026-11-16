@@ -6,8 +6,6 @@
 //! bottleneck runs below the track's bitrate behind a deep but finite queue, and the run checks
 //! that the queue overflowed, so the congestion loss came from the sender filling it.
 
-#![cfg(feature = "quic")]
-
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use kio::clock::Instant;

@@ -29,6 +29,7 @@ fn start_on(route: u64, path: &'static str) -> Msg {
 		epoch: 0,
 		hops: Default::default(),
 		cost: Cost::new(0),
+		above: 0,
 	}
 }
 
@@ -323,6 +324,7 @@ async fn pending_changes_net_out() {
 			id: 0,
 			hops: Default::default(),
 			cost: Cost::new(cost),
+			above: 0,
 		};
 		routed.receive(update).unwrap();
 	}
@@ -332,6 +334,7 @@ async fn pending_changes_net_out() {
 		id: 0,
 		hops: Default::default(),
 		cost: Cost::new(0),
+		above: 0,
 	};
 	routed.receive(back).unwrap();
 	assert_eq!(pending(&routed), 0, "an update back to the committed claim");
@@ -371,6 +374,7 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 		epoch: 1,
 		cost: Cost::new(0),
 		hops: Default::default(),
+		above: 0,
 	};
 	// Each batch the edge would send for node 7: the paths it changes, whether each is
 	// present, and its floor.
@@ -415,6 +419,7 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 		id: 1,
 		hops: Default::default(),
 		cost: Cost::new(5),
+		above: 0,
 	};
 	for msg in [update, floor(2)] {
 		routed.receive(msg).unwrap();
@@ -550,6 +555,7 @@ async fn a_refused_route_still_follows_a_dead() {
 		epoch: 0,
 		hops: Default::default(),
 		cost: Cost::new(0),
+		above: 0,
 	};
 	let closed = |session, gone, moved| {
 		Msg::Dead(Dead::Closed {
@@ -837,4 +843,48 @@ async fn an_exact_route_stays_where_a_widening_leaves_it() {
 	}
 	routed.outputs(&subscriber);
 	assert!(served(&routed).contains(&"a/b/z".to_string()), "{:?}", served(&routed));
+}
+
+/// A narrowing carries the claim covering the new prefix from above to that prefix, as the
+/// peer does, under the next Announce ID and that many segments more above its path.
+#[kio::test]
+async fn a_narrowed_claim_is_more_above_its_new_path() {
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let wide = Path::from_static("a");
+	let mut routed = super::Routed::asking(&subscriber, &wide, 1, &Default::default()).unwrap();
+	let route = Msg::RouteStart {
+		node: 7,
+		prefix: 0,
+		suffix: Path::empty(),
+		exact: false,
+		offer: offer(),
+	};
+	// The root's claim, presented at `a`.
+	let mut covering = start("a");
+	let Msg::Active { above, .. } = &mut covering else {
+		unreachable!()
+	};
+	*above = 1;
+	for msg in [
+		route,
+		covering,
+		Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		},
+	] {
+		routed.receive(msg).unwrap();
+	}
+	routed.outputs(&subscriber);
+
+	let narrow = Path::from_static("a/b/c");
+	routed.want(narrow.clone(), subscriber.origin.snapshot("a/b/c"));
+	routed.unwant(&wide);
+	let requests = routed.outputs(&subscriber);
+	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
+	routed.receive(Msg::Ok).unwrap();
+	let claims: Vec<_> = (routed.claims.iter())
+		.map(|(id, claim)| (*id, claim.wire.clone(), claim.claim.as_ref().map(|claim| claim.above)))
+		.collect();
+	assert_eq!(claims, [(1, Some(narrow), Some(3))]);
 }

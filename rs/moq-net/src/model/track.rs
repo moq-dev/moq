@@ -10223,6 +10223,9 @@ impl Subscriber {
 	/// subscriber's ranges. A copy knows only the skips its wire forwarded.
 	///
 	/// What tells a reader that nothing lies between two groups, or before a track's first.
+	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
+	/// still in flight reads `false`, as does one a local producer's cache expired below its
+	/// edge. A reader that asks once treats such a group as one with something before it.
 	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
 			return true;
@@ -10791,6 +10794,12 @@ impl Ordered {
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		self.inner.poll_largest(waiter)
+	}
+
+	/// Whether the publisher declared every start in `groups` skipped; see
+	/// [`Subscriber::is_skipped`].
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+		self.inner.is_skipped(groups)
 	}
 
 	/// Whether `other` reads the same underlying track state.

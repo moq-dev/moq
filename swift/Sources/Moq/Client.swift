@@ -84,11 +84,6 @@ public func versions() -> [String] {
     moqVersions()
 }
 
-/// Whether this build can write qlog traces for `QuicConfig.qlog`.
-public func qlogSupported() -> Bool {
-    moqQlogSupported()
-}
-
 /// A MoQ session, including its initial native dial.
 public final class Session: Sendable {
     let ffi: MoqSession

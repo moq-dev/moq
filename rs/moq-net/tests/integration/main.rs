@@ -53,6 +53,7 @@ mod mesh_withdraw;
 mod model;
 mod mount;
 mod multi_cdn;
+mod nested_claim;
 mod partial_group;
 mod path_routes;
 mod quiet_catalog;

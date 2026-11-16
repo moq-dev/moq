@@ -62,10 +62,13 @@ export interface Route {
 export type Kind = "stays" | "widens" | "narrows";
 
 /** A claim of a route that lives on: its Announce ID from here on, and the one it had, the same
- * unless it is now presented at a prefix below its path. */
+ * unless it is now presented at a prefix below its path. `lowered` is how many segments below where
+ * it was presented it is presented now, which its Above grows by: 0 unless it now covers a narrower
+ * prefix from above. */
 export interface Claim {
 	id: bigint;
 	from: bigint;
+	lowered: bigint;
 }
 
 /** A route that lives on: its Route ID from here on, and the route whose offer and state it keeps. */
@@ -137,7 +140,7 @@ export function plan(
 
 	const carried = new Map<bigint, Carried>();
 	const kept = (claims: ReadonlyMap<Path.Valid, bigint>): [Path.Valid, Claim][] =>
-		[...claims].map(([path, id]) => [path, { id, from: id }]);
+		[...claims].map(([path, id]) => [path, { id, from: id, lowered: 0n }]);
 	for (const { wider, sources } of widening.values()) {
 		let winner = sources[0];
 		for (const id of sources) if (compare(route(id).order, route(winner).order) < 0) winner = id;
@@ -169,12 +172,13 @@ export function plan(
 		// Of the claims covering the whole prefix alike, only the most specific shows.
 		let above: [Path.Valid, bigint] | undefined;
 		for (const [path, id] of source.claims) {
-			if (path !== inside && Path.hasPrefix(inside, path)) claims.set(path, { id, from: id });
+			if (path !== inside && Path.hasPrefix(inside, path)) claims.set(path, { id, from: id, lowered: 0n });
 			if (Path.hasPrefix(path, inside) && (!above || path.length > above[0].length)) above = [path, id];
 		}
 		if (above) {
 			const id = above[0] === inside ? above[1] : nextClaim++;
-			claims.set(inside, { id, from: above[1] });
+			const lowered = BigInt(Path.parts(inside).length - Path.parts(above[0]).length);
+			claims.set(inside, { id, from: above[1], lowered });
 		}
 		const id = nextRoute++;
 		carried.set(id, { id, from, kind: "narrows", prefix: inside, region: inside, exact: false, claims });

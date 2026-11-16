@@ -1277,9 +1277,12 @@ impl AnnounceRun {
 				advertised.cost = cost;
 				let hops = chain(self.version, hops);
 				match advertised.id {
-					Some(id) => stream
-						.writer
-						.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?,
+					Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::Update {
+						id,
+						hops,
+						cost,
+						above: 0,
+					})?,
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 						route: 0,
@@ -1288,6 +1291,7 @@ impl AnnounceRun {
 						suffix: lite::PathRef::literal(suffix),
 						hops,
 						cost,
+						above: 0,
 					})?,
 				}
 				self.sent(stream)?;
@@ -1365,6 +1369,7 @@ impl AnnounceRun {
 			suffix: wire,
 			hops: wire_hops,
 			cost,
+			above: 0,
 		})?;
 		self.sent(stream)?;
 		Ok(())
@@ -1401,6 +1406,7 @@ impl AnnounceRun {
 					epoch,
 					cost,
 					hops: crate::Hops::new(),
+					above: 0,
 				})?;
 				self.sent(stream)?;
 			}
@@ -3920,6 +3926,57 @@ mod announce_test {
 		}
 	}
 
+	/// A lite-07 claim covering the requested prefix from above is presented there with
+	/// how far above it is, and a narrowing carries it to the narrower prefix with nothing
+	/// sent for it: the peer adds the distance to its Above as this side does.
+	#[kio::test]
+	async fn a_lite07_narrowing_carries_a_covering_claim_further_above() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let mut answer = super::routed::Answer::alone(origin.consume());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		answer
+			.request(false, Vec::new(), vec![(crate::Path::from_static("a/b"), false)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut first = sent(&mut answer);
+		kio::clock::sim::yield_now().await;
+		first.extend(sent(&mut answer));
+		assert!(
+			first
+				.iter()
+				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { above: 1, .. })),
+			"{first:?}"
+		);
+
+		answer
+			.request(false, vec![0], vec![(crate::Path::from_static("a/b/c"), false)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		assert_eq!(
+			sent(&mut answer),
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 1 }
+			]
+		);
+	}
+
 	/// A lite-07 stream holds a route on the wire only while it shows one of the
 	/// route's claims: an origin whose only claim is hidden from the peer starts no
 	/// route, the route ends after the floor once its last shown claim goes, and it
@@ -4213,7 +4270,14 @@ mod announce_test {
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
+			[
+				lite::AnnounceBroadcast::Update {
+					id: 0,
+					hops,
+					cost,
+					above: 0,
+				},
+			] => {
 				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}

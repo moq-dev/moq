@@ -50,6 +50,13 @@ is a later decision that [failover](/quest/m3/route-health/failover.md)
 leaves room for. A node that has not opted in still finds a silent death by
 the idle timeout alone and never recovers a stall on a live session.
 
+Decided 2026-11-16 (maintainer, on
+[moq-dev/moq#8882](https://github.com/moq-dev/moq/pull/8882)): ✅ the
+metadata subscription and the payload subscription stay separate, and
+nothing switches mode in place; the track moves as it moves between any two
+routes. The epic is deferred behind the route layer: "we don't have an
+immediate user".
+
 New on 2026-11-15, from the prior art this is closest to:
 
 - The standby is a route whose path does not name this node, and one that

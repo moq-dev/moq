@@ -486,12 +486,14 @@ impl AnnounceWriter {
 					suffix,
 					hops: hop_chain(hops.iter().copied()),
 					cost: Default::default(),
+					above: 0,
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
 				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
+				above: 0,
 			},
 			Announced::End(id) => {
 				self.encoder.end(*id);
@@ -631,6 +633,7 @@ impl RouteNode {
 			cost: 0,
 			upstream: false,
 			learned: false,
+			above: 0,
 			chain: crate::Hops::new(),
 		}
 	}
@@ -746,6 +749,7 @@ impl RouteRelay {
 			cost,
 			upstream: false,
 			learned: false,
+			above: 0,
 			chain: crate::Hops::new(),
 		}
 	}
@@ -869,6 +873,7 @@ impl RouteFollower {
 			cost: 0,
 			upstream: false,
 			learned: false,
+			above: 0,
 			chain: crate::Hops::new(),
 		};
 		let snapshot = (0..self.claims)

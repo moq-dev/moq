@@ -477,14 +477,6 @@ impl std::fmt::Debug for Workers {
 /// One qlog sink is built for the whole group and cloned into every worker, so
 /// the traces share a single writer thread however many workers there are.
 fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::transport::Config> {
-	// The tokio path reports this through `moq_tokio::Error::QlogUnsupported`,
-	// which nothing builds here: this listener is the io_uring stack.
-	#[cfg(not(feature = "qlog"))]
-	anyhow::ensure!(
-		quic.qlog.is_none(),
-		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
-	);
-
 	// Mirrors `moq_tokio::Error::ReceiveWindowTooSmall`: incomplete messages hold
 	// connection credit, so a window that cannot fit the largest one stalls.
 	anyhow::ensure!(
@@ -495,7 +487,6 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	);
 
 	let mut transport = moq_uring::quic::transport::Config::default();
-	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
 		transport.qlog = Some(
 			moq_uring::quic::qlog::Sink::directory(dir)

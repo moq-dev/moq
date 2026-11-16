@@ -128,10 +128,7 @@ impl Config {
 			.map(Path::new)
 			.transpose()
 			.context("invalid stats.node")?;
-		#[cfg(feature = "cluster-lan")]
 		let lan = cluster.lan.enabled;
-		#[cfg(not(feature = "cluster-lan"))]
-		let lan = false;
 		let clustered = !cluster.connect.is_empty() || cluster.api.url.is_some() || cluster.node.is_some() || lan;
 		// An empty name is the root path, which publishes the shared unnamed broadcast.
 		anyhow::ensure!(

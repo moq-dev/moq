@@ -324,7 +324,6 @@ mod imp {
 
 		/// The QUIC port's reuseport group on `addr`: the predecessor's, or a fresh one
 		/// of `count` members with room for a successor.
-		#[cfg(any(feature = "_quic", feature = "_uring"))]
 		pub(crate) fn group(&mut self, addr: SocketAddr, count: u16) -> anyhow::Result<Option<shard::Bound>> {
 			if !self.enabled() {
 				return Ok(None);
@@ -394,7 +393,6 @@ mod imp {
 
 		/// The tokio QUIC workers: on the predecessor's group, or a fresh one with room
 		/// for a successor when handoff is on.
-		#[cfg(feature = "_quic")]
 		pub(crate) fn workers(
 			&mut self,
 			server: moq_tokio::server::Config,
@@ -924,7 +922,6 @@ mod imp {
 			false
 		}
 
-		#[cfg(feature = "_quic")]
 		pub(crate) fn workers(
 			&mut self,
 			server: moq_tokio::server::Config,
@@ -941,7 +938,7 @@ mod imp {
 			Ok(None)
 		}
 
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		pub(crate) fn unix(
 			&mut self,
 			_role: Role,

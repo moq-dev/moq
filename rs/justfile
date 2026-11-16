@@ -103,11 +103,6 @@ fix-changed $LIST:
 test-changed $LIST:
     sh/rs/select.sh test "$LIST"
 
-# Compile moq-tokio at its feature extremes; --all also isolates crypto and transport modes.
-[positional-arguments]
-tokio-features *args:
-    sh/rs/tokio-features.sh "$@"
-
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
 # so a release PR compiles only the affected crates. Default
@@ -137,25 +132,15 @@ uring-changed base="":
     bash sh/changed.sh "$1" > "$changed"
     bash sh/rs/select.sh uring "$changed"
 
-# Compile and test the io_uring relay path, which is off the default feature set.
+# Test the io_uring relay path on a kernel that supports it.
 # Linux-only; CI_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
-    just rs uring-check "$@"
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --tests "$@"
     # Signal ownership and scoped tracing must also survive sharing one process.
     cargo test --locked -p moq-relay --test integration
     # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
-    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
-
-# Compile the io_uring relay path, off the default feature set.
-[positional-arguments]
-uring-check *args:
-    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@" -- -D warnings
-    # Without the default `quic`, so moq-tokio's `driver` is off: the relay's io_uring path must not lean on it.
-    bash sh/local.sh cargo clippy --locked -p moq-relay --no-default-features --features io-uring --all-targets "$@" -- -D warnings
 
 # The Apple-gated code in moq-video, moq-audio, and moq-sock, which
 # platform.yml compiles on a Mac runner alongside `windows`.
@@ -272,16 +257,11 @@ features:
     run just rs coroutines
     run just rs quic-features --all
     run just rs crypto-key
-    run just rs tokio-features --all
     run just rs media-features --all
     run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    run bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
-    run just rs test -p moq-relay --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
-    run just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
-    run just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
-    run bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
-    run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    run just rs test -p moq-cli --no-default-features --features capture -E 'test(capture_window)'
+    run just rs test -p moq-cli --no-default-features --features capture,pipewire -E 'test(capture_window)'
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
     run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
     run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-webrtc --no-default-features --all-targets
@@ -471,8 +451,8 @@ render-sw:
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
-    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
-    just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+    just rs test -p moq-tokio --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
+    just rs test -p moq-relay --run-ignored only -E 'test(/^lan_mesh::/)'
 
 # Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.
 ts-recovery:

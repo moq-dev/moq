@@ -338,7 +338,6 @@ impl DialTarget {
 	}
 
 	/// A LAN peer's advertised addresses, each carrying that peer's credential.
-	#[cfg(feature = "cluster-lan")]
 	fn from_lan_peer(peer: &moq_tokio::mdns::Peer) -> anyhow::Result<Self> {
 		let mut urls = peer.urls();
 		anyhow::ensure!(!urls.is_empty(), "peer advertised no reachable address");
@@ -394,7 +393,6 @@ enum DialSource {
 	Api,
 	/// Discovered on the LAN via mDNS (`--cluster-lan`). Released as soon as the
 	/// advertisement goes away.
-	#[cfg(feature = "cluster-lan")]
 	Mdns,
 }
 
@@ -403,7 +401,6 @@ enum DialSource {
 struct DialSources {
 	seeded: Option<DialTarget>,
 	api: Option<DialTarget>,
-	#[cfg(feature = "cluster-lan")]
 	mdns: Option<DialTarget>,
 }
 
@@ -412,7 +409,6 @@ impl DialSources {
 		match source {
 			DialSource::Static => self.seeded.as_ref(),
 			DialSource::Api => self.api.as_ref(),
-			#[cfg(feature = "cluster-lan")]
 			DialSource::Mdns => self.mdns.as_ref(),
 		}
 	}
@@ -421,7 +417,6 @@ impl DialSources {
 		match source {
 			DialSource::Static => self.seeded = Some(target),
 			DialSource::Api => self.api = Some(target),
-			#[cfg(feature = "cluster-lan")]
 			DialSource::Mdns => self.mdns = Some(target),
 		}
 	}
@@ -430,7 +425,6 @@ impl DialSources {
 		match source {
 			DialSource::Static => self.seeded = None,
 			DialSource::Api => self.api = None,
-			#[cfg(feature = "cluster-lan")]
 			DialSource::Mdns => self.mdns = None,
 		}
 	}
@@ -439,14 +433,11 @@ impl DialSources {
 	/// first: operator intent, then the API list, then LAN discovery, whose
 	/// targets come and go on their own.
 	fn fallback(&self) -> Option<(DialSource, &DialTarget)> {
-		let fallback = self
-			.seeded
+		self.seeded
 			.as_ref()
 			.map(|target| (DialSource::Static, target))
-			.or_else(|| self.api.as_ref().map(|target| (DialSource::Api, target)));
-		#[cfg(feature = "cluster-lan")]
-		let fallback = fallback.or_else(|| self.mdns.as_ref().map(|target| (DialSource::Mdns, target)));
-		fallback
+			.or_else(|| self.api.as_ref().map(|target| (DialSource::Api, target)))
+			.or_else(|| self.mdns.as_ref().map(|target| (DialSource::Mdns, target)))
 	}
 }
 
@@ -574,10 +565,8 @@ enum DialCommand {
 	/// The latest valid `--cluster-api-url` peer list.
 	Api(HashMap<PeerKey, DialTarget>),
 	/// A LAN peer this node should dial appeared or changed.
-	#[cfg(feature = "cluster-lan")]
 	Found(DialTarget),
 	/// A LAN peer's advertisement went away, by canonical key.
-	#[cfg(feature = "cluster-lan")]
 	Lost(PeerKey),
 }
 
@@ -831,7 +820,6 @@ pub struct Config {
 	pub node: Option<String>,
 
 	/// LAN discovery over mDNS (`[cluster.lan]`).
-	#[cfg(feature = "cluster-lan")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub lan: LanConfig,
@@ -928,7 +916,6 @@ impl Config {
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-#[cfg(feature = "cluster-lan")]
 pub struct LanConfig {
 	/// Enable mDNS discovery. Boolean flag: pass `--cluster-lan` (or `=true` /
 	/// `=false`). Advertises the listener fingerprint when the certificate was
@@ -972,7 +959,6 @@ pub struct LanConfig {
 	pub app: Option<moq_tokio::mdns::App>,
 }
 
-#[cfg(feature = "cluster-lan")]
 impl LanConfig {
 	/// Reject a secret or app configured without the mesh that would read it.
 	pub fn validate(&self) -> anyhow::Result<()> {
@@ -1021,7 +1007,6 @@ impl LanAdvertise {
 /// The per-advertisement credential [`Connection::authenticate`] checks on
 /// `/.cluster/<credential>`. Shared via `Arc` so clones taken before
 /// [`Cluster::start`] still see it.
-#[cfg(feature = "cluster-lan")]
 struct LanAuth {
 	credential: String,
 }
@@ -1066,7 +1051,7 @@ pub struct Options {
 
 	/// The simulated host peer dials bind on, for tests over QUIC on `kio::clock::sim`;
 	/// see [`moq_tokio::client::Config::sim`]. `None` binds UDP sockets.
-	#[cfg(all(feature = "test-support", feature = "quic"))]
+	#[cfg(feature = "test-support")]
 	pub sim: Option<moq_tokio::quic::driver::sim::Host>,
 }
 
@@ -1230,7 +1215,6 @@ struct Work {
 	token: ClusterToken,
 	http: Option<ClientWithMiddleware>,
 	/// The live mDNS advertisement, bound by [`Cluster::start`].
-	#[cfg(feature = "cluster-lan")]
 	discovery: Option<moq_tokio::mdns::Discovery>,
 }
 
@@ -1286,9 +1270,7 @@ impl Mesh {
 		let mut dial = dialer(&self.cluster, &self.token);
 		match command {
 			DialCommand::Api(desired) => self.dialed.reconcile_api(&desired, &mut dial),
-			#[cfg(feature = "cluster-lan")]
 			DialCommand::Found(target) => self.dialed.upsert(target, DialSource::Mdns, &mut dial),
-			#[cfg(feature = "cluster-lan")]
 			DialCommand::Lost(peer) => self.dialed.release(&peer, DialSource::Mdns, &mut dial),
 		}
 		// A replaced dial keeps its peer's `/nodes` history; a peer that left the
@@ -1344,7 +1326,7 @@ pub struct Cluster {
 	#[cfg(feature = "test-support")]
 	network: Option<moq_tokio::sim::Network>,
 	/// The simulated host peer dials bind on; see [`Options::sim`].
-	#[cfg(all(feature = "test-support", feature = "quic"))]
+	#[cfg(feature = "test-support")]
 	sim: Option<moq_tokio::quic::driver::sim::Host>,
 	/// The client static and API peers share when the template binds a fixed
 	/// `[connect]` port, so that port stays the cluster's egress port. Otherwise
@@ -1357,7 +1339,6 @@ pub struct Cluster {
 	advertise: Option<LanAdvertise>,
 	/// Set by [`Self::start`] when LAN discovery is on, so inbound
 	/// `/.cluster/<credential>` can be verified on every clone.
-	#[cfg(feature = "cluster-lan")]
 	lan_auth: Arc<std::sync::OnceLock<LanAuth>>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
@@ -1469,7 +1450,7 @@ impl Cluster {
 			stats_hold,
 			#[cfg(feature = "test-support")]
 			network,
-			#[cfg(all(feature = "test-support", feature = "quic"))]
+			#[cfg(feature = "test-support")]
 			sim,
 		} = options;
 		let deprecated = config.deprecated();
@@ -1483,7 +1464,6 @@ impl Cluster {
 		}
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
-		#[cfg(feature = "cluster-lan")]
 		config.lan.validate()?;
 		stats.check(&config)?;
 		let mut work = kio::Tasks::new();
@@ -1534,12 +1514,11 @@ impl Cluster {
 			quic: None,
 			#[cfg(feature = "test-support")]
 			network,
-			#[cfg(all(feature = "test-support", feature = "quic"))]
+			#[cfg(feature = "test-support")]
 			sim,
 			dial: None,
 			dialers: Dialers::new(),
 			advertise: None,
-			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
 			refusals: crate::refusals::Refusals::new(&stats),
@@ -1747,10 +1726,7 @@ impl Cluster {
 
 	/// Whether `--cluster-lan` asked this relay to discover peers over mDNS.
 	fn lan(&self) -> bool {
-		#[cfg(feature = "cluster-lan")]
-		return self.config.lan.enabled;
-		#[cfg(not(feature = "cluster-lan"))]
-		false
+		self.config.lan.enabled
 	}
 
 	/// The credential a LAN path carries, if `path` is `/.cluster/<credential>`.
@@ -1774,19 +1750,10 @@ impl Cluster {
 	///
 	/// `None` means this cluster has no LAN discovery, so the path must be
 	/// refused rather than routed through JWT or public prefixes.
-	#[cfg(feature = "cluster-lan")]
 	pub(crate) fn verify_lan_credential(&self, presented: &str) -> Option<bool> {
 		self.lan_auth
 			.get()
 			.map(|auth| moq_tokio::mdns::ct_eq(&auth.credential, presented))
-	}
-
-	/// Verify a presented `/.cluster/<credential>` against the live advertisement.
-	///
-	/// Without the `cluster-lan` feature there is no discovery to consult.
-	#[cfg(not(feature = "cluster-lan"))]
-	pub(crate) fn verify_lan_credential(&self, _presented: &str) -> Option<bool> {
-		None
 	}
 
 	/// The grant a LAN peer gets once its membership proof checks out: everything,
@@ -1839,7 +1806,6 @@ impl Cluster {
 	pub async fn start(mut self) -> anyhow::Result<Started> {
 		let node = self.config.node.clone();
 		let lan = self.lan();
-		#[cfg(feature = "cluster-lan")]
 		if lan {
 			let advertise = self.advertise.as_ref();
 			anyhow::ensure!(
@@ -1901,7 +1867,6 @@ impl Cluster {
 		// Binds the multicast socket and reads the key, so it belongs here rather
 		// than in `run`: both fail loudly, and the whole point of `--cluster-lan` is
 		// that a relay which cannot join the mesh is misconfigured, not degraded.
-		#[cfg(feature = "cluster-lan")]
 		let discovery = match lan {
 			true => {
 				let advertise = self
@@ -1931,7 +1896,6 @@ impl Cluster {
 		self.dial = shared.then(|| Arc::new(client));
 
 		// After everything fallible, so a failed start leaves no credential behind.
-		#[cfg(feature = "cluster-lan")]
 		if let Some(discovery) = &discovery {
 			let _ = self.lan_auth.set(LanAuth {
 				credential: discovery.credential().to_string(),
@@ -1943,7 +1907,6 @@ impl Cluster {
 				http,
 				node,
 				token,
-				#[cfg(feature = "cluster-lan")]
 				discovery,
 			}),
 			cluster: self,
@@ -1958,7 +1921,6 @@ impl Cluster {
 			http,
 			node,
 			token,
-			#[cfg(feature = "cluster-lan")]
 			discovery,
 		} = work;
 
@@ -1988,7 +1950,6 @@ impl Cluster {
 			}));
 		}
 
-		#[cfg(feature = "cluster-lan")]
 		if let Some(discovery) = discovery {
 			// A dial ending is ordinary (that peer went away), but discovery ending is
 			// the relay going blind, so `run_mdns` only returns an error.
@@ -2006,7 +1967,6 @@ impl Cluster {
 	/// pinned. The lower discovery id dials; the other waits inbound. A LAN dial
 	/// never carries `?jwt=`: [`Config::token`] is for static and API peers
 	/// only.
-	#[cfg(feature = "cluster-lan")]
 	async fn run_mdns(commands: DialCommands, mut discovery: moq_tokio::mdns::Discovery) -> anyhow::Result<()> {
 		use moq_tokio::mdns::Event;
 
@@ -2384,7 +2344,7 @@ impl Cluster {
 		let mut config = moq_tokio::client::Config::default();
 		config.connect = connect;
 		config.quic = quic;
-		#[cfg(all(feature = "test-support", feature = "quic"))]
+		#[cfg(feature = "test-support")]
 		{
 			config.sim = self.sim.clone();
 		}
@@ -2399,7 +2359,7 @@ impl Cluster {
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this
 	/// without multicast.
-	#[cfg(all(test, feature = "cluster-lan"))]
+	#[cfg(test)]
 	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let origin = self.origin.clone().with_link(origin::Link::Peer);
@@ -2413,7 +2373,7 @@ impl Cluster {
 		Ok(client.connect(addrs))
 	}
 
-	#[cfg(all(test, feature = "cluster-lan"))]
+	#[cfg(test)]
 	fn set_lan_credential(&self, credential: impl Into<String>) {
 		let _ = self.lan_auth.set(LanAuth {
 			credential: credential.into(),
@@ -2423,7 +2383,6 @@ impl Cluster {
 
 /// Advertise this listener on the LAN: fingerprint when the certificate was
 /// generated, node URL when configured, secret when shared.
-#[cfg(feature = "cluster-lan")]
 async fn lan_discovery(
 	advertise: &LanAdvertise,
 	node: Option<&str>,
@@ -2682,7 +2641,6 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	#[cfg(feature = "cluster-lan")]
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
 			moq_net::origin::RouteEvent {
@@ -3732,7 +3690,6 @@ mod tests {
 				node: Some("https://B.example".to_string()),
 				token: ClusterToken::default(),
 				http: None,
-				#[cfg(feature = "cluster-lan")]
 				discovery: None,
 			})
 			.expect("mesh");
@@ -3742,7 +3699,6 @@ mod tests {
 	}
 
 	/// The nested `[cluster.lan]` table survives the TOML-to-CLI merge.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_survives_toml_merge() {
 		// Usage reads the environment while parsing, so a variable in the developer's
@@ -3772,7 +3728,6 @@ mod tests {
 
 	/// A CLI flag overrides the same key from TOML, rather than the nesting
 	/// hiding it from `update_from`.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cli_overrides_toml_cluster_lan() {
 		if !test_env::Env::without(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]).isolate() {
@@ -3806,7 +3761,6 @@ mod tests {
 
 	/// A path-capable client version that the listener does not offer cannot
 	/// negotiate, so start-up must refuse it rather than retry forever.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn lan_versions_must_overlap_on_a_path_capable_version() {
 		let lite04: moq_net::Version = "moq-lite-04".parse().unwrap();
@@ -3830,7 +3784,6 @@ mod tests {
 
 	/// A LAN mesh without a node URL still starts when the listener has a
 	/// generated certificate to advertise.
-	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn lan_without_node_needs_a_fingerprint() {
 		let config = Config {
@@ -3862,7 +3815,6 @@ mod tests {
 	/// The secret is optional: without one the mesh is open, and start-up does
 	/// not refuse it. Binding mDNS is skipped here by not attaching a client;
 	/// the missing-fingerprint/node check still runs first.
-	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn lan_without_a_secret_is_open() {
 		let config = Config {
@@ -3889,7 +3841,6 @@ mod tests {
 	}
 
 	/// A secret or app without the mesh is an error, not a silently ignored flag.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn lan_secret_and_app_require_the_mesh() {
 		assert!(
@@ -3918,7 +3869,6 @@ mod tests {
 
 	/// A LAN dial presents the peer's credential on the mesh path and drops
 	/// `?jwt=` even when the advertised node URL carried one.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn lan_dial_urls_carry_the_credential_not_the_token() {
 		let mut url = Url::parse("https://relay.example.com/anon?jwt=secret&cost=2").expect("url");
@@ -3946,7 +3896,6 @@ mod tests {
 	/// mDNS is just another wanter: a peer also reached by a static seed keeps
 	/// its dial when the advertisement goes away, and only the last release
 	/// tears it down.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn mdns_release_respects_the_other_sources() {
 		let mut dialed = DialMap::new(None);
@@ -4067,7 +4016,6 @@ mod tests {
 	/// exercise `run_mdns`, `Peer::urls()` order, or `discovery.should_dial`;
 	/// the names "node" and "fingerprint" are the two origins, not two
 	/// advertising modes.
-	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn lan_cluster_path_carries_broadcasts_both_ways() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -4305,7 +4253,6 @@ mod tests {
 
 	/// A QUIC endpoint that accepts the ALPNs of `connect` and speaks no MoQ, so a
 	/// test sees the transport close of the dial itself. `idle` outlasts any wait.
-	#[cfg(feature = "quic")]
 	fn bare_quic_server(
 		connect: &moq_tokio::connect::Config,
 		idle: std::time::Duration,
@@ -4346,7 +4293,6 @@ mod tests {
 
 	/// Cancelling `run` aborts the dials a peer list started, which run outside
 	/// the tasks of `run` itself, so none keeps redialing with nothing left to close it.
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn cancelling_run_stops_its_dynamic_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -4394,7 +4340,6 @@ mod tests {
 	/// caller consumed the cluster, so nothing else could. The dialing runtime stops
 	/// right after, as a process exit would, and the peer's idle timeout is far past
 	/// the wait, so only the close explains the link ending.
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn a_critical_failure_closes_the_dials() {
 		use moq_tokio::quic::driver;
@@ -4489,7 +4434,6 @@ mod tests {
 	/// A LAN dial owns its client, so closing the cluster closes that too: the peer
 	/// drops the dialer's routes at once, though the dialing runtime stops right
 	/// after, as a process exit would. Both idle timeouts are far past the wait.
-	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn closing_a_cluster_closes_its_lan_dials() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -4660,7 +4604,6 @@ mod tests {
 	}
 
 	/// A `/.cluster` request on a cluster without LAN discovery is refused.
-	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn lan_path_without_discovery_is_refused() {
 		assert_eq!(

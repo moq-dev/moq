@@ -354,7 +354,7 @@ impl Running {
 				Poll::Ready(res) => res?,
 				Poll::Pending => {
 					// Everything the node queued is served, so what the peer synced shows.
-					self.routed.release();
+					self.routed.release(waiter);
 					break;
 				}
 			}

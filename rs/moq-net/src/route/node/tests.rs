@@ -11,6 +11,7 @@ fn claim(instance: &Instance, cost: u64) -> Claim {
 		cost,
 		upstream: false,
 		learned: false,
+		above: 0,
 		chain: crate::Hops::new(),
 	}
 }

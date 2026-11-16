@@ -16,7 +16,6 @@ pub(crate) fn enter() -> Option<tokio::runtime::EnterGuard<'static>> {
 }
 
 /// Where detached tasks run, captured once so tasks spawned later land beside the first.
-#[cfg(any(feature = "driver", feature = "net"))]
 #[derive(Debug, Clone)]
 pub(crate) enum Spawner {
 	/// The caller's tokio runtime, else the fallback.
@@ -26,7 +25,6 @@ pub(crate) enum Spawner {
 	Sim,
 }
 
-#[cfg(any(feature = "driver", feature = "net"))]
 impl Spawner {
 	/// The `kio::clock` simulator when called inside one, else the caller's runtime or the fallback.
 	pub(crate) fn current() -> Self {
@@ -52,7 +50,6 @@ impl Spawner {
 }
 
 /// Run `future` in the background with nobody to join it, where [`Spawner::current`] picks.
-#[cfg(feature = "quic")]
 pub(crate) fn detach<F>(future: F)
 where
 	F: Future + Send + 'static,
@@ -73,7 +70,6 @@ fn fallback() -> &'static tokio::runtime::Runtime {
 }
 
 /// Run `future` with [`enter`] held for each poll, since a poll may spawn or make timers.
-#[cfg(any(feature = "net", feature = "jemalloc", feature = "mdns"))]
 pub(crate) async fn scope<F: Future>(future: F) -> F::Output {
 	let mut future = std::pin::pin!(future);
 	std::future::poll_fn(|cx| {
@@ -84,7 +80,6 @@ pub(crate) async fn scope<F: Future>(future: F) -> F::Output {
 }
 
 /// Spawn `future` on the caller's runtime, else the fallback.
-#[cfg(any(feature = "net", all(feature = "watch", feature = "_certs")))]
 pub(crate) fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
 	F: Future + Send + 'static,

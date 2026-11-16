@@ -242,8 +242,13 @@ export class Answer {
 			if (!source) throw new Error("a carried route's source");
 			const live = new Map<Path.Valid, { id: bigint; snap: Advertised }>();
 			for (const [path, claim] of carried.claims) {
-				const snap = snaps.get(claim.from);
-				if (!snap) throw new Error("a carried claim's state");
+				const from = snaps.get(claim.from);
+				if (!from) throw new Error("a carried claim's state");
+				// A claim now covering a narrower prefix from above is that much more above it.
+				const snap =
+					claim.lowered > 0n
+						? { ...from, route: { ...from.route, above: (from.route.above ?? 0n) + claim.lowered } }
+						: from;
 				live.set(path, { id: claim.id, snap });
 			}
 			this.#routes.set(carried.prefix, {
@@ -298,7 +303,8 @@ export class Answer {
 		const latest = new Map<Path.Valid, Advertised>();
 		if (table && identity) {
 			const carries = (covered: Path.Valid) => prefix.hidden || !hiddenBelow(prefix.path, covered);
-			for (const [suffix, snap] of presented(prefix.path, table, carries)) {
+			// A claim covering the prefix from above keeps how many segments broader than it it is.
+			for (const [suffix, snap] of presented(prefix.path, table, carries, true)) {
 				const path = Path.join(prefix.path, suffix);
 				if (!grant || grant.publish.matches(path)) latest.set(path, snap);
 			}
@@ -352,19 +358,21 @@ export class Answer {
 				});
 			}
 			const { instance, epoch, cost } = snap.route;
+			// How much broader the claim is than the path it is presented at.
+			const above = snap.route.above ?? 0n;
 			if (!prev) {
 				const claim = this.#nextAnnounce++;
 				route.live.set(path, { id: claim, snap });
 				console.debug(`announce: broadcast=${path} active=true instance=${instance}`);
 				// Every claim's path is relative to the session, whichever prefix it answers.
-				msgs.push({ status: "active", suffix: path, route: route.id, instance, epoch, cost });
+				msgs.push({ status: "active", suffix: path, route: route.id, instance, epoch, cost, above });
 			} else if (restarted(prev.snap, snap)) {
 				route.live.set(path, { id: prev.id, snap });
 				console.debug(`announce: broadcast=${path} restart=true instance=${instance} epoch=${epoch}`);
-				msgs.push({ status: "restart", id: prev.id, instance, epoch, cost });
+				msgs.push({ status: "restart", id: prev.id, instance, epoch, cost, above });
 			} else {
 				route.live.set(path, { id: prev.id, snap });
-				msgs.push({ status: "update", id: prev.id, cost });
+				msgs.push({ status: "update", id: prev.id, cost, above });
 			}
 		}
 		if (!route) return msgs;

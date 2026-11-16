@@ -261,3 +261,41 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 		"the session closed"
 	);
 }
+
+/// A relay's listing follows its broadcast onto another route of the same instance when
+/// the serving one dies: a track listed afterwards still reaches the downstream reader.
+///
+/// `P` is pulled by `A` directly and through `B`; `D` lists through `A`. `A`'s session
+/// to `P` dies, so `A` moves to the route through `B`, and `P` then lists a new track.
+#[kio::test]
+async fn a_listing_follows_its_broadcast_onto_another_route() {
+	use crate::route_change::{link, priced_link, settle};
+
+	let publisher = produce_origin(1);
+	let relay_a = produce_origin(2);
+	let relay_b = produce_origin(3);
+	let dash = produce_origin(4);
+
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let _a = broadcast.broadcast().create_track("a", None).unwrap();
+	broadcast.announce().unwrap();
+
+	let p_to_a = link(lite07(), &publisher, &relay_a).await;
+	let _p_to_b = link(lite07(), &publisher, &relay_b).await;
+	let _b_to_a = priced_link(lite07(), &relay_b, &relay_a, Some(1_000)).await;
+	let _a_to_d = link(lite07(), &relay_a, &dash).await;
+	settle().await;
+
+	let mut listing = resolve(&dash).await.tracks().unwrap();
+	assert_eq!(next(&mut listing).await, "+a");
+	assert_eq!(next(&mut listing).await, "synced");
+
+	p_to_a.server.abort(moq_net::Error::Cancel);
+	p_to_a.client.abort(moq_net::Error::Cancel);
+	settle().await;
+
+	let _b = broadcast.broadcast().create_track("b", None).unwrap();
+	assert_eq!(next(&mut listing).await, "+b");
+}

@@ -1,7 +1,6 @@
 //! The per-connection transport knobs, the same for either role.
 
 use super::Congestion;
-#[cfg(feature = "qlog")]
 use super::qlog;
 use crate::quic::Limits;
 
@@ -53,10 +52,6 @@ pub struct Config {
 	/// moq-quic takes one sink per transport config, so this writes one file
 	/// per endpoint on the accept side and per dial on the connect side, each
 	/// event tagged with the qlog `group_id` of the connection it belongs to.
-	///
-	/// Only compiled with the `qlog` feature, so a build without it cannot ask
-	/// for traces the backends would not produce.
-	#[cfg(feature = "qlog")]
 	pub qlog: Option<qlog::Sink>,
 }
 
@@ -69,7 +64,6 @@ impl Default for Config {
 			congestion: Congestion::Delay.into(),
 			keep_alive: None,
 			mtu_discovery: false,
-			#[cfg(feature = "qlog")]
 			qlog: None,
 		}
 	}
@@ -86,7 +80,6 @@ impl std::fmt::Debug for Config {
 			.field("congestion", &format_args!(".."))
 			.field("keep_alive", &self.keep_alive)
 			.field("mtu_discovery", &self.mtu_discovery);
-		#[cfg(feature = "qlog")]
 		debug.field("qlog", &self.qlog);
 		debug.finish()
 	}

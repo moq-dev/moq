@@ -7657,15 +7657,12 @@ fn config_quic_and_backoff_knobs_apply() {
 	);
 }
 
-/// Whether a qlog directory works at all is a compile-time feature, so the capability
-/// has to agree with what a dial does. Both branches matter: `just check` runs without
-/// `--all-features` and only ever sees the unsupported one, while CI runs with them and
-/// only sees the supported one.
+/// A dial with a qlog directory starts, since every build captures qlog.
 #[test]
-fn qlog_support_matches_what_a_dial_accepts() {
-	// A real directory: with capture compiled in, the dial creates a trace file inside
-	// it, so a path that doesn't exist would fail for that reason instead of the one
-	// under test. The pid keeps concurrent test binaries out of each other's way.
+fn dial_accepts_a_qlog_directory() {
+	// A real directory: the dial creates a trace file inside it, so a path that doesn't
+	// exist would fail for that reason instead. The pid keeps concurrent test binaries
+	// out of each other's way.
 	let dir = std::env::temp_dir().join(format!("moq-qlog-test-{}", std::process::id()));
 	std::fs::create_dir_all(&dir).expect("create the qlog directory");
 	let path = dir.to_str().expect("temp dir is UTF-8").to_string();
@@ -7674,17 +7671,11 @@ fn qlog_support_matches_what_a_dial_accepts() {
 	config.quic_qlog = path.as_ptr() as *const c_char;
 	config.quic_qlog_len = path.len();
 
-	// Parsing stores the path either way; the dial is what rejects it.
 	assert!(unsafe { crate::parse_client(Some(&config)) }.is_ok());
 
 	let ret = dial(Some(&config));
-	match moq_qlog_supported() {
-		true => {
-			assert!(ret > 0, "qlog is supported, so the dial must start: {ret}");
-			moq_session_close(id(ret));
-		}
-		false => assert!(ret < 0, "qlog is unsupported, so the dial must be refused"),
-	}
+	assert!(ret > 0, "the dial must start: {ret}");
+	moq_session_close(id(ret));
 
 	std::fs::remove_dir_all(&dir).ok();
 }

@@ -69,7 +69,7 @@ use crate::Path;
 
 use super::reader::Reader;
 use super::view::{ancestors, below, covering, heads, within_any, within_set};
-use super::{Error, Event, GENERATED, Id, Key, Link, MAX, MAX_HOPS, Metric, QUALIFIED, Rev, Shown, View, within};
+use super::{Error, Event, GENERATED, Id, Item, Key, Link, MAX, MAX_HOPS, Metric, QUALIFIED, Rev, Shown, View, within};
 
 /// One node on a route's path, and the session it learned the route on. A
 /// publisher names itself with session 0.
@@ -843,7 +843,7 @@ fn preferred<A, T: Carries<A>>(a: &T, b: &T, receiver: Id) -> bool {
 /// among equals, and the claims of every route that widened into it. Keeping
 /// another could leave the receiver no usable route until the sender's next offer
 /// for the key, and its claims offline in between.
-fn rekey<A: Clone + Eq, T: Carries<A>>(
+fn rekey<A: Item, T: Carries<A>>(
 	old: &BTreeSet<Path>,
 	new: &BTreeSet<Path>,
 	routes: BTreeMap<RouteId, T>,
@@ -932,7 +932,7 @@ fn of<V>(map: &BTreeMap<RouteId, V>, id: Id) -> impl Iterator<Item = (&RouteId, 
 		.take_while(move |((key, _), _)| *key == id)
 }
 
-impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
+impl<N: Key, A: Item> Router<N, A> {
 	/// A node with no sessions, naming itself `hop` in the routes it forwards and
 	/// minting rotated identities from `seed`. `hop` must be fresh per process:
 	/// a restart starts a new session namespace and must not reuse old hop names.
@@ -2546,11 +2546,26 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 
 	/// Whether a neighbour offers a route for `key` that only doubt keeps this node off.
 	fn hopes(&self, key: &RouteId) -> bool {
-		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| {
-			heard.state == State::Live
-				&& !names(&heard.offer.path, self.hop)
-				&& heard.offer.metric.checked_add(self.sessions[peer].link.cost).is_some()
-				&& self.doubts_path(*peer, &heard.offer.path)
+		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| self.kept_off(*peer, heard))
+	}
+
+	/// Whether only doubt keeps this node off the route `heard` from `peer`.
+	fn kept_off(&self, peer: N, heard: &Heard<A>) -> bool {
+		heard.state == State::Live
+			&& !names(&heard.offer.path, self.hop)
+			&& heard.offer.metric.checked_add(self.sessions[&peer].link.cost).is_some()
+			&& self.doubts_path(peer, &heard.offer.path)
+	}
+
+	/// Whether `peer` offers a route that only doubt keeps this node off, where it has
+	/// no live one: it takes the route once the doubt lifts.
+	pub fn doubted(&self, peer: N) -> bool {
+		let Some(session) = self.sessions.get(&peer) else {
+			return false;
+		};
+		session.heard.iter().any(|key| {
+			!self.routes.get(key).is_some_and(Route::live)
+				&& (self.rx.get(key).and_then(|heard| heard.get(&peer))).is_some_and(|heard| self.kept_off(peer, heard))
 		})
 	}
 
@@ -3300,18 +3315,16 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 						claims.extend(below(&old.items, &region).map(|(claim, _)| claim));
 					}
 				}
-				let mut changes: Vec<(&Path, Option<&A>)> = claims
+				let mut changes: Vec<(&Path, Option<A>)> = claims
 					.into_iter()
 					.filter(|claim| within(claim, prefix) && *claim != prefix)
-					.map(|claim| (claim, view.items.get(claim)))
+					.map(|claim| (claim, view.items.get(claim).cloned()))
 					.collect();
 				changes.push((prefix, covering(&view.floors, prefix, |claim| view.items.get(claim))));
-				changes.retain(|(claim, now)| old.items.get(*claim) != *now);
+				changes.retain(|(claim, now)| old.items.get(*claim) != now.as_ref());
 				// Starts and changes, then ends, as a whole snapshot's diff orders them.
 				changes.sort_by_key(|(_, now)| now.is_none());
-				(changes.into_iter())
-					.map(|(claim, now)| (claim.clone(), now.cloned()))
-					.collect()
+				(changes.into_iter()).map(|(claim, now)| (claim.clone(), now)).collect()
 			}
 			(sent, _) => {
 				let empty = View::default();

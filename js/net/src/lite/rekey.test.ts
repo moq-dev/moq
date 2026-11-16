@@ -77,6 +77,14 @@ test("narrowing presents the covering claim", () => {
 		["a/b", 5n, 0n],
 		["a/b/x", 1n, 1n],
 	]);
+	// Only the claim now presented below its path is further above it, by the segments between.
+	const lowered = (index: number) =>
+		[...carried.routes[index].claims].map(([path, claim]) => [path as string, claim.lowered]).sort();
+	expect(lowered(0)).toEqual([["a/c", 0n]]);
+	expect(lowered(1)).toEqual([
+		["a/b", 1n],
+		["a/b/x", 0n],
+	]);
 	expect([carried.nextRoute, carried.nextClaim]).toEqual([4n, 6n]);
 });
 

@@ -349,13 +349,20 @@ impl Routed {
 	/// Let the origin's readers see each prefix synced whose answer is in: the peer
 	/// answered every request, and sent the initial set of each prefix asked for it.
 	/// The caller serves what the node queued first.
-	pub(in crate::lite) fn release(&mut self) {
+	///
+	/// The answer is in only once the node shows every route the peer sent: one that only
+	/// doubt keeps the node off, as on a session redialed to a node still in doubt,
+	/// reaches the origin once the doubt lifts, and `waiter` wakes then.
+	pub(in crate::lite) fn release(&mut self, waiter: &kio::Waiter) {
 		if self.wants.values().all(|snapshot| snapshot.is_none()) {
 			return;
 		}
 		if !self.finished && !self.silent {
 			let asked: BTreeSet<Path> = self.asked.values().map(|asked| asked.path.clone()).collect();
 			if self.editing.is_some() || self.stream.asks() != asked {
+				return;
+			}
+			if self.stream.poll_undoubted(waiter).is_pending() {
 				return;
 			}
 		}
@@ -521,7 +528,10 @@ impl Routed {
 					debug_assert_eq!(assigned, claim.id, "both ends assign the same id");
 				}
 				let path = self.claim_path(Some(wire.clone()));
-				let held = claims[&claim.from].claim.clone().filter(|_| path.is_some());
+				// A claim now covering a narrower prefix from above is that much more above it.
+				let held = (claims[&claim.from].claim.as_ref())
+					.filter(|_| path.is_some())
+					.map(|held| route::Item::lowered(held, claim.lowered));
 				match (&path, &held) {
 					(Some(path), Some(held)) => {
 						committed.insert(path.clone(), held.clone());
@@ -685,10 +695,11 @@ impl Routed {
 				epoch,
 				hops,
 				cost,
+				above,
 			} => {
 				let wire = self.decoder.start(Some(suffix))?;
 				let path = self.claim_path(wire.clone());
-				let claim = claim(instance, epoch, cost, hops)?;
+				let claim = claim(instance, epoch, cost, hops, self.above(path.as_ref(), above)?)?;
 				let id = self.decoder.last();
 				// Fields valid alone can still resolve, or join the root, past the path limits.
 				if path.is_none() {
@@ -698,11 +709,14 @@ impl Routed {
 				}
 				self.start(id, route, wire, path, Some(claim))?;
 			}
-			Msg::Update { id, hops, cost } => {
+			Msg::Update { id, hops, cost, above } => {
+				let claim = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
+				let above = self.above(claim.path.as_ref(), above)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				// An update names none of what a refused claim lacks.
 				if let Some(held) = &mut claim.claim {
 					held.cost = cost.value();
+					held.above = above;
 					held.chain = hops;
 					let change = claim.claim.clone();
 					self.pending(id, change)?;
@@ -714,8 +728,10 @@ impl Routed {
 				epoch,
 				cost,
 				hops,
+				above,
 			} => {
-				let fresh = self::claim(instance, epoch, cost, hops)?;
+				let named = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
+				let fresh = self::claim(instance, epoch, cost, hops, self.above(named.path.as_ref(), above)?)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim = Some(fresh);
 				if let Some(route) = self.routes.get_mut(&claim.route) {
@@ -1012,6 +1028,20 @@ impl Routed {
 		self.stream.batch(node, prefix, changes, revision);
 	}
 
+	/// The peer's `above` for the claim at the absolute `path`, if it can be: a claim is no
+	/// more than the segments of the path the peer names, beneath the session's root, broader
+	/// than the path it is shown at.
+	fn above(&self, path: Option<&Path>, above: u64) -> Result<u64, Error> {
+		let Some(path) = path else {
+			return Ok(above);
+		};
+		let named = path.strip_prefix(&self.root).unwrap_or_else(|| path.clone());
+		match above <= named.parts().count() as u64 {
+			true => Ok(above),
+			false => Err(Error::ProtocolViolation),
+		}
+	}
+
 	/// The absolute path of a claim the peer named `path`, or `None` when it is no path
 	/// this node can hold.
 	fn claim_path(&self, path: Option<Path>) -> Option<Path> {
@@ -1207,6 +1237,8 @@ impl Routed {
 			selected: served.selected,
 			path: served.path.clone(),
 			priority: Some(served.priority),
+			// A receiver refuses a claim above its path by more than the path's segments.
+			above: u8::try_from(served.claim.above).unwrap_or(u8::MAX),
 		};
 		// A route held without a path to it is unavailable: it serves only as a last
 		// resort, like a draining one, at its real cost.
@@ -1285,6 +1317,7 @@ fn claim(
 	epoch: u64,
 	cost: crate::origin::Cost,
 	chain: crate::Hops,
+	above: u64,
 ) -> Result<node::Claim, Error> {
 	Ok(node::Claim {
 		instance: instance.ok_or(Error::ProtocolViolation)?,
@@ -1292,6 +1325,7 @@ fn claim(
 		cost: cost.value(),
 		upstream: false,
 		learned: false,
+		above,
 		chain,
 	})
 }

@@ -1,5 +1,4 @@
 //! A permanently dropped UDP flow must not strand a reconnecting client.
-#![cfg(feature = "quic")]
 
 use std::{
 	collections::{HashMap, HashSet},
@@ -100,10 +99,7 @@ fn client(bind: SocketAddr) -> Client {
 	config.timeout = Some(DIAL.into());
 	config.backoff.initial = Some(Duration::ZERO.into());
 	config.backoff.timeout = Some(Duration::ZERO.into());
-	#[cfg(feature = "websocket")]
-	{
-		config.websocket.enabled = Some(false);
-	}
+	config.websocket.enabled = Some(false);
 	config.init(Default::default()).unwrap()
 }
 

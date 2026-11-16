@@ -65,6 +65,9 @@ pub(crate) struct Claim {
 	/// The Announce ID it had, the same unless it is now presented at a prefix below
 	/// its path.
 	pub from: u64,
+	/// How many segments below where it was presented it is presented now, which its
+	/// Above grows by: 0 unless it now covers a narrower prefix from above.
+	pub lowered: u64,
 }
 
 /// A route that lives on.
@@ -125,7 +128,16 @@ pub(crate) fn plan(
 	let kept = |claims: &BTreeMap<Path, u64>| -> BTreeMap<Path, Claim> {
 		let claims = claims.iter();
 		claims
-			.map(|(path, id)| (path.clone(), Claim { id: *id, from: *id }))
+			.map(|(path, id)| {
+				(
+					path.clone(),
+					Claim {
+						id: *id,
+						from: *id,
+						lowered: 0,
+					},
+				)
+			})
 			.collect()
 	};
 	for ((_, wider), sources) in widening {
@@ -164,7 +176,16 @@ pub(crate) fn plan(
 		}
 		let mut claims: BTreeMap<Path, Claim> = (route.claims.iter())
 			.filter(|(path, _)| **path != inside && within(path, &inside))
-			.map(|(path, id)| (path.clone(), Claim { id: *id, from: *id }))
+			.map(|(path, id)| {
+				(
+					path.clone(),
+					Claim {
+						id: *id,
+						from: *id,
+						lowered: 0,
+					},
+				)
+			})
 			.collect();
 		// Of the claims covering the whole prefix alike, only the most specific shows.
 		let above = (route.claims.iter()).filter(|(path, _)| within(&inside, path));
@@ -176,7 +197,15 @@ pub(crate) fn plan(
 					next_claim - 1
 				}
 			};
-			claims.insert(inside.clone(), Claim { id, from: *from });
+			let lowered = (inside.parts().count() - path.parts().count()) as u64;
+			claims.insert(
+				inside.clone(),
+				Claim {
+					id,
+					from: *from,
+					lowered,
+				},
+			);
 		}
 		let id = next_route;
 		next_route += 1;
@@ -290,13 +319,34 @@ mod tests {
 		);
 		assert_eq!(
 			plan.routes[0].claims,
-			BTreeMap::from([(path("a/c"), Claim { id: 2, from: 2 })])
+			BTreeMap::from([(
+				path("a/c"),
+				Claim {
+					id: 2,
+					from: 2,
+					lowered: 0
+				}
+			)])
 		);
 		assert_eq!(
 			plan.routes[1].claims,
 			BTreeMap::from([
-				(path("a/b"), Claim { id: 5, from: 0 }),
-				(path("a/b/x"), Claim { id: 1, from: 1 })
+				(
+					path("a/b"),
+					Claim {
+						id: 5,
+						from: 0,
+						lowered: 1
+					}
+				),
+				(
+					path("a/b/x"),
+					Claim {
+						id: 1,
+						from: 1,
+						lowered: 0
+					}
+				)
 			])
 		);
 		assert_eq!((plan.next_route, plan.next_claim), (4, 6));
@@ -342,8 +392,22 @@ mod tests {
 		assert_eq!(
 			stays.claims,
 			BTreeMap::from([
-				(path("a/b"), Claim { id: 0, from: 0 }),
-				(path("a/b/x"), Claim { id: 1, from: 1 })
+				(
+					path("a/b"),
+					Claim {
+						id: 0,
+						from: 0,
+						lowered: 0
+					}
+				),
+				(
+					path("a/b/x"),
+					Claim {
+						id: 1,
+						from: 1,
+						lowered: 0
+					}
+				)
 			])
 		);
 		assert!(!planned.routes[1].exact);
