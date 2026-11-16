@@ -49,7 +49,7 @@ package.
     subscribes `viewer/carla/**`, each under the relay's `demo` root.
   - The site's `moq` submodule moves to the cut, its `moq/js/moq-boy`
     workspace becomes `moq/demo/boy`, and `src/components/boy.tsx` imports
-    the element from there (`src/element.tsx`), keeping `prefix-viewer`.
+    the element from there (`src/element.ts`), keeping `prefix-viewer`.
 
   Then open both demos in a browser and drive a truck and a game; an agent can
   drive Chrome for that check.
