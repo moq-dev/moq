@@ -3782,7 +3782,7 @@ mod tests {
 				.await
 				.unwrap(),
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			start: None,
 			priority: 0,
@@ -3944,7 +3944,7 @@ mod tests {
 					.await
 					.unwrap(),
 				id: 0,
-				max_delay: Duration::ZERO,
+				max_delay: Some(Duration::ZERO),
 				min_delay: None,
 				start: Some(floor),
 				priority: 0,
@@ -4419,7 +4419,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			start: Some(2),
 			priority: 0,
@@ -4536,7 +4536,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			start: Some(4),
 			priority: 0,
@@ -4605,7 +4605,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			start: Some(4),
 			priority: 0,
@@ -4979,7 +4979,8 @@ mod tests {
 				);
 				let mut accept = UniAccept::new(subscriber, early);
 				assert!(accept.poll(&kio::Waiter::noop()).is_pending());
-				assert!(log.stops().is_empty());
+				// Only the early stream of an unknown type is stopped.
+				assert_eq!(log.stops().len(), usize::from(pre_read));
 				let mut group = consumer.recv_group().await.unwrap().unwrap();
 				assert_eq!(group.start, 3);
 				let frame = group.read_frame().await.unwrap().unwrap();
@@ -6311,7 +6312,10 @@ mod tests {
 		let largest = track::Position { group: 4, frame: 2 };
 		let mut responses = Vec::new();
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: Some(largest),
+			largest: Some(lite::Largest {
+				position: largest,
+				ended: true,
+			}),
 			starts: vec![Some(4)],
 		})
 		.encode(
@@ -6363,6 +6367,8 @@ mod tests {
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
+		// Recorded as ended, so a relay serving this copy says so in its own SUBSCRIBE_OK.
+		assert!(reader.largest_finished(largest));
 		assert_eq!(reader.largest().await, Some(largest));
 		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
@@ -6408,7 +6414,7 @@ mod tests {
 				.await
 				.unwrap(),
 			id: 0,
-			max_delay: budget,
+			max_delay: Some(budget),
 			min_delay: None,
 			start: None,
 			priority: 0,
@@ -7778,7 +7784,7 @@ mod tests {
 			waiting.now_or_never().expect("accepted").unwrap();
 
 			let (msg, trailing) = sent_subscribe(&sent(&session.log, 1), version);
-			assert_eq!(msg.max_delay, wait, "{version}: the subscriber's own max delay");
+			assert_eq!(msg.max_delay, Some(wait), "{version}: the subscriber's own max delay");
 			assert!(!trailing, "{version}: a SUBSCRIBE_UPDATE followed the accept");
 		}
 	}
@@ -11215,7 +11221,8 @@ mod tests {
 ///
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, and a time end as the exclusive group past
-/// it. `None` when nothing is left to ask for, which no wire can say. The caller narrows a
+/// it, which lite-07 carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
 ///
@@ -11277,7 +11284,7 @@ struct SubStream {
 	id: u64,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
-	max_delay: Duration,
+	max_delay: Option<Duration>,
 	min_delay: Option<Duration>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
@@ -11965,7 +11972,7 @@ impl TrackServe {
 						let start_moved = demand.is_some() && active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
-						active.max_delay = wire_max_delay(subscription.delay.max);
+						active.max_delay = subscription.delay.max;
 						active.min_delay = subscription.delay.min;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
@@ -12282,12 +12289,6 @@ enum Begin {
 	Establish(Establish),
 }
 
-/// The `Subscriber Max Age` a SUBSCRIBE carries for [`Delay::max`](crate::track::Delay::max): `None` is the publisher's
-/// max age alone, which the largest value every peer can read leaves to its clamp.
-fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration {
-	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
-}
-
 /// Every group `ranges` name, which a stale drop under them was judged against. A bound only
 /// the publisher resolves is taken at its widest: a start from group 0, an end past the live
 /// edge (an exclusive end of `u64::MAX`).
@@ -12409,7 +12410,7 @@ impl Establish {
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
 			priority: self.subscription.priority,
-			max_delay: wire_max_delay(self.subscription.delay.max),
+			max_delay: self.subscription.delay.max,
 			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
@@ -12454,7 +12455,7 @@ impl Establish {
 			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
 			id: self.id,
-			max_delay: wire_max_delay(self.subscription.delay.max),
+			max_delay: self.subscription.delay.max,
 			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
@@ -13749,13 +13750,15 @@ impl ServeLoop {
 					// A bounded feed that never delivers Largest goes live at the
 					// answer alone; one that does waits for it to show.
 					// An answer behind the copy's cache fails it.
-					match active.never_serves(start.largest) {
+					let position = start.largest.map(|largest| largest.position);
+					match active.never_serves(position) {
 						Some(largest) => self.serving.set_live_ahead(largest, served),
-						None => self.serving.set_live(start.largest, served),
+						None => self.serving.set_live(position, served),
 					}
 					.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
+					// Recorded whole, so a relay answers its own readers that the group ended.
 					if let Some(largest) = start.largest {
-						self.serving.report_largest(largest);
+						self.serving.report_largest(largest.position, largest.ended);
 					}
 				} else if active.demand.is_some()
 					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
@@ -13876,7 +13879,7 @@ impl ServeLoop {
 							for given in given.iter() {
 								owed.extend(
 									self.serving
-										.give_up(given.clone(), track::Hole::stale(active.max_delay)),
+										.give_up(given.clone(), track::Hole::stale(active.max_delay.unwrap_or(Duration::MAX))),
 								);
 							}
 							// Owed again by the next update, save what a stream may have won.

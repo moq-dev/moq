@@ -194,6 +194,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one,
+	/// so 0 says no limit. Added in lite-07; earlier wires carry bare milliseconds.
+	pub(crate) fn has_unlimited_max_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
 	/// earlier fetch is bounded by the publisher's max age alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {

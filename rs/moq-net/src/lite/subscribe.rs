@@ -26,7 +26,10 @@ pub struct Subscribe<'a> {
 	pub depth: u64,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
-	pub max_delay: std::time::Duration,
+	/// The subscriber's `Subscriber Max Age`, or `None` for no limit beyond the publisher's.
+	/// Lite01/02 carry none and decode as `None`; lite03-06 can't say `None` (see
+	/// [`encode_max_delay`]).
+	pub max_delay: Option<std::time::Duration>,
 	/// The subscriber's `Subscriber Min Age`, or `None` when not stated. Lite07+ only; earlier
 	/// wires decode as not stated and drop it on encode.
 	pub min_delay: Option<std::time::Duration>,
@@ -65,14 +68,16 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Lite-07 names
-	/// only a group, so its frame is 0 there; only lite-06 bounds a range partway through one.
+	/// A position: a start delivers from it, and an end stops just before it. Only lite-06
+	/// bounds a range partway through a group. Lite-07 has no such type: a group's start is its
+	/// time, so it goes out as a [`Anchor::Time`], an end as the time just before it, and
+	/// decodes as one.
 	Absolute(crate::track::Position),
 	/// The group this many before the latest, included as an end. Lite07+ only, except a
 	/// start of 0 (see [`Range`]).
 	Relative(u64),
-	/// The group containing this presentation time in the track's timescale, included as
-	/// an end. Lite07+ only.
+	/// The group containing this time in the track's timescale (the highest start at or
+	/// below it), included as an end. Lite07+ only.
 	Time(u64),
 }
 
@@ -125,17 +130,6 @@ impl Range {
 	}
 }
 
-impl Version {
-	/// Whether this version's SUBSCRIBE carries the subscriber's max delay preference.
-	///
-	/// Lite01/02 have no field for it, so a decoded `std::time::Duration::ZERO` there means
-	/// "not stated", not "real time". Callers that act on the budget must tell the
-	/// two apart or they will hold every legacy peer to the live edge.
-	pub(crate) fn carries_max_delay(self) -> bool {
-		!matches!(self, Version::Lite01 | Version::Lite02)
-	}
-}
-
 impl<'a> Message<'a> for Subscribe<'a> {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
@@ -147,12 +141,10 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let priority = super::priority::from_wire(r.u8()?);
 
 		let (order, max_delay, min_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => {
-				(Order::Descending, std::time::Duration::ZERO, None, vec![Range::OLDEST])
-			}
+			Version::Lite01 | Version::Lite02 => (Order::Descending, None, None, vec![Range::OLDEST]),
 			_ => {
 				let order = decode_order(r, version)?;
-				let max_delay = std::time::Duration::from_millis(r.varint()?);
+				let max_delay = decode_max_delay(r, version)?;
 				let min_delay = decode_min_delay(r, version)?;
 				(order, max_delay, min_delay, decode_ranges(r, version)?)
 			}
@@ -188,7 +180,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {
 				encode_order(w, version, self.order)?;
-				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+				encode_max_delay(w, version, self.max_delay)?;
 				encode_min_delay(w, version, self.min_delay)?;
 				encode_ranges(w, version, &self.ranges)?;
 			}
@@ -212,6 +204,35 @@ fn encode_update(w: &mut Encoder<'_>, version: Version, update: u64) -> Result<(
 	match version.has_skip() {
 		true => w.varint(update),
 		false => Ok(()),
+	}
+}
+
+/// What lite03-06 send for no `Subscriber Max Age` limit, which their bare milliseconds can't
+/// say: the largest every implementation carries losslessly.
+const MAX_SAFE_DELAY_MS: u64 = (1 << 53) - 1;
+
+/// Decode the `Subscriber Max Age`: on lite-07 milliseconds plus one, zero meaning no limit;
+/// before it bare milliseconds.
+fn decode_max_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
+	Ok(match version.has_unlimited_max_delay() {
+		true => r.varint_opt()?.map(std::time::Duration::from_millis),
+		false => Some(std::time::Duration::from_millis(r.varint()?)),
+	})
+}
+
+/// Encode the inverse of [`decode_max_delay`]. Before lite-07 no limit goes out as
+/// [`MAX_SAFE_DELAY_MS`].
+fn encode_max_delay(
+	w: &mut Encoder<'_>,
+	version: Version,
+	max_delay: Option<std::time::Duration>,
+) -> Result<(), EncodeError> {
+	let millis = max_delay
+		.map(|max| u64::try_from(max.as_millis()).map_err(|_| EncodeError::BoundsExceeded))
+		.transpose()?;
+	match version.has_unlimited_max_delay() {
+		true => w.varint_opt(millis),
+		false => w.varint(millis.unwrap_or(MAX_SAFE_DELAY_MS)),
 	}
 }
 
@@ -330,22 +351,25 @@ fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
 fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), EncodeError> {
 	w.varint(ranges.len() as u64)?;
 	for range in ranges {
-		encode_anchor(w, range.start)?;
-		encode_anchor(w, range.end)?;
+		for (anchor, end) in [(range.start, false), (range.end, true)] {
+			let (kind, value) = wire_anchor(anchor, end)?;
+			w.varint(kind)?;
+			if let Some(value) = value {
+				w.varint(value)?;
+			}
+		}
 	}
 	Ok(())
 }
 
-/// The bytes a lite-07 range takes on the wire, or `None` past the varint's reach.
+/// The bytes a lite-07 range takes on the wire, or `None` when it can't go out.
 fn range_size(range: &Range, form: Form) -> Option<usize> {
 	let size = |value| varint::size(value, form).ok();
-	let anchor = |anchor: Option<Anchor>| match anchor {
-		None => size(0),
-		Some(Anchor::Absolute(position)) => Some(size(1)? + size(position.group)?),
-		Some(Anchor::Relative(back)) => Some(size(2)? + size(back)?),
-		Some(Anchor::Time(pts)) => Some(size(3)? + size(pts)?),
+	let anchor = |anchor, end| -> Option<usize> {
+		let (kind, value) = wire_anchor(anchor, end).ok()?;
+		Some(size(kind)? + value.map_or(Some(0), size)?)
 	};
-	Some(anchor(range.start)? + anchor(range.end)?)
+	Some(anchor(range.start, false)? + anchor(range.end, true)?)
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
@@ -353,32 +377,30 @@ fn range_size(range: &Range, form: Form) -> Option<usize> {
 fn decode_anchor(r: &mut Decoder<'_>) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
-		1 => Some(Anchor::Absolute(crate::track::Position::group(r.varint()?))),
+		1 => Some(Anchor::Time(r.varint()?)),
 		2 => Some(Anchor::Relative(r.varint()?)),
-		3 => Some(Anchor::Time(r.varint()?)),
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
 
-/// Encode the inverse of [`decode_anchor`]. A range covers whole groups, so a position
-/// partway through one is refused: FETCH reads a slice of a group.
-fn encode_anchor(w: &mut Encoder<'_>, anchor: Option<Anchor>) -> Result<(), EncodeError> {
-	match anchor {
-		None => w.varint(0),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => Err(EncodeError::Version),
-		Some(Anchor::Absolute(position)) => {
-			w.varint(1)?;
-			w.varint(position.group)
-		}
-		Some(Anchor::Relative(back)) => {
-			w.varint(2)?;
-			w.varint(back)
-		}
-		Some(Anchor::Time(pts)) => {
-			w.varint(3)?;
-			w.varint(pts)
-		}
-	}
+/// The lite-07 type and value of a range's start or `end`, the inverse of [`decode_anchor`].
+///
+/// An absolute position goes out as its group's time: a start as is, and an exclusive end as
+/// the inclusive time just before it, an end at group 0 holding nothing a time can say. A
+/// range covers whole groups, so a position partway through one is refused: FETCH reads a
+/// slice of a group.
+fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, Option<u64>), EncodeError> {
+	Ok(match anchor {
+		None => (0, None),
+		Some(Anchor::Time(time)) => (1, Some(time)),
+		Some(Anchor::Relative(back)) => (2, Some(back)),
+		Some(Anchor::Absolute(position)) if position.frame != 0 => return Err(EncodeError::Version),
+		Some(Anchor::Absolute(position)) if end => (
+			1,
+			Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
+		),
+		Some(Anchor::Absolute(position)) => (1, Some(position.group)),
+	})
 }
 
 /// Step over the retired `Ordered` byte on a version whose layout still has it.
@@ -592,12 +614,22 @@ impl<'a> Message<'a> for SubscribeOk {
 /// group, and at frame 0 of a later one otherwise.
 #[derive(Clone, Debug)]
 pub struct SubscribeStart {
-	/// The publisher's largest (group, frame) when it answered, `None` for a track with
-	/// nothing yet. Lite07+ only; not on the wire before, where it decodes as `None`.
-	pub largest: Option<crate::track::Position>,
+	/// The publisher's largest when it answered, `None` for a track with nothing yet. Lite07+
+	/// only; not on the wire before, where it decodes as `None`.
+	pub largest: Option<Largest>,
 	/// The group each range's delivery starts at, by index, `None` for a range with no
 	/// group there. Before lite-07 the wire carries the one range's start as `Group`.
 	pub starts: Vec<Option<u64>>,
+}
+
+/// The publisher's largest position, as SUBSCRIBE_OK reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Largest {
+	/// The newest group and its last frame so far.
+	pub position: crate::track::Position,
+	/// The group ended at that frame, so no frame follows it: a reader knows at once that it
+	/// isn't the live one.
+	pub ended: bool,
 }
 
 impl<'a> Message<'a> for SubscribeStart {
@@ -613,11 +645,19 @@ impl<'a> Message<'a> for SubscribeStart {
 				starts: vec![Some(r.varint()?)],
 			});
 		}
-		// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
+		// Group + 1, so 0 is a track with nothing yet; the frame and whether the group ended
+		// follow only otherwise.
 		let largest = match r.varint_opt()? {
-			Some(group) => Some(crate::track::Position {
-				group,
-				frame: r.varint()?,
+			Some(group) => Some(Largest {
+				position: crate::track::Position {
+					group,
+					frame: r.varint()?,
+				},
+				ended: match r.u8()? {
+					0 => false,
+					1 => true,
+					_ => return Err(DecodeError::InvalidValue),
+				},
 			}),
 			None => None,
 		};
@@ -639,9 +679,10 @@ impl<'a> Message<'a> for SubscribeStart {
 			};
 			return w.varint(group);
 		}
-		w.varint_opt(self.largest.map(|largest| largest.group))?;
+		w.varint_opt(self.largest.map(|largest| largest.position.group))?;
 		if let Some(largest) = self.largest {
-			w.varint(largest.frame)?;
+			w.varint(largest.position.frame)?;
+			w.u8(largest.ended.into());
 		}
 		w.varint(self.starts.len() as u64)?;
 		for start in &self.starts {
@@ -706,7 +747,8 @@ pub struct SubscribeUpdate<R = RangeEdit> {
 	/// A join requesting this group or later, judged against the local refresh ratio.
 	pub wanted_group: Option<u64>,
 	pub priority: i8,
-	pub max_delay: std::time::Duration,
+	/// See [`Subscribe::max_delay`].
+	pub max_delay: Option<std::time::Duration>,
 	/// See [`Subscribe::min_delay`].
 	pub min_delay: Option<std::time::Duration>,
 	/// The change to the ranges; see [`Subscribe::ranges`].
@@ -744,7 +786,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 
 		let priority = super::priority::from_wire(r.u8()?);
 		let order = decode_order(r, version)?;
-		let max_delay = std::time::Duration::from_millis(r.varint()?);
+		let max_delay = decode_max_delay(r, version)?;
 		let min_delay = decode_min_delay(r, version)?;
 		let ranges = match version.has_ranges() {
 			true => {
@@ -788,7 +830,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 
 		w.u8(super::priority::to_wire(self.priority));
 		encode_order(w, version, self.order)?;
-		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+		encode_max_delay(w, version, self.max_delay)?;
 		encode_min_delay(w, version, self.min_delay)?;
 		match (&self.ranges, version.has_ranges()) {
 			(RangeEdit::Edit { remove, add }, true) => {
@@ -1336,11 +1378,16 @@ mod test {
 		}
 	}
 
-	/// Lite-07 carries the publisher's largest position; earlier versions leave it off the
-	/// wire, so it decodes as `None` there.
+	/// Lite-07 carries the publisher's largest position and whether its group ended;
+	/// earlier versions leave it off the wire, so it decodes as `None` there.
 	#[test]
 	fn subscribe_start_carries_the_largest_position_on_lite07() {
-		for largest in [None, Some(crate::track::Position { group: 3, frame: 2 })] {
+		let position = crate::track::Position { group: 3, frame: 2 };
+		for largest in [
+			None,
+			Some(Largest { position, ended: false }),
+			Some(Largest { position, ended: true }),
+		] {
 			let resp = SubscribeResponse::Start(SubscribeStart {
 				largest,
 				starts: vec![Some(4)],
@@ -1352,11 +1399,17 @@ mod test {
 			}
 		}
 		let resp = SubscribeResponse::Start(SubscribeStart {
-			largest: Some(crate::track::Position { group: 3, frame: 2 }),
+			largest: Some(Largest { position, ended: true }),
 			starts: vec![Some(4)],
 		});
 		let buf = resp.encode_bytes(Version::Lite06).unwrap();
 		assert_eq!(buf.as_ref(), [0, 1, 4], "lite-06 has no largest position");
+
+		// Type, length, group + 1, frame, ended, then one start: any other ended is malformed.
+		let mut buf = resp.encode_bytes(Version::Lite07).unwrap().to_vec();
+		assert_eq!(buf, [0, 5, 4, 2, 1, 1, 5]);
+		buf[4] = 2;
+		assert!(SubscribeResponse::decode_slice(&buf, Version::Lite07).is_err());
 	}
 
 	/// Lite-07 says where each range starts in place of the one `Group` earlier versions
@@ -1545,7 +1598,7 @@ mod test {
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
-			max_delay: std::time::Duration::from_millis(250),
+			max_delay: Some(std::time::Duration::from_millis(250)),
 			min_delay: None,
 			// Groups 7 through 9.
 			ranges: vec![Range {
@@ -1721,16 +1774,12 @@ mod test {
 		));
 	}
 
-	/// Lite-07 carries every range, each end absolute, relative, at a time, or open.
+	/// Lite-07 carries every range, each end relative, at a time, or open.
 	#[test]
 	fn ranges_roundtrip_on_lite07() {
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![
 			Range::OLDEST,
-			Range {
-				start: absolute(7, 0),
-				end: absolute(9, 0),
-			},
 			Range {
 				start: Some(Anchor::Relative(2)),
 				end: Some(Anchor::Relative(0)),
@@ -1740,8 +1789,8 @@ mod test {
 				end: Some(Anchor::Time(3_500)),
 			},
 			Range {
-				start: absolute(0, 0),
-				end: None,
+				start: Some(Anchor::Time(0)),
+				end: Some(Anchor::Time(u64::MAX)),
 			},
 		];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
@@ -1751,7 +1800,7 @@ mod test {
 		let update = SubscribeUpdate {
 			wanted_group: None,
 			priority: 3,
-			max_delay: std::time::Duration::from_millis(250),
+			max_delay: Some(std::time::Duration::from_millis(250)),
 			min_delay: None,
 			ranges: sent.edit(&msg.ranges).unwrap(),
 			order: crate::track::Order::Ascending,
@@ -1768,6 +1817,30 @@ mod test {
 			.map(|(_, range)| range)
 			.collect();
 		assert_eq!(resolved, msg.ranges);
+	}
+
+	/// Lite-07 has no absolute anchor: a group's position goes out as its start's time, an
+	/// exclusive end as the inclusive time before it, so the publisher reads the same groups.
+	#[test]
+	fn lite07_sends_an_absolute_anchor_as_a_time() {
+		let mut msg = subscribe_sample();
+		msg.ranges = vec![Range {
+			start: absolute(7, 0),
+			end: absolute(10, 0),
+		}];
+		assert_eq!(
+			roundtrip(&msg, Version::Lite07).ranges,
+			[Range {
+				start: Some(Anchor::Time(7)),
+				end: Some(Anchor::Time(9)),
+			}]
+		);
+		// Nothing comes before group 0, so an end there is refused, as on the older wires.
+		msg.ranges[0] = Range {
+			start: None,
+			end: absolute(0, 0),
+		};
+		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
 	}
 
 	/// A lite-07 range covers whole groups: an absolute anchor is its type and group alone,
@@ -1803,8 +1876,8 @@ mod test {
 		let version = Version::Lite07;
 		let (a, b, c) = (
 			Range {
-				start: absolute(1, 0),
-				end: absolute(5, 0),
+				start: Some(Anchor::Time(1)),
+				end: Some(Anchor::Time(4)),
 			},
 			Range {
 				start: Some(Anchor::Relative(3)),
@@ -1823,7 +1896,7 @@ mod test {
 			let update = SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
-				max_delay: std::time::Duration::ZERO,
+				max_delay: Some(std::time::Duration::ZERO),
 				min_delay: None,
 				ranges: edit,
 				order: crate::track::Order::Descending,
@@ -1940,13 +2013,16 @@ mod test {
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 
-		let mut buf = encode(&msg, version).unwrap();
-		let last = buf.len() - 2;
-		buf[last] = 4;
-		assert!(matches!(
-			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
-			Err(DecodeError::InvalidValue)
-		));
+		// Type 3 was a second time anchor before lite-07 settled on one.
+		for kind in [3, 4] {
+			let mut buf = encode(&msg, version).unwrap();
+			let last = buf.len() - 2;
+			buf[last] = kind;
+			assert!(matches!(
+				crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
+				Err(DecodeError::InvalidValue)
+			));
+		}
 	}
 
 	/// An older wire carries one span with absolute ends, so anything else is refused for
@@ -2003,7 +2079,7 @@ mod test {
 				let update = SubscribeUpdate {
 					wanted_group: wanted,
 					priority: 0,
-					max_delay: std::time::Duration::ZERO,
+					max_delay: Some(std::time::Duration::ZERO),
 					min_delay: None,
 					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 					order: crate::track::Order::Descending,
@@ -2015,6 +2091,38 @@ mod test {
 				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
 			}
 		}
+	}
+
+	/// Lite-07 encodes `Subscriber Max Age` as milliseconds plus one, 0 for no limit. An earlier
+	/// wire carries bare milliseconds, so no limit goes out as the largest every peer reads, and
+	/// Lite01/02 carry none at all, which decodes as no limit rather than the live edge.
+	#[test]
+	fn max_delay_says_no_limit_on_lite07() {
+		let ms = std::time::Duration::from_millis;
+		let encoded = |version: Version, max_delay| {
+			let mut buf = Vec::new();
+			encode_max_delay(&mut Encoder::new(&mut buf, version.into()), version, max_delay).unwrap();
+			let wire = Decoder::new(&buf, version.into()).varint().unwrap();
+			let got = decode_max_delay(&mut Decoder::new(&buf, version.into()), version).unwrap();
+			(wire, got)
+		};
+		assert_eq!(encoded(Version::Lite07, None), (0, None));
+		assert_eq!(encoded(Version::Lite07, Some(ms(0))), (1, Some(ms(0))));
+		assert_eq!(encoded(Version::Lite07, Some(ms(250))), (251, Some(ms(250))));
+		assert_eq!(encoded(Version::Lite06, Some(ms(250))), (250, Some(ms(250))));
+		assert_eq!(
+			encoded(Version::Lite06, None),
+			(MAX_SAFE_DELAY_MS, Some(ms(MAX_SAFE_DELAY_MS)))
+		);
+
+		let mut msg = subscribe_sample();
+		msg.max_delay = Some(ms(250));
+		for version in [Version::Lite01, Version::Lite02] {
+			assert_eq!(roundtrip(&msg, version).max_delay, None, "{version}");
+		}
+		assert_eq!(roundtrip(&msg, Version::Lite03).max_delay, Some(ms(250)));
+		msg.max_delay = None;
+		assert_eq!(roundtrip(&msg, Version::Lite07).max_delay, None);
 	}
 
 	/// Lite-07 carries `Subscriber Min Age` on SUBSCRIBE and SUBSCRIBE_UPDATE, keeping a stated
@@ -2037,7 +2145,7 @@ mod test {
 				let update = SubscribeUpdate {
 					wanted_group: None,
 					priority: 0,
-					max_delay: std::time::Duration::ZERO,
+					max_delay: Some(std::time::Duration::ZERO),
 					min_delay,
 					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 					order: crate::track::Order::Descending,
@@ -2066,7 +2174,7 @@ mod test {
 			let update = SubscribeUpdate {
 				wanted_group: None,
 				priority: 3,
-				max_delay: std::time::Duration::from_millis(250),
+				max_delay: Some(std::time::Duration::from_millis(250)),
 				min_delay: None,
 				ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 				order,

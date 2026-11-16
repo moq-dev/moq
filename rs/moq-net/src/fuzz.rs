@@ -1480,7 +1480,7 @@ impl LiteSample {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_delay: std::time::Duration::from_secs(10),
+				max_delay: Some(std::time::Duration::from_secs(10)),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
 				update: 0,
@@ -1681,7 +1681,7 @@ impl Default for Messages {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
@@ -1693,7 +1693,7 @@ impl Default for Messages {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				// Lite-06, the bench's version, restates the ranges.
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
@@ -1865,7 +1865,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			depth: 0,
 			track: track.into(),
 			priority: 0,
-			max_delay: std::time::Duration::ZERO,
+			max_delay: Some(std::time::Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,

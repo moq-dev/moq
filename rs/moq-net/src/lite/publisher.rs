@@ -115,20 +115,6 @@ struct PeerTargets {
 	writes: u64,
 }
 
-/// Largest millisecond duration every implementation can carry losslessly.
-pub(super) const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
-
-/// The budget to serve a peer with, given what its wire could tell us.
-///
-/// A version without the field decodes as [`Duration::ZERO`], which is
-/// indistinguishable from a peer genuinely asking for the live edge. Serving that
-/// as real time would discard backlog a legacy subscriber never declined, so serve the
-/// publisher's max age alone and leave enforcement to the receiver, exactly as the IETF
-/// path does for the same reason.
-fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> {
-	version.carries_max_delay().then_some(requested)
-}
-
 /// The floor of a subscription's read cursor for the wire serving it.
 ///
 /// On lite-06 there is nothing to do: `Consumer::subscribe` resolves the cursor from the
@@ -138,8 +124,8 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
 /// latest group, so say so explicitly rather than letting the budget reach back. Lite03-05
 /// carry a `Subscriber Max Age`, but there it is a staleness tolerance only; Lite01/02 additionally get
-/// an unbounded budget so nothing is dropped under them (see [`serving_max_delay`]), which
-/// must not read as a request to replay the whole cache on join.
+/// an unbounded budget so nothing is dropped under them (they carry no max age, which decodes
+/// as none), which must not read as a request to replay the whole cache on join.
 ///
 /// `latest` is the newest group known once the track resolves, which a SUBSCRIBE can beat, as
 /// one a relay serves from a copy still fetching upstream, or on lite-05 one sent alongside its
@@ -2428,7 +2414,7 @@ impl Request for SubscribeServe {
 		};
 		let latest = track.latest_key();
 		let bounds = Bounds::new(&msg.ranges, !shared.version.has_ranges());
-		Ok(Self::subscribe(shared, msg, bounds, &track, latest, None, legacy))
+		Ok(Self::subscribe(msg, bounds, &track, latest, None, legacy))
 	}
 
 	fn update(&mut self, update: LiveUpdate) {
@@ -3070,7 +3056,6 @@ impl SubscribeServe {
 	/// One subscriber for the whole subscription, so a track opens exactly one (no duplicate
 	/// demand).
 	fn subscribe(
-		shared: &Shared,
 		msg: lite::Subscribe<'static>,
 		bounds: Bounds,
 		track: &track::Consumer,
@@ -3082,7 +3067,7 @@ impl SubscribeServe {
 			priority: msg.priority,
 			delay: track::Delay {
 				min: msg.min_delay,
-				max: serving_max_delay(shared.version, msg.max_delay),
+				max: msg.max_delay,
 			},
 			order: msg.order,
 			..bounds.groups()
@@ -3363,13 +3348,9 @@ mod test {
 			group.close().unwrap();
 		}
 
-		// What run_subscribe hands the model for a peer that sent no budget at all.
+		// What run_subscribe hands the model for a Lite01/02 peer, which sends no budget at all.
 		let served =
-			|version| {
-				producer.subscribe(track::Subscription::default().with_delay(
-					track::Delay::default().with_max(serving_max_delay(version, std::time::Duration::ZERO)),
-				))
-			};
+			|| producer.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(None)));
 		let drain = |subscriber: &mut track::Subscriber| {
 			let mut keys = Vec::new();
 			while let Some(Ok(Some(group))) = subscriber.recv_group().now_or_never() {
@@ -3378,14 +3359,14 @@ mod test {
 			keys
 		};
 
-		let mut unpinned = served(Version::Lite01);
+		let mut unpinned = served();
 		assert_eq!(
 			drain(&mut unpinned),
 			vec![0, 1, 2],
 			"the unbounded budget alone resolves to the whole cache"
 		);
 
-		let legacy = served(Version::Lite01);
+		let legacy = served();
 		let mut legacy = legacy.with_range(cursor_floor(Version::Lite01, None, producer.latest_key())..);
 		assert_eq!(drain(&mut legacy), vec![2]);
 
@@ -4825,7 +4806,7 @@ struct Bounds {
 
 impl Bounds {
 	/// Read `ranges` as they arrived. Group IDs are group starts, so an absolute anchor and a
-	/// time anchor both name a start.
+	/// time anchor both name a start. Lite-07 carries only time anchors, both ends inclusive.
 	///
 	/// A `legacy` wire (one without ranges) means its start as the first group starting at
 	/// or after it, never one before it that contains it, so the frames narrow to that
@@ -5283,7 +5264,7 @@ impl TrackRun {
 			priority: upd.priority,
 			delay: crate::track::Delay {
 				min: upd.min_delay,
-				max: serving_max_delay(self.ctx.version, upd.max_delay),
+				max: upd.max_delay,
 			},
 			order: upd.order,
 			..groups
@@ -6064,7 +6045,10 @@ impl TrackRun {
 				Poll::Pending => None,
 			},
 		};
-		let largest = live.max(self.track.peek_largest());
+		let largest = live.max(self.track.peek_largest()).map(|position| lite::Largest {
+			position,
+			ended: self.track.largest_finished(position),
+		});
 		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 			largest,
 			starts: self.starts(start),
@@ -7709,28 +7693,6 @@ mod serve_group_test {
 		assert_eq!(log.resets(), vec![crate::StreamError::Evicted.to_code()]);
 	}
 
-	/// Lite01/02 have no max delay field, so a SUBSCRIBE from one decodes as
-	/// `Duration::ZERO`. Serving that as a real-time budget would hold every legacy
-	/// peer to the live edge and discard backlog it never declined, so those versions
-	/// get a non-dropping window and leave enforcement to the receiver.
-	///
-	/// These are the two most-preferred negotiated versions, so this is the common
-	/// wire, not an edge case.
-	#[test]
-	fn a_version_without_the_field_serves_a_non_dropping_budget() {
-		for version in [Version::Lite01, Version::Lite02] {
-			let max_delay = serving_max_delay(version, Duration::ZERO);
-			assert_eq!(max_delay, None, "{version:?} must not be served as real time");
-		}
-
-		// A version that does carry it is taken at its word, zero included.
-		assert_eq!(serving_max_delay(Version::Lite05, Duration::ZERO), Some(Duration::ZERO));
-		assert_eq!(
-			serving_max_delay(Version::Lite05, Duration::from_secs(3)),
-			Some(Duration::from_secs(3))
-		);
-	}
-
 	/// A group that completes cleanly must not reset at all. The completion path
 	/// releases the stream via `poll_close`; leaving the writer to drop after
 	/// `finish()` would fire the Drop fallback and tack a spurious Cancel reset
@@ -7971,7 +7933,7 @@ mod serve_group_test {
 		let update = |wanted_group| lite::SubscribeUpdate {
 			wanted_group,
 			priority: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			order: Order::Descending,
@@ -8133,7 +8095,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: Order::Ascending,
 			priority: 7,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -8291,7 +8253,7 @@ mod serve_group_test {
 		lite::SubscribeUpdate {
 			wanted_group: None,
 			priority: 0,
-			max_delay: Duration::from_secs(3600),
+			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
 			ranges,
 			order: Order::Descending,
@@ -8503,11 +8465,12 @@ mod serve_group_test {
 		let _track = track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 
-		// SUBSCRIBE_START with the range starting at 0, a DROP for group 1 with OLD (0x34)
-		// under update 0, which the end gives up on at once, and SUBSCRIBE_FINISH at 3.
+		// SUBSCRIBE_START with group 0 ended as the largest and the range starting at 0, a
+		// DROP for group 1 with OLD (0x34) under update 0, which the end gives up on at once,
+		// and SUBSCRIBE_FINISH at 3.
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[0, 4, 1, 0, 1, 1, 2, 4, 1, 1, 0x34, 0, 1, 2, 3, 0]
+			[0, 5, 1, 0, 1, 1, 1, 2, 4, 1, 1, 0x34, 0, 1, 2, 3, 0]
 		);
 	}
 
@@ -8531,9 +8494,10 @@ mod serve_group_test {
 		let _track = track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 
-		// SUBSCRIBE_START with the range starting at 0, a SKIP for group 1, and
+		// SUBSCRIBE_START with group 0 ended as the largest and the range starting at 0, a
+		// SKIP for group 1, and
 		// SUBSCRIBE_FINISH at 3.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 4, 1, 0, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
+		assert_eq!(*log.writes.lock().unwrap(), [0, 5, 1, 0, 1, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
 	}
 
 	/// A relay forwards a SKIP over a DROP it already forwarded for the same groups, since the
@@ -8625,7 +8589,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		// The source answered with group 4 as its largest; only group 0 has landed.
-		track.report_largest(track::Position::group(4));
+		track.report_largest(track::Position::group(4), false);
 		let subscriber = track.subscribe(None);
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
@@ -8641,8 +8605,53 @@ mod serve_group_test {
 		};
 		assert_eq!(
 			(start.starts, start.largest),
-			(vec![Some(0)], Some(track::Position::group(4)))
+			(
+				vec![Some(0)],
+				Some(lite::Largest {
+					position: track::Position::group(4),
+					ended: false,
+				})
+			)
 		);
+	}
+
+	/// SUBSCRIBE_OK says whether its largest group ended: one closed or finished here, or one
+	/// the source said ended, but not one still open.
+	#[kio::test]
+	async fn lite07_start_says_whether_the_largest_ended() {
+		for (case, ended) in [("open", false), ("closed", true), ("reported", true)] {
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+				.unwrap();
+			match case {
+				"closed" => drop(group.close().unwrap()),
+				"reported" => track.report_largest(track::Position { group: 0, frame: 0 }, true),
+				_ => {}
+			}
+			let subscriber = track.subscribe(None);
+			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+			while run.start.resolved().is_none() {
+				assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+			}
+			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+
+			let writes = log.writes.lock().unwrap().clone();
+			let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, Version::Lite07).unwrap();
+			let lite::SubscribeResponse::Start(start) = msg else {
+				panic!("expected SUBSCRIBE_START, got {msg:?}");
+			};
+			let largest = lite::Largest {
+				position: track::Position { group: 0, frame: 0 },
+				ended,
+			};
+			assert_eq!(start.largest, Some(largest), "{case}");
+		}
 	}
 
 	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed, each as
@@ -8747,7 +8756,7 @@ mod serve_group_test {
 		run.update(lite::SubscribeUpdate {
 			wanted_group: None,
 			priority: 1,
-			max_delay: budget,
+			max_delay: Some(budget),
 			min_delay: None,
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
@@ -8788,7 +8797,7 @@ mod serve_group_test {
 		run.update(lite::SubscribeUpdate {
 			wanted_group: None,
 			priority: 1,
-			max_delay: Duration::from_secs(3600),
+			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
@@ -8834,7 +8843,7 @@ mod serve_group_test {
 				run.update(lite::SubscribeUpdate {
 					wanted_group: None,
 					priority: 0,
-					max_delay: if widen { Duration::from_secs(10) } else { budget },
+					max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
 					min_delay: None,
 					ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 					order: Order::Descending,
@@ -8879,7 +8888,7 @@ mod serve_group_test {
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 5,
-				max_delay: if widen { Duration::from_secs(10) } else { budget },
+				max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
 				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
@@ -8925,7 +8934,7 @@ mod serve_group_test {
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 1,
-				max_delay: Duration::from_secs(3600),
+				max_delay: Some(Duration::from_secs(3600)),
 				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
@@ -8962,7 +8971,7 @@ mod serve_group_test {
 		let update = |update, max_delay| lite::SubscribeUpdate {
 			wanted_group: None,
 			priority: 0,
-			max_delay,
+			max_delay: Some(max_delay),
 			min_delay: None,
 			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 			order: Order::Descending,
@@ -9031,7 +9040,7 @@ mod serve_group_test {
 			run.replace(lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
-				max_delay: if widen { Duration::from_secs(10) } else { budget },
+				max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				order: Order::Descending,
@@ -9081,7 +9090,7 @@ mod serve_group_test {
 			let update = |id, start, update| lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
-				max_delay: Duration::from_secs(10),
+				max_delay: Some(Duration::from_secs(10)),
 				min_delay: None,
 				ranges: vec![(id, lite::Range::span(start, 0, None, None))],
 				order: Order::Descending,
@@ -9139,7 +9148,7 @@ mod serve_group_test {
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
-				max_delay,
+				max_delay: Some(max_delay),
 				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
@@ -9175,7 +9184,7 @@ mod serve_group_test {
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 1,
-				max_delay: Duration::from_secs(3600),
+				max_delay: Some(Duration::from_secs(3600)),
 				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
@@ -9217,7 +9226,7 @@ mod serve_group_test {
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
-				max_delay,
+				max_delay: Some(max_delay),
 				min_delay: None,
 				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 				order: Order::Descending,
@@ -9413,7 +9422,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(60),
+			max_delay: Some(Duration::from_secs(60)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
@@ -9840,7 +9849,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(60),
+			max_delay: Some(Duration::from_secs(60)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
@@ -9882,7 +9891,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(1),
+			max_delay: Some(Duration::from_secs(1)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			update: 0,
@@ -9929,7 +9938,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(1),
+			max_delay: Some(Duration::from_secs(1)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 			update: 0,
@@ -9976,7 +9985,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Ascending,
 			priority: 0,
-			max_delay: Duration::from_secs(10),
+			max_delay: Some(Duration::from_secs(10)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 			update: 0,
@@ -10023,7 +10032,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(60),
+			max_delay: Some(Duration::from_secs(60)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -10116,7 +10125,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(60),
+			max_delay: Some(Duration::from_secs(60)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -10254,7 +10263,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(30),
+			max_delay: Some(Duration::from_secs(30)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -10285,7 +10294,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(30),
+			max_delay: Some(Duration::from_secs(30)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -10313,7 +10322,7 @@ mod serve_group_test {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(7), 0, None, None)],
 			update: 0,
@@ -10456,7 +10465,7 @@ mod serve_group_test {
 			*log.writes.lock().unwrap(),
 			// The DROP names group 0 as a start and count, with OLD (0x34) and the SUBSCRIBE's
 			// update, 0.
-			[0, 4, 1, 0, 1, 1, 2, 4, 0, 1, 0x34, 0, 1, 2, 2, 0],
+			[0, 5, 1, 0, 1, 1, 1, 2, 4, 0, 1, 0x34, 0, 1, 2, 2, 0],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -10468,7 +10477,7 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[0, 4, 1, 0, 1, 1, 2, 4, 0, 1, 0x34, 0, 1, 2, 2, 0]
+			[0, 5, 1, 0, 1, 1, 1, 2, 4, 0, 1, 0x34, 0, 1, 2, 2, 0]
 		);
 	}
 }
@@ -11185,7 +11194,7 @@ mod tests {
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
-						max_delay: Duration::ZERO,
+						max_delay: Some(Duration::ZERO),
 						min_delay: None,
 						ranges: vec![lite::Range::span(None, 0, None, None)],
 						update: 0,
@@ -11250,7 +11259,7 @@ mod tests {
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
 				priority: 0,
-				max_delay: Duration::ZERO,
+				max_delay: Some(Duration::ZERO),
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
@@ -11406,7 +11415,7 @@ mod tests {
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
 			priority,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -11719,7 +11728,7 @@ mod tests {
 						let mut resolved = staged.take().unwrap().commit();
 						write(&mut resolved, &[0, 3]);
 						if let Answer::Warm = answer {
-							resolved.report_largest(track::Position::group(9));
+							resolved.report_largest(track::Position::group(9), false);
 						}
 						track = Some(resolved);
 					}
@@ -11751,7 +11760,7 @@ mod tests {
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 						priority: 0,
-						max_delay: Duration::from_secs(60),
+						max_delay: Some(Duration::from_secs(60)),
 						min_delay: None,
 						ranges: vec![lite::Range::span(start, 0, None, None)],
 						update: 0,
@@ -11791,7 +11800,7 @@ mod tests {
 						Answer::Reported => {
 							let mut staged = staged.take().unwrap();
 							write(&mut staged, &[3]);
-							staged.report_largest(track::Position::group(9));
+							staged.report_largest(track::Position::group(9), false);
 							staged.commit()
 						}
 						Answer::Empty => staged.take().unwrap().commit(),
@@ -11887,7 +11896,7 @@ mod tests {
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 1,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
@@ -11913,7 +11922,7 @@ mod tests {
 			wanted_group,
 			order: crate::track::Order::Descending,
 			priority,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			ranges: lite::RangeEdit::Edit {
 				remove: Vec::new(),
@@ -11976,7 +11985,7 @@ mod tests {
 			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
-			max_delay: Duration::from_secs(3600),
+			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
 			ranges: lite::RangeEdit::Edit {
 				remove: Vec::new(),
@@ -12021,7 +12030,7 @@ mod tests {
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
-			max_delay: Duration::from_secs(3600),
+			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
@@ -12550,7 +12559,7 @@ mod tests {
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
 				priority: 0,
-				max_delay: Duration::ZERO,
+				max_delay: Some(Duration::ZERO),
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
@@ -12667,7 +12676,7 @@ mod tests {
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
 				priority: 0,
-				max_delay: Duration::ZERO,
+				max_delay: Some(Duration::ZERO),
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				update: 0,
@@ -12808,7 +12817,7 @@ mod tests {
 			broadcast: crate::Path::new(broadcast).unwrap(),
 			track: track.into(),
 			priority,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			update: 0,
