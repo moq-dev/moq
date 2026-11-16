@@ -86,4 +86,3 @@ to broadcasts; the worker and the player deploy together.
 ## Related
 
 - [moq.dev's hosted demos run the cut](/quest/m3/release/demos-deploy.md) - deploys this
-- [moq-json writes take a value and a time](/quest/m2/json-write-at.md) - changes the write the `control` track uses
