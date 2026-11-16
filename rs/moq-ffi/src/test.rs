@@ -7789,11 +7789,23 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	// A drop applies at once, so this waits on the follow thread alone, never a timer.
-	video.wait_applied(1_000_000);
+	// A drop applies at once, on the next frame written.
+	video.write(gray_frame(0)).unwrap();
+	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
+}
+
+/// One mid-gray 320x240 RGBA picture at `micros`.
+fn gray_frame(micros: u64) -> crate::video::MoqVideoFrame {
+	crate::video::MoqVideoFrame {
+		timestamp: crate::media::MoqTimestamp {
+			value: micros,
+			scale: Some(1_000_000),
+		},
+		data: vec![0x80; 320 * 240 * 4],
+	}
 }
 
 fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::video::MoqVideoEncoderOutput) {
@@ -7815,36 +7827,6 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 			kind: MoqVideoEncoderKind::Software,
 		},
 	)
-}
-
-/// Dropping a producer parked in `changed()` must stop the follow thread, not
-/// leak it until the session allocator dies.
-#[tokio::test]
-async fn dropping_a_video_producer_stops_the_rate_follower() {
-	use crate::bandwidth::MoqAllocator;
-
-	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
-		estimate.consume(),
-	)));
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let (input, output) = software_camera(4_000_000);
-	let video = crate::video::MoqVideoProducer::new(
-		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		crate::video::MoqVideoProducerOptions {
-			input,
-			output,
-			track: Some("camera".into()),
-			bandwidth: Some(bandwidth),
-			lower: None,
-		},
-	)
-	.unwrap();
-
-	kio::clock::timeout(TIMEOUT, tokio::task::spawn_blocking(move || drop(video)))
-		.await
-		.expect("rate follower did not stop")
-		.expect("drop panicked");
 }
 
 /// `set_bitrate` is the manual ceiling: a later grant cannot retune above it.
@@ -7886,6 +7868,7 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
+	video.write(gray_frame(0)).unwrap();
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();

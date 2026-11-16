@@ -25824,10 +25824,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqvideoproducer_reservation() != 1052) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_set_bitrate() != 19081) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_set_bitrate() != 5725) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_write() != 17427) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_write() != 39148) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqaudiocodec_aac() != 62161) {
@@ -25947,7 +25947,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_constructor_moqvideoencoder_new() != 22531) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqvideoproducer_new() != 51291) {
+  if (uniffi_moq_ffi_checksum_constructor_moqvideoproducer_new() != 47759) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
 }

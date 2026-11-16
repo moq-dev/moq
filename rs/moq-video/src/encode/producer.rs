@@ -950,4 +950,148 @@ mod tests {
 
 		assert_eq!(read(consumer).await, [1, 1, 1]);
 	}
+
+	/// A rung resumed at a ceiling past its declared level publishes a new track, and its
+	/// bandwidth claim moves there with it rather than watching the track that ended.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn a_resume_past_the_declared_level_moves_the_claim() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut options = Options::new(config(encoder::Kind::Software, Rate::from_mbps(2)));
+		options.track = Some("video".into());
+		let mut producer = Producer::new(&broadcast, catalog, options).await.unwrap();
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		let before = producer.reservation().clone();
+		producer.apply(rate::Target::Disabled).await.unwrap();
+		// 3 Mbps takes H.264 level 2.1, past the 2.0 the 2 Mbps rendition declared.
+		producer.set_bitrate(Rate::from_mbps(3)).await.unwrap();
+		producer.apply(rate::Target::Enabled(Rate::from_mbps(3))).await.unwrap();
+		producer.write(frame(&mut micros)).await.unwrap();
+
+		assert_eq!(producer.demand().name(), "video/1");
+		assert!(
+			!Arc::ptr_eq(&before, producer.reservation()),
+			"the claim still watches the ended track"
+		);
+		let _finished = producer.finish().await.unwrap();
+		assert_eq!(Arc::strong_count(&before), 1, "a finished producer still holds a claim");
+	}
+
+	/// A disable that fails partway leaves the catalog and the encoder agreeing, so viewers
+	/// never wait on a rendition the catalog calls enabled while its frames are dropped.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn a_failed_disable_leaves_the_catalog_and_encoder_agreeing() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let config = config(encoder::Kind::Software, Rate::from_mbps(1));
+		let rendition = config.probe().await.unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let mut producer = Producer::with_track(track.clone(), &catalog, config, rendition, unlimited, None).unwrap();
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		// The track breaks, so the break marker the disable writes fails.
+		track.abort(moq_net::Error::Cancel).unwrap();
+		let disabled = producer.apply(rate::Target::Disabled).await;
+
+		assert!(disabled.is_err(), "the break marker should fail on a broken track");
+		let encoding = matches!(producer.encoding, Encoding::Open(_));
+		assert_eq!(
+			encoding,
+			enabled(&catalog, "video"),
+			"the catalog and the encoder disagree"
+		);
+	}
+
+	/// A lost tail must reach the subscriber as an abort: finishing the track anyway would
+	/// report a truncated stream as a complete one, and only the publisher would ever know.
+	#[tokio::test]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_lost_tail_aborts_the_track() {
+		let _probe = probe::exclusive();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let mut producer = probed(&broadcast, &catalog, "video", Rate::from_mbps(1), unlimited, None);
+		let mut track = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut micros = 0;
+
+		// The probe holds this frame back, so only the flush can publish it.
+		producer.write(frame(&mut micros)).await.unwrap();
+		probe::lose_tail();
+		assert!(producer.finish().await.is_err());
+
+		let Err(err) = track.recv_group().await else {
+			panic!("expected an abort, not a clean end");
+		};
+		assert!(
+			err.to_string().contains("the probe lost its tail"),
+			"the abort should carry the drain failure: {err}"
+		);
+	}
+
+	/// `set_bitrate` lowers the ceiling while the grant is climbing back toward the old one:
+	/// nothing retunes past the new ceiling, and the encoder recovers to it.
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_lowered_ceiling_caps_a_recovering_grant() {
+		let _probe = probe::exclusive();
+		let old = Rate::from_mbps(4);
+		let lowered = Rate::from_mbps(2);
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_mbps(1))).unwrap();
+		let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = probed(&broadcast, &catalog, "video", old, bandwidth, None);
+		let _viewer = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		assert!(producer.bitrate().unwrap() <= Rate::from_mbps(1));
+		// The link recovers, and the encoder starts climbing back toward the old ceiling.
+		tokio::time::advance(Duration::from_secs(1)).await;
+		estimate.set(Some(old)).unwrap();
+		for _ in 0..3 {
+			tokio::time::advance(Duration::from_millis(100)).await;
+			producer.write(frame(&mut micros)).await.unwrap();
+		}
+
+		producer.set_bitrate(lowered).await.unwrap();
+		let _ = probe::bitrates();
+		for _ in 0..600 {
+			tokio::time::advance(Duration::from_millis(100)).await;
+			producer.write(frame(&mut micros)).await.unwrap();
+		}
+		let applied = probe::bitrates();
+		assert!(applied.iter().all(|&bps| bps <= lowered.as_bps()), "{applied:?}");
+		assert_eq!(producer.bitrate(), Some(lowered));
+		assert_eq!(producer.reservation().rate(), Some(lowered));
+	}
 }

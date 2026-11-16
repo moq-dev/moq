@@ -98,6 +98,5 @@ Public API: moq-mux, moq-video, moq-transcode, hang, `@moq/hang`, and
 
 ## Related
 
-- [moq-video has a producer that takes frames](/quest/m2/video-producer.md) - reworks the encode module these items sit in
 - [Client health in use](/quest/m3/stats/health-consumers.md) - publishes `Health` once something reads it
 - [The OBS adapter](/quest/m3/obs-moq-video/adapter.md) - the planned consumer of `Preset` and `Applied`

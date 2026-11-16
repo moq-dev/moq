@@ -54,9 +54,9 @@ For the PR:
   job.
 - `moq_video::encode::Producer::finish(self) -> Result<Finished, Error>`,
   with `Finished::abort`, matching the audio producer line for line. This
-  type is being renamed by
-  [the frame-taking video producer](/quest/m2/video-producer.md); whichever
-  lands second merges main and keeps both changes.
+  type is now `encode::Publisher`, and the frame-taking `encode::Producer`
+  wraps it with a provisional `Finished` of the same shape (`demand`,
+  `abort`); this quest's `Finished` replaces that one.
 - Callers hold these behind locks in moq-ffi and moq-c
   (`rs/moq-ffi/src/{video,media,audio}.rs`, `rs/moq-c/src/{video,publish}.rs`):
   move the producer out of its slot on finish and store the `Finished`, as
@@ -73,5 +73,4 @@ importers, `moq_mux::import::{Track, TrackStream}`, and
 
 ## Related
 
-- [The frame-taking video producer](/quest/m2/video-producer.md) - renames the video type this changes
 - [TS import reports typed outcomes](/quest/m2/ts-typed-outcomes.md) - changes the TS importers' `finish` error type

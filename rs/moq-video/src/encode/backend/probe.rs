@@ -36,6 +36,9 @@ static BITRATES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 /// A bitrate the probe refuses once, standing in for a transient codec failure.
 static REFUSE: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Whether the next flush fails, standing in for a codec that loses its tail.
+static LOSE_TAIL: Mutex<bool> = Mutex::new(false);
+
 /// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
 /// each test its own process, but `cargo test` does not, and a shared log that
 /// only holds up under one runner is a trap for whoever adds the next test.
@@ -47,6 +50,7 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let _ = take();
 	BITRATES.lock().unwrap().clear();
 	REFUSE.lock().unwrap().take();
+	*LOSE_TAIL.lock().unwrap() = false;
 	guard
 }
 
@@ -79,6 +83,11 @@ pub(crate) fn bitrates() -> Vec<u64> {
 /// Fail the first `set_bitrate` asking for `bitrate`, then accept it again.
 pub(crate) fn refuse_once(bitrate: u64) {
 	*REFUSE.lock().unwrap() = Some(bitrate);
+}
+
+/// Fail the next flush, losing the frame held back.
+pub(crate) fn lose_tail() {
+	*LOSE_TAIL.lock().unwrap() = true;
 }
 
 pub(crate) struct Probe {
@@ -136,6 +145,9 @@ impl Backend for Probe {
 
 	fn flush(&mut self) -> Result<(), Error> {
 		record("flush");
+		if std::mem::take(&mut *LOSE_TAIL.lock().unwrap()) {
+			return Err(Error::codec(anyhow::anyhow!("the probe lost its tail")));
+		}
 		self.ready.extend(self.held.take());
 		Ok(())
 	}

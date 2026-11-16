@@ -79,6 +79,5 @@ configs, `capture::Config::cursor`). CLI: none. Wire: none.
 
 ## Related
 
-- [moq-video has a producer that takes frames](/quest/m2/video-producer.md) - changes `encode::Capture` and its driver in the same crate
 - [GPU health](/quest/m3/gpu-health.md) - the render-node identity the selector reuses
 - [The cursor apart from the frame](/quest/m4/capture-cursor.md) - adds the third cursor variant

@@ -54,12 +54,13 @@ impl MoqAllocator {
 /// means no estimate, so hold the current rate, and `Some(0)` is a real zero rate.
 #[derive(uniffi::Object)]
 pub struct MoqReservation {
-	inner: moq_net::bandwidth::Reservation,
+	/// Shared with the producer that holds the claim, such as a video producer's.
+	inner: Arc<moq_net::bandwidth::Reservation>,
 }
 
 impl MoqReservation {
-	pub(crate) fn new(inner: moq_net::bandwidth::Reservation) -> Self {
-		Self { inner }
+	pub(crate) fn new(inner: impl Into<Arc<moq_net::bandwidth::Reservation>>) -> Self {
+		Self { inner: inner.into() }
 	}
 
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
