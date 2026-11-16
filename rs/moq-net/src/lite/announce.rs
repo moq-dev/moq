@@ -653,8 +653,6 @@ fn decode_chain(r: &mut Decoder<'_>, version: Version) -> Result<Hops, DecodeErr
 	}
 }
 
-/// Encode lite-07's trailing Lite-06 Chain, omitted when empty. A lite-06 compatibility
-/// field: the lite-07 to lite-08 migration deletes it.
 /// Encode lite-07's Above, which no earlier version has: a claim there is only ever at the
 /// path it names.
 fn encode_above(w: &mut Encoder<'_>, version: Version, above: u64) -> Result<(), EncodeError> {
@@ -667,6 +665,8 @@ fn encode_above(w: &mut Encoder<'_>, version: Version, above: u64) -> Result<(),
 	}
 }
 
+/// Encode lite-07's trailing Lite-06 Chain, omitted when empty. A lite-06 compatibility
+/// field: the lite-07 to lite-08 migration deletes it.
 fn encode_lite06_chain(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(), EncodeError> {
 	match version.has_routes() && !hops.is_empty() {
 		true => hops.encode(w, version),

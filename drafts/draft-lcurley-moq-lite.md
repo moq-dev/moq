@@ -597,7 +597,7 @@ It MAY also close it when the stream falls behind repeated failures of the route
 A SUBSCRIBE, FETCH, or TRACK request naming no origin node names a path, and the receiver resolves it against the claims covering that path whose route it selected and is usable.
 
 Only the most specific covering claims are consulted: those with the longest prefix, which for a claim shown below its own prefix is the path it is shown at less its Above (see [ANNOUNCE_START](#announce-start)).
-A claim strictly inside another's paths always ranks above it, and a broadcast's exact path is the most specific claim there is, so a concrete announcement shadows every broader claim covering it at any cost; claims over the same prefix form one tier.
+A claim strictly inside another's paths always ranks above it, and a broadcast's exact path is the most specific claim there is, so a concrete announcement shadows every broader claim covering it at any cost; claims over the same prefix shown at the same path form one tier, and among those shown at different paths the deepest wins (see [Above](#announce-start)).
 The winning tier is the whole answer: a refusal from it never falls through to a less specific claim, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
 Nor is a refusal retried at another claim of the same prefix.
 
@@ -1500,7 +1500,8 @@ A relay forwards it unchanged; the cost of a path through the claim is the Annou
 How many segments the claim's own prefix is broader than the path it is shown at (see [Announce](#announce)): 0 for a claim exactly there.
 A publisher presenting a claim above the requested prefix at the requested prefix itself writes the distance between them, plus the Above the claim already had where it learned it from a stream of a broader request, and no more than the path has segments below the publisher's root.
 A claim is no more above its path than the path has segments; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
-A receiver treats a claim as covering its path less its Above, and ranks the claims of a request by that prefix first, longest first, then by their Above, lowest first (see [Resolution](#resolution)), so the claim of a broadcast at exactly the requested path outranks a broader claim shown there or deeper, however the two compare otherwise.
+A receiver treats a claim as covering its path less its Above, and ranks the claims of a request by that prefix first, longest first, then, among claims of the same prefix, by the path each is shown at, deepest first (see [Resolution](#resolution)), so the claim of a broadcast at exactly the requested path outranks a broader claim shown there or deeper, however the two compare otherwise.
+The claims of one tier are those of the winning prefix shown at the winning depth; claims of the same prefix shown at a shallower depth are not consulted.
 A relay forwards a claim's Above unchanged, adding the distance when it shows the claim at a narrower prefix than the one it learned it at.
 
 **Lite-06 Chain**:

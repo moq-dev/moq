@@ -708,13 +708,22 @@ impl Answer {
 		for (path, claim) in changes {
 			// Named as the handle names it: beneath the mount point for a mount, and never
 			// a claim the origin holds beneath a mount for the prefix's own.
-			let path = match mount {
+			let (path, claim) = match mount {
 				Some(mount) => match mount.name(&path) {
-					Some(named) => named,
+					// A claim above the target covers all of the mount, so as the handle
+					// names it, it is no more above the path than the mount point is.
+					Some(named) => {
+						let beneath = mount.beneath(&named);
+						let claim = claim.map(|claim| node::Claim {
+							above: claim.above.min(beneath),
+							..claim
+						});
+						(named, claim)
+					}
 					None => continue,
 				},
 				None if self.origin.shadows(&path) => continue,
-				None => path,
+				None => (path, claim),
 			};
 			sent.set(&self.link, path.clone(), claim);
 			paths.push(path);

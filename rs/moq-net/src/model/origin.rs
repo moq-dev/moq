@@ -815,27 +815,31 @@ fn chain_key(path: &str, hops: &Hops) -> u64 {
 	fnv_key(path, hops.iter().flat_map(|hop| hop.id().to_le_bytes()))
 }
 
-/// The highest epoch each instance reaches among a set of candidates, per prefix: an older
+/// The highest epoch each instance reaches among a set of candidates, per claim: an older
 /// incarnation of an instance is never eligible, however cheap, since its publisher was
-/// replaced. Built in one pass, so ranking N candidates stays linear. Only epochs above 0
-/// are kept, since nothing is below 0: the common case, where every instance announces
-/// epoch 0, allocates nothing.
-struct Epochs<'a>(HashMap<(&'a Path, &'a Instance), u64>);
+/// replaced. A claim is its prefix and how far above it was shown ([`Lane::above`]), so a
+/// broader claim shown at a prefix is another claim than the one made there, and its epoch
+/// supersedes nothing of it. Built in one pass, so ranking N candidates stays linear. Only
+/// epochs above 0 are kept, since nothing is below 0: the common case, where every instance
+/// announces epoch 0, allocates nothing.
+struct Epochs<'a>(HashMap<(&'a Path, &'a Instance, u8), u64>);
 
 impl<'a> Epochs<'a> {
 	fn of(candidates: impl Iterator<Item = &'a RouteEntry>) -> Self {
 		let mut highest = HashMap::new();
 		for entry in candidates.filter(|entry| entry.epoch > 0) {
-			let epoch = highest.entry((&entry.prefix, &entry.instance)).or_insert(0);
+			let epoch = highest
+				.entry((&entry.prefix, &entry.instance, entry.lane.above))
+				.or_insert(0);
 			*epoch = (*epoch).max(entry.epoch);
 		}
 		Self(highest)
 	}
 
-	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same prefix.
+	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same claim.
 	fn superseded(&self, entry: &RouteEntry) -> bool {
 		self.0
-			.get(&(&entry.prefix, &entry.instance))
+			.get(&(&entry.prefix, &entry.instance, entry.lane.above))
 			.is_some_and(|&highest| highest > entry.epoch)
 	}
 }
@@ -1937,6 +1941,13 @@ impl Mounted {
 	/// Whether the absolute, handle-side `path` lies at or beneath the mount point.
 	pub fn holds(&self, path: &Path) -> bool {
 		path.has_prefix(&self.mount.at)
+	}
+
+	/// How many segments the handle-side `path` lies beneath the mount point: the most a
+	/// claim read through the mount can be above it. A claim covering the whole target, which
+	/// is broader than the mount point as the handle sees it, covers no more than that.
+	pub fn beneath(&self, path: &Path) -> u64 {
+		path.parts().count().saturating_sub(self.mount.at.parts().count()) as u64
 	}
 }
 
@@ -10739,6 +10750,52 @@ mod tests {
 		assert!(best("src/a").is_some_and(|entry| entry.source.is_some()));
 	}
 
+	/// A broader claim shown at a prefix never supersedes the claim of that prefix: an instance's
+	/// higher epoch on a claim above the prefix is another claim's, so the announce stream
+	/// advertises what a request resolves to, the broadcast here.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_broader_claim_at_a_higher_epoch_does_not_supersede_the_exact_one() {
+		// Updates are delivered at once: the hold is not what this checks.
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let mut announced = producer.consume().routes();
+		let instance = crate::Instance::random();
+		let _exact = producer
+			.route("src/a", RouteOptions::default().with_instance(instance.clone(), 0))
+			.unwrap();
+		let first = announced.expect_next_active("src/a").await;
+		assert_eq!(first.epoch, 0);
+
+		let _broad = producer
+			.forward(
+				"src/a",
+				RouteInfo::new()
+					.with_instance(instance.clone(), 1)
+					.with_hops(hops(&[10]))
+					.with_node(Some(10))
+					.with_lane(Lane {
+						above: 1,
+						..Lane::default()
+					}),
+			)
+			.unwrap();
+
+		let table = producer.shared.read();
+		let best = table
+			.best_route(&Path::new("src/a").unwrap(), Horizon::default(), &HashSet::new(), |_| true)
+			.expect("the exact claim serves its own prefix");
+		assert_eq!((best.epoch, best.lane.above), (0, 0));
+		drop(table);
+		assert!(
+			announced.try_next().is_none(),
+			"the broader claim at a higher epoch must not replace the exact one in the announcement"
+		);
+	}
+
 	/// A draining route ranks below every other eligible one, even on a preferred link
 	/// against a demoted one, whatever the costs say.
 	#[kio::test]
@@ -10782,6 +10839,8 @@ mod tests {
 		announced.expect_next_active("room").await;
 		dynamic.update(dynamic.route().unwrap().with_draining(true)).unwrap();
 		// Past the hold a best-route change would wait out.
+		// An update is held back from the poll that first sees it, so poll on both sides of the hold.
+		announced.assert_next_wait();
 		kio::clock::sleep(Config::default().update_hold * 2).await;
 		announced.assert_next_wait();
 		let route = dynamic.route().unwrap();
