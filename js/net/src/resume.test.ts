@@ -1325,6 +1325,149 @@ test("a read stranded on a route asks it again once the table moves", async () =
 	close();
 });
 
+// Mirrors `a_pending_takeover_leaves_a_stranded_track_waiting` in rs/moq-net/src/model/front.rs:
+// the table moving toward a cheaper route that has yet to answer is no news for the stranded one.
+for (const answers of [true, false]) {
+	test(`a read stranded on a route waits out a takeover still pending, until it ${answers ? "answers" : "leaves"}`, async () => {
+		const { origin, a, b, active, close } = await setup();
+		const first = copy(a);
+		const sub = active.track("seq").subscribe();
+		first.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+
+		first.producer.abort(new StreamError(StreamCode.Unroutable));
+		await settle();
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		// The stranded route could serve again, but a cheaper one is announced and has not answered.
+		const second = copy(a);
+		second.write(1n);
+		const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+		const asked = next.requested();
+		await settle();
+		await settle();
+		expect(sub.tryRecvGroup()).toBeUndefined();
+		expect(sub.closed.peek()).toBeUndefined();
+
+		if (answers) {
+			// It answers, and takes over.
+			const tb = copy(b);
+			const { value: pending } = await asked.next();
+			pending.serve(b.consume());
+			await settle();
+			await settle();
+			tb.write(2n);
+			await settle();
+			expect(drain(sub)).toEqual([2n]);
+		} else {
+			// It leaves first: the stranded route wins again, which is the news the read waited for.
+			next.close();
+			await settle();
+			await settle();
+			expect(drain(sub)).toEqual([1n]);
+		}
+
+		sub.close();
+		next.close();
+		close();
+	});
+}
+
+// Mirrors `a_stranded_track_still_draining_asks_again_when_the_table_moves` in rs/moq-net/src/model/front.rs.
+test("a replacement that loses its route is asked again once the table moves, the replaced copy feeding meanwhile", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	const lost = copy(b);
+	front.serve(b.consume());
+	await settle();
+	lost.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	const tb = copy(b);
+	tb.write(2n);
+	front.moved();
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// Mirrors `a_drained_copy_lost_as_unroutable_waits_on_the_serving_source` in rs/moq-net/src/model/front.rs.
+test("a replaced copy that loses its route after its replacement did waits on the serving source", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	const lost = copy(b);
+	front.serve(b.consume());
+	await settle();
+	lost.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	// The serving source could serve again, but reading it is no news: the read keeps waiting.
+	const tb = copy(b);
+	tb.write(1n);
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+
+	front.moved();
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
+// Mirrors `a_drained_copy_lost_as_unroutable_leaves_the_serving_refusal_standing` in rs/moq-net/src/model/front.rs.
+test("a replaced copy that loses its route leaves its replacement's refusal standing", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+
+	// The replacement has no such track.
+	front.serve(b.consume());
+	await settle();
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	let ended: unknown;
+	try {
+		sub.tryRecvGroup();
+	} catch (err) {
+		ended = err;
+	}
+	expect(ended).toBeInstanceOf(Error);
+	expect(routeFailed(ended as Error)).toBe(false);
+
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
 // A local broadcast's word on a track is its verdict: no route news can overtake it.
 test("a local broadcast failing a track as unroutable ends the read", async () => {
 	const front = new Front();

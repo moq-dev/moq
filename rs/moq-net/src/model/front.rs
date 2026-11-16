@@ -1436,6 +1436,62 @@ mod tests {
 		}
 	}
 
+	/// The table moving toward a route that has yet to answer is no news for a stranded track:
+	/// it waits for that answer, or asks its own route again once that route wins back.
+	#[test]
+	fn a_pending_takeover_leaves_a_stranded_track_waiting() {
+		let stranded = || {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Unroutable),
+				delivered: true,
+			});
+			// A cheaper route wins: ask it, and nothing else.
+			let cheaper = Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			};
+			assert_actions(front.step(cheaper.clone()), &[Action::Request { route: 2 }]);
+			assert_actions(front.step(cheaper), &[]);
+			front
+		};
+
+		// It answers: the track asks it.
+		let mut front = stranded();
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
+				Action::Query {
+					track: name("video"),
+					source: 200,
+				},
+			],
+		);
+
+		// It leaves first: the serving route wins again, which is the news the track waited for.
+		let mut front = stranded();
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+	}
+
 	/// The serving source refuses a track unroutable while the copy it replaces still drains.
 	/// Once the table moves, the source is asked again with the draining copy still read, and
 	/// its answer replaces it. A request for the track after it aborted starts unstranded.

@@ -263,8 +263,8 @@ interface RequestSlot {
 	/** Pending plain handles, each ending itself once synced discovery leaves it no route. */
 	readonly absent: Set<() => void>;
 	/**
-	 * Called each time the table moves for the path, after the slot re-resolves, even when the
-	 * same route still wins: the evidence a read stranded on that route waits for.
+	 * Called each time the table moves for the path while the slot keeps its route and no takeover
+	 * is pending: the evidence a read stranded on that route waits for.
 	 */
 	readonly moved: Set<() => void>;
 	readonly route: Signal<Resolution | undefined>;
@@ -288,6 +288,8 @@ interface Resolution {
 	readonly source?: object;
 	/** Whether the front is the local broadcast, whose word on a track no route news overtakes. */
 	readonly local?: boolean;
+	/** Kept while a cheaper route of the instance has yet to answer: a takeover is pending. */
+	readonly pending?: boolean;
 }
 
 /**
@@ -869,7 +871,12 @@ class OriginState {
 	 * stops serving, it ends, except for an answer retained across an in-place Restart.
 	 */
 	reroute(path: Path.Valid, slot: RequestSlot): void {
+		const before = slot.route.peek()?.source;
 		this.#reroute(path, slot);
+		// Only the same route still winning, with no takeover pending, is news for a read stranded
+		// on it, as the Rust front unstrands only when the selected route is the serving one.
+		const after = slot.route.peek();
+		if (before === undefined || after?.source !== before || after.pending || slot.failover) return;
 		for (const moved of [...slot.moved]) moved();
 	}
 
@@ -1240,7 +1247,7 @@ class OriginState {
 		entry.server.enqueue(path);
 		// The same instance over another route: the old front serves until the new one answers.
 		const kept = cached?.instance === instance ? cached : undefined;
-		return { front: kept?.front, instance, source: kept?.source };
+		return { front: kept?.front, instance, source: kept?.source, pending: true };
 	}
 }
 

@@ -222,7 +222,7 @@ class Route {
 	 * a replacement failing first leaves it serving. The Rust front only swaps once one delivers.
 	 */
 	incumbent?: Source;
-	/** The serving source a read idles on, having lost the route; cleared once asked again. */
+	/** The source a read idles on, having lost the route; cleared once asked again or replaced. */
 	#stranded?: Source;
 	/** Bumped on every change above, waking parked reads. */
 	readonly changed = new Signal(0);
@@ -242,6 +242,7 @@ class Route {
 	serve(source: Source): void {
 		// A refusal ends the track: no later source continues it, compatible or not.
 		if (this.concluded || this.refusal || this.source === source) return;
+		this.#stranded = undefined;
 		this.generation++;
 		// An undelivered source hands over the incumbent it held, not itself.
 		if (!this.incumbent) this.#hold(this.source);
@@ -278,19 +279,16 @@ class Route {
 	}
 
 	/** Subscribe every reader afresh to the source that still serves, once its copy failed. */
-	/** A reader idles on `source`, which lost the route: see {@link unstrand}. */
+	/** A read idles on `source`, which lost the route, until the table moves: see {@link Front.moved}. */
 	strand(source: Source): void {
 		this.#stranded = source;
 	}
 
-	/**
-	 * The table moved while `source` still serves: subscribe afresh a read it lost as unroutable.
-	 * Mirrors the Rust front's `unstrand`; see {@link Front.moved}.
-	 */
-	unstrand(source: Source): void {
-		if (this.#stranded !== source || this.source !== source) return;
+	/** Whether a read idles on a lost route, which the table moving now ends. */
+	unstrand(): boolean {
+		if (!this.#stranded) return false;
 		this.#stranded = undefined;
-		this.resubscribe();
+		return true;
 	}
 
 	resubscribe(): void {
@@ -1087,7 +1085,12 @@ class Reader implements ResumeSource {
 				copy.sub.closed.peek() === undefined,
 		);
 		if (!incumbent || !this.route.revert(serving.source, incumbent.source)) return false;
-		if (!closing(failed) && !strands(failed, serving.source)) this.route.refuse(failed);
+		if (!closing(failed)) {
+			// A replacement losing its route judged the route: the replaced copy keeps feeding the
+			// read, which asks the replacement again once the table moves, as the Rust front does.
+			if (strands(failed, serving.source)) this.route.strand(serving.source);
+			else this.route.refuse(failed);
+		}
 		return true;
 	}
 
@@ -1986,13 +1989,20 @@ export class Front {
 	}
 
 	/**
-	 * The table moved for the path, whichever route now wins: a read stranded on the source still
-	 * serving asks it again, the evidence it waited for. Mirrors the Rust front's `unstrand`.
+	 * The table moved for the path while the same route still wins, with no takeover pending: a
+	 * read stranded on a lost route asks the serving source again, the evidence it waited for.
+	 * Mirrors the Rust front's `unstrand`.
 	 */
 	moved(): void {
 		const current = this.#source;
 		if (this.#concluded || !current) return;
-		for (const route of this.#routes.values()) route.unstrand(current);
+		for (const route of this.#routes.values()) {
+			if (!route.unstrand()) continue;
+			// Read from the serving source: subscribe afresh. Otherwise the read is on a copy the
+			// serving source replaced, which takes over again as any handover does.
+			if (route.source === current) route.resubscribe();
+			else this.#splice(route, current);
+		}
 	}
 
 	/** Between routes: readers keep what they have and wait for the next one. */
