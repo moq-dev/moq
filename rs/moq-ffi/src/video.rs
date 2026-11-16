@@ -762,6 +762,27 @@ impl MoqVideoProducer {
 		Some(guard.as_ref()?.follow.as_ref()?.reservation.clone())
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null. Fails with `Closed` once finished, like every other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::runtime().enter();
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+		let rendition = guard.take().ok_or(MoqError::Closed)?;
+		if let Err(producer) = rendition.producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			*guard = Some(VideoProducer { producer, ..rendition });
+			return Ok(false);
+		}
+		// Outside the lock, which the follower takes on its way out.
+		drop(guard);
+		rendition.follow.map_or(Ok(()), |follow| follow.follower.stop())?;
+		Ok(true)
+	}
+
 	/// Flush any frames the codec is still holding and finalize the track.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it.

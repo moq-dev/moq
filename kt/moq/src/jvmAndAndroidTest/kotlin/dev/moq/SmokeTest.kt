@@ -7,6 +7,8 @@ import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
+import dev.moq.json.StreamConsumer
+import dev.moq.json.StreamProducer
 import dev.moq.json.Timed
 import dev.moq.json.WindowConfig
 import dev.moq.json.WindowConsumer
@@ -616,6 +618,27 @@ class SmokeTest {
                     consumer.latest()?.decode<Status>(),
                 )
             }
+        }
+    }
+
+    @Test
+    fun `json abortUnwanted keeps a reader that joined late`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000uL))
+            val producer = StreamProducer(broadcast, track)
+            val demand = producer.demand()
+            while (demand.wantedChanged() != null) {}
+
+            val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
+            assertFalse(producer.abortUnwanted(7u))
+            producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
+            assertEquals("\"still serving\"", late.next()?.value)
+
+            while (demand.wantedChanged() == null) {}
+            late.cancel()
+            while (demand.wantedChanged() != null) {}
+            assertTrue(producer.abortUnwanted(7u))
+            assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
         }
     }
 

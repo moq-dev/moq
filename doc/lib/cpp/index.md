@@ -245,7 +245,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
-To end a track nobody wants, call the producer's `abort_unwanted(code)` once `wanted_changed()` returns `std::nullopt` rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns `std::nullopt` rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
 
 ## Authorization
 

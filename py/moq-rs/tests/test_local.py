@@ -642,6 +642,28 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
+async def test_json_abort_unwanted_keeps_a_late_reader():
+    """An idle JSON stream ends only once a reader that joined after it went unwanted has left."""
+    broadcast = moq.BroadcastProducer()
+    producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", moq.TrackInfo(timescale=1_000)))
+    demand = producer.demand()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+
+    late = moq.json.StreamConsumer(await broadcast.consume().subscribe_track("events"))
+    assert producer.abort_unwanted(7) is False
+    producer.append("still serving", moq.Timestamp(0, 1_000))
+    record = await asyncio.wait_for(anext(late), timeout=5.0)
+    assert record == moq.json.Timed("still serving", moq.Timestamp(0, 1_000))
+
+    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    late.cancel()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+    assert producer.abort_unwanted(7) is True
+    with pytest.raises(moq.Error.Closed):
+        producer.abort_unwanted(7)
+    broadcast.close()
+
+
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))

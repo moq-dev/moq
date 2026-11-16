@@ -444,6 +444,14 @@ func (m *TrackProducer) Seek(sequence uint64) error {
 	return m.inner.Seek(sequence)
 }
 
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil.
+func (m *TrackProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
+}
+
 // Finish closes the media track.
 func (m *TrackProducer) Finish() error {
 	return m.inner.Finish()
@@ -512,6 +520,14 @@ func (m *TrackStreamProducer) Write(payload []byte) error {
 // next keyframe in the stream.
 func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 	return m.inner.SetEnabled(enabled)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil.
+func (m *TrackStreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the stream.

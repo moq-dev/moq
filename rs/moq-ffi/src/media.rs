@@ -1243,6 +1243,29 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null. Fails with `Closed` once finished, like every other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let MediaProducer { import, video } = guard.take().ok_or(MoqError::Closed)?;
+		match import.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => Ok(true),
+			Err(import) => {
+				*guard = Some(MediaProducer {
+					import: Box::new(import),
+					video,
+				});
+				Ok(false)
+			}
+		}
+	}
+
 	/// Finish this track and finalize encoding.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
@@ -1380,6 +1403,29 @@ impl MoqMediaTrackStreamProducer {
 			reason: format!("set enabled failed: {err}"),
 		})?;
 		Ok(())
+	}
+
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null. Fails with `Closed` once finished, like every other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let MediaStreamProducer { import, priority } = guard.take().ok_or(MoqError::Closed)?;
+		match import.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => Ok(true),
+			Err(import) => {
+				*guard = Some(MediaStreamProducer {
+					import: Box::new(import),
+					priority,
+				});
+				Ok(false)
+			}
+		}
 	}
 
 	/// Finalize the track, publishing the last access unit still waiting for a following start code.

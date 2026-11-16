@@ -90,6 +90,14 @@ func (p *SnapshotProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil.
+func (p *SnapshotProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
+}
+
 // Finish closes the snapshot track.
 func (p *SnapshotProducer) Finish() error {
 	return p.inner.Finish()
@@ -128,6 +136,14 @@ func (p *StreamProducer) Demand() (*moq.TrackDemand, error) {
 		return nil, err
 	}
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil.
+func (p *StreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the stream track.
@@ -280,6 +296,14 @@ func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 		return nil, err
 	}
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil.
+func (p *WindowProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the window track.

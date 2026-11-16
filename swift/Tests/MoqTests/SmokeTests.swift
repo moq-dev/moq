@@ -759,6 +759,34 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
+    /// A typed producer keeps an idle track for a reader that joined since, like a raw one.
+    func testJsonAbortUnwantedKeepsALateReader() async throws {
+        let broadcast = try BroadcastProducer()
+        let producer = try Json.StreamProducer<String>(
+            broadcast: broadcast,
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
+        let demand = try producer.demand()
+        while try await demand.wantedChanged() != nil {}
+
+        let late = try Json.StreamConsumer<String>(
+            track: try await broadcast.consume().subscribeTrack(name: "events"))
+        XCTAssertFalse(try producer.abortUnwanted(errorCode: 7))
+        try producer.append("still serving", timestamp: micros(0))
+        let record = try await late.next()
+        XCTAssertEqual(record, Json.Timed(value: "still serving", timestamp: micros(0)))
+
+        while try await demand.wantedChanged() == nil {}
+        late.cancel()
+        while try await demand.wantedChanged() != nil {}
+        XCTAssertTrue(try producer.abortUnwanted(errorCode: 7))
+        XCTAssertThrowsError(try producer.abortUnwanted(errorCode: 7)) { error in
+            guard case MoqError.Closed = error else {
+                return XCTFail("expected Closed, got \(error)")
+            }
+        }
+        try broadcast.close()
+    }
+
     func testScaleLessTrackCarriesGroupKey() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "untimed")
