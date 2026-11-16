@@ -26,6 +26,18 @@ broadcast feeds that only do intra refresh.
 
 Decisions the quests share:
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ video
+`warmup` is not in moq-hang-04 (rejected: freezing it with Chromium-only
+evidence; gating the cut on a Safari and Firefox run). No producer wrote it,
+and a 0.22 player claiming to read it would mis-decode a later producer's
+rendition instead of refusing it. The m2 quest
+`quest/m2/hang04/video-warmup.md` removed the field and the one-decoder
+player path that
+[moq-dev/moq#8857](https://github.com/moq-dev/moq/pull/8857) had landed the
+day before. [Catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md)
+brings both back, from that history, as the next catalog version, and every
+other quest here builds on it. Audio `warmup` stayed in hang-04.
+
 Decided 2026-11-15 (maintainer, /quest-complete): ✅ a catalog `warmup` is a
 hint nothing enforces (rejected: refusing the stream once a sweep exceeds the
 published `warmup`; a bound published before the content it covers; a fixed
@@ -38,7 +50,8 @@ refresh stripes a little longer: a cosmetic cost, not a correctness one.
 - One group per refresh cycle. A group starts at the recovery point, the frame
   that begins a sweep, so a viewer joining at any group boundary is clean after
   exactly one cycle and relay shedding keeps its meaning.
-- The catalog carries a `warmup` duration per rendition. The transcoder
+- The catalog carries a `warmup` duration per rendition (for video, from
+  the catalog version after hang-04). The transcoder
   decodes enough preceding groups to cover it as history before each group it
   transcodes. A player joins that much earlier and hides that much after each
   join or skip, so an imprecise `warmup` shows stripes or hides clean pictures.

@@ -51,7 +51,12 @@ Recommendations for the PR:
   time, so it lines up with the video at its timestamp.
 - Each still is encoded after the request that asks for it, from the newest
   frame the capture has delivered by then, and never reuses an earlier
-  encode, so it meets the `refresh()` request barrier. A capture that
+  encode, so at the publisher a still always follows the request that
+  made it. Across relays `refresh()` promises only a group newer than the
+  newest the asking node held (decided 2026-11-16 on
+  [refresh](/quest/m2/refresh-interval.md): no request counter and no tag
+  on groups), so a remote caller that needs "after my action" reads until
+  the still's timestamp passes the time of its action. A capture that
   delivers frames only on change (PipeWire does) has its last frame as the
   current screen, so the producer must not wait for a newer one. A caller
   that needs the result of an action calls `refresh()` once the action has

@@ -10,15 +10,27 @@ only between two moq-transport peers.
 
 ## Plan
 
-Moved from m2 to m4 2026-11-14 (the m2 triage before the cut, under
-/quest-afk, for the maintainer's review): ✅ m4 (rejected: m2; m3, where the
-cut's re-split would keep a moq-transport wire change in the next cycle's
-wire phase). The verbatim group ID, the only part this cut needs, rides
-[the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md). What is left changes only
-what moq-net sends third-party moq-transport peers, adds no public API, and
-has no named consumer, and AGENTS.md ranks moq-transport compatibility below
-moq-lite's. It sits beside the other moq-transport quests in m4, such as
-[range FETCH](/quest/m4/ietf-range-fetch.md).
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ back
+in m2, so the Timestamp deletion lands before the cut (rejected: leaving it
+in m4; confirming the deferral knowingly). This reverses the 2026-11-14 move
+to m4, made by the m2 triage under /quest-afk for the maintainer's review on
+the grounds that what is left changes only what moq-net sends third-party
+moq-transport peers and has no named consumer. The audit's point: 0.22 would
+otherwise publish TIMESTAMP behaviour that a quest already schedules for
+deletion, to peers who would then see it withdrawn one release later. The
+verbatim group ID, the other half, already rides
+[the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md).
+
+Decided the same day: ✅ `quest/m3/ietf-finish.md` and
+`quest/m3/ietf-hole-stall.md` are deleted (rejected: keeping them as m3
+work). Both polished moq-transport interop between our own languages, which
+AGENTS.md says does not matter: our libraries prefer moq-lite, so
+moq-transport compatibility counts only against third-party implementations.
+The interop `finish` case stays recorded as skipped on a pinned
+moq-transport pass, and the ignored range-read test that waited on the
+second quest is gone. So this quest's tests cover what it changes and do
+not take on either gap. [Range FETCH](/quest/m4/ietf-range-fetch.md) stays
+in m4 with its outside reporter.
 
 Decided 2026-11-03 (maintainer, the `/quest-import` grill of
 [moq-dev/moq#7573](https://github.com/moq-dev/moq/issues/7573)), replacing
