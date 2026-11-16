@@ -16876,9 +16876,9 @@ mod test {
 		let producer = track_producer("test", Info::default());
 		assert_eq!(producer.append_group(None).unwrap().start, 0);
 		assert_eq!(producer.append_group(None).unwrap().start, 1);
-		producer.append_group(5).unwrap();
+		producer.append_group(5).unwrap().finish().unwrap();
 		assert_eq!(producer.append_group(None).unwrap().start, 6);
-		producer.append_group(u64::MAX - 1).unwrap();
+		producer.append_group(u64::MAX - 1).unwrap().finish().unwrap();
 		assert!(matches!(producer.append_group(None), Err(Error::BoundsExceeded(_))));
 	}
 
