@@ -1,9 +1,9 @@
 import { Duration, Instant, now } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Once, race, Signal } from "@moq/signals";
-import type { Format } from "./format";
-import { Jitter } from "./jitter";
-import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
+import type { Format } from "./format.ts";
+import { Jitter } from "./jitter.ts";
+import type { BufferedRanges, Frame, ReceivedFrame } from "./types.ts";
 
 /**
  * The longest playout delay: it caps a reader's latency and how far catalog `warmup` reaches back,

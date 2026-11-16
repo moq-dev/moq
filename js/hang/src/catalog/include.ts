@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
 
 /**
  * A whole broadcast whose own catalog describes its renditions, listed without opening it.

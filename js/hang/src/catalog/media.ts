@@ -1,6 +1,6 @@
 import * as z from "zod/mini";
-import { ClockSchema } from "./clock";
-import { nonzeroU53Schema } from "./integers";
+import { ClockSchema } from "./clock.ts";
+import { nonzeroU53Schema } from "./integers.ts";
 
 /**
  * How a viewer joins every audio and video track: the promise that each one starts a group at

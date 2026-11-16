@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
-import { ModeSchema } from "./mode";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { renditions } from "./section";
+import { u53Schema } from "./integers.ts";
+import { ModeSchema } from "./mode.ts";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { renditions } from "./section.ts";
 
 /**
  * Schema for a single JSON track: application data published as a live JSON document or log.

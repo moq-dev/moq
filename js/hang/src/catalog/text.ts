@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { ContainerSchema } from "./container";
-import { u53Schema } from "./integers";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { renditions } from "./section";
+import { ContainerSchema } from "./container.ts";
+import { u53Schema } from "./integers.ts";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { renditions } from "./section.ts";
 
 /**
  * The cue serialization format of a text track, mirroring the Rust `TextFormat`.

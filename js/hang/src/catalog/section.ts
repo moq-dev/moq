@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
+import { u53Schema } from "./integers.ts";
 
 /**
  * Wrap a catalog section so a value that isn't one decodes as absent rather than failing the
