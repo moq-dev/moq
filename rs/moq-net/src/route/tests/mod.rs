@@ -110,8 +110,14 @@ pub(super) struct Item {
 	pub since: Rev,
 }
 
+impl crate::route::Item for Item {
+	fn lowered(&self, _: u64) -> Self {
+		*self
+	}
+}
+
 /// `peer` replaces everything it asks `router` for with `prefixes`, in one edit.
-pub(super) fn reask<A: Clone + Eq + std::fmt::Debug>(
+pub(super) fn reask<A: crate::route::Item>(
 	router: &mut path::Router<Node, A>,
 	peer: Node,
 	prefixes: &[&str],

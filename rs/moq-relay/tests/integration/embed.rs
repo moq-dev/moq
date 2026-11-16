@@ -7,8 +7,6 @@
 //! live QUIC subscriber, then stops the owner through its shutdown trigger
 //! and proves `run` returned with its sockets closed.
 
-#![cfg(feature = "_quic")]
-
 #[cfg(not(target_os = "linux"))]
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -422,10 +420,8 @@ async fn worker_tokio_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
-/// io_uring workers. Off the default feature set; the Linux gate's test build,
-/// `just rs uring`, and nightly `--all-features` compile it. Skips below the
-/// 6.12 floor unless CI_STRICT.
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+/// io_uring workers. Skips below the 6.12 floor unless CI_STRICT.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {

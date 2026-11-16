@@ -879,7 +879,7 @@ impl Subscriber {
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 				run.announced.withdraw(&path);
 			}
-			lite::AnnounceBroadcast::Update { id, hops, cost } => {
+			lite::AnnounceBroadcast::Update { id, hops, cost, .. } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
 				let suffix = run.decoder.get(id)?;
@@ -922,9 +922,6 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteEnd { .. }
 			| lite::AnnounceBroadcast::Dead(_)
 			| lite::AnnounceBroadcast::Floor { .. }
-			| lite::AnnounceBroadcast::WarmStart { .. }
-			| lite::AnnounceBroadcast::WarmUpdate { .. }
-			| lite::AnnounceBroadcast::WarmEnd { .. }
 			| lite::AnnounceBroadcast::Refused { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
@@ -2931,7 +2928,7 @@ impl AnnouncePrefix {
 							// be let go in between.
 							let retired = self.replacing.take().and_then(|old| old.retire());
 							// What the initial set put in the node is served before the
-							// snapshot lets readers see the origin synced.
+							// claims the old request served let go.
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
@@ -2939,7 +2936,7 @@ impl AnnouncePrefix {
 							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
-							self.snapshot = None;
+							// The snapshot lets go below, once the node shows every route.
 							continue;
 						}
 						if run.initial > 0 {
@@ -2978,6 +2975,12 @@ impl AnnouncePrefix {
 			run.announced.poll_serve(&self.subscriber, waiter);
 			if let Some(routed) = &mut run.routed {
 				routed.poll(&self.subscriber, waiter)?;
+				// The initial set is in once the node shows every route the peer sent: one
+				// that only doubt keeps the node off, as on a session redialed to a node
+				// still in doubt, reaches the origin once the doubt lifts.
+				if run.synced && self.snapshot.is_some() && routed.poll_undoubted(&self.subscriber, waiter).is_ready() {
+					self.snapshot = None;
+				}
 			}
 			Poll::Pending
 		}))
@@ -10187,6 +10190,7 @@ mod tests {
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
+			above: 0,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -10263,6 +10267,7 @@ mod tests {
 				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 				hops: crate::Hops::new(),
 				cost: crate::origin::Cost::default(),
+				above: 0,
 			}
 			.encode(w, version)
 			.unwrap()
@@ -10489,6 +10494,7 @@ mod tests {
 				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 				hops: crate::Hops::new(),
 				cost: crate::origin::Cost::default(),
+				above: 0,
 			}
 			.encode(w, Version::Lite07)
 			.unwrap()
@@ -10682,6 +10688,11 @@ mod tests {
 	/// An ANNOUNCE_START body on route 0 whose suffix keeps `keep` segments of the claim
 	/// `base` Announce IDs back.
 	fn based_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8]) -> Vec<u8> {
+		above_start_body(base, keep, path, instance, 0)
+	}
+
+	/// The same body for a claim `above` segments broader than the path it is shown at.
+	fn above_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8], above: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		let w = &mut crate::coding::Encoder::new(&mut body, Version::Lite07.into());
 		w.varint(base).unwrap();
@@ -10692,6 +10703,7 @@ mod tests {
 		w.bool(false);
 		w.varint(0).unwrap();
 		w.varint(0).unwrap();
+		w.varint(above).unwrap();
 		body
 	}
 
@@ -10727,7 +10739,7 @@ mod tests {
 		push(&[
 			&raw(ANNOUNCE_START, start_body(b"x//y", b"i")),
 			&raw(ANNOUNCE_START, start_body(b"d", b"")),
-			&raw(ANNOUNCE_UPDATE, vec![0, 0, 0]),
+			&raw(ANNOUNCE_UPDATE, vec![0, 0, 0, 0]),
 			&claim_on(0, "c"),
 			&floor(0, Some(1)),
 		]);
@@ -10746,11 +10758,12 @@ mod tests {
 				epoch: 1,
 				cost: Default::default(),
 				hops: Default::default(),
+				above: 0,
 			}
 			.encode(w, Version::Lite07)
 			.unwrap()
 		};
-		push(&[&raw(ANNOUNCE_UPDATE, vec![3, 5]), &floor(0, Some(2))]);
+		push(&[&raw(ANNOUNCE_UPDATE, vec![3, 5, 0]), &floor(0, Some(2))]);
 		poll(&mut prefix);
 		cursor.assert_next_wait();
 		push(&[&restart, &floor(0, Some(3))]);
@@ -10758,7 +10771,7 @@ mod tests {
 		cursor.assert_next_active("a");
 
 		// A restart to an empty instance is refused like the update was.
-		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0]), &floor(0, Some(4))]);
+		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0, 0]), &floor(0, Some(4))]);
 		poll(&mut prefix);
 		cursor.assert_next_offline("a");
 		assert_eq!(refusals(&registry), 4);
@@ -10817,6 +10830,82 @@ mod tests {
 		assert_eq!(refusals(&registry), 1);
 	}
 
+	/// A claim shown below the requested prefix may still be broader than its path, as a
+	/// relay forwards one it learned from a narrower stream; one broader than its path has
+	/// segments cannot be, and closes the session.
+	#[kio::test]
+	async fn a_claim_above_its_path_stays_within_the_path() {
+		let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
+		let (mut prefix, consumer) = root_prefix(Version::Lite07, session.clone());
+		let mut cursor = consumer.routes();
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.assert_next_active("a");
+		cursor.assert_next_active("b");
+		session.push(&announce_script(
+			Version::Lite07,
+			&[
+				&raw(ANNOUNCE_START, above_start_body(0, 0, b"x/y", b"i", 2)),
+				&floor(0, Some(1)),
+			],
+		));
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.assert_next_active("x/y");
+
+		let mut script = two_routes();
+		script.extend(announce_script(
+			Version::Lite07,
+			&[&raw(ANNOUNCE_START, above_start_body(0, 0, b"x/y", b"i", 3))],
+		));
+		let (mut prefix, _consumer) = root_prefix(
+			Version::Lite07,
+			crate::lite::test_transport::ScriptedSession::new(script),
+		);
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation), "{err}");
+	}
+
+	/// The bound counts the segments of the path as the peer names it, beneath the session's
+	/// root: under the root `tenant`, a claim at `x` is at most one above, though its absolute
+	/// path has two segments.
+	#[kio::test]
+	async fn a_claim_above_its_path_counts_from_the_sessions_root() {
+		for (above, closes) in [(1, false), (2, true)] {
+			let mut script = two_routes();
+			script.extend(announce_script(
+				Version::Lite07,
+				&[&raw(ANNOUNCE_START, above_start_body(0, 0, b"x", b"i", above))],
+			));
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
+				.produce()
+				.scope("tenant", &crate::Patterns::from(crate::Pattern::all()))
+				.unwrap();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(crate::lite::test_transport::ScriptedSession::new(script)),
+				origin,
+				recv_bandwidth: None,
+				version: Version::Lite07,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				cost: Some(1),
+				peer_hop: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let mut prefix = AnnouncePrefix::new(
+				subscriber.clone(),
+				Path::from_static(""),
+				subscriber.origin.snapshot(""),
+			);
+			match closes {
+				true => {
+					let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+					assert!(matches!(err, Error::ProtocolViolation), "above {above}: {err}");
+				}
+				false => assert!(prefix.poll(&kio::Waiter::noop()).is_pending(), "above {above}"),
+			}
+		}
+	}
+
 	/// Only the neighbour's own framing and state close the session: a refused route
 	/// message naming a Route ID or Announce ID the neighbour never opened still does.
 	#[kio::test]
@@ -10827,7 +10916,11 @@ mod tests {
 				refused_offers(&[5])[0].1.clone(),
 				ROUTE_UPDATE,
 			),
-			("a refused change of an unknown claim", vec![9, 0, 0], ANNOUNCE_UPDATE),
+			(
+				"a refused change of an unknown claim",
+				vec![9, 0, 0, 0],
+				ANNOUNCE_UPDATE,
+			),
 			(
 				"a refused claim under an unknown route",
 				{
@@ -10994,6 +11087,7 @@ mod tests {
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
+			above: 0,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {

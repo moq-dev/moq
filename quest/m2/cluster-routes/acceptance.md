@@ -27,6 +27,18 @@ mount continuity (`mount.rs`), and operation-count regressions
 (`route/tests/cost.rs`, `route/node/tests.rs`). They found the flaws the
 quests under Required fix; the tests that pin each flaw say so in their docs.
 
+Reordered 2026-11-15 (maintainer, /quest-plan on
+[cache-aware multicast](/quest/m2/multicast/README.md)): the retirement below
+waits for [the switch](/quest/m2/multicast/switch.md), which rewrites these
+fixtures' assertions for the new rule and deletes the Required quests it
+makes moot.
+
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
+switch makes `origin::Config::update_hold` crate-private, since nothing
+outside moq-net sets it, and puts whatever of the three mitigations survives
+here under one named lite-06 marker. So retiring them below changes no
+public API, and one that a lite-06 mesh keeps is already marked temporary.
+
 What remains:
 
 - Retire the quarantine, the dedup, and the hold once the Required quests
@@ -48,6 +60,7 @@ What remains:
 
 ## Required
 
+- [The switch](/quest/m2/multicast/switch.md) - the rule whose fixtures replace the mitigations, once the new route layer is on the wire
 - [Held after close](/quest/m2/cluster-routes/held-after-close.md) - a relay whose own session closed shows its held claims unavailable, not offline
 - [Doubt holds](/quest/m2/cluster-routes/doubt-holds.md) - a relay keeps holding while doubt alone keeps it off its routes
 - [Route fan-out](/quest/m2/cluster-routes/route-fanout.md) - a route change costs only the streams and broadcasts it touches

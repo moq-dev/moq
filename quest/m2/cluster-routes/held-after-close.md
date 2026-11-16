@@ -9,6 +9,14 @@ route recovers.
 
 ## Plan
 
+Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
+multicast](/quest/m2/multicast/README.md)): this waits on the
+[bake-off](/quest/m2/multicast/bakeoff.md). The new rule has no hold: a reader
+debounces unavailable to offline locally, which answers the same symptom. If
+the new rule goes ahead, [the switch](/quest/m2/multicast/switch.md) deletes
+this quest with the fixtures that pin it; if it does not, this starts as
+written.
+
 Kept 2026-11-15 (maintainer, /quest-complete on
 [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)): ✅ keep it in
 m2 (rejected: drop; moving it to m3).
@@ -31,6 +39,10 @@ Recommended: when a held claim loses its last slot to a closing stream,
 move it, unavailable, onto a stream that still hears the held route, or show
 it through the node itself, before the closing stream withdraws it. Turn the
 three pinned fixtures into the contract's held-then-available sequence.
+
+## Required
+
+- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the hold this shows remains
 
 ## Related
 

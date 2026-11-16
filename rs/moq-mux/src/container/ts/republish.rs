@@ -375,11 +375,11 @@ mod tests {
 		}
 	}
 
-	/// A source that steps within the mux rate's measurement window, before its first catalog went
+	/// A source that steps in the same chunk as its first media, before its first catalog went
 	/// out, republishes rather than failing: only the last instance has to declare a track.
 	#[test]
 	fn a_switch_before_the_first_catalog_republishes() {
-		// 1.5 s: short of the two-second window that holds the first catalog.
+		// 1.5 s of input, then the step, all in one chunk.
 		let mut data = CLIP[..400 * 188].to_vec();
 		data.extend(shift(CLIP, |_| -SWITCH));
 		let origin = crate::source::produce_origin();

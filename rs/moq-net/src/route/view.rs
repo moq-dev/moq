@@ -7,7 +7,7 @@ use std::{
 
 use crate::Path;
 
-use super::Rev;
+use super::{Item, Rev};
 
 /// Whether `path` is `prefix` or lies below it, matching whole segments.
 pub(crate) fn within(path: &Path, prefix: &Path) -> bool {
@@ -37,7 +37,7 @@ impl<A> Default for View<A> {
 	}
 }
 
-impl<A: Clone + Eq> View<A> {
+impl<A: Item> View<A> {
 	/// The view as a stream answering `prefix` presents it.
 	///
 	/// Every claim inside the prefix keeps its path, and of the claims above it only
@@ -49,7 +49,7 @@ impl<A: Clone + Eq> View<A> {
 			.map(|(claim, item)| (claim.clone(), item.clone()))
 			.collect();
 		if let Some(item) = covering(&self.floors, prefix, |claim| self.items.get(claim)) {
-			items.insert(prefix.clone(), item.clone());
+			items.insert(prefix.clone(), item);
 		}
 		Self {
 			floors: narrow(&self.floors, prefix),
@@ -78,7 +78,7 @@ impl<A: Clone + Eq> View<A> {
 		}
 		for region in regions {
 			match covering(&raw.floors, region, |claim| raw.items.get(claim)) {
-				Some(item) => self.items.insert(region.clone(), item.clone()),
+				Some(item) => self.items.insert(region.clone(), item),
 				None => self.items.remove(region),
 			};
 		}
@@ -181,24 +181,26 @@ pub(crate) fn ancestors(path: &Path) -> impl DoubleEndedIterator<Item = Path> + 
 }
 
 /// The claim a stream answering `prefix` is shown at `prefix` itself, looked up by
-/// `item`: one exactly there, else the most specific claim above it.
+/// `item`: one exactly there, else the most specific claim above it, lowered to the
+/// prefix (see [`Item::lowered`]).
 ///
 /// The newest floor over the prefix certifies what covers it there: a claim between
 /// the two, else the one that floor presents at its own region, else none. A claim
 /// above that floor is older knowledge, or uncertified, so it is not presented.
-pub(crate) fn covering<'a, A>(
+pub(crate) fn covering<'a, A: Item + 'a>(
 	floors: &BTreeMap<Path, Rev>,
 	prefix: &Path,
 	item: impl Fn(&Path) -> Option<&'a A>,
-) -> Option<&'a A> {
+) -> Option<A> {
 	let (claim, found) = ancestors(prefix)
 		.rev()
 		.find_map(|claim| item(&claim).map(|found| (claim, found)))?;
+	let lowered = || found.lowered((prefix.parts().count() - claim.parts().count()) as u64);
 	if claim == *prefix {
-		return Some(found);
+		return Some(lowered());
 	}
 	let Some(floor) = above(floors, prefix).map(|(_, &rev)| rev).max() else {
-		return Some(found);
+		return Some(lowered());
 	};
 	// The most specific of the newest, since the root comes first.
 	let certifier = above(floors, prefix)
@@ -207,7 +209,7 @@ pub(crate) fn covering<'a, A>(
 		.last();
 	match certifier.is_some_and(|certifier| !within(&claim, certifier)) {
 		true => None,
-		false => Some(found),
+		false => Some(lowered()),
 	}
 }
 

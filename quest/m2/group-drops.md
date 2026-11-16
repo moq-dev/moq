@@ -49,10 +49,22 @@ the container consumer's `Read::Gap` (`rs/moq-mux/src/container/consumer.rs`);
 `recv_group` is unchanged (rejected: a separate `recv_drop` read; a drop
 variant on `recv_group`).
 
-Open, for whoever starts this, with the maintainer: a `Gap`'s start-keyed
-`range` doesn't say how many groups it covers once starts are sparse, yet
-the Goal has readers count losses. Recommended: `Gap` also carries the
-number of groups dropped, which the drop set's runs already know.
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ a
+drop is a span and nothing more: SUBSCRIBE_DROP carries no group count on
+lite-07, and `Gap` reports its start-keyed `range` with no count (rejected:
+a count on SUBSCRIBE_DROP that `Gap` passes on, which would also have let a
+skip become a drop with a count of 0). This settles the question left open
+here on 2026-11-07, against its recommendation. Once starts are sparse a
+span's length is not a number of groups, and only the node that dropped
+them could count; a relay's downstream would need the count carried on the
+wire at every hop for a number few readers use. A reader that needs a count
+measures what it lost in time, which the span gives, or counts the groups
+it did receive. So "count losses" in the Goal means account for every span:
+the receive-windows benchmark's overcommitted cells finish when delivered
+groups plus reported spans cover everything sent. At HEAD
+`SubscribeDrop`'s `Group Count` (`rs/moq-net/src/lite/subscribe.rs`) is a
+count of keys, which [the wire rewrite](/quest/m2/time-addressing/lite07.md)
+turns into the span's end.
 
 Public API: breaking for `track::Ordered` only. Its one read,
 `poll_next_group` (and its async wrapper), returns
@@ -67,4 +79,5 @@ Wire: none.
 
 ## Related
 
+- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - SUBSCRIBE_DROP names the time spans `Gap` reports
 - [The receive-windows benchmark](/quest/m3/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)

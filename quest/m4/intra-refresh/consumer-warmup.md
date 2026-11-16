@@ -6,8 +6,9 @@ The transcoder, given a source rendition with `warmup` set, never encodes a
 picture its decoder has not fully recovered. Every group it transcodes,
 whether fetched on demand for a rung or read live after a skip, is preceded
 by enough earlier groups decoded as history that its first picture is clean.
-Players stay live with stripes instead, via the min-delay and max-delay
-decoder pairs in `@moq/watch` and the native `moq_video::decode::Consumer`.
+Players instead join a group earlier and hide the warmup after each join or
+skip, in `@moq/watch` and the native `moq_video::decode::Consumer`, once
+[catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md) restores that.
 Renditions without `warmup` behave exactly as today.
 
 ## Plan
@@ -56,3 +57,7 @@ The fix is history rather than a withhold rule:
   feed start and a feed skip both decode history before forwarding; an IDR
   group needs no history; a rendition without `warmup` fetches and reads
   exactly as today.
+
+## Required
+
+- [Catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md) - the video `warmup` field a source rendition declares

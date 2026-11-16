@@ -24,14 +24,12 @@ pub(crate) mod backend;
 mod conformance;
 mod consumer;
 mod decoder;
-mod select;
 mod sink;
 mod vui;
 
 pub use backend::{Codec, NAMES};
 pub use consumer::{Consumer, Delay, Options, Read, Start};
 pub use decoder::{Config, Decoder, Kind};
-pub use select::{Lane, Next, Selector};
 pub use sink::Sink;
 
 #[cfg(test)]

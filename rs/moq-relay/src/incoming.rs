@@ -10,7 +10,7 @@ pub trait Incoming: Sealed {}
 
 impl Incoming for moq_tokio::server::Request {}
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 impl Incoming for crate::uring::Request {}
 
 #[cfg(feature = "test-support")]
@@ -122,7 +122,6 @@ impl Sealed for moq_tokio::server::Request {
 		let _ = moq_tokio::server::Request::reject(self, code).await;
 	}
 
-	#[cfg(feature = "quic")]
 	fn pacer(&self) -> Option<auth::Pacer> {
 		let quic = moq_tokio::server::Request::quic_limits(self)?;
 		Some(auth::Pacer::new(move |caps| {
@@ -132,7 +131,6 @@ impl Sealed for moq_tokio::server::Request {
 		}))
 	}
 
-	#[cfg(feature = "quic")]
 	fn with_quic_limits(self, limits: moq_quic::Limits) -> anyhow::Result<Self> {
 		Ok(moq_tokio::server::Request::with_quic_limits(self, limits)?)
 	}

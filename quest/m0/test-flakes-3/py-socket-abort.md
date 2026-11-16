@@ -21,4 +21,12 @@ ending of a socket endpoint run its cleanup and likely fixes it: run the test
 alone in a loop on a base that includes it. If it no longer fails, delete this
 quest; if it does, the cause lies elsewhere.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): socket
+endpoints leave moq for Kixel, and
+[their removal](/quest/m2/sockets/remove.md) deletes this test with the
+Python wrapper. So do not fix the endpoint here. If the test still flakes
+before the removal lands, skip it with the removal quest as its owner and
+delete this quest; the removal deletes this quest otherwise. Kixel's port
+inherits the race, which goes in that PR's follow-ups for Kixel's tree.
+
 Public API: none. Wire: none.

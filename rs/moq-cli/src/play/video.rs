@@ -6,8 +6,6 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 use moq_mux::container::{Frame, Read};
-use moq_video::decode::Read as Decoded;
-use moq_video::decode::{Lane, Next, Selector};
 
 use super::buffer::Buffer;
 use super::output::Output;
@@ -59,19 +57,8 @@ pub(super) struct Video<O> {
 	pub min_delay: Duration,
 	/// The rendition's catalog `delay`, held as this track's playout target.
 	pub delay: tokio::sync::watch::Receiver<Option<Duration>>,
-}
-
-/// The max-delay decoder of a rendition with a catalog `warmup`, and the track it
-/// reads: subscribed with one more sweep of budget, starting a group earlier.
-///
-/// Its pictures replace the min-delay decoder's once it catches up, through the
-/// same [`Selector`] `moq_video::decode::Consumer` uses. It never moves the clock.
-pub(super) struct Refresh<D> {
-	pub track: Track,
-	pub decoder: D,
-	/// The catalog's frame interval, when it declares a rate.
-	pub interval: Option<Duration>,
-	/// The extra budget its subscription holds over the min-delay decoder's.
+	/// The rendition's catalog `warmup`: after a join or a skip, pictures before the
+	/// recovery point plus this decode but never show.
 	pub warmup: Duration,
 }
 
@@ -122,13 +109,7 @@ impl std::ops::DerefMut for Segment {
 	}
 }
 
-/// The earlier deadline, where `None` is no deadline.
-/// The later of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no `Ord`.
-fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
-	if b > a { b } else { a }
-}
-
-/// The earlier of two timestamps, `a` when they don't compare; see [`later`].
+/// The earlier of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no `Ord`.
 fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
 	if b < a { b } else { a }
 }
@@ -152,13 +133,6 @@ impl PartialOrd for Ordered {
 	}
 }
 
-fn soonest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
-	match (a, b) {
-		(Some(a), Some(b)) => Some(a.min(b)),
-		(a, b) => a.or(b),
-	}
-}
-
 impl<O: Output> Video<O> {
 	/// How much longer than its own budgets video retains media once playback
 	/// trails the reference by `shared`, whichever track's target set it.
@@ -166,28 +140,17 @@ impl<O: Output> Video<O> {
 		shared.saturating_sub(self.min_delay)
 	}
 
-	/// A subscription's budget with `held` and `warmup` on top of its own.
-	fn budget(&self, held: Duration, warmup: Duration) -> moq_net::track::Delay {
+	/// A subscription's budget with `held` on top of its own. The container adds the
+	/// warmup to the subscription's max itself.
+	fn budget(&self, held: Duration) -> moq_net::track::Delay {
 		moq_net::track::Delay {
-			min: Some(self.min_delay + held + warmup),
-			max: Some(self.max_delay + held + warmup),
+			min: Some(self.min_delay + held),
+			max: Some(self.max_delay + held),
 		}
 	}
 
-	/// Play `track`, and with `refresh` also run its max-delay decoder.
-	pub async fn run<D: Decoder>(
-		self,
-		mut track: Track,
-		mut decoder: D,
-		refresh: Option<Refresh<D>>,
-	) -> anyhow::Result<()> {
-		let interval = refresh.as_ref().and_then(|refresh| refresh.interval);
-		let selector = Mutex::new(Selector::new(refresh.is_some(), interval));
-		// The newest presentation time fed to the min-delay decoder, which the
-		// max-delay decoder may always decode up to.
-		let edge: Mutex<Option<moq_net::Timestamp>> = Mutex::new(None);
-		// Wakes the max-delay decoder when the clock, the segments, or the selector change.
-		let wake = tokio::sync::Notify::new();
+	/// Play `track` through `decoder`.
+	pub async fn run<D: Decoder>(self, mut track: Track, mut decoder: D) -> anyhow::Result<()> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
 		// One segment per encoder between declared ends, oldest first.
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
@@ -216,13 +179,15 @@ impl<O: Output> Video<O> {
 				let next = self.held(shared);
 				if next != *held {
 					*held = next;
-					track.set_delay(self.budget(next, Duration::ZERO));
+					track.set_delay(self.budget(next));
 				}
 			};
 			follow(&mut track, &mut held, shared);
 			// The group of a declared end no later group has followed yet. The media
 			// buffered before the end still plays out.
 			let mut end = None;
+			// Whether a frame was read yet, so only the first can be the track's start.
+			let mut started = false;
 
 			loop {
 				// Stop reading while media queued behind the front segment arrived more
@@ -277,21 +242,33 @@ impl<O: Output> Video<O> {
 									buffers.remove(index);
 								}
 							}
-							buffers.push_back(Segment::default());
+							// A fresh encoder opens on a picture of its own, with nothing before it
+							// to warm up from.
+							buffers.push_back(Segment {
+								media: Buffer::fresh(),
+								..Default::default()
+							});
 							// Another timeline: its arrivals stop holding the clock until this one.
 							role.reset();
 						}
+						// The clock anchors on the arrival furthest ahead of its media, so a warmup
+						// trailing the live edge never holds playback back.
 						if role.received(frame.timestamp, Instant::now()) {
 							self.output.send(Event::Wake);
 						}
 						let back = buffers.back_mut().unwrap();
-						back.push(frame, self.max_delay + held);
+						// A group with nothing below it is the track's first, decoded from the
+						// encoder's first picture.
+						if !std::mem::replace(&mut started, true) && track.is_skipped(0..group) {
+							back.joined = false;
+						}
+						back.push(frame, self.max_delay + held, self.warmup);
 						back.arrived.get_or_insert_with(Instant::now);
 						false
 					}
-					// Lost media discards every picture still buffered. An end declared
-					// before the loss still holds, as on the audio side: a later group comes
-					// from the replacement encoder.
+					// Lost media discards every picture still buffered, and what follows warms
+					// up again. An end declared before the loss still holds, as on the audio
+					// side: a later group comes from the replacement encoder.
 					Some(Read::Gap { .. }) => {
 						buffers.clear();
 						buffers.push_back(Segment::default());
@@ -323,7 +300,6 @@ impl<O: Output> Video<O> {
 					"buffered encoded video"
 				);
 				self.changed.notify_one();
-				wake.notify_one();
 				if ended {
 					break;
 				}
@@ -338,79 +314,31 @@ impl<O: Output> Video<O> {
 			// Decoded pictures waiting for room in the window's queue.
 			let mut pending = VecDeque::new();
 			loop {
-				wake.notify_one();
-				let (current, oldest, ended, last, floor) = {
+				let (current, oldest, ended) = {
 					let buffers = buffers.lock().unwrap();
 					let buffer = buffers.front().unwrap();
-					let last = buffers.len() == 1 && closed.load(std::sync::atomic::Ordering::Relaxed);
-					(buffer.generation, buffer.oldest(), buffer.ended, last, buffer.floor)
+					(buffer.generation, buffer.oldest(), buffer.ended)
 				};
-				// A codec may return pictures it held across the keyframe that
-				// resumed a skipped timeline. Those pictures no longer have a slot.
 				if generation.is_some_and(|generation| generation != current) {
 					// Whatever the codec still holds sits below the new floor, so it is
 					// filtered on the way out and owes the window nothing.
 					generation = None;
 					held.clear();
 					pending.clear();
-					selector.lock().unwrap().clear();
 				}
 				let step = {
 					let mut queue = self.frames.lock().unwrap();
 					let presentation = &self.presentation;
 					let now = Instant::now();
-					let mut selector = selector.lock().unwrap();
-					// The min-delay decoder drained its tail, so the selector waits only on
-					// the max-delay one, which ends with the same track.
-					if last && oldest.is_none() && ended && generation.is_none() {
-						selector.finish(Lane::Min);
-					}
-					// When the selector next has a picture, if it is holding one back. It
-					// hands over only once the window took everything it handed over before.
-					let mut select = None;
-					let mut done = false;
 					let mut placed = false;
-					loop {
-						if pending.is_empty() {
-							loop {
-								match selector.next(now) {
-									Next::Read(Decoded::Frame(frame)) => {
-										// A picture that doesn't compare with the floor isn't known to precede it.
-										let below = floor.is_some_and(
-											|floor| matches!((frame.timestamp.as_micros(), floor.as_micros()), (Ok(at), Ok(floor)) if at < floor),
-										);
-										if !below {
-											pending.push_back(frame);
-										}
-									}
-									// Only pictures are pushed.
-									Next::Read(_) => {}
-									Next::Wait(at) => {
-										select = at;
-										break;
-									}
-									Next::Done => {
-										done = true;
-										break;
-									}
-								}
-							}
-							if pending.is_empty() {
-								break;
-							}
+					while !pending.is_empty() && vacancy(&queue, presentation).is_none_or(|at| at <= now) {
+						if queue.len() >= MAX_FRAMES {
+							queue.pop_front();
 						}
-						while !pending.is_empty() && vacancy(&queue, presentation).is_none_or(|at| at <= now) {
-							if queue.len() >= MAX_FRAMES {
-								queue.pop_front();
-							}
-							let frame: moq_video::Frame = pending.pop_front().expect("checked by the loop");
-							let index = queue.partition_point(|queued| queued.timestamp <= frame.timestamp);
-							queue.insert(index, frame);
-							placed = true;
-						}
-						if !pending.is_empty() {
-							break;
-						}
+						let frame: moq_video::Frame = pending.pop_front().expect("checked by the loop");
+						let index = queue.partition_point(|queued| queued.timestamp <= frame.timestamp);
+						queue.insert(index, frame);
+						placed = true;
 					}
 					if placed {
 						self.output.send(Event::Wake);
@@ -427,18 +355,13 @@ impl<O: Output> Video<O> {
 							.and_then(|at| at.checked_sub(DECODE_AHEAD))
 							.max(vacancy(&queue, presentation));
 						match at.filter(|at| *at > now) {
-							Some(at) => Step::Wait(soonest(Some(at), select)),
-							// Pictures the selector holds back wait for the max-delay decoder.
-							None if !selector.wants(Lane::Min) => Step::Wait(select),
+							Some(at) => Step::Wait(Some(at)),
 							None => Step::Decode,
 						}
 					} else if !ended {
-						Step::Wait(select)
+						Step::Wait(None)
 					} else if generation.is_some() {
 						Step::Flush
-					} else if select.is_some() || (last && !done) {
-						// The segment's last pictures are still owed to the window.
-						Step::Wait(select)
 					} else if closed.load(std::sync::atomic::Ordering::Relaxed) && buffers.lock().unwrap().len() == 1 {
 						break;
 					} else {
@@ -467,11 +390,6 @@ impl<O: Output> Video<O> {
 							.expect("no await since inspecting the buffer");
 						generation = Some(current);
 						held.insert(Ordered(frame.timestamp));
-						{
-							let mut edge = edge.lock().unwrap();
-							*edge = Some(edge.map_or(frame.timestamp, |edge| later(edge, frame.timestamp)));
-						}
-						wake.notify_one();
 						// Never race a codec call: cancelling Sink::decode poisons it. The
 						// joined receiver continues observing arrivals during this await.
 						decoder.decode(frame).await?;
@@ -510,138 +428,30 @@ impl<O: Output> Video<O> {
 						}
 					}
 				}
-				let now = Instant::now();
-				let mut selector = selector.lock().unwrap();
+				// A codec may return pictures it held across the keyframe that resumed a
+				// skipped timeline, which no longer have a slot, and pictures still warming up
+				// after it, which would show refresh stripes.
+				let (floor, present) = {
+					let buffers = buffers.lock().unwrap();
+					let front = buffers.front().unwrap();
+					(front.floor, front.present)
+				};
+				// A picture that doesn't compare with a bound isn't known to precede it.
+				let below = |at: moq_net::Timestamp, bound: Option<moq_net::Timestamp>| {
+					bound.is_some_and(
+						|bound| matches!((at.as_micros(), bound.as_micros()), (Ok(at), Ok(bound)) if at < bound),
+					)
+				};
 				while let Some(frame) = decoder.receive()? {
 					// A codec returns display order, so a picture held before one it
 					// returned was dropped rather than delayed.
 					held.retain(|held| held.0 > frame.timestamp);
-					selector.push(Lane::Min, Decoded::Frame(frame), now);
+					if !below(frame.timestamp, floor) && !below(frame.timestamp, present) {
+						pending.push_back(frame);
+					}
 				}
 			}
 			Ok::<_, anyhow::Error>(())
-		};
-		// Pushes the max-delay decoder's pictures to the selector. It never moves the
-		// clock.
-		let refresh = async {
-			let Some(Refresh {
-				track: mut refresh,
-				decoder: mut codec,
-				warmup,
-				..
-			}) = refresh
-			else {
-				return std::future::pending::<anyhow::Result<()>>().await;
-			};
-			let push = |codec: &mut D| -> anyhow::Result<()> {
-				let now = Instant::now();
-				let mut selector = selector.lock().unwrap();
-				while let Some(frame) = codec.receive()? {
-					selector.push(Lane::Max, Decoded::Frame(frame), now);
-				}
-				drop(selector);
-				self.changed.notify_one();
-				Ok(())
-			};
-			// After a join or a loss, pictures presenting before the first recovery
-			// point reference media this decoder never had.
-			let mut recover = true;
-			let mut leading = None;
-			let schedule = self.presentation.consume();
-			let mut shared = schedule.delay();
-			let mut held = Duration::ZERO;
-			let follow = |refresh: &mut Track, held: &mut Duration, shared: Duration| {
-				let next = self.held(shared);
-				if next != *held {
-					*held = next;
-					refresh.set_delay(self.budget(next, warmup));
-				}
-			};
-			follow(&mut refresh, &mut held, shared);
-			loop {
-				let read = tokio::select! {
-					read = refresh.read() => read?,
-					delay = role.delay_changed(shared) => {
-						shared = delay;
-						follow(&mut refresh, &mut held, shared);
-						continue;
-					}
-				};
-				let frame = match read {
-					Some(Read::Frame { frame, .. }) => frame,
-					Some(Read::Gap { .. }) => {
-						codec.flush().await?;
-						push(&mut codec)?;
-						recover = true;
-						continue;
-					}
-					// A fresh encoder has no preceding GOP to reference, so no recovery.
-					Some(Read::End { .. }) => {
-						codec.flush().await?;
-						push(&mut codec)?;
-						continue;
-					}
-					None => {
-						codec.flush().await?;
-						push(&mut codec)?;
-						selector.lock().unwrap().finish(Lane::Max);
-						self.changed.notify_one();
-						return std::future::pending::<anyhow::Result<()>>().await;
-					}
-				};
-				if frame.keyframe {
-					leading = recover.then_some(frame.timestamp);
-					recover = false;
-				}
-				if leading.is_some_and(|floor| frame.timestamp < floor) {
-					continue;
-				}
-				// Wait until the frame is due to decode: not ahead of the min-delay
-				// decoder, nor of the decode lead.
-				loop {
-					let woken = wake.notified();
-					let at = if !selector.lock().unwrap().wants(Lane::Max) {
-						None
-					} else if edge.lock().unwrap().is_some_and(|edge| frame.timestamp <= edge) {
-						break;
-					} else {
-						match self
-							.presentation
-							.due(frame.timestamp)
-							.and_then(|at| at.checked_sub(DECODE_AHEAD))
-							.filter(|at| *at > Instant::now())
-						{
-							None => break,
-							at => at,
-						}
-					};
-					// A delay rise while parked must grow this subscription's budget now,
-					// or it evicts frames the later schedule still waits for.
-					let sleep = async {
-						match at {
-							Some(at) => kio::clock::sleep_until(at).await,
-							None => std::future::pending().await,
-						}
-					};
-					tokio::select! {
-						_ = woken => {},
-						_ = sleep => {},
-						delay = role.delay_changed(shared) => {
-							shared = delay;
-							follow(&mut refresh, &mut held, shared);
-						}
-					}
-				}
-				// Never race a codec call: cancelling Sink::decode poisons it.
-				codec.decode(frame).await?;
-				push(&mut codec)?;
-			}
-		};
-		let decode = async {
-			tokio::select! {
-				drained = decode => drained,
-				Err(err) = refresh => Err(err),
-			}
 		};
 		tokio::try_join!(receive, decode)?;
 		Ok(())
@@ -662,8 +472,6 @@ mod tests {
 	/// earliest one out, the way a real decoder returns display order.
 	struct Buffered {
 		depth: usize,
-		/// The edge of every picture, which tells the two decoders apart.
-		size: u32,
 		/// How long each decode takes.
 		cost: Duration,
 		held: Vec<moq_video::Frame>,
@@ -682,7 +490,6 @@ mod tests {
 		fn new(depth: usize) -> Self {
 			Self {
 				depth,
-				size: MIN,
 				cost: Duration::ZERO,
 				held: Vec::new(),
 				ready: VecDeque::new(),
@@ -692,28 +499,13 @@ mod tests {
 		}
 	}
 
-	/// The min-delay decoder's picture size in tests, and the max-delay one's.
-	const MIN: u32 = 16;
-	const MAX: u32 = 32;
-
-	/// The max-delay decoder of a test: [`MAX`] pictures, each decode taking `cost`.
-	fn refresh_decoder(cost: Duration) -> Buffered {
-		Buffered {
-			size: MAX,
-			cost,
-			..Buffered::new(0)
-		}
-	}
-
 	impl Decoder for Buffered {
 		async fn decode(&mut self, frame: Frame) -> anyhow::Result<()> {
 			if !self.cost.is_zero() {
 				kio::clock::sleep(self.cost).await;
 			}
 			self.decoded.lock().unwrap().push((frame.timestamp, Instant::now()));
-			let size = self.size as usize;
-			let surface =
-				moq_video::Surface::rgba(&vec![128; size * size * 4], moq_video::Size::new(self.size, self.size))?;
+			let surface = moq_video::Surface::rgba(&[128; 16 * 16 * 4], moq_video::Size::new(16, 16))?;
 			self.held.push(moq_video::Frame::new(surface, frame.timestamp));
 			self.held.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
 			let bumped = self.held.len().saturating_sub(self.depth);
@@ -764,6 +556,7 @@ mod tests {
 			max_delay,
 			min_delay: max_delay,
 			delay: tokio::sync::watch::channel(None).1,
+			warmup: Duration::ZERO,
 		}
 	}
 
@@ -798,39 +591,6 @@ mod tests {
 		}
 		let _finished = producer.finish().unwrap();
 		moq_mux::container::Consumer::new(subscriber, format)
-	}
-
-	/// Two subscriptions to one track: the min-delay decoder's, and the max-delay
-	/// one's with `warmup` more budget.
-	async fn tracks(frames: impl IntoIterator<Item = Frame>, delay: Duration, warmup: Duration) -> (Track, Track) {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		let subscribe = async |budget| {
-			let subscriber = track
-				.consume()
-				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(budget)),
-				)
-				.await
-				.unwrap();
-			moq_mux::container::Consumer::new(
-				subscriber,
-				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
-			)
-		};
-		let (min, max) = (subscribe(delay).await, subscribe(delay + warmup).await);
-		let mut producer = moq_mux::container::Producer::new(
-			track,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
-		);
-		for frame in frames {
-			producer.write(frame).unwrap();
-		}
-		let _finished = producer.finish().unwrap();
-		(min, max)
 	}
 
 	/// A video rendition's catalog `delay` holds audio back with it, and a rise moves both.
@@ -873,7 +633,7 @@ mod tests {
 			delay,
 			..playback(&media, budget)
 		};
-		let task = tokio::spawn(video.run(track_consumer, Buffered::default(), None));
+		let task = tokio::spawn(video.run(track_consumer, Buffered::default()));
 		producer.write(frame(0, true)).unwrap();
 		settle().await;
 		assert_eq!(
@@ -930,7 +690,7 @@ mod tests {
 			min_delay: min,
 			..playback(&media, max)
 		};
-		let task = tokio::spawn(video.run(track, Buffered::new(0), None));
+		let task = tokio::spawn(video.run(track, Buffered::new(0)));
 
 		let mut first = None;
 		for at in 0..=5_500u64 {
@@ -962,10 +722,6 @@ mod tests {
 	}
 
 	async fn burst(speaker: bool, paused_window: bool) {
-		burst_with(speaker, paused_window, false).await;
-	}
-
-	async fn burst_with(speaker: bool, paused_window: bool, dual: bool) {
 		tokio::time::pause();
 		let delay = Duration::from_secs(2);
 		let media = media(delay);
@@ -981,19 +737,8 @@ mod tests {
 		let decoded = decoder.decoded.clone();
 		let flushed = decoder.flushed.clone();
 		let frames = (0..=60).map(|index| frame(index * 33, index == 0));
-		let task = if dual {
-			let (track, max) = tracks(frames, delay, Duration::from_secs(1)).await;
-			let refresh = Refresh {
-				track: max,
-				decoder: refresh_decoder(Duration::ZERO),
-				interval: Some(Duration::from_millis(33)),
-				warmup: Duration::ZERO,
-			};
-			tokio::spawn(playback(&media, delay).run(track, decoder, Some(refresh)))
-		} else {
-			let track = track(frames, delay).await;
-			tokio::spawn(playback(&media, delay).run(track, decoder, None))
-		};
+		let track = track(frames, delay).await;
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
 		tokio::task::yield_now().await;
 		// The burst is the live edge, which no speaker holds video back from.
 		let last_due = start.saturating_add(delay);
@@ -1004,13 +749,11 @@ mod tests {
 		assert_eq!(media.presentation.due(last), Some(last_due));
 		assert!(media.video.lock().unwrap().len() <= MAX_FRAMES);
 		let mut shown = Vec::new();
-		let mut sizes = Vec::new();
 		while Instant::now() <= last_due.saturating_add(Duration::from_millis(10)) {
 			if (!paused_window || Instant::now() >= start.saturating_add(Duration::from_secs(1)))
-				&& let Some(picture) = media.output.present_frame(&media)
+				&& let Some(timestamp) = media.output.present(&media)
 			{
-				shown.push((picture.timestamp, Instant::now()));
-				sizes.push(picture.size().width);
+				shown.push((timestamp, Instant::now()));
 			}
 			assert!(media.video.lock().unwrap().len() <= MAX_FRAMES, "unbounded raw queue");
 			tokio::time::advance(Duration::from_millis(1)).await;
@@ -1030,27 +773,6 @@ mod tests {
 		);
 		assert!(shown.windows(2).all(|pair| pair[0].0 < pair[1].0));
 		assert_eq!(decoded.lock().unwrap().len(), 61);
-		if dual {
-			// Both decoders start on the same keyframe, and the max-delay one takes over
-			// for good once it has decoded what the min-delay one has.
-			assert!(
-				sizes.iter().skip_while(|size| **size == MIN).all(|size| *size == MAX),
-				"{sizes:?}"
-			);
-			assert_eq!(sizes.last(), Some(&MAX));
-		}
-	}
-
-	/// The max-delay decoder decodes past due pictures the min-delay one also
-	/// paced, without moving the clock or the schedule.
-	#[tokio::test]
-	async fn a_dual_burst_keeps_the_single_decoder_schedule() {
-		burst_with(false, false, true).await;
-	}
-
-	#[tokio::test]
-	async fn a_dual_burst_reaches_live_past_a_trailing_speaker() {
-		burst_with(true, false, true).await;
 	}
 
 	#[tokio::test]
@@ -1078,7 +800,7 @@ mod tests {
 			delay,
 		)
 		.await;
-		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::default(), None));
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::default()));
 		let mut shown = Vec::new();
 		for _ in 0..110 {
 			tokio::task::yield_now().await;
@@ -1117,7 +839,7 @@ mod tests {
 		producer.write(frame(0, true)).unwrap();
 		let decoder = Buffered::default();
 		let decoded = decoder.decoded.clone();
-		let task = tokio::spawn(playback(&media, delay).run(track, decoder, None));
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
 		tokio::task::yield_now().await;
 		tokio::time::advance(delay).await;
 		tokio::task::yield_now().await;
@@ -1182,7 +904,7 @@ mod tests {
 		);
 		let decoder = Buffered::new(0);
 		let decoded = decoder.decoded.clone();
-		let task = tokio::spawn(playback(&media, delay).run(track, decoder, None));
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
 		for _ in 0..1300 {
 			tokio::task::yield_now().await;
 			media.output.present(&media);
@@ -1240,7 +962,7 @@ mod tests {
 		// The publisher pauses and sends nothing more for now.
 		producer.discontinuity().unwrap();
 		// A codec that holds nothing back, so every picture is owed before the track ends.
-		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
 		let mut shown = Vec::new();
 		for _ in 0..2_200 {
 			tokio::task::yield_now().await;
@@ -1280,7 +1002,7 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		// The window never presents, so the decoded pictures stay queued.
-		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
 		while !task.is_finished() {
 			tokio::time::advance(Duration::from_millis(1)).await;
 			tokio::task::yield_now().await;
@@ -1315,7 +1037,7 @@ mod tests {
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let mut producer = moq_mux::container::Producer::new(source, format());
 		let track = moq_mux::container::Consumer::new(subscriber, format());
-		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
 		producer.write(frame(0, true)).unwrap();
 		// Each replacement is one GOP longer than the age budget, so eviction
 		// takes its only keyframe and leaves it empty.
@@ -1364,7 +1086,7 @@ mod tests {
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let decoder = Buffered::new(0);
 		let decoded = decoder.decoded.clone();
-		let task = tokio::spawn(playback(&media, delay).run(track, decoder, None));
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
 		for ms in [0, 20, 40] {
 			producer.write(frame(ms, ms == 0)).unwrap();
 		}
@@ -1436,11 +1158,8 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		let decoder = Buffered::new(2);
 		let flushed = decoder.flushed.clone();
-		let task = tokio::spawn(playback(&media, delay).run(
-			moq_mux::container::Consumer::new(subscriber, format),
-			decoder,
-			None,
-		));
+		let task =
+			tokio::spawn(playback(&media, delay).run(moq_mux::container::Consumer::new(subscriber, format), decoder));
 		let mut shown = Vec::new();
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
@@ -1490,7 +1209,7 @@ mod tests {
 			..Buffered::new(0)
 		};
 		let decoded = decoder.decoded.clone();
-		let task = tokio::spawn(playback(&media, delay).run(track, decoder, None));
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
 		// Two-picture segments, one per restart, published live for two seconds.
 		const SEGMENTS: u64 = 50;
 		for at in 0..60_000u64 {
@@ -1518,358 +1237,70 @@ mod tests {
 		);
 	}
 
-	/// Subscribe to `track` as `moq play` does, starting `lookback` groups before
-	/// the live edge.
-	async fn join(track: &moq_net::track::Producer, budget: Duration, lookback: u64) -> Track {
-		let mut subscriber = track
+	/// Play a group starting at `first` holding media from 1 s, and the live group from 2 s,
+	/// through a rendition with a one-second warmup. Returns each picture shown, in
+	/// milliseconds, and when after the groups were published.
+	async fn warmup_join(first: u64) -> Vec<(u128, Duration)> {
+		let delay = Duration::from_secs(2);
+		let warmup = Duration::from_secs(1);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let published = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let playout = moq_mux::container::Playout::new(
+			moq_net::track::Delay {
+				min: Some(delay),
+				max: Some(delay),
+			},
+			warmup,
+		);
+		let subscriber = published
 			.consume()
-			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(budget)),
-			)
+			.subscribe(playout.subscription(moq_net::track::Subscription::default()))
 			.await
 			.unwrap();
-		let largest = subscriber.largest().await.unwrap();
-		subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
-		moq_mux::container::Consumer::new(
-			subscriber,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
-		)
-	}
-
-	/// Publishes 33 ms pictures live into sweeps of `sweep` pictures, each its own
-	/// group, so a test can hold one back.
-	struct Live {
-		track: moq_net::track::Producer,
-		sweep: u64,
-		groups: std::collections::BTreeMap<u64, moq_net::group::Producer>,
-	}
-
-	impl Live {
-		fn new(track: moq_net::track::Producer, sweep: u64) -> Self {
-			Self {
-				track,
-				sweep,
-				groups: Default::default(),
-			}
+		let wire = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		for (start, stamps) in [(first, 1_000..=1_900), (2_000, 2_000..=2_200)] {
+			let mut group = published.append_group(start).unwrap();
+			let frames: Vec<_> = stamps
+				.step_by(100)
+				.enumerate()
+				.map(|(index, ms)| frame(ms, index == 0))
+				.collect();
+			wire().write(&mut group, &frames).unwrap();
+			group.close().unwrap();
 		}
-
-		/// Publish picture `index`, the first of its sweep starting a group.
-		fn write(&mut self, index: u64) {
-			let sequence = index / self.sweep;
-			if !self.groups.contains_key(&sequence) {
-				// A publisher finishes a group when it starts the next one.
-				self.seal(sequence);
-			}
-			let group = self.groups.entry(sequence).or_insert_with(|| {
-				self.track
-					.create_group(moq_net::group::Info { start: sequence })
-					.unwrap()
-			});
-			let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-			format
-				.write(group, &[frame(index * 33, index.is_multiple_of(self.sweep))])
-				.unwrap();
-		}
-
-		/// Finish every group before `sequence` still open.
-		fn seal(&mut self, sequence: u64) {
-			let open = self.groups.split_off(&sequence);
-			for (_, group) in std::mem::replace(&mut self.groups, open) {
-				group.close().unwrap();
-			}
-		}
-
-		fn finish(&mut self) {
-			self.seal(u64::MAX);
-			drop(self.track.clone().finish().unwrap());
-		}
-	}
-
-	/// The min-delay decoder's pictures, then the max-delay decoder's for good.
-	fn hands_over(sizes: &[u32]) -> bool {
-		let switch = sizes.iter().position(|size| *size == MAX);
-		switch.is_some_and(|switch| switch > 0 && sizes[switch..].iter().all(|size| *size == MAX))
-	}
-
-	/// Publish one picture every 33 ms from `from` until `until`, skipping
-	/// `held` until `late`, presenting every millisecond. Returns what was shown as
-	/// (timestamp, picture size).
-	async fn live(
-		media: &Media<Recorder>,
-		mut live: Live,
-		task: tokio::task::JoinHandle<anyhow::Result<()>>,
-		pictures: std::ops::Range<u64>,
-		held: std::ops::Range<u64>,
-		late: Duration,
-	) -> Vec<(u128, u32)> {
-		let start = Instant::now();
-		let mut next = pictures.start;
+		let _published = published.finish().unwrap();
+		let begin = Instant::now();
+		let video = Video {
+			warmup,
+			..playback(&media, delay)
+		};
+		let task = tokio::spawn(video.run(playout.consumer(subscriber, wire()), Buffered::new(0)));
 		let mut shown = Vec::new();
-		let mut released = false;
-		let mut finished = false;
-		while !task.is_finished() {
-			let elapsed = Instant::now() - start;
-			while next < pictures.end && Duration::from_millis((next - pictures.start) * 33) <= elapsed {
-				if !held.contains(&next) {
-					live.write(next);
-				}
-				next += 1;
-			}
-			if !released && elapsed >= late {
-				held.clone().for_each(|index| live.write(index));
-				// Finished on arrival, like the groups around it.
-				live.seal((next - 1) / live.sweep);
-				released = true;
-			}
-			if next == pictures.end && released && !finished {
-				live.finish();
-				finished = true;
-			}
+		for _ in 0..10_000 {
 			tokio::task::yield_now().await;
-			if let Some(picture) = media.output.present_frame(media) {
-				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
+			if let Some(timestamp) = media.output.present(&media) {
+				shown.push((timestamp.as_millis().unwrap(), Instant::now() - begin));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
-			assert!(elapsed < Duration::from_secs(30), "playback never finished");
 		}
 		task.await.unwrap().unwrap();
-		// The window still holds the last pictures the decoder queued.
-		for _ in 0..1_000 {
-			if let Some(picture) = media.output.present_frame(media) {
-				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-		}
 		shown
 	}
 
-	/// A cold join shows the min-delay decoder's pictures right away, then the
-	/// max-delay decoder's once it has decoded the group before the live edge and
-	/// caught up.
-	#[tokio::test]
-	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
-		tokio::time::pause();
-		let delay = Duration::from_millis(200);
-		let warmup = Duration::from_secs(1);
-		let media = media(delay);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		// Sweeps a second long, and the viewer joins at the start of the second.
-		let mut publish = Live::new(track.clone(), 30);
-		(0..=30).for_each(|index| publish.write(index));
-		let min = join(&track, delay, 0).await;
-		let max = join(&track, delay + warmup, 1).await;
-		let refresh = Refresh {
-			track: max,
-			// Slower than real time to start, so the earlier sweep takes a while.
-			decoder: refresh_decoder(Duration::from_millis(10)),
-			interval: Some(Duration::from_millis(33)),
-			warmup: Duration::ZERO,
-		};
-		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
-		let shown = live(&media, publish, task, 31..90, 0..0, Duration::ZERO).await;
-		let sizes: Vec<_> = shown.iter().map(|(_, size)| *size).collect();
-		assert_eq!(shown.first().map(|(at, _)| *at), Some(30 * 33), "{shown:?}");
-		assert!(hands_over(&sizes), "no clean handover: {shown:?}");
-		assert!(shown.windows(2).all(|pair| pair[0].0 < pair[1].0), "{shown:?}");
-		assert_eq!(shown.last().map(|(at, _)| *at), Some(89 * 33));
-	}
-
-	/// After a loss only the min-delay decoder skips, so it shows its pictures
-	/// right after the hole while the max-delay decoder catches up on the late
-	/// sweep, and then hands back over. Pictures behind the playhead never show.
-	#[tokio::test]
-	async fn a_skip_recovers_through_the_max_delay_decoder() {
-		tokio::time::pause();
-		let delay = Duration::from_millis(100);
-		let warmup = Duration::from_secs(1);
-		let media = media(delay);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		// Sweeps a third of a second long.
-		let mut publish = Live::new(track.clone(), 10);
-		publish.write(0);
-		let min = join(&track, delay, 0).await;
-		let max = join(&track, delay + warmup, 1).await;
-		let refresh = Refresh {
-			track: max,
-			decoder: refresh_decoder(Duration::from_millis(10)),
-			interval: Some(Duration::from_millis(33)),
-			warmup: Duration::ZERO,
-		};
-		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
-		// The fourth sweep is held up past the min-delay budget, not the max-delay one.
-		let shown = live(&media, publish, task, 1..90, 30..40, Duration::from_millis(1_500)).await;
-		assert!(shown.windows(2).all(|pair| pair[0].0 < pair[1].0), "{shown:?}");
-		let (before, after): (Vec<_>, Vec<_>) = shown.iter().partition(|(at, _)| *at < 30 * 33);
-		assert_eq!(before.last().map(|(_, size)| *size), Some(MAX), "{shown:?}");
-		assert!(
-			after.iter().all(|(at, _)| *at >= 40 * 33),
-			"the late sweep showed behind the playhead: {shown:?}"
-		);
-		let sizes: Vec<_> = after.iter().map(|(_, size)| *size).collect();
-		assert!(hands_over(&sizes), "no clean handover after the skip: {shown:?}");
-	}
-
-	/// A join right after an encoder restart starts the max-delay decoder on the end,
-	/// a group before the min-delay one. That end holds nothing back.
-	#[tokio::test]
-	async fn a_join_right_after_a_restart_still_hands_over() {
-		tokio::time::pause();
-		let delay = Duration::from_millis(200);
-		let warmup = Duration::from_secs(1);
-		let media = media(delay);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		let mut producer = Some(moq_mux::container::Producer::new(
-			track.clone(),
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
-		));
-		let mut _finished = None;
-		for ms in [0, 33, 66] {
-			producer.as_mut().unwrap().write(frame(ms, ms == 0)).unwrap();
-		}
-		producer.as_mut().unwrap().discontinuity().unwrap();
-		// The replacement is published live, one picture every 33 ms.
-		let picture = |index: u64| frame(1_000 + index * 33, index == 0);
-		producer.as_mut().unwrap().write(picture(0)).unwrap();
-		let min = join(&track, delay, 0).await;
-		let max = join(&track, delay + warmup, 1).await;
-		let refresh = Refresh {
-			track: max,
-			decoder: refresh_decoder(Duration::from_millis(10)),
-			interval: Some(Duration::from_millis(33)),
-			warmup: Duration::ZERO,
-		};
-		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
-		let start = Instant::now();
-		let mut next = 1;
-		let mut shown = Vec::new();
-		while !task.is_finished() {
-			let elapsed = Instant::now() - start;
-			if next < 60 && Duration::from_millis(next * 33) <= elapsed {
-				producer.as_mut().unwrap().write(picture(next)).unwrap();
-				next += 1;
-				if next == 60 {
-					_finished = producer.take().map(|producer| producer.finish().unwrap());
-				}
-			}
-			tokio::task::yield_now().await;
-			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-			assert!(elapsed < Duration::from_secs(30), "playback never finished: {shown:?}");
-		}
-		task.await.unwrap().unwrap();
-		// The window still holds the last pictures the decoder queued.
-		for _ in 0..1_000 {
-			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis().unwrap(), picture.size().width));
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-		}
-		assert_eq!(shown.first().map(|(at, _)| *at), Some(1_000), "{shown:?}");
-		assert_eq!(shown.last().map(|(at, _)| *at), Some(1_000 + 59 * 33), "{shown:?}");
-		let sizes: Vec<_> = shown.iter().map(|(_, size)| *size).collect();
-		assert!(hands_over(&sizes), "no clean handover: {shown:?}");
-		assert!(shown.windows(2).all(|pair| pair[0].0 < pair[1].0), "{shown:?}");
-	}
-
-	/// The max-delay decoder reads its own subscription, so it can see an encoder
-	/// restart before the min-delay decoder does. Timestamps run on through the end,
-	/// so it plays the replacement when the shared clock says it is due, without
-	/// waiting for the min-delay decoder to read the end.
-	#[tokio::test]
-	async fn a_restart_the_max_delay_decoder_reads_first_plays_on_the_clock() {
-		tokio::time::pause();
-		let delay = Duration::from_millis(200);
-		let media = media(delay);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		// Separate tracks with the same groups, so each decoder's delivery is up to the test.
-		let publish = async |name: &str| {
-			let track = broadcast
-				.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
-				.unwrap();
-			let subscriber = track
-				.consume()
-				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(delay)),
-				)
-				.await
-				.unwrap();
-			let mut producer = moq_mux::container::Producer::new(track, format());
-			for ms in [0, 33, 66] {
-				producer.write(frame(ms, ms == 0)).unwrap();
-			}
-			(producer, moq_mux::container::Consumer::new(subscriber, format()))
-		};
-		let (min, min_track) = publish("min").await;
-		let (max, max_track) = publish("max").await;
-		// The replacement encoder's timestamps run ahead of the old one's.
-		let restart = |mut producer: moq_mux::container::Producer<moq_mux::catalog::hang::Container>| {
-			producer.discontinuity().unwrap();
-			for ms in [1_000, 1_033, 1_066] {
-				producer.write(frame(ms, ms == 1_000)).unwrap();
-			}
-			producer.finish().unwrap()
-		};
-		let _max = restart(max);
-		let mut min = Some(min);
-		let mut _min = None;
-		let refresh = Refresh {
-			track: max_track,
-			decoder: refresh_decoder(Duration::ZERO),
-			interval: Some(Duration::from_millis(33)),
-			warmup: Duration::ZERO,
-		};
-		let task = tokio::spawn(playback(&media, delay).run(min_track, Buffered::new(0), Some(refresh)));
-		let start = Instant::now();
-		let late = Duration::from_secs(2);
-		let mut shown = Vec::new();
-		let mut restarted = false;
-		while !task.is_finished() {
-			if !restarted && Instant::now() >= start.saturating_add(late) {
-				_min = min.take().map(restart);
-				restarted = true;
-			}
-			tokio::task::yield_now().await;
-			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis().unwrap(), Instant::now() - start));
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-			assert!(
-				Instant::now() - start < Duration::from_secs(30),
-				"playback never finished"
-			);
-		}
-		task.await.unwrap().unwrap();
-		for _ in 0..1_000 {
-			if let Some(picture) = media.output.present_frame(&media) {
-				shown.push((picture.timestamp.as_millis().unwrap(), Instant::now() - start));
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-		}
-		let timestamps: Vec<_> = shown.iter().map(|(at, _)| *at).collect();
-		assert_eq!(&timestamps[..3], [0, 33, 66], "{shown:?}");
-		assert_eq!(timestamps.len(), 6, "{shown:?}");
-		// The old pictures all arrived at once, so the clock holds the newest: 66 ms
-		// played at the delay.
-		assert_eq!(
-			shown[3].1,
-			delay + Duration::from_millis(1_000 - 66),
-			"the replacement missed its due time: {shown:?}"
-		);
-		assert_eq!(timestamps[4] - timestamps[3], 33, "{shown:?}");
-		assert_eq!(timestamps[5] - timestamps[4], 33, "{shown:?}");
+	/// A join mid-track decodes the group before the live one as its warmup and never shows
+	/// it, so the live group's pictures play when they would have anyway. The track's first
+	/// group decodes from the encoder's first picture, so nothing warms up there.
+	#[tokio::test(start_paused = true)]
+	async fn a_warmup_join_shows_only_the_recovered_pictures() {
+		let joined = warmup_join(1_000).await;
+		let start = warmup_join(0).await;
+		let millis = |shown: &[(u128, Duration)]| shown.iter().map(|(ms, _)| *ms).collect::<Vec<_>>();
+		assert_eq!(millis(&joined), [2_000, 2_100, 2_200]);
+		assert_eq!(millis(&start), (1_000..=2_200).step_by(100).collect::<Vec<_>>());
+		assert_eq!(joined, start[10..], "the warmup moved the live group's schedule");
 	}
 
 	/// Play one burst of 33 ms pictures, given by slot in decode order, through a
@@ -1880,7 +1311,7 @@ mod tests {
 		let delay = Duration::from_secs(2);
 		let media = media(delay);
 		let track = track(order.iter().map(|&slot| frame(slot * 33, slot == 0)), delay).await;
-		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(depth), None));
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(depth)));
 		tokio::task::yield_now().await;
 		let last = moq_net::Timestamp::from_millis(order.iter().max().unwrap() * 33).unwrap();
 		let end = media.presentation.due(last).unwrap();
