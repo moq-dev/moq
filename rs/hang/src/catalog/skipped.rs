@@ -52,12 +52,32 @@ impl Skipped {
 /// What a reader checks before decoding any section: the root `version`, and which entries are too
 /// new to read.
 ///
-/// Read straight from the bytes where it can, so a repeated `version` member is refused rather
-/// than resolved to either copy. Every other shape is left to the catalog's own decoding.
+/// Read straight from the bytes where it can, so a repeated `version` member is caught rather than
+/// resolved to either copy. Nothing here refuses an entry before the root `version` is checked,
+/// since a newer draft may have reshaped any section; every other shape is left to the catalog's
+/// own decoding.
 #[derive(Default)]
 pub(crate) struct Probe {
 	pub version: Option<u64>,
 	pub skipped: Skipped,
+	/// An entry repeats its `version` member, which refuses the catalog once the root is read.
+	pub repeated: bool,
+}
+
+impl Probe {
+	/// Refuse a root `version` above [`VERSION`], then an entry that repeats its `version`.
+	///
+	/// A root `version` above this reader means the newer draft changed something it would
+	/// misread, not merely added something it would miss.
+	pub fn check(&self) -> crate::Result<()> {
+		match self.version {
+			Some(version) if version > VERSION => Err(crate::Error::UnsupportedVersion(version)),
+			_ if self.repeated => Err(crate::Error::Json(
+				"duplicate field `version` in a catalog entry".to_string(),
+			)),
+			_ => Ok(()),
+		}
+	}
 }
 
 impl<'de> serde::Deserialize<'de> for Probe {
@@ -124,15 +144,6 @@ impl<'de, S: MapSeed> Visitor<'de> for Lenient<S> {
 	}
 }
 
-/// Reads a `version` member, refusing a second one.
-fn version<'de, A: MapAccess<'de>>(map: &mut A, version: &mut Option<u64>) -> Result<(), A::Error> {
-	if version.is_some() {
-		return Err(A::Error::duplicate_field("version"));
-	}
-	*version = Some(map.next_value()?);
-	Ok(())
-}
-
 struct RootSeed;
 
 impl MapSeed for RootSeed {
@@ -142,9 +153,13 @@ impl MapSeed for RootSeed {
 		let mut probe = Probe::default();
 		while let Some(key) = map.next_key::<String>()? {
 			let skipped = &mut probe.skipped;
+			let repeated = &mut probe.repeated;
 			let (section, entries) = match key.as_str() {
 				"version" => {
-					version(&mut map, &mut probe.version)?;
+					if probe.version.is_some() {
+						return Err(A::Error::duplicate_field("version"));
+					}
+					probe.version = Some(map.next_value()?);
 					continue;
 				}
 				"video" => (&mut skipped.video, Some("renditions")),
@@ -159,8 +174,8 @@ impl MapSeed for RootSeed {
 				}
 			};
 			*section = match entries {
-				Some(key) => map.next_value_seed(Lenient(SectionSeed(key)))?,
-				None => map.next_value_seed(Lenient(EntriesSeed))?,
+				Some(key) => map.next_value_seed(Lenient(SectionSeed(key, repeated)))?,
+				None => map.next_value_seed(Lenient(EntriesSeed(repeated)))?,
 			};
 		}
 		Ok(probe)
@@ -168,16 +183,17 @@ impl MapSeed for RootSeed {
 }
 
 /// A section holding its entries under one key (`renditions`, `tracks`).
-struct SectionSeed(&'static str);
+struct SectionSeed<'a>(&'static str, &'a mut bool);
 
-impl MapSeed for SectionSeed {
+impl MapSeed for SectionSeed<'_> {
 	type Value = BTreeMap<String, u64>;
 
 	fn visit<'de, A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+		let Self(entries, repeated) = self;
 		let mut skipped = BTreeMap::new();
 		while let Some(key) = map.next_key::<String>()? {
-			if key == self.0 {
-				skipped = map.next_value_seed(Lenient(EntriesSeed))?;
+			if key == entries {
+				skipped = map.next_value_seed(Lenient(EntriesSeed(&mut *repeated)))?;
 			} else {
 				map.next_value::<IgnoredAny>()?;
 			}
@@ -187,15 +203,15 @@ impl MapSeed for SectionSeed {
 }
 
 /// A map of entries keyed by ID, yielding the ones newer than this reader.
-struct EntriesSeed;
+struct EntriesSeed<'a>(&'a mut bool);
 
-impl MapSeed for EntriesSeed {
+impl MapSeed for EntriesSeed<'_> {
 	type Value = BTreeMap<String, u64>;
 
 	fn visit<'de, A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
 		let mut skipped = BTreeMap::new();
 		while let Some(id) = map.next_key::<String>()? {
-			if let Some(version) = map.next_value_seed(Lenient(EntrySeed))?
+			if let Some(version) = map.next_value_seed(Lenient(EntrySeed(&mut *self.0)))?
 				&& version > VERSION
 			{
 				skipped.insert(id, version);
@@ -205,21 +221,22 @@ impl MapSeed for EntriesSeed {
 	}
 }
 
-/// One entry, yielding its `version`.
-struct EntrySeed;
+/// One entry, yielding its `version` when it is one. A malformed `version` is left to the entry's
+/// own decoding, which refuses it once the root `version` has been checked.
+struct EntrySeed<'a>(&'a mut bool);
 
-impl MapSeed for EntrySeed {
+impl MapSeed for EntrySeed<'_> {
 	type Value = Option<u64>;
 
 	fn visit<'de, A: MapAccess<'de>>(self, mut map: A) -> Result<Option<u64>, A::Error> {
-		let mut entry = None;
+		let mut version = None;
 		while let Some(key) = map.next_key::<String>()? {
-			if key == "version" {
-				version(&mut map, &mut entry)?;
-			} else {
+			if key != "version" {
 				map.next_value::<IgnoredAny>()?;
+			} else if version.replace(map.next_value::<serde_json::Value>()?).is_some() {
+				*self.0 = true;
 			}
 		}
-		Ok(entry)
+		Ok(version.as_ref().and_then(serde_json::Value::as_u64))
 	}
 }

@@ -1,7 +1,7 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
 use crate::catalog::skipped::Probe;
-use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, VERSION, Video};
+use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
 use std::str::FromStr;
 
@@ -337,7 +337,7 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	pub fn from_slice(v: &[u8]) -> Result<Self> {
 		// Probed straight from the bytes as well, since a `Value` keeps only the last of two
 		// `version` members instead of refusing them.
-		check_version(serde_json::from_slice::<Probe>(v)?.version)?;
+		serde_json::from_slice::<Probe>(v)?.check()?;
 		Self::from_value(serde_json::from_slice(v)?)
 	}
 
@@ -359,7 +359,7 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// skipped and reported in [`skipped`](Self::skipped).
 	pub(crate) fn from_value(mut value: serde_json::Value) -> Result<Self> {
 		let probe = Probe::deserialize(&value)?;
-		check_version(probe.version)?;
+		probe.check()?;
 		// Checked, so taken out of what an extension would otherwise receive.
 		if let Some(root) = value.as_object_mut() {
 			root.remove("version");
@@ -367,15 +367,6 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 		let mut catalog: Self = Wire::deserialize(value)?;
 		catalog.skipped = probe.skipped;
 		Ok(catalog)
-	}
-}
-
-/// Refuse a root `version` above [`VERSION`]: the newer draft changed something this reader would
-/// misread, not merely added something it would miss.
-fn check_version(version: Option<u64>) -> Result<()> {
-	match version {
-		Some(version) if version > VERSION => Err(crate::Error::UnsupportedVersion(version)),
-		_ => Ok(()),
 	}
 }
 
@@ -1680,6 +1671,19 @@ mod test {
 			Catalog::<()>::from_str(&root),
 			Err(crate::Error::UnsupportedVersion(5))
 		));
+
+		// Even when the newer draft reshaped an entry's own `version`, wherever the root's sits.
+		for entry in [r#"{"version":"new-shape"}"#, r#"{"version":5,"version":3}"#] {
+			for json in [
+				format!(r#"{{"version":5,"video":{{"renditions":{{"hd":{entry}}}}}}}"#),
+				format!(r#"{{"video":{{"renditions":{{"hd":{entry}}}}},"version":5}}"#),
+			] {
+				assert!(
+					matches!(Catalog::<()>::from_str(&json), Err(crate::Error::UnsupportedVersion(5))),
+					"{json}"
+				);
+			}
+		}
 	}
 
 	/// An entry readable by this draft is read whatever version it claims.
