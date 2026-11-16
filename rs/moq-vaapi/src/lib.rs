@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Implements a lightweight and safe interface over `libva`.
+//! VA-API H.264 and H.265 encode and decode, with libva loaded at runtime.
 //!
-//! The starting point to using this crate is to open a [`Display`], from which a [`Context`] and
-//! [`Surface`]s can be allocated and used for doing actual work.
+//! [`encode::Encoder`] and [`decode::Decoder`] each open their own [`Display`], and
+//! [`vpp::Processor`] imports, scales, and converts [`dmabuf::DmaBuf`]s on the GPU.
 
 #![allow(
 	dead_code,
@@ -27,7 +27,7 @@
 #![cfg(target_os = "linux")]
 
 mod bindings;
-pub mod buffer;
+mod buffer;
 mod config;
 mod context;
 mod display;
@@ -40,36 +40,42 @@ mod usage_hint;
 
 // Vendored from discord/cros-codecs (BSD-3-Clause): the backend-agnostic H.264
 // bitstream layer (SPS/PPS/slice synthesis) plus a thin VA-API encode driver.
-pub mod bitstream_utils;
-pub mod codec;
+mod bitstream_utils;
+mod codec;
 pub mod decode;
 pub mod encode;
 
 // Written for this crate: DMA-BUF import, the color space an encoder labels its
 // stream with, and the VA-API video post-processing entrypoint, which scales,
 // converts, and re-tiles surfaces on the GPU.
-pub mod color;
+mod color;
 pub mod dmabuf;
 pub mod vpp;
 
-pub use bindings::_VADRMPRIMESurfaceDescriptor__bindgen_ty_1 as VADRMPRIMESurfaceDescriptorObject;
-pub use bindings::_VADRMPRIMESurfaceDescriptor__bindgen_ty_2 as VADRMPRIMESurfaceDescriptorLayer;
-pub use bindings::*;
-pub use buffer::*;
+// The vendored modules name each other's items through these crate-root globs,
+// as upstream does. Only the items below are public.
+use bindings::*;
+use buffer::*;
+use config::*;
+use context::*;
+use generic_value::*;
+use picture::*;
+use surface::*;
+
+pub use bindings::{
+	VAEntrypoint, VAImage, VAImageFormat, VAProfile, VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_I420, VA_FOURCC_NV12,
+	VA_FOURCC_RGBA, VA_FOURCC_RGBX, VA_RT_FORMAT_RGB32, VA_RT_FORMAT_YUV420,
+};
 pub use codec::Codec;
 pub use color::{Color, Matrix};
-pub use config::*;
-pub use context::*;
-pub use display::*;
-pub use generic_value::*;
-pub use image::*;
-pub use picture::*;
-pub use surface::*;
-pub use usage_hint::*;
+pub use display::{Display, DrmDeviceIterator, OpenDrmDisplayError};
+pub use image::Image;
+pub use surface::{DrmPrimeSurfaceDescriptor, DrmPrimeSurfaceDescriptorLayer, DrmPrimeSurfaceDescriptorObject, Surface};
+pub use usage_hint::UsageHint;
 
 /// A frame resolution in pixels. (Vendored from discord/cros-codecs, BSD-3-Clause.)
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct Resolution {
+pub(crate) struct Resolution {
 	pub width: u32,
 	pub height: u32,
 }

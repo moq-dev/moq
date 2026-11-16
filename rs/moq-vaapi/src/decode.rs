@@ -9,7 +9,7 @@
 //! Thin VA-API H.264 and H.265 decoder built on the vendored libva binding.
 //!
 //! The mirror of [`crate::encode`]. It reuses the backend-agnostic bitstream
-//! layers ([`crate::codec::h264`], [`crate::codec::h265`]) from
+//! layers (`codec::h264`, `codec::h265`) from
 //! discord/cros-codecs (BSD-3-Clause) for parameter set and slice parsing,
 //! reference marking, and DPB bumping, then drives libva directly rather than
 //! vendoring cros-codecs's generic multi-backend decoder framework. The

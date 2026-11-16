@@ -8,7 +8,7 @@
 //! Thin VA-API H.264 and H.265 encoder built on the vendored libva binding.
 //!
 //! For H.264 it reuses the backend-agnostic bitstream layer
-//! ([`crate::codec::h264`]) from discord/cros-codecs (BSD-3-Clause) for
+//! (`codec::h264`) from discord/cros-codecs (BSD-3-Clause) for
 //! SPS/PPS/slice synthesis, and drives libva directly for surface upload +
 //! slice submission, rather than vendoring cros-codecs's generic multi-backend
 //! encoder framework. The per-frame VA buffer population is ported from
@@ -61,7 +61,7 @@ mod h265;
 /// Whether a frame is used as a reference, and for how long.
 /// (Vendored from discord/cros-codecs, BSD-3-Clause; used by the slice synthesizer.)
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum IsReference {
+pub(crate) enum IsReference {
 	No,
 	ShortTerm,
 	LongTerm,
