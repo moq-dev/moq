@@ -433,6 +433,8 @@ pub enum MoqTransport {
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
 	Tcp,
+	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
+	Tls,
 	/// A Unix domain socket using qmux framing.
 	Unix,
 	/// WebTransport over HTTP/3 on QUIC.
@@ -447,6 +449,7 @@ impl TryFrom<moq_tokio::Transport> for MoqTransport {
 			moq_tokio::Transport::Quic => Self::Quic,
 			moq_tokio::Transport::WebSocket => Self::WebSocket,
 			moq_tokio::Transport::Tcp => Self::Tcp,
+			moq_tokio::Transport::Tls => Self::Tls,
 			moq_tokio::Transport::Unix => Self::Unix,
 			moq_tokio::Transport::WebTransport => Self::WebTransport,
 			_ => return Err(MoqError::Unsupported),
@@ -467,6 +470,7 @@ mod transport_tests {
 			MoqTransport::WebSocket
 		);
 		assert_eq!(MoqTransport::try_from(Transport::Tcp).unwrap(), MoqTransport::Tcp);
+		assert_eq!(MoqTransport::try_from(Transport::Tls).unwrap(), MoqTransport::Tls);
 		assert_eq!(MoqTransport::try_from(Transport::Unix).unwrap(), MoqTransport::Unix);
 		assert_eq!(
 			MoqTransport::try_from(Transport::WebTransport).unwrap(),

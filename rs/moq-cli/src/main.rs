@@ -222,10 +222,11 @@ impl Serving {
 	}
 }
 
-/// Whether ordinary clients may use this transport on the shared LAN server.
+/// Whether ordinary clients may use this transport on the shared LAN server. A TLS stream link is
+/// public the same way plaintext TCP is.
 fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Tls | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -1733,6 +1734,7 @@ mod tests {
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
 		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Tls, false));
 		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
 		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
 		assert!(is_public_transport(moq_tokio::Transport::Quic, true));

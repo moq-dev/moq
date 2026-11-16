@@ -46,8 +46,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   cut waits on by name; [congestion names](/quest/m2/congestion-names.md);
   [config names](/quest/m2/relay-config-names.md),
   [the two dial keys](/quest/m2/relay-connect-keys.md), and
-  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md);
-  [transport names](/quest/m2/transport-names.md); and
+  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [stats names](/quest/m2/stats-old-names.md).
 - **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
   [claims](/quest/m2/auth-claims.md), and

@@ -29,10 +29,8 @@ export type SendStreamOptions = WebTransportSendStreamOptions & {
 
 /** Configuration for a QMux session. */
 export interface Config {
-	/** Max concurrent bidirectional streams the peer can open. */
-	maxStreamsBidi?: bigint;
-	/** Max concurrent unidirectional streams the peer can open. */
-	maxStreamsUni?: bigint;
+	/** Max concurrent streams the peer can open, in each direction. */
+	maxStreams?: bigint;
 	/** Connection-level receive window in bytes. */
 	receiveWindow?: bigint;
 	/** Receive window in bytes for every stream. */
@@ -54,8 +52,7 @@ export interface Config {
 }
 
 const DEFAULT_CONFIG: Required<Config> = {
-	maxStreamsBidi: 100n,
-	maxStreamsUni: 100n,
+	maxStreams: 100n,
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
 	idleTimeout: Duration.secs(30),
@@ -104,8 +101,8 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 		initialMaxStreamDataBidiLocal: config.streamReceiveWindow,
 		initialMaxStreamDataBidiRemote: config.streamReceiveWindow,
 		initialMaxStreamDataUni: config.streamReceiveWindow,
-		initialMaxStreamsBidi: config.maxStreamsBidi,
-		initialMaxStreamsUni: config.maxStreamsUni,
+		initialMaxStreamsBidi: config.maxStreams,
+		initialMaxStreamsUni: config.maxStreams,
 		// Clamp to maxRecordSize so we never advertise a datagram larger than our
 		// record layer accepts.
 		maxDatagramFrameSize:
@@ -783,8 +780,8 @@ export class Session implements WebTransport {
 		// Receive limits are version-independent.
 		const notify = () => this.#scheduler?.notify();
 		this.#recvData = new Window(this.#ourParams.initialMaxData, notify);
-		this.#recvBiLimit = new StreamLimit(this.#config.maxStreamsBidi, notify);
-		this.#recvUniLimit = new StreamLimit(this.#config.maxStreamsUni, notify);
+		this.#recvBiLimit = new StreamLimit(this.#config.maxStreams, notify);
+		this.#recvUniLimit = new StreamLimit(this.#config.maxStreams, notify);
 
 		const ready = Promise.withResolvers<void>();
 		this.ready = ready.promise;

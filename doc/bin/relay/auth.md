@@ -398,9 +398,10 @@ subscribe = []
 
 ## Auth server
 
-Upgrade auth servers before relays when adopting the `webtransport` transport value.
+Upgrade auth servers before relays when adopting the `webtransport` or `tls` transport value.
 WebTransport sessions report `webtransport`; native QUIC sessions report `quic`.
-Older auth servers reject the new value. Updated Rust and JavaScript auth parsers
+`tls://` sessions report `tls`; plaintext `tcp://` sessions report `tcp`.
+Older auth servers reject the new values. Updated Rust and JavaScript auth parsers
 map future transport names to `unknown`, which your policy should handle explicitly.
 
 `moq auth serve` is the reference auth server, answering the contract above.
@@ -496,8 +497,10 @@ so count sessions only on the others. See
 
 The plaintext TCP and Unix-socket listeners are admitted exactly like QUIC:
 the path and query ride the `SETUP` (`tcp://127.0.0.1:4444/room?jwt=...`) and
-reach the auth server with `transport` set to `tcp` or `unix`. A Unix socket
-can also require a specific uid, gid, or pid:
+reach the auth server with `transport` set to `tcp` or `unix`. A `tls://` link
+(below) reports `tls`, so a policy keyed on `transport == "tcp"` for cluster
+links over TLS now sees `"tls"`. A Unix socket can also require a specific uid,
+gid, or pid:
 
 ```toml
 [listen.unix]

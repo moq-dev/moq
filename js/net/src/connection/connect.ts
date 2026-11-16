@@ -556,8 +556,7 @@ async function dialRace(
 					protocols: offered.alpns,
 					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
 					config: {
-						maxStreamsBidi: maxStreams,
-						maxStreamsUni: maxStreams,
+						maxStreams,
 						receiveWindow: BigInt(props.websocket?.receiveWindow ?? DEFAULT_RECEIVE_WINDOW),
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,

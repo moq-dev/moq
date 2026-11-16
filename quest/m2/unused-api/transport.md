@@ -100,8 +100,8 @@ moq-webrtc's `p2p` and moq-relay's `stun` features went in
 [moq-dev/moq#8771](https://github.com/moq-dev/moq/pull/8771). The
 [API review](/quest/m3/release/api-review.md) still lists all three.
 
-Left alone, with the reason: `moq_tokio::mdns` stays where it is (see
-[transport names](/quest/m2/transport-names.md)); plaintext `tcp://` and
+Left alone, with the reason: `moq_tokio::mdns` stays where it is (the maintainer declined moving it into
+moq-relay; reopen only with a new reason, such as a measured build cost); plaintext `tcp://` and
 `unix://` are small and a same-host sidecar is a plausible use; kio's
 `PushError` and `Queue::poll_push_with` have no outside caller but belong to
 a foundation crate whose surface is otherwise tight.
@@ -117,6 +117,5 @@ methods. The bindings are unchanged. Wire: none.
 
 ## Related
 
-- [Transport names](/quest/m2/transport-names.md) - adds `Tls` to the enum item 3 trims
 - [Congestion control by algorithm name](/quest/m2/congestion-names.md) - removes `quic::Config::controller`, the other unused transport hook
 - [A runtime-free QUIC driver](/quest/m4/quic-sansio-driver.md) - rebuilds the modules item 1 hides
