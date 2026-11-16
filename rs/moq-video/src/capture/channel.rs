@@ -25,6 +25,12 @@ use moq_net::Timestamp;
 /// 500 ms without one, and a viewer joining mid-stillness waits for the next
 /// frame to open its group. An unchanged picture encodes as a skip frame of a
 /// few dozen bytes, so this costs next to nothing.
+#[cfg(any(
+	all(target_os = "linux", feature = "pipewire"),
+	target_os = "macos",
+	target_os = "windows",
+	test
+))]
 const REPEAT: Duration = Duration::from_millis(250);
 
 /// The producer/consumer rendezvous for a single capture session.

@@ -1590,6 +1590,22 @@ fn format_offer(framerate: u32, format: VideoFormat, dmabuf: bool) -> Vec<u8> {
 			spa::utils::Fraction { num: 0, denom: 1 },
 			spa::utils::Fraction { num: 1000, denom: 1 }
 		),
+		// A compositor sends a changed frame as often as it repaints, up to this.
+		spa::pod::property!(
+			spa::param::format::FormatProperties::VideoMaxFramerate,
+			Choice,
+			Range,
+			Fraction,
+			spa::utils::Fraction {
+				num: framerate,
+				denom: 1
+			},
+			spa::utils::Fraction { num: 1, denom: 1 },
+			spa::utils::Fraction {
+				num: framerate,
+				denom: 1
+			}
+		),
 	);
 	if dmabuf {
 		obj.properties.push(linear_modifier());
@@ -1702,6 +1718,14 @@ mod tests {
 				property(spa::param::format::FormatProperties::VideoFormat.as_raw()).map(|p| &p.value),
 				Some(&spa::pod::Value::Id(spa::utils::Id(format.as_raw())))
 			);
+			// The compositor paces changed frames to the configured rate.
+			assert!(matches!(
+				property(spa::param::format::FormatProperties::VideoMaxFramerate.as_raw()).map(|p| &p.value),
+				Some(spa::pod::Value::Choice(spa::pod::ChoiceValue::Fraction(spa::utils::Choice(
+					_,
+					spa::utils::ChoiceEnum::Range { max, .. },
+				)))) if max.num == 30 && max.denom == 1
+			));
 			let modifier = property(spa::param::format::FormatProperties::VideoModifier.as_raw());
 			if index < SCREEN_FORMATS.len() {
 				let modifier = modifier.expect("DMA-BUF offer has no modifier");
