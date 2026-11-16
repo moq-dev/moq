@@ -263,7 +263,8 @@ impl<'a> Message<'a> for Publish<'a> {
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
 			0x09 => self.largest_location,
-			0x10 => self.forward,
+			0x10 => (!version.paused()).then_some(self.forward),
+			0x11 => version.paused().then_some(!self.forward),
 			0x20 => self.subscriber_priority.filter(|_| draft20),
 			0x21 => self.filter.filter(|_| draft20),
 			0x22 => self.group_order.filter(|_| draft20),
@@ -294,7 +295,8 @@ impl<'a> Message<'a> for Publish<'a> {
 			0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 			0x08 => _expires: Option<u64>,
 			0x09 => largest_location: Option<Location>,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => subscriber_priority: Option<u8> where Filter::is_draft20(version),
 			0x21 => filter: Option<Filter> where Filter::is_draft20(version),
 			0x22 => group_order: Option<GroupOrder> where Filter::is_draft20(version),
@@ -310,7 +312,7 @@ impl<'a> Message<'a> for Publish<'a> {
 			track_name,
 			track_alias,
 			largest_location,
-			forward: forward.unwrap_or(true),
+			forward: Version::forward_state(forward, paused).unwrap_or(true),
 			properties,
 			subscriber_priority,
 			group_order,
@@ -545,6 +547,33 @@ mod tests {
 			done(0x3).end(Version::Draft22),
 			Err(crate::Error::Remote(0x3))
 		));
+	}
+
+	/// Draft-23 announces a paused PUBLISH with PAUSED = 1 and a forwarding one with
+	/// PAUSED = 0 (section 9.19.18).
+	#[test]
+	fn draft23_publish_carries_paused() {
+		let version = Version::Draft23;
+		for forward in [true, false] {
+			let msg = Publish {
+				authorization_token: None,
+				request_id: RequestId(1),
+				track_namespace: Path::from_static("test/ns"),
+				track_name: "video".into(),
+				track_alias: 42,
+				largest_location: None,
+				forward,
+				properties: Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
+			};
+			let wire = encode_message(&msg, version);
+			let decoded: Publish = decode_message(&wire, version).unwrap();
+			assert_eq!(decoded.forward, forward);
+			// The same bytes mean nothing to draft-22, which knows no parameter 0x11.
+			assert!(decode_message::<Publish>(&wire, Version::Draft22).is_err());
+		}
 	}
 
 	#[test]

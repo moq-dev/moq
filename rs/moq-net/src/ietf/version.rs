@@ -27,6 +27,18 @@ impl Version {
 	pub(crate) fn varint_length(self) -> bool {
 		!matches!(self, Self::Draft18 | Self::Draft20 | Self::Draft22)
 	}
+
+	/// Whether the PAUSED parameter (0x11) replaces FORWARD (0x10), with the opposite sense
+	/// and a default of 0, unpaused (draft-23 section 9.19.18).
+	pub(crate) fn paused(self) -> bool {
+		!matches!(self, Self::Draft18 | Self::Draft20 | Self::Draft22)
+	}
+
+	/// The Forward State a message carries: FORWARD as sent, or PAUSED inverted, whichever
+	/// `self` puts on the wire. `None` when the message carried neither.
+	pub(crate) fn forward_state(forward: Option<bool>, paused: Option<bool>) -> Option<bool> {
+		forward.or(paused.map(|paused| !paused))
+	}
 }
 
 impl From<Version> for crate::Version {

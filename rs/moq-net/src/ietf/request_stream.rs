@@ -360,7 +360,8 @@ impl Update {
 			0x02 => object_timeout: Option<u64>,
 			0x03 => token: Vec<super::token::RequestToken>,
 			0x06 => subgroup_timeout: Option<u64>,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
 			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
@@ -391,7 +392,7 @@ impl Update {
 			refused,
 			authorization_token,
 			new_group,
-			forward,
+			forward: Version::forward_state(forward, paused),
 			filter,
 			fill,
 		})
