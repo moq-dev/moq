@@ -1326,8 +1326,16 @@ mod timeout_tests {
 			let _stream = kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
-			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;
-			let result = accept.as_mut().now_or_never();
+			// Step a second at a time so QMux keep-alives flow as on a live link: one jump
+			// past their 30s deadline would close the session without a ping.
+			let mut result = None;
+			for _ in 0..timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT).as_secs() {
+				tokio::time::advance(time::Duration::from_secs(1)).await;
+				result = accept.as_mut().now_or_never();
+				if result.is_some() {
+					break;
+				}
+			}
 			if expires {
 				assert!(
 					matches!(result, Some(Err(crate::Error::MoqNet(moq_net::Error::Timeout)))),
