@@ -3612,8 +3612,9 @@ test("a final drop before the payload was asked for leaves a paused payload grou
 // Asking for the payload again lets go of a paused metadata group, and a metadata stream still
 // arriving that the publisher yields after that does not pause: no continuation follows either, since
 // the publisher serves those groups again with the payload, or drops them. Their copies stay cached,
-// owed to a payload reader. A metadata stream that arrives after it fills no copy the cache holds.
-// Mirrors the Rust `promotion_lets_go_of_paused_metadata_groups`.
+// owed to a payload reader, and a reader holding one gets an end once the payload replaces it. A
+// metadata stream that arrives after it fills no copy the cache holds. Mirrors the Rust
+// `promotion_lets_go_of_paused_metadata_groups`.
 test("promotion lets go of paused metadata groups on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
@@ -3657,6 +3658,8 @@ test("promotion lets go of paused metadata groups on lite-07", async () => {
 		expect(paused()).toEqual([1n]);
 		// Still arriving across the update.
 		const two = await openMeta(2n);
+		const held = [await track.recvGroup(), await track.recvGroup()];
+		expect(held.map((group) => group?.sequence)).toEqual([1n, 2n]);
 
 		track.update({ delay });
 		await drainReactions();
@@ -3673,6 +3676,18 @@ test("promotion lets go of paused metadata groups on lite-07", async () => {
 		three.stream.finish();
 		await three.run;
 		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([1n, 2n]);
+		expect(held.map((group) => group?.closed.peek())).toEqual([undefined, undefined]);
+
+		// The payload replaces both: nothing writes the metadata copies a reader holds any longer.
+		for (const sequence of [1n, 2n]) {
+			const payload = handStream(version);
+			payload.write(await liteFrame(Number(sequence), new Uint8Array([1])));
+			payload.finish();
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), payload.reader);
+		}
+		await drainReactions();
+		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([]);
+		for (const group of held) expect(group?.closed.peek()).toBeInstanceOf(Error);
 	} finally {
 		responses.mockRestore();
 		track.close();

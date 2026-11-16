@@ -3884,6 +3884,7 @@ export class Subscriber {
 		// publisher serves its group again with the payload, or drops it. The copy stays, owed to a
 		// payload reader until then, and the stream holds the end no longer.
 		if (hooks.groupMeta(paused.group) && entry.meta !== true) {
+			hooks.abandonGroup(entry.track, paused.group);
 			paused.read();
 			return;
 		}
@@ -3955,6 +3956,7 @@ export class Subscriber {
 		for (const [sequence, group] of paused.groups) {
 			if (!hooks.groupMeta(group.group)) continue;
 			paused.groups.delete(sequence);
+			hooks.abandonGroup(entry.track, group.group);
 			group.read();
 		}
 	}

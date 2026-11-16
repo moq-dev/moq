@@ -1131,6 +1131,8 @@ export class Producer {
 	#cache = new Set<CachedGroup>();
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<bigint, CachedGroup>();
+	// Cached copies nothing writes any longer, aborted once the cache lets go of them.
+	#abandoned = new WeakSet<GroupProducer>();
 	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
@@ -1338,6 +1340,10 @@ export class Producer {
 		};
 		hooks.receiveGroup = (producer, { sequence, start, fill, meta, discard }) =>
 			producer.#createGroup(sequence, start, fill, meta, discard);
+		hooks.abandonGroup = (producer, group) => {
+			if (producer.#cached.get(group.sequence)?.group === group) producer.#abandoned.add(group);
+			else if (group.closed.peek() === undefined) group.abort(new StreamError(StreamCode.Cancel));
+		};
 		hooks.arrivingGroup = (producer, sequence, meta = false) => {
 			const group = producer.#cached.get(sequence)?.group;
 			if (!group || group.closed.peek() !== undefined || hooks.groupMeta(group) !== meta) return undefined;
@@ -1859,6 +1865,8 @@ export class Producer {
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
 		hooks.chargeGroup(entry.group, undefined);
+		if (this.#abandoned.has(entry.group) && entry.group.closed.peek() === undefined)
+			entry.group.abort(new StreamError(StreamCode.Cancel));
 	}
 
 	// The starts a first frame of group `sequence` must fall between: the nearest checked

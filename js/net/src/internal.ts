@@ -682,6 +682,13 @@ export const hooks: {
 	 * by `track.ts`.
 	 */
 	arrivingGroup: (producer: Producer, sequence: bigint, meta?: boolean) => Arriving | undefined;
+	/**
+	 * Nothing writes `group` any longer, a metadata copy whose stream the payload request let go:
+	 * it stays cached, owed to a payload reader, and is aborted once the cache lets go of it, or at
+	 * once if the cache does not hold it, so a reader holding it never waits on it forever. Assigned
+	 * by `track.ts`; mirrors the Rust subscriber aborting a displaced copy.
+	 */
+	abandonGroup: (producer: Producer, group: GroupProducer) => void;
 	/** The cached groups of `[start, end)` held only as metadata, costing what the cache holds. Assigned by `track.ts`. */
 	cachedMeta: (producer: Producer, start: bigint, end: bigint) => bigint[];
 	/** The cached groups of `[start, end)` still arriving, by sequence, costing what the cache holds. Assigned by `track.ts`. */
@@ -1265,6 +1272,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	receiveGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	abandonGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	arrivingGroup: () => {
