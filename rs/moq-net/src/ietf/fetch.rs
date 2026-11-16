@@ -1166,9 +1166,14 @@ mod cache_duration_tests {
 	/// subscription still learns its max age.
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for age in [0u64, 30_000] {
-				let mut payload = vec![0, 0, 0, 0, 4];
+				// End Of Track, End Location and no parameters ahead of the property; draft-23's
+				// REQUEST_OK has only the parameter count there.
+				let mut payload = match version {
+					Version::Draft23 => vec![0, 4],
+					_ => vec![0, 0, 0, 0, 4],
+				};
 				Encoder::new(&mut payload, version.into()).varint(age).unwrap();
 				let got = FetchOk::decode_msg(&mut Decoder::new(&payload, version.into()), version).unwrap();
 				assert_eq!(
