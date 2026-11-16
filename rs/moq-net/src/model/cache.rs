@@ -1404,11 +1404,6 @@ impl Reader {
 		}
 	}
 
-	/// Bytes currently billed.
-	pub(super) fn size(&self) -> u64 {
-		self.bytes
-	}
-
 	/// The debt the track's readers owe, forgiven once the pool is back within its capacity:
 	/// nothing needs the room any more, as the track forgives its own debt.
 	pub(super) fn debt(&self) -> u64 {

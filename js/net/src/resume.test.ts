@@ -2094,9 +2094,9 @@ test("a drop waits while a copy the serving one replaced may still deliver it", 
 	}
 });
 
-// A received stale run the reader held back is unknown again once new terms supersede it on the
-// serving copy: its upstream re-offers or drops it again, so it is not reported meanwhile.
-test("a held-back stale run new terms supersede is not reported", async () => {
+// A received stale run the reader held back is unknown again once a new upstream subscription
+// supersedes it on the serving copy, so it is not reported.
+test("a held-back stale run a new subscription supersedes is not reported", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
@@ -2116,8 +2116,8 @@ test("a held-back stale run new terms supersede is not reported", async () => {
 		expect(recvDisposition(sub)).toBe("idle");
 		tb.write(3n);
 		expect(recvDisposition(sub)).toBe(3n);
-		// The route's subscription updates before the old copy is past the budget.
-		hooks.supersedeStale(tb.producer, undefined);
+		// The route subscribes anew before the old copy is past the budget.
+		hooks.supersedeStale(tb.producer);
 		await clock.advance(Duration.nanos(1_000_000_000));
 		expect(recvDisposition(sub)).toBe("idle");
 
@@ -2128,40 +2128,6 @@ test("a held-back stale run new terms supersede is not reported", async () => {
 	} finally {
 		installed.close();
 	}
-});
-
-// A group the new route delivers over a stale run the old route reported retires that report, and
-// a final drop the new route gives replaces it: only what is still stale is taken back, so an
-// update reopens no group already served. Mirrors Rust.
-test("a resumed reader retires a stale report its group or final drop replaces", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
-	hooks.dropTrackGroups(ta.producer, 1n, 4n, staleHole(60_000));
-	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 4n, stale: 60_000 });
-
-	front.serve(b.consume());
-	await settle();
-	tb.write(1n);
-	expect(drain(sub)).toEqual([1n]);
-	// Reported once the replaced route no longer feeds.
-	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
-	await settle();
-	const cut = new StreamError(StreamCode(70), { message: "cut" });
-	hooks.dropTrackGroups(tb.producer, 2n, 3n, { error: cut });
-	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 2n, end: 3n, stale: undefined });
-	// Only group 3 is still stale.
-	expect(hooks.reofferStale(sub)).toEqual([{ start: 3n, end: 4n }]);
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
 });
 
 test("a drop a replaced route held back is no verdict on the route serving next", async () => {
@@ -3946,9 +3912,9 @@ test("a route whose IETF session closed before subscribing moves the track to th
 	b.close();
 });
 
-// A front's reader re-offers what its serving route's copy still caches and judges fresh, and gives
-// up the rest, so a relay's publisher re-serves an expired stream through it. Mirrors Rust.
-test("a resumed reader re-offers a group its serving copy still caches", () => {
+// A front's reader continues a yielded group its serving route's copy still caches and judges fresh,
+// so a relay's publisher continues the group through it, and nothing it lacks.
+test("a resumed reader continues a group its serving copy still caches", () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const ta = copy(a);
@@ -3956,107 +3922,13 @@ test("a resumed reader re-offers a group its serving copy still caches", () => {
 	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
 	ta.write(0n);
 	expect(drain(sub)).toEqual([0n]);
-	const { groups, givenUp } = hooks.reofferGroups(sub, 0n, 3n);
-	expect(groups.map((group) => group.sequence)).toEqual([0n]);
-	expect(givenUp).toEqual([{ start: 1n, end: 3n }]);
-	for (const group of groups) group.close();
+	const group = hooks.continueGroup(sub, 0n, 0);
+	expect(group?.sequence).toBe(0n);
+	group?.close();
+	expect(hooks.continueGroup(sub, 1n, 0)).toBeUndefined();
 	sub.close();
 	front.consumer.close();
 	a.close();
-});
-
-// A front's reader takes back the stale runs its serving route's copy reported, so a relay's
-// publisher re-offers them under a new update rather than keep them reported. Mirrors Rust.
-test("a resumed reader takes back its stale reports", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
-	hooks.dropTrackGroups(ta.producer, 1n, 3n, staleHole(60_000));
-	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 3n, stale: 60_000 });
-	expect(hooks.reofferStale(sub)).toEqual([{ start: 1n, end: 3n }]);
-	expect(hooks.reofferStale(sub)).toEqual([]);
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
-// A stale run the reader queued and has yet to report is taken back by an update too, as a plain
-// reader's is: the new terms judge it anew, rather than an old verdict going out under the new
-// update number. The update widens past the verdict, so nothing goes out at all. Mirrors Rust
-// `a_resumed_reader_takes_back_its_queued_stale_runs`, which checks the queue directly.
-test("a resumed reader takes back its queued stale runs", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const front = new Front();
-		const a = new BroadcastProducer();
-		const b = new BroadcastProducer();
-		const ta = copy(a);
-		const tb = copy(b);
-		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(1_000) } });
-		ta.write(0n);
-		expect(drain(sub)).toEqual([0n]);
-		hooks.dropTrackGroups(ta.producer, 2n, 3n, staleHole(1_000));
-		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 2n, end: 3n });
-
-		// The new route's stale run around the one already reported goes out in parts once the old
-		// route can no longer deliver it: the part below it first, with the rest queued.
-		front.serve(b.consume());
-		await settle();
-		hooks.dropTrackGroups(tb.producer, 1n, 5n, staleHole(1_000));
-		tb.write(5n);
-		expect(drain(sub)).toEqual([5n]);
-		await clock.advance(Duration.millis(1_000));
-		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 2n });
-
-		// An update that widens the budget past the verdict: nothing is stale under it.
-		sub.update({ delay: { max: Duration.millis(60_000) } });
-		expect(hooks.reofferStale(sub)).toEqual([{ start: 1n, end: 5n }]);
-		await settle();
-		expect(hooks.tryDrop(sub)).toBeUndefined();
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	} finally {
-		installed.close();
-	}
-});
-
-// A stale run one route reported is still taken back once another serves: the update reopened it
-// downstream, and the new route's copy knows nothing of it, so the groups it delivers there
-// afterwards are owed rather than kept reported. Mirrors Rust.
-test("a resumed reader takes back a replaced route's stale reports", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
-	hooks.dropTrackGroups(ta.producer, 1n, 3n, staleHole(60_000));
-	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 3n, stale: 60_000 });
-
-	front.serve(b.consume());
-	await settle();
-	expect(hooks.tryDrop(sub)).toBeUndefined();
-	// Reopened, though the new route never reported it.
-	expect(hooks.reofferStale(sub)).toEqual([{ start: 1n, end: 3n }]);
-	expect(hooks.reofferStale(sub)).toEqual([]);
-	tb.write(1n);
-	tb.write(2n);
-	expect(drain(sub)).toEqual([1n, 2n]);
-	sub.close();
-	front.consumer.close();
-	a.close();
-	b.close();
 });
 
 test("routed metadata receives a refusal without polling a group cursor", async () => {

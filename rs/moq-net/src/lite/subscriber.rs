@@ -20,7 +20,6 @@ use super::Version;
 use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
-use rangemap::RangeSet;
 
 mod fills;
 use fills::{FillAsk, RangeFills};
@@ -271,41 +270,21 @@ struct Yielding {
 	verdict: YieldVerdict,
 }
 
-/// A stale verdict expires on the next update; a final drop never does. A group already
-/// accounted before its header stays accounted even if a later stale drop expires.
+/// What a YIELDED reset of the stream leaves of its group: still owed a continuation, or
+/// accounted already, by a drop that overtook the header or one that named the group since,
+/// which ends it. Every drop is final, a stale one included.
 enum YieldVerdict {
 	Owed,
 	Accounted,
-	Stale { under: u64, error: Error },
-	AccountedStale { under: u64, error: Error },
 	Dropped(Error),
 }
 
 impl YieldVerdict {
-	fn updated(self, updates: u64) -> Self {
-		match self {
-			Self::Stale { under, .. } if under < updates => Self::Owed,
-			Self::AccountedStale { under, .. } if under < updates => Self::Accounted,
-			verdict => verdict,
-		}
-	}
-
-	fn drop_with(&mut self, error: Error, under: Option<u64>) {
-		*self = match under {
-			Some(_) if matches!(self, Self::Dropped(_)) => return,
-			Some(under) if matches!(self, Self::Accounted | Self::AccountedStale { .. }) => {
-				Self::AccountedStale { under, error }
-			}
-			Some(under) => Self::Stale { under, error },
-			None => Self::Dropped(error),
-		};
-	}
-
 	fn error(self) -> Option<Error> {
 		match self {
 			Self::Owed => None,
 			Self::Accounted => Some(Error::Stream(crate::StreamError::Old)),
-			Self::Stale { error, .. } | Self::AccountedStale { error, .. } | Self::Dropped(error) => Some(error),
+			Self::Dropped(error) => Some(error),
 		}
 	}
 }
@@ -328,9 +307,10 @@ struct Opened {
 	reading: Reading,
 }
 
-/// A group stream duplicating a copy still arriving, such as a lite-07 re-offer that
-/// overtook the reset of the stream it replaces. It waits unread, which its stream credit
-/// bounds, and is discarded if that copy finishes or takes the group if it fails.
+/// A group stream duplicating a copy still arriving, such as a lite-07 continuation that
+/// overtook the YIELDED reset of the stream it continues, or another subscription's stream
+/// feeding the same copy. It waits unread, which its stream credit bounds, and is discarded
+/// if that copy finishes or takes the group if it fails.
 struct Duplicate {
 	/// The copy still arriving, whose readers wait while this holds it.
 	arriving: track::Hold,
@@ -385,9 +365,6 @@ impl Drop for ParkWait {
 
 impl TrackEntry {
 	fn new(copy: Option<Accepted>, tail: kio::Producer<Tail>) -> Self {
-		if let Some(copy) = &copy {
-			Self::bill_tail(&tail, copy);
-		}
 		Self {
 			copy,
 			parked: None,
@@ -422,17 +399,7 @@ impl TrackEntry {
 	}
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
-	/// Bill what the tail keeps to the copy's account.
-	fn bill_tail(tail: &kio::Producer<Tail>, copy: &Accepted) {
-		// Opened before the tail's lock, which is never held across the track's.
-		let bill = copy.producer.bill();
-		if let Ok(mut tail) = tail.write() {
-			tail.bill(bill);
-		}
-	}
-
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
-		Self::bill_tail(&self.tail, &copy);
 		self.copy = Some(copy);
 		let Some(parked) = self.parked.clone() else {
 			return;
@@ -500,9 +467,6 @@ impl TrackEntry {
 			return Err(Error::Cancel);
 		};
 		let group_info = group::Info { start: hdr.key };
-		// A stale drop that overtook this stream, which the group replaces: the next update
-		// supersedes that verdict, so a YIELDED reset after it pauses the group.
-		let stale = producer.holds_stale(hdr.key);
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
@@ -534,15 +498,9 @@ impl TrackEntry {
 				}
 			}
 		}
-		let verdict = if owed {
-			YieldVerdict::Owed
-		} else if stale {
-			YieldVerdict::Stale {
-				under: self.tail.read().updates(),
-				error: Error::Stream(crate::StreamError::Old),
-			}
-		} else {
-			YieldVerdict::Accounted
+		let verdict = match owed {
+			true => YieldVerdict::Owed,
+			false => YieldVerdict::Accounted,
 		};
 		self.place(hdr, version, received, reading, verdict)
 	}
@@ -632,25 +590,20 @@ impl TrackEntry {
 
 	/// Stop tracking the stream reading `key`, returning whether a YIELDED reset pauses it.
 	/// A stream that a later one for the same group replaced finds nothing, leaving the
-	/// later stream's record in place. A stale drop an update sent since superseded no
-	/// longer ends the group.
+	/// later stream's record in place.
 	fn end_yielding(&mut self, key: u64, stream: u64) -> Option<Yielding> {
-		let mut yielding = match self.yielding.get(&key) {
-			Some(yielding) if yielding.stream == stream => self.yielding.remove(&key)?,
-			_ => return None,
-		};
-		yielding.verdict = yielding.verdict.updated(self.tail.read().updates());
-		Some(yielding)
+		match self.yielding.get(&key) {
+			Some(yielding) if yielding.stream == stream => self.yielding.remove(&key),
+			_ => None,
+		}
 	}
 
-	/// A SUBSCRIBE_DROP named `groups` with `err`, `stale` when it is a lite-07 stale verdict: a
-	/// paused group ends there, and one a stream is reading ends with it if a YIELDED reset
-	/// would otherwise pause it, since no continuation follows, unless an update supersedes a
-	/// stale drop first.
-	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error, stale: bool) {
-		let updates = stale.then(|| self.tail.read().updates());
+	/// A SUBSCRIBE_DROP named `groups` with `err`: a paused group ends there, and one a stream
+	/// is reading ends with it if a YIELDED reset would otherwise pause it, since no
+	/// continuation follows.
+	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error) {
 		for (_, yielding) in self.yielding.range_mut(groups.clone()) {
-			yielding.verdict.drop_with(err.clone(), updates);
+			yielding.verdict = YieldVerdict::Dropped(err.clone());
 		}
 		let Some(registry) = &self.paused else {
 			return;
@@ -1863,10 +1816,7 @@ impl GroupRecv {
 		});
 		let res = match res {
 			Ok(()) => {
-				// Only a lite-07 stale drop asks which groups arrived whole.
-				if group.finish().is_ok() && self.subscriber.version.has_skip() {
-					reading.finish();
-				}
+				let _ = group.finish();
 				Ok(())
 			}
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
@@ -3803,6 +3753,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: None,
 			priority: 0,
@@ -3821,8 +3772,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		})
 	}
 
@@ -3965,6 +3914,7 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Some(Duration::ZERO),
+				stale_budget: Duration::ZERO,
 				min_delay: None,
 				start: Some(floor),
 				priority: 0,
@@ -3983,8 +3933,6 @@ mod tests {
 				wanted: None,
 				unanswered: None,
 				_working: crate::session::Work::default().start(),
-				update: 0,
-				stale: RangeSet::new(),
 			});
 			if update {
 				h.serve
@@ -4440,6 +4388,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: Some(2),
 			priority: 0,
@@ -4458,8 +4407,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4557,6 +4504,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: Some(4),
 			priority: 0,
@@ -4575,8 +4523,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		};
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
@@ -4626,6 +4572,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: Some(4),
 			priority: 0,
@@ -4644,8 +4591,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		};
 		assert_eq!(sub.owed(None), Some(vec![4..10]));
 
@@ -5957,7 +5902,7 @@ mod tests {
 			.lock()
 			.get_mut(&7)
 			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
+			.dropped(3..4, &Error::Stream(crate::StreamError::Old));
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
 		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 		assert!(res.is_ok(), "{res:?}");
@@ -5970,94 +5915,10 @@ mod tests {
 		);
 	}
 
-	/// Lite-07: a stale drop that overtook the YIELDED reset of the stream it names holds only
-	/// under the update it names: once the subscriber sends another, the reset pauses the
-	/// group, which the publisher then continues or drops again.
+	/// Lite-07: a stale drop that overtook the header of the stream it names is final, so a
+	/// YIELDED reset of that stream ends the group as stale rather than pausing it.
 	#[kio::test]
-	async fn a_yielded_group_pauses_once_an_update_supersedes_its_stale_drop() {
-		use crate::lite::test_transport::{Close, ScriptedSession};
-		use crate::transport::poll::Session as _;
-
-		let version = Version::Lite07;
-		let mut script = Vec::new();
-		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-		lite::Group {
-			subscribe: 7,
-			key: 3,
-			frame_start: 0,
-		}
-		.encode(&mut encoder, version)
-		.unwrap();
-		encoder.varint(2).unwrap();
-		encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
-		script.push(b'x');
-		let yielded = ScriptedSession::new(script);
-		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: clock.clone(),
-			session: crate::driver::Transport::new(yielded.clone()),
-			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version,
-			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			peer_hop: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			crate::track::Info::timed(),
-		);
-		let subscription = crate::track::Subscription::default()
-			.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
-			.with_range(0..);
-		let mut reader = track.subscribe(subscription);
-		let framing = lite::Framing {
-			timescale: Some(Timescale::MILLI),
-			ietf: None,
-			compressed: false,
-			length_first: true,
-		};
-		let tail = kio::Producer::new(Tail::default());
-		subscriber
-			.subscribes
-			.lock()
-			.insert(7, TrackEntry::accepted(track.clone(), framing, tail.clone()));
-
-		let (_, recv) = yielded.open_bi(Default::default()).await.unwrap();
-		let mut first = GroupRecv::new(
-			subscriber.clone(),
-			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
-		);
-		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
-		let mut group = reader.assert_group();
-		// The publisher gave the group up after pausing it, and its drop lands first.
-		subscriber
-			.subscribes
-			.lock()
-			.get_mut(&7)
-			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
-		// An update supersedes it, as `buffer_update` does.
-		tail.write().ok().expect("the tail is open").updated();
-		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
-		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
-		assert!(res.is_ok(), "{res:?}");
-
-		let read = group.read_frame().await;
-		assert!(matches!(read, Ok(Some(_))), "the frame that arrived stays: {read:?}");
-		let subs = subscriber.subscribes.lock();
-		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
-		assert!(paused.groups.contains_key(&3), "the group pauses");
-	}
-
-	/// Lite-07: a stale drop that overtook the header of the stream it names holds only under
-	/// the update it names: once the subscriber sends another, a YIELDED reset of that stream
-	/// pauses the group rather than ending it as stale.
-	#[kio::test]
-	async fn a_yielded_group_pauses_once_an_update_supersedes_a_stale_drop_before_its_header() {
+	async fn a_yielded_group_ends_on_a_stale_drop_before_its_header() {
 		use crate::lite::test_transport::{Close, ScriptedSession};
 		use crate::transport::poll::Session as _;
 
@@ -6120,17 +5981,16 @@ mod tests {
 		);
 		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
 		let mut group = reader.assert_group();
-		// An update supersedes it, as `buffer_update` does.
-		tail.write().ok().expect("the tail is open").updated();
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
 		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 		assert!(res.is_ok(), "{res:?}");
 
 		let read = group.read_frame().await;
-		assert!(matches!(read, Ok(Some(_))), "the frame that arrived stays: {read:?}");
-		let subs = subscriber.subscribes.lock();
-		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
-		assert!(paused.groups.contains_key(&3), "the group pauses");
+		assert!(matches!(read, Err(Error::Stream(crate::StreamError::Old))), "{read:?}");
+		assert!(
+			subscriber.subscribes.lock().get(&7).unwrap().paused.is_none(),
+			"nothing paused"
+		);
 	}
 
 	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
@@ -6394,8 +6254,8 @@ mod tests {
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
-	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under update 0 and the
-	/// max age `budget`, its broadcast, and the tail it accounts on.
+	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under the max age `budget`,
+	/// its broadcast, and the tail it accounts on.
 	async fn lite07_serving(
 		budget: Duration,
 	) -> (TrackServe, ServeLoop, kio::Producer<Tail>, crate::broadcast::Producer) {
@@ -6435,6 +6295,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Some(budget),
+			stale_budget: budget,
 			min_delay: None,
 			start: None,
 			priority: 0,
@@ -6453,16 +6314,13 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		});
 		(serve, serving, tail, broadcast)
 	}
 
 	/// A stale drop of part of a fill's run recovers that part on its own subscription, which
-	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: left
-	/// in, any later update would reopen the stale drop and the publisher would serve the
-	/// recovered groups on both.
+	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: the
+	/// subscription that dropped it never delivers it.
 	#[kio::test]
 	#[expect(clippy::single_range_in_vec_init, reason = "the asked runs are a list, here one")]
 	async fn a_recovered_run_leaves_the_subscription() {
@@ -6514,33 +6372,11 @@ mod tests {
 		);
 	}
 
-	/// A SUBSCRIBE_DROP can only echo an update the subscriber sent: one naming a later update
-	/// is a protocol violation, and accounts for nothing.
+	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
+	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
+	/// OLD drop arriving after it may have been judged before the publisher read it.
 	#[kio::test]
-	async fn a_drop_naming_an_unsent_update_is_a_protocol_violation() {
-		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-			groups: 1..3,
-			error: u64::from(crate::coding::StreamCodes::encode_stream_code(
-				&Version::Lite07,
-				&crate::StreamError::Old,
-			)),
-			update: 1,
-		});
-		assert!(matches!(
-			serving.apply_response(&serve, drop),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(!tail.read().covers(1..3));
-	}
-
-	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
-	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
-	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
-	/// verdict: still owed, and given up on no reader. Any other drop is final, whatever update
-	/// it names.
-	#[kio::test]
-	async fn an_update_reopens_every_stale_drop_and_supersedes_the_rest() {
+	async fn an_update_reopens_no_stale_drop() {
 		let version = Version::Lite07;
 		let budget = Duration::from_millis(500);
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
@@ -6550,70 +6386,40 @@ mod tests {
 				.with_ranges([crate::track::Range::groups(0..)]),
 		);
 		let waiter = kio::Waiter::noop();
-		let code = |err: &crate::StreamError| u64::from(crate::coding::StreamCodes::encode_stream_code(&version, err));
-		let drop = |first, last: u64, err: &crate::StreamError, update| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: first..last + 1,
-				error: code(err),
-				update,
-			})
+		let old = |groups: std::ops::Range<u64>| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &crate::StreamError::Old, version))
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 
-		serving
-			.apply_response(&serve, drop(1, 2, &crate::StreamError::Old, 0))
-			.unwrap();
+		serving.apply_response(&serve, old(1..3)).unwrap();
 		assert!(covers(1..3));
 		assert_eq!(
 			reader.poll_drop(&waiter),
-			Poll::Ready((1..3, track::Hole::stale(budget))),
-			"judged under the budget sent with update 0"
+			Poll::Ready((1..3, track::Hole::stale(budget)))
 		);
 
-		// An update that keeps the budget and the ranges still reopens the stale run.
 		{
 			let Sub::Active(active) = &mut serving.sub else {
 				unreachable!("an active subscription");
 			};
+			active.max_delay = Some(Duration::from_secs(5));
 			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, serve.subscriber.runtime.now()).unwrap();
-			assert_eq!(active.update, 1);
-			assert!(active.stale.is_empty());
+			buffer_update(active, ranges).unwrap();
 		}
-		assert!(!covers(1..3), "the publisher re-offers or drops it again");
+		assert!(covers(1..3), "still accounted for");
+		assert!(reader.poll_drop(&waiter).is_pending(), "reported once");
 
-		// Still in flight from before the update: no verdict.
-		serving
-			.apply_response(&serve, drop(4, 4, &crate::StreamError::Old, 0))
-			.unwrap();
-		assert!(!covers(4..5), "still owed");
-		assert!(reader.poll_drop(&waiter).is_pending(), "no reader settles on it");
-
-		// Any other drop is final, whatever update it names.
-		serving
-			.apply_response(&serve, drop(5, 5, &crate::StreamError::App(5), 0))
-			.unwrap();
-		assert!(covers(5..6));
+		serving.apply_response(&serve, old(4..5)).unwrap();
+		assert!(covers(4..5));
 		assert_eq!(
 			reader.poll_drop(&waiter),
-			Poll::Ready((5..6, track::Hole::drop(crate::StreamError::App(5))))
-		);
-
-		// Under the current update, a stale drop is a verdict again.
-		serving
-			.apply_response(&serve, drop(6, 6, &crate::StreamError::Old, 1))
-			.unwrap();
-		assert!(covers(6..7));
-		assert_eq!(
-			reader.poll_drop(&waiter),
-			Poll::Ready((6..7, track::Hole::stale(budget)))
+			Poll::Ready((4..5, track::Hole::stale(budget)))
 		);
 	}
 
-	/// A group that arrives over a lite-07 stale (OLD) drop wins over it, whichever lands first:
-	/// the publisher serves a group after its stale drop, as a front that switched routes does,
-	/// and the group's stream may overtake the drop. The next update owes it no more, and a
-	/// group still arriving is never aborted by the drop.
+	/// A group that arrives over a lite-07 stale (OLD) drop wins over it in the copy, whichever
+	/// lands first: the group's stream may overtake the drop, or a recovery may deliver it. A
+	/// group still arriving is never aborted by the drop, and an update owes none of them again.
 	#[kio::test]
 	async fn a_group_wins_over_its_stale_drop() {
 		let version = Version::Lite07;
@@ -6627,7 +6433,6 @@ mod tests {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 				groups: key..key + 1,
 				error: code,
-				update: 0,
 			})
 		};
 		let frame = |mut group: crate::group::Producer| {
@@ -6658,116 +6463,15 @@ mod tests {
 				unreachable!("an active subscription");
 			};
 			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+			buffer_update(active, ranges).unwrap();
 		}
-		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
-		assert!(covers(1..4), "every group that arrived stays accounted for");
-		assert!(!covers(4..5), "the group that never arrived is owed again");
+		assert!(tail.read().covers(1..5), "every group stays accounted for");
 		frame(two).expect("the drop leaves a group still arriving");
 		frame(three).expect("the update leaves a group still arriving");
 	}
 
-	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
-	/// evicted it: the publisher served it over that drop, so the next update owes it no more.
-	/// A stream that finished under an earlier update says nothing of a drop under the new one.
-	#[kio::test]
-	async fn a_finished_group_wins_over_a_late_stale_drop_once_evicted() {
-		let version = Version::Lite07;
-		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-		let now = || serve.subscriber.runtime.now();
-		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
-			&version,
-			&crate::StreamError::Old,
-		));
-		let old = |key: u64, update| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: key..key + 1,
-				error: code,
-				update,
-			})
-		};
-		serve.subscriber.subscribes.lock().insert(
-			0,
-			TrackEntry::accepted(
-				serving.serving.clone(),
-				lite::Framing {
-					timescale: Some(Timescale::MILLI),
-					ietf: None,
-					compressed: false,
-					length_first: false,
-				},
-				tail.clone(),
-			),
-		);
-		// A group stream that arrives whole, through the path that records it, then is evicted.
-		let arrive = async |serving: &mut ServeLoop, key| {
-			use crate::transport::poll::Session as _;
-
-			let mut script = Vec::new();
-			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-			lite::Group {
-				subscribe: 0,
-				key,
-				frame_start: 0,
-			}
-			.encode(&mut encoder, version)
-			.unwrap();
-			// A frame at the group's key, since starts strictly increase.
-			encoder.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
-			encoder.bytes(b"x").unwrap();
-			let session = crate::lite::test_transport::ScriptedSession::eof(script);
-			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			let mut group = GroupRecv::new(
-				serve.subscriber.clone(),
-				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
-			);
-			kio::wait(|waiter| group.poll_serve(waiter)).await.unwrap();
-			serving.serving.evict(key);
-		};
-		let update = |serving: &mut ServeLoop| {
-			let Sub::Active(active) = &mut serving.sub else {
-				unreachable!("an active subscription");
-			};
-			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, now()).unwrap();
-		};
-		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
-
-		arrive(&mut serving, 1).await;
-		serving.apply_response(&serve, old(1, 0)).unwrap();
-		update(&mut serving);
-		assert!(covers(1..2), "the evicted group that arrived stays accounted for");
-
-		// Finished under the first update, then judged stale under the second.
-		arrive(&mut serving, 2).await;
-		update(&mut serving);
-		serving.apply_response(&serve, old(2, 2)).unwrap();
-		update(&mut serving);
-		assert!(
-			!covers(2..3),
-			"a drop under a later update is the publisher's to re-offer"
-		);
-
-		// Under the pool's debt the tail folds what finished, gaps and all. A group in the span
-		// whose stream arrived before its stale drop still wins over it; a gap there the drop
-		// accounted first is owed again.
-		for key in [3, 5, 7] {
-			arrive(&mut serving, key).await;
-		}
-		if let Ok(mut state) = tail.write() {
-			assert!(state.fold());
-		}
-		serving.apply_response(&serve, old(3, 3)).unwrap();
-		serving.apply_response(&serve, old(4, 3)).unwrap();
-		update(&mut serving);
-		assert!(covers(3..4), "the folded group that arrived stays accounted for");
-		assert!(!covers(4..5), "the folded gap is the publisher's to re-offer");
-	}
-
-	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
-	/// update reopens only stale verdicts, so the groups stay accounted for, and the skip
-	/// stays final rather than being superseded with the OLD drop. An empty range names
-	/// nothing.
+	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it in
+	/// the copy, and an update reopens none of them. An empty range names nothing.
 	#[kio::test]
 	async fn a_skip_or_final_drop_replaces_an_earlier_stale_one() {
 		let version = Version::Lite07;
@@ -6781,7 +6485,6 @@ mod tests {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 				groups: first..last + 1,
 				error: code,
-				update: 0,
 			})
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
@@ -6797,7 +6500,7 @@ mod tests {
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..5, &crate::StreamError::App(5), 0, version)),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..5, &crate::StreamError::App(5), version)),
 			)
 			.unwrap();
 		// Empty ranges.
@@ -6814,7 +6517,7 @@ mod tests {
 				unreachable!("an active subscription");
 			};
 			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, serve.subscriber.runtime.now()).unwrap();
+			buffer_update(active, ranges).unwrap();
 		}
 		assert!(covers(1..3), "the skip is final");
 		assert!(covers(4..5), "the drop is final");
@@ -6835,7 +6538,7 @@ mod tests {
 		let version = Version::Lite07;
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
 		let drop = |first, last: u64, error: &crate::StreamError| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, 0, version))
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, version))
 		};
 		let skip = |first, last: u64| {
 			lite::SubscribeResponse::Skip(lite::SubscribeSkip {
@@ -6901,7 +6604,6 @@ mod tests {
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 					groups: 2..3,
 					error: code.into(),
-					update: 0,
 				}),
 			] {
 				resp.encode(
@@ -11305,6 +11007,11 @@ struct SubStream {
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	max_delay: Option<Duration>,
+	/// The narrowest max delay this subscription has asked, which a lite-07 stale drop is
+	/// recorded under: the wire does not say which update a drop crossed, so it may have been
+	/// judged under any budget asked before it arrived. Too narrow costs a wider reader a
+	/// request of its own; too wide would settle it on a group it could still get.
+	stale_budget: Duration,
 	min_delay: Option<Duration>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
@@ -11354,12 +11061,6 @@ struct SubStream {
 	/// without an instance resolves whichever one wins the path when it arrives, so one
 	/// still unanswered once another instance takes the path may be answered by it.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
-	/// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given
-	/// up under an earlier one is no verdict on the current terms.
-	update: u64,
-	/// The runs `tail` accounts for by a stale drop under `update`: the next update reopens
-	/// them, since the publisher re-offers or drops them again under it.
-	stale: RangeSet<u64>,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -11977,7 +11678,7 @@ impl TrackServe {
 					// Open an upstream SUBSCRIBE for the first subscriber. Its terms are new, so a
 					// stale run an earlier subscription reported is no verdict on them.
 					Sub::None => {
-						producer.supersede_stale(judged(&wire.ranges));
+						producer.supersede_stale();
 						Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups)))
 					}
 					Sub::Active(active) => {
@@ -12040,7 +11741,7 @@ impl TrackServe {
 							} else if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active, edit, producer, self.subscriber.runtime.now())?;
+							buffer_update(active, edit)?;
 						}
 						Ok(Begin::None)
 					}
@@ -12309,55 +12010,11 @@ enum Begin {
 	Establish(Establish),
 }
 
-/// Every group `ranges` name, which a stale drop under them was judged against. A bound only
-/// the publisher resolves is taken at its widest: a start from group 0, an end past the live
-/// edge (an exclusive end of `u64::MAX`).
-fn judged<'a>(ranges: impl IntoIterator<Item = &'a lite::Range>) -> Option<RangeSet<u64>> {
-	let mut judged = RangeSet::new();
-	for range in ranges {
-		let start = match range.start {
-			Some(lite::Anchor::Absolute(start)) => start.group,
-			_ => 0,
-		};
-		let end = match range.end {
-			Some(lite::Anchor::Absolute(end)) => end.group.saturating_add(u64::from(end.frame > 0)),
-			_ => u64::MAX,
-		};
-		if start < end {
-			judged.insert(start..end);
-		}
-	}
-	Some(judged)
-}
-
 /// Buffer the current SUBSCRIBE parameters as the next update, with `ranges` the change to
-/// the live ranges. The caller flushes.
-///
-/// A stale drop given up under an earlier update may still be in flight, and this one may
-/// move the range or budget it was judged against, so the runs `serving` holds as stale
-/// become unknown again: a reader fills them by range rather than trust an old verdict.
-///
-/// A lite-07 publisher re-offers every group it reported stale on any update, and drops
-/// again under the new number what is still stale, so the tail owes every stale run again,
-/// from `now`. A group that arrived since its stale drop won over it: the publisher served
-/// it, so it is neither re-offered nor owed again.
-fn buffer_update(
-	active: &mut SubStream,
-	ranges: lite::RangeEdit,
-	serving: &track::Producer,
-	now: crate::time::Instant,
-) -> Result<(), Error> {
-	active.update += 1;
-	let held = serving.supersede_stale(judged(active.live.iter().map(|(_, range)| range)));
-	let recorded = std::mem::take(&mut active.stale);
-	if let Ok(mut tail) = active.tail.write() {
-		tail.updated();
-		for run in recorded.iter() {
-			for reopened in held.overlapping(run) {
-				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
-			}
-		}
-	}
+/// the live ranges. The caller flushes. It reopens nothing: every drop the publisher sent,
+/// a stale one included, stays final on the subscription.
+fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), Error> {
+	active.stale_budget = active.stale_budget.min(active.max_delay.unwrap_or(Duration::MAX));
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
@@ -12365,7 +12022,6 @@ fn buffer_update(
 		min_delay: active.min_delay,
 		ranges,
 		order: active.order,
-		update: active.update,
 	})
 }
 
@@ -12434,7 +12090,6 @@ impl Establish {
 			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
-			update: 0,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -12476,6 +12131,7 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: self.subscription.delay.max,
+			stale_budget: self.subscription.delay.max.unwrap_or(Duration::MAX),
 			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
@@ -12494,8 +12150,6 @@ impl Establish {
 			declared: None,
 			end: None,
 			wanted: None,
-			update: 0,
-			stale: RangeSet::new(),
 			_working: self.session.work().start(),
 		}
 	}
@@ -13846,80 +13500,46 @@ impl ServeLoop {
 			}
 			// The publisher will never send these groups, so they
 			// are accounted for without a stream, and a reader of
-			// one still arriving ends with the drop's error now. A
-			// lite-07 stale drop leaves a group whose stream arrived,
-			// since the stream wins over it.
+			// one still arriving ends with the drop's error now. Every
+			// drop is final on the subscription, a stale one included.
 			lite::SubscribeResponse::Drop(dropped) => {
-				// It can only echo an update this subscriber sent, even when it names nothing.
-				if dropped.update > active.update {
-					return Err(Error::ProtocolViolation);
-				}
 				let groups = dropped.groups.clone();
 				if groups.is_empty() {
 					return Ok(());
 				}
 				let error = dropped.error(serve.subscriber.version);
-				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
-				// other drop is final, whatever update it names.
-				let stale = serve.subscriber.version.has_skip() && error == crate::StreamError::Old;
-				// One given up under an update since replaced says nothing of the current terms:
-				// the publisher re-offers it or drops it again under the new number, so it is
-				// still owed, and a reader that wants it fills it by range meanwhile.
-				if !(stale && dropped.update < active.update) {
-					// Asked before this drop is accounted: what a fold forgot finishing that the
-					// ledger already accounted may be a stream this drop overtook.
-					let overtaken: Vec<_> = match stale {
-						true => active.tail.read().overtaken(groups.clone()).collect(),
-						false => Vec::new(),
-					};
-					if let Ok(mut tail) = active.tail.write() {
-						tail.account(groups.clone(), serve.subscriber.runtime.now());
-					}
-					// A paused group the drop names ends there: no continuation follows.
-					if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
-						entry.dropped(groups.clone(), &Error::Stream(error.clone()), stale);
-					}
-					match stale {
-						// Judged under the budget this subscriber sent with that update. A
-						// key already skipped stays skipped, and one whose group arrived
-						// keeps it, so no update reopens either. A group a fill asked for is
-						// recovered on its own, so the copy does not record it given up meanwhile.
-						true => {
-							let mut given = rangemap::RangeSet::new();
-							given.insert(groups.clone());
-							for asked in active.fill_groups.overlapping(&groups) {
-								given.remove(asked.clone());
-							}
-							// A group whose stream finished under this update was served over
-							// the drop, so it won, even once the cache evicted it.
-							for finished in active.tail.read().finished(groups.clone()) {
-								given.remove(finished);
-							}
-							let mut owed = rangemap::RangeSet::new();
-							for given in given.iter() {
-								owed.extend(self.serving.give_up(
-									given.clone(),
-									track::Hole::stale(active.max_delay.unwrap_or(Duration::MAX)),
-								));
-							}
-							// Owed again by the next update, save what a stream may have won.
-							for overtaken in overtaken {
-								owed.remove(overtaken);
-							}
-							active.stale.extend(owed);
-						}
-						// Final, so no update reopens it, even where it replaces a stale drop.
-						false => {
-							active.stale.remove(groups.clone());
-							self.serving.give_up(groups.clone(), track::Hole::drop(error.clone()));
-						}
-					}
-					self.range_fills.refuse(groups, error);
+				if let Ok(mut tail) = active.tail.write() {
+					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
+				// A paused group the drop names ends there: no continuation follows.
+				if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
+					entry.dropped(groups.clone(), &Error::Stream(error.clone()));
+				}
+				match serve.subscriber.version.has_skip() && error == crate::StreamError::Old {
+					// Lite-07 judged it stale, recorded under the narrowest budget it may have been
+					// judged under. A reader no wider settles on it; a wider one asks for the group
+					// on a request of its own, since this subscription never delivers it. A key already skipped stays
+					// skipped, and one whose group arrived keeps it. A group a fill asked for is
+					// recovered on its own, so the copy does not record it given up meanwhile.
+					true => {
+						let mut given = rangemap::RangeSet::new();
+						given.insert(groups.clone());
+						for asked in active.fill_groups.overlapping(&groups) {
+							given.remove(asked.clone());
+						}
+						for given in given.iter() {
+							self.serving
+								.give_up(given.clone(), track::Hole::stale(active.stale_budget));
+						}
+					}
+					false => {
+						self.serving.give_up(groups.clone(), track::Hole::drop(error.clone()));
+					}
+				}
+				self.range_fills.refuse(groups, error);
 			}
-			// Never produced, so nothing is waited for and no reader ends. A skip is final and
-			// replaces any drop of the same groups, stale or final, so no update reopens them;
-			// a reader a drop already ended stays ended.
+			// Never produced, so nothing is waited for and no reader ends. A skip replaces any
+			// drop of the same groups, stale or final; a reader a drop already ended stays ended.
 			lite::SubscribeResponse::Skip(skipped) => {
 				let groups = skipped.groups.clone();
 				if groups.is_empty() {
@@ -13928,7 +13548,6 @@ impl ServeLoop {
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
-				active.stale.remove(groups.clone());
 				// A fill owing them is answered: the source never had them.
 				self.range_fills.refuse(groups.clone(), crate::StreamError::NotFound);
 				// A group that arrived was produced after all, so the skip contradicts it: it
@@ -14207,9 +13826,7 @@ impl ServeLoop {
 						{
 							active.wanted = Some(wanted);
 							let ranges = active.live.unchanged();
-							if let Err(err) =
-								buffer_update(active, ranges, &self.serving, serve.subscriber.runtime.now())
-							{
+							if let Err(err) = buffer_update(active, ranges) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							continue;

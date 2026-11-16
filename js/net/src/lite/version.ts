@@ -610,10 +610,10 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count`. Added in lite-07;
- * earlier versions carry an inclusive `Group Start` and `Group End`.
+ * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry a non-empty `[Group Start, Group End)` with an
+ * exclusive end. Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
  */
-export function hasGroupCount(version: Version): boolean {
+export function hasGroupSpan(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

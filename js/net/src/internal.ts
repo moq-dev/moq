@@ -534,13 +534,8 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
-	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
-	reofferGroups(start: bigint, end: bigint, from?: number): { groups: GroupConsumer[]; givenUp: Run[] };
-	/**
-	 * See {@link hooks.reofferStale}: the stale runs queued here, those this reader reported, which a
-	 * route change keeps, and those the serving copy reported.
-	 */
-	reofferStale(): Run[];
+	/** See {@link hooks.continueGroup}, answered by the serving copy. */
+	continueGroup(sequence: bigint, from: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -649,12 +644,10 @@ export const hooks: {
 	 */
 	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
 	/**
-	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
-	 * were replaced, so they are unknown again. `judged` is every group the new terms' ranges name,
-	 * undefined when unknown. Returns the runs forgotten: a group that arrived since its stale drop
-	 * replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
+	 * Forget every run a received copy holds as stale: a new upstream subscription opened, whose
+	 * terms are new, so those groups are unknown again. Mirrors the Rust `supersede_stale`.
 	 */
-	supersedeStale: (producer: Producer, judged: readonly Run[] | undefined) => Run[];
+	supersedeStale: (producer: Producer) => void;
 	/**
 	 * Mark a track as fed by a wire subscription, which owes missing groups, until
 	 * {@link cacheTrack} ends it. `starts` says how that wire's start bounds the fills its readers
@@ -812,26 +805,11 @@ export const hooks: {
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
-	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
-	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
-	 * taken back, which are owed again. Mirrors the Rust crate-private
-	 * `track::Subscriber::reoffer_stale`.
+	 * A fresh read from frame `from` of group `sequence`, if a subscriber's track still caches it from
+	 * there, its range still admits it, and its current budget does not judge it stale, expiring
+	 * against that budget: a lite-07 continuation of a group whose stream yielded.
 	 */
-	reofferStale: (subscriber: Subscriber) => Run[];
-	/**
-	 * Fresh reads of the groups in `[start, end)` a subscriber's track still caches, its range still
-	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
-	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
-	 * stale, or a lite-07 continuation of a group whose stream yielded. Each read starts at frame
-	 * `from`, so a group whose cache holds only frames past it is given up. Mirrors the Rust
-	 * crate-private `track::Subscriber::reoffer_groups`.
-	 */
-	reofferGroups: (
-		subscriber: Subscriber,
-		start: bigint,
-		end: bigint,
-		from?: number,
-	) => { groups: GroupConsumer[]; givenUp: Run[] };
+	continueGroup: (subscriber: Subscriber, sequence: bigint, from: number) => GroupConsumer | undefined;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -842,7 +820,8 @@ export const hooks: {
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
-	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.
+	 * a new upstream subscription superseded is gone. Mirrors the Rust crate-private
+	 * `track::Subscriber::stale_held`.
 	 */
 	staleHeld: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
@@ -1143,10 +1122,7 @@ export const hooks: {
 	supersedeStale: () => {
 		throw new Error("track.ts not loaded");
 	},
-	reofferStale: () => {
-		throw new Error("track.ts not loaded");
-	},
-	reofferGroups: () => {
+	continueGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {

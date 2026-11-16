@@ -21,8 +21,8 @@ import {
 	hasDropCode,
 	hasEndError,
 	hasFrameBounds,
-	hasGroupCount,
 	hasGroupOrder,
+	hasGroupSpan,
 	hasMinDelay,
 	hasOrder,
 	hasRanges,
@@ -32,16 +32,6 @@ import {
 	resolvesStart,
 	Version,
 } from "./version.ts";
-
-/** Decode the `Update` number after the ranges. A wire without the field decodes as 0. */
-async function decodeUpdate(r: Reader, version: Version): Promise<bigint> {
-	return hasSkip(version) ? await r.u62() : 0n;
-}
-
-/** Encode the `Update` number, dropping it on a wire without the field. */
-async function encodeUpdate(w: Writer, version: Version, update: bigint) {
-	if (hasSkip(version)) await w.u62(update);
-}
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -655,8 +645,6 @@ export class SubscribeUpdate {
 	 * {@link remove}; {@link LiveRanges.apply} resolves a received update to every live range.
 	 */
 	ranges?: WireRange[];
-	/** See {@link Subscribe.update}: larger than the subscription's previous one. */
-	update: bigint;
 	/** Lite-07: the Range IDs of the live ranges to retire before adding {@link ranges}. */
 	remove?: bigint[];
 
@@ -671,7 +659,6 @@ export class SubscribeUpdate {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
-		update?: bigint;
 		remove?: bigint[];
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
@@ -686,7 +673,6 @@ export class SubscribeUpdate {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
-		this.update = props.update ?? 0n;
 		this.remove = props.remove;
 	}
 
@@ -718,7 +704,6 @@ export class SubscribeUpdate {
 				} else {
 					await encodeSpan(w, version, this, this.ranges);
 				}
-				await encodeUpdate(w, version, this.update);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				break;
 		}
@@ -743,7 +728,6 @@ export class SubscribeUpdate {
 				} else {
 					span = await decodeSpan(r, version);
 				}
-				const update = await decodeUpdate(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
 				return new SubscribeUpdate({
 					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
@@ -752,7 +736,6 @@ export class SubscribeUpdate {
 					maxDelay,
 					minDelay,
 					...span,
-					update,
 				});
 			}
 		}
@@ -822,13 +805,6 @@ export class Subscribe {
 	 */
 	ranges?: WireRange[];
 
-	/**
-	 * The number of the terms in effect: the SUBSCRIBE is 0 and every SUBSCRIBE_UPDATE carries a
-	 * larger one, which a {@link SubscribeDrop} echoes. Lite-07+; earlier wires decode as 0 and
-	 * drop it on encode.
-	 */
-	update: bigint;
-
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -845,7 +821,6 @@ export class Subscribe {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
-		update?: bigint;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -862,7 +837,6 @@ export class Subscribe {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
-		this.update = props.update ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -884,7 +858,6 @@ export class Subscribe {
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
-		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -904,7 +877,6 @@ export class Subscribe {
 				const maxDelay = await decodeMaxDelay(r, version);
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
-				const update = await decodeUpdate(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -917,7 +889,6 @@ export class Subscribe {
 					maxDelay,
 					minDelay,
 					...span,
-					update,
 				});
 			}
 		}
@@ -1172,23 +1143,26 @@ export class SubscribeStarted {
 }
 
 /**
- * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: `Group Start` and `Group Count` on lite-07, an inclusive
- * `Group Start` and `Group End` before. Either way it ends by the reserved sequence 2^64-1, so it
- * never names that group.
+ * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: a non-empty `[Group Start, Group End)` on lite-07, an
+ * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved sequence
+ * 2^64-1, so it never names that group.
  */
 async function decodeGroups(r: Reader, version: Version): Promise<{ start: bigint; end: bigint }> {
 	const start = await r.u62();
-	const end = hasGroupCount(version) ? start + (await r.u62()) : (await r.u62()) + 1n;
-	if (end < start || end >= UNBOUNDED) throw new ProtocolViolation(`invalid group range: [${start}, ${end})`);
+	const span = hasGroupSpan(version);
+	const end = span ? await r.u62() : (await r.u62()) + 1n;
+	if (end < start || (span && end === start) || end >= UNBOUNDED)
+		throw new ProtocolViolation(`invalid group range: [${start}, ${end})`);
 	return { start, end };
 }
 
 async function encodeGroups(w: Writer, start: bigint, end: bigint, version: Version) {
-	// An empty range at 0 has no inclusive end to spell before lite-07.
-	if (end < start || end >= UNBOUNDED || (end === 0n && !hasGroupCount(version)))
+	const span = hasGroupSpan(version);
+	// An empty range at 0 has no inclusive end to spell before lite-07, and lite-07 has no empty one.
+	if (end < start || end >= UNBOUNDED || (span ? end === start : end === 0n))
 		throw new RangeError(`invalid group range: [${start}, ${end})`);
 	await w.u62(start);
-	await w.u62(hasGroupCount(version) ? end - start : end - 1n);
+	await w.u62(span ? end : end - 1n);
 }
 
 /**
@@ -1204,28 +1178,20 @@ export class SubscribeDrop {
 	/** One past the last dropped group sequence. */
 	end: bigint;
 	error: number;
-	/**
-	 * The number of the SUBSCRIBE or SUBSCRIBE_UPDATE in effect when the groups were given up
-	 * ({@link Subscribe.update}): a stale (OLD) drop under a superseded one is no verdict.
-	 * Lite-07+; earlier wires decode as 0.
-	 */
-	update: bigint;
 
-	constructor(props: { start: bigint; end: bigint; error: number; update?: bigint }) {
+	constructor(props: { start: bigint; end: bigint; error: number }) {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
-		this.update = props.update ?? 0n;
 	}
 
-	/** Name `[start, end)` given up with `err` under the terms numbered `update`, as `version` carries it. */
-	static given(start: bigint, end: bigint, err: unknown, version: Version, update = 0n): SubscribeDrop {
+	/** Name `[start, end)` given up with `err`, as `version` carries it. */
+	static given(start: bigint, end: bigint, err: unknown, version: Version): SubscribeDrop {
 		return new SubscribeDrop({
 			start,
 			end,
 			// Before lite-07 the code is the application's, so it says nothing of why.
 			error: hasDropCode(version) ? toStreamCode(err) : 0,
-			update: hasSkip(version) ? update : 0n,
 		});
 	}
 
@@ -1245,14 +1211,12 @@ export class SubscribeDrop {
 	async #encode(w: Writer, version: Version) {
 		await encodeGroups(w, this.start, this.end, version);
 		await w.u53(this.error);
-		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<SubscribeDrop> {
 		const { start, end } = await decodeGroups(r, version);
 		const error = await r.u53();
-		const update = await decodeUpdate(r, version);
-		return new SubscribeDrop({ start, end, error, update });
+		return new SubscribeDrop({ start, end, error });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
