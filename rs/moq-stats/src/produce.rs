@@ -493,7 +493,9 @@ impl<T: Serialize> Snapshot<T> {
 
 	/// Declare every start below the first group skipped, for a track whose name no earlier
 	/// run used: a reader then knows the first group it reads opens the track
-	/// ([`moq_net::track::Subscriber::is_skipped`]).
+	/// ([`moq_net::track::Subscriber::is_skipped`]). A reader the skip hasn't reached, in
+	/// flight or forgotten by this relay's cache, reads the first group as a later one, so
+	/// a meter that bills a run from zero only on its first group never counts it twice.
 	fn fresh(mut self) -> Self {
 		self.fresh = true;
 		self
