@@ -132,10 +132,6 @@ class TruckSession:
     def commands(self) -> asyncio.Queue[Command]:
         return self._commands
 
-    @property
-    def drivers(self) -> Drivers:
-        return self._drivers
-
     async def run(self, client: moq.Client, drivers: str) -> None:
         """Consume driver commands and actuate until cancelled.
 
