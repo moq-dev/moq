@@ -912,10 +912,7 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: TrackInfo(
-          timescale: 1000000,
-          compression: Compression.deflate(),
-        ),
+        info: TrackInfo(timescale: 1000000, compression: Compression.deflate()),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -951,10 +948,7 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: TrackInfo(
-          timescale: 1000000,
-          compression: Compression.deflate(),
-        ),
+        info: TrackInfo(timescale: 1000000, compression: Compression.deflate()),
       ),
       config: moq_json.WindowConfig(),
     );

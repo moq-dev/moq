@@ -408,7 +408,8 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // directly. `dev.moq.media.Container` aliases `MoqContainer` for signatures, but its
 // variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
-// (AudioCodec, VideoCodec, Compression) expose constructors through the alias (`AudioCodec.opus()`).
+// (AudioCodec, VideoCodec, Compression) expose constructors through the alias
+// (`AudioCodec.opus()`).
 
 /** Writes live datagrams with an independent sequence counter and no cache. */
 typealias DatagramProducer = uniffi.moq.MoqDatagramProducer

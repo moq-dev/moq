@@ -674,7 +674,8 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate()))
+            track: try broadcast.publishTrack(
+                name: "log", info: TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate()))
         )
         let consumer = try Json.WindowConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "log"))
