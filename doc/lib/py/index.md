@@ -28,7 +28,7 @@ Every write takes a timestamp, and the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowEventPush`, `WindowEventPop`, or `WindowEventSkip`.
 A raw track with a `None` timescale is untimed: each frame carries `moq.Timestamp.unscaled(key)`, its group's key, whose `scale` is `None`.
-`TrackInfo(compression=moq.Compression.DEFLATE)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+`TrackInfo(compression=moq.Compression.deflate())` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `update`, `append`, `push`, and `pop` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
@@ -86,7 +86,7 @@ async def main():
             catalog_producer,
             moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
-                codec=moq.VideoCodec.H264,
+                codec=moq.VideoCodec.h264(),
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
             track="camera",
@@ -96,7 +96,7 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}', moq.Timestamp.unscaled(0))  # untimed: the first group's key
-        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE))
+        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.deflate()))
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 

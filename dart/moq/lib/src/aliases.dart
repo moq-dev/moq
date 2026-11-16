@@ -3,11 +3,12 @@ import 'package:moq_ffi/moq_ffi.dart';
 // Re-export the UniFFI types without their `Moq` prefix, so consumers spell
 // them the way the Rust API does. These are type aliases, not wrappers: the
 // values are the exact same objects, so every generated method applies
-// unchanged and the prefixed names stay valid. `Delay`, `Subscription`, and
-// `Timestamp` are extension types instead, which are the same objects too but
-// add constructors: an omitted delay bound is the zero moq-net defaults to,
-// where the generated record leaves it null, and a timestamp is built either
-// scaled or [Timestamp.unscaled], as in Rust.
+// unchanged and the prefixed names stay valid. `Delay`, `Subscription`,
+// `TrackInfo`, and `Timestamp` are extension types instead, which are the same
+// objects too but add constructors: an omitted delay bound or max age is the
+// zero moq-net defaults to, where the generated record leaves it null (no
+// limit), and a timestamp is built either scaled or [Timestamp.unscaled], as in
+// Rust.
 //
 // Four types are deliberately not aliased, because the unprefixed name is
 // already taken where this package is used:
@@ -216,8 +217,30 @@ typedef Position = MoqPosition;
 /// Options for fetching one past group by sequence.
 typedef FetchGroupOptions = MoqFetchGroupOptions;
 
+/// How a track's frames are compressed on the wire: `Compression.deflate()`, or null in
+/// [TrackInfo] for none. Compare a received one by `name()`.
+typedef Compression = MoqCompression;
+
 /// Delivery settings for a raw track: priority, ordering, latency budget, and timescale.
-typedef TrackInfo = MoqTrackInfo;
+extension type TrackInfo._(MoqTrackInfo _info) implements MoqTrackInfo {
+  /// `maxAge` is how long a superseded group stays fresh, defaulting to zero, moq-net's
+  /// default, which serves only the live edge. An explicit null sets no publisher limit.
+  TrackInfo({
+    int priority = 0,
+    Duration? maxAge = Duration.zero,
+    int? refresh,
+    int? timescale,
+    MoqCompression? compression,
+  }) : this._(
+         MoqTrackInfo(
+           priority: priority,
+           maxAge: maxAge,
+           refresh: refresh,
+           timescale: timescale,
+           compression: compression,
+         ),
+       );
+}
 
 /// Divides one connection's send estimate among the tracks sharing it.
 typedef Allocator = MoqAllocator;

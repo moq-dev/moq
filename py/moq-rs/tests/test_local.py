@@ -537,7 +537,7 @@ async def test_publish_track_info_and_subscription():
 
 def test_track_info_keeps_native_default_priority():
     """A partially configured TrackInfo keeps moq-ffi's default priority of 0."""
-    native = moq_ffi.MoqTrackInfo().priority
+    native = moq_ffi.MoqTrackInfo(max_age=None).priority
     assert moq.TrackInfo()._ffi().priority == native
     assert moq.TrackInfo(max_age=timedelta(seconds=2))._ffi().priority == native
     assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
@@ -557,6 +557,17 @@ def test_track_info_max_age():
         assert got.max_age == max_age
         again = broadcast.publish_track(f"again{i}", got).consume().info()
         assert again.max_age == max_age
+    broadcast.close()
+
+
+def test_track_info_reads_compression_back():
+    """A received compression compares equal to the selector and names itself."""
+    broadcast = moq.BroadcastProducer()
+    info = moq.TrackInfo(compression=moq.Compression.deflate())
+    got = broadcast.publish_track("deflate", info).consume().info()
+    assert got.compression == moq.Compression.deflate()
+    assert got.compression is not None and got.compression.name() == "deflate"
+    assert broadcast.publish_track("plain").consume().info().compression is None
     broadcast.close()
 
 
@@ -610,7 +621,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.deflate()))
     producer = moq.json.SnapshotProducer(broadcast, track)
     consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
@@ -644,7 +655,7 @@ async def test_json_stream_roundtrip():
 
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.deflate()))
     producer = moq.json.WindowProducer(track)
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     demand = producer.demand()
@@ -730,7 +741,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE)
+    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.deflate())
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
     stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
@@ -1593,7 +1604,7 @@ def test_video_encoder_submits_and_receives():
             framerate=moq.video.FrameRate(numerator=30, denominator=1),
         ),
         moq.video.EncoderOutput(
-            codec=moq.video.Codec.H264,
+            codec=moq.video.Codec.h264(),
             kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.SOFTWARE()),
         ),
     )
@@ -1633,11 +1644,13 @@ def test_audio_encoder_frame_init_and_bitrate():
 
 def test_video_namespace_names_its_configuration_types():
     """``moq.video`` names every type its records take."""
+    codec = moq.video.Codec.h264()
     output = moq.video.EncoderOutput(
-        codec=moq.video.Codec.H264,
+        codec=codec,
         kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.AUTO()),
     )
-    assert output.codec == moq.VideoCodec.H264
+    assert output.codec is codec
+    assert isinstance(codec, moq.VideoCodec)
     assert moq.video.PixelFormat.RGBA == moq.VideoPixelFormat.RGBA
 
 
@@ -1733,7 +1746,7 @@ async def test_decode_video_frame():
         # variant inside the enum without declaring it a subclass, so the cast is
         # what makes the variant typecheck.
         moq.VideoEncoderOutput(
-            codec=moq.VideoCodec.H264,
+            codec=moq.VideoCodec.h264(),
             kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
         ),
         track="camera",
@@ -1773,15 +1786,6 @@ async def test_decode_video_frame():
 
     video.finish()
     broadcast.close()
-
-
-def test_video_surface_unknown_kind() -> None:
-    """A surface kind this package predates maps to the fallback arm instead of failing."""
-    from moq._records import _surface
-
-    assert _surface(None) is None
-    assert _surface(cast(Any, moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7))) == moq.VideoSurfacePixelBuffer(7)
-    assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 
 async def test_broadcast_is_reachable_only_while_announced():

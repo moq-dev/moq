@@ -49,8 +49,7 @@ fn timed() -> moq_net::track::Info {
 fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
-		max_age: None,
-		max_age_unlimited: false,
+		max_age: Some(Duration::ZERO),
 		refresh: None,
 		timescale: Some(1_000_000),
 		compression: None,
@@ -60,7 +59,7 @@ fn timed_info() -> MoqTrackInfo {
 /// [`timed_info`] with no publisher age limit, for a test that reads superseded groups.
 fn unlimited_info() -> MoqTrackInfo {
 	MoqTrackInfo {
-		max_age_unlimited: true,
+		max_age: None,
 		..timed_info()
 	}
 }
@@ -1195,10 +1194,9 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
-		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
-		compression: Some(crate::producer::MoqCompression::Deflate),
+		compression: Some(MoqCompression::deflate()),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -1206,10 +1204,9 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
-	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
-	assert_eq!(got.compression, Some(crate::producer::MoqCompression::Deflate));
+	assert_eq!(got.compression.unwrap().name(), "deflate");
 }
 
 #[tokio::test]
@@ -1280,8 +1277,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 				"data".into(),
 				Some(MoqTrackInfo {
 					priority: 0,
-					max_age: None,
-					max_age_unlimited: false,
+					max_age: Some(Duration::ZERO),
 					refresh: None,
 					timescale: timestamp.scale,
 					compression: None,
@@ -1384,11 +1380,10 @@ async fn json_snapshot_roundtrip() {
 	let config = MoqJsonSnapshotConfig { deltas: true };
 	let info = MoqTrackInfo {
 		priority: 0,
-		max_age: None,
-		max_age_unlimited: false,
+		max_age: Some(Duration::ZERO),
 		timescale: Some(1_000_000),
 		refresh: None,
-		compression: Some(crate::producer::MoqCompression::Deflate),
+		compression: Some(MoqCompression::deflate()),
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
@@ -1458,8 +1453,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			"meta".into(),
 			Some(MoqTrackInfo {
 				priority: 127,
-				max_age: None,
-				max_age_unlimited: false,
+				max_age: Some(Duration::ZERO),
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compression: None,
@@ -1690,8 +1684,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			"log".into(),
 			Some(MoqTrackInfo {
 				priority: 127,
-				max_age: None,
-				max_age_unlimited: false,
+				max_age: Some(Duration::ZERO),
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compression: None,
@@ -4116,7 +4109,7 @@ async fn video_raw_publish_consume() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				// Software so the test is deterministic everywhere: `Auto` would
@@ -4241,7 +4234,7 @@ async fn video_decode_frame_ownership() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				// Software so the encode is deterministic everywhere.
@@ -4391,7 +4384,7 @@ async fn video_decode_start() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				kind: MoqVideoEncoderKind::Software,
@@ -4511,7 +4504,7 @@ async fn video_raw_publish_from_many_threads() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				// An explicit ceiling so the retunes below stay under the rate the
 				// encoder opened at, which openh264 requires.
 				bitrate: Some(1_000_000),
@@ -4590,7 +4583,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 		},
 	};
 	let output = || MoqVideoEncoderOutput {
-		codec: MoqVideoCodec::H264,
+		codec: MoqVideoCodec::h264(),
 		bitrate: None,
 		join: None,
 		kind: MoqVideoEncoderKind::Software,
@@ -7761,7 +7754,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: Some(4_000_000),
 				join: None,
 				kind: MoqVideoEncoderKind::Software,
@@ -7809,7 +7802,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 			},
 		},
 		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+			codec: MoqVideoCodec::h264(),
 			bitrate: Some(bitrate),
 			join: None,
 			kind: MoqVideoEncoderKind::Software,
@@ -9692,7 +9685,6 @@ async fn audio_subscribe_configuration_boundary() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				max_age: Some(Duration::from_millis(10)),
-				max_age_unlimited: false,
 				refresh: None,
 				timescale: None,
 				compression: None,

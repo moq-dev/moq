@@ -176,7 +176,7 @@ type TrackInfo struct {
 	// only the live edge.
 	MaxAge time.Duration
 	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
-	// cache to bound how long a superseded group is served.
+	// cache to bound how long a superseded group is served: the ffi record's null MaxAge.
 	MaxAgeUnlimited bool
 	Refresh         *uint32
 	Timescale       *uint64
@@ -188,11 +188,10 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	out := &ffi.MoqTrackInfo{
-		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
-		Compression:     info.Compression,
+		Priority:    info.Priority,
+		Refresh:     info.Refresh,
+		Timescale:   info.Timescale,
+		Compression: info.Compression,
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
@@ -203,12 +202,12 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	out := TrackInfo{
 		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		MaxAgeUnlimited: info.MaxAge == nil,
 		Refresh:         info.Refresh,
 		Timescale:       info.Timescale,
 		Compression:     info.Compression,
 	}
-	if info.MaxAge != nil && !info.MaxAgeUnlimited {
+	if info.MaxAge != nil {
 		out.MaxAge = *info.MaxAge
 	}
 	return out

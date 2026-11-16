@@ -16,7 +16,7 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 `dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
-Publish JSON tracks with `TrackInfo(compression = Compression.DEFLATE)`; a `dev.moq.json` consumer reads one with no option of its own.
+Publish JSON tracks with `TrackInfo(maxAge = Duration.ZERO, compression = Compression.deflate())`; a `dev.moq.json` consumer reads one with no option of its own.
 Every write takes a timestamp, and the library never substitutes zero or now.
 `SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
@@ -24,7 +24,8 @@ a snapshot consumer yields each state in order, and `latest()` skips to the newe
 A `Timestamp(value, scale)` is exact and reads back at the track's timescale, so a 90 kHz tick republishes unchanged.
 `Duration.toTimestamp()` is exact at nanosecond scale; `Timestamp.toDuration()` rounds down to a whole nanosecond.
 A raw track with a `null` timescale is untimed: each frame carries `Timestamp.unscaled(key)`, its group's key, whose `scale` is `null`.
-`MoqTrackInfo.compression` set to `DEFLATE` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`TrackInfo` names `maxAge` (a `java.time.Duration`), how long a superseded group stays fresh: `Duration.ZERO` serves only the live edge, and `null` sets no publisher limit, as `null` does for `Delay.max`.
+`TrackInfo.compression` set to `Compression.deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -83,7 +84,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     val video = dev.moq.video.Producer(
         CatalogProducer(broadcast),
         dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
-        output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, join = null, kind = autoEncoder), track = "camera"),
+        output = VideoEncoderOutput(codec = VideoCodec.h264(), bitrate = null, join = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestamp = pts, data = rgba))
     route.announce() // the route mints its own instance: route.instance()

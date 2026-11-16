@@ -232,7 +232,7 @@ and `.cut()` ends its open group so the next edit opens one restating the window
 no window mode, so `WindowProducer` takes only the track.
 A raw frame on a scale-less track carries `Timestamp.unscaled` at its group key, but every JSON
 write takes a time on the broadcast clock. Publish JSON tracks with
-`TrackInfo(compression=moq.Compression.DEFLATE)`: the track compresses each group on the wire, and consumers read it the
+`TrackInfo(compression=moq.Compression.deflate())`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
 ### Subscribing

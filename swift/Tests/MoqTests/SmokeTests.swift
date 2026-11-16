@@ -91,7 +91,7 @@ final class SmokeTests: XCTestCase {
 
     func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
         let broadcast = try BroadcastProducer()
-        let info = TrackInfo(maxAgeUnlimited: true, timescale: 1_000_000)
+        let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
         let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
             let group = try track.appendGroup()
@@ -595,7 +595,7 @@ final class SmokeTests: XCTestCase {
 
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
+        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let group = try track.appendGroup()
         try group.writeFrame(Data("cached".utf8), timestamp: micros(0))
         try group.finish()
@@ -623,7 +623,7 @@ final class SmokeTests: XCTestCase {
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
             track: try broadcast.publishTrack(
-                name: "status", info: TrackInfo(timescale: 1_000_000, compression: .deflate)))
+                name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate())))
         let consumer = try Json.SnapshotConsumer<Status>(
             broadcast: try broadcast.consume(), name: "status")
 
@@ -652,7 +652,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.StreamProducer<Event>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000)))
         let consumer = try Json.StreamConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
 
@@ -674,7 +674,7 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compression: .deflate))
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate()))
         )
         let consumer = try Json.WindowConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "log"))
@@ -707,7 +707,7 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
-        let timed = TrackInfo(timescale: 1_000_000)
+        let timed = TrackInfo(maxAge: 0, timescale: 1_000_000)
         let snapshot = try Json.SnapshotProducer<[String: Int]>(
             broadcast: broadcast, track: try broadcast.publishTrack(name: "status", info: timed))
         let stream = try Json.StreamProducer<[String: Int]>(
@@ -787,16 +787,15 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let omitted = try broadcast.publishTrack(name: "omitted").consume().info()
         XCTAssertEqual(omitted.maxAge, 0)
-        let info = TrackInfo(maxAgeUnlimited: true)
+        let info = TrackInfo(maxAge: nil)
         let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
         XCTAssertNil(unlimited.maxAge)
-        XCTAssertTrue(unlimited.maxAgeUnlimited)
         try broadcast.close()
     }
 
     func testRawTrackTimestamps() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
+        let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let consumer = try track.consume()
 
         let payload = Data("ready".utf8)
@@ -822,7 +821,7 @@ final class SmokeTests: XCTestCase {
 
     func testTimestampsAreExact() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(timescale: 90_000))
+        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(maxAge: 0, timescale: 90_000))
         let consumer = try track.consume()
 
         // A present zero stays present, and one 90 kHz tick reads back as itself rather than
@@ -883,7 +882,7 @@ final class SmokeTests: XCTestCase {
 
     func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000))
+        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let consumer = try track.consume()
 
         try track.appendGroup().finish()
@@ -1008,7 +1007,7 @@ final class SmokeTests: XCTestCase {
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(
                 format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
-            output: VideoEncoderOutput(codec: .h264, kind: .software),
+            output: VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software),
             track: "camera"
         )
         try route.announce()

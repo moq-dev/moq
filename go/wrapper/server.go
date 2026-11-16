@@ -23,6 +23,8 @@ const (
 	TransportUnix = ffi.MoqTransportUnix
 	// TransportWebTransport is a session that arrived over WebTransport (HTTP/3).
 	TransportWebTransport = ffi.MoqTransportWebTransport
+	// TransportUnknown is a session that arrived over a transport this version cannot name yet.
+	TransportUnknown = ffi.MoqTransportUnknown
 )
 
 // Request is an incoming session that can be accepted (Accept) or rejected (Reject).
