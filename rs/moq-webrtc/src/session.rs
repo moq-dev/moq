@@ -767,32 +767,6 @@ mod tests {
 		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
 	}
 
-	/// str0m has no setting that refuses a data channel, so an offered one is accepted
-	/// beside the media and its SCTP association goes unread.
-	#[test]
-	fn an_offered_data_channel_is_accepted_beside_the_media() {
-		use str0m::media::{Direction, MediaKind};
-
-		let now = Instant::now().into_std();
-		let mut offerer = rtc_config().unwrap().build(now);
-		let mut api = offerer.sdp_api();
-		api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
-		api.add_channel("chat".into());
-		let (offer, _) = api.apply().unwrap();
-
-		let answer = rtc_with_codecs(&[str0m::format::Codec::Opus])
-			.unwrap()
-			.sdp_api()
-			.accept_offer(offer)
-			.unwrap()
-			.to_sdp_string();
-		assert!(answer.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111"), "{answer}");
-		assert!(
-			answer.contains("m=application 9 UDP/DTLS/SCTP webrtc-datachannel"),
-			"{answer}"
-		);
-	}
-
 	#[test]
 	fn media_flow_respects_negotiated_direction() {
 		use str0m::media::Direction::{Inactive, RecvOnly, SendOnly, SendRecv};

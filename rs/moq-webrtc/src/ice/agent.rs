@@ -325,7 +325,11 @@ mod tests {
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
 		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
-		Agent::new(crate::session::rtc_config().unwrap().build(Instant::now().into_std()), socket).unwrap()
+		Agent::new(
+			crate::session::rtc_config().unwrap().build(Instant::now().into_std()),
+			socket,
+		)
+		.unwrap()
 	}
 
 	#[tokio::test]
@@ -352,7 +356,8 @@ mod tests {
 			None,
 		);
 		let (offer, pending) = api.apply().unwrap();
-		let answer = crate::session::rtc_config().unwrap()
+		let answer = crate::session::rtc_config()
+			.unwrap()
 			.build(Instant::now().into_std())
 			.sdp_api()
 			.accept_offer(offer)
