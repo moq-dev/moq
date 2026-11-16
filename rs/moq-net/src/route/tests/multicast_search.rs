@@ -373,7 +373,8 @@ impl Search<'_> {
 			return Err(Broken::Rule(Rule::Budget, why));
 		}
 		if self.checks(Rule::QuietIsSettled) && self.quiet(sim) {
-			self.settled(sim).map_err(|why| Broken::Rule(Rule::QuietIsSettled, why))?;
+			self.settled(sim)
+				.map_err(|why| Broken::Rule(Rule::QuietIsSettled, why))?;
 		}
 		Ok(())
 	}

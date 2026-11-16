@@ -411,6 +411,10 @@ pub(crate) struct Router<N, I, A> {
 	/// A defect a fixture plants, to show a check catches it.
 	#[cfg(test)]
 	mutant: Option<Mutant>,
+	/// Whether each input ends by rebuilding every index to compare: on but where a
+	/// benchmark's mesh is too large for it.
+	#[cfg(test)]
+	checked: bool,
 }
 
 /// Whether a fixture planted the defect `$mutant` in `$router`: never outside tests.
@@ -486,6 +490,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			forgets: 0,
 			#[cfg(test)]
 			mutant: None,
+			#[cfg(test)]
+			checked: true,
 		}
 	}
 
@@ -766,7 +772,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				return Ok(());
 			}
 			Msg::Synced(prefix) => {
-				let synced = peer.asked.get_mut(&prefix).filter(|_| peer.answering).ok_or(Error::Unasked)?;
+				let synced = peer
+					.asked
+					.get_mut(&prefix)
+					.filter(|_| peer.answering)
+					.ok_or(Error::Unasked)?;
 				*synced = true;
 				return Ok(());
 			}
@@ -808,7 +818,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn done(&mut self) {
 		self.refresh();
 		#[cfg(test)]
-		self.check();
+		if self.checked {
+			self.check();
+		}
 	}
 
 	// --- Routes ---
@@ -816,7 +828,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn route(&mut self, from: N, origin: NodeId, offer: Option<Offer>) -> Result<(), Error> {
 		self.visit();
 		if mutated!(self, Chatter) {
-			self.stale.extend(self.best.keys().copied().chain(self.announced.then_some(self.me)));
+			self.stale
+				.extend(self.best.keys().copied().chain(self.announced.then_some(self.me)));
 		}
 		let sender = self.peers[&from].routing().expect("a routing neighbour");
 		match offer {
@@ -826,8 +839,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				let path = &offer.path;
 				let built = path.len() >= 2 || offer.cost == 0;
 				if origin.relay == self.me.relay
-					|| path.first() != Some(&Hop { node: origin, session: 0 })
-					|| path.last().map(|hop| hop.node) != Some(sender)
+					|| path.first()
+						!= Some(&Hop {
+							node: origin,
+							session: 0,
+						}) || path.last().map(|hop| hop.node) != Some(sender)
 					|| path.len() > MAX_HOPS
 					|| names(path, self.me.relay)
 					|| !built
@@ -956,7 +972,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn track(&mut self, origin: NodeId, from: N, path: &[Hop]) {
 		for hop in path {
 			self.visit();
-			self.rx_hops.entry(*hop).or_default().entry(from).or_default().insert(origin);
+			self.rx_hops
+				.entry(*hop)
+				.or_default()
+				.entry(from)
+				.or_default()
+				.insert(origin);
 			*self.live.entry(*hop).or_default() += 1;
 		}
 		for (pair, _) in pairs(path) {
@@ -1809,6 +1830,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.mutant = Some(mutant);
 	}
 
+	/// Stop rebuilding every index after each input, for a benchmark's large mesh.
+	pub fn unchecked(&mut self) {
+		self.checked = false;
+	}
+
 	/// This node's own claims at each revision, the first empty.
 	pub fn history(&self) -> &[Claims<I, A>] {
 		&self.history
@@ -1906,6 +1932,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			history: _,
 			forgets: _,
 			mutant: _,
+			checked: _,
 		} = self;
 		// A deadline counts by how far off it is; one due counts as zero.
 		let waiting: BTreeMap<&Broadcast<I>, Duration> = (waiting.iter())
@@ -1929,7 +1956,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			for (peer, heard) in offers {
 				assert!(self.peers[peer].offers.contains(origin), "offers index");
 				for hop in heard.offer.path.iter() {
-					rx_hops.entry(*hop).or_default().entry(*peer).or_default().insert(*origin);
+					rx_hops
+						.entry(*hop)
+						.or_default()
+						.entry(*peer)
+						.or_default()
+						.insert(*origin);
 					if !heard.ended {
 						*live.entry(*hop).or_default() += 1;
 					}
@@ -1950,11 +1982,19 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			for (origin, offer) in &state.sent {
 				sent_to.entry(*origin).or_default().insert(*peer);
 				for hop in offer.iter().flat_map(|offer| offer.path.iter()) {
-					tx_hops.entry(*hop).or_default().entry(*peer).or_default().insert(*origin);
+					tx_hops
+						.entry(*hop)
+						.or_default()
+						.entry(*peer)
+						.or_default()
+						.insert(*origin);
 				}
 			}
 			for (broadcast, claim) in &state.given {
-				givers.entry(broadcast.clone()).or_default().insert(*peer, claim.clone());
+				givers
+					.entry(broadcast.clone())
+					.or_default()
+					.insert(*peer, claim.clone());
 			}
 			if state.routing().is_none() {
 				for prefix in &state.asks {
@@ -1988,8 +2028,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		assert_eq!(self.claimants, claimants, "claimants");
 		assert_eq!(self.shared, shared, "shared claims");
-		let deadlines: BTreeSet<(Instant, Broadcast<I>)> =
-			(self.waiting.iter()).map(|(broadcast, at)| (*at, broadcast.clone())).collect();
+		let deadlines: BTreeSet<(Instant, Broadcast<I>)> = (self.waiting.iter())
+			.map(|(broadcast, at)| (*at, broadcast.clone()))
+			.collect();
 		assert_eq!(self.deadlines, deadlines, "deadlines");
 		assert!(self.dirty.is_empty(), "refreshed");
 	}
@@ -2043,7 +2084,15 @@ mod tests {
 			Role::Scoped(_) | Role::Endpoint => Vec::new(),
 		};
 		if !ask.is_empty() {
-			router.edit(peer, Edit { remove: Vec::new(), add: ask }).unwrap();
+			router
+				.edit(
+					peer,
+					Edit {
+						remove: Vec::new(),
+						add: ask,
+					},
+				)
+				.unwrap();
 		}
 	}
 
@@ -2064,9 +2113,12 @@ mod tests {
 		open(&mut router, 2, Role::Scoped(vec![p("a")]));
 		let inside = ((p("a/x"), 7), live(0));
 		let outside = ((p("b/x"), 7), live(0));
-		let err = router.recv(2, Msg::Announce {
-			changes: vec![inside.clone(), outside],
-		});
+		let err = router.recv(
+			2,
+			Msg::Announce {
+				changes: vec![inside.clone(), outside],
+			},
+		);
 		assert_eq!(err, Err(Error::Unasked));
 		assert!(router.shown().is_empty(), "nothing of it applied");
 		router.recv(2, Msg::Announce { changes: vec![inside] }).unwrap();
@@ -2149,8 +2201,25 @@ mod tests {
 		};
 		router.recv(2, route).unwrap();
 		// A dead hop the route crosses, with the wrong node at its far end.
-		assert_eq!(router.recv(2, Msg::Dead { hop: sender, far: node(9) }), Err(Error::Malformed));
-		router.recv(2, Msg::Dead { hop: sender, far: node(5) }).unwrap();
+		assert_eq!(
+			router.recv(
+				2,
+				Msg::Dead {
+					hop: sender,
+					far: node(9)
+				}
+			),
+			Err(Error::Malformed)
+		);
+		router
+			.recv(
+				2,
+				Msg::Dead {
+					hop: sender,
+					far: node(5),
+				},
+			)
+			.unwrap();
 	}
 
 	/// A claim lost with nothing to replace it shows unavailable for the debounce, then
@@ -2193,15 +2262,25 @@ mod tests {
 	fn an_endpoint_is_shown_what_covers_its_prefix() {
 		let mut router = relay(1);
 		open(&mut router, 2, Role::Endpoint);
-		router.recv(2, Msg::Announce {
-			changes: vec![((p("live"), 7), live(0)), ((p("live/a/x"), 8), live(0))],
-		}).unwrap();
+		router
+			.recv(
+				2,
+				Msg::Announce {
+					changes: vec![((p("live"), 7), live(0)), ((p("live/a/x"), 8), live(0))],
+				},
+			)
+			.unwrap();
 		open(&mut router, 3, Role::Endpoint);
 		router.drain();
-		router.edit(3, Edit {
-			remove: Vec::new(),
-			add: vec![p("live/a")],
-		}).unwrap();
+		router
+			.edit(
+				3,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p("live/a")],
+				},
+			)
+			.unwrap();
 		let out = router.drain();
 		let told: Vec<&Msg<u64, u64>> = (out.iter()).filter(|(to, _)| *to == 3).map(|(_, msg)| msg).collect();
 		let shown = |path: &str, instance: u64| {
@@ -2214,17 +2293,27 @@ mod tests {
 		assert_eq!(told.first(), Some(&&Msg::Edited));
 		assert_eq!(told.last(), Some(&&Msg::Synced(p("live/a"))));
 		// Withdrawing the broader claim withdraws what stood for it.
-		router.recv(2, Msg::Announce {
-			changes: vec![((p("live"), 7), Change::Ended)],
-		}).unwrap();
+		router
+			.recv(
+				2,
+				Msg::Announce {
+					changes: vec![((p("live"), 7), Change::Ended)],
+				},
+			)
+			.unwrap();
 		let out = router.drain();
 		assert!(out.iter().any(|(to, msg)| *to == 3
 			&& matches!(msg, Msg::Announce { changes } if changes == &vec![((p("live/a"), 7), Change::Ended)])));
 		// Swapping its prefix in place drops what the old one covered, silently.
-		router.edit(3, Edit {
-			remove: vec![p("live/a")],
-			add: vec![p("other")],
-		}).unwrap();
+		router
+			.edit(
+				3,
+				Edit {
+					remove: vec![p("live/a")],
+					add: vec![p("other")],
+				},
+			)
+			.unwrap();
 		let out = router.drain();
 		let told: Vec<&Msg<u64, u64>> = (out.iter()).filter(|(to, _)| *to == 3).map(|(_, msg)| msg).collect();
 		assert_eq!(told, [&Msg::Edited, &Msg::Synced(p("other"))]);

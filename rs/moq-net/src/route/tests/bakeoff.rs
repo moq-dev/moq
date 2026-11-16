@@ -584,22 +584,26 @@ fn an_endpoint_changes_no_route() {
 /// for a moment announces it again, its first claim.
 #[test]
 fn a_first_claim_starts_a_route() {
-	let (mut echoed, mut started) = (0, 0);
-	for shape in shapes(9, 2) {
-		let scoped = shape.mesh.ties.values().any(|tie| *tie == Tie::Scoped);
-		for (failure, row) in fail(Arm::LEAN, &shape.mesh, false) {
-			let case = format!("{} on {}", failure.as_str(), shape.name);
-			match failure {
-				Failure::Leave | Failure::LoseOne | Failure::LoseBoth if scoped => echoed += row.cost.sent.msgs,
-				Failure::Leave | Failure::LoseOne | Failure::LoseBoth => assert_eq!(row.cost.sent.msgs, 0, "{case}"),
-				// Unless the relay it moves to has announced before.
-				Failure::Move => started += row.cost.sent.msgs,
-				_ => {}
+	for arm in [Arm::LEAN, Arm::RELAY] {
+		let (mut echoed, mut started) = (0, 0);
+		for shape in shapes(9, 2) {
+			let scoped = shape.mesh.ties.values().any(|tie| *tie == Tie::Scoped);
+			for (failure, row) in fail(arm, &shape.mesh, false) {
+				let case = format!("{} on {} under {}", failure.as_str(), shape.name, arm.name());
+				match failure {
+					Failure::Leave | Failure::LoseOne | Failure::LoseBoth if scoped => echoed += row.cost.sent.msgs,
+					Failure::Leave | Failure::LoseOne | Failure::LoseBoth => {
+						assert_eq!(row.cost.sent.msgs, 0, "{case}")
+					}
+					// Unless the relay it moves to has announced before.
+					Failure::Move => started += row.cost.sent.msgs,
+					_ => {}
+				}
 			}
 		}
+		assert!(started > 0, "no move started a route under {}", arm.name());
+		assert!(echoed > 0, "no gateway announced an echo under {}", arm.name());
 	}
-	assert!(started > 0, "no move started a route");
-	assert!(echoed > 0, "no gateway announced an echo");
 }
 
 /// A relay with nothing to announce costs no route anywhere: the routes a mesh
@@ -611,26 +615,30 @@ fn a_relay_with_no_claim_offers_no_route() {
 		lab.net.held()
 	};
 	for publishers in [1, 2, 9] {
-		let (all, lean, today) = (
-			held(Arm::TUNED, publishers),
-			held(Arm::LEAN, publishers),
-			held(Arm::TODAY, publishers),
-		);
-		println!("{publishers} publishers: {all:?} {lean:?} {today:?}");
-		assert!(
-			lean.offers * 15 <= all.offers * publishers.min(9) + all.offers,
-			"{publishers}"
-		);
-		assert!(lean.routes <= today.routes, "{publishers}");
+		let (all, today) = (held(Arm::TUNED, publishers), held(Arm::TODAY, publishers));
+		for arm in [Arm::LEAN, Arm::RELAY] {
+			let lean = held(arm, publishers);
+			println!(
+				"{publishers} publishers: {all:?} {lean:?} {today:?} under {}",
+				arm.name()
+			);
+			assert!(
+				lean.offers * 15 <= all.offers * publishers.min(9) + all.offers,
+				"{publishers} under {}",
+				arm.name()
+			);
+			assert!(lean.routes <= today.routes, "{publishers} under {}", arm.name());
+		}
 	}
 }
 
 /// A failure costs route messages per forwarding node, never per publisher behind it.
+/// Every relay is one under the prototype as tuned; under the router, every relay a
+/// publisher joins is, so it is measured with the same relays behind more publishers.
 #[test]
 fn a_failure_costs_the_same_with_more_publishers() {
-	let cost = |publishers: usize| {
-		let mesh = tiers(3, 3, true, publishers);
-		let rows = fail(Arm::TUNED, &mesh, false);
+	let cost = |arm: Arm, mesh: &Mesh| {
+		let rows = fail(arm, mesh, false);
 		let of = |failure: Failure| {
 			rows.iter()
 				.find(|(found, _)| *found == failure)
@@ -638,7 +646,14 @@ fn a_failure_costs_the_same_with_more_publishers() {
 		};
 		(of(Failure::Close), of(Failure::Partition))
 	};
-	assert_eq!(cost(1), cost(12));
+	let mesh = |publishers: usize| tiers(3, 3, true, publishers);
+	assert_eq!(cost(Arm::TUNED, &mesh(1)), cost(Arm::TUNED, &mesh(12)));
+	let few = mesh(3);
+	let many = Mesh {
+		homes: few.homes.iter().cycle().take(12).copied().collect(),
+		..few.clone()
+	};
+	assert_eq!(cost(Arm::RELAY, &few), cost(Arm::RELAY, &many));
 }
 
 /// Remembering the highest session closed between a pair of nodes stops a stale

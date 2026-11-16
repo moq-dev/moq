@@ -13,7 +13,7 @@ use kio::clock::Instant;
 
 use crate::route::relay::{self, Claim, Msg, Next, NodeId, Port, Role};
 
-use super::bakeoff::{Row, carries, fail, shapes};
+use super::bakeoff::{Failure, Row, carries, fail, shapes};
 use super::compare::{Arm, Chan, Faults, Held, Mesh, Net, Sent, churn, run, tally};
 use super::multi::{self, Seen, Tie};
 use super::*;
@@ -49,6 +49,8 @@ pub(super) struct RelaySim {
 	held: BTreeSet<(Node, Node)>,
 	lives: BTreeMap<multi::Broadcast, u64>,
 	pub stats: Stats,
+	/// Messages each node sent, the interest exchange left out.
+	pub sent: BTreeMap<Node, usize>,
 	pub events: Vec<Seen>,
 	spent: usize,
 	now: Instant,
@@ -56,6 +58,8 @@ pub(super) struct RelaySim {
 	/// Each forwarding node's claims at every revision, kept past its restart.
 	histories: BTreeMap<NodeId, Vec<relay::Claims<Id, ()>>>,
 	mutant: Option<relay::Mutant>,
+	/// Whether each router rebuilds its indexes after every input to compare.
+	checked: bool,
 	/// Every router sends what it has after each change to the network, as the bake-off
 	/// runs it; the search flushes each router as a step of its own instead.
 	pub auto: bool,
@@ -89,12 +93,14 @@ impl RelaySim {
 			held: BTreeSet::new(),
 			lives: BTreeMap::new(),
 			stats: Stats::default(),
+			sent: BTreeMap::new(),
 			events: Vec::new(),
 			spent: 0,
 			now: Instant::ZERO,
 			debounce,
 			histories: BTreeMap::new(),
 			mutant: None,
+			checked: true,
 			auto: true,
 		};
 		sim.spots = (0..nodes).map(|node| Spot::Relay(Box::new(sim.fresh(node)))).collect();
@@ -115,7 +121,21 @@ impl RelaySim {
 		if let Some(mutant) = self.mutant {
 			router.mutate(mutant);
 		}
+		if !self.checked {
+			router.unchecked();
+		}
 		router
+	}
+
+	/// Stop every router rebuilding its indexes after each input, now and after a restart:
+	/// for a benchmark's mesh, where it would cost more than the routers.
+	pub fn unchecked(&mut self) {
+		self.checked = false;
+		for node in 0..self.spots.len() {
+			if let Some(router) = self.relay(node) {
+				router.unchecked();
+			}
+		}
 	}
 
 	/// Plant `mutant` in every router, now and after a restart.
@@ -388,6 +408,7 @@ impl RelaySim {
 			}
 			Msg::Ask(_) | Msg::Edited | Msg::Synced(_) => unreachable!("the interest exchange crosses at once"),
 		}
+		*self.sent.entry(from).or_default() += 1;
 		self.queues.entry((from, to)).or_default().push_back(msg);
 	}
 
@@ -420,6 +441,18 @@ impl RelaySim {
 		}
 		for prefix in edit.add {
 			self.exchange(to, from, Msg::Synced(prefix));
+		}
+	}
+
+	/// The endpoint at `node` asks `relay` for `prefix`.
+	pub fn ask(&mut self, node: Node, relay: Node, prefix: &str) {
+		let edit = relay::Edit {
+			remove: Vec::new(),
+			add: vec![p(prefix)],
+		};
+		self.exchange(node, relay, Msg::Ask(edit));
+		if self.auto {
+			self.flush();
 		}
 	}
 
@@ -711,11 +744,41 @@ fn the_router_carries_every_failure_on_every_shape() {
 	carries(Arm::RELAY, 9);
 }
 
-/// The same at the quest's largest size.
+/// The same at the quest's largest size, where the debounce still outlasts every failure.
 #[test]
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn sweep_the_router_carries_every_failure_at_32_relays() {
 	carries(Arm::RELAY, 32);
+	assert_eq!(flaps(Arm::RELAY, 32), Vec::<String>::new());
+}
+
+/// Each failure on each shape at `relays` that showed a reader a claim start again, though
+/// it brings nothing back, with how many times.
+fn flaps(arm: Arm, relays: usize) -> Vec<String> {
+	let mut out = Vec::new();
+	for shape in shapes(relays, 2) {
+		for (failure, row) in fail(arm, &shape.mesh, relays > 16) {
+			let returns = matches!(failure, Failure::Heal | Failure::Restart);
+			if !returns && row.cost.sent.starts > 0 {
+				out.push(format!("{} on {}: {}", failure.as_str(), shape.name, row.cost.sent.starts));
+			}
+		}
+	}
+	out
+}
+
+/// The readers' debounce, a hop for each node a route may cross, outlasts the hunting a
+/// failure causes: a failure that brings nothing back never shows a reader a claim start
+/// again, only unavailable for a while. Without it a reader lets go and takes the claim
+/// back on most failures, and on every relay when a publisher moves.
+#[test]
+fn the_debounce_outlasts_a_failure() {
+	assert_eq!(flaps(Arm::RELAY, 9), Vec::<String>::new());
+	let undebounced = flaps(Arm::Relay(Duration::ZERO), 9);
+	assert!(
+		undebounced.iter().any(|flap| flap.starts_with(Failure::Move.as_str())),
+		"{undebounced:?}"
+	);
 }
 
 /// What one failure's row says, by field.
@@ -777,5 +840,131 @@ fn the_router_gives_the_prototypes_answers() {
 		}
 	}
 	assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// Deliver and flush round by round, the clock advancing a hop each, until nothing is in
+/// flight and no debounce runs.
+pub(super) fn quiesce(sim: &mut RelaySim) {
+	for _ in 0..200 {
+		let ready = sim.ready();
+		for &((from, to), count) in &ready {
+			for _ in 0..count {
+				sim.deliver(from, to);
+			}
+		}
+		let waiting = sim.tick();
+		if ready.is_empty() && !waiting && sim.ready().is_empty() {
+			return;
+		}
+	}
+	panic!("never settles");
+}
+
+/// Two relays that share a draining neighbour and a scoped link each hold the other's
+/// copy of its claim. The copy says it is draining too, so neither prefers it to its own
+/// route and the two never trade places.
+#[test]
+fn a_claim_across_a_grant_keeps_its_drain() {
+	let mut sim = RelaySim::new(4, relay::debounce(HOP));
+	sim.client(3);
+	sim.publish(3, 100);
+	sim.link(0, 1, 1, Tie::Peer);
+	sim.link(0, 2, 1, Tie::Peer);
+	sim.link(1, 2, 1, Tie::Scoped);
+	sim.link(3, 0, 1, Tie::Peer);
+	sim.claim(3, "live/0", true);
+	quiesce(&mut sim);
+	// Both read the GOAWAY before either hears from the other.
+	sim.goaway(0);
+	quiesce(&mut sim);
+	let broadcast = (p("live/0"), 100);
+	for relay in [1, 2] {
+		let router = sim.router(relay).expect("a relay");
+		assert_eq!(router.pick(&broadcast), Some(sim.id(0)), "relay {relay}");
+	}
+}
+
+/// A scoped neighbour that sends GOAWAY is draining for the claims it gave, so a node
+/// holding the same claim from another neighbour announces that one instead.
+#[test]
+fn a_scoped_neighbour_draining_drains_its_claims() {
+	// A publisher on 0 and 2, each of which grants 1 the claim, 0 the cheaper.
+	let mut sim = RelaySim::new(4, relay::debounce(HOP));
+	sim.client(3);
+	sim.publish(3, 100);
+	sim.link(3, 0, 1, Tie::Peer);
+	sim.link(3, 2, 1, Tie::Peer);
+	sim.link(0, 1, 1, Tie::Scoped);
+	sim.link(2, 1, 2, Tie::Scoped);
+	sim.claim(3, "live/0", true);
+	quiesce(&mut sim);
+	let broadcast = (p("live/0"), 100);
+	let source = |sim: &RelaySim| sim.router(1).expect("a relay").step(sim.id(1), &broadcast);
+	assert_eq!(source(&sim), Some(Next::Local(0)));
+	sim.goaway(0);
+	quiesce(&mut sim);
+	assert_eq!(source(&sim), Some(Next::Local(2)));
+}
+
+/// A relay that takes a newer copy of a node's claims from another neighbour tells its
+/// own neighbours the floor even when nothing in the copy differs from what it had, so
+/// one that heard a claim in between, by a route since gone, lets go of it.
+#[test]
+fn a_newer_floor_travels_with_nothing_changed() {
+	// 0 announces. 3 hears it through 1, and later 2; 4 hears it through 3 and 5.
+	let mut sim = RelaySim::new(7, relay::debounce(HOP));
+	sim.client(6);
+	sim.publish(6, 100);
+	for (a, b) in [(0, 1), (0, 2), (1, 3), (3, 4), (0, 5), (5, 4), (6, 0)] {
+		sim.link(a, b, 1, Tie::Peer);
+	}
+	sim.claim(6, "live/a", true);
+	quiesce(&mut sim);
+	let shown = |sim: &RelaySim, relay: Node| sim.showing(relay, 100, "live/b");
+
+	// 3 misses the claim starting, which reaches 4 through 5.
+	sim.hold(1, 3);
+	sim.hold(4, 3);
+	sim.claim(6, "live/b", true);
+	quiesce(&mut sim);
+	assert_eq!((shown(&sim, 3), shown(&sim, 4)), (None, Some(true)));
+
+	// 5 misses it ending, and then 4 loses its route through 5.
+	sim.hold(0, 5);
+	sim.claim(6, "live/b", false);
+	quiesce(&mut sim);
+	sim.close(5, 4);
+	quiesce(&mut sim);
+	assert_eq!(shown(&sim, 4), Some(true), "nothing has told it yet");
+
+	// 3 hears a newer copy from 2 that matches what it holds.
+	sim.link(2, 3, 1, Tie::Peer);
+	quiesce(&mut sim);
+	assert_eq!(shown(&sim, 4), None);
+}
+
+/// A relay that restarts is a new node, but its neighbours file the session floor per
+/// pair of relays with the restart in the session's order, so a restart replaces the
+/// entry instead of adding one.
+#[test]
+fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
+	let mut sim = RelaySim::new(3, relay::debounce(HOP));
+	for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+		sim.link(a, b, 1, Tie::Peer);
+	}
+	quiesce(&mut sim);
+	let mut kept = Vec::new();
+	for _ in 0..8 {
+		sim.reset(0);
+		quiesce(&mut sim);
+		for peer in [1, 2] {
+			sim.open(0, peer);
+		}
+		quiesce(&mut sim);
+		kept.push(sim.kept().closed);
+	}
+	// Two ways round each of the three links at most.
+	assert!(kept.iter().all(|&pairs| pairs <= 6), "{kept:?}");
+	assert_eq!(kept[0], kept[7], "{kept:?}");
 }
 
