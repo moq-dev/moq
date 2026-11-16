@@ -10,7 +10,7 @@ use bytes::Bytes;
 use kio::clock::Instant;
 
 use super::oracle::{Admitted, Loss, Object};
-use super::{Passthrough, Release, fixture};
+use super::{Ext, Passthrough, PassthroughTrack, Release, fixture};
 use crate::catalog::CatalogFormat;
 use crate::container::Frame;
 
@@ -28,15 +28,20 @@ const TOLERANCE: Duration = Duration::from_millis(1);
 /// A capture imported whole, with what keeps its broadcast up.
 struct Imported {
 	_passthrough: crate::container::ts::passthrough::Finished,
-	_catalog: crate::catalog::Producer,
+	_catalog: crate::catalog::Producer<Ext>,
 	_broadcast: moq_net::broadcast::Producer,
 	consumer: moq_net::broadcast::Consumer,
 	objects: Vec<Object>,
 }
 
+/// A catalog carrying the `mpegts` section a passthrough lists its track in.
+fn config() -> crate::catalog::Config<Ext> {
+	crate::catalog::Config::default().with_catalog(hang::catalog::Catalog::<Ext>::default())
+}
+
 async fn import(data: &[u8]) -> Imported {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let consumer = broadcast.consume();
 	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
 	let name = passthrough.track().to_string();
@@ -100,7 +105,7 @@ fn skips(objects: &[Object]) -> Vec<std::ops::Range<u64>> {
 		.collect()
 }
 
-/// Republish `objects` on a new broadcast's `m2ts` track, in the groups they were published in,
+/// Republish `objects` on a new broadcast's passthrough track, in the groups they were published in,
 /// each once `at` says it is due after the start and not before the one ahead of it, as a relay
 /// delivering them would, skipping the starts between them as the importer did.
 fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Send + 'static) -> Republished {
@@ -120,13 +125,13 @@ fn republish_cut(
 ) -> Republished {
 	let cut = cut.to_vec();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let track = broadcast
 		.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))
 		.unwrap();
 	let name = track.name().to_string();
 	catalog
-		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new(name)))
+		.mutate(|catalog| catalog.ext.mpegts.passthrough = Some(PassthroughTrack::new(name)))
 		.unwrap();
 	let consumer = broadcast.consume();
 	let start = Instant::now();
@@ -227,19 +232,21 @@ fn payloads(released: &[(Instant, Frame)]) -> Vec<u8> {
 	bytes(released.iter().map(|(_, frame)| &frame.payload))
 }
 
+/// Either catalog names the track: the `mpegts` section rides both.
 #[tokio::test(start_paused = true)]
 async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
-	for data in [KYRION, KYRION_H264] {
+	for (data, format) in [
+		(KYRION, CatalogFormat::Hang),
+		(KYRION_H264, CatalogFormat::Hang),
+		(KYRION, CatalogFormat::Msf),
+	] {
 		let imported = import(data).await;
 		let source = crate::source::announced(&imported.consumer).await;
-		let release = Release::new(source, CatalogFormat::Hang, RECORDING)
-			.await
-			.unwrap()
-			.with_replay();
+		let release = Release::new(source, format, RECORDING).await.unwrap().with_replay();
 		let (released, release) = drain(release).await;
 
 		let admitted = Admitted::new(data, &imported.objects);
-		assert_eq!(admitted.grade(&released, TOLERANCE), Loss::default());
+		assert_eq!(admitted.grade(&released, TOLERANCE), Loss::default(), "{format:?}");
 		assert_eq!(release.dropped(), 0);
 	}
 }
@@ -492,17 +499,6 @@ fn pids(data: &[u8]) -> std::collections::BTreeSet<u16> {
 		.iter()
 		.map(|pkt| u16::from_be_bytes([pkt[1] & 0x1f, pkt[2]]))
 		.collect()
-}
-
-/// The MSF catalog never names the `m2ts` track, so a release reading it would wait forever.
-#[tokio::test(start_paused = true)]
-async fn an_msf_catalog_is_refused() {
-	let imported = import(KYRION).await;
-	let source = crate::source::announced(&imported.consumer).await;
-	let Err(err) = Release::new(source, CatalogFormat::Msf, std::time::Duration::ZERO).await else {
-		panic!("a release reading the MSF catalog must fail");
-	};
-	assert!(err.to_string().contains("MSF"), "{err}");
 }
 
 /// Objects received while a sink stalls stay in the source and retain their arrival bound.

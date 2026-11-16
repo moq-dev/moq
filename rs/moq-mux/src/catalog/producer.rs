@@ -86,7 +86,6 @@ impl<E: CatalogExt> State<E> {
 			|| !catalog.text.renditions.is_empty()
 			|| !catalog.json.tracks.is_empty()
 			|| !catalog.binary.tracks.is_empty()
-			|| catalog.m2ts.is_some()
 			|| self.ext_tracks.is_some_and(|lists| lists(&mut catalog.ext))
 			|| self.owned.iter().any(|((ty, _), &listed)| listed && !base.contains(ty))
 	}
@@ -964,7 +963,7 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// What each media track minted under this catalog has written, keyed by its catalog key: the
-	/// rendition ID, or the track name for an `m2ts` or verbatim `mpegts` track.
+	/// rendition ID, or the track name for a passthrough or verbatim `mpegts` track.
 	///
 	/// Counters are cumulative for the life of the catalog, so a track that ended keeps its final
 	/// counts and a later track under the same key continues them, until 1,024 keys are held: then
@@ -2829,26 +2828,6 @@ mod test {
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
 		assert!(snapshot.ext.get("mpegts").is_some());
-	}
-
-	/// A passthrough lists its multiplex as `m2ts`, not as a rendition, and that is a track.
-	#[test]
-	fn m2ts_counts_as_a_servable_track() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
-		let waiter = kio::Waiter::noop();
-
-		let reserved = catalog.reserve();
-		catalog
-			.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
-			.unwrap();
-		drop(reserved);
-		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
-			other => panic!("expected the passthrough catalog, got {other:?}"),
-		};
-		assert_eq!(snapshot.m2ts.unwrap().track, "input.m2ts");
 	}
 
 	/// A metadata edit after the last reservation released is still an initial publish, so it waits

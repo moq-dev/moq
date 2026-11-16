@@ -24,7 +24,7 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 Facts found by the audit:
 
 - A mis-shaped section is, by key: refused (`video`, `audio`, `include`,
-  `m2ts`, `version`); empty unless it is an object (`media`,
+  `version`); empty unless it is an object (`media`,
   `deserialize_media`); empty unless it has its map key (`text`, `json`,
   `binary`, `deserialize_section`); absent unless it has a string field
   (`stats`, `echo`, `deserialize_named`); absent on any error
@@ -56,9 +56,9 @@ For the PR:
   Delete `deserialize_section`'s and `deserialize_named`'s fallbacks and
   their JS twins, keep `deserialize_object`, and replace the draft's
   per-key "is ignored" and "treat as absent" sentences with one statement
-  in the Root section. [The sync section](/quest/m2/hang04/sync.md) and
-  [the MPEG-TS section](/quest/m2/hang04/m2ts.md) own their keys; whichever
-  lands second meets the rule already in place.
+  in the Root section. [The sync section](/quest/m2/hang04/sync.md) owns
+  its key; whichever lands second meets the rule already in place. The
+  root `m2ts` member is gone: `mpegts.passthrough` replaced it.
 - Before deleting a fallback, search the tree and the docs for an
   application that writes its own value under one of those keys
   (`js/room` writes a root `hang` section, which no rule here touches).
@@ -76,9 +76,7 @@ For the PR:
   conferencing protocol" becomes what the document is, the media format
   every gateway shares; `JsonSchema` and `BinarySchema` gain the `instance`
   the code carries.
-- Not here: the duplicated MPEG-TS SI section goes with
-  [the MPEG-TS section](/quest/m2/hang04/m2ts.md), the dual-decoder
-  sentences with [video warmup](/quest/m2/hang04/video-warmup.md), and the
+- Not here: the dual-decoder sentences with [video warmup](/quest/m2/hang04/video-warmup.md), and the
   marker rules with
   [media consumers](/quest/m2/time-addressing/consumers.md).
 

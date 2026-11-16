@@ -232,6 +232,11 @@ pub enum Error {
 	#[error("capture time is outside the broadcast clock")]
 	InvalidCapture,
 
+	/// A transport stream passthrough's catalog extension carries no `mpegts` section to list its
+	/// track in.
+	#[error("a passthrough lists its track in the `mpegts` section, which the catalog extension does not carry")]
+	NoMpegtsSection,
+
 	/// A transport stream passthrough was fed packets other than 188 bytes.
 	///
 	/// A 192-byte source (BDAV M2TS, a four-byte timestamp before each packet) or a 204-byte one

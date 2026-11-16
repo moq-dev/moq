@@ -31,7 +31,7 @@ Facts found by the audit:
 - [moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652) moved the
   root `clock` under a new `media` section and gave no reason beyond
   grouping it with the new interval.
-- The clock times text cues, data tracks, `m2ts` frames, stats `arrival`,
+- The clock times text cues, data tracks, passthrough frames, stats `arrival`,
   and the catalog track itself
   (`rs/hang/src/catalog/root.rs`: "snapshots share the broadcast clock with
   media"), which

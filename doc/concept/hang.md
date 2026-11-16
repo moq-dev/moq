@@ -161,11 +161,15 @@ Name the section with a namespaced key such as
 
 A broadcast can carry an MPEG transport stream whole instead of demultiplexed
 into renditions, for what demultiplexing cannot carry, such as a scrambled
-service. The root `m2ts` section names the one track holding it:
+service. The `mpegts` section's `passthrough` member names the one track holding
+it:
 
 ```json
 {
-  "m2ts": { "track": "0.m2ts", "randomAccess": true, "muxRate": 2499999 }
+  "mpegts": {
+    "muxRate": 2499999,
+    "passthrough": { "track": "0.m2ts", "randomAccess": true }
+  }
 }
 ```
 
@@ -175,7 +179,8 @@ steps back is a new broadcast. `randomAccess` says whether every published group
 began where a receiver can start decoding, and `muxRate` is the measured
 constant multiplex rate in bits per second, absent for a variable-rate source.
 A player has nothing to decode here. `moq import ts --passthrough` writes this
-section (see [MPEG-TS](/bin/ts#passthrough-mode)); the encoding is in
+member (see [MPEG-TS](/bin/ts#passthrough-mode)); the section, which also
+describes a demultiplexed stream, is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
 ## Container

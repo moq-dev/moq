@@ -945,7 +945,7 @@ pub struct TsImport {
 	pub program: Option<TsProgram>,
 
 	/// Publish the multiplex whole instead of demultiplexing it: every 188-byte packet verbatim,
-	/// on one track the catalog's `m2ts` section names. Scrambled streams, private PIDs, and the
+	/// on one track the catalog's `mpegts` section names. Scrambled streams, private PIDs, and the
 	/// PSI and SI ride through as authored. Bytes before the first group are dropped.
 	#[usage(long, conflicts = "--program")]
 	pub passthrough: bool,
@@ -1199,7 +1199,7 @@ pub struct ContainerSink {
 	pub stitch: bool,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
-	/// Write the `m2ts` passthrough track back out (`ts` only).
+	/// Write the passthrough track back out (`ts` only).
 	pub passthrough: bool,
 	/// The file a recording writes (`mp4` only); the rest write to stdout.
 	pub output: Option<PathBuf>,

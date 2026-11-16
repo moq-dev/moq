@@ -56,7 +56,8 @@ const VersionSchema = z.number().check(
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
  * ignores the extra sections; an extended consumer validates them with its own schema, typically
- * built via `z.extend(RootSchema, { ... })`.
+ * built via `z.extend(RootSchema, { ... })`. The `mpegts` section (draft-lcurley-moq-mpegts),
+ * including a transport stream carried whole, is such an extension: nothing in JS reads it yet.
  *
  * The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
  * that is 3. Parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}; a

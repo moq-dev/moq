@@ -136,8 +136,7 @@ impl FromStr for Format {
 
 			"fmp4" | "cmaf" => Format::Container(ContainerFormat::Fmp4),
 			"mkv" | "webm" | "matroska" => Format::Container(ContainerFormat::Mkv),
-			// Not `m2ts`: that names the catalog section carrying a multiplex whole, and BDAV's
-			// 192-byte packets besides.
+			// Not `m2ts`, which names BDAV's 192-byte packets rather than 188-byte TS.
 			"ts" | "mpegts" | "mpeg2ts" => Format::Container(ContainerFormat::Ts),
 			"flv" => Format::Container(ContainerFormat::Flv),
 

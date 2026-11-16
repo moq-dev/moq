@@ -24,7 +24,7 @@ moq ... --broadcast event.hang export ts --passthrough > out.ts
 
 | | Semantic | Passthrough (`--passthrough`) |
 | --- | --- | --- |
-| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [`m2ts`](/concept/hang#transport-streams) track of whole 188-byte packets |
+| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [passthrough](/concept/hang#transport-streams) track of whole 188-byte packets, named in the same section |
 | Output | A rebuilt TS: same media, programs, descriptors and kept SI; new packetization, PCR and table cadence | The source's packets, byte for byte, from the first group on |
 | Browsers and `moq play` | Watch the video and AAC or Opus audio; MP2, AC-3 and E-AC-3 play only where the player has a decoder for them, which `moq play` does not | Have nothing to decode |
 | A relay | Drops and prioritizes per track | Caches and drops whole runs of packets |

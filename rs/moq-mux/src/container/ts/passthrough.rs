@@ -56,10 +56,11 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 
 /// Publishes a transport stream verbatim, as one track of whole 188-byte packets.
 ///
-/// Every packet goes out in input order, on the track the catalog's [`m2ts`](hang::catalog::M2ts)
-/// section names. It reads the PAT and PMT to find the program clock and the video stream, and
-/// reads nothing else past an adaptation field, so a scrambled multiplex groups and paces exactly
-/// like its clear twin.
+/// Every packet goes out in input order, on the track the catalog's `mpegts` section names in
+/// [`passthrough`](super::Mpegts::passthrough), with the multiplex rate in its
+/// [`mux_rate`](super::Mpegts::mux_rate). It reads the PAT and PMT to find the program clock and
+/// the video stream, and reads nothing else past an adaptation field, so a scrambled multiplex
+/// groups and paces exactly like its clear twin.
 ///
 /// # Objects and groups
 ///
@@ -77,7 +78,7 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 ///   split to meet the bound.
 ///
 /// Only the first of these makes a group a random access point, so any other start publishes
-/// [`random_access`](hang::catalog::M2ts::random_access) false from then on, as does any group
+/// [`random_access`](super::PassthroughTrack::random_access) false from then on, as does any group
 /// carried while the layout allows no random access (more than one program or video stream). A
 /// group the PCR discontinuity starts is behind a break even when it is also a random access
 /// point.
@@ -106,7 +107,10 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 /// needs a new broadcast. The timeline therefore depends only on the bytes since the importer's
 /// first PCR and its shift, and two importers of one feed started at the same packet each placing
 /// its own catalog's clock publish identical objects.
-pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
+///
+/// The catalog's extension must carry the `mpegts` section ([`Catalog`](super::Catalog)), such as
+/// [`Ext`](super::Ext): [`new`](Self::new) refuses one that does not.
+pub struct Passthrough<E: super::Catalog = super::Ext> {
 	catalog: crate::catalog::Producer<E>,
 	/// Held until the first group is written, so the first catalog already names the track with
 	/// its final `randomAccess`.
@@ -158,17 +162,24 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	mux_rate: Meter,
 }
 
-/// Owns the `m2ts` catalog section once written, removing it however the track ends, as the
+/// Owns the passthrough's catalog entry once written, removing it however the track ends, as the
 /// demultiplexed lane's catalog entries are.
-struct Section<E: crate::catalog::hang::CatalogExt> {
+struct Section<E: super::Catalog> {
 	catalog: crate::catalog::Producer<E>,
-	written: hang::catalog::M2ts,
+	written: Written,
+}
+
+/// What a passthrough last wrote into the `mpegts` section.
+#[derive(Clone, PartialEq)]
+struct Written {
+	track: super::PassthroughTrack,
+	mux_rate: Option<u64>,
 }
 
 /// A passthrough that [finished](Passthrough::finish): its track has ended, and it can still be
 /// read or aborted, but it takes no more input.
 ///
-/// Dropping it releases the track and removes the catalog's `m2ts` section.
+/// Dropping it releases the track and removes it from the catalog's `mpegts` section.
 ///
 /// ```compile_fail,E0599
 /// # fn cannot_decode(mut passthrough: moq_mux::container::ts::passthrough::Finished) {
@@ -176,11 +187,11 @@ struct Section<E: crate::catalog::hang::CatalogExt> {
 /// # }
 /// ```
 #[must_use = "dropping it releases the track and its catalog section"]
-pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+pub struct Finished<E: super::Catalog = super::Ext> {
 	passthrough: Passthrough<E>,
 }
 
-impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+impl<E: super::Catalog> Finished<E> {
 	/// The name of the track carrying the packets.
 	pub fn track(&self) -> &str {
 		self.passthrough.track()
@@ -193,10 +204,19 @@ impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
 	}
 }
 
-impl<E: crate::catalog::hang::CatalogExt> Drop for Section<E> {
+impl<E: super::Catalog> Drop for Section<E> {
 	fn drop(&mut self) {
+		let written = &self.written;
 		// A closed catalog has nothing left to remove it from.
-		let _ = self.catalog.mutate(|catalog| catalog.m2ts = None);
+		let _ = self.catalog.mutate(|catalog| {
+			if let Some(mpegts) = catalog.ext.mpegts_mut() {
+				mpegts.passthrough = None;
+				// The rate is the multiplex's, so leave one something else wrote since.
+				if mpegts.mux_rate == written.mux_rate {
+					mpegts.mux_rate = None;
+				}
+			}
+		});
 	}
 }
 
@@ -271,11 +291,18 @@ struct Group {
 	objects: usize,
 }
 
-impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
+impl<E: super::Catalog> Passthrough<E> {
 	/// A passthrough importer publishing one track on `broadcast`, listed in the catalog behind
 	/// `reserved`.
+	///
+	/// Fails with [`NoMpegtsSection`](crate::Error::NoMpegtsSection) when the catalog's extension
+	/// carries no `mpegts` section to list the track in.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> crate::Result<Self> {
 		let catalog = reserved.producer();
+		if catalog.snapshot().ext.mpegts_mut().is_none() {
+			return Err(crate::Error::NoMpegtsSection);
+		}
+		catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
 		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))?;
 		let media = catalog.media_raw(
 			track,
@@ -340,7 +367,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// [`Finished`] passthrough.
 	///
 	/// No later PCR will arrive, so the objects since the last one are timed at the rate of the
-	/// interval before it. The catalog keeps the `m2ts` section until the [`Finished`] passthrough
+	/// interval before it. The catalog keeps listing the track until the [`Finished`] passthrough
 	/// drops.
 	///
 	/// A finish that fails ends the track with an error, so it can't be retried.
@@ -669,24 +696,35 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		Ok(())
 	}
 
-	/// Write the section to the catalog if it changed. Nothing is written before the first group.
+	/// Write the track and rate to the catalog if they changed. Nothing is written before the first
+	/// group.
 	fn record(&mut self) -> crate::Result<()> {
 		if matches!(self.groups, Groups::Waiting(_)) && self.section.is_none() {
 			return Ok(());
 		}
-		let mut section = hang::catalog::M2ts::new(self.media.name());
-		section.random_access = self.single && self.all_random_access;
-		section.mux_rate = self.mux_rate.published();
-		if self.section.as_ref().is_some_and(|written| written.written == section) {
+		let mut track = super::PassthroughTrack::new(self.media.name());
+		track.random_access = self.single && self.all_random_access;
+		let written = Written {
+			track,
+			mux_rate: self.mux_rate.published(),
+		};
+		if self.section.as_ref().is_some_and(|section| section.written == written) {
 			return Ok(());
 		}
-		self.catalog.mutate(|catalog| catalog.m2ts = Some(section.clone()))?;
+		let update = written.clone();
+		self.catalog.mutate(|catalog| {
+			// `new` checked the section exists, and an extension keeps it for its life.
+			if let Some(mpegts) = catalog.ext.mpegts_mut() {
+				mpegts.passthrough = Some(update.track);
+				mpegts.mux_rate = update.mux_rate;
+			}
+		})?;
 		match &mut self.section {
-			Some(written) => written.written = section,
+			Some(section) => section.written = written,
 			None => {
 				self.section = Some(Section {
 					catalog: self.catalog.clone(),
-					written: section,
+					written,
 				})
 			}
 		}

@@ -24,7 +24,7 @@ read the catalog as a frozen format: hang-03 is what the datatracker and
 readers are the first that check `version` at all. Each child's Plan records
 its own decisions.
 
-The children land in any order. They overlap in three places, so whichever
+The children land in any order. They overlap in two places, so whichever
 lands second merges main first:
 
 - [Entry versions](/quest/m2/hang04/entry-version.md) and
@@ -34,8 +34,6 @@ lands second merges main first:
 - [The sync section](/quest/m2/hang04/sync.md) is born strict, under the
   rule [one strict rule](/quest/m2/hang04/shape.md) applies to the sections
   that exist today.
-- [The MPEG-TS section](/quest/m2/hang04/m2ts.md) removes a root member
-  that the strict rule would otherwise cover.
 
 What the audit judged and kept, so nobody reopens it without new evidence:
 `include`, `track` apart from the ID, `instance` on references, `enabled`,
