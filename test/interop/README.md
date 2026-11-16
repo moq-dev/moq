@@ -64,7 +64,9 @@ The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
 native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
-Node and Bun. The FETCH round crosses Rust and each selected native JS runtime as both
+Node and Bun. The same track also crosses on lite-07 as a metadata-only subscription:
+the reader checks every group arrives as metadata, with each frame's declared size and
+no payload, Rust-to-Rust and in both directions with each selected native JS runtime. The FETCH round crosses Rust and each selected native JS runtime as both
 publisher and subscriber. Each reader fetches group 1 of a finished track, requires exactly
 its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
 that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers

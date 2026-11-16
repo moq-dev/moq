@@ -37,12 +37,15 @@ const status = mode === "status";
 const cached = mode === "cached";
 const history = mode === "history";
 const late = mode === "late";
+const meta = mode === "meta";
 const fetch = mode === "fetch";
 if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch"].includes(mode)
+	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch", "meta"].includes(
+		mode,
+	)
 ) {
 	throw new Error(
 		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch]]",
@@ -105,6 +108,17 @@ function serveHistory(track: Moq.Track.Producer) {
 
 /** Read one whole group, checking every frame's bytes, and report when the `late` head is in. */
 async function read(group: Moq.Group.Consumer) {
+	if (meta) {
+		// A metadata group declares each frame's size and carries no payload.
+		assert(group.meta, `group ${group.sequence} carried its payload`);
+		for (const [index, want] of frames(Number(group.sequence)).entries()) {
+			const info = await group.readInfo();
+			assert(info, "short group");
+			assert.equal(info.size, want.length, `wrong size of frame ${index} in group ${group.sequence}`);
+		}
+		assert.equal(await group.readInfo(), undefined, "extra frame");
+		return;
+	}
 	for (const [index, want] of frames(Number(group.sequence)).entries()) {
 		const frame = await group.readFrame();
 		assert(frame, "short group");
@@ -245,6 +259,7 @@ try {
 				const track = broadcast.track("tail").subscribe({
 					delay: { max: Duration.millis(drop ? 60_000 : 5000) },
 					...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
+					meta,
 				});
 				if (compress)
 					assert.equal((await track.info()).compression, version === "moq-lite-07-wip" ? "deflate" : "none");
@@ -283,6 +298,7 @@ try {
 						assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
 						if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
 						else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
+						else if (meta) console.error("tail meta clean end=4 groups=0,1,2,3 bytes=1048576");
 						else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
 					}
 				} finally {

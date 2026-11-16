@@ -63,8 +63,21 @@ fn at(sequence: u64) -> moq_net::Timestamp {
 }
 
 /// Read one whole group, checking every frame's bytes, and report when the `late` head is in.
+/// `meta` checks each frame's declared size instead, with no payload to read.
 async fn read(group: &mut moq_net::group::Consumer, mode: Option<&str>) -> anyhow::Result<()> {
 	let sequence = group.start;
+	if mode == Some("meta") {
+		ensure!(group.is_meta(), "group {sequence} carried its payload");
+		for (index, want) in frames(sequence, mode).iter().enumerate() {
+			let info = group.read_info().await?.context("short group")?;
+			ensure!(
+				info.size == want.len() as u64,
+				"wrong size of frame {index} in group {sequence}"
+			);
+		}
+		ensure!(group.read_info().await?.is_none(), "extra frame in group {sequence}");
+		return Ok(());
+	}
 	for (index, want) in frames(sequence, mode).iter().enumerate() {
 		let frame = group.read_frame().await?.context("short group")?;
 		ensure!(frame.payload[..] == want[..], "wrong frame {index} in group {sequence}");
@@ -83,14 +96,14 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late|meta]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
 		matches!(
 			mode,
-			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late")
+			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late" | "meta")
 		),
 		"unknown mode: {mode:?}"
 	);
@@ -101,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
 	let datagram = mode == Some("datagram");
 	let status = mode == Some("status");
 	let late = mode == Some("late");
+	let meta = mode == Some("meta");
 	let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 	let mut config = moq_tokio::connect::Config::default();
 	// An empty version offers the defaults, so a mode can follow it.
@@ -279,7 +293,8 @@ async fn main() -> anyhow::Result<()> {
 				.with_ranges([moq_net::track::Range {
 					start: moq_net::track::Anchor::Time(0),
 					end: None,
-				}]);
+				}])
+				.with_meta(meta);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {
 				ensure!(
@@ -309,6 +324,8 @@ async fn main() -> anyhow::Result<()> {
 				eprintln!("tail join clean end=4 groups={}", groups.join(","));
 			} else if drop {
 				eprintln!("tail drop clean end=4 groups=0,2,3 bytes=786432");
+			} else if meta {
+				eprintln!("tail meta clean end=4 groups=0,1,2,3 bytes=1048576");
 			} else {
 				eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
 			}
