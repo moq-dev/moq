@@ -2801,9 +2801,13 @@ impl kio::Task for Fetching {
 					self.left = Some(served);
 					continue;
 				}
-				// The route failed: ask the next one, unless none will come. Kept as the answer,
-				// since the same copy is never asked twice.
-				Err(err) if (err.retryable() || copy_failed(&serving)) && self.route.moves() => {
+				// The route failed: ask the next one, unless none will come and none came since
+				// the snapshot, which a front may have spliced just before concluding. Kept as
+				// the answer, since the same copy is never asked twice.
+				Err(err)
+					if (err.retryable() || copy_failed(&serving))
+						&& (self.route.moves() || self.moved(generation, staged_id)) =>
+				{
 					if let Some(asked) = &mut self.pending {
 						asked.answer = Some(Err(err));
 					}
