@@ -4,7 +4,7 @@
 
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
 import { checkPackageConstructors } from "./constructors.ts";
@@ -133,7 +133,10 @@ for (const [name, version] of Object.entries<string>(pkg.devDependencies ?? {}))
 				console.error(`${file}: imports ${name}${subpath}, which has no such code export`);
 				process.exit(1);
 			}
-			const path = relative(dirname(file), join(out, rewritePath(target, "js")));
+			// A module specifier separates with "/" on every platform, unlike a Windows path.
+			const path = relative(dirname(file), join(out, rewritePath(target, "js")))
+				.split(sep)
+				.join("/");
 			return `${quote}${path.startsWith(".") ? path : `./${path}`}${quote}`;
 		});
 		writeFileSync(file, body);
