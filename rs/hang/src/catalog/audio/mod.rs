@@ -36,7 +36,10 @@ pub struct Audio {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -261,7 +264,7 @@ impl AudioConfig {
 	}
 }
 
-impl crate::catalog::Rendition for AudioConfig {
+impl crate::catalog::Entry for AudioConfig {
 	fn check(&self) -> crate::Result<()> {
 		if self.sample_rate == 0 {
 			return Err(crate::Error::Zero("sampleRate"));
@@ -273,6 +276,10 @@ impl crate::catalog::Rendition for AudioConfig {
 			layout.check(self.channel_count)?;
 		}
 		Ok(())
+	}
+
+	fn version(&self, id: &str) -> Option<u64> {
+		crate::catalog::renamed_version(self, id)
 	}
 }
 

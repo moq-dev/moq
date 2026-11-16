@@ -25,11 +25,25 @@ pub struct Binary {
 	///
 	/// A map rather than an array so it works with JSON Merge Patch, and a `BTreeMap` so keys are
 	/// sorted for *some* deterministic behavior.
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub tracks: BTreeMap<String, BinaryConfig>,
 }
 
 impl crate::catalog::Section for Binary {
 	const MAP: &'static str = "tracks";
+}
+
+impl crate::catalog::Entry for BinaryConfig {
+	fn version(&self, id: &str) -> Option<u64> {
+		crate::catalog::renamed_version(self, id)
+	}
+
+	fn claims_version(&self) -> bool {
+		self.extra.contains_key("version")
+	}
 }
 
 impl Binary {
@@ -121,7 +135,8 @@ pub struct BinaryConfig {
 	#[serde(default, skip_serializing_if = "crate::catalog::millis::no_delay")]
 	pub delay: Option<std::time::Duration>,
 
-	/// Fields this build doesn't recognize, kept so the entry round-trips.
+	/// Fields this build doesn't recognize, kept so the entry round-trips. Never `version`, which
+	/// is computed when the entry is written.
 	///
 	/// A future [`Mode`] almost certainly comes with fields describing it, and
 	/// preserving the discriminant without them would leave a relay republishing an entry nothing

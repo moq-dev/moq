@@ -46,7 +46,10 @@ pub struct Video {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub renditions: BTreeMap<String, VideoConfig>,
 
 	/// Render the video at this size in pixels.
@@ -416,7 +419,7 @@ impl VideoConfig {
 	}
 }
 
-impl crate::catalog::Rendition for VideoConfig {
+impl crate::catalog::Entry for VideoConfig {
 	fn check(&self) -> crate::Result<()> {
 		for (field, value) in [
 			("codedWidth", self.coded_width),
@@ -432,6 +435,13 @@ impl crate::catalog::Rendition for VideoConfig {
 			projection.check()?;
 		}
 		Ok(())
+	}
+
+	fn version(&self, id: &str) -> Option<u64> {
+		// moq-hang-04: a reader that ignores video `warmup` assumes every group starts at a
+		// keyframe, and hands its decoder one that starts at a converging picture instead.
+		let warmup = self.warmup.is_some_and(|warmup| !warmup.is_zero()).then_some(4);
+		crate::catalog::renamed_version(self, id).max(warmup)
 	}
 }
 

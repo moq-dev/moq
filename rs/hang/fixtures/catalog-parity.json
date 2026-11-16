@@ -3759,5 +3759,197 @@
 			}
 		},
 		"refused": true
+	},
+	{
+		"name": "a newer entry is skipped",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"next": {
+						"version": 5,
+						"codec": 42
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"next": {
+						"version": 6
+					}
+				}
+			},
+			"text": {
+				"renditions": {
+					"next": {
+						"version": 5
+					}
+				}
+			},
+			"json": {
+				"tracks": {
+					"next": {
+						"version": 5
+					}
+				}
+			},
+			"binary": {
+				"tracks": {
+					"next": {
+						"version": 5,
+						"mode": []
+					}
+				}
+			},
+			"include": {
+				"next": {
+					"version": 5,
+					"broadcast": 7
+				}
+			}
+		},
+		"video": ["compat"],
+		"skipped": {
+			"video": {
+				"next": 5
+			},
+			"audio": {
+				"next": 6
+			},
+			"text": {
+				"next": 5
+			},
+			"json": {
+				"next": 5
+			},
+			"binary": {
+				"next": 5
+			},
+			"include": {
+				"next": 5
+			}
+		}
+	},
+	{
+		"name": "a supported entry version is read",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"zero": {
+						"version": 0,
+						"codec": "avc1.64001f"
+					},
+					"four": {
+						"version": 4,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"video": ["four", "zero"]
+	},
+	{
+		"name": "a newer root version refuses despite entry versions",
+		"catalog": {
+			"version": 5,
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"next": {
+						"version": 5
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version \"5\" refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": "5",
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version -1 refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": -1,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version 4.5 refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": 4.5,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version null refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": null,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version [] refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": [],
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
 	}
 ]

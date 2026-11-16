@@ -523,6 +523,16 @@ export const RootSchema: ZodMiniObject<{
 	}, $strip>>;
 }, $loose>;
 
+export interface Skipped {
+	audio: Record<string, number>;
+	binary: Record<string, number>;
+	include: Record<string, number>;
+	json: Record<string, number>;
+	text: Record<string, number>;
+	version: number;
+	video: Record<string, number>;
+}
+
 export type Stats = infer<typeof StatsSchema>;
 
 export const StatsSchema: ZodMiniObject<{
@@ -834,6 +844,8 @@ export const hexSchema: ZodMiniString<string>;
 export function modeSupported(mode: Mode): mode is KnownMode;
 
 export const nonzeroU53Schema: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+
+export function skipped(root: Root): Skipped | undefined;
 
 export function track(id: string, config: {
 	track?: string;

@@ -157,6 +157,7 @@ type Catalog = {
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
   "include": Record<string, {
+    "version": number | undefined,
     "broadcast": string,
     "instance": string | undefined,
   }> | undefined,
@@ -172,18 +173,22 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, an optional `media` section ({{media}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed in `include` ({{include}}).
+This specification defines audio, video, and text media tracks, an optional `media` section ({{media}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the `version` of the catalog and of each entry ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed in `include` ({{include}}).
 
 ## Version {#catalog-version}
-The root `version` field is the oldest draft of this specification that reads the catalog correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
+The `version` field is the oldest draft of this specification that reads what carries it correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
 If absent, it is 3.
+The root carries one for the whole catalog, and each entry of a map keyed by ID (an audio, video, or text rendition, a data track, or an include) carries one for itself.
 
 A consumer MUST ignore fields it does not recognize.
-A consumer MUST refuse a catalog whose `version` is above the draft it implements, or is not a non-negative integer, rather than read it; one that refuses SHOULD tell its user to upgrade.
+A consumer MUST refuse a catalog whose root `version` is above the draft it implements, or any `version` that is not a non-negative integer, rather than read it; one that refuses SHOULD tell its user to upgrade.
+A consumer MUST read an entry's `version` before the rest of the entry, and MUST skip an entry whose `version` is above the draft it implements: it reads the catalog as if that entry were absent, so the entry is never malformed.
+One that skips an entry SHOULD tell its user that an upgrade would show more.
 
-A publisher writes the highest draft whose fields the catalog uses that an older consumer would misread, and omits `version` while that is 3.
-A change raises the version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
-This draft needs `version` 4 for:
+A publisher writes on each entry the highest draft whose fields the entry uses that an older consumer would misread, and on the root the highest such draft for the root's own fields, omitting each `version` while it is 3.
+A field one entry carries raises only that entry's `version`, so an older consumer still plays the rest of the catalog, including a compatibility rendition beside the new one.
+A change raises a version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
+This draft writes no root `version`, and needs an entry `version` of 4 for:
 
 - a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
 - a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
@@ -621,6 +626,7 @@ A consumer discovers these tracks the same way it discovers media, by reading th
 ### JSON {#json-tracks}
 ~~~
 type JsonSchema = {
+  "version": number | undefined,
   "mode": Mode,
   "schema": string | undefined,
   "broadcast": string | undefined,
@@ -637,6 +643,7 @@ It is descriptive: a consumer that does not recognize it MUST still be able to r
 ### Binary {#binary-tracks}
 ~~~
 type BinarySchema = {
+  "version": number | undefined,
   "mode": Mode,
   "mime": string | undefined,
   "broadcast": string | undefined,
@@ -708,6 +715,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 
 ~~~
 type CommonExtensions = {
+  "version": number | undefined,
   "broadcast": string | undefined,
   "instance": string | undefined,
   "track": string | undefined,
@@ -1123,7 +1131,7 @@ This document has no IANA actions.
 - Replaced the root `archive` section and its per-track timelines with the root `media` section ({{media}}). Its `join.interval` is the longest group of any audio or video track, fixed for the broadcast, and the grid an edge numbers HLS and DASH segments on, each segment the smallest whole multiple of it at least a second long, from each group's first timestamp ({{hls}}); the root `clock` moved to `media.clock`. Segment indexes, frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
-- Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
+- Added `version` on the root and on each rendition, data track, and include ({{catalog-version}}): the oldest draft that reads it. A consumer refuses a catalog whose root `version` is above its own, and skips an entry whose `version` is. A `track` other than the entry's ID or a video `warmup` needs an entry `version` of 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Removed the viewer feedback `latency` field.

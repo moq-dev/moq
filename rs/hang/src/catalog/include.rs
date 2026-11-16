@@ -39,3 +39,5 @@ impl Include {
 		}
 	}
 }
+
+impl crate::catalog::Entry for Include {}

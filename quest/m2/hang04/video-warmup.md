@@ -48,8 +48,9 @@ Facts found by the audit:
   Firefox and Safari are unverified, and Chromium refuses a non-IRAP H.265
   frame sent as `key`, so an HEVC refresh rendition fails
   ([second decoder](/quest/m4/intra-refresh/dual-decoder.md)).
-- The draft makes video `warmup` above zero one of two triggers for
-  `version` 4 (`min_version`, `rs/hang/src/catalog/root.rs`; `minVersion`,
+- The draft makes video `warmup` above zero one of two triggers for an
+  entry `version` of 4 (`VideoConfig`'s `Entry::version`,
+  `rs/hang/src/catalog/video/mod.rs`; `videoVersion`,
   `js/hang/src/catalog/root.ts`), and lets a video group start at "a
   picture from which decoding converges within that duration" (the
   Container section's group rules).
@@ -99,4 +100,3 @@ catalog JSON and group rule, unpublished.
 ## Related
 
 - [Video warmup returns with its producer](/quest/m4/intra-refresh/catalog-warmup.md) - restores this from history as the next catalog version
-- [A player skips a catalog entry newer than it reads](/quest/m2/hang04/entry-version.md) - how a 0.22 player will refuse that later rendition; edits the same version lines

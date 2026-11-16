@@ -11,32 +11,18 @@ import { JsonSchema } from "./json";
 import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, object, renditions, section } from "./section";
+import { named, object, renditions, SKIPPED, section } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { track } from "./track";
+import { UnsupportedVersion, VERSION, VersionSchema } from "./version";
 import { VideoSchema } from "./video";
 
-/** The newest moq-hang draft this package reads; a catalog whose `version` is higher is refused. */
-export const VERSION = 4;
-
-/** A catalog needs a newer moq-hang draft than this reader implements. */
-export class UnsupportedVersion extends Error {
-	/** The catalog version that was read. */
-	readonly version: number;
-
-	constructor(version: number) {
-		super(`unsupported catalog version ${version}: upgrade to read it`);
-		this.name = "UnsupportedVersion";
-		this.version = version;
-	}
-}
+export { UnsupportedVersion, VERSION } from "./version";
 
 // Thrown rather than reported as an issue, so it surfaces as itself and before any section, which
 // the newer draft may have reshaped.
-const VersionSchema = z.number().check(
-	z.int(),
-	z.nonnegative(),
+const RootVersionSchema = VersionSchema.check(
 	z.refine((version) => {
 		if (Number.isInteger(version) && version > VERSION) throw new UnsupportedVersion(version);
 		return true;
@@ -59,12 +45,14 @@ const VersionSchema = z.number().check(
  * built via `z.extend(RootSchema, { ... })`.
  *
  * The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
- * that is 3. Parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}; a
- * publisher sets it with {@link encode}.
+ * that is 3, and parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}. Each
+ * entry (rendition, data track, include) carries its own `version` the same way, and parsing skips
+ * an entry whose `version` is above {@link VERSION}; {@link skipped} reports it. A publisher writes
+ * the entry versions with {@link encode}.
  */
 export const RootSchema = z.looseObject({
 	// First, so it is checked before any section.
-	version: z.optional(VersionSchema),
+	version: z.optional(RootVersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
 	// What applies to every audio and video track, omitted when it holds nothing. `media` is a
@@ -91,26 +79,77 @@ export const RootSchema = z.looseObject({
 /** The root catalog object: the media sections, `media`, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
 
-/**
- * The oldest moq-hang draft that reads `root` correctly, or undefined while that is 3.
- *
- * Only a field an older reader would misread raises it; one it would merely ignore does not.
- */
-function minVersion(root: Root): number | undefined {
-	// moq-hang-04: a reader that ignores `track` subscribes to the ID, a different track.
-	const renamed = [
-		root.video?.renditions,
-		root.audio?.renditions,
-		root.text?.renditions,
-		root.json?.tracks,
-		root.binary?.tracks,
-	].some((entries) => Object.entries(entries ?? {}).some(([id, config]) => track(id, config) !== id));
+/** The catalog entries a reader skipped because a newer moq-hang draft defines them. */
+export interface Skipped {
+	/** The draft a reader needs to read every skipped entry. */
+	version: number;
+	/** Skipped video renditions, mapping each ID to its `version`. */
+	video: Record<string, number>;
+	/** Skipped audio renditions. */
+	audio: Record<string, number>;
+	/** Skipped text renditions. */
+	text: Record<string, number>;
+	/** Skipped JSON tracks. */
+	json: Record<string, number>;
+	/** Skipped binary tracks. */
+	binary: Record<string, number>;
+	/** Skipped includes. */
+	include: Record<string, number>;
+}
 
+/**
+ * The entries parsing `root` skipped because a newer moq-hang draft defines them, or undefined if
+ * it read them all. The rest of the catalog reads as if they were absent, so a player plays what
+ * it can and may tell its user to upgrade for the rest.
+ *
+ * Reads what {@link RootSchema} recorded on each parsed map, so pass the parsed value itself, not
+ * a copy. Mirrors Rust's `Catalog::skipped`.
+ */
+export function skipped(root: Root): Skipped | undefined {
+	const of = (map: object | undefined) => (map && SKIPPED.get(map)) ?? {};
+	const sections = {
+		video: of(root.video?.renditions),
+		audio: of(root.audio?.renditions),
+		text: of(root.text?.renditions),
+		json: of(root.json?.tracks),
+		binary: of(root.binary?.tracks),
+		include: of(root.include),
+	};
+	const versions = Object.values(sections).flatMap((section) => Object.values(section));
+	if (versions.length === 0) return undefined;
+	return { version: Math.max(...versions), ...sections };
+}
+
+/**
+ * The oldest moq-hang draft that reads an entry correctly given its ID, or undefined while that is
+ * 3. Only a field an older reader would misread raises it; one it would merely ignore does not.
+ */
+function entryVersion(id: string, entry: { track?: string; warmup?: number }): number | undefined {
+	// moq-hang-04: a reader that ignores `track` subscribes to the ID, a different track.
+	if (track(id, entry) !== id) return 4;
+	return undefined;
+}
+
+/** Video adds `warmup` to {@link entryVersion}. */
+function videoVersion(id: string, entry: { track?: string; warmup?: number }): number | undefined {
 	// moq-hang-04: a reader that ignores video `warmup` assumes every group starts at a keyframe,
 	// and hands its decoder one that starts at a converging picture instead.
-	const warmup = Object.values(root.video?.renditions ?? {}).some((config) => (config.warmup ?? 0) > 0);
+	if ((entry.warmup ?? 0) > 0) return 4;
+	return entryVersion(id, entry);
+}
 
-	return renamed || warmup ? 4 : undefined;
+/** Rewrite a map's entries with their computed `version` first, dropping any they carried. */
+function versioned<T extends object>(
+	entries: Record<string, T>,
+	version: (id: string, entry: T) => number | undefined,
+): Record<string, T> {
+	return Object.fromEntries(
+		Object.entries(entries).map(([id, entry]) => {
+			const { version: _, ...rest } = entry as T & { version?: unknown };
+			const computed = version(id, entry);
+			return [id, computed === undefined ? rest : { version: computed, ...rest }];
+		}),
+	) as Record<string, T>;
 }
 
 /** A catalog update used one rendition ID for both a video and an audio rendition. */
@@ -134,9 +173,10 @@ export function checkRenditions(root: Root): Root {
 }
 
 /**
- * The catalog as a publisher writes it: refused as every reader refuses it, with the root
- * `version` computed rather than carried, so an edit can't claim less than the catalog uses, and an
- * empty `media` left off the wire.
+ * The catalog as a publisher writes it: refused as every reader refuses it, with each entry's
+ * `version` computed rather than carried, so an edit can't claim less than an entry uses, and an
+ * empty `media` left off the wire. No moq-hang-04 field reshapes the root, so the root `version` is
+ * never written.
  *
  * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
@@ -145,8 +185,12 @@ export function encode(root: Root): Root {
 	const value = { ...root };
 	delete value.version;
 	if (value.media && value.media.clock === undefined && value.media.join === undefined) delete value.media;
-	const version = minVersion(root);
-	if (version !== undefined) value.version = version;
+	if (value.video) value.video = { ...value.video, renditions: versioned(value.video.renditions, videoVersion) };
+	if (value.audio) value.audio = { ...value.audio, renditions: versioned(value.audio.renditions, entryVersion) };
+	if (value.text) value.text = { ...value.text, renditions: versioned(value.text.renditions, entryVersion) };
+	if (value.json) value.json = { ...value.json, tracks: versioned(value.json.tracks, entryVersion) };
+	if (value.binary) value.binary = { ...value.binary, tracks: versioned(value.binary.tracks, entryVersion) };
+	if (value.include) value.include = versioned(value.include, () => undefined);
 	return value;
 }
 
