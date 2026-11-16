@@ -745,6 +745,13 @@ pub const MAX_SHARDS: u16 = 256;
 
 /// What the steering filter computes for one group.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(
+		dead_code,
+		reason = "only Linux's filter reads it, and elsewhere a group never binds"
+	)
+)]
 struct Program {
 	/// Members per generation.
 	count: u16,
@@ -1060,7 +1067,9 @@ mod tests {
 		packet
 	}
 
+	#[cfg(target_os = "linux")]
 	const V1: [u8; 4] = [0, 0, 0, 1];
+	#[cfg(target_os = "linux")]
 	const V2: [u8; 4] = [0x6b, 0x33, 0x43, 0xcf];
 
 	/// Every packet a client sends with a connection ID the server chose.
