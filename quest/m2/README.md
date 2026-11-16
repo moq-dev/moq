@@ -71,7 +71,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [upstream str0m](/quest/m2/str0m-upstream.md), which reverses the
   2026-10-30 vendoring.
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
-  [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
+  [`@moq/ui`](/quest/m2/ui-private.md),
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
 - **Bindings.** [Open selectors](/quest/m2/ffi-open-selectors.md),
   [Dart as experimental](/quest/m2/dart-experimental.md), and
