@@ -160,7 +160,7 @@ impl RouteStream {
 				State::Opening => {
 					let session = &self.subscriber.session;
 					let stream = ready!(session.poll_open_uni(&mut self.open, waiter, Default::default()))
-						.map_err(lite::error::from_transport)?;
+						.map_err(Error::from_transport)?;
 					let mut writer: Writer =
 						Writer::new(stream, self.subscriber.version).with_stats(self.subscriber.origin.stats());
 					writer.buffer(&lite::DataType::Announce)?;
