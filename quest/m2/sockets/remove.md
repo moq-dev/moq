@@ -78,8 +78,6 @@ For the PR:
   must already be off it.
 - Record the PR's parent commit in the PR body: it is the reference Kixel
   ports from.
-- If [the closed-endpoint flake](/quest/m0/test-flakes-3/py-socket-abort.md)
-  is still open, delete it here: its test leaves.
 - Run `just test interop --all` (moq-ffi changes) and `just api-diff`.
 
 Public API: breaking for `main`-only API in every language; nothing on
