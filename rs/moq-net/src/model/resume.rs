@@ -161,7 +161,7 @@ impl Producer {
 				}) if *from == preferences.ranges => sub.resolved_ranges(),
 				Some(Copy {
 					sub: Sub::Ready(sub), ..
-				}) => sub.resolve_ranges(&preferences.ranges),
+				}) => sub.resolve_ranges(&preferences),
 				Some(copy) if copy.from == preferences.ranges => copy.resolved.clone(),
 				_ => Vec::new(),
 			};
@@ -382,7 +382,7 @@ impl Consumer {
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
-		let window = Window::new(&mirrored.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
+		let window = Window::new(&mirrored.ranges, None, None, &Unheld).expect("an unheld hop refuses nothing");
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -552,7 +552,7 @@ impl Copy {
 			Sub::Ready(sub) if reader.ranges == self.from => self.resolved = sub.resolved_ranges(),
 			// Replaced ranges resolve against this copy's cache now, as any subscriber's do.
 			Sub::Ready(sub) => {
-				self.resolved = sub.resolve_ranges(&reader.ranges);
+				self.resolved = sub.resolve_ranges(reader);
 				self.from = reader.ranges.clone();
 			}
 			Sub::Pending(_) if reader.ranges == self.from => {}
@@ -1218,7 +1218,7 @@ impl Reader {
 		if unplaced {
 			return;
 		}
-		let window = Window::new(&ranges, None, &Placed).expect("a placed hop refuses nothing");
+		let window = Window::new(&ranges, None, None, &Placed).expect("a placed hop refuses nothing");
 		if !window.is_pending() {
 			self.window = window;
 		}
@@ -1241,7 +1241,7 @@ impl Reader {
 		if let Some(sub) = changed {
 			let replaced = sub.ranges != self.mirrored.ranges;
 			if replaced {
-				self.window = Window::new(&sub.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
+				self.window = Window::new(&sub.ranges, None, None, &Unheld).expect("an unheld hop refuses nothing");
 				// The serving copy's resume point may cut off groups the new ranges cover, judged
 				// by the reader's window.
 				self.resumed = Some((None, Vec::new()));

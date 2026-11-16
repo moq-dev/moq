@@ -9,11 +9,6 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
-    # rsa 0.9.x Marvin Attack: test-only compatibility fixtures use published
-    # moq-auth 0.2.1 and moq-token 0.7, which still depend on rsa. Production
-    # key generation and signing use rind; no normal/build graph holds rsa.
-    "RUSTSEC-2023-0071",
-
     # paste is unmaintained (proc-macro, build-time only). Pulled by
     # tikv-jemalloc-ctl (moq-tokio's `jemalloc` feature; 0.7 still uses it).
     "RUSTSEC-2024-0436",
@@ -36,6 +31,15 @@ ignore = [
     # Drop when Askama releases its migration to toml:
     # https://github.com/askama-rs/askama/blob/main/askama_derive/Cargo.toml
     "RUSTSEC-2026-0374",
+
+    # zvariant, zbus_names, and zvariant_derive are unmaintained: zbus 6 absorbed
+    # them. Reachable only via moq-video's `pipewire` feature -> ashpd 0.13 ->
+    # zbus 5, held there because zbus 6 pipelines its handshake, which breaks
+    # every portal call inside a Flatpak on xdg-dbus-proxy before 0.1.6 (Ubuntu
+    # 24.04 LTS ships 0.1.5). See the ashpd note in rs/moq-video/Cargo.toml.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 
 ]
 

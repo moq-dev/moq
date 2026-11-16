@@ -5,6 +5,9 @@
 
 use std::time::Duration;
 
+/// The default healthy bar: a session held this long establishes the loop, so its end retries.
+const HEALTHY: Duration = Duration::from_secs(1);
+
 /// A client whose reconnect loop escalates fast enough to assert on inside a test.
 fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
@@ -82,6 +85,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 /// count, however fast the redial.
 #[tokio::test]
 async fn the_connect_count_advances_on_reconnect() {
+	kio::clock::host_time(); // real TCP sockets
 	let (port, mut sessions, _task) = spawn_server().await;
 	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
 	let mut connection = quick_client(Default::default()).connect(url);
@@ -93,8 +97,9 @@ async fn the_connect_count_advances_on_reconnect() {
 	assert_eq!(status, moq_tokio::Status::Connected);
 	assert_eq!(connection.connects(), 1, "the first connect counts 1");
 
-	// Dropping the server's handle closes the session, so the loop redials.
+	// Dropping the server's handle closes the session once it was healthy, so the loop redials.
 	let session = sessions.recv().await.expect("server stopped accepting");
+	kio::clock::sleep(HEALTHY).await;
 	drop(session);
 
 	// Revisions, not `status()`: a drop and redial between polls would leave the status
@@ -170,13 +175,19 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	config.init(Default::default()).expect("failed to init client")
 }
 
-/// After a first session, a protocol violation reconnects like any other close.
+/// After a healthy first session, a protocol violation reconnects like any other close.
 #[tokio::test]
 async fn a_protocol_violation_reconnects() {
+	kio::clock::host_time(); // real TCP sockets
 	let (port, mut sessions, task) = spawn_server().await;
-	let connection =
+	let mut connection =
 		quick_client(Default::default()).connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap());
+	let status = kio::clock::timeout(Duration::from_secs(10), connection.status())
+		.await
+		.unwrap();
+	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
 	let first = sessions.recv().await.unwrap();
+	kio::clock::sleep(HEALTHY).await;
 	first.abort(moq_net::Error::ProtocolViolation);
 	tokio::select! {
 		session = sessions.recv() => {

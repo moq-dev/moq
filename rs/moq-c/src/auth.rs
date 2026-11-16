@@ -147,9 +147,8 @@ impl Auth {
 /// The first is the connection credential, unless the URL carries its own `?jwt=`; each
 /// other one widens the grant over in-band AUTH. The next dial presents them, and a live
 /// session that supports in-band AUTH presents them at once, withdrawing each replaced
-/// token once its replacements are answered, even when one is refused. After an
-/// authorization refusal the session redials only if they changed. Wait for the peer's
-/// verdict with [moq_session_tokens_answered].
+/// token once its replacements are answered, even when one is refused. Wait for the
+/// peer's verdict with [moq_session_tokens_answered].
 ///
 /// Returns zero on success, or a negative code: `MOQ_ERROR_UNSUPPORTED` for a session a
 /// server accepted, which presents no tokens, and `MOQ_ERROR_INVALID_CONFIG` for an empty token.

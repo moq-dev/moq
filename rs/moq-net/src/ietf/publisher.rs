@@ -13002,14 +13002,18 @@ mod serve_tests {
 				.await
 				.expect("no subscription")
 				.unwrap();
-				for expected in [0, 1] {
+				// Read in arrival order, which the hop's streams do not fix.
+				let mut warmed = Vec::new();
+				for _ in 0..2 {
 					let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
 						.await
 						.expect("no group")
 						.unwrap()
 						.expect("track finished");
-					assert_eq!(group.start, expected, "{version} {filter:?}");
+					warmed.push(group.start);
 				}
+				warmed.sort_unstable();
+				assert_eq!(warmed, [0, 1], "{version} {filter:?}");
 
 				let session = ScriptedSession::per_stream(vec![Vec::new()]);
 				let peer_setup = peer::PeerSetup::default();

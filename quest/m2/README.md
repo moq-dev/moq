@@ -23,7 +23,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
   for lite-08; [the ietf extension](/quest/m2/ietf-records-per-track.md)
   costs nothing on a moq-lite track; [the path escape](/quest/m2/path-escape.md)
-  is finished; [Subscriber Min Age](/quest/m2/min-age-join.md) stays and
+  is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
   smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
@@ -41,10 +41,9 @@ removal, a rename, or a wire, catalog, or format change that is free until
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [Memory](/quest/m2/relay-memory.md), which the
-  cut waits on by name; [congestion names](/quest/m2/congestion-names.md);
-  [config names](/quest/m2/relay-config-names.md),
-  [the two dial keys](/quest/m2/relay-connect-keys.md), and
+- **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
+  memory pairing found; [congestion names](/quest/m2/congestion-names.md);
+  [config names](/quest/m2/relay-config-names.md) and
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md);
   [transport names](/quest/m2/transport-names.md); and
   [stats names](/quest/m2/stats-old-names.md).
@@ -321,7 +320,7 @@ what would need a breaking release had it landed right after the cut:
   in m2.
 - ✅ Stayed in m2 though not breaking itself:
   [the interest set](https://github.com/moq-dev/moq/pull/8728), because
-  [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
+  [the route stream](https://github.com/moq-dev/moq/pull/8835) needs it.
   The route stream stays because lite-07 would otherwise freeze with one
   router key per announce stream, which the route model doesn't check, and
   keep the reopen-and-hand-over machinery for its lifetime (rejected: moving
