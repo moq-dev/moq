@@ -6,7 +6,16 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { chainHash, compareRouteCandidates, mostSpecific, presented, rendezvousHash, spreadHash } from "./internal.ts";
+import {
+	bestCandidate,
+	chainHash,
+	compareRouteCandidates,
+	mostSpecific,
+	presented,
+	rendezvousHash,
+	spreadHash,
+	superseded,
+} from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -2250,6 +2259,22 @@ test("the most specific claim wins whichever prefix shows it", () => {
 			(route) => route,
 		)?.node,
 	).toBe(3n);
+});
+
+// An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by prefix and Above:
+// a broader claim shown at the path, at a higher epoch, is another claim than the exact one there.
+test("a broader claim at a higher epoch does not supersede the exact one", () => {
+	const path = Path.from("src/a");
+	const instance = Instance.parse("i");
+	const exact = { ...WireRoute.default, instance, node: 1n, epoch: 0n };
+	const broad = { ...WireRoute.default, instance, node: 2n, epoch: 1n, above: 1n };
+	expect(bestCandidate(path, path, [exact, broad], (route) => route)).toBe(exact);
+	expect(bestCandidate(path, path, [broad, exact], (route) => route)).toBe(exact);
+	// The same claim at a higher epoch still supersedes its older one.
+	const newer = { ...exact, epoch: 2n };
+	expect(bestCandidate(path, path, [exact, newer], (route) => route)).toBe(newer);
+	expect(superseded(exact, [exact, newer])).toBe(true);
+	expect(superseded(exact, [exact, broad])).toBe(false);
 });
 
 // A lite-07 claim ranks as the one hop to its origin node in what the origin announces, as in

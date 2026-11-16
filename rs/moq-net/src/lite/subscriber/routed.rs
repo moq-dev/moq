@@ -604,13 +604,15 @@ impl Routed {
 		self.stream.batch(node, prefix, changes, revision);
 	}
 
-	/// The peer's `above` for the claim at `path`, if it can be: a claim is no more than its
-	/// path's segments broader than the path it is shown at.
+	/// The peer's `above` for the claim at the absolute `path`, if it can be: a claim is no
+	/// more than the segments of the path the peer names, beneath the session's root, broader
+	/// than the path it is shown at.
 	fn above(&self, path: Option<&Path>, above: u64) -> Result<u64, Error> {
 		let Some(path) = path else {
 			return Ok(above);
 		};
-		match above <= path.parts().count() as u64 {
+		let named = path.strip_prefix(&self.root).unwrap_or_else(|| path.clone());
+		match above <= named.parts().count() as u64 {
 			true => Ok(above),
 			false => Err(Error::ProtocolViolation),
 		}

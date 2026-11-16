@@ -10858,6 +10858,48 @@ mod tests {
 		assert!(matches!(err, Error::ProtocolViolation), "{err}");
 	}
 
+	/// The bound counts the segments of the path as the peer names it, beneath the session's
+	/// root: under the root `tenant`, a claim at `x` is at most one above, though its absolute
+	/// path has two segments.
+	#[kio::test]
+	async fn a_claim_above_its_path_counts_from_the_sessions_root() {
+		for (above, closes) in [(1, false), (2, true)] {
+			let mut script = two_routes();
+			script.extend(announce_script(
+				Version::Lite07,
+				&[&raw(ANNOUNCE_START, above_start_body(0, 0, b"x", b"i", above))],
+			));
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
+				.produce()
+				.scope("tenant", &crate::Patterns::from(crate::Pattern::all()))
+				.unwrap();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(crate::lite::test_transport::ScriptedSession::new(script)),
+				origin,
+				recv_bandwidth: None,
+				version: Version::Lite07,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				cost: Some(1),
+				peer_hop: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let mut prefix = AnnouncePrefix::new(
+				subscriber.clone(),
+				Path::from_static(""),
+				subscriber.origin.snapshot(""),
+			);
+			match closes {
+				true => {
+					let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+					assert!(matches!(err, Error::ProtocolViolation), "above {above}: {err}");
+				}
+				false => assert!(prefix.poll(&kio::Waiter::noop()).is_pending(), "above {above}"),
+			}
+		}
+	}
+
 	/// Only the neighbour's own framing and state close the session: a refused route
 	/// message naming a Route ID or Announce ID the neighbour never opened still does.
 	#[kio::test]

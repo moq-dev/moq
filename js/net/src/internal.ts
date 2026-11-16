@@ -1475,25 +1475,33 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
 }
 
 /**
- * The highest epoch each instance reaches among a set of routes, built in one pass so ranking
- * N routes stays linear. Only epochs above 0 are kept, since nothing is below 0: the common
- * case, where every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net.
+ * The highest epoch each instance reaches among a set of routes, per claim: a claim is its prefix
+ * and how far above it was shown, so a broader claim shown at a prefix is another claim than the
+ * one made there, and its epoch supersedes nothing of it. Built in one pass so ranking N routes
+ * stays linear. Only epochs above 0 are kept, since nothing is below 0: the common case, where
+ * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
+ * are all of one prefix here.
  */
 export class Epochs {
-	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
+	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
 
 	constructor(routes: Iterable<WireRoute>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			const highest = this.#highest.get(route.instance);
-			if (highest === undefined || epoch > highest) this.#highest.set(route.instance, epoch);
+			let above = this.#highest.get(route.instance);
+			if (!above) {
+				above = new Map();
+				this.#highest.set(route.instance, above);
+			}
+			const highest = above.get(route.above ?? 0n);
+			if (highest === undefined || epoch > highest) above.set(route.above ?? 0n, epoch);
 		}
 	}
 
-	/** Whether a route carries `route`'s instance at a higher epoch. */
+	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance);
+		const highest = this.#highest.get(route.instance)?.get(route.above ?? 0n);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
