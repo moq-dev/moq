@@ -414,7 +414,8 @@ export class Connection {
 	 * Waits while no connection is held, such as before a URL is set.
 	 *
 	 * @throws The peer's refusal, an `Unsupported` error when the session cannot carry a token in
-	 * band, or the connection's end, such as an abort of its auth handle.
+	 * band, the connection's end such as an abort of its auth handle, or the failure that stopped
+	 * it retrying its URL while no session answered, such as a refused first dial.
 	 */
 	async answered(): Promise<void> {
 		for (;;) {
@@ -424,11 +425,14 @@ export class Connection {
 			// A new loop, such as one a version change built, restarts the wait.
 			const { promise: moved, resolve } = Promise.withResolvers<"moved">();
 			const stop = this.#loop.changed(() => resolve("moved"));
+			// Closing this handle ends the wait, even with no loop to notice.
+			const closing = this.#closed.changed(() => resolve("moved"));
 			try {
 				const answered = loop?.answered().then(() => "answered" as const);
 				if ((await Promise.race(answered ? [answered, moved] : [moved])) === "answered") return;
 			} finally {
 				stop();
+				closing();
 			}
 		}
 	}

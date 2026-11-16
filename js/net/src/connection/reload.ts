@@ -980,6 +980,7 @@ export class Reload {
 	}
 
 	#giveUp(cause: Error): void {
+		this.#verdict.gaveUp(cause);
 		this.#error.set(cause);
 		this.#givenUpHref = this.#sequenceHref;
 		this.#resetSequence();
@@ -1000,7 +1001,8 @@ export class Reload {
 	 * each is granted in band, or is the connection credential a dial carried and the peer
 	 * accepted. A token the set kept, the connection credential included, counts only once the
 	 * peer refuses it, and nothing is re-checked after the answer. Rejects with the peer's refusal,
-	 * `Unsupported` when a session cannot carry a token in band, or the loop's end. A set replaced
+	 * `Unsupported` when a session cannot carry a token in band, the loop's end, or the failure that
+	 * stopped it retrying its URL while no session answered, such as a refused first dial. A set replaced
 	 * before its answer moves the wait to the new one.
 	 */
 	answered(): Promise<void> {

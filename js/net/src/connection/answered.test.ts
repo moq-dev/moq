@@ -202,3 +202,29 @@ test("a connection answers once its loop ends with the abort's error", async () 
 		globalThis.WebTransport = original;
 	}
 });
+
+test("a first dial the peer refuses answers with its failure", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	// Closed before the handshake finishes, so the dial never yields a session.
+	globalThis.WebTransport = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	const reload = loop(["moq-lite-06"], new Signal<readonly string[]>(["old"]));
+	try {
+		const err = await clock.drive(refusal(reload.answered()));
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("releasing a connection that holds no loop ends its wait", async () => {
+	const connection = new Connection({ tokens: ["old"] });
+	const waiting = connection.answered();
+	connection.close();
+	await expect(waiting).rejects.toThrow("connection closed");
+});

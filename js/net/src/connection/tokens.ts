@@ -257,6 +257,9 @@ export class Verdict {
 	#held?: Held;
 	// Why the loop ended, which answers a set no session will.
 	#closed?: Error;
+	// Why the loop stopped retrying its URL, such as a refused first dial: no session will answer
+	// until a new sequence dials, so a waiting set fails with it, but it is no verdict to latch.
+	#gaveUp?: Error;
 	// Bumped whenever an input changes, so a waiting answer looks again.
 	#epoch = new Signal(0);
 	#stops: (() => void)[] = [];
@@ -283,6 +286,7 @@ export class Verdict {
 				if (this.#latched.outcome) throw this.#latched.outcome;
 				return;
 			}
+			if (this.#gaveUp) throw this.#gaveUp;
 			await this.#epoch.changed();
 		}
 	}
@@ -291,6 +295,7 @@ export class Verdict {
 	dialing(): void {
 		this.#sync();
 		this.#record();
+		this.#gaveUp = undefined;
 		this.#dialed = undefined;
 		this.#connected = undefined;
 		this.#release();
@@ -314,6 +319,12 @@ export class Verdict {
 			connected.closed = end ?? new Error("the session closed before the peer accepted its credential");
 			if (this.#connected === connected) this.#notify();
 		});
+		this.#notify();
+	}
+
+	/** The loop stopped retrying its URL with `err`, which fails a set still waiting for a session. */
+	gaveUp(err: Error): void {
+		this.#gaveUp = err;
 		this.#notify();
 	}
 
