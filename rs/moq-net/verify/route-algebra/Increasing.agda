@@ -17,7 +17,7 @@
 -- enough (`convergent`).
 --------------------------------------------------------------------------------
 
-open import Data.Bool.Base using (Bool; true; false; _∨_)
+open import Data.Bool.Base using (Bool; true; false; _∨_; if_then_else_)
 open import Data.List.Base using (List; []; _∷_)
 open import Data.Nat.Base using (ℕ; zero; suc; _+_; _⊔_; z≤n; _^_)
 
@@ -106,11 +106,10 @@ module Rule (P : Policy) where
   -- that offered it.
   extend : Link → Edge → Weight → Weight
   extend f e invalid = invalid
-  extend f (i , j) (valid v) with (i , j) ⇿? path v | i ∈ₚ? path v | refuses f (i , j) v
-  ... | no  _ | _     | _     = invalid
-  ... | yes _ | yes _ | _     = invalid
-  ... | yes _ | no  _ | true  = invalid
-  ... | yes _ | no  _ | false = valid (route
+  extend f (i , j) (valid v) with (i , j) ⇿? path v | i ∈ₚ? path v
+  ... | no  _ | _     = invalid
+  ... | yes _ | yes _ = invalid
+  ... | yes _ | no  _ = if refuses f (i , j) v then invalid else valid (route
     (draining v ∨ drains f ∨ marks f (i , j) (path v))
     (P.penalty f ⊔ penalty v)
     (P.cost f + cost v)
@@ -223,11 +222,12 @@ module Rule (P : Policy) where
 
   extend-increasing : ∀ f e r → r ≤ᵣ extend f e r
   extend-increasing f e invalid = below-invalid
-  extend-increasing f (i , j) (valid v) with (i , j) ⇿? path v | i ∈ₚ? path v | refuses f (i , j) v
-  ... | no  _ | _     | _     = below-invalid
-  ... | yes _ | yes _ | _     = below-invalid
-  ... | yes _ | no  _ | true  = below-invalid
-  ... | yes _ | no  _ | false = below
+  extend-increasing f (i , j) (valid v) with (i , j) ⇿? path v | i ∈ₚ? path v
+  ... | no  _ | _     = below-invalid
+  ... | yes _ | yes _ = below-invalid
+  ... | yes _ | no  _ with refuses f (i , j) v
+  ...   | true  = below-invalid
+  ...   | false = below
     (lex-≤ bool O₂ (≤-∨ (draining v) _) λ _ →
      lex-≤ nat O₃ (ℕ.m≤n⊔m (P.penalty f) (penalty v)) λ _ →
      lex-≤ nat O₄ (ℕ.m≤n+m (cost v) (P.cost f)) λ _ →
@@ -255,11 +255,10 @@ module Rule (P : Policy) where
     where
     down-rejects : ∀ e r → extend down e r ≡ invalid
     down-rejects e invalid = refl
-    down-rejects (i , j) (valid v) with (i , j) ⇿? path v | i ∈ₚ? path v | refuses down (i , j) v | down-refuses (i , j) v
-    ... | no  _ | _     | _     | _  = refl
-    ... | yes _ | yes _ | _     | _  = refl
-    ... | yes _ | no  _ | true  | _  = refl
-    ... | yes _ | no  _ | false | ()
+    down-rejects (i , j) (valid v) with (i , j) ⇿? path v | i ∈ₚ? path v
+    ... | no  _ | _     = refl
+    ... | yes _ | yes _ = refl
+    ... | yes _ | no  _ rewrite down-refuses (i , j) v = refl
 
   isRoutingAlgebra : IsRoutingAlgebra algebra
   isRoutingAlgebra = record
@@ -288,23 +287,23 @@ module Rule (P : Policy) where
   path-reject : ∀ (i j : ℕ) f {r p} → pathOf r ≡ PathI.valid p →
                 (¬ (i , j) PathI.⇿ᵥ p) ⊎ i PathI.∈ᵥₚ p → extend f (i , j) r ≡ invalid
   path-reject i j f {invalid} () _
-  path-reject i j f {valid v} eq bad with (i , j) ⇿? path v | i ∈ₚ? path v | refuses f (i , j) v
-  ... | no  _   | _      | _     = refl
-  ... | yes _   | yes _  | _     = refl
-  ... | yes _   | no  _  | true  = refl
-  ... | yes ij⇿ | no  i∉ | false with valid-injective eq | bad
+  path-reject i j f {valid v} eq bad with (i , j) ⇿? path v | i ∈ₚ? path v
+  ... | no  _   | _      = refl
+  ... | yes _   | yes _  = refl
+  ... | yes ij⇿ | no  i∉ with valid-injective eq | bad
   ...   | refl | inj₁ ¬ij⇿ = contradiction ij⇿ ¬ij⇿
   ...   | refl | inj₂ i∈   = contradiction i∈ i∉
 
   path-accept : ∀ (i j : ℕ) f {r p} → pathOf r ≡ PathI.valid p →
                 extend f (i , j) r ≢ invalid → pathOf (extend f (i , j) r) ≡ PathI.valid ((i , j) ∷ p)
   path-accept i j f {invalid} () _
-  path-accept i j f {valid v} eq ok with (i , j) ⇿? path v | i ∈ₚ? path v | refuses f (i , j) v
-  ... | no  _ | _     | _     = contradiction refl ok
-  ... | yes _ | yes _ | _     = contradiction refl ok
-  ... | yes _ | no  _ | true  = contradiction refl ok
-  ... | yes _ | no  _ | false with valid-injective eq
-  ...   | refl = refl
+  path-accept i j f {valid v} eq ok with (i , j) ⇿? path v | i ∈ₚ? path v
+  ... | no  _ | _     = contradiction refl ok
+  ... | yes _ | yes _ = contradiction refl ok
+  ... | yes _ | no  _ with refuses f (i , j) v
+  ...   | true  = contradiction refl ok
+  ...   | false with valid-injective eq
+  ...     | refl = refl
 
   isPathAlgebra : IsPathAlgebra algebra
   isPathAlgebra = record

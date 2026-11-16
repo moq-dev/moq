@@ -103,16 +103,16 @@ record Link : Set where
 private
   module L = Link
 
-  _∈ᵇ_ : ℕ → List ℕ → Bool
-  n ∈ᵇ ns = any (n ≡ᵇ_) ns
+_∈ᵇ_ : ℕ → List ℕ → Bool
+n ∈ᵇ ns = any (n ≡ᵇ_) ns
 
-  -- Whether `floors` hold the session from `a` to `b` numbered `s` closed.
-  closed : List Floor → Edge × ℕ → Bool
-  closed fs ((a , b) , s) = any at-or-below fs
-    where
-    at-or-below : Floor → Bool
-    at-or-below (floor n f st se) =
-      (relay a ≡ᵇ n) ∧ (relay b ≡ᵇ f) ∧ ((start a <ᵇ st) ∨ ((start a ≡ᵇ st) ∧ (s ≤ᵇ se)))
+-- Whether `floors` hold the session from `a` to `b` numbered `s` closed.
+closed : List Floor → Edge × ℕ → Bool
+closed fs ((a , b) , s) = any at-or-below fs
+  where
+  at-or-below : Floor → Bool
+  at-or-below (floor n f st se) =
+    (relay a ≡ᵇ n) ∧ (relay b ≡ᵇ f) ∧ ((start a <ᵇ st) ∨ ((start a ≡ᵇ st) ∧ (s ≤ᵇ se)))
 
 -- A link refuses a route when it is down, when the route is the neighbour's
 -- route to itself and the neighbour announces no claim, when the route crossed a
