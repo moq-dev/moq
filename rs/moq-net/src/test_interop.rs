@@ -264,14 +264,15 @@ fn lite_values() -> Vec<u64> {
 }
 
 /// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta on
-/// a timed track, the payload size, then the payload.
+/// a timed track, the payload size, then the payload. The header names a previous start,
+/// which only lite-07 carries.
 fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i64>, usize)>) -> Vec<u8> {
 	let mut buf = Vec::new();
 	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
 		subscribe: 5,
 		key: 1 << 20,
-		previous: None,
+		previous: Some((1 << 20) - 3),
 		frame_start: 200,
 	};
 	header.encode(w, version).unwrap();

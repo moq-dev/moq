@@ -5772,7 +5772,9 @@ impl TrackRun {
 
 	/// Forward a verdict the cursor reached on `range`, which its record already took in,
 	/// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
-	/// earlier drop ended stays ended. Returns whether any was buffered.
+	/// earlier drop ended stays ended. A run elided for a group in `range` goes out ahead of
+	/// a drop, or joins a skip, since no GROUP passes over it now. Returns whether any was
+	/// buffered.
 	fn forward_range(
 		&mut self,
 		range: Range<u64>,
@@ -5784,18 +5786,23 @@ impl TrackRun {
 		}
 		let report = self.report(hole);
 		self.track.record_mut().tell(range.clone(), report);
-		match hole {
-			Hole::Skip if self.elides(&range) => {
-				let start = self.elided.entry(range.end).or_insert(range.start);
-				*start = range.start.min(*start);
-				return Ok(false);
-			}
-			Hole::Skip => {}
-			Hole::Drop { .. } => {
-				self.send_elided(range.clone(), writer)?;
-			}
+		if !matches!(hole, Hole::Skip) {
+			self.send_elided(range.clone(), writer)?;
+			writer.buffer(&self.hole(range, hole))?;
+			return Ok(true);
 		}
-		writer.buffer(&self.hole(range, hole))?;
+		let mut run = range;
+		let covered: Vec<u64> = self.elided.range(run.clone()).map(|(above, _)| *above).collect();
+		for above in covered {
+			let start = self.elided.remove(&above).expect("collected above");
+			run.start = run.start.min(start);
+		}
+		if self.elides(&run) {
+			let start = self.elided.entry(run.end).or_insert(run.start);
+			*start = run.start.min(*start);
+			return Ok(false);
+		}
+		writer.buffer(&self.hole(run, hole))?;
 		Ok(true)
 	}
 
@@ -5818,17 +5825,18 @@ impl TrackRun {
 	}
 
 	/// Send as SUBSCRIBE_SKIP each run elided for a group in `groups`, which is given up.
+	/// Returns whether any was buffered.
 	fn send_elided(
 		&mut self,
 		groups: Range<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
 		let above: Vec<u64> = self.elided.range(groups).map(|(above, _)| *above).collect();
-		for above in above {
-			let start = self.elided.remove(&above).expect("collected above");
-			writer.buffer(&self.hole(start..above, &Hole::Skip))?;
+		for above in &above {
+			let start = self.elided.remove(above).expect("collected above");
+			writer.buffer(&self.hole(start..*above, &Hole::Skip))?;
 		}
-		Ok(())
+		Ok(!above.is_empty())
 	}
 
 	/// Send as SUBSCRIBE_SKIP each run elided for a group this subscription no longer owes,
@@ -5872,9 +5880,8 @@ impl TrackRun {
 		if !self.start.emits_range() || range.is_empty() {
 			return Ok(false);
 		}
-		if !matches!(hole, Hole::Skip) {
-			self.send_elided(range.clone(), writer)?;
-		}
+		// A run elided for a group given up goes out ahead of its drop.
+		let elided = self.send_elided(range.clone(), writer)?;
 		let gaps = self.track.record_mut().untold(range);
 		let report = self.report(hole);
 		for gap in gaps.iter() {
@@ -5882,7 +5889,7 @@ impl TrackRun {
 			let msg = self.hole(gap.clone(), hole);
 			writer.buffer(&msg)?;
 		}
-		Ok(!gaps.is_empty())
+		Ok(elided || !gaps.is_empty())
 	}
 
 	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
@@ -8828,6 +8835,28 @@ mod serve_group_test {
 		assert!(holes(&mut writer, &log).await.is_empty(), "held for group 3's GROUP");
 		forward(&mut run, 3..4, &Hole::drop(StreamError::Cancel), &mut writer);
 		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3), ("drop", 3..4)]);
+	}
+
+	/// A skipped run held back for a group that is then skipped too joins that group's skip,
+	/// since no GROUP will pass over it.
+	#[kio::test]
+	async fn lite07_a_held_skip_joins_its_groups_skip() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.skip_groups(1..3);
+		write_group(&mut track, 3, 3);
+		forward(&mut run, 1..3, &Hole::Skip, &mut writer);
+		assert!(holes(&mut writer, &log).await.is_empty(), "held for group 3's GROUP");
+		forward(&mut run, 3..4, &Hole::Skip, &mut writer);
+		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..4)]);
 	}
 
 	/// A relay forwards a SKIP over a DROP it already forwarded for the same groups, since the
