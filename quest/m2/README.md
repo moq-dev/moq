@@ -227,7 +227,7 @@ maintainer asked that what remains be unblocked or punted, and picked these on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)). m2 keeps only
 what would need a breaking release had it landed right after the cut:
 
-- ✅ Left m2: [the request loop](/quest/m2/multicast/requests.md)
+- ✅ Left m2: [the request loop](https://github.com/moq-dev/moq/pull/8881)
   to m3's cluster-routing epic (a fixture and a fix, no wire), until it
   returned to m2 on 2026-11-15 (maintainer, on
   [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became

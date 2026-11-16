@@ -23,7 +23,7 @@ a node that says it carries a broadcast). What stands and what goes:
 
 - ✅ Joins stop at the first relay carrying the Instance, which the route
   layer gives with no message
-  ([requests](/quest/m2/multicast/requests.md)).
+  ([requests](https://github.com/moq-dev/moq/pull/8881)).
 - ✅ How a relay learns of a warm neighbour off its path is picked from
   measurements ([warmth](/quest/m2/multicast/warmth.md)), which
   [the implementation](/quest/m3/cache-routing/select.md) then builds.

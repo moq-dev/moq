@@ -27,7 +27,11 @@ is a decision to list in the PR:
   Lite-06 Chain and its Setup Parameter: the nodes that announced it again
   across a scoped grant or an older version.
 - A request keeps its Instance and the origin node its first hop chose, and
-  loses Route Depth.
+  loses Route Depth. That ends the second subscription a move from a claim's
+  route to its answer's opens on one link, which
+  `route_failover::residual_two_depths_of_one_claim_subscribe_twice` pins
+  ([moq-dev/moq#8881](https://github.com/moq-dev/moq/pull/8881)): flip it to
+  one subscription.
 - An endpoint that never forwards declares no Node ID. A peer holding a
   scoped publish grant sends claims and no routes, and the relay announces
   them under its own Node ID. Peers that trust each other with the whole

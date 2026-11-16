@@ -88,8 +88,9 @@ mod tests {
 /// in a fresh group, by a task this producer runs until it is finished or dropped. That joiner
 /// still reads the cached group first.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>,
@@ -135,7 +136,7 @@ impl Child for MoqJsonSnapshotProducer {
 
 impl Drop for MoqJsonSnapshotProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Unroutable);
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 
@@ -280,8 +281,9 @@ impl MoqJsonSnapshotConsumer {
 
 /// Publishes an ordered log of JSON records, one record per append.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
 	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
@@ -299,7 +301,7 @@ impl Child for MoqJsonStreamProducer {
 
 impl Drop for MoqJsonStreamProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Unroutable);
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 
@@ -404,8 +406,9 @@ impl MoqJsonStreamConsumer {
 /// A join that finds the open group's edits outweigh the track's `refresh` ratio gets the window
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
@@ -464,7 +467,7 @@ impl Child for MoqJsonWindowProducer {
 
 impl Drop for MoqJsonWindowProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Unroutable);
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 

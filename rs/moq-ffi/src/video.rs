@@ -599,8 +599,9 @@ impl VideoProducer {
 /// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	/// `None` once finished or aborted.
@@ -670,7 +671,7 @@ impl crate::producer::Child for MoqVideoProducer {
 
 impl Drop for MoqVideoProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+		crate::producer::Child::abort(self, moq_net::Error::Dropped);
 	}
 }
 
