@@ -46,7 +46,7 @@ pub struct Video {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub renditions: BTreeMap<String, VideoConfig>,
 
 	/// Render the video at this size in pixels.
@@ -316,21 +316,17 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay between a frame being ready and the publisher flushing it.
-	/// The player's jitter buffer should be larger than this value.
-	/// If not provided, the player should assume each frame is flushed immediately.
+	/// The largest media span the publisher hands to the transport behind a frame's presentation
+	/// timestamp: the reorder delay of a frame presented after frames decoded behind it, or the span
+	/// of a batch written together, such as an fMP4 fragment. A consumer's jitter buffer should be at
+	/// least this large. Absent when the publisher measured none.
 	///
-	/// This is measured at the publisher (encoder latency, segment size, B-frame
-	/// reordering), never on the network a consumer sees. It only ever grows over the life of a
-	/// stream.
+	/// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	/// whatever the frame rate; encoder latency and the network don't count. It only ever grows
+	/// over the life of a stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
 	/// rounds down into a promise the publisher can't keep.
-	///
-	/// ex:
-	/// - If each frame is flushed immediately, this would be 1000/fps.
-	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
-	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
@@ -416,7 +412,7 @@ impl VideoConfig {
 	}
 }
 
-impl crate::catalog::Rendition for VideoConfig {
+impl crate::catalog::Entry for VideoConfig {
 	fn check(&self) -> crate::Result<()> {
 		for (field, value) in [
 			("codedWidth", self.coded_width),

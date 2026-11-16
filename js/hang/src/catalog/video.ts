@@ -190,17 +190,14 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.optional(z.boolean()),
 
-	// The maximum delay between a frame being ready and the publisher flushing it, in whole
-	// milliseconds rounded up. The player's jitter buffer should be larger than this value.
-	// If not provided, the player should assume each frame is flushed immediately.
+	// The largest media span the publisher hands to the transport behind a frame's presentation
+	// timestamp, in whole milliseconds rounded up: the reorder delay of a frame presented after
+	// frames decoded behind it, or the span of a batch written together. The player's jitter buffer
+	// should be at least this large. Absent when the publisher measured none.
 	//
-	// This is measured at the publisher (encoder latency, segment size, B-frame reordering),
-	// never on the network a consumer sees. It only ever grows over the life of a stream.
-	//
-	// ex:
-	// - If each frame is flushed immediately, this would be 1000/fps.
-	// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
-	// - If frames are buffered into 2s segments, this would be 2s.
+	// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	// whatever the frame rate; encoder latency and the network don't count. It only ever grows over
+	// the life of a stream.
 	jitter: z.optional(
 		z.pipe(
 			u53Schema,
@@ -212,10 +209,11 @@ export const VideoConfigSchema = z.object({
 	// and join that many milliseconds earlier.
 	warmup: z.optional(u53Schema),
 
-	// How far this rendition's frames reach the transport behind the broadcast's earliest
-	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
-	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
-	// ever grows over the life of a stream.
+	// How far this rendition's frames persistently trail what the broadcast's other renditions
+	// already wrote: the least any frame trails within a window of a second or more, and the
+	// largest of those windows, in whole milliseconds rounded up. A player holds `delay + jitter`
+	// for it and never subtracts one rendition's `delay` from another's. Absent on a rendition that
+	// trails nothing. It only ever grows over the life of a stream.
 	delay: z.optional(
 		z.pipe(
 			u53Schema,

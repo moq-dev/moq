@@ -11,7 +11,7 @@ import { JsonSchema } from "./json";
 import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, object, renditions, section } from "./section";
+import { renditions } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { track } from "./track";
@@ -56,7 +56,9 @@ const VersionSchema = z.number().check(
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
  * ignores the extra sections; an extended consumer validates them with its own schema, typically
- * built via `z.extend(RootSchema, { ... })`.
+ * built via `z.extend(RootSchema, { ... })`. An application names its own sections with a
+ * namespaced key (`com.example.telemetry`): every section defined here must have its shape when
+ * present, or parsing refuses the whole catalog, the same as Rust.
  *
  * The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
  * that is 3. Parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}; a
@@ -67,24 +69,13 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// What applies to every audio and video track, omitted when it holds nothing. `media` is a
-	// generic key an application may already carry, so a value that isn't an object decodes as
-	// absent; an object with a malformed clock fails the catalog, the same as Rust. See `MediaSchema`
-	// for its lenient `join`.
-	media: object(MediaSchema),
-	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
-	// else's and decodes as absent. See `named`.
-	stats: named(StatsSchema, "track"),
-	echo: named(EchoSchema, "path"),
-	// `text`, `json`, and `binary` are generic enough keys that an application could have been
-	// carrying its own before these sections were reserved, so a value that isn't a section decodes
-	// as absent rather than failing the whole catalog. A value that IS a section but carries a
-	// malformed entry (a rendition with no `format`, a track with no `mode`) still fails, the same
-	// as Rust, rather than silently dropping every caption or data track. See `section`.
-	text: section(TextSchema, "renditions"),
-	json: section(JsonSchema, "tracks"),
-	binary: section(BinarySchema, "tracks"),
-	// A new key, so a malformed entry fails the catalog, the same as Rust.
+	// What applies to every audio and video track, omitted when it holds nothing.
+	media: z.optional(MediaSchema),
+	stats: z.optional(StatsSchema),
+	echo: z.optional(EchoSchema),
+	text: z.optional(TextSchema),
+	json: z.optional(JsonSchema),
+	binary: z.optional(BinarySchema),
 	include: z.optional(renditions(IncludeSchema, "include")),
 });
 

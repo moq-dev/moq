@@ -3759,5 +3759,1215 @@
 			}
 		},
 		"refused": true
+	},
+	{
+		"name": "mis-shaped version null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"version": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped version \"4\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"version": "4"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped version -1",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"version": -1
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped version 1.5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"version": 1.5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video null",
+		"catalog": {
+			"video": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video 5",
+		"catalog": {
+			"video": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video \"x\"",
+		"catalog": {
+			"video": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video true",
+		"catalog": {
+			"video": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video []",
+		"catalog": {
+			"video": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video {}",
+		"catalog": {
+			"video": {}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video {\"renditions\": 5}",
+		"catalog": {
+			"video": {
+				"renditions": 5
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped video {\"renditions\": {\"a\": [\"avc1.64001f\"]}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"a": ["avc1.64001f"]
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped audio null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"audio": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped audio 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"audio": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped audio \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"audio": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped audio true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"audio": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped audio []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"audio": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped audio {\"renditions\": {\"a\": [\"opus\", 48000, 2]}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"a": ["opus", 48000, 2]
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"clock\": null}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"clock": null
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"clock\": [1000]}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"clock": [1000]
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"clock\": {\"wall\": \"1000\"}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"clock": {
+					"wall": "1000"
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"join\": null}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"join": null
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"join\": [2000]}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"join": [2000]
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"join\": {}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"join": {}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"join\": {\"interval\": 0}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"join": {
+					"interval": 0
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped media {\"join\": {\"interval\": 1.5}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"join": {
+					"interval": 1.5
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text {}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": {}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text {\"overlay\": {\"x\": 1}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": {
+				"overlay": {
+					"x": 1
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text {\"renditions\": 42}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": {
+				"renditions": 42
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text {\"renditions\": []}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": {
+				"renditions": []
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped text {\"renditions\": {\"a\": [\"vtt\"]}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"text": {
+				"renditions": {
+					"a": ["vtt"]
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json {}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": {}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json {\"messages\": \"chat\"}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": {
+				"messages": "chat"
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json {\"tracks\": \"chat\"}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": {
+				"tracks": "chat"
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped json {\"tracks\": {\"a\": [\"snapshot\"]}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"json": {
+				"tracks": {
+					"a": ["snapshot"]
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary {}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": {}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary {\"messages\": \"chat\"}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": {
+				"messages": "chat"
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary {\"tracks\": \"chat\"}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": {
+				"tracks": "chat"
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped binary {\"tracks\": {\"a\": [\"stream\"]}}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"binary": {
+				"tracks": {
+					"a": ["stream"]
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats {}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": {}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats {\"track\": 5}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": {
+				"track": 5
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped stats [\"stats.json\"]",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"stats": ["stats.json"]
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo {}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": {}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo {\"path\": [\"a\"]}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": {
+				"path": ["a"]
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped echo [\"viewers\"]",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"echo": ["viewers"]
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include null",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": null
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include 5",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": 5
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include \"x\"",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": "x"
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include true",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": true
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include []",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": []
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include {\"a\": 5}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": {
+				"a": 5
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "mis-shaped include {\"a\": [\"./a.hang\"]}",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"include": {
+				"a": ["./a.hang"]
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "media without a clock or join",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {}
+		},
+		"video": ["ok"]
+	},
+	{
+		"name": "media with a clock and join",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"media": {
+				"clock": {
+					"wall": 1000
+				},
+				"join": {
+					"interval": 2000
+				}
+			}
+		},
+		"video": ["ok"]
+	},
+	{
+		"name": "an application's own root keys are ignored",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"com.example.telemetry": [1, 2],
+			"com.example.text": null
+		},
+		"video": ["ok"]
 	}
 ]
