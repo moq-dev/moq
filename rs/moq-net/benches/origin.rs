@@ -1704,7 +1704,13 @@ impl ResumeReader {
 	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		match self {
 			Self::Arrival(reader) => reader.poll_recv_group(waiter),
-			Self::Key(reader) => reader.poll_next_group(waiter),
+			Self::Key(reader) => loop {
+				match std::task::ready!(reader.poll_next_group(waiter))? {
+					Some(track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
+					Some(track::Item::Gap { .. }) => continue,
+					None => return Poll::Ready(Ok(None)),
+				}
+			},
 		}
 	}
 }

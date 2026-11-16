@@ -283,7 +283,12 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 		};
 		let read = async {
 			let mut ordered = dialed.consumer.ordered();
-			let mut group = ordered.next_group().await.unwrap().expect("a group");
+			let mut group = ordered
+				.next_group()
+				.await
+				.unwrap()
+				.and_then(moq_net::track::Item::group)
+				.expect("a group");
 			let mut read = 0;
 			while let Some(frame) = group
 				.read_frame()

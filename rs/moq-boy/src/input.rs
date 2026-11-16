@@ -156,7 +156,11 @@ async fn read_commands(
 	let live = consumer.subscription().with_delay(moq_net::track::Delay::default());
 	consumer.control().update(live)?;
 	let mut commands = consumer.ordered();
-	while let Some(mut group) = commands.next_group().await? {
+	while let Some(item) = commands.next_group().await? {
+		// A command given up on is lost the same way as one the delay budget dropped.
+		let moq_net::track::Item::Group(mut group) = item else {
+			continue;
+		};
 		let frame = match group.read_frame().await {
 			Ok(Some(frame)) => frame,
 			Ok(None) => continue,
@@ -330,6 +334,7 @@ mod tests {
 			.await
 			.expect("reply timeout")
 			.unwrap()
+			.and_then(moq_net::track::Item::group)
 			.expect("a reply");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(&frame.payload[..], br#"{"latency":[{"label":"input","ms":42}]}"#);

@@ -173,7 +173,12 @@ fn send(track: &moq_net::track::Producer, payload: &'static [u8]) {
 /// Read the next message of a session.
 async fn recv(reader: &mut moq_net::track::Ordered) -> Vec<u8> {
 	kio::clock::timeout(TIMEOUT, async {
-		let mut group = reader.next_group().await.expect("group").expect("a group");
+		let mut group = reader
+			.next_group()
+			.await
+			.expect("group")
+			.and_then(moq_net::track::Item::group)
+			.expect("a group");
 		let frame = group.read_frame().await.expect("frame").expect("a frame");
 		frame.payload.to_vec()
 	})

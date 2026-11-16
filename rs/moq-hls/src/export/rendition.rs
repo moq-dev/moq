@@ -2416,7 +2416,9 @@ impl WatchMedia {
 					}
 					let groups = self.groups.as_mut().expect("subscribed above");
 					match ready!(groups.poll_next_group(waiter))? {
-						Some(group) => self.step = Step::First(group),
+						Some(moq_net::track::Item::Group(group)) => self.step = Step::First(group),
+						// A segment is listed from the groups that arrive, so one given up on is read past.
+						Some(moq_net::track::Item::Gap { .. }) => {}
 						None => match follow.latest.take() {
 							Some((group, _, reach)) => self.step = Step::End(group, Some(reach)),
 							None => {

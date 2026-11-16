@@ -881,9 +881,13 @@ impl Consume {
 				if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}
-				match ready!(track.poll_next_group(waiter))? {
-					Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
-					None => Poll::Ready(Ok(RawStep::End)),
+				loop {
+					match ready!(track.poll_next_group(waiter))? {
+						Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(RawStep::Item(group))),
+						// The C API reports no gaps.
+						Some(moq_net::track::Item::Gap { .. }) => continue,
+						None => return Poll::Ready(Ok(RawStep::End)),
+					}
 				}
 			})
 			.await?

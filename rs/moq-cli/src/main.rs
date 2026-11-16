@@ -1409,7 +1409,7 @@ mod tests {
 						.await
 						.unwrap()
 						.ordered();
-					let mut group = track.next_group().await.unwrap().unwrap();
+					let mut group = track.next_group().await.unwrap().unwrap().group().unwrap();
 					group.read_frame().await.unwrap().unwrap().payload
 				})
 				.await

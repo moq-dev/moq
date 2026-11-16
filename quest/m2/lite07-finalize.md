@@ -149,7 +149,7 @@ would need a breaking release had it landed right after the cut:
   waits on nixpkgs as well as the cut; dropping the check, which would find a
   transcript flaw only after the freeze.
 - ✅ The wire half of group drops split out as its own quest, which this
-  waited on in place of [the public drop signal](/quest/m2/group-drops.md),
+  waited on in place of the public drop signal,
   an API change that doesn't touch the wire. It settled without a
   wire-format change ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774)):
   both publishers already name a Group Stream the subscriber stopped in

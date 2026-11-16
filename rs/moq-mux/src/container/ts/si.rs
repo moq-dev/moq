@@ -822,8 +822,8 @@ mod tests {
 				.ordered();
 			let waiter = kio::Waiter::noop();
 			let mut read = Vec::new();
-			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
-				read.push(group.start);
+			while let std::task::Poll::Ready(Ok(Some(item))) = reader.poll_next_group(&waiter) {
+				read.push(item.group().expect("a group").start);
 			}
 			assert_eq!(read, expected);
 		}

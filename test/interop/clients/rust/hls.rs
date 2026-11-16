@@ -145,7 +145,11 @@ async fn main() -> anyhow::Result<()> {
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 			let mut groups = broadcast.track(&name)?.subscribe(replay).await?.ordered();
 			let mut out = Vec::new();
-			while let Some(mut group) = groups.next_group().await? {
+			while let Some(item) = groups.next_group().await? {
+				// A group given up on starts no segment.
+				let moq_net::track::Item::Group(mut group) = item else {
+					continue;
+				};
 				let Some(frame) = group.read_frame().await? else {
 					continue;
 				};

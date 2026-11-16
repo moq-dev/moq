@@ -883,7 +883,11 @@ async fn drop_gap(
 		let mut groups = track.subscribe(subscription).await?.ordered();
 		// The newest source group below the miss, as the output start it maps to.
 		let mut before = None;
-		while let Some(group) = groups.next_group().await? {
+		while let Some(item) = groups.next_group().await? {
+			// A group given up on is no source group.
+			let moq_net::track::Item::Group(group) = item else {
+				continue;
+			};
 			if group.start >= miss {
 				return Ok::<_, moq_net::Error>((before, output_start(group.start, scale)));
 			}

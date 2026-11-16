@@ -870,6 +870,21 @@ impl Subscriber {
 		self.reader().take(candidate)
 	}
 
+	/// The keys that landed on any copy since the last call, below `below`; see
+	/// [`track::Subscriber::note_late`].
+	pub(super) fn late(&mut self, below: u64) -> Vec<u64> {
+		let mut reader = self.reader();
+		reader
+			.copies
+			.iter_mut()
+			.filter_map(|copy| match &mut copy.sub {
+				Sub::Ready(sub) => Some(sub.late(below)),
+				Sub::Pending(_) => None,
+			})
+			.flatten()
+			.collect()
+	}
+
 	/// Forget the gaps in `delivered` below each group past the reader's budget, judged on
 	/// the newest copy that answered; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
@@ -5222,6 +5237,35 @@ mod test {
 			};
 			keys.push(group.start);
 		}
+	}
+
+	/// A front's key-order reader reports a group that lands on its copy after the read passed
+	/// its key, as old, and never one it handed out.
+	#[test]
+	fn a_front_reports_a_late_arrival_as_a_gap() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR).ordered();
+		let waiter = kio::Waiter::noop();
+		let read = |sub: &mut track::Ordered| -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+				});
+			}
+			items
+		};
+		write(&a, 0);
+		write(&a, 5);
+		assert_eq!(read(&mut sub), ["group 0", "group 5"]);
+		write(&a, 3);
+		assert_eq!(read(&mut sub), ["gap 3..4 (old)"]);
+		write(&a, 6);
+		assert_eq!(read(&mut sub), ["group 6"]);
 	}
 
 	/// Lowering a front reader's local floor offers the cached groups below the old one it
