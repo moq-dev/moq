@@ -464,7 +464,11 @@ export class Routed {
 	// what covers its own prefix from above it.
 	#revalidate() {
 		this.#session.revalidate();
-		for (const prefix of new Set([...this.#readers].map((reader) => reader.prefix))) this.#touch(prefix, false);
+		for (const reader of this.#readers) {
+			// Inside a DEAD, a path it already touched keeps whether it was lost.
+			if (this.#deferred?.has(reader.prefix)) continue;
+			this.#touch(reader.prefix, false);
+		}
 	}
 
 	#touch(path: Path.Valid, lost: boolean) {

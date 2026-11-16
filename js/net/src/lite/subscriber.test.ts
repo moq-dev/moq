@@ -4854,6 +4854,24 @@ test("a lite-07 consume skips a claim above a newer floor's region", async () =>
 	await pick.info;
 });
 
+// A DEAD whose far end is gone takes a reader's only claim offline, not withdrawn: the publisher
+// may still hold it, whatever the coverage the route took with it.
+test("a lite-07 DEAD takes a reader's claim offline at its own prefix", async () => {
+	const below = Path.from("live/x");
+	const { subscriber, announced, send } = await routedStream(undefined, Path.Pattern.subtree(below));
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: below, route: 0n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: below, kind: "start" });
+
+	const hop = { node: PEER_NODE, session: NODE_A };
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 0n } });
+	expect(await announced.next()).toMatchObject({ prefix: below, kind: "offline" });
+
+	announced.close();
+	subscriber.close();
+});
+
 // A reader below a newer floor's region is not shown a claim above it, as a consume there skips
 // it: the covering claim it sees at its own prefix is the one that floor leaves current.
 test("a lite-07 reader skips a claim above a newer floor's region", async () => {
