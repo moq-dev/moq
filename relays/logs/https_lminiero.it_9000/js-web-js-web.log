@@ -1,12 +1,20 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-js-web-4233-5971.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4233-5971.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4233-5971.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4233-5971.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4233-5971.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4233-5971.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4233-5971.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4233-5971.hang track=video
-[page] received catalog hang smoke-js-web-4233-5971.hang {video: Object, clock: Object}
-decoded 4 frames from smoke-js-web-4233-5971.hang (vite)
+[page] announced: broadcast=smoke-js-web-4240-17668.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4240-17668.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4240-17668.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4240-17668.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4240-17668.hang {video: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-js-web-4240-17668.hang track=video
+[page] subscribe written: id=4 broadcast=smoke-js-web-4240-17668.hang track=video
+[page] subscribe ok: id=4 broadcast=smoke-js-web-4240-17668.hang track=video
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 8
+    at e.decode (http://localhost:43889/assets/index-Cfem7Yji.js:1:177571)
+    at a (http://localhost:43889/assets/index-Cfem7Yji.js:1:225791)
+    at #f (http://localhost:43889/assets/index-Cfem7Yji.js:1:99907)
+    at ys.tryDecode (http://localhost:43889/assets/index-Cfem7Yji.js:1:99438)
+    at xf.handleGroup (http://localhost:43889/assets/index-Cfem7Yji.js:1:225851)
+    at async #g (http://localhost:43889/assets/index-Cfem7Yji.js:1:230340)
+[page] received catalog hang smoke-js-web-4240-17668.hang {video: Object, clock: Object}
+[page] received catalog hang smoke-js-web-4240-17668.hang {video: Object, clock: Object}
+decoded 2 frames from smoke-js-web-4240-17668.hang (vite)

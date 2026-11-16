@@ -2,20 +2,17 @@ https://cdn.moq.dev/anon connected via WebTransport
 https://cdn.moq.dev/anon negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
-announced: broadcast=sc-a233246f144198d7160f56b11e979e34 active=true
-announced: broadcast=sc-fd1f3e204fcd4b558eb4e431d4ff1b23 active=true
-announced: broadcast=sc/probe/42d91ae30e7d702d active=true
-announced: broadcast=sc/probe/969c89c7b1aadbc4 active=true
 announced: broadcast=sp-blume-town-test active=true
+announced: broadcast=vs-53b3b9a527efb5168027d6097a07c50f active=true
 announce: prefix=
-announced: broadcast=smoke-js-web-4233-30899.hang active=true
-subscribe start: id=0 broadcast=smoke-js-web-4233-30899.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-js-web-4233-30899.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-js-web-4233-30899.hang track=video
-subscribe ok: id=1 broadcast=smoke-js-web-4233-30899.hang track=video
-received 6755 bytes from smoke-js-web-4233-30899.hang
-subscribe close: id=0 broadcast=smoke-js-web-4233-30899.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-js-web-4233-30899.hang track=video
+announced: broadcast=smoke-js-web-4240-25247.hang active=true
+subscribe start: id=0 broadcast=smoke-js-web-4240-25247.hang track=catalog.json
+subscribe ok: id=0 broadcast=smoke-js-web-4240-25247.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-js-web-4240-25247.hang track=video
+subscribe ok: id=1 broadcast=smoke-js-web-4240-25247.hang track=video
+received 6916 bytes from smoke-js-web-4240-25247.hang
+subscribe close: id=0 broadcast=smoke-js-web-4240-25247.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-js-web-4240-25247.hang track=video
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

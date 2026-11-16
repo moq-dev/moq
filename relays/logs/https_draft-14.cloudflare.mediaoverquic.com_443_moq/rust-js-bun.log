@@ -6,6 +6,6 @@ adapter: close() called
 error: timed out waiting for data
 subscribe_namespace error: unexpected end of stream
 broadcast discovery failed; broadcasts resolve on request only. warn: unexpected end of stream
-      at #fillTo (/home/runner/work/moq/moq/test/smoke/clients/js-native/node_modules/@moq/net/stream.js:199:23)
-      at async decode (/home/runner/work/moq/moq/test/smoke/clients/js-native/node_modules/@moq/net/stream.js:246:24)
+      at #fillTo (/home/runner/work/moq/moq/test/smoke/clients/js-native/node_modules/@moq/net/stream.js:198:23)
+      at async decode (/home/runner/work/moq/moq/test/smoke/clients/js-native/node_modules/@moq/net/stream.js:245:24)
 

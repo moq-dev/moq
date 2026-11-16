@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-15T15:33:34Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/43729900586",
+  "generated": "2026-11-16T18:09:54Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/43924554391",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -99,32 +99,32 @@
       "url": "https://lminiero.it:9000",
       "transport": "WebTransport",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "https_lminiero.it_9000/rust-rust.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed",
           "sub_log": "https_lminiero.it_9000/rust-js-web.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: error: timed out waiting for data",
           "sub_log": "https_lminiero.it_9000/rust-js-bun.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
@@ -160,16 +160,16 @@
       "url": "moqt://lminiero.it:9000",
       "transport": "QUIC",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "moqt_lminiero.it_9000/rust-rust.log",
           "pub_log": "moqt_lminiero.it_9000/pub-rust.log"
         }
@@ -560,7 +560,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
+          "reason": "SUBSCRIBE for 0.avc3, no SUBSCRIBE_OK logged, no objects: track failed; ending the reader track=\"0.avc3\" error=Remote(18)",
           "sub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/rust-rust.log",
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         },
@@ -573,10 +573,10 @@
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "SUBSCRIBE_OK for 0.avc3, only headless groups: subscribe error: id=4 broadcast=smoke-rust-4240-29142.hang track=0.avc3 error=publish done: status=0x12 reason=malformed track: a copy of an object differs",
           "sub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/rust-js-bun.log",
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         },
@@ -668,82 +668,78 @@
       }
     },
     {
-      "key": "moqt-nr-draft-18",
-      "name": "moqt-nokiaresearch (draft-18)",
+      "key": "moqt-nr-draft-23",
+      "name": "moqt-nokiaresearch (draft-23)",
       "url": "moqt://moqt.nokiaresearch.com:8443/moq",
       "transport": "QUIC",
       "required": false,
-      "ok": true,
-      "versions": [
-        "moq-transport-19"
-      ],
+      "ok": false,
+      "versions": [],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: connection loop exited err=reconnect timed out after 10s: timed out connecting to moqt://moqt.nokiaresearch.com:8443",
           "sub_log": "moqt_moqt.nokiaresearch.com_8443_moq/rust-rust.log",
           "pub_log": "moqt_moqt.nokiaresearch.com_8443_moq/pub-rust.log"
         }
       }
     },
     {
-      "key": "moqt-nr-draft-18",
-      "name": "moqt-nokiaresearch (draft-18)",
+      "key": "moqt-nr-draft-23",
+      "name": "moqt-nokiaresearch (draft-23)",
       "url": "https://moqt.nokiaresearch.com:8443/moq",
       "transport": "WebTransport",
       "required": false,
-      "ok": true,
-      "versions": [
-        "moq-transport-19"
-      ],
+      "ok": false,
+      "versions": [],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: connection loop exited err=reconnect timed out after 10s: timed out connecting to https://moqt.nokiaresearch.com:8443",
           "sub_log": "https_moqt.nokiaresearch.com_8443_moq/rust-rust.log",
           "pub_log": "https_moqt.nokiaresearch.com_8443_moq/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: Failed to establish a connection to https://moqt.nokiaresearch.com:8443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002116us. Timeout:4s num_undecryptable_packets: 0 {}).",
           "sub_log": "https_moqt.nokiaresearch.com_8443_moq/rust-js-web.log",
           "pub_log": "https_moqt.nokiaresearch.com_8443_moq/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: error: timed out waiting for data",
           "sub_log": "https_moqt.nokiaresearch.com_8443_moq/rust-js-bun.log",
           "pub_log": "https_moqt.nokiaresearch.com_8443_moq/pub-rust.log"
         },
         "js-web → rust": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: connection loop exited err=reconnect timed out after 10s: timed out connecting to https://moqt.nokiaresearch.com:8443",
           "sub_log": "https_moqt.nokiaresearch.com_8443_moq/js-web-rust.log",
           "pub_log": "https_moqt.nokiaresearch.com_8443_moq/pub-js-web.log"
         },
         "js-web → js-web": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: Failed to establish a connection to https://moqt.nokiaresearch.com:8443/moq: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001818us. Timeout:4s num_undecryptable_packets: 0 {}).",
           "sub_log": "https_moqt.nokiaresearch.com_8443_moq/js-web-js-web.log",
           "pub_log": "https_moqt.nokiaresearch.com_8443_moq/pub-js-web.log"
         },
         "js-web → js-bun": {
-          "status": "PASS",
-          "pub_version": "moq-transport-19",
-          "sub_version": "moq-transport-19",
-          "reason": "",
+          "status": "FAIL",
+          "pub_version": "",
+          "sub_version": "",
+          "reason": "not connected: error: timed out waiting for data",
           "sub_log": "https_moqt.nokiaresearch.com_8443_moq/js-web-js-bun.log",
           "pub_log": "https_moqt.nokiaresearch.com_8443_moq/pub-js-web.log"
         }
@@ -751,18 +747,20 @@
     },
     {
       "key": "moqt-nr",
-      "name": "moqt-nokiaresearch (draft-23)",
+      "name": "moqt-nokiaresearch",
       "url": "moqt://moqt.nokiaresearch.com:4443/moq",
       "transport": "QUIC",
       "required": false,
-      "ok": false,
-      "versions": [],
+      "ok": true,
+      "versions": [
+        "moq-transport-22"
+      ],
       "cells": {
         "rust → rust": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: QUIC connection failed err=aborted by peer: the cryptographic handshake failed: error 120",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "moqt_moqt.nokiaresearch.com_4443_moq/rust-rust.log",
           "pub_log": "moqt_moqt.nokiaresearch.com_4443_moq/pub-rust.log"
         }
@@ -770,58 +768,60 @@
     },
     {
       "key": "moqt-nr",
-      "name": "moqt-nokiaresearch (draft-23)",
+      "name": "moqt-nokiaresearch",
       "url": "https://moqt.nokiaresearch.com:4443/moq",
       "transport": "WebTransport",
       "required": false,
-      "ok": false,
-      "versions": [],
+      "ok": true,
+      "versions": [
+        "moq-transport-22"
+      ],
       "cells": {
         "rust → rust": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: QUIC connection failed err=failed to exchange h3 connect: protocol error: expected 200, got: Some(500): protocol error: expected 200, got: Some(500): expected 200, got: Some(500)",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "https_moqt.nokiaresearch.com_4443_moq/rust-rust.log",
           "pub_log": "https_moqt.nokiaresearch.com_4443_moq/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "https_moqt.nokiaresearch.com_4443_moq/rust-js-web.log",
           "pub_log": "https_moqt.nokiaresearch.com_4443_moq/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: error: failed to exchange h3 connect: protocol error: expected 200, got: Some(500)",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "https_moqt.nokiaresearch.com_4443_moq/rust-js-bun.log",
           "pub_log": "https_moqt.nokiaresearch.com_4443_moq/pub-rust.log"
         },
         "js-web → rust": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: QUIC connection failed err=failed to exchange h3 connect: protocol error: expected 200, got: Some(500): protocol error: expected 200, got: Some(500): expected 200, got: Some(500)",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "https_moqt.nokiaresearch.com_4443_moq/js-web-rust.log",
           "pub_log": "https_moqt.nokiaresearch.com_4443_moq/pub-js-web.log"
         },
         "js-web → js-web": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: Failed to establish a connection to https://moqt.nokiaresearch.com:4443/moq: net::ERR_QUIC_PROTOCOL_ERROR.",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "https_moqt.nokiaresearch.com_4443_moq/js-web-js-web.log",
           "pub_log": "https_moqt.nokiaresearch.com_4443_moq/pub-js-web.log"
         },
         "js-web → js-bun": {
-          "status": "FAIL",
-          "pub_version": "",
-          "sub_version": "",
-          "reason": "not connected: error: failed to exchange h3 connect: protocol error: expected 200, got: Some(500)",
+          "status": "PASS",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
+          "reason": "",
           "sub_log": "https_moqt.nokiaresearch.com_4443_moq/js-web-js-bun.log",
           "pub_log": "https_moqt.nokiaresearch.com_4443_moq/pub-js-web.log"
         }
@@ -999,53 +999,53 @@
       "required": false,
       "ok": true,
       "versions": [
-        "moq-transport-18"
+        "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
           "status": "PASS",
-          "pub_version": "moq-transport-18",
-          "sub_version": "moq-transport-18",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
           "reason": "",
           "sub_log": "https_quichemoq.dev_443/rust-rust.log",
           "pub_log": "https_quichemoq.dev_443/pub-rust.log"
         },
         "rust → js-web": {
           "status": "PASS",
-          "pub_version": "moq-transport-18",
-          "sub_version": "moq-transport-18",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
           "reason": "",
           "sub_log": "https_quichemoq.dev_443/rust-js-web.log",
           "pub_log": "https_quichemoq.dev_443/pub-rust.log"
         },
         "rust → js-bun": {
           "status": "PASS",
-          "pub_version": "moq-transport-18",
-          "sub_version": "moq-transport-18",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
           "reason": "",
           "sub_log": "https_quichemoq.dev_443/rust-js-bun.log",
           "pub_log": "https_quichemoq.dev_443/pub-rust.log"
         },
         "js-web → rust": {
           "status": "PASS",
-          "pub_version": "moq-transport-18",
-          "sub_version": "moq-transport-18",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
           "reason": "",
           "sub_log": "https_quichemoq.dev_443/js-web-rust.log",
           "pub_log": "https_quichemoq.dev_443/pub-js-web.log"
         },
         "js-web → js-web": {
           "status": "PASS",
-          "pub_version": "moq-transport-18",
-          "sub_version": "moq-transport-18",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
           "reason": "",
           "sub_log": "https_quichemoq.dev_443/js-web-js-web.log",
           "pub_log": "https_quichemoq.dev_443/pub-js-web.log"
         },
         "js-web → js-bun": {
           "status": "PASS",
-          "pub_version": "moq-transport-18",
-          "sub_version": "moq-transport-18",
+          "pub_version": "moq-transport-22",
+          "sub_version": "moq-transport-22",
           "reason": "",
           "sub_log": "https_quichemoq.dev_443/js-web-js-bun.log",
           "pub_log": "https_quichemoq.dev_443/pub-js-web.log"
@@ -1112,7 +1112,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
+          "reason": "connected, nothing subscribed",
           "sub_log": "https_moq-relay.red5.net_4433_moq/js-web-rust.log",
           "pub_log": "https_moq-relay.red5.net_4433_moq/pub-js-web.log"
         },

@@ -1,13 +1,12 @@
 [page] negotiated protocol: moqt-18
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4233-17589.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4233-17589.hang track=catalog.json
-[page] announced: broadcast=org=000001/app=01/conf=0001EC/media=80[text]/endpoint=0002 active=true
+[page] announced: broadcast=smoke-rust-4240-6688.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4240-6688.hang track=catalog.json
 [page] announced: broadcast=metrics/us-west-2.relay.public active=true
-[page] subscribe written: id=2 broadcast=smoke-rust-4233-17589.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4233-17589.hang track=catalog.json
-[page] received catalog hang smoke-rust-4233-17589.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4233-17589.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4233-17589.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4233-17589.hang track=0.avc3
-decoded 9 frames from smoke-rust-4233-17589.hang (vite)
+[page] subscribe written: id=2 broadcast=smoke-rust-4240-6688.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4240-6688.hang track=catalog.json
+[page] received catalog hang smoke-rust-4240-6688.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4240-6688.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4240-6688.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4240-6688.hang track=0.avc3
+decoded 9 frames from smoke-rust-4240-6688.hang (vite)
