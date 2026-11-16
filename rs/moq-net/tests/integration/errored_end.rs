@@ -6,6 +6,7 @@
 
 use crate::support;
 use moq_net::track::Delay;
+use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -89,7 +90,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
-			let mut group = track.append_group(None).unwrap();
+			let mut group = track.append_next().unwrap();
 			for frame in FRAMES {
 				group.write_frame(group.at_start(), frame).unwrap();
 			}

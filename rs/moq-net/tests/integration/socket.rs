@@ -9,6 +9,7 @@ use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TrackStream};
 use moq_net::{Error, StreamError, Version, group, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -97,7 +98,7 @@ async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, 
 
 /// Write `payload` as one message of a session: one group.
 fn send(track: &track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
@@ -519,7 +520,7 @@ async fn closing_an_endpoint_ends_its_sessions() {
 		matches!(ended, Err(Error::Stream(StreamError::Session(_)))),
 		"bob's half outlived his endpoint: {ended:?}"
 	);
-	assert!(accepted.producer.append_group(0).is_err());
+	assert!(accepted.producer.append_group(moq_net::Timestamp::unscaled(0)).is_err());
 	assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 	assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));
 }

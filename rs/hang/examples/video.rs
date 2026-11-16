@@ -67,7 +67,7 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	// Publish the catalog as a "catalog.json" track in the broadcast.
 	let catalog_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 	// This catalog never changes, so its one group starts at zero, where the media's timeline does.
-	let mut group = catalog_track.append_group(0)?;
+	let mut group = catalog_track.append_group(moq_net::Timestamp::unscaled(0))?;
 	group.write_frame(moq_net::Timestamp::ZERO, catalog.to_json()?)?;
 	group.finish()?;
 

@@ -53,9 +53,10 @@ async fn main() -> anyhow::Result<()> {
 	let mut consumer = stream.consumer.ordered();
 	// The track carries no timescale, so its groups count up from 0.
 	for start in 0..3 {
+		let start = moq_net::Timestamp::unscaled(start);
 		let mut group = producer.append_group(start)?;
 		for payload in PAYLOADS {
-			group.write_frame(moq_net::Timestamp::unscaled(start), payload)?;
+			group.write_frame(start, payload)?;
 		}
 		group.finish()?;
 	}

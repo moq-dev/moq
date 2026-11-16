@@ -14,6 +14,7 @@ use crate::support::harness::MockPair;
 
 use std::time::Duration;
 
+use crate::support::AppendNext;
 use crate::support::AtStart;
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -83,7 +84,7 @@ impl Chain {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
-		let mut group0 = track.append_group(None).unwrap();
+		let mut group0 = track.append_next().unwrap();
 		group0.write_frame(group0.at_start(), payload(0, 0)).unwrap();
 		let mut read0 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read0.start, 0);
@@ -92,7 +93,7 @@ impl Chain {
 			payload(0, 0)
 		);
 
-		let mut group1 = track.append_group(None).unwrap();
+		let mut group1 = track.append_next().unwrap();
 		group1.write_frame(group1.at_start(), payload(1, 0)).unwrap();
 		group1.finish().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();

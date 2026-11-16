@@ -17,6 +17,7 @@
 //! same way.
 
 use crate::support;
+use support::AppendNext;
 use support::AtStart;
 
 use std::collections::BTreeMap;
@@ -254,7 +255,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	let mut seen = Vec::new();
 
 	// Group 0 in full through `A`.
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(group.at_start(), payload(0, frame)).unwrap();
 		expected.push((0, payload(0, frame)));
@@ -271,7 +272,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	if split == 0 {
 		topology.trigger(trigger).await;
 	}
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		if frame == split && split != 0 {
 			topology.trigger(trigger).await;
@@ -283,7 +284,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	group.finish().unwrap();
 
 	// Group 2 entirely through the replacement.
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		expected.push((2, payload(2, frame)));
@@ -320,7 +321,7 @@ async fn route_flaps(version: &str) {
 	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
 	let mut expected = Vec::new();
 	let mut seen = Vec::new();
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES * (triggers.len() as u64 + 1) {
 		if frame % FRAMES == FRAMES / 2
 			&& let Some(trigger) = triggers.get((frame / FRAMES) as usize)
@@ -347,7 +348,7 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 	let mut rx = read(sub);
 	topology.standby().await;
 
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(group.at_start(), payload(0, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
@@ -355,7 +356,7 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 	group.finish().unwrap();
 
 	topology.trigger(trigger).await;
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
 	settle().await;
 	match kio::clock::timeout(Duration::from_secs(10), rx.next())
@@ -380,7 +381,7 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 	let mut rx = read(sub);
 	group.write_frame(group.at_start(), payload(1, 1)).unwrap();
 	group.finish().unwrap();
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload(2, 0)).unwrap();
 	while next(&mut rx).await != (2, payload(2, 0)) {}
 }
@@ -436,7 +437,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	let _b_to_r = link(version, &relay_b, &standby).await;
 	settle().await;
 
-	let mut group = track_a.append_group(None).unwrap();
+	let mut group = track_a.append_next().unwrap();
 	group.write_frame(group.at_start(), tagged("A", 0, 0)).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("A", 0, 0)), "{version}");
@@ -505,7 +506,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	assert!(!second.is_clone(&first), "{version}: joined the replaced broadcast");
 	let sub = second.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
-	let mut group = track_b.append_group(None).unwrap();
+	let mut group = track_b.append_next().unwrap();
 	group.write_frame(group.at_start(), tagged("B", 0, 0)).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("B", 0, 0)), "{version} {trigger:?}");
@@ -528,7 +529,7 @@ async fn better_route_restarts(version: &str) {
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
 
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)), "{version}");
 	let incumbent = consumer.request("live", None).await.unwrap();
@@ -552,7 +553,7 @@ async fn better_route_restarts(version: &str) {
 	let sub = replaced.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut fresh = read(sub);
 	group.finish().unwrap();
-	let mut group = topology.track.append_group(None).unwrap();
+	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
 	while next(&mut fresh).await != (1, payload(1, 0)) {}
 	assert_eq!(
@@ -737,7 +738,7 @@ async fn lagging_route_dies(version: Version) {
 	let b_r = lagged(version, &b, &r, Duration::ZERO).await;
 	settle().await;
 
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	for frame in 0..4 {
 		write(&mut group, 0, frame);
 	}
@@ -746,7 +747,7 @@ async fn lagging_route_dies(version: Version) {
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
 	}
 
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	write(&mut group, 1, 0);
 	write(&mut group, 1, 1);
 	assert_eq!(next(&mut rx).await, (1, payload(1, 0)), "{version}");
@@ -755,7 +756,7 @@ async fn lagging_route_dies(version: Version) {
 	write(&mut group, 1, 2);
 	write(&mut group, 1, 3);
 	group.finish().unwrap();
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		write(&mut group, 2, frame);
 	}
@@ -836,7 +837,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let mut after = BTreeMap::<u64, Vec<String>>::new();
 	for key in 0..=E_NOTICES + 3 {
 		// Each group starts at its first frame, a second after the last.
-		let mut group = track.append_group(key * 1_000).unwrap();
+		let mut group = track.append_group(Timestamp::unscaled(key * 1_000)).unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(key * 1_000 + frame * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -1100,7 +1101,7 @@ async fn replaced_behind_a_relay(version: &str) {
 	let mut dead = None;
 	for key in 0..3 {
 		for replica in &mut replicas {
-			replica.group = Some(replica.track.append_group(None).unwrap());
+			replica.group = Some(replica.track.append_next().unwrap());
 		}
 		for frame in 0..FRAMES {
 			if key == 1 && frame == FRAMES / 2 {
@@ -1221,7 +1222,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			settle().await;
 		}
 		for replica in &mut replicas {
-			let mut group = replica.track.append_group(None).unwrap();
+			let mut group = replica.track.append_next().unwrap();
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 				group.write_frame(timestamp, tagged(replica.name, key, frame)).unwrap();
@@ -1307,7 +1308,7 @@ async fn producer_replaced(version: &str) {
 
 	let first = producers.next().await.unwrap();
 	for key in 0..2 {
-		let mut group = first.append_group(None).unwrap();
+		let mut group = first.append_next().unwrap();
 		assert_eq!(group.start, key, "{version}");
 		for frame in 0..FRAMES {
 			group.write_frame(group.at_start(), payload(key, frame)).unwrap();

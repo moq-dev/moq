@@ -268,7 +268,7 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 		let (dialed, accepted) = (dialed.expect("dial"), accepted.expect("accept"));
 
 		let write = async {
-			let mut group = accepted.producer.append_group(0).unwrap();
+			let mut group = accepted.producer.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 			let info = moq_net::frame::Info {
 				size: CHUNK as u64,
 				timestamp: moq_net::Timestamp::unscaled(0),

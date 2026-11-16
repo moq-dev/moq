@@ -73,7 +73,7 @@ fn measure(frames: usize, payload: usize) -> (usize, u64) {
 
 	// Warm up outside the measurement so the track's own one-time allocations and
 	// any lazy statics aren't billed to the groups.
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
 	group.write_frame(Timestamp::ZERO, vec![0u8; payload]).unwrap();
 	group.finish().unwrap();
 
@@ -81,7 +81,7 @@ fn measure(frames: usize, payload: usize) -> (usize, u64) {
 	let before_charge = pool.used();
 
 	for key in 1..=GROUPS as u64 {
-		let mut group = track.append_group(key).unwrap();
+		let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
 		let timestamp = Timestamp::from_millis(key).unwrap();
 		for _ in 0..frames {
 			group.write_frame(timestamp, vec![0u8; payload]).unwrap();

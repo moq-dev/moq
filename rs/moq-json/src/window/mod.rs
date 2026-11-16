@@ -312,7 +312,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
@@ -677,7 +677,7 @@ mod test {
 			let first = encoder.push(&rec(0)).unwrap();
 			let payload = first.payload.clone();
 			first.commit();
-			let mut lost = track.append_group(0).unwrap();
+			let mut lost = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 			lost.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
 			assert_eq!(
 				drain(&mut consumer),
@@ -691,7 +691,7 @@ mod test {
 			let second = encoder.push(&rec(1)).unwrap();
 			let payload = second.payload.clone();
 			second.commit();
-			let mut checkpoint = track.append_group(1).unwrap();
+			let mut checkpoint = track.append_group(moq_net::Timestamp::unscaled(1)).unwrap();
 			checkpoint
 				.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), payload)
 				.unwrap();

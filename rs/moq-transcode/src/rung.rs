@@ -1388,8 +1388,16 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		if !empty {
-			video.append_group(0).unwrap().finish().unwrap();
-			video.append_group(HOUR).unwrap().finish().unwrap();
+			video
+				.append_group(moq_net::Timestamp::unscaled(0))
+				.unwrap()
+				.finish()
+				.unwrap();
+			video
+				.append_group(moq_net::Timestamp::unscaled(HOUR))
+				.unwrap()
+				.finish()
+				.unwrap();
 		}
 
 		let output = moq_net::broadcast::Info::default().produce();
@@ -1437,7 +1445,11 @@ mod tests {
 			);
 			// As a media producer's first group does, saying nothing came before it.
 			video.skip_groups(0..HOUR + 1);
-			video.append_group(HOUR + 1).unwrap().finish().unwrap();
+			video
+				.append_group(moq_net::Timestamp::unscaled(HOUR + 1))
+				.unwrap()
+				.finish()
+				.unwrap();
 		}
 		kio::clock::timeout(wait, tasks.join_next())
 			.await

@@ -450,7 +450,7 @@ impl Entry {
 		// A cut can land on the same millisecond as the last one (a retraction cuts at once, and SI
 		// without media PTS cuts at zero), so it is stamped a unit later instead of refused.
 		let (start, pts) = crate::start::next(track, pts)?;
-		let mut group = track.append_group(start)?;
+		let mut group = track.append_group(Timestamp::unscaled(start))?;
 		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}

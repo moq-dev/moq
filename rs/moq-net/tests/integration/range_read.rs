@@ -5,6 +5,7 @@
 //! past the live edge ends once the groups up to its end arrive.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 }
 
 fn write_group(track: &mut moq_net::track::Producer, key: u64) {
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	assert_eq!(group.start, key);
 	let at = Timestamp::from_millis(key).unwrap();
 	for frame in 0..2u64 {

@@ -253,7 +253,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 			.create_track(moq_msf::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let msf = moq_msf::Catalog::<()>::new(Vec::new()).to_json().unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, msf).unwrap();
 		group.finish().unwrap();
 		broadcast.announce().unwrap();
@@ -10734,7 +10734,7 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 			.broadcast()
 			.create_track(name, hang::Catalog::default_track_info())
 			.unwrap();
-		let mut group = old_catalog.append_group(0).unwrap();
+		let mut group = old_catalog.append_group(Timestamp::unscaled(0)).unwrap();
 		group.write_frame(Timestamp::ZERO, snapshot).unwrap();
 		group.finish().unwrap();
 		let source = crate::source::resolved(&origin, "live").await;

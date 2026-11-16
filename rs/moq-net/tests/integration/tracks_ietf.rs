@@ -8,6 +8,7 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -116,7 +117,7 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 			.await
 			.expect("never subscribed")
 			.unwrap();
-		let mut group = video.append_group(None).unwrap();
+		let mut group = video.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"before"[..])
 			.unwrap();
@@ -130,7 +131,7 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		assert!(failed.starts_with("error:"), "{version}: {failed}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 1, "{version}");
 
-		let mut group = video.append_group(None).unwrap();
+		let mut group = video.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"after"[..])
 			.unwrap();

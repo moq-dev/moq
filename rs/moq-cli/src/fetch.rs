@@ -201,7 +201,9 @@ mod tests {
 
 			let data = broadcast.broadcast().create_track("data", timed()).expect("data track");
 			for sequence in 0..3 {
-				let mut group = data.append_group(sequence).expect("group");
+				let mut group = data
+					.append_group(moq_net::Timestamp::unscaled(sequence))
+					.expect("group");
 				let at = moq_net::Timestamp::from_millis(sequence).expect("timestamp");
 				for frame in frames(sequence) {
 					group.write_frame(at, frame).expect("frame");
@@ -213,7 +215,7 @@ mod tests {
 				.create_track("empty", timed())
 				.expect("empty track");
 			let live = broadcast.broadcast().create_track("live", timed()).expect("live track");
-			let mut open = live.append_group(0).expect("open group");
+			let mut open = live.append_group(moq_net::Timestamp::unscaled(0)).expect("open group");
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
 
@@ -266,7 +268,7 @@ mod tests {
 				.route(".hidden", moq_net::origin::RouteOptions::default())
 				.expect("hidden broadcast");
 			let secret = hidden.broadcast().create_track("data", timed()).expect("hidden track");
-			let mut group = secret.append_group(0).expect("group");
+			let mut group = secret.append_group(moq_net::Timestamp::unscaled(0)).expect("group");
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
 				.expect("frame");

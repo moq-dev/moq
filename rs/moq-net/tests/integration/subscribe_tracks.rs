@@ -5,6 +5,7 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
+use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -94,7 +95,7 @@ async fn setup(version: Version) -> Setup {
 }
 
 async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
-	let mut group = setup.track.append_group(None).unwrap();
+	let mut group = setup.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload).unwrap();
 	group.finish().unwrap();
 	let got = kio::clock::timeout(TIMEOUT, setup.frames.next())

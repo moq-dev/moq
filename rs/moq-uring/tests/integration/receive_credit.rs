@@ -166,7 +166,9 @@ fn partial_frame_gives_way() {
 			let mut high_sub = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
 			// Three quarters of the window, held by a frame that never finishes.
-			let group = low.append_group(None).expect("low group");
+			let group = low
+				.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+				.expect("low group");
 			let timestamp = Timestamp::from_millis(group.start).unwrap();
 			let mut low_frame = group
 				.create_frame(frame::Info {
@@ -196,7 +198,11 @@ fn partial_frame_gives_way() {
 
 			// Half the window, which only fits once the low frame lets go.
 			let payload = Bytes::from(vec![2u8; WINDOW / 2]);
-			let mut high_group = high.append_group(None).expect("high group");
+			let mut high_group = high
+				.append_group(
+					moq_net::Timestamp::from_millis(high.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("high group");
 			high_group
 				.write_frame(
 					moq_net::Timestamp::from_millis(high_group.start).unwrap(),
@@ -208,7 +214,11 @@ fn partial_frame_gives_way() {
 
 			// The session survives, and the low track keeps delivering what fits.
 			drop(low_frame);
-			let mut group = low.append_group(None).expect("after group");
+			let mut group = low
+				.append_group(
+					moq_net::Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("after group");
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
 				.expect("after frame");

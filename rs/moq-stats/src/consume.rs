@@ -223,7 +223,12 @@ mod tests {
 		/// Write one frame of `bytes` bytes into the broadcast and read it out on the
 		/// egress side, so the publisher `bytes`/`frames`/`groups` counters advance.
 		async fn write(&mut self, bytes: usize) {
-			let mut group = self.track.append_group(None).unwrap();
+			let mut group = self
+				.track
+				.append_group(
+					Timestamp::from_millis(self.track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; bytes])
 				.unwrap();

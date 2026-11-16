@@ -206,7 +206,9 @@ pub fn catalog(data: &[u8]) -> bool {
 		Box::new(move || consumer.poll_next(&waiter))
 	};
 
-	let mut group = track.append_group(0).expect("a fresh track takes a group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::unscaled(0))
+		.expect("a fresh track takes a group");
 	let mut accepted = false;
 	for frame in data.split(|&byte| byte == 0) {
 		if group

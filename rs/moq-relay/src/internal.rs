@@ -1816,7 +1816,12 @@ mod tests {
 		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
-			let mut group = pub_track.append_group(None).unwrap();
+			let mut group = pub_track
+				.append_group(
+					moq_net::Timestamp::from_millis(pub_track.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
+				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 12])
 				.unwrap();
@@ -1826,7 +1831,11 @@ mod tests {
 			group.finish().unwrap();
 		}
 		{
-			let mut group = pub_track.append_group(None).unwrap();
+			let mut group = pub_track
+				.append_group(Timestamp::unscaled(
+					pub_track.largest().map_or(0, |largest| largest.group + 1),
+				))
+				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
 				.unwrap();
@@ -1837,7 +1846,12 @@ mod tests {
 
 		// Write 56 ingress bytes into the regional-tier broadcast.
 		{
-			let mut group = sub_track.append_group(None).unwrap();
+			let mut group = sub_track
+				.append_group(
+					moq_net::Timestamp::from_millis(sub_track.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
+				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 56])
 				.unwrap();
@@ -1901,7 +1915,11 @@ mod tests {
 			let bc = egress.request("demo/x", None).await.unwrap();
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
 		}
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 			.unwrap();

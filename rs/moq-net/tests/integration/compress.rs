@@ -6,6 +6,7 @@
 //! signal compression receive the plain frames the relay inflates once for all of them.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -202,7 +203,7 @@ async fn relay_serves_every_version() {
 				"{version}: compression declared"
 			);
 
-			let mut group = fixture.track.append_group(None).unwrap();
+			let mut group = fixture.track.append_next().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(0).unwrap(), payload(0))
 				.unwrap();
@@ -250,7 +251,7 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 					fixture.subscriber.info().compression == moq_net::track::Compression::Deflate,
 					"{upstream} -> {downstream}"
 				);
-				let mut group = fixture.track.append_group(None).unwrap();
+				let mut group = fixture.track.append_next().unwrap();
 				for index in 0..3 {
 					group
 						.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
@@ -282,7 +283,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				.route("bcast", moq_net::origin::RouteOptions::hidden())
 				.unwrap();
 			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
-			let mut group = track.append_group(None).unwrap();
+			let mut group = track.append_next().unwrap();
 			for index in 0..3 {
 				group
 					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))

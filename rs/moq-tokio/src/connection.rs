@@ -2674,7 +2674,11 @@ mod tests {
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
@@ -2699,7 +2703,11 @@ mod tests {
 			.expect("never redialed through the fresh resolve")
 			.unwrap();
 
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
@@ -2763,7 +2771,11 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
@@ -2819,7 +2831,11 @@ mod tests {
 		);
 		assert!(monitor.stats().is_some());
 
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
@@ -3016,7 +3032,11 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
@@ -3046,7 +3066,11 @@ mod tests {
 		assert!(connection.connected(), "the move went through a disconnect");
 		assert!(!crate::websocket::won(&url), "the race still skips QUIC's head start");
 
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();

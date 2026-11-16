@@ -221,7 +221,9 @@ async fn net_round(
 		.collect();
 	for track in &mut tracks {
 		// The group starts at its first frame's time, in the track's microseconds.
-		let mut group = track.append_group(n * case.frames() as u64).unwrap();
+		let mut group = track
+			.append_group(moq_net::Timestamp::unscaled(n * case.frames() as u64))
+			.unwrap();
 		for f in 0..case.frames() {
 			let timestamp = moq_net::Timestamp::from_micros(n * case.frames() as u64 + f as u64).unwrap();
 			// Copy, as a binding's write does, so the baseline does not get zero-copy for free.

@@ -3,6 +3,7 @@
 //! Group key boundaries, directly and through a forwarding origin.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -107,7 +108,7 @@ async fn wide_key_fails_only_its_subscription() {
 	broadcast.announce().unwrap();
 	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
 	group.write_frame(latest(), b"wide".as_ref()).unwrap();
-	let mut group = narrow.append_group(None).unwrap();
+	let mut group = narrow.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
@@ -174,9 +175,9 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = wide.append_group(None).unwrap();
+	let mut group = wide.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"first".as_ref()).unwrap();
-	let mut group = narrow.append_group(None).unwrap();
+	let mut group = narrow.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());

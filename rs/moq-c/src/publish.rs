@@ -1219,7 +1219,9 @@ impl Publish {
 	/// group producer.
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.append_group(None)?;
+		let group = raw.inner.append_group(moq_net::Timestamp::unscaled(
+			raw.inner.largest().map_or(0, |largest| largest.group + 1),
+		))?;
 		self.insert_group(group)
 	}
 

@@ -559,7 +559,7 @@ impl<T: Serialize> Snapshot<T> {
 			if self.fresh && self.largest.is_none() {
 				self.track.skip_groups(0..start);
 			}
-			self.group = Some(self.track.append_group(start)?);
+			self.group = Some(self.track.append_group(moq_net::Timestamp::unscaled(start))?);
 			self.largest = Some(start);
 			self.opened = Some(stamp.group);
 			#[cfg(feature = "bench")]
@@ -1790,7 +1790,7 @@ mod tests {
 				.expect("subscribe");
 
 			if frames > 0 {
-				let mut group = producer.append_group(0).expect("group");
+				let mut group = producer.append_group(Timestamp::unscaled(0)).expect("group");
 				for _ in 0..frames {
 					group
 						.write_frame(Timestamp::ZERO, vec![0u8; frame_size])
@@ -2248,7 +2248,9 @@ mod tests {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let mut group = video.append_group(None).expect("group");
+			let mut group = video
+				.append_group(Timestamp::from_millis(video.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+				.expect("group");
 			group
 				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; size])
 				.expect("write");
@@ -2708,7 +2710,7 @@ mod tests {
 			subs.push(track.subscribe(None).await.expect("subscribe"));
 		}
 		{
-			let mut group = video.append_group(0).expect("group");
+			let mut group = video.append_group(Timestamp::unscaled(0)).expect("group");
 			group.write_frame(Timestamp::ZERO, vec![0u8; 10]).expect("write");
 			group.finish().expect("close");
 		}

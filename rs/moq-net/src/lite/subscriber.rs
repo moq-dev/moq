@@ -8809,7 +8809,7 @@ mod tests {
 			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			// Held for the whole round: a dropped tail settles at once.
 			let tail = kio::Producer::new(Tail::default());
-			let mut group = Some(serving.serving.append_group(None).unwrap());
+			let mut group = Some(serving.serving.append_next().unwrap());
 			if let Some(finished) = ended {
 				if finished {
 					group.take().unwrap().finish().unwrap();
@@ -9809,7 +9809,7 @@ mod tests {
 			.broadcast()
 			.create_track("video", crate::track::Info::timed())
 			.unwrap();
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"local".as_ref()).unwrap();
 		group.finish().unwrap();
 
@@ -9870,7 +9870,7 @@ mod tests {
 			"the reflected announce must not replace the local front"
 		);
 
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
 		group.finish().unwrap();
 		let mut group = sub.recv_group().await.expect("recv group").expect("track ended early");

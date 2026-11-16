@@ -10,6 +10,7 @@
 
 use crate::support;
 use moq_net::track::Delay;
+use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -146,7 +147,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
 			for key in 0..GROUPS {
-				let mut group = track.append_group(None).unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
@@ -167,7 +168,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 		Arrival::NewestFirst => {
 			upstream.server_transport.hold_unis();
 			for _ in 0..GROUPS {
-				let mut group = track.append_group(None).unwrap();
+				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
 				group.finish().unwrap();

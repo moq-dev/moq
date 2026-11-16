@@ -530,9 +530,8 @@ impl Track {
 	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
 	/// before the previous group closes.
 	fn write_snapshot(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
-		let start = timestamp.value();
-		let mut group = self.inner.append_group(start)?;
-		self.largest = Some(start);
+		let mut group = self.inner.append_group(timestamp)?;
+		self.largest = Some(group.start);
 
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(previous) = self.group.take() {

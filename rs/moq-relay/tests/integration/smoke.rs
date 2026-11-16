@@ -144,7 +144,9 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -288,7 +290,9 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		.route(".x/y", moq_net::origin::RouteOptions::default())
 		.expect("create hidden");
 	let track = hidden.broadcast().create_track("video", timed()).expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(
 			moq_net::Timestamp::from_millis(group.start).unwrap(),
@@ -503,7 +507,9 @@ async fn relay_websocket_root_path_upgrades() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -640,7 +646,9 @@ async fn internal_tcp_round_trip() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -747,7 +755,9 @@ async fn internal_unix_round_trip() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -832,7 +842,9 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.route(broadcast, moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
 	let track = bc.broadcast().create_track("video", timed()).expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");

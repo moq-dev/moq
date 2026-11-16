@@ -43,7 +43,7 @@ fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Re
 	// Declare the end before the final group's payload is even available.
 	track.finish_at(moq_net::track::Position::group(GROUPS))?;
 	for sequence in 0..GROUPS {
-		let mut group = track.append_group(sequence)?;
+		let mut group = track.append_group(at(sequence))?;
 		if mode == Some("drop") && sequence == 1 {
 			group.abort(moq_net::Error::App(1))?;
 			continue;
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
 				}
 				let mut head = None;
 				if late {
-					let mut group = track.append_group(0)?;
+					let mut group = track.append_group(at(0))?;
 					for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
 						group.write_frame(at(0), frame)?;
 					}
@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
 					}
 					group.finish()?;
 					for sequence in 1..LATE_GROUPS {
-						let mut group = track.append_group(sequence)?;
+						let mut group = track.append_group(at(sequence))?;
 						for frame in frames(sequence, mode) {
 							group.write_frame(at(sequence), frame)?;
 						}

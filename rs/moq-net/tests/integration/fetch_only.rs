@@ -7,6 +7,7 @@
 //! the fetches that report where the track ends.
 
 use crate::support;
+use support::AppendNext;
 use support::AtStart;
 
 use std::sync::Arc;
@@ -48,7 +49,7 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 	let mut track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..3u64 {
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track.append_next().unwrap();
 		for frame in 0..2 {
 			group
 				.write_frame(group.at_start(), format!("{key}-{frame}").into_bytes())
@@ -180,7 +181,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 			crate::support::wanted(track.demand()).await.unwrap();
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let stamp = Timestamp::from_millis(123_456).unwrap();
-			let mut group = track.append_group(None).unwrap();
+			let mut group = track.append_next().unwrap();
 			group.write_frame(stamp, b"frame".as_ref()).unwrap();
 			group.finish().unwrap();
 

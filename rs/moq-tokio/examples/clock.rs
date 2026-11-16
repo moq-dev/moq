@@ -155,7 +155,7 @@ impl Publisher {
 
 		loop {
 			// A group starts at its first frame: the minute, in the track's milliseconds.
-			let segment = self.track.append_group(millis(now)?)?;
+			let segment = self.track.append_group(Timestamp::unscaled(millis(now)?))?;
 
 			tokio::spawn(async move {
 				if let Err(err) = Self::send_segment(segment, now).await {

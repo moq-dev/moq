@@ -233,8 +233,7 @@ impl Track {
 	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
 	fn open(&mut self, timestamp: moq_net::Timestamp) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
-			let start = timestamp.value();
-			self.group = Some(self.inner.append_group(start)?);
+			self.group = Some(self.inner.append_group(timestamp)?);
 		}
 		Ok(())
 	}

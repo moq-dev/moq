@@ -306,7 +306,9 @@ impl Cache {
 					self.groups[frame.track].push((recv.finish().unwrap(), bytes));
 				}
 				// A group starts at its first frame's timestamp, in the track's milliseconds.
-				let group = self.tracks[frame.track].append_group(frame.timestamp).unwrap();
+				let group = self.tracks[frame.track]
+					.append_group(Timestamp::unscaled(frame.timestamp))
+					.unwrap();
 				*slot = Some((GroupRecv::new(group), 0));
 			}
 			let (recv, bytes) = slot.as_mut().expect("every track opens with a group");

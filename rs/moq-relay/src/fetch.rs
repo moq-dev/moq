@@ -32,12 +32,20 @@ mod test {
 	fn the_newest_group_can_be_empty() {
 		let broadcast = moq_net::broadcast::Info::default().produce();
 		let track = broadcast.create_track("t", moq_net::track::Info::default()).unwrap();
-		let mut first = track.append_group(None).unwrap();
+		let mut first = track
+			.append_group(moq_net::Timestamp::unscaled(
+				track.largest().map_or(0, |largest| largest.group + 1),
+			))
+			.unwrap();
 		first
 			.write_frame(moq_net::Timestamp::unscaled(first.start), &b"a"[..])
 			.unwrap();
 		first.finish().unwrap();
-		let _open = track.append_group(None).unwrap();
+		let _open = track
+			.append_group(moq_net::Timestamp::unscaled(
+				track.largest().map_or(0, |largest| largest.group + 1),
+			))
+			.unwrap();
 
 		let handle = broadcast.consume().track("t").unwrap();
 		let group = fetch_group(&handle, None)

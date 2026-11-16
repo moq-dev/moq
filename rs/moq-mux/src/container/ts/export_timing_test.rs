@@ -288,7 +288,7 @@ impl Live {
 				}
 				if keyframe {
 					let start = video.strict_add_signed(self.offset);
-					self.group = Some(self.video.append_group(start).unwrap());
+					self.group = Some(self.video.append_group(Timestamp::unscaled(start)).unwrap());
 				}
 				if stall(tick) {
 					self.stalling = true;
@@ -983,7 +983,7 @@ async fn a_successor_settles_held_video_across_a_skip_or_restart() {
 				live.group.take().unwrap().finish().unwrap();
 				// A microsecond before the keyframe that resumes: group starts strictly increase.
 				let at = live.tick * VIDEO_US - 1;
-				let mut marker = live.video.append_group(at).unwrap();
+				let mut marker = live.video.append_group(Timestamp::unscaled(at)).unwrap();
 				HangContainer::Legacy(crate::container::Kind::Video)
 					.write(&mut marker, &[crate::container::test_util::raw_frame(at, b"", true)])
 					.unwrap();

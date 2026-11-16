@@ -48,7 +48,9 @@ fn client(version: &str) -> moq_tokio::Client {
 }
 
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track
+		.append_group(Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(Timestamp::from_millis(group.start).unwrap(), tag.as_bytes().to_vec())
 		.unwrap();

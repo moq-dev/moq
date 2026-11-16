@@ -1258,7 +1258,11 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
@@ -1498,7 +1502,11 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.unwrap();
@@ -1612,7 +1620,7 @@ mod tests {
 		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
 		// edge: past the 500ms max age, so it is no longer served.
 		for millis in [0, 1000, 2000] {
-			let mut group = track.append_group(millis).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::unscaled(millis)).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();

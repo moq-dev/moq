@@ -40,7 +40,9 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("failed to create track");
 
 	// Write a group containing a single frame.
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -158,7 +160,11 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	// Three frames where the middle PTS goes backwards (B-frame decode order) so the
 	// zigzag timestamp delta carries a negative value.
 	let frames = [10_000u64, 30_000, 20_000];
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("failed to append group");
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
 		group
@@ -274,7 +280,11 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch
 	// stream carries a negative zigzag delta too).
 	let frames = [10_000u64, 30_000, 20_000];
-	let mut group = track.append_group(None).expect("failed to append group"); // seq 0
+	let mut group = track
+		.append_group(Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
 		group
@@ -384,7 +394,11 @@ async fn transport_fetch_roundtrip(version: &str) {
 		.create_track("video", timed())
 		.expect("failed to create track");
 	for sequence in 0..3u64 {
-		let mut group = track.append_group(None).expect("failed to append group");
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.expect("failed to append group");
 		for frame in 0..2 {
 			group
 				.write_frame(
@@ -507,13 +521,21 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 
 	// Group 0 is the "past" group only reachable via FETCH; group 1 is the latest,
 	// delivered live over the subscription.
-	let mut group0 = track.append_group(None).expect("append group 0"); // seq 0
+	let mut group0 = track
+		.append_group(Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("append group 0"); // seq 0
 	group0
 		.write_frame(Timestamp::new(10_000, Timescale::MICRO).unwrap(), b"old".as_slice())
 		.expect("frame 0");
 	group0.finish().expect("finish group 0");
 
-	let mut group1 = track.append_group(None).expect("append group 1"); // seq 1
+	let mut group1 = track
+		.append_group(Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("append group 1"); // seq 1
 	group1
 		.write_frame(Timestamp::new(20_000, Timescale::MICRO).unwrap(), b"new".as_slice())
 		.expect("frame 1");
@@ -623,7 +645,11 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("create broadcast");
 	let track = broadcast.broadcast().create_track("video", None).expect("create track");
 
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), b"hello".as_ref())
 		.expect("write frame");
@@ -728,7 +754,9 @@ async fn broadcast_moq_transport_22_current_group_join() {
 
 	// The group is left open, so the subscriber joins part way through it: the two head
 	// frames are published before the SUBSCRIBE and the tail frame after.
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	for payload in [b"head-0".as_ref(), b"head-1".as_ref()] {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
@@ -1323,7 +1351,9 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		.create_track("catalog.json", timed())
 		.expect("create track");
 	let live = track.clone();
-	let mut group = live.append_group(None).expect("append group");
+	let mut group = live
+		.append_group(moq_net::Timestamp::from_millis(live.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"v0".as_ref())
 		.expect("write frame");
@@ -1406,7 +1436,11 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 			group.write_frame(at, update.as_bytes()).expect("write frame");
 		} else {
 			assert_eq!(read(&mut reading, &ctx).await, format!("v{}", round - 1), "{ctx}");
-			let mut next = live.append_group(None).expect("append group");
+			let mut next = live
+				.append_group(
+					moq_net::Timestamp::from_millis(live.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("append group");
 			next.write_frame(moq_net::Timestamp::from_millis(next.start).unwrap(), update.as_bytes())
 				.expect("write frame");
 			next.finish().expect("finish group");
@@ -1820,7 +1854,9 @@ async fn broadcast_websocket() {
 		.create_track("video", timed())
 		.expect("failed to create track");
 
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -1938,7 +1974,9 @@ async fn broadcast_websocket_fallback() {
 		.create_track("video", timed())
 		.expect("failed to create track");
 
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -2066,7 +2104,9 @@ async fn broadcast_websocket_uses_newest_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("failed to create track");
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -2146,7 +2186,9 @@ async fn quic_driver_task_inherits_connection_span() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("failed to create track");
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -2271,7 +2313,9 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 		.create_track("video", timed())
 		.expect("create track");
 
-	let mut group0 = track.append_group(None).expect("append group 0");
+	let mut group0 = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group 0");
 	group0
 		.write_frame(moq_net::Timestamp::from_millis(group0.start).unwrap(), b"a".as_ref())
 		.expect("write frame 0");
@@ -2348,7 +2392,9 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	let mut sub2 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe2");
 
 	// A new group published after the resubscribe must reach the consumer.
-	let mut group1 = track.append_group(None).expect("append group 1");
+	let mut group1 = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group 1");
 	group1
 		.write_frame(moq_net::Timestamp::from_millis(group1.start).unwrap(), b"b".as_ref())
 		.expect("write frame 1");
@@ -2412,7 +2458,9 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.create_track("video", timed())
 		.expect("create track");
 
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -2755,7 +2803,9 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("failed to create track");
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -2850,7 +2900,11 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 			.broadcast()
 			.create_track("data", timed())
 			.expect("create track");
-		let mut group = track.append_group(None).expect("append group");
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), path.as_bytes())
 			.expect("write frame");
@@ -3058,7 +3112,9 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("failed to create track");
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
@@ -3138,7 +3194,9 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.create_track("video", timed())
 		.expect("failed to create track");
 
-	let mut group = track.append_group(None).expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
 		.write_frame(
 			moq_net::Timestamp::from_millis(group.start).unwrap(),

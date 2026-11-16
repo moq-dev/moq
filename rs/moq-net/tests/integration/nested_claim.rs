@@ -11,6 +11,7 @@
 //! same setup reaches the derivative on some runs and is refused on others.
 
 use crate::support;
+use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -61,7 +62,7 @@ fn publish(node: &origin::Producer, path: &str, tag: &'static str) -> (origin::R
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), tag.as_bytes().to_vec()).unwrap();
 	group.finish().unwrap();
 	route.announce().unwrap();

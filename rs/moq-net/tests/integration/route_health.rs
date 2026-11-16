@@ -12,6 +12,7 @@ use super::route_change::{Delivery, link, payload, priced_link, produce_origin, 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use crate::support::AppendNext;
 use futures::channel::mpsc;
 use moq_net::{Error, StreamError, Timestamp, Version, origin, track};
 
@@ -86,7 +87,9 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	let mut tick = 0;
 	for key in 0..groups {
 		// Each group starts at its first frame's time.
-		let mut group = track.append_group(tick * STEP.as_millis() as u64).unwrap();
+		let mut group = track
+			.append_group(Timestamp::unscaled(tick * STEP.as_millis() as u64))
+			.unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -229,7 +232,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	let mut write = async |groups: u64| {
 		for _ in 0..groups {
 			let key = tick / FRAMES;
-			let mut group = track.append_group(None).unwrap();
+			let mut group = track.append_next().unwrap();
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 				group.write_frame(timestamp, payload(key, frame)).unwrap();

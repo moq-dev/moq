@@ -11,7 +11,7 @@
 
 use crate::route_change::{link, next, payload, produce_origin, read, timed};
 use crate::support;
-use support::AtStart;
+use support::{AppendNext, AtStart};
 
 use std::time::Duration;
 
@@ -202,7 +202,7 @@ async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
 			_ => p_a = peer(version, &p, &a).await,
 		}
 		let sent = kio::clock::now();
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), payload(flap, 0)).unwrap();
 		group.finish().unwrap();
 		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");

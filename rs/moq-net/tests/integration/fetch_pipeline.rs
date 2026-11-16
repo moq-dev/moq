@@ -6,6 +6,7 @@
 //! `model::resume`'s staged copies.
 
 use crate::support;
+use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -146,7 +147,7 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"frame".as_ref()).unwrap();
 	group.finish().unwrap();
 

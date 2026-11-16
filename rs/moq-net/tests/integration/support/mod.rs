@@ -8,6 +8,25 @@ use std::ops::{Bound, RangeBounds};
 use futures::channel::mpsc;
 use moq_net::{Timestamp, datagram, goaway, group, origin, track};
 
+/// Appending for tests that count groups rather than time them.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub trait AppendNext {
+	/// Append a group starting one past the largest start the track holds, or at 0 on an empty
+	/// track, so consecutive appends land on consecutive keys and skip nothing between them.
+	fn append_next(&self) -> moq_net::Result<group::Producer>;
+}
+
+impl AppendNext for track::Producer {
+	fn append_next(&self) -> moq_net::Result<group::Producer> {
+		let key = self.largest().map_or(0, |largest| largest.group + 1);
+		let start = match self.info().timescale {
+			Some(scale) => Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch)?,
+			None => Timestamp::unscaled(key),
+		};
+		self.append_group(start)
+	}
+}
+
 /// A frame time for tests whose frames carry no time of their own.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub trait AtStart {

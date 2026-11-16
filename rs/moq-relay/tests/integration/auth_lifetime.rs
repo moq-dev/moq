@@ -301,7 +301,9 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -746,7 +748,11 @@ async fn a_moved_tier_retags_the_live_session() {
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 	let mut round_trip = async |payload: &'static [u8]| {
-		let mut group = track.append_group(None).expect("append group");
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 			.expect("write frame");
@@ -887,7 +893,13 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			);
 		}
 		let send = |index: usize, sequence: u64| {
-			let mut group = tracks[index].1.append_group(None).expect("append group");
+			let mut group = tracks[index]
+				.1
+				.append_group(
+					moq_net::Timestamp::from_millis(tracks[index].1.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
+				.expect("append group");
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"media".as_ref())
 				.expect("write frame");
@@ -1038,7 +1050,9 @@ async fn http_routes_hold_a_lease() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
@@ -1939,7 +1953,11 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut group = b_track.append_group(None).unwrap();
+		let mut group = b_track
+			.append_group(
+				moq_net::Timestamp::from_millis(b_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(group.start).unwrap(),
@@ -1966,7 +1984,11 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			"{scheme}: {:?}",
 			ended.as_ref().err()
 		);
-		let mut group = a_track.append_group(None).unwrap();
+		let mut group = a_track
+			.append_group(
+				moq_net::Timestamp::from_millis(a_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(group.start).unwrap(),

@@ -8,6 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Timestamp, Version, frame, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,7 +52,7 @@ async fn a_segmented_frame_crosses_whole() {
 		subscribed(&track).await;
 
 		// Two frames: one read whole, one streamed.
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track.append_next().unwrap();
 		for _ in 0..2 {
 			let mut frame = group
 				.create_frame(frame::Info {

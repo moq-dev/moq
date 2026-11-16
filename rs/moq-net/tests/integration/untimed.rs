@@ -8,6 +8,7 @@
 //! track's time.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -122,7 +123,7 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Timestamp, track::I
 	match timed {
 		true => producer.write_frame(millis(7), &b"frame"[..]).unwrap(),
 		false => {
-			let mut group = producer.append_group(7).unwrap();
+			let mut group = producer.append_group(Timestamp::unscaled(7)).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..])
 				.unwrap();
@@ -200,7 +201,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		let producer = broadcast.broadcast().create_track("data", untimed()).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..5 {
-			let mut group = producer.append_group(None).unwrap();
+			let mut group = producer.append_next().unwrap();
 			group
 				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..])
 				.unwrap();

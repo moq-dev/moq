@@ -174,7 +174,11 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	}
 
 	// The first group is open, its first frame read, when A redirects to B.
-	let mut split = track.append_group(None).expect("append group");
+	let mut split = track
+		.append_group(moq_net::Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("append group");
 	write(&mut split, "a");
 	let mut reading = within("recv the split group", sub.recv_group())
 		.await
@@ -220,7 +224,11 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	assert_eq!(read(&mut reading).await, (0, Some("b".into())));
 	assert_eq!(read(&mut reading).await, (0, None));
 
-	let mut after = track.append_group(None).expect("append group");
+	let mut after = track
+		.append_group(moq_net::Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
+		.expect("append group");
 	write(&mut after, "c");
 	after.finish().expect("finish");
 	let mut next = within("recv the next group", sub.recv_group())
@@ -269,7 +277,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		.await
 		.expect("subscribe");
 
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 		.expect("write frame");
@@ -304,7 +314,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 	// New content lands after the swap (both siblings serve the same
 	// origin, so B has it).
-	let mut group = track.append_group(None).expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 		.expect("write frame");
@@ -454,7 +466,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── group 0 flows through the MID-A leg (all frames verified) ──
 	const FRAMES_PER_GROUP: u64 = 3;
-	let mut g = track.append_group(None).expect("append group");
+	let mut g = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	for f in 0..FRAMES_PER_GROUP {
 		let payload = format!("diamond_g0_f{f}");
 		g.write_frame(moq_net::Timestamp::from_millis(g.start).unwrap(), payload.as_bytes())
@@ -472,7 +486,11 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	const LAST_GROUP: u64 = 20;
 	let publisher = kio::clock::sim::spawn(async move {
 		for seq in 1..=LAST_GROUP {
-			let mut g = track.append_group(None).expect("append group");
+			let mut g = track
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("append group");
 			for f in 0..FRAMES_PER_GROUP {
 				let payload = format!("diamond_g{seq}_f{f}");
 				g.write_frame(moq_net::Timestamp::from_millis(g.start).unwrap(), payload.as_bytes())
@@ -527,7 +545,11 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = kio::clock::sim::spawn(async move {
 		for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
-			let mut g = track.append_group(None).expect("append group");
+			let mut g = track
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("append group");
 			for f in 0..FRAMES_PER_GROUP {
 				let payload = format!("diamond_g{seq}_f{f}");
 				g.write_frame(moq_net::Timestamp::from_millis(g.start).unwrap(), payload.as_bytes())

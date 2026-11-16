@@ -1075,7 +1075,7 @@ mod tests {
 			// together.
 			let settle = kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
 			assert!(settle.await.is_err(), "nothing is written yet");
-			let mut group = track.append_group(0).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 			let held = match failure {
 				"malformed" => {
 					// An empty Legacy audio frame is malformed.

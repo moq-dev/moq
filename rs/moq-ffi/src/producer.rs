@@ -842,7 +842,9 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group(None)?;
+		let group = raw.append_group(moq_net::Timestamp::unscaled(
+			raw.largest().map_or(0, |largest| largest.group + 1),
+		))?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -1126,7 +1128,7 @@ mod metadata_tests {
 	fn dropping_a_group_binding_ends_its_unfinished_group() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.append_group(0).unwrap();
+		let group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		let mut consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);

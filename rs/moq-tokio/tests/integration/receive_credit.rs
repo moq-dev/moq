@@ -264,7 +264,9 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	let (high, mut high_sub) = setup.subscribe("high", 100).await;
 
 	// Three quarters of the window, held by a frame that never finishes.
-	let group = low.append_group(None).unwrap();
+	let group = low
+		.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	let timestamp = Timestamp::from_millis(group.start).unwrap();
 	let mut low_frame = group
 		.create_frame(frame::Info {
@@ -279,7 +281,9 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 
 	// Half the window, which only fits once the low frame lets go.
 	let payload = Bytes::from(vec![2u8; WINDOW / 2]);
-	let mut high_group = high.append_group(None).unwrap();
+	let mut high_group = high
+		.append_group(moq_net::Timestamp::from_millis(high.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	high_group
 		.write_frame(
 			moq_net::Timestamp::from_millis(high_group.start).unwrap(),
@@ -291,7 +295,9 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 
 	// The session survives, and the low track keeps delivering what fits.
 	drop(low_frame);
-	let mut group = low.append_group(None).unwrap();
+	let mut group = low
+		.append_group(moq_net::Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
 		.unwrap();
@@ -337,7 +343,12 @@ async fn bufferbloat_is_not_a_stuck_window() {
 		let payload = payload.clone();
 		tasks.push(tokio::spawn(async move {
 			for _ in 0..ROUNDS {
-				let mut group = track.append_group(None).unwrap();
+				let mut group = track
+					.append_group(
+						moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1))
+							.unwrap(),
+					)
+					.unwrap();
 				group
 					.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 					.unwrap();
@@ -364,7 +375,9 @@ async fn lite_frame_of_many_windows_completes() {
 	let (track, mut sub) = setup.subscribe("file", 0).await;
 
 	let payload = Bytes::from((0..4 * SEGMENTED).map(|i| (i % 251) as u8).collect::<Vec<_>>());
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 		.unwrap();
@@ -382,7 +395,9 @@ async fn lite_frame_past_the_window_gives_way() {
 	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
 	let (low, mut low_sub) = setup.subscribe("low", 1).await;
 
-	let group = low.append_group(None).unwrap();
+	let group = low
+		.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	let timestamp = Timestamp::from_millis(group.start).unwrap();
 	let mut low_frame = group
 		.create_frame(frame::Info {
@@ -408,7 +423,9 @@ async fn lite_frame_past_the_window_gives_way() {
 	}
 
 	drop(low_frame);
-	let mut group = low.append_group(None).unwrap();
+	let mut group = low
+		.append_group(moq_net::Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
 		.unwrap();
@@ -581,7 +598,9 @@ async fn unidentified_headers_give_way() {
 	let partial = partial_message(0x00, (WINDOW / 2) as u32, WINDOW / 2 - 1);
 	setup.raw(false, vec![partial; 2], 1).await;
 	let (track, mut sub) = setup.subscribe("video", 1).await;
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![3u8; 4096])
 		.unwrap();
@@ -631,7 +650,9 @@ async fn groups_waiting_for_track_info_give_way_first() {
 
 	// Subscription 0: an urgent track's frame, half sent and holding its credit.
 	let (urgent, mut urgent_sub) = setup.subscribe("urgent", 100).await;
-	let group = urgent.append_group(None).unwrap();
+	let group = urgent
+		.append_group(Timestamp::from_millis(urgent.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	let timestamp = Timestamp::from_millis(group.start).unwrap();
 	let mut frame = group
 		.create_frame(frame::Info {
@@ -755,7 +776,9 @@ async fn partial_control_requests_give_way() {
 	let partial = partial_message(0x01, size as u32, size - 1);
 	setup.raw(true, vec![partial; 5], 2).await;
 	let (track, mut sub) = setup.subscribe("video", 1).await;
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![3u8; 4096])
 		.unwrap();
@@ -773,7 +796,9 @@ async fn the_largest_unit_completes_under_pressure(version: &str) {
 	// Several groups' worth of frames that never finish, opened before and after.
 	let mut partial = Vec::new();
 	let mut open_partial = || {
-		let group = low.append_group(None).unwrap();
+		let group = low
+			.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+			.unwrap();
 		let timestamp = Timestamp::from_millis(group.start).unwrap();
 		let mut frame = group
 			.create_frame(frame::Info {
@@ -789,7 +814,9 @@ async fn the_largest_unit_completes_under_pressure(version: &str) {
 
 	// Room for the stream's headers and nothing else.
 	let payload = Bytes::from(vec![2u8; WINDOW - 64]);
-	let mut group = high.append_group(None).unwrap();
+	let mut group = high
+		.append_group(moq_net::Timestamp::from_millis(high.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 		.unwrap();
@@ -1091,7 +1118,14 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 					async move {
 						for _ in 0..rounds {
 							inflight.acquire().await.unwrap().forget();
-							let mut group = track.append_group(None).unwrap();
+							let mut group = track
+								.append_group(
+									moq_net::Timestamp::from_millis(
+										track.largest().map_or(0, |largest| largest.group + 1),
+									)
+									.unwrap(),
+								)
+								.unwrap();
 							sent.lock().unwrap().insert(group.start, kio::clock::now());
 							group
 								.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())

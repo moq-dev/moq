@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use moq_net::{Timestamp, Version, cache, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,7 +39,7 @@ async fn each_joining_viewer_reads_the_held_group() {
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
 		let source = broadcast.broadcast().create_track("video", info).unwrap();
-		let mut group = source.append_group(None).unwrap();
+		let mut group = source.append_next().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..])
 			.unwrap();

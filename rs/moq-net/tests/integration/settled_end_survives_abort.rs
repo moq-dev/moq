@@ -6,6 +6,7 @@
 //! consumer that has not read them yet still gets them, then the clean end.
 
 use crate::support;
+use support::AppendNext;
 use support::AtStart;
 
 use moq_net::Error;
@@ -42,7 +43,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {
-		let mut group = track.append_group(None).unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 	}

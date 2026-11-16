@@ -15,6 +15,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Version, cache, frame, group, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -163,7 +164,7 @@ async fn moq_transport_relays_a_cold_finished_group() {
 	route.announce().unwrap();
 	let (written, ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
 	serve(track.requests(), written, ended, true);
-	let mut group = track.append_group(None).unwrap();
+	let mut group = track.append_next().unwrap();
 	for index in 0..FRAMES {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index))
@@ -253,7 +254,7 @@ async fn chain(version: &str, replay: Replay) {
 		.expect("subscribe");
 
 	// The live reader at the bottom of the chain keeps up with the publisher.
-	let mut live = track.append_group(None).unwrap();
+	let mut live = track.append_next().unwrap();
 	live.write_frame(moq_net::Timestamp::unscaled(live.start), numbered(0))
 		.unwrap();
 	let mut reader = kio::clock::timeout(TIMEOUT, live_sub.recv_group())
