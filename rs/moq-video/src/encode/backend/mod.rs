@@ -452,9 +452,22 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 			tried.push(format!("{name}: cannot import external Vulkan {device}"));
 			continue;
 		}
-		if !config.device.takes(attempt.candidate.drives)? {
-			tried.push(format!("{name}: does not open {}", config.device));
-			continue;
+		match config.device.takes(attempt.candidate.drives) {
+			Ok(true) => {}
+			Ok(false) => {
+				tried.push(format!("{name}: does not open {}", config.device));
+				continue;
+			}
+			// Telling whether this backend drives the named node failed, which
+			// counts against this candidate alone, as a failed open would.
+			Err(e) => {
+				tracing::debug!(encoder = name, error = %e, "encoder unavailable, trying next");
+				tried.push(format!("{name}: {e}"));
+				if attempt.hardware {
+					refused.push(format!("{name}: {e}"));
+				}
+				continue;
+			}
 		}
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
@@ -728,6 +741,38 @@ mod tests {
 		match select(vec![Attempt::hardware(&RENDER)], &config) {
 			Err(Error::NoEncoder(reason)) => assert!(
 				reason.contains("render: does not open codec node /dev/video11"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoEncoder, opened {}", backend.name()),
+		}
+	}
+
+	/// A driver check that cannot read the named node counts against the NVIDIA
+	/// candidate alone: selection goes on, and the reason reaches the error.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_failed_driver_check_moves_on() {
+		const NVIDIA: Candidate = Candidate {
+			name: "nvidia",
+			open: |_| panic!("opened NVIDIA for an unreadable node"),
+			drives: Drives::Nvidia,
+			..WORKING
+		};
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			drives: Drives::Render,
+			..WORKING
+		};
+
+		let mut config = config();
+		config.device = crate::Device::Render("/dev/dri/renderD199-absent".into());
+		let opened = select(vec![Attempt::hardware(&NVIDIA), Attempt::hardware(&RENDER)], &config).unwrap();
+		assert_eq!(opened.name(), "stub");
+
+		match select(vec![Attempt::hardware(&NVIDIA)], &config) {
+			Err(Error::NoEncoder(reason)) => assert!(
+				reason.contains("nvidia: ") && reason.contains("renderD199-absent"),
 				"{reason}"
 			),
 			Err(other) => panic!("expected NoEncoder, got {other:?}"),

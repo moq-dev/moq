@@ -414,9 +414,23 @@ fn select(stream: &Stream, attempts: Vec<Attempt>, config: &Config) -> Result<Bo
 		}
 
 		let name = attempt.candidate.name;
-		if !config.device.takes(attempt.candidate.drives)? {
-			passed.push(format!("{name}: does not open {}", config.device));
-			continue;
+		match config.device.takes(attempt.candidate.drives) {
+			Ok(true) => {}
+			Ok(false) => {
+				passed.push(format!("{name}: does not open {}", config.device));
+				continue;
+			}
+			// Telling whether this backend drives the named node failed, which
+			// counts against this candidate alone, as a failed open would.
+			Err(e) => {
+				tracing::debug!(decoder = name, error = %e, "decoder unavailable, trying next");
+				faulted = true;
+				tried.push(format!("{name}: {e}"));
+				if attempt.hardware {
+					skipped.push(format!("{name}: {e}"));
+				}
+				continue;
+			}
 		}
 
 		match (attempt.candidate.open)(stream, config) {
@@ -580,6 +594,38 @@ mod tests {
 		let attempts = vec![Attempt::hardware(&H265_ONLY), Attempt::software(&WORKING)];
 		select(&Codec::H264.into(), attempts, &Config::new()).unwrap();
 		assert!(!logs_contain("no hardware decoder available"));
+	}
+
+	/// A driver check that cannot read the named node counts against the NVIDIA
+	/// candidate alone: selection goes on to the next, and with none left the
+	/// failure is a fault that names the node, not a refusal of the stream.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_failed_driver_check_moves_on() {
+		const NVIDIA: Candidate = Candidate {
+			name: "nvidia",
+			supports: |c| matches!(c, Codec::H264),
+			open: |_, _| panic!("opened NVIDIA for an unreadable node"),
+			drives: Drives::Nvidia,
+		};
+		const RENDER: Candidate = Candidate {
+			drives: Drives::Render,
+			..WORKING
+		};
+
+		let mut config = Config::new();
+		config.device = crate::Device::Render("/dev/dri/renderD199-absent".into());
+		let attempts = vec![Attempt::hardware(&NVIDIA), Attempt::hardware(&RENDER)];
+		assert_eq!(select(&Codec::H264.into(), attempts, &config).unwrap().name(), "stub");
+
+		match select(&Codec::H264.into(), vec![Attempt::hardware(&NVIDIA)], &config) {
+			Err(Error::NoDecoder(reason)) => assert!(
+				reason.contains("nvidia: ") && reason.contains("renderD199-absent"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoDecoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
+		}
 	}
 
 	/// A named node passes over the backends that drive another kind of device

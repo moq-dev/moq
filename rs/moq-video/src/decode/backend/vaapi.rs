@@ -16,7 +16,7 @@
 //! that is a refusal of the stream rather than a fault. For H.265, which has no
 //! software decoder behind this one, that refusal is what lets a player pick
 //! another rendition. The render node is the one the encoder and the GPU resize
-//! share, unless that one cannot decode H.265, and `Config::vaapi` can name
+//! share, unless that one cannot decode H.265, and `Config::device` can name
 //! it; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
