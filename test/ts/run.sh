@@ -801,7 +801,7 @@ stop_shaper() {
     # datagrams back. A loss-based sender (MOQ_QUIC_CONGESTION_CONTROL=cubic) grows until it
     # loses, and the queue's tail drop is the only loss here, so its run must overflow too.
     local counter overflow=""
-    [[ -n "$RATE" && "${MOQ_QUIC_CONGESTION_CONTROL:-}" == loss ]] && overflow=overflowed
+    [[ -n "$RATE" && "${MOQ_QUIC_CONGESTION_CONTROL:-}" == cubic ]] && overflow=overflowed
     for counter in ${LOSS:+lost} ${RATE:+throttled} $overflow; do
         if ! python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["down"][sys.argv[2]] == 0)' \
             "$HARNESS_RUN/shaper.json" "$counter"; then
