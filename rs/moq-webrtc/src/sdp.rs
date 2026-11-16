@@ -29,17 +29,24 @@ pub fn parse_offer(body: &str) -> Result<(str0m::change::SdpOffer, Refused)> {
 	Ok((offer, refused))
 }
 
-/// Take each `m=application` section out of an offer, and its mid out of the BUNDLE group.
-fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
-	let mut refused = Refused::default();
-	if !offer.contains("m=application") {
-		return (Cow::Borrowed(offer), refused);
-	}
+/// The attributes of the transport a BUNDLE group shares. A max-bundle offer can carry
+/// them only on the group's first section, which may be a data channel.
+const TRANSPORT: [&str; 7] = [
+	"a=ice-ufrag:",
+	"a=ice-pwd:",
+	"a=ice-options:",
+	"a=fingerprint:",
+	"a=setup:",
+	"a=candidate:",
+	"a=end-of-candidates",
+];
 
-	// Each line keeps its own ending, so the offer's CRLF or LF survives.
+/// Split SDP text into its session lines and each media section's lines, every line
+/// keeping its own ending.
+fn split_sections<'a>(sdp: &'a str, ending: &str) -> (Vec<&'a str>, Vec<Vec<&'a str>>) {
 	let mut session = Vec::new();
 	let mut sections: Vec<Vec<&str>> = Vec::new();
-	for line in offer.split_inclusive('\n') {
+	for line in sdp.split_inclusive(ending) {
 		if line.starts_with("m=") {
 			sections.push(vec![line]);
 		} else if let Some(section) = sections.last_mut() {
@@ -48,9 +55,36 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 			session.push(line);
 		}
 	}
+	(session, sections)
+}
+
+/// The port of a section's `m=<media> <port> ...` line.
+fn port<'a>(section: &[&'a str]) -> Option<&'a str> {
+	section.first()?.split_whitespace().nth(1)
+}
+
+/// Take each `m=application` section out of an offer, and its mid out of the BUNDLE group.
+///
+/// A refused section in the group keeps its share of the group's transport: each
+/// attribute no other section or the session carries moves to the session, as do its
+/// candidates, which str0m reads from either.
+fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
+	let mut refused = Refused::default();
+	if !offer.contains("m=application") {
+		return (Cow::Borrowed(offer), refused);
+	}
+
+	// The offer's CRLF or LF survives.
+	let (session, sections) = split_sections(offer, "\n");
+	let group: Vec<&str> = session
+		.iter()
+		.find_map(|line| line.trim_end().strip_prefix("a=group:BUNDLE"))
+		.map(|group| group.split_whitespace().collect())
+		.unwrap_or_default();
 
 	let mut kept = Vec::new();
 	let mut mids = Vec::new();
+	let mut transport = Vec::new();
 	for (index, section) in sections.into_iter().enumerate() {
 		let mut tokens = section[0].split_whitespace();
 		if tokens.next() != Some("m=application") {
@@ -67,8 +101,37 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 		if let Some(mid) = mid {
 			answer.push_str(&format!("a=mid:{mid}\r\n"));
 			mids.push(mid);
+			if group.contains(&mid) {
+				transport.extend(
+					section
+						.into_iter()
+						.filter(|line| TRANSPORT.iter().any(|a| line.starts_with(a))),
+				);
+			}
 		}
 		refused.sections.push((index, answer));
+	}
+
+	let carried = |key: &str| {
+		session
+			.iter()
+			.chain(kept.iter().flatten())
+			.any(|line| line.starts_with(key))
+	};
+	let mut hoisted: Vec<&str> = Vec::new();
+	for line in transport {
+		let key = TRANSPORT
+			.iter()
+			.copied()
+			.find(|a| line.starts_with(a))
+			.unwrap_or_default();
+		let fresh = match key {
+			"a=candidate:" => !hoisted.contains(&line),
+			_ => !carried(key) && !hoisted.iter().any(|h| h.starts_with(key)),
+		};
+		if fresh {
+			hoisted.push(line);
+		}
 	}
 
 	let mut out = String::with_capacity(offer.len());
@@ -84,6 +147,9 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 			}
 			None => out.push_str(line),
 		}
+	}
+	for line in hoisted {
+		out.push_str(line);
 	}
 	for line in kept.into_iter().flatten() {
 		out.push_str(line);
@@ -113,7 +179,30 @@ pub fn render_answer(answer: &str0m::change::SdpAnswer, refused: &Refused) -> St
 		.map(ensure_media_format)
 		.collect::<Vec<Cow<str>>>()
 		.join("\r\n");
-	restore_channels(&answer, refused)
+	restore_channels(&candidates_on_accepted(&answer), refused)
+}
+
+/// Move the answer's candidates off a rejected first section onto the first accepted one.
+///
+/// str0m writes them only on the first section, where the BUNDLE group's tag usually
+/// sits. A rejected first section, such as audio a broadcast can't egress, is out of the
+/// group, so a browser would ignore its candidates.
+fn candidates_on_accepted(answer: &str) -> Cow<'_, str> {
+	let (session, mut sections) = split_sections(answer, "\r\n");
+	let is_candidate = |line: &&str| line.starts_with("a=candidate:") || line.starts_with("a=end-of-candidates");
+	let Some(first) = sections.first() else {
+		return Cow::Borrowed(answer);
+	};
+	if port(first) != Some("0") || !first.iter().any(is_candidate) {
+		return Cow::Borrowed(answer);
+	}
+	let Some(accepted) = sections.iter().position(|section| port(section) != Some("0")) else {
+		return Cow::Borrowed(answer);
+	};
+	let (candidates, rest): (Vec<&str>, Vec<&str>) = sections[0].iter().copied().partition(is_candidate);
+	sections[0] = rest;
+	sections[accepted].extend(candidates);
+	Cow::Owned(session.into_iter().chain(sections.into_iter().flatten()).collect())
 }
 
 /// Put each refused data channel section back into the answer at its offer's index.
@@ -287,6 +376,73 @@ mod tests {
 		assert!(sections[1].starts_with("audio 9 "), "{answer}");
 		assert!(sections[1].contains("a=candidate:"), "{answer}");
 		assert!(answer.contains(&format!("a=group:BUNDLE {audio}\r\n")), "{answer}");
+	}
+
+	/// A max-bundle offer whose data channel tags the group carries the shared transport
+	/// only there, with its media bundle-only; the media still gets that transport.
+	#[test]
+	fn a_data_channel_tagging_the_bundle_keeps_its_transport() {
+		let now = kio::clock::now().into_std();
+		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		offerer.add_local_candidate(Candidate::host(([2, 2, 2, 2], 2000).into(), "udp").unwrap());
+		let mut api = offerer.sdp_api();
+		let audio = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, _) = api.apply().unwrap();
+		let offer = offer.to_sdp_string();
+		let (session, media) = offer.split_at(offer.find("m=audio").unwrap());
+		let session = session.replace(
+			&format!("a=group:BUNDLE {audio}\r\n"),
+			&format!("a=group:BUNDLE dc {audio}\r\n"),
+		);
+		let is_transport = |line: &&str| super::TRANSPORT.iter().any(|a| line.starts_with(a));
+		let transport: String = media.split_inclusive("\r\n").filter(is_transport).collect();
+		assert!(transport.contains("a=candidate:"), "{offer}");
+		let media: String = media
+			.split_inclusive("\r\n")
+			.filter(|line| !is_transport(line))
+			.collect::<String>()
+			.replacen("m=audio 9 ", "m=audio 0 ", 1)
+			+ "a=bundle-only\r\n";
+		let offer = format!(
+			"{session}m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:dc\r\n\
+			{transport}\
+			a=sctp-port:5000\r\n{media}"
+		);
+
+		let answer = answer(&offer);
+		let sections: Vec<&str> = answer.split("m=").skip(1).collect();
+		assert!(sections[0].starts_with("application 0 "), "{answer}");
+		assert!(sections[1].starts_with("audio 9 "), "{answer}");
+		assert!(answer.contains(&format!("a=group:BUNDLE {audio}\r\n")), "{answer}");
+	}
+
+	/// A rejected first section, such as audio a broadcast can't egress, leaves the
+	/// answer's candidates to the first accepted one.
+	#[test]
+	fn candidates_skip_a_rejected_first_section() {
+		let now = kio::clock::now().into_std();
+		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut api = offerer.sdp_api();
+		api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+		let video = api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+		let (offer, pending) = api.apply().unwrap();
+
+		let (offer, refused) = parse_offer(&offer.to_sdp_string()).unwrap();
+		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Vp8]).unwrap();
+		rtc.add_local_candidate(Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap());
+		let answer = render_answer(&rtc.sdp_api().accept_offer(offer).unwrap(), &refused);
+
+		let sections: Vec<&str> = answer.split("m=").skip(1).collect();
+		assert!(sections[0].starts_with("audio 0 "), "{answer}");
+		assert!(!sections[0].contains("a=candidate:"), "{answer}");
+		assert!(sections[1].starts_with("video 9 "), "{answer}");
+		assert!(sections[1].contains("a=candidate:"), "{answer}");
+		assert!(answer.contains(&format!("a=group:BUNDLE {video}\r\n")), "{answer}");
+
+		let answer = SdpAnswer::from_sdp_string(&answer).unwrap();
+		offerer.sdp_api().accept_answer(pending, answer).unwrap();
 	}
 
 	/// An offer of only a data channel has nothing to answer.

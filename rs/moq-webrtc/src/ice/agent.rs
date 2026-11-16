@@ -95,8 +95,14 @@ impl Agent {
 			outbox: VecDeque::new(),
 			phase: Phase::Establishing { started: now },
 		};
-		// Signaling already changed the connection.
-		agent.drain();
+		// str0m's ICE has no clock, and asks for no timeout, until its first one. Without
+		// it a side that hears no checks, such as one facing an ICE-lite peer, would never
+		// check the candidates signaling gave it. Draining on drop sends what this
+		// and signaling produced.
+		let result = agent.rtc_mut().handle_input(Input::Timeout(now.into_std()));
+		if let Err(err) = result {
+			agent.fail(Error::rtc(err));
+		}
 		Ok(agent)
 	}
 
@@ -384,6 +390,46 @@ mod tests {
 		// The reason sticks: driving the agent again reports it again.
 		let again = agent.next().await;
 		assert!(matches!(again, Err(Error::Timeout)), "{again:?}");
+	}
+
+	/// Facing an ICE-lite offerer, which never sends a check, the answerer checks the
+	/// offer's candidate on its own.
+	#[tokio::test]
+	async fn an_ice_lite_offerers_candidate_is_checked_unprompted() {
+		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let now = Instant::now().into_std();
+		let mut offerer = crate::session::rtc_config().unwrap().set_ice_lite(true).build(now);
+		offerer.add_local_candidate(str0m::Candidate::host(peer.local_addr().unwrap(), "udp").unwrap());
+		let mut api = offerer.sdp_api();
+		api.add_media(
+			str0m::media::MediaKind::Audio,
+			str0m::media::Direction::SendOnly,
+			None,
+			None,
+			None,
+		);
+		let (offer, _) = api.apply().unwrap();
+
+		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let local = socket.local_addr().unwrap();
+		let mut answerer = crate::session::rtc_config().unwrap().build(now);
+		answerer.add_local_candidate(str0m::Candidate::host(local, "udp").unwrap());
+		answerer.sdp_api().accept_offer(offer).unwrap();
+		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
+		let mut agent = Agent::new(answerer, socket).unwrap();
+
+		let mut buf = [0u8; 1500];
+		tokio::select! {
+			received = peer.recv_from(&mut buf) => {
+				let (len, src) = received.unwrap();
+				assert_eq!(src, local);
+				// A STUN Binding request.
+				assert!(len >= 20 && buf[..2] == [0x00, 0x01], "{:?}", &buf[..len]);
+			}
+			err = async { loop { if let Err(err) = agent.next().await { break err } } } => {
+				panic!("the agent ended without a check: {err:?}");
+			}
+		}
 	}
 
 	#[test]
