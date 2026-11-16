@@ -17,22 +17,22 @@ its own decryption path.
   `@moq/hang`'s catalog and container code, `@moq/publish`'s broadcast,
   and `@moq/watch`'s subscriptions.
 - `@moq/crypto`'s broadcast, track, and group wrappers adapt to `@moq/net`'s
-  method shapes, as moq-crypto does in Rust, with its errors mapped to
-  `@moq/net`'s. Like moq-crypto, it compresses a `compression: "deflate"` track before
-  encryption, publishes the physical track uncompressed, and carries the
-  logical flag in the same authenticated E2EE metadata
-  ([e2ee](/quest/m5/net-wrap/e2ee.md)).
+  method shapes, as moq-e2ee does in Rust, with its errors mapped to
+  `@moq/net`'s. Like moq-e2ee, it does not compress (decided 2026-11-16,
+  maintainer: the profile carries no compression): it publishes the
+  physical track uncompressed and follows whatever
+  [e2ee](/quest/m5/net-wrap/e2ee.md) settles for a logical
+  `compression: "deflate"` track.
 - Demand and preference cross the wrapper: a publisher with no viewer
   through an encrypted track stays idle.
 - Test publish and watch round trips through a pass-through wrapper and
   through `@moq/crypto`.
 
 Public API: new `@moq/net` interfaces; `@moq/crypto` wrapper signatures change.
-Wire: the `draft-lcurley-moq-e2ee.md` compress flag from
-[e2ee](/quest/m5/net-wrap/e2ee.md).
+Wire: none.
 
 ## Required
 
 - [moq-net traits](/quest/m5/net-wrap/traits.md) - the names and methods this mirrors
 
-- [moq-crypto's e2ee implements the traits](/quest/m5/net-wrap/e2ee.md) - owns the authenticated logical compression encoding this mirrors
+- [moq-e2ee implements the traits](/quest/m5/net-wrap/e2ee.md) - settles what a logical compression flag means on an encrypted track, which this mirrors

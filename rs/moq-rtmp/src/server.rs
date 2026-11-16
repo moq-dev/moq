@@ -185,7 +185,6 @@ pub enum Conn {
 	/// A TLS connection (`rtmps://`): terminated by [`Server::with_tls`], or dialed with
 	/// [`crate::Connect::with_tls`]. Boxed because a `TlsStream` is large relative to a
 	/// bare `TcpStream`.
-	#[cfg(feature = "tls")]
 	Tls(Box<tokio_rustls::TlsStream<TcpStream>>),
 }
 
@@ -193,7 +192,6 @@ impl AsyncRead for Conn {
 	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_read(cx, buf),
 		}
 	}
@@ -203,7 +201,6 @@ impl AsyncWrite for Conn {
 	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_write(cx, buf),
 		}
 	}
@@ -211,7 +208,6 @@ impl AsyncWrite for Conn {
 	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_flush(cx),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_flush(cx),
 		}
 	}
@@ -219,7 +215,6 @@ impl AsyncWrite for Conn {
 	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_shutdown(cx),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_shutdown(cx),
 		}
 	}
@@ -233,8 +228,8 @@ const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
-/// Build it with [`bind`](Self::bind), optionally enable RTMPS with `with_tls`
-/// (the `tls` feature), then loop on [`accept`](Self::accept). The
+/// Build it with [`bind`](Self::bind), optionally enable RTMPS with `with_tls`,
+/// then loop on [`accept`](Self::accept). The
 /// handshake and the connect exchange happen inside `accept`, so a [`Request`] is
 /// only produced once a client actually wants to publish or play.
 pub struct Server {
@@ -242,7 +237,6 @@ pub struct Server {
 
 	/// When set, each accepted connection that opens with a ClientHello is
 	/// TLS-terminated (RTMPS) before the RTMP handshake.
-	#[cfg(feature = "tls")]
 	tls: Option<tokio_rustls::TlsAcceptor>,
 
 	/// Whether a connection that is not TLS is served as plaintext RTMP.
@@ -273,7 +267,6 @@ impl Server {
 
 		Ok(Self {
 			listener,
-			#[cfg(feature = "tls")]
 			tls: None,
 			plaintext: true,
 			pending: FuturesUnordered::new(),
@@ -290,7 +283,6 @@ impl Server {
 	/// Pass a `rustls::ServerConfig` (e.g. from
 	/// `moq_tokio::tls::Listen::server_config` with an empty ALPN list), or
 	/// `None` to serve plaintext only.
-	#[cfg(feature = "tls")]
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ServerConfig>>>) -> Self {
 		self.tls = tls.into().map(tokio_rustls::TlsAcceptor::from);
 		self
@@ -308,12 +300,7 @@ impl Server {
 	/// Refuse a server that would accept no connection at all: plaintext turned off with
 	/// no TLS to serve instead.
 	pub(crate) fn check(&self) -> Result<()> {
-		#[cfg(feature = "tls")]
-		let tls = self.tls.is_some();
-		#[cfg(not(feature = "tls"))]
-		let tls = false;
-
-		if !self.plaintext && !tls {
+		if !self.plaintext && self.tls.is_none() {
 			return Err(crate::Error::Session(
 				"plaintext RTMP is refused but no TLS config is set, so no client could connect".to_string(),
 			));
@@ -363,7 +350,6 @@ impl Server {
 						// A connection got through, so whatever the last failure was has cleared.
 						self.accept_delay = ACCEPT_RETRY_MIN;
 						configure_socket(&stream, peer);
-						#[cfg(feature = "tls")]
 						let (tls, plaintext) = (self.tls.clone(), self.plaintext);
 						if self.pending_order.len() == MAX_PENDING_REQUESTS {
 							let (_, oldest) = self.pending_order.pop_first().unwrap();
@@ -378,7 +364,6 @@ impl Server {
 								// The TLS handshake (if any) and the RTMP handshake share one
 								// budget, so a client that stalls either is dropped.
 								let outcome = kio::clock::timeout(REQUEST_TIMEOUT, async move {
-									#[cfg(feature = "tls")]
 									let conn = match tls {
 										Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
 											kio::clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
@@ -393,8 +378,6 @@ impl Server {
 										}
 										_ => Conn::Plain(stream),
 									};
-									#[cfg(not(feature = "tls"))]
-									let conn = Conn::Plain(stream);
 									accept_until_request(conn, peer).await
 								})
 								.await;
@@ -434,11 +417,9 @@ impl Server {
 
 /// The first byte of a TLS record carrying a ClientHello. RTMP's C0 is `0x03` (or `0x06`
 /// for the legacy encrypted variant), so one byte tells the two apart.
-#[cfg(feature = "tls")]
 const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 
 /// Whether the client opened with a TLS ClientHello, peeked without consuming it.
-#[cfg(feature = "tls")]
 async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 	let mut first = [0u8; 1];
 	if kio::clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
@@ -2995,7 +2976,6 @@ mod tests {
 
 	/// A throwaway self-signed server config for `localhost` plus a client connector that
 	/// trusts anything. The cert is generated by the `moq-tokio` dev-dependency.
-	#[cfg(feature = "tls")]
 	fn tls_fixture() -> (std::sync::Arc<rustls::ServerConfig>, tokio_rustls::TlsConnector) {
 		use std::sync::Arc;
 
@@ -3060,7 +3040,6 @@ mod tests {
 
 	/// Publish over TLS: prove the server terminates RTMPS and yields an identical
 	/// [`Request`].
-	#[cfg(feature = "tls")]
 	async fn rtmps_publish(server: &mut Server, connector: tokio_rustls::TlsConnector) {
 		use rustls::pki_types::ServerName;
 
@@ -3088,8 +3067,7 @@ mod tests {
 	}
 
 	/// By default a server with TLS terminates RTMPS and still serves a plaintext client on the
-	/// same port. Gated on `tls` (RTMPS support).
-	#[cfg(feature = "tls")]
+	/// same port.
 	#[tokio::test]
 	async fn rtmps_and_rtmp_share_one_port() {
 		let (server_config, connector) = tls_fixture();
@@ -3119,7 +3097,6 @@ mod tests {
 
 	/// With plaintext turned off, a server refuses a plaintext client at its first byte,
 	/// without waiting for the request timeout, and keeps serving RTMPS afterwards.
-	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn rtmps_required_refuses_plaintext() {
 		let (server_config, connector) = tls_fixture();

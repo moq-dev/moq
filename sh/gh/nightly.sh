@@ -116,7 +116,7 @@ case "$1" in
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
             -p moq-bench -p moq-congestion -p moq-quic -p moq-net -p moq-tokio -p moq-uring \
-            --features moq-net/async --lib --bin moq-bench --test integration \
+            --features moq-net/async,moq-congestion/lab --lib --bin moq-bench --test integration \
             -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
         ;;
     rust-test-apps)
@@ -160,7 +160,7 @@ case "$1" in
         criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls -p moq-video \
             --features moq-json/bench,moq-quic/fuzz,moq-video/openh264 \
-            --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
+            --bench protect --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench sync --bench decode_clock --bench ts_programs --bench ts_video \
             --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include \
             --bench openh264

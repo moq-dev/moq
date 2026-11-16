@@ -5,7 +5,6 @@
 //! redialing from its one port. Here a proxy drops everything from the first
 //! source port it sees, so the link only comes up once a redial leaves from
 //! another.
-#![cfg(feature = "quic")]
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -145,10 +144,7 @@ async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
 	connect.timeout = Some(Duration::from_millis(500).into());
 	connect.backoff.initial = Some(Duration::from_millis(100).into());
 	connect.backoff.timeout = Some(budget.into());
-	#[cfg(feature = "websocket")]
-	{
-		connect.websocket.enabled = Some(false);
-	}
+	connect.websocket.enabled = Some(false);
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://{proxy}/"))];

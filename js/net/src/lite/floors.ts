@@ -3,8 +3,12 @@ import type * as Instance from "../instance.ts";
 import { coveringPrefixes, hiddenBelow } from "../internal.ts";
 import * as Path from "../path.ts";
 
-/** A claim as an announce stream carries it: the instance, its epoch, and the origin's cost. @internal */
-export type Claim = { instance: Instance.Valid; epoch: bigint; cost: Cost };
+/**
+ * A claim as an announce stream carries it: the instance, its epoch, the origin's cost, and how
+ * many segments broader the claim is than the path it is presented at (`above`), so a claim
+ * exactly at a path outranks every broader one shown there. @internal
+ */
+export type Claim = { instance: Instance.Valid; epoch: bigint; cost: Cost; above: bigint };
 
 /**
  * One announce stream's claims for a route, as its last floor left them. `revision` is the
@@ -54,13 +58,16 @@ function meets(a: Path.Valid, b: Path.Valid): boolean {
 }
 
 // The claim `view` presents at `path`: exactly there, or with `covering`, at the requesting
-// stream's own prefix, the most specific claim at or above it within the view.
+// stream's own prefix, the most specific claim at or above it within the view, which keeps how far
+// above the path it is. As `covering` in rs/moq-net's `route/view.rs`.
 function presented(view: View, path: Path.Valid, covering: boolean): Claim | undefined {
 	if (!covering) return view.claims.get(path);
+	let by = 0n;
 	for (const at of coveringPrefixes(path)) {
 		if (!Path.hasPrefix(view.prefix, at)) return undefined;
 		const found = view.claims.get(at);
-		if (found) return found;
+		if (found) return by === 0n ? found : { ...found, above: found.above + by };
+		by++;
 	}
 	return undefined;
 }

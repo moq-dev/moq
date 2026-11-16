@@ -9,6 +9,8 @@ browser peer stays compiled.
 
 ## Plan
 
+Changed 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): moq-webrtc [returns to upstream str0m](/quest/m2/str0m-upstream.md) before the cut, and that quest's PR deletes this one with the vendored copy. It stays only if that PR reports it cannot make the switch.
+
 Planned 2026-11-07 (maintainer, /quest-complete), a follow-up of
 [moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163). The maintainer
 widened the suggestion from PSK alone: delete anything browsers don't use

@@ -7,7 +7,6 @@
 //! throttles far below its rate fails too. The io_uring workers serve real sockets, so
 //! there the caps are measured on the wall clock as lower bounds on how long a transfer
 //! takes: uncapped, the same transfer takes milliseconds.
-#![cfg(feature = "quic")]
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -36,7 +35,7 @@ fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
 /// Where a relay's QUIC listener is, and the clients and sockets that reach it.
 enum Dial {
 	/// Real sockets on loopback.
-	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	#[cfg(target_os = "linux")]
 	Real(u16),
 	/// A simulated host serving at `addr`, trusting `fingerprints`.
 	#[cfg(feature = "test-support")]
@@ -52,7 +51,7 @@ impl Dial {
 	fn client(&self, host: std::net::IpAddr) -> moq_tokio::Client {
 		let _ = host;
 		match self {
-			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			#[cfg(target_os = "linux")]
 			Dial::Real(_) => {
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.insecure = Some(true);
@@ -79,7 +78,7 @@ impl Dial {
 
 	fn addr(&self) -> SocketAddr {
 		match self {
-			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			#[cfg(target_os = "linux")]
 			Dial::Real(port) => ([127, 0, 0, 1], *port).into(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { addr, .. } => *addr,
@@ -88,7 +87,7 @@ impl Dial {
 
 	fn url(&self) -> url::Url {
 		match self {
-			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			#[cfg(target_os = "linux")]
 			Dial::Real(port) => format!("https://localhost:{port}/room").parse().unwrap(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { addr, .. } => format!("moqt://{addr}/room").parse().unwrap(),
@@ -99,7 +98,7 @@ impl Dial {
 	fn endpoint(&self, host: std::net::IpAddr) -> driver::endpoint::Endpoint {
 		let _ = host;
 		let socket: driver::endpoint::Socket = match self {
-			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			#[cfg(target_os = "linux")]
 			Dial::Real(_) => std::net::UdpSocket::bind("127.0.0.1:0").unwrap().into(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { network, .. } => (Box::new(network.bind(SocketAddr::new(host, 4433)))
@@ -327,7 +326,7 @@ mod sim {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 mod uring {
 	use std::net::{IpAddr, Ipv4Addr};
 
@@ -339,6 +338,7 @@ mod uring {
 	const HOST: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 	async fn relay() -> Option<(Relay, u16, tempfile::TempDir)> {
+		kio::clock::host_time(); // a real relay on real sockets, paced in real time
 		let _ = rind_rustls::default_provider().unwrap().install_default();
 		match moq_uring::Worker::new(Default::default()) {
 			Ok(_) => {}

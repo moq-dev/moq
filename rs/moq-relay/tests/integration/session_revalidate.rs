@@ -155,7 +155,6 @@ impl Fixture {
 		Self::spawn(auth, false).await
 	}
 
-	#[cfg(feature = "websocket")]
 	async fn ws(auth: moq_relay::auth::Auth) -> Self {
 		Self::spawn(auth, true).await
 	}
@@ -266,10 +265,7 @@ impl Fixture {
 fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	#[cfg(feature = "websocket")]
-	{
-		config.websocket.delay = Some((Duration::ZERO).into());
-	}
+	config.websocket.delay = Some((Duration::ZERO).into());
 	config.bind = Some(bind.parse().expect("parse bind"));
 	config
 		.init(Default::default())
@@ -394,7 +390,6 @@ async fn path_and_cidr_select_a_subset() {
 }
 
 /// A WebSocket session is listed and closes on a push like a QUIC one.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_is_listed_and_closes_on_a_push() {
 	let script = Script::new(grant());

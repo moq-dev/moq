@@ -9,7 +9,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
 	sync::Arc,
-	task::Poll,
+	task::{Poll, ready},
 };
 
 use crate::{
@@ -19,7 +19,6 @@ use crate::{
 		self, node,
 		path::{Dead, Hop, Moved, Offer, Reach},
 	},
-	transport::{Metrics as _, poll::Session as _},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -120,6 +119,11 @@ struct ServedClaim {
 /// A served claim's identity, its path, and the prefix of the route it is served along.
 type ServedKey = (route::Id, Path, Path);
 
+/// What a replaced request's stream served, kept in the origin until dropped.
+pub(super) struct Retired {
+	_served: HashMap<ServedKey, ServedClaim>,
+}
+
 /// The route layer one lite-07 announce stream feeds.
 pub(super) struct Routed {
 	node: node::Node,
@@ -157,12 +161,6 @@ pub(super) struct Routed {
 	drained: bool,
 	/// A DEAD whose next part the peer sends next.
 	continued: Option<Continued>,
-	/// The link's min RTT, which the peer's routes add.
-	rtt: route::LinkRtt,
-	/// When to read the link's RTT next, or `None` once it stopped reading.
-	read_rtt: Option<crate::time::Deadline>,
-	/// Whether the peer has a route here, so the link's RTT is read.
-	sampling: bool,
 	/// Counts what this node refuses of the peer's routes and claims.
 	stats: crate::stats::Session,
 }
@@ -224,9 +222,6 @@ impl Routed {
 			ready: Default::default(),
 			drained: false,
 			continued: None,
-			rtt: Default::default(),
-			read_rtt: None,
-			sampling: false,
 			stats: subscriber.origin.stats().clone(),
 		})
 	}
@@ -284,10 +279,11 @@ impl Routed {
 				epoch,
 				hops,
 				cost,
+				above,
 			} => {
 				let path = decoder.start(Some(suffix))?;
 				let path = self.claim_path(prefix, path);
-				let claim = claim(instance, epoch, cost, hops)?;
+				let claim = claim(instance, epoch, cost, hops, self.above(path.as_ref(), above)?)?;
 				let id = decoder.last();
 				// Fields valid alone can still resolve, or join the prefix, past the path limits.
 				if path.is_none() {
@@ -297,11 +293,14 @@ impl Routed {
 				}
 				self.start(id, route, path, Some(claim))?;
 			}
-			Msg::Update { id, hops, cost } => {
+			Msg::Update { id, hops, cost, above } => {
+				let claim = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
+				let above = self.above(claim.path.as_ref(), above)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				// An update names none of what a refused claim lacks.
 				if let Some(held) = &mut claim.claim {
 					held.cost = cost.value();
+					held.above = above;
 					held.chain = hops;
 					let change = claim.claim.clone();
 					self.pending(id, change)?;
@@ -313,8 +312,10 @@ impl Routed {
 				epoch,
 				cost,
 				hops,
+				above,
 			} => {
-				let fresh = self::claim(instance, epoch, cost, hops)?;
+				let named = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
+				let fresh = self::claim(instance, epoch, cost, hops, self.above(named.path.as_ref(), above)?)?;
 				let claim = self.claims.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 				claim.claim = Some(fresh);
 				if let Some(route) = self.routes.get_mut(&claim.route) {
@@ -330,9 +331,6 @@ impl Routed {
 			Msg::Refused { message, reason } => self.refused(prefix, message, reason, decoder)?,
 			// Lite-07 ends a claim by its Announce ID only.
 			Msg::Ended { .. } => return Err(Error::ProtocolViolation),
-			// Only a relay choosing a parent per broadcast uses warm routes, which this
-			// endpoint does not do.
-			Msg::WarmStart { .. } | Msg::WarmUpdate { .. } | Msg::WarmEnd { .. } => {}
 			Msg::Skipped | Msg::Synced => {}
 		}
 		Ok(())
@@ -586,13 +584,6 @@ impl Routed {
 				}
 				self.pending(id, None)?;
 			}
-			// Warm routes are ignored here anyway, so refusing one changes nothing.
-			Refusable::WarmStart { route } => {
-				tracing::warn!(route, %reason, "refusing a forwarded warm route");
-			}
-			Refusable::WarmUpdate { id } => {
-				tracing::warn!(warm = id, %reason, "refusing a forwarded warm route");
-			}
 		}
 		self.stats.refuse_route();
 		Ok(())
@@ -611,6 +602,20 @@ impl Routed {
 			.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
 			.collect();
 		self.stream.batch(node, prefix, changes, revision);
+	}
+
+	/// The peer's `above` for the claim at the absolute `path`, if it can be: a claim is no
+	/// more than the segments of the path the peer names, beneath the session's root, broader
+	/// than the path it is shown at.
+	fn above(&self, path: Option<&Path>, above: u64) -> Result<u64, Error> {
+		let Some(path) = path else {
+			return Ok(above);
+		};
+		let named = path.strip_prefix(&self.root).unwrap_or_else(|| path.clone());
+		match above <= named.parts().count() as u64 {
+			true => Ok(above),
+			false => Err(Error::ProtocolViolation),
+		}
 	}
 
 	/// The absolute path of a claim under the stream's prefix, or `None` when it, or the
@@ -677,6 +682,14 @@ impl Routed {
 		Ok(())
 	}
 
+	/// Take what the stream serves, for the caller to let go of once the request replacing
+	/// this one serves it too.
+	pub(super) fn retire(&mut self) -> Retired {
+		let mut served = std::mem::take(&mut self.served);
+		served.extend(self.previous.drain());
+		Retired { _served: served }
+	}
+
 	/// Move what the stream holds onto a budget of its own with the session's cap, while a
 	/// request replacing it takes the same claims over on the session's. The session's
 	/// count is then the replacement's alone, and a peer flooding this stream fails it
@@ -718,7 +731,6 @@ impl Routed {
 			.receive(self.peer, scoped(&self.link, &self.root, permit, key))
 			.map_err(refused)?
 			.with_clock(subscriber.runtime.clone());
-		stream.rtt(self.rtt.reported());
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.
 		let previous = std::mem::take(&mut self.served);
@@ -752,7 +764,6 @@ impl Routed {
 	/// Act on everything the node queued for the stream: serve the claims it hands
 	/// over.
 	pub(super) fn outputs(&mut self, subscriber: &Subscriber) {
-		self.sample(subscriber);
 		while let Some(output) = self.stream.try_output() {
 			self.output(subscriber, output);
 		}
@@ -832,6 +843,8 @@ impl Routed {
 			selected: served.selected,
 			path: served.path.clone(),
 			priority: Some(served.priority),
+			// A receiver refuses a claim above its path by more than the path's segments.
+			above: u8::try_from(served.claim.above).unwrap_or(u8::MAX),
 		};
 		// A route held without a path to it is unavailable: it serves only as a last
 		// resort, like a draining one, at its real cost.
@@ -843,8 +856,7 @@ impl Routed {
 			.with_node(Some(*id))
 			.with_lane(lane)
 			.with_draining(self.drained || served.draining)
-			.with_available(served.available)
-			.with_rtt(served.rtt);
+			.with_available(served.available);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);
 		}
@@ -880,46 +892,16 @@ impl Routed {
 		}
 	}
 
-	/// Start or stop reading the link's min RTT as the peer's routes come and go.
-	///
-	/// Only a route the peer sent adds the link's min RTT, so a peer sending none costs
-	/// no timer. Starting reads at once, so the first claims served already carry it,
-	/// and in a fresh window, so a pause never keeps a reading older than the window.
-	fn sample(&mut self, subscriber: &Subscriber) {
-		match (self.routes.is_empty(), self.sampling) {
-			(true, true) => {
-				self.sampling = false;
-				self.rtt = Default::default();
-				self.read_rtt = None;
-				self.stream.rtt(None);
-			}
-			(false, false) => {
-				self.sampling = true;
-				self.read_link(subscriber);
-			}
-			_ => {}
-		}
-	}
-
-	/// Read the link's smoothed RTT once and schedule the next read.
-	fn read_link(&mut self, subscriber: &Subscriber) {
-		let last = self.rtt.reported();
-		let now = self.rtt.read(subscriber.session.metrics().rtt());
-		if now != last {
-			self.stream.rtt(now);
-		}
-		self.read_rtt =
-			(self.rtt.reading()).then(|| crate::time::Deadline::after(&subscriber.runtime, route::LinkRtt::INTERVAL));
+	/// Ready once nothing the peer offers on this stream waits on a doubt to reach the
+	/// origin, with what the node served meanwhile already in it.
+	pub(super) fn poll_undoubted(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) -> Poll<()> {
+		ready!(self.stream.poll_undoubted(waiter));
+		self.outputs(subscriber);
+		Poll::Ready(())
 	}
 
 	/// Serve requests on every claim whose queue woke.
 	pub(super) fn poll(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) -> Result<(), Error> {
-		self.sample(subscriber);
-		while let Some(read_rtt) = &mut self.read_rtt
-			&& read_rtt.poll(waiter).is_ready()
-		{
-			self.read_link(subscriber);
-		}
 		while let Poll::Ready(output) = self.stream.poll_output(waiter) {
 			self.output(subscriber, output);
 		}
@@ -956,6 +938,7 @@ fn claim(
 	epoch: u64,
 	cost: crate::origin::Cost,
 	chain: crate::Hops,
+	above: u64,
 ) -> Result<node::Claim, Error> {
 	Ok(node::Claim {
 		instance: instance.ok_or(Error::ProtocolViolation)?,
@@ -963,6 +946,7 @@ fn claim(
 		cost: cost.value(),
 		upstream: false,
 		learned: false,
+		above,
 		chain,
 	})
 }

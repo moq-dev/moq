@@ -9,6 +9,87 @@ complete it before cutting main into release.
 
 ## Plan
 
+Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
+`main` since `release`, and of the lite-07 draft): the cut also waits on what
+that audit found. Fifteen reviewers judged about 480 work lines for a
+long-term purpose and a caller, against moq.pro's and Kixel's roadmaps; the
+maintainer decided each finding in a 15-round interview, and each quest's
+Plan records its decision with what was rejected. The audit reopened the 50
+work lines the 2026-11-14 [feature review](/quest/m3/release/feature-review.md)
+judged "ship as is". Everything below is breaking by this milestone's rule: a
+removal, a rename, or a wire, catalog, or format change that is free until
+0.22 publishes it.
+
+- **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
+  for lite-08; [the ietf extension](/quest/m2/ietf-records-per-track.md)
+  costs nothing on a moq-lite track; [the path escape](/quest/m2/path-escape.md)
+  is finished; [Subscriber Min Age](/quest/m2/min-age-join.md) stays and
+  gains its reader, reversing 2026-11-14; and
+  [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
+  smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
+  [group drops](/quest/m2/group-drops.md) took simpler contracts.
+  [moq-transport time addressing](/quest/m2/ietf-time-addressing.md)
+  returned from m4, and the two moq-transport interop quests in m3 were
+  deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
+  all seven lite versions, the hidden `.` path prefix, and the route plan
+  of [cache-aware multicast](/quest/m2/multicast/README.md), whose
+  [switch](/quest/m2/multicast/switch.md) also settles the public route API
+  and retires the moq-cluster draft.
+- **moq-net API.** [Groups](/quest/m2/group-api.md),
+  [reconnect](/quest/m2/reconnect-off.md), [names](/quest/m2/net-renames.md),
+  and [session codes](/quest/m2/session-codes.md).
+  [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
+  demos return to their earlier format.
+- **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
+  item re-checked for a downstream caller first.
+- **Relay and transports.** [Memory](/quest/m2/relay-memory.md), which the
+  cut waits on by name; [congestion names](/quest/m2/congestion-names.md);
+  [config names](/quest/m2/relay-config-names.md),
+  [the two dial keys](/quest/m2/relay-connect-keys.md), and
+  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md);
+  [transport names](/quest/m2/transport-names.md); and
+  [stats names](/quest/m2/stats-old-names.md).
+- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
+  [claims](/quest/m2/auth-claims.md), and
+  [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
+  [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
+  [finished format](/quest/m3/e2ee-format.md) follows in m3.
+- **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
+  (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
+  `mpegts`, one strict rule); [dead drafts](/quest/m2/drafts-retire.md);
+  [the archive as version 2](/quest/m2/archive-v2.md);
+  [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
+  [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),
+  and [moq-json writes](/quest/m2/json-write-at.md).
+- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
+  [the hole wait](/quest/m2/delay-hole-wait.md),
+  [device and cursor](/quest/m2/native-media-config.md),
+  [sink names](/quest/m2/audio-sink-names.md),
+  [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
+  [the WebRTC bind](/quest/m2/webrtc-bind.md),
+  [gateway admission](/quest/m2/gateway-align.md), and
+  [upstream str0m](/quest/m2/str0m-upstream.md), which reverses the
+  2026-10-30 vendoring.
+- **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
+  [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
+  and [room, publish, and OBS names](/quest/m2/browser-packages.md).
+- **Bindings.** [Open selectors](/quest/m2/ffi-open-selectors.md),
+  [Dart as experimental](/quest/m2/dart-experimental.md), and
+  [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
+  The bindings break twice by decision: at 0.22, and again at
+  [the exporter switch](/quest/m3/ffi-exporter.md).
+
+Two rules changed with it (AGENTS.md): a feature reaches the bindings when a
+binding user needs it, and a path segment's leading `.` is the one marker
+allowed inside a value. Not reopened: AUTH_ERROR's retry codes (2026-11-14)
+and AUTH_OK's rate fields, which wait for lite-08
+([rate grant](/quest/m5/rate-grant.md)).
+
+Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅ the
+cut waits on [cache-aware multicast](/quest/m2/multicast/README.md), which
+replaces lite-07's route layer before it freezes (rejected: lite-08). The
+routes chain stays the critical path, now through that epic.
+
 Decided 2026-11-05 (maintainer, milestone re-cut): m2 holds the breaking half
 of what was "everything before the cut" (2026-10-20). Breaking covers every
 published surface, as the root [questline](/quest/README.md) defines: the
@@ -222,12 +303,17 @@ maintainer asked that what remains be unblocked or punted, and picked these on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)). m2 keeps only
 what would need a breaking release had it landed right after the cut:
 
-- ✅ Left m2: [the request loop](/quest/m3/cluster-routing/request-loop.md)
-  to m3's cluster-routing epic (a fixture and a fix, no wire);
-  [media consumers](/quest/m3/time-addressing-consumers.md) to m3 (its API
-  breaks ride the model; dropping hang's markers is tolerated by readers);
-  [moq-transport time addressing](/quest/m4/ietf-time-addressing.md) to m4
-  (low-priority compatibility, no named consumer); and the
+- ✅ Left m2: [the request loop](https://github.com/moq-dev/moq/pull/8881)
+  to m3's cluster-routing epic (a fixture and a fix, no wire), until it
+  returned to m2 on 2026-11-15 (maintainer, on
+  [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
+  the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
+  [media consumers](/quest/m2/time-addressing/consumers.md) to m3 (its API
+  breaks ride the model; dropping hang's markers is tolerated by readers),
+  until it returned to m2 on 2026-11-16;
+  [moq-transport time addressing](/quest/m2/ietf-time-addressing.md) to m4
+  (low-priority compatibility, no named consumer), until it returned to m2
+  on 2026-11-16; and the
   [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release
   cut requires in place of lite07-finalize (its strict interop lane needs
   Chromium 158), with lite07-finalize checking Chromium 158 once by hand. The E2EE nonce

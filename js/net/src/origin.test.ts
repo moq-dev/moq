@@ -6,7 +6,16 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { chainHash, compareRouteCandidates, presented, rendezvousHash, spreadHash } from "./internal.ts";
+import {
+	bestCandidate,
+	chainHash,
+	compareRouteCandidates,
+	mostSpecific,
+	presented,
+	rendezvousHash,
+	spreadHash,
+	superseded,
+} from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -1242,6 +1251,97 @@ test("a request prefers a cheaper received route over an announced local broadca
 	origin.close();
 });
 
+test("an announced local broadcast shadows a broader claim shown at its path whatever its epoch", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const dispose = serve(
+		origin,
+		path,
+		provider(upstream),
+		WireRoute.normalize({ instance: INSTANCE, epoch: 1n, hops: [PEER], cost: 1n, above: 1n }),
+	);
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 3n });
+	const local = localRoute.broadcast;
+
+	const request = consumer.request(path);
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+	expect(readsFrom(active as BroadcastConsumer, local)).toBe(true);
+
+	request.close();
+	local.close();
+	dispose();
+	upstream.close();
+	origin.close();
+});
+
+test("a broader claim shown at a path never supersedes the local broadcast against an exact route", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const other = Instance.parse("01900000-0000-7000-8000-000000000002");
+	const exact = new BroadcastProducer();
+	const broad = new BroadcastProducer();
+	const disposeExact = serve(
+		origin,
+		path,
+		provider(exact),
+		WireRoute.normalize({ instance: other, hops: [PEER], cost: 5n }),
+	);
+	const disposeBroad = serve(
+		origin,
+		path,
+		provider(broad),
+		WireRoute.normalize({ instance: INSTANCE, epoch: 1n, hops: [PEER], cost: 1n, above: 1n }),
+	);
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 3n });
+	const local = localRoute.broadcast;
+
+	const request = consumer.request(path);
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+	expect(readsFrom(active as BroadcastConsumer, local)).toBe(true);
+
+	request.close();
+	local.close();
+	disposeExact();
+	disposeBroad();
+	exact.close();
+	broad.close();
+	origin.close();
+});
+
+test("an announced local broadcast shadows a cheaper broader claim shown at its path", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const dispose = serve(
+		origin,
+		path,
+		provider(upstream),
+		WireRoute.normalize({ instance: INSTANCE, hops: [PEER], cost: 1n, above: 1n }),
+	);
+	const localRoute = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 3n });
+	const local = localRoute.broadcast;
+
+	const request = consumer.request(path);
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+	expect(readsFrom(active as BroadcastConsumer, local)).toBe(true);
+
+	request.close();
+	local.close();
+	dispose();
+	upstream.close();
+	origin.close();
+});
+
 test("the cheapest received route competes with the local broadcast, not the newest", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
@@ -2122,6 +2222,59 @@ test("a lite-07 and a lite-06 route beneath one prefix rank by each one's own ke
 	expect(spreadHash(job, "b")).toBe(0xd16a3821c67a2d25n);
 	expect(compareRouteCandidates(job, pool, claim, legacy)).toBeLessThan(0);
 	expect(compareRouteCandidates(job, pool, legacy, claim)).toBeGreaterThan(0);
+});
+
+// A claim exactly at the path outranks one that only covers it, whatever else ranks them, as the
+// Rust router's `above` does: the covering one is cheaper and ahead on priority here.
+test("a claim nearer its path outranks a broader one", () => {
+	const path = Path.from("src/derived");
+	const exact = { ...WireRoute.default, instance: Instance.parse("a"), node: 1n, cost: 9n, priority: -5 };
+	const broad = { ...WireRoute.default, instance: Instance.parse("b"), node: 2n, cost: 1n, above: 1n };
+	expect(compareRouteCandidates(path, path, exact, broad)).toBeLessThan(0);
+	expect(compareRouteCandidates(path, path, broad, exact)).toBeGreaterThan(0);
+	expect(compareRouteCandidates(path, path, exact, { ...broad, above: 0n })).toBeGreaterThan(0);
+});
+
+// A claim shown above its own prefix is filed deeper than it is: it counts for where it really is,
+// so a broad claim shown deep never beats the more specific claim filed shallower.
+test("the most specific claim wins whichever prefix shows it", () => {
+	const path = Path.from("src/a/b/c");
+	const broad = { ...WireRoute.default, node: 1n, above: 2n };
+	const exact = { ...WireRoute.default, node: 2n };
+	const at = new Map([
+		[Path.from("src/a/b"), broad],
+		[Path.from("src/a"), exact],
+	]);
+	const pick = (prefix: Path.Valid) => at.get(prefix);
+	expect(mostSpecific(path, pick, (route) => route)).toBe(exact);
+	// Claims as specific as each other go to the deepest prefix.
+	const same = new Map([
+		[Path.from("src/a/b"), { ...WireRoute.default, node: 3n, above: 1n }],
+		[Path.from("src/a"), exact],
+	]);
+	expect(
+		mostSpecific(
+			path,
+			(prefix) => same.get(prefix),
+			(route) => route,
+		)?.node,
+	).toBe(3n);
+});
+
+// An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by prefix and Above:
+// a broader claim shown at the path, at a higher epoch, is another claim than the exact one there.
+test("a broader claim at a higher epoch does not supersede the exact one", () => {
+	const path = Path.from("src/a");
+	const instance = Instance.parse("i");
+	const exact = { ...WireRoute.default, instance, node: 1n, epoch: 0n };
+	const broad = { ...WireRoute.default, instance, node: 2n, epoch: 1n, above: 1n };
+	expect(bestCandidate(path, path, [exact, broad], (route) => route)).toBe(exact);
+	expect(bestCandidate(path, path, [broad, exact], (route) => route)).toBe(exact);
+	// The same claim at a higher epoch still supersedes its older one.
+	const newer = { ...exact, epoch: 2n };
+	expect(bestCandidate(path, path, [exact, newer], (route) => route)).toBe(newer);
+	expect(superseded(exact, [exact, newer])).toBe(true);
+	expect(superseded(exact, [exact, broad])).toBe(false);
 });
 
 // A lite-07 claim ranks as the one hop to its origin node in what the origin announces, as in

@@ -2,7 +2,8 @@
 
 ## Goal
 
-App capture and system audio work on Windows. Display and window capture,
+System audio works on Windows. App capture stays macOS-only (decided below),
+which `Source::App` already reports as `Unsupported` here. Display and window capture,
 including the cursor, already run on the Windows.Graphics.Capture backend
 (`rs/moq-video/src/capture/wgc/native.rs`), which
 [its own quest](/quest/m3/capture-wgc.md) verifies on real hardware.
@@ -11,9 +12,14 @@ including the cursor, already run on the Windows.Graphics.Capture backend
 
 - **Applications** (every window of a process, including ones that open later)
   are still `Unsupported` outside macOS, where `SCShareableContent` gives it
-  almost free. Windows has no direct equivalent, so this needs per-window
-  composition or an explicit decision that Windows offers window capture only.
-  Decide that rather than leaving a variant that errors at runtime.
+  almost free. Decided 2026-11-15 (maintainer, /quest-complete, with
+  [Linux capture parity](/quest/m3/capture-linux.md)): ✅ (A) Windows offers
+  window capture only: `Source::App` stays macOS-only and fails with its
+  reason here, and a listing uses apps only to group windows
+  (rejected: (B) build app capture by composing a process tree's windows). No
+  consumer asks for it, and it matches the
+  [capture listing](/quest/m3/capture-list.md)'s rule that a listed app must
+  not hand out a source that fails at open.
 - **System audio** needs WASAPI loopback. `moq_audio::capture::Source::System`
   exists but is macOS-only and returns `Unsupported` elsewhere. Unlike macOS
   this does not go through the screen-capture API, so it is an independent path
@@ -25,14 +31,6 @@ including the cursor, already run on the Windows.Graphics.Capture backend
   it works from Windows 10 2004 (build 19041) in practice. Activate it at
   setup and refuse per-app audio with the reason where activation fails,
   rather than gating on a build number.
-
-WGC does not answer app capture. It captures one monitor or one window per
-item and has no per-process source, so the per-window-composition or
-window-only decision still stands now that the backend has landed.
-
-## Waiting
-
-- Maintainer: whether app capture exists off macOS, here and in [Linux capture parity](/quest/m3/capture-linux.md). (A) Windows and Linux offer window capture only: `Source::App` stays macOS-only and fails with its reason elsewhere, and a listing off macOS uses apps only to group windows. (B) Build app capture by composing a process tree's windows. I recommend A, since no consumer asks for B and it matches the capture listing's rule that a listed app must not hand out a source that fails at open.
 
 ## Related
 

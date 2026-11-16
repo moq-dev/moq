@@ -243,7 +243,6 @@ async fn connect_addrs(
 ///
 /// From [`crate::Server::tls_acceptor`]: the listen TLS identity, offering the
 /// same `qmux-01.<protocol>` ALPNs as a [`Listener`] serving `tls://`.
-#[cfg(feature = "_certs")]
 #[derive(Clone)]
 pub struct TlsAcceptor {
 	config: std::sync::Arc<rustls::ServerConfig>,
@@ -253,7 +252,6 @@ pub struct TlsAcceptor {
 	server: moq_net::Server,
 }
 
-#[cfg(feature = "_certs")]
 impl TlsAcceptor {
 	pub(crate) fn new(
 		config: std::sync::Arc<rustls::ServerConfig>,

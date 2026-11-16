@@ -25,10 +25,9 @@ RUN rustup show active-toolchain || rustup toolchain install \
 ARG CRATES="kio hang moq-auth moq-crypto moq-hls moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-webrtc moq-cli"
 
 # Path specs, because the lockfile also has published copies of some workspace crates.
-# io-uring compiles the relay's io_uring QUIC workers (`--runtime-io-uring`), which the default features leave out.
 RUN cargo fetch --locked \
     && specs=$(printf -- '-p path+file:///src/rs/%s ' $CRATES) \
-    && cargo build --locked $specs --features moq-relay/io-uring --bins \
-    && cargo test --locked --no-run $specs --features moq-relay/io-uring
+    && cargo build --locked $specs --bins \
+    && cargo test --locked --no-run $specs
 
 ENV CARGO_NET_OFFLINE=true

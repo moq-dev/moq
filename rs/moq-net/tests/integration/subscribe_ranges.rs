@@ -778,16 +778,6 @@ async fn a_relay_with_holes_answers_a_wide_past_range_plus_live() {
 	}
 }
 
-/// [`a_relay_with_holes_answers_a_wide_past_range_plus_live`] over moq-transport, which marks
-/// no hole, so one is skipped only once the reader's max age rules it out.
-#[kio::test]
-#[ignore = "stalls on a hole until /quest/m3/ietf-hole-stall.md"]
-async fn a_relay_with_holes_answers_a_wide_past_range_plus_live_over_moq_transport() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
-		holes_through_a_relay(version, Some(BUDGET)).await;
-	}
-}
-
 /// A budget the past range stays inside while it's read, and the live group then leaves behind.
 const BUDGET: Duration = Duration::from_secs(60);
 

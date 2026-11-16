@@ -191,7 +191,8 @@ int main()
 		CHECK(config.timeout == std::chrono::milliseconds(7000));
 		CHECK(config.race == std::chrono::milliseconds(80));
 		CHECK(config.tls.host_name == std::string("relay.example"));
-		CHECK(config.quic.congestion_control == moq::CongestionControl::kLoss);
+		CHECK(config.quic.congestion_control);
+		CHECK(config.quic.congestion_control->eq(moq::CongestionControl::loss()));
 		CHECK(config.quic.idle_timeout == std::chrono::milliseconds(9000));
 		CHECK(config.quic.keep_alive == std::chrono::nanoseconds::zero());
 		CHECK(config.quic.gso == false);

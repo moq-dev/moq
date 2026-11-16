@@ -57,7 +57,6 @@ use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
 mod mtud;
-#[cfg(feature = "mux")]
 pub mod mux;
 
 mod packet_builder;
@@ -1869,7 +1868,11 @@ impl Connection {
 			}
 		}
 
-		// After the RTT update, as RFC 9002's OnAckReceived orders it.
+		// Must be called before crypto/pto_count are clobbered. The losses this ACK reveals reach
+		// the controller before the ACK itself, as RFC 9002's OnAckReceived orders them.
+		self.detect_lost_packets(now, space, true);
+
+		// After the RTT update and loss detection, as RFC 9002's OnAckReceived orders it.
 		self.path.congestion.on_ack(congestion::Ack {
 			now,
 			packets: &acked,
@@ -1878,9 +1881,6 @@ impl Connection {
 			rtt: self.path.rtt.get(),
 		});
 		self.acked = acked;
-
-		// Must be called before crypto/pto_count are clobbered
-		self.detect_lost_packets(now, space, true);
 
 		if self.peer_completed_address_validation() {
 			self.pto_count = 0;
@@ -2166,14 +2166,10 @@ impl Connection {
 					.congestion
 					.filter(|_| info.path_generation == self.path.generation())
 				{
-					let new_burst = packet
-						.checked_sub(1)
-						.is_none_or(|prev| self.spaces[pn_space].lost_packets.get(prev).is_none());
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
 						packet: state,
-						new_burst,
 					});
 				}
 				self.qlog
@@ -3312,10 +3308,15 @@ impl Connection {
 						}
 					};
 
-					if self.side.is_server() && self.rem_cids.active_seq() == 0 {
-						// We're a server still using the initial remote CID for the client, so
-						// let's switch immediately to enable clientside stateless resets.
-						self.update_rem_cid();
+					// A server still on the client's initial CID switches at once, to enable
+					// client-side stateless resets, but only to sequence 1: jumping to a later
+					// one would retire the CIDs before it, still in flight, without using them.
+					if self.side.is_server()
+						&& self.rem_cids.active_seq() == 0
+						&& let Some((reset_token, retired)) = self.rem_cids.next_in_order()
+					{
+						self.spaces[SpaceId::Data].pending.retire_cids.extend(retired);
+						self.set_reset_token(reset_token);
 					}
 				}
 				Frame::NewToken(NewToken { token }) => {

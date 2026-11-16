@@ -4,7 +4,7 @@
 
 `@moq/crypto`'s broadcast producer answers requests for track names it never
 created, under semantic names, through `@moq/net`'s public broadcast request
-handler, as `moq_crypto::e2ee::broadcast::Requests` does in Rust. A JS
+handler, as `moq_e2ee::broadcast::Requests` does in Rust. A JS
 application then serves on-demand tracks from a plaintext or encrypted
 broadcast the same way.
 
@@ -24,7 +24,7 @@ Decided with the maintainer on 2026-10-24:
   2026-10-17 refusal, so every identity stays unique and a handler can serve
   a dropped name again).
 - The handler offers the lister, taking semantic names and listing their
-  physical names, as Rust's `moq_crypto::e2ee::broadcast::Lister` does, over
+  physical names, as Rust's `moq_e2ee::broadcast::Lister` does, over
   the broadcast lister `@moq/net` exports with its handler.
 - Port Rust's `requests_refuse_names_the_generation_did_not_issue` and
   `requests_serve_a_dropped_name_above_its_marks` tests: a relay-forged name, an older epoch's name,

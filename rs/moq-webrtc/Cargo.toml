@@ -72,7 +72,7 @@ x509-cert = { workspace = true }
 
 [dev-dependencies]
 # The tests host their broadcasts on `origin::spawn`, and dial a session over TCP.
-moq-tokio = { workspace = true, features = ["net", "tcp"] }
+moq-tokio = { workspace = true }
 # The vendored stack's tests replay RTP captures.
 pcap-file = { workspace = true }
 serde_json = { workspace = true }

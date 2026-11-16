@@ -56,25 +56,18 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_START's suffix extends the requested prefix, and its 0x2 flag carries an RTT in milliseconds",
+		"name": "a ROUTE_START's suffix extends the requested prefix",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060b9234016101090002ff0019",
+		"hex": "060a9234016101090000ff00",
 		"expect": "decoded"
 	},
 	{
-		"name": "a Route Offer's 0x4 flag marks a path through a draining node",
+		"name": "a Route Offer's 0x2 flag marks a path through a draining node",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0609923400010900047f03",
+		"hex": "0609923400010900027f03",
 		"expect": "decoded"
-	},
-	{
-		"name": "a Route Offer's RTT flag without its RTT is refused",
-		"version": "moq-lite-07-wip",
-		"message": "announce",
-		"hex": "0609923400010900028003",
-		"expect": "refused"
 	},
 	{
 		"name": "a Route Offer flag no version defines is withdrawn, with whatever field it adds",
@@ -234,14 +227,14 @@
 		"name": "a lite-07 ANNOUNCE_START names its Route ID in place of a hop chain",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "000a00000178020161000100",
+		"hex": "000b0000017802016100010000",
 		"expect": "decoded"
 	},
 	{
 		"name": "a lite-07 ANNOUNCE_START with an invalid path is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "000c0000032f2f78020161000100",
+		"hex": "000d0000032f2f7802016100010000",
 		"expect": "withdrawn"
 	},
 	{

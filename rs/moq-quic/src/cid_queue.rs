@@ -94,6 +94,20 @@ impl CidQueue {
 		Some((cid_data.1.unwrap(), orig_offset..self.offset))
 	}
 
+	/// Switch to the CID right after the active one, if known, returning its reset token and
+	/// the retired active sequence number
+	pub(crate) fn next_in_order(&mut self) -> Option<(ResetToken, Range<u64>)> {
+		let next = (self.cursor + 1) % Self::LEN;
+		let (_, token) = self.buffer[next]?;
+		self.buffer[self.cursor] = None;
+		self.cursor = next;
+		self.offset += 1;
+		Some((
+			token.expect("non-initial CID missing reset token"),
+			self.offset - 1..self.offset,
+		))
+	}
+
 	/// Iterate CIDs in CidQueue that are not `None`, including the active CID
 	fn iter(&self) -> impl Iterator<Item = (usize, CidData)> + '_ {
 		(0..Self::LEN).filter_map(move |step| {
@@ -176,6 +190,28 @@ mod tests {
 			assert_eq!(retire, (q.active_seq().saturating_sub(2))..q.active_seq());
 		}
 		assert!(q.next().is_none());
+	}
+
+	#[test]
+	fn next_in_order_waits_for_the_gap() {
+		let mut q = CidQueue::new(initial_cid());
+		q.insert(cid(4, 0)).unwrap();
+		q.insert(cid(2, 0)).unwrap();
+		assert!(q.next_in_order().is_none(), "sequence 1 is still in flight");
+		assert_eq!(q.active_seq(), 0);
+
+		q.insert(cid(1, 0)).unwrap();
+		assert_eq!(q.next_in_order().unwrap().1, 0..1);
+		assert_eq!(q.active_seq(), 1);
+		assert_eq!(q.next_in_order().unwrap().1, 1..2);
+		assert!(q.next_in_order().is_none(), "sequence 3 is still in flight");
+
+		// The CIDs that arrived early are still there to use.
+		q.insert(cid(3, 0)).unwrap();
+		assert_eq!(q.next_in_order().unwrap().1, 2..3);
+		assert_eq!(q.next_in_order().unwrap().1, 3..4);
+		assert_eq!(q.active_seq(), 4);
+		assert!(q.next_in_order().is_none());
 	}
 
 	#[test]

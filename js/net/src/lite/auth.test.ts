@@ -204,3 +204,10 @@ test("malformed AUTH_ERROR reasons close their session", async () => {
 		await assertSessionViolation(reader);
 	}
 });
+
+// Mirrors `only_three_codes_leave_a_token_undecided` in `rs/moq-net/src/lite/auth.rs`.
+test("only INTERNAL_ERROR, TOO_MANY_REQUESTS, and CONTROL_MESSAGE_TIMEOUT leave a token undecided", () => {
+	for (const code of [...Array(0x100).keys(), 0xffffffff]) {
+		expect([code, new AuthError(code, "").undecided()]).toEqual([code, [0x1, 0x7, 0x11].includes(code)]);
+	}
+});
