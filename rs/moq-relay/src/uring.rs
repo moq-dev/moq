@@ -186,8 +186,7 @@ impl Workers {
 						&& listen_tls.key.is_empty()
 						&& listen_tls.generate.is_empty()
 						&& listen_tls.root.is_empty()
-						&& listen_tls.identity.is_none()
-						&& listen_tls.peers.is_none(),
+						&& listen_tls.identity.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
 				tls

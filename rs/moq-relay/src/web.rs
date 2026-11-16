@@ -2204,8 +2204,8 @@ mod tests {
 	}
 
 	/// `tls://` on the HTTPS port applies the listen client-certificate policy, as the
-	/// `listen.tcp` `tls://` listener does: under pinned peers a dial without a pinned
-	/// certificate is refused. HTTPS on the same port is never asked for one.
+	/// `listen.tcp` `tls://` listener does: a certificate the client roots did not issue is
+	/// refused, and one they did is accepted. HTTPS on the same port is never asked for one.
 	#[tokio::test]
 	async fn https_listener_verifies_tls_qmux_client_certificates() {
 		use rustls::pki_types::{CertificateDer, pem::PemObject};
@@ -2213,14 +2213,21 @@ mod tests {
 
 		let dir = TempDir::new().unwrap();
 		let (ca, cert, key) = make_certs(&dir);
+		let (client_ca, client_cert, client_key) = make_named_certs(&dir, "client", "client.invalid");
 		let mut config = crate::Config::default();
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
-		config.listen.tls.peers = Some(moq_tokio::tls::Peers::new());
+		config.listen.tls.root = vec![client_ca];
 		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
-		config.web.https.cert = vec![cert];
-		config.web.https.key = vec![key];
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.web.https.cert = vec![cert.clone()];
+		config.web.https.key = vec![key.clone()];
+		// A client CA needs a server to grant certificates; this one grants them everything.
+		let mut policy = moq_auth::serve::Policy::default();
+		policy.mtls = moq_auth::Permissions::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+		let auth = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		config.auth.url = Some(format!("http://{}/", auth.local_addr().unwrap()).parse().unwrap());
+		let auth_server = moq_auth::serve::Server::new(policy).unwrap();
+		tokio::spawn(async move { auth_server.serve(auth).await });
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let https = relay.web_addrs().https.unwrap();
 		let ready = relay.ready();
@@ -2229,17 +2236,30 @@ mod tests {
 		ready.wait().await.unwrap();
 
 		let url: url::Url = format!("tls://localhost:{}/room", https.port()).parse().unwrap();
-		let mut config = moq_tokio::connect::Config::default();
-		config.tls.insecure = Some(true);
-		let connection = config
-			.init(Default::default())
-			.unwrap()
-			.with_reconnect(false)
-			.connect(url);
-		let refused = kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
+		let dial = |cert: &PathBuf, key: &PathBuf| {
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls.insecure = Some(true);
+			config.tls.cert = Some(cert.clone());
+			config.tls.key = Some(key.clone());
+			let connection = config
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url.clone());
+			async move {
+				kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
+					.await
+					.expect("the tls:// dial timed out")
+			}
+		};
+		// The server's own certificate chains to a CA the client roots do not hold.
+		assert!(
+			dial(&cert, &key).await.is_err(),
+			"tls:// accepted a certificate its client roots did not issue"
+		);
+		let _accepted = dial(&client_cert, &client_key)
 			.await
-			.expect("the tls:// dial timed out");
-		assert!(refused.is_err(), "tls:// accepted a dial without a pinned certificate");
+			.expect("tls:// refused a certificate its client roots issued");
 
 		let mut roots = rustls::RootCertStore::empty();
 		for cert in CertificateDer::pem_slice_iter(&std::fs::read(&ca).unwrap()) {

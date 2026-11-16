@@ -325,7 +325,7 @@ impl Server {
 		// server with neither would ignore the CA or pinned peers. A caller opening
 		// only the streams owns QUIC elsewhere.
 		let tcp_tls = build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
-		let client_auth = !config.tls.root.is_empty() || config.tls.peers.is_some();
+		let client_auth = !config.tls.root.is_empty();
 		if parts.quic() && !build_quic && !tcp_tls && client_auth {
 			return Err(Error::MtlsUnsupported);
 		}
@@ -2900,9 +2900,8 @@ mod tests {
 		assert!(matches!(err, Error::NoBackend(_)), "{err}");
 	}
 
-	/// A client CA or pinned peers on a stream-only server are refused unless a
-	/// `tls://` listener verifies them: the plaintext stream listeners never ask
-	/// for a client certificate.
+	/// A client CA on a stream-only server is refused unless a `tls://` listener
+	/// verifies it: the plaintext stream listeners never ask for a client certificate.
 	#[tokio::test]
 	async fn client_auth_without_a_tls_listener_is_rejected() {
 		let dir = tempfile::tempdir().unwrap();
@@ -2918,30 +2917,23 @@ mod tests {
 		.cert;
 		std::fs::write(&ca, cert.pem()).unwrap();
 
-		type Set = Box<dyn Fn(&mut crate::listen::Config)>;
-		let cases: [Set; 2] = [
-			Box::new(move |c| c.tls.root = vec![ca.clone()]),
-			Box::new(|c| c.tls.peers = Some(crate::tls::Peers::new())),
-		];
-		for set in cases {
-			let mut config = crate::listen::Config::default();
-			config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-			set(&mut config);
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tls.root = vec![ca];
 
-			assert!(matches!(
-				config.clone().init(Default::default()),
-				Err(Error::MtlsUnsupported)
-			));
-			// A worker group owning QUIC verifies it, so the streams alone accept it.
-			config.clone().init_streams().expect("streams beside worker-owned QUIC");
+		assert!(matches!(
+			config.clone().init(Default::default()),
+			Err(Error::MtlsUnsupported)
+		));
+		// A worker group owning QUIC verifies it, so the streams alone accept it.
+		config.clone().init_streams().expect("streams beside worker-owned QUIC");
 
-			// A `tls://` listener verifies it.
-			config.tcp.tls = Some(true);
-			config.tls.generate = vec!["localhost".into()];
-			config
-				.init(Default::default())
-				.expect("tls:// verifies client certificates");
-		}
+		// A `tls://` listener verifies it.
+		config.tcp.tls = Some(true);
+		config.tls.generate = vec!["localhost".into()];
+		config
+			.init(Default::default())
+			.expect("tls:// verifies client certificates");
 	}
 
 	/// A server with no stream listener reports nothing. QUIC multiplexes over one UDP

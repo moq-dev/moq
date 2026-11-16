@@ -571,27 +571,6 @@ mod tests {
 		let (_server, identity, _) = mtls_dial(server, None).await.expect("token-only client refused");
 		assert!(identity.is_none());
 
-		// Pinned peers: a certificate is required, and must be pinned.
-		let peers = crate::tls::Peers::new();
-		peers.insert(&fingerprint).unwrap();
-		let server = listen(&|l| l.tls.peers = Some(peers.clone()));
-		let server = server.init(Default::default()).unwrap().listen().await.unwrap();
-		let (server, identity, _) = mtls_dial(server, Some(&cert))
-			.await
-			.expect("pinned certificate refused");
-		assert_eq!(identity.unwrap().fingerprint(), Some(fingerprint.clone()));
-		// A refused dial consumes its listener, so the token-only check gets its own.
-		let token_only = listen(&|l| l.tls.peers = Some(peers.clone()));
-		let token_only = token_only.init(Default::default()).unwrap().listen().await.unwrap();
-		assert!(
-			mtls_dial(token_only, None).await.is_none(),
-			"a token-only client must be refused under pinned peers"
-		);
-		peers.remove(&fingerprint).unwrap();
-		assert!(
-			mtls_dial(server, Some(&cert)).await.is_none(),
-			"an unpinned certificate must be refused"
-		);
 	}
 
 	/// Dial `server` over `tls://localhost`, presenting `cert` (a PEM cert and key)
