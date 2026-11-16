@@ -194,7 +194,7 @@ mod tests {
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
 			.await
 			.unwrap();
 		let whep_origin = origin.consume();
@@ -262,7 +262,7 @@ mod tests {
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
 			.await
 			.unwrap();
 		let ingest_origin = moq_tokio::origin::spawn();
@@ -329,7 +329,7 @@ mod tests {
 		tokio::task::JoinHandle<()>,
 		tokio::sync::mpsc::Receiver<tokio::task::JoinHandle<crate::Result<()>>>,
 	) {
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
 			.await
 			.unwrap();
 		let origin = moq_tokio::origin::spawn();
@@ -474,7 +474,7 @@ mod tests {
 		drop(announcements);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
 			.await
 			.unwrap();
 		let (sources_tx, mut sources_rx) = tokio::sync::mpsc::channel(2);

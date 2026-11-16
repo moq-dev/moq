@@ -176,7 +176,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
 	// and a guard the session task holds for its lifetime (unregisters on exit).
-	let mux = server.mux().await?;
+	let mux = server.mux();
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config()?
 		.set_local_ice_credentials(creds)
@@ -270,7 +270,7 @@ mod tests {
 	/// a description str0m still parses, and an uncapped one carries no bandwidth line.
 	#[tokio::test]
 	async fn a_capped_answer_carries_tias() {
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), crate::server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), crate::server::Config::default())
 			.await
 			.unwrap();
 		let origin = moq_tokio::origin::spawn();
@@ -293,10 +293,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_advertised_candidate_keeps_its_port() {
 		let config = crate::server::Config {
-			ice_candidates: vec![
-				"203.0.113.1:5000".parse().unwrap(),
-				"[2001:db8::1]:0".parse().unwrap(),
-			],
+			ice_candidates: vec!["203.0.113.1:5000".parse().unwrap(), "[2001:db8::1]:0".parse().unwrap()],
 		};
 		let server = Server::bind("127.0.0.1:0".parse().unwrap(), config).await.unwrap();
 		let bound = server.local_addr().port();
@@ -319,7 +316,7 @@ mod tests {
 	/// dropped unfinished.
 	#[tokio::test(start_paused = true)]
 	async fn a_session_ending_without_a_delete_ends_its_tracks() {
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), crate::server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), crate::server::Config::default())
 			.await
 			.unwrap();
 		let origin = moq_tokio::origin::spawn();
@@ -355,7 +352,7 @@ mod tests {
 	/// it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_session() {
-		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), crate::server::Config::default())
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), crate::server::Config::default())
 			.await
 			.unwrap();
 		let origin = moq_tokio::origin::spawn();

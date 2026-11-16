@@ -170,7 +170,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// CodecConfig before accept_offer so the answer intersects the peer's offer
 	// with what the catalog actually has, instead of agreeing to a codec we can't
 	// fulfil; set the mux's known ICE credentials on the same config.
-	let mux = server.mux().await?;
+	let mux = server.mux();
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config_with_codecs(&codecs)?
 		.set_local_ice_credentials(creds)
@@ -343,7 +343,7 @@ mod tests {
 			.expect("create broadcast");
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let server = crate::server::Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), Default::default())
+		let server = crate::server::Server::bind("127.0.0.1:0".parse().unwrap(), Default::default())
 			.await
 			.unwrap();
 		let _router = super::router(server, sub_origin.consume());

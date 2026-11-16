@@ -805,17 +805,6 @@ mod tests {
 	}
 
 	#[test]
-	fn advertised_candidates_reuse_bound_port_for_configured_addresses() {
-		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
-		let advertised = vec!["127.0.0.1:1000".parse().unwrap(), "[::1]:2000".parse().unwrap()];
-
-		assert_eq!(
-			advertised_candidates(&advertised, local).unwrap(),
-			vec!["127.0.0.1:4444".parse().unwrap(), "[::1]:4444".parse().unwrap()]
-		);
-	}
-
-	#[test]
 	fn advertised_candidates_reject_configured_unspecified_addresses() {
 		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
 		let advertised = vec!["0.0.0.0:1000".parse().unwrap()];
