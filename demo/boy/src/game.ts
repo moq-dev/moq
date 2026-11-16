@@ -141,14 +141,12 @@ export class Game {
 		this.videoSource = new Watch.Video.Source({
 			broadcast: this.broadcast,
 			target: this.#target,
-			supported: Watch.Video.Decoder.supported,
 			rate: new Moq.Signals.Derived([connection.probe], (probe) => probe?.estimatedRecvRate),
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
 		this.audioSource = new Watch.Audio.Source({
 			broadcast: this.broadcast,
-			supported: Watch.Audio.Decoder.supported,
 		});
 		this.#signals.cleanup(() => this.audioSource.close());
 

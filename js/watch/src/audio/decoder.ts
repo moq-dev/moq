@@ -34,7 +34,7 @@ import { Order } from "./order";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
-import { supported } from "./supported";
+
 import { Terminal } from "./terminal";
 
 type FrameRead = Extract<Container.Read, { kind: "frame" }>;
@@ -1178,9 +1178,6 @@ export class Decoder {
 	close() {
 		this.#signals.close();
 	}
-
-	/** Whether the WebCodecs audio decoder can play this config. */
-	static supported = supported;
 }
 
 // Run `task` for one decode attempt. A setup, read, or decode failure that is not the attempt's

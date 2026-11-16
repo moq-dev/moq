@@ -88,7 +88,7 @@ Not here: sockets leave `@moq/net` with
 [the socket move](/quest/m2/sockets/README.md), and the `NO_MAX_DELAY`
 sentinel (`js/net/src/internal.ts`) goes with the Max Age change in
 [the lite-07 wire](/quest/m2/time-addressing/lite07.md). The browser media
-packages' leftovers are [their own sweep](/quest/m2/unused-api/media.md).
+packages' leftovers were their own sweep.
 
 For the PR: regenerate `js/net/api/index.api.md` and check that every
 removed name is gone from it; add each removal to `js/net/MIGRATE.md`;

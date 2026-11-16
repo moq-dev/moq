@@ -406,7 +406,7 @@ export class Broadcast {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
 
-		effect.interval(() => writer.update(this.#stats()), Duration.millis(Report.INTERVAL));
+		effect.interval(() => writer.update(this.#stats()), Report.INTERVAL);
 	}
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.

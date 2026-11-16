@@ -2,8 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Util from "@moq/hang/util";
 import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
-import { supportCacheKey } from "../support-probe";
-import { decoderConfigKey, decoderDescription } from "./config";
+import { decoderDescription } from "./config";
 
 /** Whether the WebCodecs audio decoder can play this config. */
 export async function supported(config: Catalog.AudioConfig): Promise<boolean> {
@@ -47,5 +46,3 @@ export async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	});
 	return res.supported ?? false;
 }
-
-Object.assign(supported, { [supportCacheKey]: decoderConfigKey });

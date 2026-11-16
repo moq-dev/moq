@@ -91,7 +91,7 @@ Two ways to serve `rtmps://`:
   When the transport is a `TcpStream` you own, call `configure_socket` on it
   first; `Server` does this for every socket it accepts. Its keepalive is the
   only thing that reaps a **play** session whose viewer vanished without a FIN:
-  publishers are bounded by `PUBLISH_IDLE_TIMEOUT`, but a play session sitting on
+  a publisher that sends no media for 30 seconds is dropped, but a play session sitting on
   a quiet broadcast neither reads nor writes, so nothing else would notice.
 
 ## CLI

@@ -76,7 +76,7 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// A listener's play session has no equivalent,
 /// which is why [`configure_socket`]'s keepalive is not optional.
-pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a play request may wait for its broadcast and initial FLV header
 /// before the server rejects it.

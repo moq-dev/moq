@@ -24,8 +24,9 @@ pub mod stats;
 /// Solicited viewer feedback and echo broadcast names.
 pub mod echo;
 
-/// Client health graded from two consecutive media reports.
-pub mod health;
+// Client health graded from two consecutive media reports; private until something reads the grade.
+#[allow(dead_code, reason = "only its tests grade a client until a consumer reads the result")]
+mod health;
 
 /// The catalog is used to describe the available media tracks and codecs.
 pub mod catalog;

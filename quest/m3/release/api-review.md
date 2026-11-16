@@ -72,8 +72,8 @@ re-read this list, so it is settled:
   ([the hole wait](/quest/m2/delay-hole-wait.md)). The first pass was wrong
   that native audio sets it to the `min` it already passes: it passes its
   live estimate, which that quest gives a home.
-- `Rendition::applied()` and `moq_video::encode::Applied` go in
-  [the media sweep](/quest/m2/unused-api/media.md); moq-sock's ICMP error
+- `Rendition::applied()` and `moq_video::encode::Applied` stay: the media
+  sweep found moq.pro's transcode bench reading them. moq-sock's ICMP error
   queue and `qmux::Config::fixed_receive_window` in
   [the transport sweep](/quest/m2/unused-api/transport.md).
 - Already gone: `TcpTls::new`

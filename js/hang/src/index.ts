@@ -15,8 +15,6 @@ export * as Catalog from "./catalog";
 export * as Container from "./container";
 /** Solicited viewer feedback schemas and broadcast names. */
 export * as Echo from "./echo";
-/** Client health graded from two consecutive media reports. */
-export * as Health from "./health";
 /** The compressed snapshot track a stats or feedback report is written to. */
 export * as Report from "./report";
 /** Publisher media and transport snapshot schemas. */

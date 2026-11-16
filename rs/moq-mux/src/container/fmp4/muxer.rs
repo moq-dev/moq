@@ -18,7 +18,7 @@ use super::export::{
 	Run, apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init,
 	infer_missing_durations, timestamp_gap,
 };
-use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video_trak};
+use super::{Error, synthesize_audio_trak, synthesize_video_trak};
 
 /// The single track id used by a muxer's init segment and fragments.
 ///
@@ -49,8 +49,6 @@ enum Kind {
 /// 2. [`init`](Self::init) builds the rendition's init segment (ftyp+moov).
 /// 3. [`fragment`](Self::fragment) encodes frames as one moof+mdat whose `tfdt` carries their
 ///    real presentation time, so a fragment built from a mid-stream group stands alone.
-///    [`fragmenter`](Self::fragmenter) instead cuts a stream into one separately addressable
-///    fragment per frame, for a consumer that stores media per encoded frame.
 ///
 /// For video missing codec configuration or geometry, [`init`](Self::init) returns `None` until a
 /// group has been [`read`](Self::read) to resolve the missing fields from a keyframe.
@@ -312,38 +310,9 @@ impl Muxer {
 	///
 	/// `end`, when the caller knows where the content ends (such as the next segment's start),
 	/// times the last presented sample if neither its codec nor a duration marker does.
-	///
-	/// To make each frame separately addressable instead, use
-	/// [`fragmenter`](Self::fragmenter).
 	pub fn fragment(&self, sequence: u32, frames: &[Frame], end: Option<Timestamp>) -> crate::Result<Bytes> {
 		let frames = self.resolve_durations(frames, end)?;
 		Ok(super::encode_fragment(self.fragment_info(sequence), &frames)?)
-	}
-
-	/// A [`Fragmenter`] cutting this rendition into one fragment per frame.
-	///
-	/// It emits at the same timescale as [`init`](Self::init) and [`fragment`](Self::fragment),
-	/// and owns its own decode timeline and sequence numbering, so feed it every frame of the
-	/// stream in decode order. One fragmenter per continuous stream: a fetch-on-demand caller
-	/// serving unrelated groups builds a fresh one per group and
-	/// [`flush`](Fragmenter::flush)es it.
-	pub fn fragmenter(&self, config: fragment::Config) -> Fragmenter {
-		let is_video = matches!(self.kind, Kind::Video(_));
-		Fragmenter {
-			track_id: TRACK_ID,
-			timescale: self.timescale,
-			default_frame: self.default_frame,
-			is_video,
-			opus: self.opus,
-			infer_missing: !is_video
-				|| matches!(
-					config.missing_duration,
-					fragment::MissingDuration::InferFromPresentationTime
-				),
-			pending: None,
-			dts: None,
-			sequence: 0,
-		}
 	}
 
 	/// Give every frame a duration: the one its codec states, else `end` for the last presented
@@ -681,13 +650,6 @@ mod tests {
 		};
 		let fragment = muxer.fragment(0, std::slice::from_ref(&frame), None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1001)]);
-
-		let mut fragmenter = muxer.fragmenter(fragment::Config {
-			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
-		});
-		assert!(fragmenter.push(frame).unwrap().is_empty());
-		let fragment = fragmenter.flush().unwrap().unwrap();
-		assert_eq!(super::super::sample_durations(&fragment.data), vec![Some(1001)]);
 	}
 
 	#[test]
@@ -703,25 +665,6 @@ mod tests {
 		let fragment = muxer.fragment(0, &input, None).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000); 3]);
 		assert_eq!(super::super::timeline(&fragment), (0, vec![0; 3]));
-
-		let mut fragmenter = muxer.fragmenter(fragment::Config {
-			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
-		});
-		let mut fragments = Vec::new();
-		for frame in input {
-			fragments.extend(fragmenter.push(frame).unwrap());
-		}
-		fragments.extend(fragmenter.flush().unwrap());
-		let durations: Vec<_> = fragments
-			.iter()
-			.map(|fragment| super::super::sample_durations(&fragment.data)[0])
-			.collect();
-		assert_eq!(durations, vec![Some(1_000); 3]);
-		let timelines: Vec<_> = fragments
-			.iter()
-			.map(|fragment| super::super::timeline(&fragment.data))
-			.collect();
-		assert_eq!(timelines, vec![(0, vec![0]), (1_000, vec![0]), (2_000, vec![0])]);
 	}
 
 	#[test]

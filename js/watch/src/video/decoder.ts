@@ -24,7 +24,7 @@ import { type DecoderConfig, hardwareAcceleration, type PlaybackIdentity, playba
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
 import type { Source } from "./source";
-import { accepted, supported } from "./supported";
+import { accepted } from "./supported";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Duration.millis(500);
@@ -547,9 +547,6 @@ export class Decoder {
 
 		this.#signals.close();
 	}
-
-	/** Whether the WebCodecs video decoder can play this config. */
-	static supported = supported;
 }
 
 interface RenditionProps {
@@ -1082,9 +1079,8 @@ class Rendition {
 		return rendered !== undefined && timestamp.lt(rendered);
 	}
 
-	// Resolve the codec string WebCodecs accepts once per track, from the same probe as `supported`, so a
-	// custom `supported` that skipped the probe still opens an `avc3.*` rendition on Safari. False when
-	// torn down meanwhile.
+	// Resolve the codec string WebCodecs accepts once per track, from the probe the source ran, so Safari
+	// opens an `avc3.*` rendition as `avc1.*`. False when torn down meanwhile.
 	async #accept(effect: Effect): Promise<boolean> {
 		if (this.#codec !== undefined) return true;
 		const codec = await accepted(this.config);
