@@ -226,6 +226,39 @@ async fn claimed(version: &str, mounted: bool) {
 	);
 }
 
+/// A claim above the mount's target covers all of the mount, so a reader of the mounted handle
+/// takes it over a claim at the mount point's parent: the handle resolves the mount point's
+/// paths through the target, whichever claims are above the mount point.
+///
+/// `W1`'s claim at the origin's root covers the target `tenant-a/public` and is shown at it, two
+/// segments above. Renamed beneath the mount point `tenant-b/x/shared` it is three deep, and
+/// carried as two above would rank below `W2`'s exact claim at `tenant-b/x`, which the handle
+/// never resolves a path beneath the mount through.
+#[kio::test]
+async fn a_claim_above_the_target_outranks_a_claim_above_the_mount_point() {
+	use crate::claim_continues::{Worker, settle, watch};
+
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let root = Worker::new(1, "", "root");
+	let rival = Worker::new(3, "tenant-b/x", "rival");
+	let relay = produce_origin(2);
+	let viewer = produce_origin(4);
+	let _roots = link(version, root.origin.consume(), &relay).await;
+	let _rivals = link(version, rival.origin.consume(), &relay).await;
+	let handle = relay
+		.mount("tenant-b/x/shared", "tenant-a/public")
+		.unwrap()
+		.scope("", &Patterns::from(Pattern::all()))
+		.unwrap()
+		.with_proxy(true)
+		.consume();
+	let _downstream = link(version, handle, &viewer).await;
+	settle().await;
+
+	assert_eq!(watch(true, &viewer, "tenant-b/x/shared/cam").await, "root0");
+	assert_eq!(rival.served(), 0, "the claim above the mount point was asked");
+}
+
 macro_rules! mounted_tests {
 	($($name:ident: $test:ident($($arg:expr),*),)*) => {
 		$(

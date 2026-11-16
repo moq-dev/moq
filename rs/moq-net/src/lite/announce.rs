@@ -29,10 +29,8 @@ const ROUTE_UPDATE: u64 = 7;
 const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
 const ROUTE_HOLD: u64 = 11;
-// lite-07: warm routes, copies of one broadcast offered toward the subscriber.
-const WARM_START: u64 = 12;
-const WARM_UPDATE: u64 = 13;
-const WARM_END: u64 = 14;
+// 12 to 14 were WARM_START, WARM_UPDATE, and WARM_END, which return in a later wip version
+// with an implementation that picks a source per broadcast.
 // lite-07: news of a closed session or a draining node on the routes the sender offered.
 const DEAD: u64 = 15;
 
@@ -76,7 +74,9 @@ pub enum AnnounceBroadcast {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
 	/// Carries the path suffix, (lite-07+) the Route ID and the instance and epoch it
 	/// serves, (before lite-07) the hop chain, and (lite-06+) the cost, and assigns the
-	/// next announce id. The instance and epoch change only with a `Restart`.
+	/// next announce id. The instance and epoch change only with a `Restart`. On lite-07,
+	/// `above` is how many segments the claim's own prefix lacks of the one its suffix names,
+	/// 0 for a claim exactly there; it is 0 on every earlier version.
 	Active {
 		suffix: PathRef,
 		route: u64,
@@ -84,6 +84,7 @@ pub enum AnnounceBroadcast {
 		epoch: u64,
 		hops: Hops,
 		cost: Cost,
+		above: u64,
 	},
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path, hops: Hops },
@@ -92,7 +93,12 @@ pub enum AnnounceBroadcast {
 	EndedId { id: u64 },
 	/// ANNOUNCE_UPDATE (lite-06+): atomically replace the metadata of the announcement
 	/// with this id: its cost, and before lite-07 its hop chain. The id stays live.
-	Update { id: u64, hops: Hops, cost: Cost },
+	Update {
+		id: u64,
+		hops: Hops,
+		cost: Cost,
+		above: u64,
+	},
 	/// ANNOUNCE_RESTART (lite-07+): the announcement with this id now serves the
 	/// instance and epoch given. Another instance is another stream, so whatever the
 	/// receiver resolved under its prefix is stale; a higher epoch of the same one
@@ -103,6 +109,7 @@ pub enum AnnounceBroadcast {
 		epoch: u64,
 		cost: Cost,
 		hops: Hops,
+		above: u64,
 	},
 	/// An unknown lite-06+ announce type. The length-prefixed body was skipped so
 	/// the stream stays up; it does not assign an announce id.
@@ -131,19 +138,6 @@ pub enum AnnounceBroadcast {
 	/// with this id, certifying them across the whole requested prefix at the origin's
 	/// revision, or certifying nothing (`None`).
 	Floor { id: u64, revision: Option<route::Rev> },
-	/// WARM_START (lite-07+): under the route with Route ID `route`, the sender offers the
-	/// copy of the broadcast at `suffix` that the receiver gets by joining it, and assigns
-	/// it the next Warm ID. See [`Warm`] for what the copy carries.
-	WarmStart {
-		route: u64,
-		suffix: Path,
-		instance: Instance,
-		warm: Warm,
-	},
-	/// WARM_UPDATE (lite-07+): the warm route with this id carries `warm` now.
-	WarmUpdate { id: u64, warm: Warm },
-	/// WARM_END (lite-07+): the sender withdrew the warm route with this id.
-	WarmEnd { id: u64 },
 	/// A route message (lite-07+) whose content, which the sender only forwarded, this
 	/// node refuses. The receiver withdraws what it names and keeps the session. Decoded
 	/// only as far as keeps the stream's ids in step; never sent.
@@ -169,10 +163,6 @@ pub(crate) enum Refusable {
 	Start { route: u64, suffix: Option<PathRef> },
 	/// ANNOUNCE_UPDATE or ANNOUNCE_RESTART of the claim with this Announce ID.
 	Change { id: u64 },
-	/// WARM_START under the route with Route ID `route`: assigns the next Warm ID.
-	WarmStart { route: u64 },
-	/// WARM_UPDATE of the warm route with this id.
-	WarmUpdate { id: u64 },
 }
 
 /// Why a node refuses content a peer forwarded: well framed, but nothing it can use.
@@ -184,8 +174,6 @@ pub(crate) enum Refusal {
 	Flags(u8),
 	#[error("{0} hops, past the limit")]
 	Hops(u64),
-	#[error("a warm route with no hops, so no carrier")]
-	Carrier,
 	#[error("an invalid path")]
 	Path,
 	#[error("an invalid instance")]
@@ -202,76 +190,6 @@ type Content<T> = Result<Result<T, Refusal>, DecodeError>;
 fn refuse<T>(r: &mut Decoder<'_>, reason: Refusal) -> Content<T> {
 	r.rest();
 	Ok(Err(reason))
-}
-
-/// A copy of a broadcast a warm route offers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Warm {
-	/// What pulling the copy through the sender costs, in the units of the route's
-	/// metric: 0 at its carrier, the relay with a local reader that offers it.
-	pub cost: u64,
-	/// A node on `hops` sent GOAWAY, which ranks the copy below every source that avoids one.
-	pub draining: bool,
-	/// The lowest local priority of a link on `hops`, ranked before cost; the carrier's
-	/// own copy has no link to lower it, so `i8::MAX`.
-	pub priority: i8,
-	/// Every relay the copy crossed, the carrier first and the sender last.
-	pub hops: Arc<[route::Id]>,
-}
-
-/// WARM_START and WARM_UPDATE flag: a node on the copy's hops drains.
-const WARM_DRAINING: u8 = 0x1;
-
-/// Encode a warm route's cost, drain, priority, and hops. No relay offers a copy with no
-/// carrier, or that crossed too many hops.
-fn encode_warm(w: &mut Encoder<'_>, warm: &Warm) -> Result<(), EncodeError> {
-	if warm.hops.is_empty() || warm.hops.len() > route::MAX_HOPS {
-		return Err(EncodeError::InvalidState);
-	}
-	w.varint(warm.cost)?;
-	w.u8(if warm.draining { WARM_DRAINING } else { 0 });
-	w.u8(warm.priority as u8);
-	w.varint(warm.hops.len() as u64)?;
-	for hop in warm.hops.iter() {
-		w.varint(*hop)?;
-	}
-	Ok(())
-}
-
-fn decode_warm(r: &mut Decoder<'_>) -> Content<Warm> {
-	let cost = r.varint()?;
-	let draining = match r.u8()? {
-		0 => false,
-		WARM_DRAINING => true,
-		flags => return refuse(r, Refusal::Flags(flags)),
-	};
-	let priority = r.u8()? as i8;
-	let count = r.varint()?;
-	if count > route::MAX_HOPS as u64 {
-		return refuse(r, Refusal::Hops(count));
-	}
-	if count == 0 {
-		return refuse(r, Refusal::Carrier);
-	}
-	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
-	Ok(Ok(Warm {
-		cost,
-		draining,
-		priority,
-		hops,
-	}))
-}
-
-/// Decode a WARM_START's body after its Route ID.
-fn decode_warm_start(r: &mut Decoder<'_>) -> Content<(Path, Instance, Warm)> {
-	let suffix = match decode_path(r)? {
-		Ok(suffix) => suffix,
-		Err(reason) => return refuse(r, reason),
-	};
-	let Some(instance) = super::instance::decode_copy(r)? else {
-		return refuse(r, Refusal::Instance);
-	};
-	Ok(decode_warm(r)?.map(|warm| (suffix, instance, warm)))
 }
 
 /// Route Offer flag: an upstream link is on the path, so the route is down-only.
@@ -644,6 +562,18 @@ fn decode_chain(r: &mut Decoder<'_>, version: Version) -> Result<Hops, DecodeErr
 	}
 }
 
+/// Encode lite-07's Above, which no earlier version has: a claim there is only ever at the
+/// path it names.
+fn encode_above(w: &mut Encoder<'_>, version: Version, above: u64) -> Result<(), EncodeError> {
+	if version.has_routes() {
+		return w.varint(above);
+	}
+	match above {
+		0 => Ok(()),
+		_ => Err(EncodeError::InvalidState),
+	}
+}
+
 /// Encode lite-07's trailing Lite-06 Chain, omitted when empty. A lite-06 compatibility
 /// field: the lite-07 to lite-08 migration deletes it.
 fn encode_lite06_chain(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(), EncodeError> {
@@ -673,6 +603,7 @@ fn decode_start(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadca
 		return Ok(refused(r, Some(suffix), Refusal::Instance));
 	};
 	let cost = Cost::decode(r, version)?;
+	let above = r.varint()?;
 	Ok(match decode_lite06_chain(r)? {
 		Ok(hops) => AnnounceBroadcast::Active {
 			suffix,
@@ -681,6 +612,7 @@ fn decode_start(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadca
 			epoch,
 			hops,
 			cost,
+			above,
 		},
 		Err(reason) => refused(r, Some(suffix), reason),
 	})
@@ -690,8 +622,9 @@ fn decode_start(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadca
 fn decode_update(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
 	let id = r.varint()?;
 	let cost = Cost::decode(r, version)?;
+	let above = r.varint()?;
 	Ok(match decode_lite06_chain(r)? {
-		Ok(hops) => AnnounceBroadcast::Update { id, hops, cost },
+		Ok(hops) => AnnounceBroadcast::Update { id, hops, cost, above },
 		Err(reason) => AnnounceBroadcast::Refused {
 			message: Refusable::Change { id },
 			reason,
@@ -714,6 +647,7 @@ fn decode_restart(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroad
 		return Ok(refused(r, Refusal::Instance));
 	};
 	let cost = Cost::decode(r, version)?;
+	let above = r.varint()?;
 	Ok(match decode_lite06_chain(r)? {
 		Ok(hops) => AnnounceBroadcast::Restart {
 			id,
@@ -721,6 +655,7 @@ fn decode_restart(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroad
 			epoch,
 			cost,
 			hops,
+			above,
 		},
 		Err(reason) => refused(r, reason),
 	})
@@ -797,18 +732,12 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::RouteEnd { .. } if version.has_routes() => ROUTE_END,
 				Self::Dead(_) if version.has_routes() => DEAD,
 				Self::Floor { .. } if version.has_routes() => ANNOUNCE_FLOOR,
-				Self::WarmStart { .. } if version.has_warm() => WARM_START,
-				Self::WarmUpdate { .. } if version.has_warm() => WARM_UPDATE,
-				Self::WarmEnd { .. } if version.has_warm() => WARM_END,
 				Self::RouteStart { .. }
 				| Self::RouteUpdate { .. }
 				| Self::RouteHold { .. }
 				| Self::RouteEnd { .. }
 				| Self::Dead(_)
-				| Self::Floor { .. }
-				| Self::WarmStart { .. }
-				| Self::WarmUpdate { .. }
-				| Self::WarmEnd { .. } => return Err(EncodeError::Version),
+				| Self::Floor { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type or refused content is never sent.
@@ -825,19 +754,22 @@ impl Encode<Version> for AnnounceBroadcast {
 					epoch,
 					hops,
 					cost,
+					above,
 				} => {
 					suffix.encode(w, version)?;
 					encode_route_id(w, version, *route)?;
 					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					encode_chain(w, version, hops)?;
 					cost.encode(w, version)?;
+					encode_above(w, version, *above)?;
 					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::EndedId { id } => w.varint(*id)?,
-				Self::Update { id, hops, cost } => {
+				Self::Update { id, hops, cost, above } => {
 					w.varint(*id)?;
 					encode_chain(w, version, hops)?;
 					cost.encode(w, version)?;
+					encode_above(w, version, *above)?;
 					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::Restart {
@@ -846,10 +778,12 @@ impl Encode<Version> for AnnounceBroadcast {
 					epoch,
 					cost,
 					hops,
+					above,
 				} => {
 					w.varint(*id)?;
 					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					cost.encode(w, version)?;
+					encode_above(w, version, *above)?;
 					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::Synced => {}
@@ -868,22 +802,6 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::RouteHold { id } | Self::RouteEnd { id } => w.varint(*id)?,
 				Self::Dead(dead) => encode_dead(w, dead)?,
 				Self::Floor { id, revision } => encode_floor(w, *id, *revision)?,
-				Self::WarmStart {
-					route,
-					suffix,
-					instance,
-					warm,
-				} => {
-					w.varint(*route)?;
-					suffix.encode(w, version)?;
-					super::instance::encode_copy(w, instance)?;
-					encode_warm(w, warm)?;
-				}
-				Self::WarmUpdate { id, warm } => {
-					w.varint(*id)?;
-					encode_warm(w, warm)?;
-				}
-				Self::WarmEnd { id } => w.varint(*id)?,
 				Self::Ended { .. } | Self::Skipped | Self::Refused { .. } => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -929,10 +847,7 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::RouteHold { .. }
 			| Self::RouteEnd { .. }
 			| Self::Dead(_)
-			| Self::Floor { .. }
-			| Self::WarmStart { .. }
-			| Self::WarmUpdate { .. }
-			| Self::WarmEnd { .. } => {
+			| Self::Floor { .. } => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -970,6 +885,7 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 							epoch: 0,
 							hops,
 							cost,
+							above: 0,
 						}
 					}
 					SYNCED if version.has_synced() => Self::Synced,
@@ -978,7 +894,12 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						let id = body.varint()?;
 						let hops = decode_chain(&mut body, version)?;
 						let cost = Cost::decode(&mut body, version)?;
-						Self::Update { id, hops, cost }
+						Self::Update {
+							id,
+							hops,
+							cost,
+							above: 0,
+						}
 					}
 					ROUTE_START if version.has_routes() => {
 						let node = body.varint()?;
@@ -1019,32 +940,6 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					ROUTE_HOLD if version.has_routes() => Self::RouteHold { id: body.varint()? },
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
 					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
-					WARM_START if version.has_warm() => {
-						let route = body.varint()?;
-						decode_warm_start(&mut body)?.map_or_else(
-							|reason| Self::Refused {
-								message: Refusable::WarmStart { route },
-								reason,
-							},
-							|(suffix, instance, warm)| Self::WarmStart {
-								route,
-								suffix,
-								instance,
-								warm,
-							},
-						)
-					}
-					WARM_UPDATE if version.has_warm() => {
-						let id = body.varint()?;
-						decode_warm(&mut body)?.map_or_else(
-							|reason| Self::Refused {
-								message: Refusable::WarmUpdate { id },
-								reason,
-							},
-							|warm| Self::WarmUpdate { id, warm },
-						)
-					}
-					WARM_END if version.has_warm() => Self::WarmEnd { id: body.varint()? },
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
 					_ => {
@@ -1100,6 +995,7 @@ impl AnnounceBroadcast {
 				epoch: 0,
 				hops,
 				cost: Cost::UNKNOWN,
+				above: 0,
 			},
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 an update travels as a duplicate ANNOUNCE (a second `Active`), so accept
@@ -1114,6 +1010,7 @@ impl AnnounceBroadcast {
 				epoch: 0,
 				hops,
 				cost: Cost::UNKNOWN,
+				above: 0,
 			},
 			AnnounceStatus::Update => return Err(DecodeError::InvalidValue),
 		})
@@ -1416,6 +1313,7 @@ mod tests {
 			suffix: PathRef::literal(Path::from_static("foo/bar")),
 			hops: Hops::default(),
 			cost: Cost::default(),
+			above: 0,
 		}
 		.encode(&mut Encoder::new(&mut buf, version.into()), version)
 		.expect("encode");
@@ -1509,6 +1407,7 @@ mod tests {
 			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: hops.clone(),
 			cost: Cost::UNKNOWN,
+			above: 0,
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
@@ -1534,13 +1433,19 @@ mod tests {
 			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: hops.clone(),
 			cost,
+			above: 0,
 		};
 		assert_eq!(broadcast_round_trip(&active, Version::Lite06), active);
 
 		let ended = AnnounceBroadcast::EndedId { id: 3 };
 		assert_eq!(broadcast_round_trip(&ended, Version::Lite06), ended);
 
-		let update = AnnounceBroadcast::Update { id: 3, hops, cost };
+		let update = AnnounceBroadcast::Update {
+			id: 3,
+			hops,
+			cost,
+			above: 0,
+		};
 		assert_eq!(broadcast_round_trip(&update, Version::Lite06), update);
 	}
 
@@ -1561,6 +1466,7 @@ mod tests {
 			},
 			hops: Hops::default(),
 			cost,
+			above: 0,
 		};
 		assert_eq!(broadcast_round_trip(&active, Version::Lite07), active);
 
@@ -1568,6 +1474,7 @@ mod tests {
 			id: 3,
 			hops: Hops::default(),
 			cost,
+			above: 0,
 		};
 		assert_eq!(broadcast_round_trip(&update, Version::Lite07), update);
 
@@ -1578,6 +1485,7 @@ mod tests {
 				epoch,
 				cost,
 				hops: Hops::default(),
+				above: 0,
 			};
 			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
 		}
@@ -1607,16 +1515,18 @@ mod tests {
 				epoch: 5,
 				hops: Hops::default(),
 				cost: Cost::new(6),
+				above: 0,
 			}),
-			[0, 10, 1, 2, 1, b'c', 3, 1, b'a', 0, 5, 6]
+			[0, 11, 1, 2, 1, b'c', 3, 1, b'a', 0, 5, 6, 0]
 		);
 		assert_eq!(
 			encode(AnnounceBroadcast::Update {
 				id: 7,
 				hops: Hops::default(),
 				cost: Cost::new(6),
+				above: 0,
 			}),
-			[2, 2, 7, 6]
+			[2, 3, 7, 6, 0]
 		);
 		assert_eq!(
 			encode(AnnounceBroadcast::Restart {
@@ -1625,95 +1535,10 @@ mod tests {
 				epoch: 5,
 				cost: Cost::new(6),
 				hops: Hops::default(),
+				above: 0,
 			}),
-			[3, 6, 7, 1, b'a', 0, 5, 6]
+			[3, 7, 7, 1, b'a', 0, 5, 6, 0]
 		);
-	}
-
-	/// The draft's warm route layouts, byte for byte: WARM_START is the Route ID, the path
-	/// suffix, the instance and its minted flag, then the copy's cost, its flags, its
-	/// priority as a signed byte, and its hops; WARM_UPDATE the Warm ID and the same four;
-	/// WARM_END the Warm ID. Lite-06 skips the types as unknown.
-	#[test]
-	fn lite07_warm_route_layout() {
-		let encode = |msg: &AnnounceBroadcast, version: Version| {
-			let mut buf = Vec::new();
-			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
-				.map(|()| buf)
-		};
-		let warm = Warm {
-			cost: 4,
-			draining: true,
-			priority: -1,
-			hops: Arc::from([5, 9, 6]),
-		};
-		let start = AnnounceBroadcast::WarmStart {
-			route: 3,
-			suffix: Path::from_static("c"),
-			instance: "a".parse().unwrap(),
-			warm: warm.clone(),
-		};
-		let update = AnnounceBroadcast::WarmUpdate { id: 7, warm };
-		let end = AnnounceBroadcast::WarmEnd { id: 7 };
-		let layouts: [(&AnnounceBroadcast, &[u8]); 3] = [
-			(&start, &[12, 13, 3, 1, b'c', 1, b'a', 0, 4, 1, 0xff, 3, 5, 9, 6]),
-			(&update, &[13, 8, 7, 4, 1, 0xff, 3, 5, 9, 6]),
-			(&end, &[14, 1, 7]),
-		];
-		for (msg, wire) in layouts {
-			assert_eq!(encode(msg, Version::Lite07).unwrap(), wire);
-			assert_eq!(&broadcast_round_trip(msg, Version::Lite07), msg);
-			assert!(matches!(encode(msg, Version::Lite06), Err(EncodeError::Version)));
-			let got =
-				crate::coding::decode_buf(&mut &wire[..], Version::Lite06, |r, v| AnnounceBroadcast::decode(r, v));
-			assert_eq!(got.unwrap(), AnnounceBroadcast::Skipped);
-		}
-	}
-
-	/// A warm route starts at its carrier, so it has at least one hop and at most 32, and
-	/// sets no flag but drain. A receiver refuses one that breaks any, without failing
-	/// the stream.
-	#[test]
-	fn lite07_warm_route_hops_and_flags_are_bounded() {
-		let empty = AnnounceBroadcast::WarmUpdate {
-			id: 7,
-			warm: Warm {
-				cost: 4,
-				draining: false,
-				priority: 0,
-				hops: Arc::from([]),
-			},
-		};
-		let mut buf = Vec::new();
-		assert!(matches!(
-			empty.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07),
-			Err(EncodeError::InvalidState)
-		));
-		let decode = |wire: &[u8]| {
-			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
-		};
-		let refused = |reason| AnnounceBroadcast::Refused {
-			message: Refusable::WarmUpdate { id: 7 },
-			reason,
-		};
-		assert_eq!(
-			decode(&[13, 5, 7, 4, 0, 0, 0]).unwrap(),
-			refused(Refusal::Carrier),
-			"no hops, so no carrier"
-		);
-		assert_eq!(
-			decode(&[13, 6, 7, 4, 2, 0, 1, 5]).unwrap(),
-			refused(Refusal::Flags(2)),
-			"an unknown flag"
-		);
-		decode(&[13, 6, 7, 4, 0, 0, 1, 5]).unwrap();
-		let mut long = vec![13, 38, 7, 4, 0, 0, 33];
-		long.extend([1; 33]);
-		assert_eq!(decode(&long).unwrap(), refused(Refusal::Hops(33)));
-		long[1] = 37;
-		long[6] = 32;
-		long.pop();
-		decode(&long).unwrap();
 	}
 
 	/// Lite-07 carries a lite-06 chain after the cost, only when it is not empty, so an
@@ -1737,11 +1562,13 @@ mod tests {
 				suffix: PathRef::literal(Path::from_static("c")),
 				hops: hops.clone(),
 				cost: Cost::new(6),
+				above: 0,
 			},
 			AnnounceBroadcast::Update {
 				id: 7,
 				hops: hops.clone(),
 				cost: Cost::new(6),
+				above: 0,
 			},
 			AnnounceBroadcast::Restart {
 				id: 7,
@@ -1749,12 +1576,13 @@ mod tests {
 				epoch: 5,
 				cost: Cost::new(6),
 				hops,
+				above: 0,
 			},
 		];
 		let layouts: [&[u8]; 3] = [
-			&[0, 13, 0, 0, 1, b'c', 3, 1, b'a', 0, 5, 6, 2, 7, 9],
-			&[2, 5, 7, 6, 2, 7, 9],
-			&[3, 9, 7, 1, b'a', 0, 5, 6, 2, 7, 9],
+			&[0, 14, 0, 0, 1, b'c', 3, 1, b'a', 0, 5, 6, 0, 2, 7, 9],
+			&[2, 6, 7, 6, 0, 2, 7, 9],
+			&[3, 10, 7, 1, b'a', 0, 5, 6, 0, 2, 7, 9],
 		];
 		for (msg, layout) in msgs.iter().zip(layouts) {
 			assert_eq!(encode(msg), layout, "{msg:?}");
@@ -1770,11 +1598,11 @@ mod tests {
 			message: Refusable::Change { id: 7 },
 			reason: Refusal::Chain,
 		};
-		assert_eq!(decode(&[2, 3, 7, 6, 0]), refused);
-		assert_eq!(decode(&[2, 5, 7, 6, 2, 9, 9]), refused);
-		assert_eq!(decode(&[3, 9, 7, 1, b'a', 0, 5, 6, 2, 9, 9]), refused);
+		assert_eq!(decode(&[2, 4, 7, 6, 0, 0]), refused);
+		assert_eq!(decode(&[2, 6, 7, 6, 0, 2, 9, 9]), refused);
+		assert_eq!(decode(&[3, 10, 7, 1, b'a', 0, 5, 6, 0, 2, 9, 9]), refused);
 		assert_eq!(
-			decode(&[0, 13, 0, 0, 1, b'c', 3, 1, b'a', 0, 5, 6, 2, 9, 9]),
+			decode(&[0, 14, 0, 0, 1, b'c', 3, 1, b'a', 0, 5, 6, 0, 2, 9, 9]),
 			AnnounceBroadcast::Refused {
 				message: Refusable::Start {
 					route: 3,
@@ -1783,6 +1611,49 @@ mod tests {
 				reason: Refusal::Chain,
 			}
 		);
+	}
+
+	/// A claim presented above its path keeps how far above on every message that carries
+	/// it, and no earlier version can say it.
+	#[test]
+	fn an_above_survives_the_wire() {
+		let msgs = [
+			AnnounceBroadcast::Active {
+				route: 1,
+				instance: Some("a".parse().unwrap()),
+				epoch: 0,
+				suffix: PathRef::literal(Path::empty()),
+				hops: Hops::default(),
+				cost: Cost::default(),
+				above: 2,
+			},
+			AnnounceBroadcast::Update {
+				id: 1,
+				hops: Hops::default(),
+				cost: Cost::default(),
+				above: 2,
+			},
+			AnnounceBroadcast::Restart {
+				id: 1,
+				instance: Some("a".parse().unwrap()),
+				epoch: 0,
+				cost: Cost::default(),
+				hops: Hops::default(),
+				above: 2,
+			},
+		];
+		for msg in &msgs {
+			assert_eq!(broadcast_round_trip(msg, Version::Lite07), *msg);
+		}
+		let msg = AnnounceBroadcast::Update {
+			id: 1,
+			hops: Hops::default(),
+			cost: Cost::default(),
+			above: 1,
+		};
+		let mut buf = Vec::new();
+		let res = msg.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06);
+		assert!(matches!(res, Err(EncodeError::InvalidState)));
 	}
 
 	/// Only lite-07 carries a Route ID: a non-zero one has nowhere to go earlier, and an
@@ -1796,6 +1667,7 @@ mod tests {
 			suffix: PathRef::literal(Path::from_static("cam")),
 			hops: Hops::default(),
 			cost: Cost::default(),
+			above: 0,
 		};
 		for version in [Version::Lite05, Version::Lite06] {
 			let mut buf = Vec::new();
@@ -1814,6 +1686,7 @@ mod tests {
 			epoch: 0,
 			cost: Cost::default(),
 			hops: Hops::default(),
+			above: 0,
 		};
 		let mut buf = Vec::new();
 		assert!(matches!(
@@ -1867,6 +1740,7 @@ mod tests {
 			},
 			hops: Hops::default(),
 			cost: Cost::default(),
+			above: 0,
 		};
 		for version in [Version::Lite05, Version::Lite06] {
 			let mut buf = Vec::new();
@@ -1890,7 +1764,8 @@ mod tests {
 			AnnounceBroadcast::Update {
 				id: 1,
 				hops: Hops::default(),
-				cost: Cost::default()
+				cost: Cost::default(),
+				above: 0,
 			}
 			.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05),
 			Err(EncodeError::Version)
@@ -1918,6 +1793,7 @@ mod tests {
 			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: Hops::default(),
 			cost: Cost::new(9),
+			above: 0,
 		};
 		let got = broadcast_round_trip(&msg, Version::Lite05);
 		assert_eq!(
@@ -1929,6 +1805,7 @@ mod tests {
 				suffix: PathRef::literal(Path::from_static("room/cam")),
 				hops: Hops::default(),
 				cost: Cost::UNKNOWN,
+				above: 0,
 			}
 		);
 	}

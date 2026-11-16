@@ -14,11 +14,9 @@ Every constructor returns the session with its `Driver`: one future that owns th
 socket, reads and writes it, and runs the session's timers. Spawn it on any
 executor, such as `tokio::spawn`; qmux spawns nothing and needs no Tokio runtime.
 
-The default features are `tls` and `wss`. Opt into `tcp`, `uds`, or `ws` for the
-corresponding unencrypted transport, or disable defaults when supplying your own.
-Unix sockets require a Unix host.
+Every transport is always compiled in; the `uds` module exists only on a Unix host.
 
 See the [API reference](https://docs.rs/qmux) and the
 [client and server examples](https://github.com/moq-dev/moq/tree/main/rs/qmux/examples).
-`just rs test --manifest-path rs/qmux/Cargo.toml --features tcp,ws` runs its
+`just rs test --manifest-path rs/qmux/Cargo.toml` runs its
 protocol tests and compatibility checks with qmux 0.6.3.

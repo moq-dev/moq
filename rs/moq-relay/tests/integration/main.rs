@@ -9,7 +9,7 @@
 
 mod auth_lifetime;
 // Its listeners are the simulator (`test-support`) and the io_uring workers.
-#[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
+#[cfg(any(feature = "test-support", target_os = "linux"))]
 mod bitrate_caps;
 mod cluster_close;
 #[cfg(feature = "test-support")]
@@ -33,7 +33,7 @@ mod logs;
 mod memory;
 mod peer_limits;
 mod public_rules;
-#[cfg(all(feature = "test-support", feature = "quic"))]
+#[cfg(feature = "test-support")]
 mod quic_sim;
 mod refusals;
 mod released_cli;

@@ -39,7 +39,7 @@
 //!
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
-//! - **Let the gateway terminate TLS** (the default `tls` feature): call
+//! - **Let the gateway terminate TLS**: call
 //!   `Server::with_tls` with a `rustls::ServerConfig`, and the listener serves
 //!   `rtmps://` alongside `rtmp://` on the same port, telling them apart by the
 //!   client's first byte. Call [`Server::with_plaintext`] with `false` to refuse

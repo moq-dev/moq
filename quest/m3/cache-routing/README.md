@@ -49,7 +49,7 @@ The earlier Plan, items 1 to 14 (2026-11-08 to 2026-11-14), is in
   over plain path routing was never measured
   ([moq-dev/moq#8732](https://github.com/moq-dev/moq/pull/8732)). The
   maintainer stripped its wire from lite-07 on 2026-11-14
-  ([warm routes on the wire](/quest/m2/warm-routes-wire.md)).
+  ([moq-dev/moq#8840](https://github.com/moq-dev/moq/pull/8840)).
 
 This README's own work, once its child lands:
 

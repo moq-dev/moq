@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+#[cfg(not(apple))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
@@ -32,18 +33,12 @@ pub(crate) const REORDER_NAME: &str = "probe-reorder";
 /// A test decoder that holds every picture until a flush.
 pub(crate) const HOLDING_NAME: &str = "probe-holding";
 
-/// A test decoder that hands each picture straight back and records nothing,
-/// for tests that run more than one decoder at a time. It refuses [`CORRUPT`].
+/// A test decoder that hands each picture straight back and records nothing.
+/// It refuses [`CORRUPT`].
 pub(crate) const IMMEDIATE_NAME: &str = "probe-immediate";
 
 /// An access unit the immediate probe fails to decode.
 pub(crate) const CORRUPT: &[u8] = b"corrupt";
-
-/// A test decoder standing in for hardware with a single session: opening a
-/// second while one is alive fails.
-pub(crate) const SINGLE_NAME: &str = "probe-single";
-
-static SINGLE_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// A test decoder whose flush waits until the test releases it.
 #[cfg(not(apple))]
@@ -168,8 +163,6 @@ pub(crate) struct Reorder {
 	ready: VecDeque<Frame>,
 }
 
-pub(crate) struct Single(VecDeque<Frame>);
-
 pub(crate) struct Native(VecDeque<Frame>);
 
 pub(crate) struct Refusing;
@@ -263,40 +256,6 @@ impl Backend for Immediate {
 
 	fn name(&self) -> &str {
 		IMMEDIATE_NAME
-	}
-}
-
-impl Single {
-	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
-		if SINGLE_OPEN.swap(true, Ordering::SeqCst) {
-			return Err(anyhow::anyhow!("probe: out of decoder sessions").into());
-		}
-		Ok(Box::new(Self(VecDeque::new())))
-	}
-}
-
-impl Backend for Single {
-	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
-		self.0.push_back(frame(timestamp)?);
-		Ok(())
-	}
-
-	fn receive(&mut self) -> Result<Option<Frame>, Error> {
-		Ok(self.0.pop_front())
-	}
-
-	fn flush(&mut self) -> Result<(), Error> {
-		Ok(())
-	}
-
-	fn name(&self) -> &str {
-		SINGLE_NAME
-	}
-}
-
-impl Drop for Single {
-	fn drop(&mut self) {
-		SINGLE_OPEN.store(false, Ordering::SeqCst);
 	}
 }
 

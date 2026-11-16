@@ -818,7 +818,6 @@ pub struct MoqMediaCatalogProducer {
 }
 
 impl MoqMediaCatalogProducer {
-	#[cfg(any(feature = "audio", feature = "video"))]
 	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		self.broadcast.upgrade().ok_or(MoqError::Closed)
 	}

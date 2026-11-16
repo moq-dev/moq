@@ -123,15 +123,18 @@ try {
 	arrivals.push(...(await page.evaluate(() => globalThis.recorder.drain())));
 	// The RTT is read last: the PROBE minimum only falls as the session runs.
 	const rtt = await page.evaluate(() => globalThis.recorder.info()?.rtt ?? null);
+	const largest = await page.evaluate(() => globalThis.recorder.info()?.largest);
+	if (largest === undefined) throw new Error("the subscription never reported the publisher's largest group");
 
 	const trimmed = arrivals.filter(([at]) => at - start <= durationMs);
 	const round = (x: number, places: number) => Math.round(x * 10 ** places) / 10 ** places;
 	const trace: Trace = {
-		version: 3,
+		version: 4,
 		source,
 		description,
 		transport: info.transport,
 		rtt: rtt === null ? null : round(rtt, 1),
+		largest,
 		config: info.config as Trace["config"],
 		duration: durationMs,
 		arrivals: trimmed.map(([at, timestamp, group, duration]) => [

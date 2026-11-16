@@ -4,7 +4,7 @@ import * as Path from "../path.ts";
 import { type Claim, Floors, type View } from "./floors.ts";
 
 const NODE = 7n;
-const A: Claim = { instance: Instance.parse("a"), epoch: 0n, cost: 0n };
+const A: Claim = { instance: Instance.parse("a"), epoch: 0n, cost: 0n, above: 0n };
 
 function carrier(prefix: string, revision: bigint | undefined, claims: [string, Claim][], hidden = false) {
 	const view: View = {
@@ -44,6 +44,31 @@ test("a claim presented at a stream's own prefix matches the newer view's claim 
 	floors.join(NODE, narrow);
 	floors.join(NODE, wide);
 	expect(floors.shows(NODE, narrow.view, Path.from("live/a"))).toBeDefined();
+});
+
+test("a covering claim presented at a stream's prefix keeps how far above it is", () => {
+	const floors = new Floors();
+	const narrow = carrier("live/a/b", 0n, [["live/a/b", A]]);
+	const wide = carrier("", 1n, [["live", A]]);
+	floors.join(NODE, narrow);
+	floors.join(NODE, wide);
+	expect(floors.shows(NODE, narrow.view, Path.from("live/a/b"))?.above).toBe(2n);
+	// A claim exactly at the prefix is not above it.
+	const exact = carrier("", 2n, [["live/a/b", A]]);
+	floors.join(NODE, exact);
+	expect(floors.shows(NODE, narrow.view, Path.from("live/a/b"))?.above).toBe(0n);
+});
+
+test("a claim's distance counts segments the way a path splits them, at every slash", () => {
+	const floors = new Floors();
+	// An escaped slash is still a segment boundary: room, `a\`, b, cam.
+	const path = Path.from("room/a\\/b/cam");
+	const narrow = carrier(path, 0n, [[path, A]]);
+	const wide = carrier("", 1n, [["room", A]]);
+	floors.join(NODE, narrow);
+	floors.join(NODE, wide);
+	expect(Path.parts(path)).toHaveLength(4);
+	expect(floors.shows(NODE, narrow.view, path)?.above).toBe(3n);
 });
 
 test("an uncertified claim stands until a floor certifies its path", () => {

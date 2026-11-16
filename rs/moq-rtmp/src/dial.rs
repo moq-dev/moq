@@ -81,7 +81,6 @@ pub struct Connect {
 	pub url: Url,
 
 	/// The TLS client configuration for `rtmps://`, which requires one.
-	#[cfg(feature = "tls")]
 	pub tls: Option<std::sync::Arc<rustls::ClientConfig>>,
 }
 
@@ -89,15 +88,10 @@ impl Connect {
 	/// Dial `url` (`rtmp://host[:port]/<app>` or `rtmps://...`), without TLS until
 	/// [`with_tls`](Self::with_tls) supplies it.
 	pub fn new(url: Url) -> Self {
-		Self {
-			url,
-			#[cfg(feature = "tls")]
-			tls: None,
-		}
+		Self { url, tls: None }
 	}
 
 	/// Use `tls` to dial `rtmps://`; it decides which server certificates to trust.
-	#[cfg(feature = "tls")]
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ClientConfig>>>) -> Self {
 		self.tls = tls.into();
 		self
@@ -162,16 +156,11 @@ impl Client<Conn> {
 	pub async fn connect(connect: Connect) -> Result<Self> {
 		moq_crypto::cpu::check()?;
 		let target = Target::parse(&connect.url)?;
-		#[cfg(feature = "tls")]
 		let tls = match (target.secure, connect.tls) {
 			(true, None) => return Err(anyhow::anyhow!("rtmps:// needs a TLS client configuration").into()),
 			(true, Some(tls)) => Some(tokio_rustls::TlsConnector::from(tls)),
 			(false, _) => None,
 		};
-		#[cfg(not(feature = "tls"))]
-		if target.secure {
-			return Err(anyhow::anyhow!("rtmps:// needs moq-rtmp's `tls` feature").into());
-		}
 
 		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let stream = match &target.host {
@@ -180,7 +169,6 @@ impl Client<Conn> {
 				url::Host::Ipv6(ip) => TcpStream::connect((*ip, target.port)).await?,
 			};
 			crate::server::configure_socket(&stream, stream.peer_addr()?);
-			#[cfg(feature = "tls")]
 			let conn = match tls {
 				Some(connector) => {
 					let name = match &target.host {
@@ -197,8 +185,6 @@ impl Client<Conn> {
 				}
 				None => Conn::Plain(stream),
 			};
-			#[cfg(not(feature = "tls"))]
-			let conn = Conn::Plain(stream);
 			Self::with_stream_config(conn, &target.app, target.tc_url).await
 		})
 		.await
@@ -756,7 +742,6 @@ mod tests {
 
 	/// Serve RTMPS on `localhost` with a fresh identity, returning the listener and
 	/// that identity's fingerprint.
-	#[cfg(feature = "tls")]
 	async fn rtmps_server() -> (Server, String) {
 		let identity = moq_tokio::tls::Identity::generate(["localhost"]).unwrap();
 		let fingerprint = identity.fingerprint().to_string();
@@ -770,14 +755,12 @@ mod tests {
 		(server, fingerprint)
 	}
 
-	#[cfg(feature = "tls")]
 	fn pinned(fingerprint: String) -> std::sync::Arc<rustls::ClientConfig> {
 		let mut tls = moq_tokio::tls::Connect::default();
 		tls.fingerprint = vec![fingerprint];
 		std::sync::Arc::new(tls.build().unwrap())
 	}
 
-	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn connect_dials_rtmps_and_advertises_tc_url() {
 		kio::clock::host_time(); // real RTMP over TCP
@@ -804,7 +787,6 @@ mod tests {
 		drop(request);
 	}
 
-	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn connect_refuses_an_untrusted_certificate() {
 		kio::clock::host_time(); // real RTMP over TCP

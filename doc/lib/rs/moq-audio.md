@@ -61,8 +61,8 @@ then: up to 10 ms later with echo cancellation on, and at the producer's read ti
 
 ```bash
 cargo add moq-audio --features playback
-cargo add moq-audio --features aec    # Built-in devices; Linux: cpal links libasound
-cargo add moq-audio                   # PCM echo processing needs no device feature
+cargo add moq-audio --features capture,playback  # Built-in devices; Linux: cpal links libasound
+cargo add moq-audio                               # PCM echo processing needs no device feature
 cargo add moq-audio --features capture,pipewire
 ```
 

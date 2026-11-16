@@ -61,7 +61,7 @@ mod source;
 pub(crate) use source::imports;
 pub use source::output;
 
-#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[cfg(target_os = "linux")]
 mod dmabuf;
 
 #[cfg(apple)]

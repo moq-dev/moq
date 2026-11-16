@@ -137,7 +137,6 @@ impl Slot {
 	}
 
 	/// Whether [`Self::release`] closed the socket
-	#[cfg(feature = "quic")]
 	pub(crate) fn is_released(&self) -> bool {
 		self.socket.read().unwrap().is_none()
 	}

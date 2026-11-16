@@ -18,10 +18,6 @@ impl Level {
 		self.peak
 	}
 
-	#[cfg_attr(
-		not(any(feature = "capture", feature = "bus")),
-		allow(dead_code, reason = "only capture and the bus measure levels")
-	)]
 	pub(crate) fn measure(samples: &[f32]) -> Self {
 		if samples.is_empty() {
 			return Self::default();
@@ -43,7 +39,6 @@ impl Level {
 
 	/// The louder of two readings, channel by channel, so a meter read less often
 	/// than buffers arrive still shows the loudest of them.
-	#[cfg_attr(not(feature = "bus"), allow(dead_code, reason = "only the bus holds levels"))]
 	pub(crate) fn max(self, other: Self) -> Self {
 		Self {
 			rms: self.rms.max(other.rms),

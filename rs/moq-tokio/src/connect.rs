@@ -87,7 +87,6 @@ impl Addr {
 	}
 
 	/// The same peer and addresses, requested at `url`.
-	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) fn with_url(&self, url: Url) -> Self {
 		Self {
 			url,
@@ -351,7 +350,6 @@ pub enum ConnectError {
 impl ConnectError {
 	/// Only the transports that carry an HTTP status (WebTransport, WebSocket) can
 	/// classify one; qmux over tcp/unix has no such response.
-	#[cfg(any(feature = "quic", feature = "websocket"))]
 	pub(crate) fn from_status_u16(status: u16) -> Option<Self> {
 		match status {
 			401 => Some(Self::Unauthorized),
@@ -367,7 +365,7 @@ impl ConnectError {
 	}
 }
 
-#[cfg(all(test, any(feature = "quic", feature = "websocket")))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
@@ -678,7 +676,6 @@ pub struct Config {
 
 	/// WebSocket fallback settings (`--websocket-*`), used when QUIC is
 	/// blocked.
-	#[cfg(feature = "websocket")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub websocket: crate::websocket::Config,
@@ -728,7 +725,6 @@ impl Config {
 			found.toml("[client.quic]", "[quic]", Some("now applies to both directions"));
 		}
 		found.extend(self.tls.deprecated());
-		#[cfg(feature = "websocket")]
 		found.extend(self.websocket.deprecated());
 		found
 	}

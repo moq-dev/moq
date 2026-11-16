@@ -35,33 +35,12 @@ path = "src/main.rs"
 doc = false
 
 [features]
-# A programmatic relay fixture with generated TLS and ephemeral ports, and
-# `cluster::Options::network`, which routes peer dials over in-memory links, and with
-# `quic`, `cluster::Options::sim`, which binds them on a simulated QUIC host.
-test-support = ["moq-tokio/sim"]
-default = ["cluster-lan", "quic", "websocket", "uds"]
-# Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
-cluster-lan = ["moq-tokio/mdns"]
+# A programmatic relay fixture with generated TLS and ephemeral ports,
+# `cluster::Options::network`, which routes peer dials over in-memory links, the `sim`
+# network of named relays those links join, and `cluster::Options::sim`, which binds
+# them on a simulated QUIC host.
+test-support = ["kio/sim", "moq-tokio/sim"]
 jemalloc = ["moq-tokio/jemalloc"]
-quic = ["_quic", "moq-tokio/quic"]
-# The tokio QUIC listener, and the thread-per-core worker group behind
-# `runtime.workers`. Not one to enable on its own: it names no backend, so
-# moq-tokio would have nothing to bind a socket with.
-_quic = []
-# qlog trace capture (`--quic-qlog <DIR>`). Off by default: it compiles the
-# qlog machinery into the enabled backends and is only wanted for debugging or
-# congestion-control testing. Covers the io_uring workers too, so one feature
-# means one thing whichever runtime is serving.
-qlog = ["moq-tokio/qlog", "moq-uring?/qlog"]
-websocket = ["moq-tokio/websocket", "dep:qmux", "dep:hyper", "dep:tokio-tungstenite"]
-# Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
-# default set; drop via --no-default-features on platforms without Unix sockets.
-uds = ["moq-tokio/uds"]
-# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only.
-# This is off by default: the relay is useful without io_uring.
-io-uring = ["_uring", "moq-tokio/driver", "moq-uring/quic"]
-# The listener machinery shared by the feature above.
-_uring = ["dep:moq-uring", "dep:web-transport-proto"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
@@ -76,7 +55,7 @@ http-body = { workspace = true }
 # reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 # Reclaims the socket under a WebSocket upgrade.
-hyper = { workspace = true, optional = true }
+hyper = { workspace = true }
 # `server-auto` reclaims the socket from under the auto builder `axum_server` serves with.
 hyper-util = { workspace = true, features = ["server-auto"] }
 kio = { workspace = true, features = ["runtime", "serde"] }
@@ -86,10 +65,10 @@ moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }
 moq-stats = { workspace = true, features = ["async"] }
-moq-tokio = { workspace = true, default-features = false, features = ["watch", "tcp"] }
+moq-tokio = { workspace = true }
 # The /metrics text encoder; the protobuf features stay off.
 prometheus-client = "0.25.2"
-qmux = { workspace = true, features = ["ws"], optional = true }
+qmux = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 reqwest-middleware = "0.5"
@@ -103,7 +82,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 # The upgrade's accept key; qmux runs the frames after it.
-tokio-tungstenite = { workspace = true, features = ["connect", "handshake"], optional = true }
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake"] }
 toml = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
@@ -115,9 +94,10 @@ usage-rs = { workspace = true, features = ["completions", "config"] }
 libc = { workspace = true }
 # The reuseport group and descriptor passing a handoff carries the sockets with.
 moq-sock = { workspace = true }
-moq-uring = { workspace = true, optional = true }
+# Serves QUIC from io_uring workers (`--runtime-io-uring`).
+moq-uring = { workspace = true, features = ["quic"] }
 # The WebTransport CONNECT response the io_uring listener answers with.
-web-transport-proto = { workspace = true, optional = true }
+web-transport-proto = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = { workspace = true }
@@ -134,7 +114,6 @@ moq-congestion = { path = "../moq-congestion" }
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 pem = { workspace = true }
-qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
 rind-rustls = { workspace = true }
