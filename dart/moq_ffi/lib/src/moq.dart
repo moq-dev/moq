@@ -25700,7 +25700,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtokens_answered() != 11571) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtokens_set() != 20110) {
+  if (uniffi_moq_ffi_checksum_method_moqtokens_set() != 52050) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_accept_track() !=

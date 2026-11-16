@@ -637,8 +637,7 @@ impl MoqTokens {
 	/// The first is the connection credential, unless the URL carries its own `?jwt=`; each
 	/// other one widens the grant over in-band AUTH. The next dial presents them, and a live
 	/// session that supports in-band AUTH presents them at once, withdrawing each replaced
-	/// token once its replacements are answered, even when one is refused. After an
-	/// authorization refusal the session redials only if they changed.
+	/// token once its replacements are answered, even when one is refused.
 	pub fn set(&self, tokens: Vec<String>) -> Result<(), MoqError> {
 		{
 			self.inner.set(parse_tokens(tokens)?);
