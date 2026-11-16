@@ -37,7 +37,9 @@
 //! asks, a broader claim presented at the prefix it asks for.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,
-//! `epoch`, `batch`, `drain`, and `claimed`, which `tests/relay.rs` compares it against.
+//! `epoch`, `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it
+//! against. `tests/multicast_search.rs` searches every delivery order on small meshes,
+//! and `tests/multicast_cost.rs` sweeps what one event costs.
 
 use std::{
 	cmp::Reverse,
@@ -1871,24 +1873,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.best.keys().copied().collect()
 	}
 
-	/// What each neighbour offers for `origin`, and whether a closed session ended it.
-	pub fn heard(&self, origin: NodeId) -> Vec<(N, &Offer, bool)> {
-		(self.heard.get(&origin).into_iter().flatten())
-			.map(|(peer, heard)| (*peer, &heard.offer, heard.ended))
-			.collect()
-	}
-
-	/// The pairs of relays with a session known closed, and where each floor stands.
-	pub fn floors(&self) -> &BTreeMap<(Id, Id), (u64, u64)> {
-		&self.closed
-	}
-
-	/// This node's revision of its own claims, and each of its claims as it stands.
 	/// Whether it offers a route to itself: it has announced a claim.
 	pub fn announced(&self) -> bool {
 		self.announced
 	}
 
+	/// This node's revision of its own claims, and each of its claims as it stands.
 	pub fn own(&self) -> (Rev, Claims<I, A>) {
 		let items = self.known.get(&self.me).map(|known| known.items.clone());
 		(self.rev, items.unwrap_or_default())
@@ -2150,6 +2140,34 @@ mod tests {
 			add: vec![p("a")],
 		};
 		assert_eq!(router.edit(2, edit), Err(Error::Partial));
+	}
+
+	/// A neighbour's answer to a prefix this node asks for is synced once it says so, and
+	/// a prefix not asked for has no answer to wait on.
+	#[test]
+	fn a_prefix_is_synced_once_its_answer_says_so() {
+		let mut router = relay(1);
+		router
+			.connect(2, port(Role::Scoped(vec![p("a"), p("a/b"), p("c")])))
+			.unwrap();
+		let asked: Vec<Msg<u64, u64>> = router.drain().into_iter().map(|(_, msg)| msg).collect();
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p("a"), p("c")],
+		};
+		assert_eq!(asked, vec![Msg::Ask(edit)], "the wider of two nested regions");
+		assert_eq!(router.is_synced(2, &p("a")), Some(false));
+		assert_eq!(
+			router.recv(2, Msg::Synced(p("a"))),
+			Err(Error::Unasked),
+			"before the marker"
+		);
+		router.recv(2, Msg::Edited).unwrap();
+		router.recv(2, Msg::Synced(p("a"))).unwrap();
+		assert_eq!(router.is_synced(2, &p("a")), Some(true));
+		assert_eq!(router.is_synced(2, &p("c")), Some(false));
+		assert_eq!(router.is_synced(2, &p("a/b")), None);
+		assert_eq!(router.recv(2, Msg::Synced(p("d"))), Err(Error::Unasked));
 	}
 
 	/// Nothing a neighbour sends counts until its answer begins at the marker.

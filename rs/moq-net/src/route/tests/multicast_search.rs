@@ -96,6 +96,7 @@ impl fmt::Display for Broken {
 }
 
 /// What the search covered.
+#[expect(dead_code, reason = "search statistics are reported through derived Debug")]
 #[derive(Clone, Copy, Debug)]
 struct Report {
 	states: usize,
@@ -619,4 +620,21 @@ fn every_property_catches_its_mutant() {
 		eprintln!("{mutant:?}: {failure}");
 		assert!(matches!(failure.broken, Broken::Rule(broke, _) if broke == rule));
 	}
+}
+
+/// The diamond with any of its links, the publisher's included, closing or opening.
+#[test]
+#[ignore = "Nightly"]
+fn every_order_past_any_diamond_link_keeps_the_multicast_rules() {
+	let mut mesh = diamond();
+	mesh.links = vec![(0, 1), (1, 2), (1, 3), (2, 4), (3, 4), (5, 0)];
+	run(mesh, &ONE);
+}
+
+/// The triangle with a link that may close and open again, so a later session of one
+/// pair of relays races what is left of the earlier one.
+#[test]
+#[ignore = "Nightly"]
+fn every_order_through_a_reopened_link_keeps_the_multicast_rules() {
+	run(triangle(), &Bounds { flaps: 2, ..ONE });
 }

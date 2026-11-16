@@ -84,12 +84,8 @@ impl Bed {
 
 	/// Built with every router rebuilding its indexes after each input, if `checked`.
 	fn new(shape: Shape, checked: bool) -> Self {
-		let nodes = 1
-			+ shape.upstream
-			+ shape.origins
-			+ shape.downstream
-			+ shape.origins * shape.publishers
-			+ shape.watchers;
+		let nodes =
+			1 + shape.upstream + shape.origins + shape.downstream + shape.origins * shape.publishers + shape.watchers;
 		let mut bed = Self {
 			sim: RelaySim::new(nodes, relay::debounce(HOP)),
 			shape,
@@ -119,7 +115,8 @@ impl Bed {
 				let publisher = bed.publisher(origin, index);
 				bed.sim.link(publisher, bed.origin(origin), 1, Tie::Peer);
 				for broadcast in 0..shape.broadcasts {
-					bed.sim.claim(publisher, &format!("o{origin}/p{index}/b{broadcast}"), true);
+					bed.sim
+						.claim(publisher, &format!("o{origin}/p{index}/b{broadcast}"), true);
 				}
 			}
 		}
@@ -312,4 +309,3 @@ fn benchmark_relay_event_work() {
 		}
 	}
 }
-

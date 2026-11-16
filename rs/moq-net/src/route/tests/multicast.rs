@@ -782,7 +782,12 @@ fn flaps(arm: Arm, relays: usize) -> Vec<String> {
 		for (failure, row) in fail(arm, &shape.mesh, relays > 16) {
 			let returns = matches!(failure, Failure::Heal | Failure::Restart);
 			if !returns && row.cost.sent.starts > 0 {
-				out.push(format!("{} on {}: {}", failure.as_str(), shape.name, row.cost.sent.starts));
+				out.push(format!(
+					"{} on {}: {}",
+					failure.as_str(),
+					shape.name,
+					row.cost.sent.starts
+				));
 			}
 		}
 	}
@@ -989,7 +994,6 @@ fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
 	assert!(kept.iter().all(|&pairs| pairs <= 6), "{kept:?}");
 	assert_eq!(kept[0], kept[7], "{kept:?}");
 }
-
 
 /// A route learned over an upstream link is marked, and a marked route is never sent over
 /// another upstream link. Relay 3 hears two routes of equal rank to relay 0: through 2,

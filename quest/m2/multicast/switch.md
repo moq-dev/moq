@@ -3,7 +3,8 @@
 ## Goal
 
 Every lite-07 session in Rust drives the
-[new router](/quest/m2/multicast/router.md) on one announce stream per side,
+new router (`route::relay::Router`, from
+[moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)) on one announce stream per side,
 the draft specifies it, and the old rule is gone: ROUTE_HOLD, the doubt,
 DEAD's moved list, the Route Key Parameter with its proof and symbolic model,
 qualified Node IDs, routes per prefix with their Route Suffix and Route
@@ -98,6 +99,11 @@ for the wire:
 - A claim's end carries one bit, ended or lost, and a claim carries the lowest
   link priority to its publisher and a draining bit beside its cost and chain.
 - A claims message with no change still carries its floor.
+- Among routes of equal rank a node takes one with no upstream-marked link on
+  its path before staying on its next hop, or a neighbour behind its own
+  upstream link is reachable by arrival order (decided by the coordinator on
+  2026-11-16, pending the maintainer, in
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
 - A node offers a route to itself only once it announces a claim, so a relay
   that has never announced a claim and only forwards or only serves viewers
   has no route on the wire.
@@ -212,5 +218,4 @@ extension on moq-transport is no longer sent or read.
 
 ## Required
 
-- [The router](/quest/m2/multicast/router.md) - the rule these sessions drive
 - [The route stream](/quest/m2/cluster-routes/route-stream.md) - one announce stream per side, which this builds on
