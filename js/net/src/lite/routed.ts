@@ -170,8 +170,9 @@ export class Routed {
 	#history = new AnnounceHistory();
 	#nextRoute = 0n;
 	#moving?: Moving;
-	// While a DEAD applies: the paths it touched, each marked whether lost, reported once it is done.
-	#deferred?: Map<Path.Valid, boolean>;
+	// While a DEAD applies: each reader's presented paths it touched, and whether any touch there
+	// lost a claim, each refreshed once it is done.
+	#deferred?: Map<Reader, Map<Path.Valid, boolean>>;
 
 	// Set once the session lets go of its routes, which then show nothing anew.
 	#closing = false;
@@ -464,21 +465,21 @@ export class Routed {
 	// what covers its own prefix from above it.
 	#revalidate() {
 		this.#session.revalidate();
-		for (const reader of this.#readers) {
-			// Inside a DEAD, a path it already touched keeps whether it was lost.
-			if (this.#deferred?.has(reader.prefix)) continue;
-			this.#touch(reader.prefix, false);
-		}
+		for (const reader of this.#readers) this.#touch(reader.prefix, false);
 	}
 
 	#touch(path: Path.Valid, lost: boolean) {
-		if (this.#deferred) {
-			this.#deferred.set(path, lost);
-			return;
-		}
 		for (const reader of this.#readers) {
 			const at = presentedAt(reader, path);
-			if (at !== undefined) this.#refresh(reader, at, lost);
+			if (at === undefined) continue;
+			if (!this.#deferred) {
+				this.#refresh(reader, at, lost);
+				continue;
+			}
+			// A path touched again keeps a loss: a later touch only rechecks it.
+			const paths = this.#deferred.get(reader) ?? new Map<Path.Valid, boolean>();
+			paths.set(at, (paths.get(at) ?? false) || lost);
+			this.#deferred.set(reader, paths);
 		}
 	}
 
@@ -745,14 +746,16 @@ export class Routed {
 	// Apply a DEAD and the offers its ROUTE_UPDATEs gave as one: readers and consumes see only
 	// where every route it moves ends up.
 	#applyDead(moving: Moving) {
-		const touched = new Map<Path.Valid, boolean>();
+		const touched = new Map<Reader, Map<Path.Valid, boolean>>();
 		this.#deferred = touched;
 		try {
 			this.#session.consumes.batch(() => this.#deadRoutes(moving));
 		} finally {
 			this.#deferred = undefined;
 		}
-		for (const [path, lost] of touched) this.#touch(path, lost);
+		for (const [reader, paths] of touched) {
+			for (const [at, lost] of paths) this.#refresh(reader, at, lost);
+		}
 	}
 
 	#deadRoutes({ hop, gone, offers }: Moving) {

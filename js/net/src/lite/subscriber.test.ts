@@ -4872,6 +4872,38 @@ test("a lite-07 DEAD takes a reader's claim offline at its own prefix", async ()
 	subscriber.close();
 });
 
+// A DEAD ending several routes through its hop shows each reader its loss once, at the path it
+// presents, whichever route went first: a broader reader's recheck does not withdraw it first.
+test("a lite-07 DEAD takes a narrower reader's claim offline beside a broader reader", async () => {
+	const below = Path.from("live/x");
+	const { subscriber, announced, send, another } = await routedStream();
+	const hop = { node: PEER_NODE, session: NODE_A };
+	// An unrelated route through the same hop goes first.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		offer: offer(NODE_B, { path: [{ node: NODE_B, session: 0n }, { node: NODE_A, session: 1n }, hop] }),
+	});
+	await send({ status: "active", suffix: Path.from("other"), route: 0n, instance: Instance.parse("b") });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: below, route: 1n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("other"), kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: below, kind: "start" });
+	const { announced: under } = await another(Path.Pattern.subtree(below));
+	expect(await under.next()).toMatchObject({ prefix: below, kind: "start" });
+
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 0n } });
+	expect(await under.next()).toMatchObject({ prefix: below, kind: "offline" });
+
+	under.close();
+	announced.close();
+	subscriber.close();
+});
+
 // A reader below a newer floor's region is not shown a claim above it, as a consume there skips
 // it: the covering claim it sees at its own prefix is the one that floor leaves current.
 test("a lite-07 reader skips a claim above a newer floor's region", async () => {
