@@ -230,6 +230,9 @@ def run(action, plan):
             Path(name).unlink()
     scripts("build")
     reports()
+    for name in ("@moq/msf", "@moq/hang"):
+        if name in packages:
+            command("node", "sh/js/dist-imports.test.mjs", packages[name]["directory"] + "/dist")
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"
