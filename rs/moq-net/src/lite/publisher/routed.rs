@@ -139,6 +139,14 @@ fn sends(link: &route::Link, claim: &node::Claim) -> bool {
 	!(link.upstream && claim.upstream) && (link.proxy || !claim.learned)
 }
 
+/// The ANNOUNCE_REQUESTs of an edit received so far, applied together at its last.
+struct Parts {
+	/// The Prefix IDs they remove.
+	remove: Vec<u64>,
+	/// The prefixes they add, each with its Hidden.
+	add: Vec<(Path, bool)>,
+}
+
 /// Answers the prefixes a lite-07 peer asks for.
 pub(in crate::lite) struct Answer {
 	origin: origin::Consumer,
@@ -157,8 +165,8 @@ pub(in crate::lite) struct Answer {
 	prefixes: BTreeMap<u64, Prefix>,
 	next_prefix: u64,
 	request: Option<Request>,
-	/// The ANNOUNCE_REQUESTs of an edit that continues: its removes and its adds so far.
-	parts: Option<(Vec<u64>, Vec<(Path, bool)>)>,
+	/// The ANNOUNCE_REQUESTs of an edit that continues.
+	parts: Option<Parts>,
 	encoder: lite::AnnounceEncoder,
 	routes: HashMap<RouteKey, Sent>,
 	next_route: u64,
@@ -237,9 +245,9 @@ impl Answer {
 			return Err(Error::ProtocolViolation);
 		}
 		let (mut remove, mut add) = (remove, add);
-		if let Some((removed, added)) = self.parts.take() {
-			remove.splice(0..0, removed);
-			add.splice(0..0, added);
+		if let Some(parts) = self.parts.take() {
+			remove.splice(0..0, parts.remove);
+			add.splice(0..0, parts.add);
 		}
 		// Parts that could never make a valid edit fail before more of them pile up: their
 		// Adds alone already pass the set's limit, or they remove more than the set holds.
@@ -248,7 +256,7 @@ impl Answer {
 			return Err(Error::ProtocolViolation);
 		}
 		if more {
-			self.parts = Some((remove, add));
+			self.parts = Some(Parts { remove, add });
 			return Ok(());
 		}
 		let mut left: BTreeMap<u64, &Prefix> = self.prefixes.iter().map(|(id, prefix)| (*id, prefix)).collect();

@@ -417,7 +417,7 @@ for (const routeCount of routeCounts) {
 				}) as Awaited<ReturnType<typeof create>>;
 			};
 			const publisher = new Publisher(pair.server, Version.DRAFT_07, toHop(1n), origin.consume());
-			publisher.request([], [{ prefix: Path.empty(), hidden: false }]);
+			publisher.request(false, [], [{ prefix: Path.empty(), hidden: false }]);
 			return { pair, publisher, entered, release };
 		});
 		await Promise.all(senders.map((sender) => sender.entered.promise));
