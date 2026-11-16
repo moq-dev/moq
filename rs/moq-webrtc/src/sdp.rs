@@ -4,7 +4,7 @@
 //! request/response bodies. On top of str0m's offer/answer parse/serialize this
 //! refuses data channels and repairs the answer's text where str0m's falls short.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashSet};
 
 use crate::{Error, Result};
 
@@ -76,14 +76,14 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 
 	// The offer's CRLF or LF survives.
 	let (session, sections) = split_sections(offer, "\n");
-	let group: Vec<&str> = session
+	let group: HashSet<&str> = session
 		.iter()
 		.find_map(|line| line.trim_end().strip_prefix("a=group:BUNDLE"))
 		.map(|group| group.split_whitespace().collect())
 		.unwrap_or_default();
 
 	let mut kept = Vec::new();
-	let mut mids = Vec::new();
+	let mut mids = HashSet::new();
 	let mut transport = Vec::new();
 	for (index, section) in sections.into_iter().enumerate() {
 		let mut tokens = section[0].split_whitespace();
@@ -100,7 +100,7 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 		let mid = section.iter().find_map(|line| line.trim_end().strip_prefix("a=mid:"));
 		if let Some(mid) = mid {
 			answer.push_str(&format!("a=mid:{mid}\r\n"));
-			mids.push(mid);
+			mids.insert(mid);
 			if group.contains(&mid) {
 				transport.extend(
 					section
@@ -112,12 +112,18 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 		refused.sections.push((index, answer));
 	}
 
-	let carried = |key: &str| {
-		session
-			.iter()
-			.chain(kept.iter().flatten())
-			.any(|line| line.starts_with(key))
-	};
+	// At most one of each other key, decided up front so the work stays linear in the
+	// offer. Every candidate moves: str0m dedupes them.
+	let mut taken: Vec<&str> = TRANSPORT
+		.iter()
+		.copied()
+		.filter(|key| {
+			session
+				.iter()
+				.chain(kept.iter().flatten())
+				.any(|line| line.starts_with(key))
+		})
+		.collect();
 	let mut hoisted: Vec<&str> = Vec::new();
 	for line in transport {
 		let key = TRANSPORT
@@ -125,11 +131,10 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 			.copied()
 			.find(|a| line.starts_with(a))
 			.unwrap_or_default();
-		let fresh = match key {
-			"a=candidate:" => !hoisted.contains(&line),
-			_ => !carried(key) && !hoisted.iter().any(|h| h.starts_with(key)),
-		};
-		if fresh {
+		if key == "a=candidate:" {
+			hoisted.push(line);
+		} else if !taken.contains(&key) {
+			taken.push(key);
 			hoisted.push(line);
 		}
 	}
@@ -459,6 +464,40 @@ mod tests {
 		let (body, refused) = super::refuse_channels(offer);
 		assert_eq!(body, "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n");
 		assert_eq!(refused.sections.len(), 1);
+	}
+
+	/// A body near the request limit of transport lines and data channels stays linear:
+	/// each key and mid is checked against a set decided once, not rescanned per line.
+	#[test]
+	fn a_flood_of_refused_transport_stays_linear() {
+		const LINES: usize = 100_000;
+		let mut offer = String::from("v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE x");
+		for mid in 0..LINES {
+			offer.push_str(&format!(" {mid}"));
+		}
+		offer.push_str("\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:x\r\n");
+		for _ in 0..LINES {
+			offer.push_str("a=ice-ufrag:u\r\n");
+		}
+		for _ in 0..LINES {
+			offer.push_str("a=setup:actpass\r\n");
+		}
+		for n in 0..LINES {
+			offer.push_str(&format!("a=candidate:{n} 1 udp 1 1.1.1.1 1000 typ host\r\n"));
+		}
+		for mid in 0..LINES {
+			offer.push_str(&format!(
+				"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:{mid}\r\n"
+			));
+		}
+
+		// Quadratic work here takes ~10^10 comparisons, past nextest's timeout.
+		let (body, refused) = super::refuse_channels(&offer);
+		assert_eq!(refused.sections.len(), LINES + 1);
+		assert_eq!(body.matches("a=ice-ufrag:").count(), 1);
+		assert_eq!(body.matches("a=setup:").count(), 1);
+		assert_eq!(body.matches("a=candidate:").count(), LINES);
+		assert!(!body.contains("a=group:BUNDLE"));
 	}
 
 	#[test]

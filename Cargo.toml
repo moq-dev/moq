@@ -79,7 +79,6 @@ allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
 anyhow = "1"
-arrayvec = "0.7.6"
 ash = "0.38"
 async-trait = "0.1"
 # Keep axum's defaults except tower-log, which enables tracing-to-log macros workspace-wide.
@@ -102,7 +101,6 @@ bitstream-io = "4.10"
 block2 = "0.6.2"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
-crc = "3"
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
