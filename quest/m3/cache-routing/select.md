@@ -2,8 +2,8 @@
 
 ## Goal
 
-A relay with demand for an Instance advertises it to its neighbours on the
-announce stream, and each relay pulls every demanded broadcast from the
+A relay with demand for an Instance advertises it on the announce stream to
+each neighbour that could take it, and each relay pulls every demanded broadcast from the
 cheapest copy of its Instance, moving an existing pull only when the route it
 uses gets worse or ends, or another is strictly cheaper in summed cost. A peer
 that sends no warm signal is treated as cold and behaves as it does today.
@@ -19,14 +19,28 @@ Plan, is replaced.
 
 Recommended 2026-11-16 on
 [moq-dev/moq#8903](https://github.com/moq-dev/moq/pull/8903), awaiting the
-maintainer's confirmation at merge: **advertise, with the data path in every
-offer, and the race left standing** (rejected: asking the cheapest
-neighbours on each SUBSCRIBE, which doubled the time to a first frame, sent
-a quarter to a third more messages, and left nearly twice the readers unfed
-under churn; joins along the path only, the cost baseline, which delivers neither
-case). That PR's simulator, `rs/moq-net/src/route/tests/warm.rs`, runs every
-rule below, and its `warmth.rs` holds the shapes and the churn sweep this
-ports onto production code.
+maintainer's confirmation at merge: **advertise only to a neighbour that
+could take the copy, with the data path in every offer, and the race left
+standing**. Rejected:
+
+- Advertising to every neighbour, which grows with the neighbours of every
+  relay on the warm chain: 11 to 76 warm messages per one-viewer reader
+  change as a full core mesh grows from 3 to 32 cores.
+- Asking the k cheapest neighbours on each SUBSCRIBE. It stays bounded per
+  subscribe only because it stops finding the copy: on a full drone mesh
+  past 5 drones, `ask_1` shared no uplink at 64 drones and `ask_2` few. It
+  doubled the time to a first frame and left about twice the readers unfed
+  under churn. On CDN tiers `ask_1` sent 6.5 to 11 warm messages per
+  one-viewer reader change against the pick's 3 to 7, about as many for a
+  crowd (3.9 to 8.1 against 5.4 to 7.9), and built dearer crowd trees.
+- Advertising only once two others want the copy, which lost both cases;
+  never advertising over a link marked upstream, which saves nothing in a
+  core mesh.
+- Joins along the path only, the cost baseline, which delivers neither case.
+
+That PR's simulator, `rs/moq-net/src/route/tests/warm.rs`, runs every rule
+below, and its `warmth.rs` holds the shapes, the churn sweep, and the growth
+sweep this ports onto production code.
 
 ### What a relay sends
 
@@ -35,15 +49,19 @@ ports onto production code.
   otherwise `O(P→R) + cold(P, R)`, the chain priced unshared. The publisher's
   relay offers 0. An offer is never below its sender's own cost.
 - **The path.** Every offer names the relays the data passes from the
-  publisher's relay to the sender. It cut transient cycles under churn by a
-  quarter on random meshes and an eighth on drone meshes, and the merge below
-  cannot work without it: it never settled on tiered meshes and failed 7 to
-  16 of 400 churned drone meshes.
+  publisher's relay to the sender. Without it, 1 of 400 churned random meshes
+  never settled, and transient cycles rose by 74% on random meshes and 25% on
+  drone meshes. The merge below cannot work without it either.
 - **Adverts.** While R has demand for an Instance besides N, it tells N its
-  offer and path on the announce stream, again on each change, and withdraws
-  it when the demand or its upstream ends. Every relay neighbour gets one,
-  parent and children included: dropping those two left 8 of 400 churned
-  drone meshes unsettled and nearly doubled the ring's uplinks.
+  offer and path on the announce stream when `O(R→N) + cold(R, N)` is below
+  N's route cost for the Instance, or equals it through a next hop other than
+  R, since a tie prefers a warm copy. It tells again on each change, and
+  withdraws when the demand, its upstream, or that test ends. Nothing it
+  skips could ever be taken: a relay at rest costs no more than its own
+  route, and a tie through R is the path join already. R knows N's route cost
+  from what N announces it, and computes it when N's route runs through R.
+  Skipping the parent and children by rule instead left 8 of 400 churned
+  drone meshes unsettled.
 - **Answers.** The subscribe answer carries the parent's offer and path to the
   subscriber, and an update on each change. A subscriber waits for that answer
   before it counts the pull as live.
@@ -84,12 +102,12 @@ neither offers the other anything cheaper, and both uplinks stay until one
 drone's demand ends. The maintainer's rule, decided 2026-11-15: merge them
 on the rendezvous hash unless that adds a cycle, an unfed reader, or more
 messages than the second uplink costs. Under adverts it does add cycles:
-in 400 churned drone meshes, 53 deliveries had a pull the merge made inside
-a cycle. Each was a pending cycle. A merged drone's new parent lost its
-uplink and rejoined through a drone that had trusted the merged drone's
-advert, before the lost parent's answer arrived. The merge also added about
-2% unfed reader hops. Under asking on subscribe, no merged pull was ever in a
-cycle.
+in 400 churned drone meshes, 41 deliveries had a pull the merge made inside
+a cycle (53 when advertising to every neighbour). Each was a pending cycle.
+A merged drone's new parent lost its uplink and rejoined through a drone
+that had trusted the merged drone's advert, before the lost parent's answer
+arrived. The merge also added about 2% unfed reader hops. Under asking on
+subscribe, no merged pull was ever in a cycle.
 
 So the race stands. A drone that loses the one uplink leaves every drone
 it fed taking its own uplink at once: 4 uplinks on the four-drone shape,
@@ -116,12 +134,27 @@ path in each offer.
   once, the lost uplink, the ring, and the tiers.
 - Bound the warm state a peer can make a relay hold: one advert per
   neighbour per Instance the relay has a route for, a path no longer than the
-  route layer's hop limit, and adverts for anything else dropped.
+  route layer's hop limit, and adverts for anything else dropped. Adverts are
+  per broadcast like the claims the announce stream already carries over
+  every link, so a relay hears at most one per neighbour per demanded
+  broadcast.
 - Check the Goal's efficiency against plain path routing on the same shapes.
   On the simulator: pops 61 against 69 (cheapest tree 59), drones in turn one
   uplink against five, a ring of 48 relays 8 uplinks against 48, tiers 1115
-  against 1191 (cheapest 1095), at 7 to 13 messages per reader change against
+  against 1191 (cheapest 1095), at 5 to 9 messages per reader change against
   2 to 3.
+- Port the growth sweep, and hold its laws. Per reader change, warm messages
+  are flat in the number of demanded broadcasts for every arm. On CDN tiers
+  with a full core mesh they are also flat in cores: 3 to 7.9 from 12 to 128
+  relays and 1 to 4,096 broadcasts. A core with demand is never cheaper
+  for another core than that core's own route, so only the edges beside it
+  hear. On a full drone mesh they grow with the drones, n − 1 per first
+  viewer (63 at 64 drones), since every drone could take the copy; that is
+  what buys the cheapest tree there (432 against 1,328 to 1,456 for asking
+  and path joins, a crowd of 9 on 16 broadcasts). At rest the busiest relay
+  of 128 holds 755 adverts for 4,096 one-viewer broadcasts, against 5,405
+  metadata-only subscriptions for `ask_1` and 151,552 adverts sent to every
+  neighbour.
 - A far pop keeps pulling through a nearer pop after that pop's reader
   leaves, while the nearer pop's unshared offer plus the warm link stays
   below the far pop's own long link. That is the cheaper tree, and the

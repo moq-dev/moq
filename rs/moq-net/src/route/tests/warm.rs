@@ -27,6 +27,7 @@
 //! ([`super::compare::Arm::KEPT`]), its messages interleaved with these at random.
 
 use std::{
+	cell::RefCell,
 	cmp::Reverse,
 	collections::{BTreeMap, BTreeSet, VecDeque},
 };
@@ -47,8 +48,25 @@ pub(super) enum Mode {
 	/// what cost. A neighbour with no demand forwards the subscription along its route,
 	/// as a metadata-only subscription does.
 	Ask(usize),
-	/// A warm relay tells every neighbour, and each change, on its announce stream.
-	Advertise,
+	/// A warm relay tells neighbours, and each change, on its announce stream: which
+	/// ones is the [`Audience`].
+	Advertise(Audience),
+}
+
+/// Which neighbours a warm relay advertises to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Audience {
+	/// Every relay neighbour.
+	All,
+	/// Only a neighbour for whom its offer plus the link beats that neighbour's route,
+	/// or ties it through another next hop, since a tie prefers a warm copy. Nothing
+	/// else could ever take it: a relay at rest costs no more than its own route, and
+	/// a tie through this relay is the path join already.
+	Useful,
+	/// Only once it has demand from two sources besides the neighbour.
+	Shared,
+	/// Never over a link marked upstream.
+	Down,
 }
 
 /// One way to find a warm copy, as measured.
@@ -69,7 +87,10 @@ impl Arm {
 			Mode::Path => "path".to_string(),
 			Mode::Ask(usize::MAX) => "ask_all".into(),
 			Mode::Ask(count) => format!("ask_{count}"),
-			Mode::Advertise => "advertise".into(),
+			Mode::Advertise(Audience::All) => "advertise".into(),
+			Mode::Advertise(Audience::Useful) => "advertise_useful".into(),
+			Mode::Advertise(Audience::Shared) => "advertise_shared".into(),
+			Mode::Advertise(Audience::Down) => "advertise_down".into(),
 		};
 		let hops = if self.hops { "+hops" } else { "" };
 		let merge = if self.merge { "+merge" } else { "" };
@@ -153,7 +174,7 @@ enum Lane {
 type Key = (Node, Node, Lane, usize);
 
 /// One relay's state for one broadcast.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Carry {
 	reader: bool,
 	/// The round its reader started, until its first frame.
@@ -319,11 +340,25 @@ pub(super) struct WarmSim {
 	endpoints: BTreeMap<Id, Node>,
 	homes: BTreeMap<Id, Node>,
 	prices: BTreeMap<(Node, Node), Price>,
+	/// Links marked upstream.
+	marked: BTreeSet<(Node, Node)>,
 	open: BTreeSet<(Node, Node)>,
+	/// Each node's open links.
+	adjacent: Vec<BTreeSet<Node>>,
+	/// Cheapest cold costs between nodes over open links, until one opens or closes.
+	distances: RefCell<Option<Vec<Vec<Metric>>>>,
 	casts: Vec<Broadcast>,
 	carry: Vec<BTreeMap<usize, Carry>>,
 	queues: BTreeMap<Key, VecDeque<(usize, Msg)>>,
 	streams: u64,
+	/// What must react before the next delivery: a relay and broadcast whose inputs
+	/// changed. Nothing else can act, so nothing else is asked to.
+	dirty: BTreeSet<(Node, usize)>,
+	/// Broadcasts whose pulls changed since cycles were last looked for.
+	changed: BTreeSet<usize>,
+	/// Broadcasts whose pulls circle: whether a reader's lead into it, and whether it
+	/// holds a pull the merge made.
+	circling: BTreeMap<usize, (bool, bool)>,
 	pub sent: Sent,
 	pub watch: Watch,
 	pub round: usize,
@@ -344,11 +379,17 @@ impl WarmSim {
 			endpoints: BTreeMap::new(),
 			homes: BTreeMap::new(),
 			prices: BTreeMap::new(),
+			marked: BTreeSet::new(),
 			open: BTreeSet::new(),
+			adjacent: vec![BTreeSet::new(); nodes],
+			distances: RefCell::new(None),
 			casts: Vec::new(),
 			carry: vec![BTreeMap::new(); nodes],
 			queues: BTreeMap::new(),
 			streams: 0,
+			dirty: BTreeSet::new(),
+			changed: BTreeSet::new(),
+			circling: BTreeMap::new(),
 			sent: Sent::default(),
 			watch: Watch::default(),
 			round: 0,
@@ -363,8 +404,31 @@ impl WarmSim {
 
 	pub fn link(&mut self, a: Node, b: Node, price: Price, tie: Tie) {
 		self.prices.insert(pair(a, b), price);
-		self.open.insert(pair(a, b));
+		if tie == Tie::Up {
+			self.marked.insert(pair(a, b));
+		}
+		self.join(a, b);
 		self.net.link(a, b, price.cold, tie);
+	}
+
+	fn join(&mut self, a: Node, b: Node) {
+		self.open.insert(pair(a, b));
+		self.adjacent[a].insert(b);
+		self.adjacent[b].insert(a);
+		self.distances.replace(None);
+	}
+
+	fn part(&mut self, a: Node, b: Node) {
+		self.open.remove(&pair(a, b));
+		self.adjacent[a].remove(&b);
+		self.adjacent[b].remove(&a);
+		self.distances.replace(None);
+	}
+
+	/// Every broadcast `node` holds state for reacts next, as when its routes change.
+	fn stir(&mut self, node: Node) {
+		let casts: Vec<usize> = self.carry[node].keys().copied().collect();
+		self.dirty.extend(casts.into_iter().map(|cast| (node, cast)));
 	}
 
 	/// Publisher `index` joins relay `home` and announces `claims` broadcasts. Returns
@@ -376,7 +440,7 @@ impl WarmSim {
 		self.endpoints.insert(id, node);
 		self.homes.insert(id, home);
 		self.prices.insert(pair(node, home), Price::flat(1));
-		self.open.insert(pair(node, home));
+		self.join(node, home);
 		self.net.link(node, home, 1, Tie::Peer);
 		self.net.publish(node, id);
 		(0..claims)
@@ -402,13 +466,7 @@ impl WarmSim {
 	}
 
 	fn peers(&self, node: Node) -> Vec<Node> {
-		(self.open.iter())
-			.filter_map(|&(a, b)| match node {
-				_ if a == node => Some(b),
-				_ if b == node => Some(a),
-				_ => None,
-			})
-			.collect()
+		self.adjacent[node].iter().copied().collect()
 	}
 
 	fn hash(&self, cast: usize, node: Node) -> u64 {
@@ -522,7 +580,7 @@ impl WarmSim {
 			Mode::Ask(_) => (carry.asks.iter())
 				.filter_map(|(&peer, signal)| Some((peer, signal.as_ref()?)))
 				.collect(),
-			Mode::Advertise => carry.heard.iter().map(|(&peer, signal)| (peer, signal)).collect(),
+			Mode::Advertise(_) => carry.heard.iter().map(|(&peer, signal)| (peer, signal)).collect(),
 		};
 		for (via, signal) in heard {
 			if !self.is_open(node, via)
@@ -787,12 +845,14 @@ impl WarmSim {
 
 	/// Tell every neighbour whether `node` is warm, on a change.
 	fn advertise(&mut self, node: Node, cast: usize) {
-		if self.arm.mode != Mode::Advertise {
+		let Mode::Advertise(audience) = self.arm.mode else {
 			return;
-		}
+		};
 		let peers: Vec<Node> = self.peers(node).into_iter().filter(|&peer| self.relay(peer)).collect();
 		for peer in peers {
-			let want = self.warm(node, cast, peer);
+			let want = self
+				.warm(node, cast, peer)
+				.filter(|signal| self.scoped(audience, node, cast, peer, signal));
 			let was = self.entry(node, cast).advertised.get(&peer).cloned();
 			if was == want {
 				continue;
@@ -805,16 +865,45 @@ impl WarmSim {
 		}
 	}
 
-	/// Every relay reacts to what changed.
+	/// Whether `audience` lets `node` advertise `signal` to `peer`.
+	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
+		match audience {
+			Audience::All => true,
+			Audience::Useful => match self.route(peer, cast) {
+				Some((via, cost)) => {
+					let price = signal.cost + self.price(node, peer).cold;
+					price < cost || (price == cost && via != node)
+				}
+				None => true,
+			},
+			Audience::Shared => self.carry(node, cast).is_some_and(|carry| {
+				let children = carry.down.keys().filter(|&&child| child != peer).count();
+				usize::from(carry.reader) + children >= 2
+			}),
+			Audience::Down => !self.marked.contains(&pair(node, peer)),
+		}
+	}
+
+	/// Each relay whose inputs changed reacts, in relay order, until it settles; a
+	/// relay with no state for a broadcast has nothing to do for it.
 	fn step(&mut self) {
-		for node in 0..self.relays {
-			for cast in 0..self.casts.len() {
+		while let Some((node, cast)) = self.dirty.pop_first() {
+			self.changed.insert(cast);
+			for _ in 0..8 {
+				let was = self.carry(node, cast).cloned();
 				self.react(node, cast);
+				if self.carry(node, cast) == was.as_ref() {
+					break;
+				}
+			}
+			if self.carry(node, cast).is_some_and(|carry| *carry == Carry::default()) {
+				self.carry[node].remove(&cast);
 			}
 		}
 	}
 
 	fn recv(&mut self, from: Node, to: Node, cast: usize, msg: Msg) {
+		self.dirty.insert((to, cast));
 		// A publisher answers at once.
 		if let Msg::Subscribe { stream, open: true } = msg
 			&& !self.relay(to)
@@ -874,6 +963,7 @@ impl WarmSim {
 		let carry = self.entry(node, cast);
 		carry.reader = reading;
 		carry.since = reading.then_some(round);
+		self.dirty.insert((node, cast));
 		self.step();
 	}
 
@@ -883,7 +973,7 @@ impl WarmSim {
 
 	/// The session between `a` and `b` closes, and both notice.
 	pub fn close(&mut self, a: Node, b: Node) {
-		self.open.remove(&pair(a, b));
+		self.part(a, b);
 		self.net.close(a, b);
 		self.queues.retain(|&(from, to, ..), _| pair(from, to) != pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
@@ -904,13 +994,16 @@ impl WarmSim {
 				carry.heard.remove(&y);
 				carry.advertised.remove(&y);
 			}
+			self.stir(x);
 		}
 		self.step();
 	}
 
 	pub fn reopen(&mut self, a: Node, b: Node) {
-		self.open.insert(pair(a, b));
+		self.join(a, b);
 		self.net.open(a, b);
+		self.stir(a);
+		self.stir(b);
 		self.step();
 	}
 
@@ -929,6 +1022,7 @@ impl WarmSim {
 				..Carry::default()
 			};
 		}
+		self.stir(node);
 		for peer in peers {
 			self.reopen(node, peer);
 		}
@@ -960,9 +1054,10 @@ impl WarmSim {
 				match queue {
 					Queue::Route(from, to) => {
 						self.net.deliver(from, to);
+						self.stir(to);
 					}
 					Queue::Data(key) => {
-						let Some((cast, msg)) = self.queues.get_mut(&key).and_then(VecDeque::pop_front) else {
+						let Some((cast, msg)) = self.pop(key) else {
 							break;
 						};
 						self.recv(key.0, key.1, cast, msg);
@@ -977,6 +1072,16 @@ impl WarmSim {
 		self.round += 1;
 		self.tally();
 		true
+	}
+
+	/// The next message on a queue, dropping the queue once empty.
+	fn pop(&mut self, key: Key) -> Option<(usize, Msg)> {
+		let queue = self.queues.get_mut(&key)?;
+		let next = queue.pop_front();
+		if queue.is_empty() {
+			self.queues.remove(&key);
+		}
+		next
 	}
 
 	/// Deliver in rounds until nothing is left. False if that never happens.
@@ -1006,14 +1111,11 @@ impl WarmSim {
 				let ((from, to), _) = routes[at];
 				self.net.deliver(from, to);
 				self.net.flush();
+				self.stir(to);
 			}
 			false => {
 				let key = data[at - routes.len()];
-				let (cast, msg) = self
-					.queues
-					.get_mut(&key)
-					.and_then(VecDeque::pop_front)
-					.expect("a message");
+				let (cast, msg) = self.pop(key).expect("a message");
 				self.recv(key.0, key.1, cast, msg);
 			}
 		}
@@ -1121,14 +1223,24 @@ impl WarmSim {
 			.collect()
 	}
 
-	/// Count a cycle after a delivery.
+	/// Count a cycle after a delivery, looking again only at broadcasts whose pulls
+	/// changed.
 	fn observe(&mut self) {
 		self.watch.steps += 1;
-		let cycle = (0..self.casts.len()).any(|cast| (0..self.relays).any(|node| self.circles(node, cast)));
-		let starved = cycle && self.readers().into_iter().any(|(node, cast)| self.circles(node, cast));
-		let merged = cycle
-			&& (0..self.casts.len())
-				.any(|cast| (0..self.relays).any(|node| self.circles(node, cast) && self.merged(node, cast)));
+		for cast in std::mem::take(&mut self.changed) {
+			let circling: Vec<Node> = (0..self.relays).filter(|&node| self.circles(node, cast)).collect();
+			match circling.is_empty() {
+				true => self.circling.remove(&cast),
+				false => {
+					let starved = circling.iter().any(|&node| self.reading(node, cast));
+					let merged = circling.iter().any(|&node| self.merged(node, cast));
+					self.circling.insert(cast, (starved, merged))
+				}
+			};
+		}
+		let cycle = !self.circling.is_empty();
+		let starved = self.circling.values().any(|&(starved, _)| starved);
+		let merged = self.circling.values().any(|&(_, merged)| merged);
 		self.watch.cycles += usize::from(cycle);
 		self.watch.merged += usize::from(merged);
 		self.watch.starved += usize::from(starved);
@@ -1154,10 +1266,11 @@ impl WarmSim {
 	/// Count unfed readers as a round ends, and the first frames that arrived.
 	fn tally(&mut self) {
 		let round = self.round;
-		let mut reach: BTreeMap<usize, BTreeSet<Node>> = BTreeMap::new();
+		let mut reach: BTreeMap<Node, BTreeSet<Node>> = BTreeMap::new();
 		for (node, cast) in self.readers() {
 			let fed = self.fed(node, cast) && self.live(node, cast).is_some();
-			let path = reach.entry(cast).or_insert_with(|| self.reach(cast)).contains(&node);
+			let start = self.endpoints[&self.casts[cast].0];
+			let path = reach.entry(start).or_insert_with(|| self.reach(cast)).contains(&node);
 			self.watch.unfed += usize::from(path && !fed);
 			let carry = self.entry(node, cast);
 			if fed && let Some(since) = carry.since.take() {
@@ -1198,6 +1311,22 @@ impl WarmSim {
 		Ok(())
 	}
 
+	/// The warm state `node` keeps about its neighbours across every broadcast: adverts
+	/// it heard and sent, or metadata-only subscriptions it holds and serves.
+	pub fn held(&self, node: Node) -> usize {
+		(self.carry[node].values())
+			.map(|carry| carry.heard.len() + carry.advertised.len() + carry.asks.len() + carry.asked.len())
+			.sum()
+	}
+
+	/// The most relay neighbours any relay has.
+	pub fn degree(&self) -> usize {
+		(0..self.relays)
+			.map(|node| self.adjacent[node].iter().filter(|&&peer| self.relay(peer)).count())
+			.max()
+			.unwrap_or(0)
+	}
+
 	/// Relays besides the publisher's pulling `cast` with no reader of their own: what
 	/// other relays' joins cost them.
 	pub fn carriers(&self, cast: usize) -> Vec<Node> {
@@ -1236,10 +1365,11 @@ impl WarmSim {
 
 	/// The cheapest tree joining `cast`'s publisher to every relay reading it, over open
 	/// links at their cold prices: Dreyfus and Wagner's exact dynamic program.
-	pub fn cheapest(&self, cast: usize) -> Metric {
-		let endpoint = self.endpoints[&self.casts[cast].0];
-		let mut terminals = vec![endpoint];
-		terminals.extend((0..self.relays).filter(|&node| self.reading(node, cast)));
+	/// The cheapest cold cost between every two nodes over open links, through relays.
+	fn distances(&self) -> Vec<Vec<Metric>> {
+		if let Some(dist) = self.distances.borrow().as_ref() {
+			return dist.clone();
+		}
 		let n = self.nodes;
 		let mut dist = vec![vec![Metric::MAX / 4; n]; n];
 		for (node, row) in dist.iter_mut().enumerate() {
@@ -1247,10 +1377,10 @@ impl WarmSim {
 		}
 		for &(a, b) in &self.open {
 			let cost = self.price(a, b).cold;
-			// Only relays forward.
 			dist[a][b] = dist[a][b].min(cost);
 			dist[b][a] = dist[b][a].min(cost);
 		}
+		// Only relays forward.
 		for via in (0..n).filter(|&node| self.relay(node)) {
 			for a in 0..n {
 				for b in 0..n {
@@ -1258,6 +1388,16 @@ impl WarmSim {
 				}
 			}
 		}
+		self.distances.replace(Some(dist.clone()));
+		dist
+	}
+
+	pub fn cheapest(&self, cast: usize) -> Metric {
+		let endpoint = self.endpoints[&self.casts[cast].0];
+		let mut terminals = vec![endpoint];
+		terminals.extend((0..self.relays).filter(|&node| self.reading(node, cast)));
+		let n = self.nodes;
+		let dist = self.distances();
 		let count = terminals.len();
 		let full = (1usize << count) - 1;
 		let mut tree = vec![vec![Metric::MAX / 4; n]; full + 1];

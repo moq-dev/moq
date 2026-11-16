@@ -21,7 +21,13 @@ fn arms() -> Vec<Arm> {
 			merge: false,
 		});
 	}
-	for mode in [Mode::Ask(1), Mode::Ask(2), Mode::Ask(usize::MAX), Mode::Advertise] {
+	for mode in [
+		Mode::Ask(1),
+		Mode::Ask(2),
+		Mode::Ask(usize::MAX),
+		Mode::Advertise(Audience::All),
+		Mode::Advertise(Audience::Useful),
+	] {
 		for hops in [true, false] {
 			for merge in [false, true] {
 				out.push(Arm { mode, hops, merge });
@@ -42,8 +48,9 @@ const fn arm(mode: Mode, merge: bool) -> Arm {
 const PATH: Arm = arm(Mode::Path, false);
 const ASK: Arm = arm(Mode::Ask(usize::MAX), false);
 const ASK_MERGE: Arm = arm(Mode::Ask(usize::MAX), true);
-const ADVERTISE: Arm = arm(Mode::Advertise, false);
-const ADVERTISE_MERGE: Arm = arm(Mode::Advertise, true);
+const ADVERTISE: Arm = arm(Mode::Advertise(Audience::All), false);
+const ADVERTISE_MERGE: Arm = arm(Mode::Advertise(Audience::All), true);
+const USEFUL: Arm = arm(Mode::Advertise(Audience::Useful), false);
 
 /// A mesh of relays with one publisher.
 #[derive(Clone, Debug)]
@@ -462,6 +469,228 @@ fn drones_take_over_a_lost_uplink() {
 	}
 }
 
+// --- Growth ---
+
+/// The cheaper ways to advertise that lost, measured beside the rest: telling only
+/// once two others want it, and never over a link marked upstream.
+fn audiences() -> Vec<Arm> {
+	[Audience::Shared, Audience::Down]
+		.into_iter()
+		.map(|audience| arm(Mode::Advertise(audience), false))
+		.collect()
+}
+
+/// The arms swept for growth, every one with the path in its offers.
+fn growing() -> Vec<Arm> {
+	let mut arms = vec![
+		PATH,
+		arm(Mode::Ask(1), false),
+		arm(Mode::Ask(2), false),
+		ASK,
+		ADVERTISE,
+		USEFUL,
+	];
+	arms.extend(audiences());
+	arms
+}
+
+/// A CDN tier: `cores` fully meshed, and `edges` edges per core, each joined to its
+/// core and the next one over links marked upstream and meshed with the edges
+/// beside it. The publisher joins core 0.
+fn cdn(cores: usize, edges: usize, claims: usize) -> Shape {
+	let edge = |core: usize, index: usize| cores + core * edges + index;
+	let mut links = Vec::new();
+	for a in 0..cores {
+		for b in a + 1..cores {
+			links.push((a, b, Price::new(6, 2), Tie::Peer));
+		}
+		for index in 0..edges {
+			links.push((edge(a, index), a, Price::new(3, 1), Tie::Up));
+			if cores > 1 {
+				links.push((edge(a, index), (a + 1) % cores, Price::new(3, 1), Tie::Up));
+			}
+			for other in index + 1..edges {
+				links.push((edge(a, index), edge(a, other), Price::new(1, 1), Tie::Peer));
+			}
+		}
+	}
+	Shape {
+		name: "cdn",
+		relays: cores * (1 + edges),
+		links,
+		home: 0,
+		claims,
+	}
+}
+
+/// Who reads: one viewer per broadcast at a random reader relay, every one at once,
+/// or a crowd of up to nine on each arriving and leaving in turn, as a crowd does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Load {
+	OneViewer,
+	Crowd,
+}
+
+impl Load {
+	fn name(self) -> &'static str {
+		match self {
+			Self::OneViewer => "one_viewer",
+			Self::Crowd => "crowd",
+		}
+	}
+
+	/// Readers per broadcast, drawn from `relays`.
+	fn readers(self, relays: std::ops::Range<Node>, claims: usize, seed: u64) -> Vec<(Node, usize)> {
+		let mut rng = XorShift(seed);
+		let mut out = Vec::new();
+		for cast in 0..claims {
+			let mut pool: Vec<Node> = relays.clone().collect();
+			let count = match self {
+				Self::OneViewer => 1,
+				Self::Crowd => pool.len().min(9),
+			};
+			for _ in 0..count {
+				let at = rng.next(pool.len() as u64) as usize;
+				out.push((pool.swap_remove(at), cast));
+			}
+		}
+		out
+	}
+}
+
+/// What one arm cost on one shape and load: every reader joins, then every one
+/// leaves, each settled before the next when `in_turn`.
+struct Grown {
+	changes: usize,
+	sent: Sent,
+	/// Warm state per relay with every reader in place: the mean and the most.
+	held: f64,
+	most: usize,
+	cost: Metric,
+	cheapest: Metric,
+	first: f64,
+	right: Result<(), String>,
+}
+
+fn grow(shape: &Shape, readers: &[(Node, usize)], in_turn: bool, arm: Arm, cheapest: bool) -> Grown {
+	let mut sim = shape.build(arm, 11);
+	let (sent, waits) = (sim.sent, sim.waits.len());
+	let mut settled = true;
+	for &(node, cast) in readers {
+		sim.read(node, cast, true);
+		if in_turn {
+			settled &= sim.settle();
+		}
+	}
+	let mut right = match settled && sim.settle() {
+		true => sim.check(),
+		false => Err("never settled".into()),
+	};
+	let held: Vec<usize> = (0..shape.relays).map(|node| sim.held(node)).collect();
+	let casts = 0..sim.casts();
+	let cost = casts.clone().map(|cast| sim.tree(cast).cost).sum();
+	let cheapest = match cheapest {
+		true => casts.map(|cast| sim.cheapest(cast)).sum(),
+		false => 0,
+	};
+	let first = mean(&sim.waits[waits..]);
+	for &(node, cast) in readers {
+		sim.read(node, cast, false);
+		if in_turn {
+			settled &= sim.settle();
+		}
+	}
+	if right.is_ok() && !(settled && sim.settle()) {
+		right = Err("never settled after leaving".into());
+	}
+	Grown {
+		changes: 2 * readers.len(),
+		sent: sim.sent - sent,
+		held: held.iter().sum::<usize>() as f64 / held.len() as f64,
+		most: held.into_iter().max().unwrap_or(0),
+		cost,
+		cheapest,
+		first,
+		right,
+	}
+}
+
+/// A first viewer's adverts on CDN tiers: told to every neighbour they grow with
+/// the core mesh, and told only where they could be taken they do not, since a core
+/// with demand is never cheaper for another core than its own route.
+#[test]
+fn useful_adverts_do_not_grow_with_the_core_mesh() {
+	let warm = |arm: Arm, cores: usize| {
+		let shape = cdn(cores, 3, 1);
+		// The first edge under core 1, which the publisher's core is not.
+		let grown = grow(&shape, &[(cores + 3, 0)], false, arm, false);
+		assert_eq!(grown.right, Ok(()), "{}", arm.name());
+		grown.sent.warm()
+	};
+	assert_eq!(warm(USEFUL, 8), warm(USEFUL, 16));
+	assert!(warm(ADVERTISE, 8) < warm(ADVERTISE, 16));
+}
+
+/// Warm messages and warm state as relays and demanded broadcasts grow, on CDN tiers
+/// with their cores fully meshed and on drone meshes, for one viewer per broadcast
+/// and for a crowd. `MOQ_WARMTH_GROWTH` caps the broadcasts.
+#[test]
+#[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
+fn benchmark_warmth_growth() {
+	let most: usize = std::env::var("MOQ_WARMTH_GROWTH").map_or(4096, |most| most.parse().expect("MOQ_WARMTH_GROWTH"));
+	println!(
+		"shape,relays,neighbours,broadcasts,load,arm,reader_changes,messages,warm_messages,per_change_warm_messages,held_per_relay,held_at_most,tree_cost,cheapest_cost,first_frame_ms,right"
+	);
+	let mut sizes: Vec<(Shape, std::ops::Range<Node>)> = Vec::new();
+	for cores in [3, 8, 16, 32] {
+		let shape = cdn(cores, 3, 1);
+		sizes.push((shape, cores..cores * 4));
+	}
+	for count in [5, 16, 64] {
+		sizes.push((drones(count), 1..count + 1));
+	}
+	for (shape, readers) in sizes {
+		for load in [Load::OneViewer, Load::Crowd] {
+			let counts: &[usize] = match load {
+				Load::OneViewer => &[1, 16, 256, 4096],
+				Load::Crowd => &[1, 4, 16],
+			};
+			for &claims in counts.iter().filter(|&&claims| claims <= most) {
+				let shape = Shape {
+					claims,
+					..shape.clone()
+				};
+				let reads = load.readers(readers.clone(), claims, 0x6772_6f77 + claims as u64);
+				let neighbours = shape.build(PATH, 11).degree();
+				let mut cheapest = None;
+				for arm in growing() {
+					let grown = grow(&shape, &reads, load == Load::Crowd, arm, cheapest.is_none());
+					let cheapest = *cheapest.get_or_insert(grown.cheapest);
+					println!(
+						"{},{},{neighbours},{claims},{},{},{},{},{},{:.2},{:.2},{},{},{cheapest},{:.0},{}",
+						shape.name,
+						shape.relays,
+						load.name(),
+						arm.name(),
+						grown.changes,
+						grown.sent.total(),
+						grown.sent.warm(),
+						grown.sent.warm() as f64 / grown.changes as f64,
+						grown.held,
+						grown.most,
+						grown.cost,
+						grown.first * HOP.as_secs_f64() * 1000.0,
+						match grown.right {
+							Ok(()) => "yes".into(),
+							Err(err) => err.replace(',', ";"),
+						},
+					);
+				}
+			}
+		}
+	}
+}
+
 // --- Churn ---
 
 /// What churn showed for one arm, summed over its cases.
@@ -576,7 +805,7 @@ fn flying(rng: &mut XorShift) -> Shape {
 /// circling: the cycles it formed lasted only while messages were in flight.
 #[test]
 fn every_arm_settles_after_churn() {
-	for arm in [PATH, ASK, ASK_MERGE, ADVERTISE, ADVERTISE_MERGE] {
+	for arm in [PATH, ASK, ASK_MERGE, ADVERTISE, ADVERTISE_MERGE, USEFUL] {
 		for shape in [random as fn(&mut XorShift) -> Shape, flying] {
 			let out = churn(arm, 0..12, shape);
 			assert_eq!(out.failed, 0, "{}: {:?}", arm.name(), out.first);
@@ -725,7 +954,7 @@ fn benchmark_warmth_cases() {
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
 	for base in cases().into_iter().map(Some).chain([None]) {
 		let mut path_cost = None;
-		for arm in arms() {
+		for arm in arms().into_iter().chain(audiences()) {
 			let case = base.as_ref().map_or_else(|| takeover(arm), |case| case.clone());
 			let rows = run(&case.shape, arm, &case.phases, 7);
 			let sum = |field: fn(&Row) -> usize| rows.iter().map(field).sum::<usize>();
@@ -772,7 +1001,7 @@ fn benchmark_warmth_churn() {
 	);
 	let cases: usize = std::env::var("MOQ_WARMTH_CASES").map_or(400, |cases| cases.parse().expect("MOQ_WARMTH_CASES"));
 	for (name, shape) in [("random", random as fn(&mut XorShift) -> Shape), ("drones", flying)] {
-		for arm in arms() {
+		for arm in arms().into_iter().chain(audiences()) {
 			let out = churn(arm, 0..cases, shape);
 			println!(
 				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
