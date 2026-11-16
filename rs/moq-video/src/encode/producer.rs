@@ -142,6 +142,9 @@ pub struct Producer {
 	/// Whether nothing has been published since the last break marker, which a second break
 	/// would only repeat.
 	marked: bool,
+	/// Whether a resume's encoder refused the funded rate, so this rung now resumes only at its
+	/// full ceiling, which needs no retune, rather than overshoot a partial grant.
+	ceiling_only: bool,
 }
 
 impl Producer {
@@ -226,6 +229,7 @@ impl Producer {
 			target: rate::Target::Enabled(ceiling),
 			watched: false,
 			marked: false,
+			ceiling_only: false,
 		})
 	}
 
@@ -613,12 +617,27 @@ impl Producer {
 				self.publisher.report_bitrate(bitrate);
 				Ok(())
 			}
+			// A resume. Left disabled, the grant ramps on as if it were on, and the
+			// target that reaches the ceiling resumes it.
 			(rate::Target::Enabled(bitrate), Encoding::Disabled) => {
-				let sink = self.reopen(bitrate).await?;
-				if let Err(err) = self.publisher.set_enabled(true) {
-					self.target = rate::Target::Disabled;
-					return Err(err);
+				let ceiling = *self.ceiling.read();
+				let bitrate = bitrate.min(ceiling);
+				if self.ceiling_only && bitrate < ceiling {
+					return Ok(());
 				}
+				let mut sink = Sink::open(&self.config).await?;
+				if bitrate < ceiling
+					&& let Err(err) = sink.set_bitrate(bitrate).await
+				{
+					// Opening at the ceiling would overshoot the grant, and retrying would reopen
+					// an encoder every ramp step on a backend that can never retune.
+					tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "resumed encoder refused the funded bitrate; resuming only at the ceiling");
+					self.ceiling_only = true;
+					return Ok(());
+				}
+				self.publisher.set_enabled(true)?;
+				self.target = rate::Target::Enabled(bitrate);
+				self.publisher.report_bitrate(bitrate);
 				self.encoding = Encoding::Open(sink);
 				Ok(())
 			}
@@ -843,6 +862,56 @@ mod tests {
 
 		high.write(frame(&mut micros)).await.unwrap();
 		assert_eq!(events("encode"), 1);
+
+		let _high = high.finish().await.unwrap();
+		let _low = low.finish().await.unwrap();
+	}
+
+	/// A rung whose resumed encoder refuses the funded rate stays disabled rather than open at a
+	/// ceiling the grant cannot fund, and from then on resumes only at its full ceiling.
+	#[tokio::test]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_refused_resume_waits_for_the_ceiling() {
+		let _probe = probe::exclusive();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let low = probed(
+			&broadcast,
+			&catalog,
+			"low",
+			Rate::from_kbps(500),
+			unlimited.clone(),
+			None,
+		);
+		let ceiling = Rate::from_mbps(2);
+		let mut high = probed(&broadcast, &catalog, "high", ceiling, unlimited, Some(low.rung()));
+		let mut micros = 0;
+
+		high.write(frame(&mut micros)).await.unwrap();
+		high.apply(rate::Target::Disabled).await.unwrap();
+		let _ = probe::take();
+
+		let funded = Rate::from_mbps(1);
+		probe::refuse_once(funded.as_bps());
+		high.apply(rate::Target::Enabled(funded)).await.unwrap();
+		assert!(!enabled(&catalog, "high"), "a refused resume stays disabled");
+		assert_eq!(high.bitrate(), None);
+
+		// A grant that would now retune fine still funds less than the ceiling.
+		let _ = probe::take();
+		high.apply(rate::Target::Enabled(funded)).await.unwrap();
+		assert!(!enabled(&catalog, "high"));
+		assert_eq!(events("open"), 0, "a partial grant no longer reopens the encoder");
+
+		high.apply(rate::Target::Enabled(ceiling)).await.unwrap();
+		assert!(enabled(&catalog, "high"));
+		assert_eq!(high.bitrate(), Some(ceiling));
+		let resumed = probe::take();
+		assert!(resumed.iter().all(|(event, _)| *event != "set_bitrate"), "{resumed:?}");
 
 		let _high = high.finish().await.unwrap();
 		let _low = low.finish().await.unwrap();
