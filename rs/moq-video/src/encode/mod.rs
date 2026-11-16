@@ -7,29 +7,33 @@
 //! - `publish_capture` captures and publishes a webcam (turnkey), returning a
 //!   `Publication` that reports its state and the `Driver` that runs it.
 //!   Requires the `capture` feature.
-//! - [`Encoder`] encodes raw [`Frame`](crate::Frame)s you supply into
-//!   [`Encoded`] access units, and [`Publisher`] publishes those (bring your own
-//!   frames). Build both for the same [`Codec`].
-//! - [`Sink`] is an [`Encoder`] that owns the thread it runs on, for an encoder
-//!   outliving a single thread's stack (a shared object, an FFI handle, a task
-//!   that migrates between workers).
-//! - [`Publisher`] alone publishes frames you already encoded.
+//! - [`Producer`] encodes raw [`Frame`](crate::Frame)s you supply and publishes
+//!   them (bring your own frames), following the uplink's bandwidth grant between
+//!   frames. The counterpart of `moq_audio::encode::Producer`; the capture driver
+//!   runs on it.
+//! - [`Encoder`] encodes raw frames into [`Encoded`] access units without
+//!   publishing them. [`Sink`] is an [`Encoder`] that owns the thread it runs on,
+//!   for an encoder outliving a single thread's stack (a shared object, an FFI
+//!   handle, a task that migrates between workers).
+//! - [`Publisher`] publishes frames you already encoded, with no rate control.
 //!
-//! A [`Publisher`] advertises its catalog rendition as soon as the track exists,
-//! resolved from the encoder itself via [`Config::probe`], so a subscriber can
-//! discover a track nothing has encoded yet. That's what lets an on-demand
-//! capture wait for its first viewer at all.
+//! Both [`Producer`] and [`Publisher`] advertise their catalog rendition as soon
+//! as the track exists, resolved from the encoder itself via [`Config::probe`], so
+//! a subscriber can discover a track nothing has encoded yet. That's what lets an
+//! on-demand capture wait for its first viewer at all.
 //!
-//! `Capture` (with `capture`) / [`Kind`] / [`Config`] configure them.
-//! [`Config::preset`] picks a [`Preset`], how the encoder trades latency for
-//! compression at the configured bitrate. The decode/consume
-//! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
+//! [`Options`] / `Capture` (with `capture`) / [`Kind`] / [`Config`] configure
+//! them. [`Config::preset`] picks a [`Preset`], how the encoder trades latency
+//! for compression at the configured bitrate. The decode/consume counterpart
+//! (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
 //!
 //! The shared [`moq_mux::rate`] policy maps a congestion-control bandwidth
-//! estimate onto the encoder's bitrate, which `publish_capture` drives for you.
+//! estimate onto the encoder's bitrate, which [`Producer`] drives for you.
 
 pub(crate) mod backend;
+#[cfg(feature = "capture")]
+mod capture;
 #[cfg_attr(
 	not(feature = "capture"),
 	allow(
@@ -40,15 +44,17 @@ pub(crate) mod backend;
 mod cuts;
 mod encoded;
 mod encoder;
+mod producer;
 mod publisher;
 mod sink;
 
 pub use backend::NAMES;
+#[cfg(feature = "capture")]
+pub use capture::{Capture, Driver, Publication, State, Status, publish_capture};
 pub use encoded::Encoded;
 pub use encoder::{Applied, Codec, Config, Encoder, Kind, Preset};
-pub use publisher::Publisher;
-#[cfg(feature = "capture")]
-pub use publisher::{Capture, Driver, Publication, State, Status, publish_capture};
+pub use producer::{Options, Producer, Rung};
+pub use publisher::{Finished, Publisher};
 pub use sink::Sink;
 
 #[cfg(test)]

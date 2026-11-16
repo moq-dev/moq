@@ -1,0 +1,953 @@
+//! Encode raw frames and publish them as a moq video track, following the uplink's grant.
+
+use std::sync::Arc;
+use std::task::Poll;
+
+use moq_mux::catalog::hang::CatalogExt;
+use moq_mux::rate;
+use moq_net::bandwidth::Rate;
+
+use super::Sink;
+use super::encoder::{Codec, Config};
+use super::publisher::{Finished, Publisher};
+use crate::{Error, Frame};
+
+/// Encode and publication policy for [`Producer`].
+///
+/// `#[non_exhaustive]`: construct via [`Options::new`] and set fields, so new knobs can be added
+/// without breaking callers.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Options {
+	/// Track name to publish under. `None` derives a unique one from the codec (`0.avc3`, then
+	/// `1.avc3`, ...). Subscribers find it through the catalog either way.
+	pub track: Option<String>,
+	/// The encoder: the geometry every written frame has, the codec, the backend, and the
+	/// [`bitrate`](Config::bitrate), which is the ceiling the grant never raises it past.
+	pub config: Config,
+	/// The connection's bandwidth, as an allocator over
+	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth) (or
+	/// `moq_tokio::Connection::send_bandwidth`, which survives reconnects).
+	///
+	/// The track reserves its ceiling against it and, while someone watches, retunes the encoder
+	/// to its share between frames, per the default [`rate::Policy`], so a closing uplink gets a
+	/// softer picture instead of a stalled one. Pass the same allocator to every sender on the
+	/// connection, audio included, so their bitrates sum to the uplink instead of each matching it.
+	///
+	/// Defaults to [`Allocator::unlimited`](moq_net::bandwidth::Allocator::unlimited), which holds
+	/// the ceiling regardless of congestion.
+	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// The next lower rendition of the same source, when this one is encoded beside it.
+	///
+	/// Makes this rendition a simulcast rung: while the grant can no longer fund it, it stops
+	/// encoding, drops what is written to it, and advertises itself disabled, so the lower
+	/// renditions keep their share, and it resumes on a keyframe once the grant recovers. It takes
+	/// the track priority one below the lower rendition's, so the allocator fills that one first.
+	/// Needs a [`bandwidth`](Self::bandwidth) to follow, and a ceiling above the lower one's.
+	pub lower: Option<Rung>,
+}
+
+impl Options {
+	/// Encode with `config`, holding its bitrate.
+	pub fn new(config: Config) -> Self {
+		Self {
+			track: None,
+			config,
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			lower: None,
+		}
+	}
+}
+
+/// A rendition's place in a simulcast ladder, from [`Producer::rung`], which the next
+/// rendition up takes as its [`Options::lower`].
+///
+/// Watches the rendition without keeping it publishing: once it finishes or drops, the rung
+/// above has nothing to fall back to and never disables.
+#[derive(Clone)]
+pub struct Rung {
+	ceiling: kio::Consumer<Rate>,
+	priority: i8,
+}
+
+impl std::fmt::Debug for Rung {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Rung")
+			.field("ceiling", &*self.ceiling.read())
+			.field("priority", &self.priority)
+			.finish()
+	}
+}
+
+impl Rung {
+	/// The rendition's current ceiling, or `None` once it ended. Arms `waiter` for either change.
+	fn ceiling(&self, waiter: &kio::Waiter) -> Option<Rate> {
+		match self.ceiling.poll(waiter, |_| Poll::<()>::Pending) {
+			Poll::Pending => Some(*self.ceiling.read()),
+			// The closure never completes, so this is the channel closing.
+			Poll::Ready(_) => None,
+		}
+	}
+}
+
+/// What a [`Producer`]'s encoder is doing.
+enum Encoding {
+	/// Encoding every frame written.
+	Open(Sink),
+	/// Stopped by a [`discontinuity`](Producer::discontinuity) or a capture between sources: the
+	/// next frame written reopens it.
+	Idle,
+	/// Stopped while the grant cannot fund this rung: frames written are dropped until it resumes.
+	Disabled,
+}
+
+/// Encode raw [`Frame`]s and publish them as a moq video track (avc3 / hev1 by codec).
+///
+/// The counterpart of `moq_audio::encode::Producer`: it owns its encoder, registers the catalog
+/// rendition at construction, probed from the encoder so a subscriber can discover the track
+/// before a frame is written, and follows the [`bandwidth`](Options::bandwidth) grant between
+/// frames. [`Publisher`] is the layer below, for frames you encoded yourself.
+///
+/// While nobody watches, a rendition with no [`lower`](Options::lower) one encodes at its
+/// ceiling and ignores the grant: its groups wait in the cache rather than being paced to a
+/// subscriber, and the next viewer's grant applies afresh. A rung keeps following the grant,
+/// which reports the slice it would get back, so it resumes after its viewers left.
+///
+/// The `async` methods are not cancel-safe, as [`Sink`]'s are not: a cancelled one leaves the
+/// encoder refusing every later call, so drop the producer instead.
+pub struct Producer {
+	publisher: Publisher,
+	encoding: Encoding,
+	/// The encoder settings, whose bitrate is the ceiling, to reopen with.
+	config: Config,
+	/// The ceiling, which caps every grant. A channel, so a rung above this rendition wakes when
+	/// it moves and when this rendition ends.
+	ceiling: kio::Producer<Rate>,
+	/// The track priority, which a higher rung takes one below.
+	priority: i8,
+	lower: Option<Rung>,
+	/// Reserves against the track a decoder identity change moves the rendition to.
+	allocator: moq_net::bandwidth::Allocator,
+	/// This rendition's claim on the track named by `demand`.
+	reservation: Arc<moq_net::bandwidth::Reservation>,
+	/// The track `reservation` claims on, which stays the published one until a frame moves it.
+	demand: moq_net::track::Demand,
+	/// `None` once retired: the grant ended for good, so the encoder holds its rate.
+	grant: Option<rate::Grant>,
+	/// What the encoder produces, or reopens at.
+	target: rate::Target,
+	/// Whether someone watched at the last write, so a rendition that never disables rests at
+	/// its ceiling once nobody does.
+	watched: bool,
+	/// Whether nothing has been published since the last break marker, which a second break
+	/// would only repeat.
+	marked: bool,
+}
+
+impl Producer {
+	/// Open the encoder and publish a track for it in `broadcast`, registering its rendition in
+	/// `catalog` immediately.
+	///
+	/// The rendition comes from [`Config::probe`], so it says what the first keyframe will. An
+	/// unsupported codec, resolution, or backend fails here, before the track exists.
+	pub async fn new<E: CatalogExt>(
+		broadcast: &moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
+		options: Options,
+	) -> Result<Self, Error> {
+		let Options {
+			track,
+			config,
+			bandwidth,
+			lower,
+		} = options;
+		let ceiling = config.resolved_bitrate();
+		if let Some(below) = lower.as_ref().and_then(|lower| lower.ceiling(&kio::Waiter::noop()))
+			&& below >= ceiling
+		{
+			return Err(Error::UnsupportedConfig(format!(
+				"the lower rendition's {} bps is not below this one's {} bps",
+				below.as_bps(),
+				ceiling.as_bps()
+			)));
+		}
+		// Both before the track exists: a config this machine can't encode fails without leaving
+		// a track advertised that will never carry frames. The probe closes its encoder before this
+		// one opens, so only one codec session is live.
+		let rendition = config.probe().await?;
+		let sink = Sink::open(&config).await?;
+
+		let priority = lower
+			.as_ref()
+			.map_or(hang::catalog::PRIORITY.video, |lower| lower.priority.saturating_sub(1));
+		let info = catalog.track_info(priority);
+		let track = match track {
+			Some(name) => broadcast.create_track(name, info)?,
+			None => broadcast.unique_track(suffix(config.codec), info)?,
+		};
+		let mut producer = Self::with_track(track, &catalog, config, rendition, bandwidth, lower)?;
+		producer.encoding = Encoding::Open(sink);
+		Ok(producer)
+	}
+
+	/// Publish `rendition` on `track` with no encoder open yet: the next frame written, or
+	/// [`open`](Self::open), opens one.
+	pub(crate) fn with_track<E: CatalogExt>(
+		track: moq_net::track::Producer,
+		catalog: &moq_mux::catalog::Producer<E>,
+		mut config: Config,
+		rendition: hang::catalog::VideoConfig,
+		allocator: moq_net::bandwidth::Allocator,
+		lower: Option<Rung>,
+	) -> Result<Self, Error> {
+		let priority = track.info().priority;
+		let publisher = Publisher::new(
+			track,
+			catalog.reserve().with_interval(config.effective_join()),
+			rendition,
+		)?;
+		let ceiling = config.resolved_bitrate();
+		config.bitrate = Some(ceiling);
+		let demand = publisher.demand();
+		let reservation = Arc::new(allocator.reserve(&demand, ceiling));
+		let grant = rate::Grant::new(reservation.consume(), policy(ceiling, lower.as_ref()));
+		publisher.report_bitrate(ceiling);
+		Ok(Self {
+			publisher,
+			encoding: Encoding::Idle,
+			config,
+			ceiling: kio::Producer::new(ceiling),
+			priority,
+			lower,
+			allocator,
+			reservation,
+			demand,
+			grant: Some(grant),
+			target: rate::Target::Enabled(ceiling),
+			watched: false,
+			marked: false,
+		})
+	}
+
+	/// A watch-only handle to the published track's subscriber demand. A frame that changes the
+	/// decoder identity, such as a resume at a ceiling past the declared level, moves the
+	/// rendition to a newly named track, so read this again after [`write`](Self::write).
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.publisher.demand()
+	}
+
+	/// This rendition's place in a simulcast ladder, for the next rendition up to take as its
+	/// [`Options::lower`].
+	pub fn rung(&self) -> Rung {
+		Rung {
+			ceiling: self.ceiling.consume(),
+			priority: self.priority,
+		}
+	}
+
+	/// This track's claim on the [`bandwidth`](Options::bandwidth) allocator, whose
+	/// [`rate`](moq_net::bandwidth::Reservation::rate) is the grant the encoder follows. A frame
+	/// that moves the rendition to a new track claims on that one instead, so read this again
+	/// after [`write`](Self::write).
+	pub fn reservation(&self) -> &Arc<moq_net::bandwidth::Reservation> {
+		&self.reservation
+	}
+
+	/// The bitrate the encoder produces at, or `None` while a rung is disabled.
+	pub fn bitrate(&self) -> Option<Rate> {
+		match self.target {
+			rate::Target::Enabled(bitrate) => Some(bitrate),
+			rate::Target::Disabled => None,
+		}
+	}
+
+	/// Encode and publish one frame at its own timestamp, at the configured size.
+	///
+	/// Follows any grant change first, so the encoder retunes between frames rather than mid-
+	/// encode. A backend that pipelines publishes an earlier frame's output here, so a call that
+	/// publishes nothing is normal. While a rung is disabled, the frame is dropped unencoded.
+	///
+	/// Takes the frame as anything that can become an [`Arc`], like [`Sink::encode`], so a
+	/// source fanning one frame out to a ladder hands each rung a clone of the handle.
+	pub async fn write(&mut self, frame: impl Into<Arc<Frame>>) -> Result<(), Error> {
+		self.follow().await;
+		if let Encoding::Idle = self.encoding {
+			let wanted = self.bitrate().unwrap_or(*self.ceiling.read());
+			let sink = self.reopen(wanted).await?;
+			self.encoding = Encoding::Open(sink);
+		}
+		let Encoding::Open(sink) = &mut self.encoding else {
+			return Ok(());
+		};
+		sink.encode(frame).await?;
+		self.publish_ready()
+	}
+
+	/// Cut a new group at the next written frame.
+	///
+	/// Optional: the encoder already keyframes every [`join`](Config::join), and each of those cuts
+	/// a group. Reach for it to place a boundary the encoder cannot see, such as a scene change.
+	/// Fails when the encoder cannot force a keyframe, leaving groups to that interval. A stopped
+	/// encoder opens with a keyframe anyway, so this does nothing then.
+	pub async fn cut(&mut self) -> Result<(), Error> {
+		match &mut self.encoding {
+			Encoding::Open(sink) => sink.cut().await,
+			Encoding::Idle | Encoding::Disabled => Ok(()),
+		}
+	}
+
+	/// Set the ceiling to `bitrate`, retuning the encoder to it from roughly the next frame. No
+	/// keyframe is forced. The reservation moves with it, so a later grant never retunes above it.
+	///
+	/// Some backends cannot raise past the bitrate they opened at (openh264), so configure the
+	/// highest you will ask for and adapt downwards. Errors, changing nothing, when the encoder
+	/// cannot retune while running; it keeps encoding at its current rate.
+	pub async fn set_bitrate(&mut self, bitrate: Rate) -> Result<(), Error> {
+		if let Encoding::Open(sink) = &mut self.encoding {
+			sink.set_bitrate(bitrate).await?;
+		}
+		if !matches!(self.encoding, Encoding::Disabled) {
+			self.target = rate::Target::Enabled(bitrate);
+			self.publisher.report_bitrate(bitrate);
+		}
+		self.config.bitrate = Some(bitrate);
+		if let Ok(mut ceiling) = self.ceiling.write() {
+			*ceiling = bitrate;
+		}
+		self.reservation.update(bitrate);
+		// A new ceiling starts the grant over from it, since the encoder applied it itself.
+		if let Some(grant) = self.grant.as_mut() {
+			grant.set_policy(policy(bitrate, self.lower.as_ref()));
+		}
+		Ok(())
+	}
+
+	/// Mark a break in the published timeline: what is written next does not continue what came
+	/// before.
+	///
+	/// Call this when the source stops rather than merely pausing between frames, such as a
+	/// paused game or a source switch. The encoder drains into the track and closes, so what
+	/// resumes opens a group with a keyframe from a fresh one. Errors when the drain fails, after
+	/// the break is marked anyway: only those last frames are lost.
+	pub async fn discontinuity(&mut self) -> Result<(), Error> {
+		let drained = match std::mem::replace(&mut self.encoding, Encoding::Idle) {
+			Encoding::Open(sink) => self.drain(sink).await,
+			Encoding::Idle => Ok(()),
+			// Stays disabled, so what is written is still dropped until the grant resumes it.
+			Encoding::Disabled => {
+				self.encoding = Encoding::Disabled;
+				Ok(())
+			}
+		};
+		self.mark()?;
+		drained
+	}
+
+	/// Drain the encoder into the track and finish it.
+	///
+	/// Consumes the producer, releasing the encoder and the bandwidth claim. The returned
+	/// [`Finished`] keeps the track and its catalog rendition published, and can still
+	/// [`abort`](Finished::abort) them. A drain that fails ends the track with an error instead,
+	/// since a clean end promises a subscriber everything the publisher produced.
+	pub async fn finish(self) -> Result<Finished, Error> {
+		let Self {
+			mut publisher,
+			encoding,
+			ceiling,
+			reservation,
+			..
+		} = self;
+		// The claim goes before the drain, so siblings can take the room while the last frames go
+		// out, and the ceiling closes, so a rung above stops counting on this one now.
+		drop((ceiling, reservation));
+		let drained = match encoding {
+			Encoding::Open(mut sink) => {
+				async {
+					sink.flush().await?;
+					while let Some(encoded) = sink.receive()? {
+						publisher.publish(&encoded)?;
+					}
+					Ok::<_, Error>(())
+				}
+				.await
+			}
+			Encoding::Idle | Encoding::Disabled => Ok(()),
+		};
+		match drained {
+			Ok(()) => Finished::new(publisher),
+			Err(err) => {
+				publisher.abort(moq_net::Error::Transport(err.to_string()));
+				Err(err)
+			}
+		}
+	}
+
+	/// Abort the track with `err` instead of finishing it, so subscribers see the real cause rather
+	/// than [`moq_net::Error::Dropped`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.publisher.abort(err);
+	}
+}
+
+/// What the capture driver needs beyond the public API: it opens and releases the encoder with
+/// its camera rather than on the first frame and on a drain.
+#[cfg(feature = "capture")]
+impl Producer {
+	/// Open an encoder for `config`, a capture's source reopened at whatever mode it negotiated.
+	///
+	/// The ceiling and its claim follow the mode, and rate control starts over from the ceiling,
+	/// since what the link did while the source was closed says little about now.
+	pub(crate) async fn open(&mut self, mut config: Config) -> Result<(), Error> {
+		let sink = Sink::open(&config).await?;
+		let ceiling = config.resolved_bitrate();
+		config.bitrate = Some(ceiling);
+		self.config = config;
+		if let Ok(mut current) = self.ceiling.write() {
+			*current = ceiling;
+		}
+		self.reservation.update(ceiling);
+		if self.grant.is_some() {
+			self.grant = Some(rate::Grant::new(
+				self.reservation.consume(),
+				policy(ceiling, self.lower.as_ref()),
+			));
+		}
+		self.target = rate::Target::Enabled(ceiling);
+		self.watched = false;
+		self.publisher.report_bitrate(ceiling);
+		self.encoding = Encoding::Open(sink);
+		Ok(())
+	}
+
+	/// Close the encoder without draining it and mark the break, for a capture whose source went
+	/// away, possibly mid-encode: a cancelled call leaves the encoder refusing the next.
+	pub(crate) fn release(&mut self) -> Result<(), Error> {
+		if let Encoding::Open(_) = self.encoding {
+			self.encoding = Encoding::Idle;
+		}
+		self.mark()
+	}
+
+	/// The open encoder's backend name.
+	pub(crate) fn name(&self) -> Option<&str> {
+		match &self.encoding {
+			Encoding::Open(sink) => Some(sink.name()),
+			Encoding::Idle | Encoding::Disabled => None,
+		}
+	}
+
+	/// What the open encoder's backend applied.
+	pub(crate) fn applied(&self) -> Option<super::Applied> {
+		match &self.encoding {
+			Encoding::Open(sink) => Some(sink.applied()),
+			Encoding::Idle | Encoding::Disabled => None,
+		}
+	}
+
+	/// The group a subscriber wants past the largest published; see [`Publisher::wanted`].
+	pub(crate) fn wanted(&self) -> Option<u64> {
+		self.publisher.wanted()
+	}
+
+	/// Report source frames the encoder never saw, in the catalog's stats.
+	pub(crate) fn report_skipped(&self, frames: u64) {
+		self.publisher.report_skipped(frames);
+	}
+}
+
+impl Producer {
+	/// Publish every access unit the encoder has ready, then move the claim to the track the
+	/// rendition is on now, even when publishing failed, so it never stays on an ended track.
+	fn publish_ready(&mut self) -> Result<(), Error> {
+		let published = match &mut self.encoding {
+			Encoding::Open(sink) => Self::publish_from(sink, &mut self.publisher, &mut self.marked),
+			Encoding::Idle | Encoding::Disabled => Ok(()),
+		};
+		self.follow_track();
+		published
+	}
+
+	fn publish_from(sink: &mut Sink, publisher: &mut Publisher, marked: &mut bool) -> Result<(), Error> {
+		while let Some(encoded) = sink.receive()? {
+			publisher.publish(&encoded)?;
+			*marked = false;
+		}
+		Ok(())
+	}
+
+	/// Flush `sink` and publish its tail, closing it.
+	async fn drain(&mut self, mut sink: Sink) -> Result<(), Error> {
+		sink.flush().await?;
+		let published = Self::publish_from(&mut sink, &mut self.publisher, &mut self.marked);
+		self.follow_track();
+		published
+	}
+
+	/// Publish the break marker, unless nothing was published since the last one.
+	fn mark(&mut self) -> Result<(), Error> {
+		if !self.marked {
+			self.publisher.discontinuity()?;
+			self.marked = true;
+		}
+		Ok(())
+	}
+
+	/// A frame whose decoder identity differs from the declared one publishes under a new name
+	/// and ends the old track. The claim moves there, following on from the current target.
+	fn follow_track(&mut self) {
+		let demand = self.publisher.demand();
+		if demand.name() == self.demand.name() {
+			return;
+		}
+		tracing::info!(track = %demand.name(), "video moved to a new track");
+		self.reservation = Arc::new(self.allocator.reserve(&demand, *self.ceiling.read()));
+		self.demand = demand;
+		if let Some(grant) = self.grant.as_mut() {
+			let mut moved = rate::Grant::new(self.reservation.consume(), grant.policy().clone());
+			moved.assume(self.target);
+			*grant = moved;
+		}
+		// The new track's stats start empty.
+		if let rate::Target::Enabled(bitrate) = self.target {
+			self.publisher.report_bitrate(bitrate);
+		}
+	}
+
+	/// Apply every target the grant has due, or rest at the ceiling while nobody watches a
+	/// rendition that never disables.
+	///
+	/// A target that fails to apply is taken back and asked for again a ramp step later, so an
+	/// encoder that cannot retune at all costs one attempt per step while the grant moves.
+	async fn follow(&mut self) {
+		if self.lower.is_none() {
+			let watched = self.demand.wanted().is_some();
+			let rested = self.watched && !watched;
+			self.watched = watched;
+			if rested {
+				self.rest().await;
+			}
+			if !watched {
+				return;
+			}
+		}
+
+		let noop = kio::Waiter::noop();
+		// Each target is one the grant would not hand out again without a new grant, a deadline,
+		// or a failure, all of which leave it pending until the next write.
+		loop {
+			let policy = policy(*self.ceiling.read(), self.lower.as_ref());
+			let Some(grant) = self.grant.as_mut() else { return };
+			grant.set_policy(policy);
+			let target = match grant.poll_next(&noop) {
+				Poll::Pending => return,
+				Poll::Ready(Ok(target)) => target,
+				Poll::Ready(Err(_)) => {
+					tracing::debug!("bandwidth grant ended; holding the current encoder bitrate");
+					self.grant = None;
+					return;
+				}
+			};
+			if let Err(err) = self.apply(target).await {
+				tracing::warn!(error = %err, ?target, "failed to follow the bandwidth grant");
+				if let Some(grant) = self.grant.as_mut() {
+					grant.failed();
+				}
+				return;
+			}
+			tracing::debug!(?target, "followed the bandwidth grant");
+		}
+	}
+
+	/// Return an encoder nobody watches to its ceiling, and start its rate control over from
+	/// there for the next viewer.
+	async fn rest(&mut self) {
+		// Retired: the grant is gone, and the encoder holds its rate.
+		if self.grant.is_none() {
+			return;
+		}
+		let ceiling = *self.ceiling.read();
+		if let Err(err) = self.apply(rate::Target::Enabled(ceiling)).await {
+			// The grant still matches the rate the encoder kept, so the next viewer follows on from it.
+			tracing::warn!(error = %err, bitrate = ceiling.as_bps(), "failed to rest the encoder bitrate");
+			return;
+		}
+		self.grant = Some(rate::Grant::new(self.reservation.consume(), policy(ceiling, None)));
+	}
+
+	/// Apply a rate-control target, leaving the rendition as it was when that fails.
+	///
+	/// A disable drains the encoder into the track and closes it; a resume reopens one, whose
+	/// first frame is a keyframe on every backend.
+	async fn apply(&mut self, target: rate::Target) -> Result<(), Error> {
+		match (target, &mut self.encoding) {
+			(rate::Target::Disabled, Encoding::Disabled) => Ok(()),
+			(rate::Target::Disabled, _) => {
+				// The catalog first, the only step that leaves the rendition as it was when it fails.
+				// After it the encoder goes whatever the drain reports, so the catalog never
+				// advertises a rendition whose frames are dropped.
+				self.publisher.set_enabled(false)?;
+				self.target = rate::Target::Disabled;
+				let drained = match std::mem::replace(&mut self.encoding, Encoding::Disabled) {
+					Encoding::Open(sink) => self.drain(sink).await,
+					Encoding::Idle | Encoding::Disabled => Ok(()),
+				};
+				// The encoder is gone either way, so a lost tail only costs those frames.
+				if let Err(err) = drained {
+					tracing::warn!(error = %err, "failed to drain a disabled rendition's encoder");
+				}
+				self.mark()
+			}
+			(rate::Target::Enabled(bitrate), Encoding::Open(sink)) => {
+				sink.set_bitrate(bitrate).await?;
+				self.target = target;
+				self.publisher.report_bitrate(bitrate);
+				Ok(())
+			}
+			// Applied when the next frame reopens the encoder.
+			(rate::Target::Enabled(bitrate), Encoding::Idle) => {
+				self.target = target;
+				self.publisher.report_bitrate(bitrate);
+				Ok(())
+			}
+			(rate::Target::Enabled(bitrate), Encoding::Disabled) => {
+				let sink = self.reopen(bitrate).await?;
+				if let Err(err) = self.publisher.set_enabled(true) {
+					self.target = rate::Target::Disabled;
+					return Err(err);
+				}
+				self.encoding = Encoding::Open(sink);
+				Ok(())
+			}
+		}
+	}
+
+	/// Open an encoder at the ceiling and retune it to `wanted`, which becomes the target once it
+	/// opens. A failed open changes nothing.
+	///
+	/// One that cannot retune still opens, at the ceiling, which the grant then follows on from.
+	async fn reopen(&mut self, wanted: Rate) -> Result<Sink, Error> {
+		let mut sink = Sink::open(&self.config).await?;
+		let ceiling = *self.ceiling.read();
+		let wanted = wanted.min(ceiling);
+		let applied = match wanted < ceiling {
+			true => match sink.set_bitrate(wanted).await {
+				Ok(()) => wanted,
+				Err(err) => {
+					tracing::warn!(error = %err, bitrate = wanted.as_bps(), "reopened encoder kept its ceiling");
+					ceiling
+				}
+			},
+			false => ceiling,
+		};
+		self.target = rate::Target::Enabled(applied);
+		if applied != wanted
+			&& let Some(grant) = self.grant.as_mut()
+		{
+			grant.assume(self.target);
+		}
+		self.publisher.report_bitrate(applied);
+		Ok(sink)
+	}
+}
+
+/// The track name suffix for `codec`: avc3 or hev1, which carry their parameter sets in band.
+pub(crate) fn suffix(codec: Codec) -> &'static str {
+	match codec {
+		Codec::H264 => ".avc3",
+		Codec::H265 => ".hev1",
+	}
+}
+
+/// The policy a rendition follows: its `ceiling`, above the `lower` rendition's current ceiling.
+fn policy(ceiling: Rate, lower: Option<&Rung>) -> rate::Policy {
+	let mut policy = rate::Policy::new(ceiling);
+	policy.lower = lower.and_then(|lower| lower.ceiling(&kio::Waiter::noop()));
+	policy
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use moq_net::Timestamp;
+
+	use super::*;
+	use crate::encode::backend::probe;
+	use crate::encode::encoder;
+
+	fn config(kind: encoder::Kind, ceiling: Rate) -> Config {
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+		config.kind = kind;
+		config.bitrate = Some(ceiling);
+		config
+	}
+
+	/// The rendition the probe backend would declare, if it emitted H.264: it emits the frame's
+	/// timestamp instead, which publishes nothing, so the declared shape never gets corrected.
+	fn rendition() -> hang::catalog::VideoConfig {
+		hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::H264(hang::catalog::H264 {
+			inline: true,
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+		}))
+	}
+
+	/// A producer on the probe backend, publishing `name` with no encoder open yet.
+	fn probed(
+		broadcast: &moq_net::broadcast::Producer,
+		catalog: &moq_mux::catalog::Producer,
+		name: &str,
+		ceiling: Rate,
+		bandwidth: moq_net::bandwidth::Allocator,
+		lower: Option<Rung>,
+	) -> Producer {
+		let track = broadcast
+			.create_track(name, catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let config = config(encoder::Kind::Named(probe::NAME.into()), ceiling);
+		Producer::with_track(track, catalog, config, rendition(), bandwidth, lower).unwrap()
+	}
+
+	/// A mid-gray frame at `micros`, advancing it by one frame at 30 fps.
+	fn frame(micros: &mut u64) -> Frame {
+		let size = crate::Size::new(320, 240);
+		let i420 = crate::I420::new(size, vec![0x80; crate::I420::len(size).unwrap()]).unwrap();
+		let frame = Frame::new(crate::Surface::I420(i420), Timestamp::from_micros(*micros).unwrap());
+		*micros += 33_333;
+		frame
+	}
+
+	fn enabled(catalog: &moq_mux::catalog::Producer, name: &str) -> bool {
+		catalog.snapshot().video.renditions[name].enabled
+	}
+
+	fn events(name: &str) -> usize {
+		probe::take().iter().filter(|(event, _)| *event == name).count()
+	}
+
+	/// A watched producer retunes to a falling grant between frames, and climbs back to its
+	/// ceiling after congestion clears although the grant never changes again, retrying a step
+	/// the encoder refused rather than waiting for the next change.
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn follows_a_falling_and_recovering_grant() {
+		let _probe = probe::exclusive();
+		let ceiling = Rate::from_mbps(4);
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(ceiling)).unwrap();
+		let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = probed(&broadcast, &catalog, "video", ceiling, bandwidth, None);
+		let _viewer = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		assert_eq!(producer.bitrate(), Some(ceiling));
+
+		estimate.set(Some(Rate::from_mbps(1))).unwrap();
+		for _ in 0..3 {
+			tokio::time::advance(Duration::from_millis(33)).await;
+			producer.write(frame(&mut micros)).await.unwrap();
+		}
+		let fallen = probe::bitrates();
+		assert!(!fallen.is_empty(), "the encoder never followed the grant down");
+		assert!(fallen.iter().all(|&bps| bps <= 1_000_000), "{fallen:?}");
+		assert!(producer.bitrate().unwrap() <= Rate::from_mbps(1));
+
+		// The last grant change: the link recovers a second later.
+		tokio::time::advance(Duration::from_secs(1)).await;
+		estimate.set(Some(ceiling)).unwrap();
+		probe::refuse_once(ceiling.as_bps());
+		let _ = probe::take();
+
+		// A minute of frames is far past anything the ramp still needs.
+		for _ in 0..600 {
+			tokio::time::advance(Duration::from_millis(100)).await;
+			producer.write(frame(&mut micros)).await.unwrap();
+		}
+		let recovered = probe::bitrates();
+		assert_eq!(
+			recovered.last(),
+			Some(&ceiling.as_bps()),
+			"the ramp stalled: {recovered:?}"
+		);
+		assert_eq!(producer.bitrate(), Some(ceiling));
+		assert!(
+			events("set_bitrate") > recovered.len(),
+			"the refused step was never retried: {recovered:?}"
+		);
+
+		let _finished = producer.finish().await.unwrap();
+	}
+
+	/// A rung the grant cannot fund stops encoding, drops what is written, and advertises itself
+	/// disabled; resumed, it opens a fresh encoder and advertises itself again.
+	#[tokio::test]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn disables_and_reenables_its_rendition() {
+		let _probe = probe::exclusive();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let low = probed(
+			&broadcast,
+			&catalog,
+			"low",
+			Rate::from_kbps(500),
+			unlimited.clone(),
+			None,
+		);
+		let ceiling = Rate::from_mbps(2);
+		let mut high = probed(&broadcast, &catalog, "high", ceiling, unlimited, Some(low.rung()));
+		let mut micros = 0;
+
+		high.write(frame(&mut micros)).await.unwrap();
+		assert!(enabled(&catalog, "high"));
+		let _ = probe::take();
+
+		high.apply(rate::Target::Disabled).await.unwrap();
+		assert!(!enabled(&catalog, "high"));
+		assert_eq!(high.bitrate(), None);
+		let disabled = probe::take();
+		assert!(disabled.iter().any(|(event, _)| *event == "flush"), "{disabled:?}");
+		assert!(disabled.iter().any(|(event, _)| *event == "drop"), "{disabled:?}");
+
+		high.write(frame(&mut micros)).await.unwrap();
+		assert_eq!(events("encode"), 0, "a disabled rung encodes nothing");
+
+		let resumed = Rate::from_mbps(1);
+		high.apply(rate::Target::Enabled(resumed)).await.unwrap();
+		assert!(enabled(&catalog, "high"));
+		assert_eq!(high.bitrate(), Some(resumed));
+		assert_eq!(probe::bitrates(), [resumed.as_bps()]);
+		assert_eq!(events("open"), 1);
+
+		high.write(frame(&mut micros)).await.unwrap();
+		assert_eq!(events("encode"), 1);
+
+		let _high = high.finish().await.unwrap();
+		let _low = low.finish().await.unwrap();
+	}
+
+	/// A rung must sit above the rendition it falls back to: one that does not fails before its
+	/// track exists.
+	#[tokio::test]
+	async fn a_rung_at_or_below_its_lower_rendition_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let lower = probed(&broadcast, &catalog, "lower", Rate::from_mbps(2), unlimited, None);
+
+		let mut options = Options::new(config(encoder::Kind::Named(probe::NAME.into()), Rate::from_mbps(2)));
+		options.lower = Some(lower.rung());
+		assert!(Producer::new(&broadcast, catalog.clone(), options).await.is_err());
+		assert_eq!(catalog.snapshot().video.renditions.len(), 1);
+	}
+
+	/// A rung takes the priority below the rendition it falls back to, so the allocator funds
+	/// that one first.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn a_rung_takes_the_priority_below_its_lower_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let lower = probed(&broadcast, &catalog, "lower", Rate::from_kbps(500), unlimited, None);
+
+		let mut options = Options::new(config(encoder::Kind::Software, Rate::from_mbps(1)));
+		options.lower = Some(lower.rung());
+		let higher = Producer::new(&broadcast, catalog, options).await.unwrap();
+		// Read back from the track it created.
+		assert_eq!(higher.priority, lower.priority - 1);
+	}
+
+	/// Subscribe to `video`, skipping no group however far behind the reader falls.
+	#[cfg(feature = "openh264")]
+	async fn subscribe(broadcast: &moq_net::broadcast::Producer) -> moq_net::track::Subscriber {
+		let history = moq_net::track::Delay::default().with_max(None);
+		broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_delay(history))
+			.await
+			.unwrap()
+	}
+
+	/// The frames in each group `consumer` reads, until the track ends.
+	#[cfg(feature = "openh264")]
+	async fn read(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+		let mut groups = Vec::new();
+		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+			let mut frames = 0;
+			while group.next_frame().await.unwrap().is_some() {
+				frames += 1;
+			}
+			groups.push(frames);
+		}
+		groups
+	}
+
+	/// A discontinuity drains the encoder and marks the break once, however often it is called,
+	/// and the next frame opens a fresh encoder on a keyframe.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn a_discontinuity_marks_the_break_once() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut options = Options::new(config(encoder::Kind::Software, Rate::from_mbps(1)));
+		options.track = Some("video".into());
+		let mut producer = Producer::new(&broadcast, catalog, options).await.unwrap();
+		let consumer = subscribe(&broadcast).await;
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		producer.discontinuity().await.unwrap();
+		producer.discontinuity().await.unwrap();
+		producer.write(frame(&mut micros)).await.unwrap();
+		let _finished = producer.finish().await.unwrap();
+
+		assert_eq!(read(consumer).await, [1, 1, 1]);
+	}
+
+	/// A disabled rung's last frames reach the track before its break marker, and it resumes on
+	/// a keyframe, so a subscriber reads the gap as a break rather than a stall.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn a_disabled_rung_resumes_on_a_new_group() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut options = Options::new(config(encoder::Kind::Software, Rate::from_mbps(1)));
+		options.track = Some("video".into());
+		let mut producer = Producer::new(&broadcast, catalog, options).await.unwrap();
+		let consumer = subscribe(&broadcast).await;
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		producer.apply(rate::Target::Disabled).await.unwrap();
+		producer.write(frame(&mut micros)).await.unwrap();
+		producer
+			.apply(rate::Target::Enabled(Rate::from_kbps(500)))
+			.await
+			.unwrap();
+		producer.write(frame(&mut micros)).await.unwrap();
+		let _finished = producer.finish().await.unwrap();
+
+		assert_eq!(read(consumer).await, [1, 1, 1]);
+	}
+}

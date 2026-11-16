@@ -40,7 +40,14 @@ build with the `v4l2` feature keeps every `Auto` or `Hardware` selection to its
 GOP, whichever encoder it lands on, since a V4L2 driver may refuse the request.
 Backends that can
 change bitrate live follow the connection's send estimate while someone
-watches, and return to the configured bitrate while nobody does. Where the platform
+watches, and return to the configured bitrate while nobody does.
+
+To publish frames from your own source, `encode::Producer` takes raw frames,
+owns the encoder, and follows the same send estimate between frames, like
+`moq_audio::encode::Producer`. Chain renditions through `Options::lower` for
+simulcast: a higher rung stops encoding and advertises itself disabled while the
+connection cannot fund it, then resumes on a keyframe. `encode::Publisher` is
+the layer below, for frames you encoded yourself. Where the platform
 allows it, frames stay on the GPU between capture, decode, encode, and render.
 
 Opt-in features: `capture`, `pipewire` (Linux portal capture and PipeWire

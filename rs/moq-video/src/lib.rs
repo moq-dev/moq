@@ -31,9 +31,11 @@
 //!     startup so they can be exact), and the camera stays open and encodes
 //!     whether or not anyone is watching, unless `encode::Capture::on_demand`
 //!     limits it to while a subscriber is. Requires the `capture` feature.
-//!   - [`encode::Encoder`] encodes [`Frame`]s you supply (from capture, a
-//!     decoder, or your own pixels via [`Surface::rgba`]) and
-//!     [`encode::Publisher`] publishes the results.
+//!   - [`encode::Producer`] encodes [`Frame`]s you supply (from capture, a
+//!     decoder, or your own pixels via [`Surface::rgba`]) and publishes them,
+//!     following the connection's bandwidth grant between frames.
+//!   - [`encode::Encoder`] encodes without publishing, and
+//!     [`encode::Publisher`] publishes frames you encoded yourself.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS and iOS, Media Foundation /
 //!   DXVA on Windows, NVDEC, VAAPI, or an ARM SoC's V4L2 M2M decoder on Linux,

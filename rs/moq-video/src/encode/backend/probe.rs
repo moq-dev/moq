@@ -6,6 +6,7 @@
 //!
 //! It also holds each frame back by one, like the Media Foundation MFT, so a
 //! drain that loses the tail shows up as a missing frame rather than passing.
+//! Every bitrate it accepts is logged too, so a test can follow rate control.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -71,13 +72,11 @@ pub(crate) fn take() -> Vec<Event> {
 }
 
 /// Empty the accepted bitrates and hand them back.
-#[cfg(feature = "capture")]
 pub(crate) fn bitrates() -> Vec<u64> {
 	std::mem::take(&mut BITRATES.lock().unwrap())
 }
 
 /// Fail the first `set_bitrate` asking for `bitrate`, then accept it again.
-#[cfg(feature = "capture")]
 pub(crate) fn refuse_once(bitrate: u64) {
 	*REFUSE.lock().unwrap() = Some(bitrate);
 }
@@ -120,8 +119,12 @@ impl Backend for Probe {
 			record("cut");
 		}
 		// The payload is the frame's timestamp, so a test can tell which frame a
-		// packet came from independently of what it's stamped with.
-		let payload = bytes::Bytes::from(frame.timestamp.as_micros()?.to_string());
+		// packet came from independently of what it's stamped with. It rides in an
+		// H.264 filler NAL, which a publisher parses and never emits as a frame, so a
+		// test can publish what the probe encodes without a real codec.
+		let mut payload = vec![0, 0, 0, 1, 0x0c];
+		payload.extend_from_slice(frame.timestamp.as_micros()?.to_string().as_bytes());
+		let payload = bytes::Bytes::from(payload);
 		let previous = self.held.replace(Encoded::new(payload, frame.timestamp, cut));
 		self.ready.extend(previous);
 		Ok(())
