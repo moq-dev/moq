@@ -51,7 +51,6 @@ export class Effect {
 	set<S extends Setter<unknown>>(signal: S, value: SetterType<S>, ...args: undefined extends SetterType<S> ? [cleanup?: SetterType<S>] : [cleanup: SetterType<S>]): void;
 	spawn(fn: () => Promise<void>): void;
 	subscribe<T>(signal: Getter<T>, fn: (value: T) => void): void;
-	timeout(fn: (effect: Effect) => void, duration: Duration): void;
 	timer(fn: () => void, duration: Duration): void;
 }
 
@@ -86,7 +85,7 @@ export class Once<T> implements GetPromise<T> {
 export type Readonlys<T extends SignalMap> = { readonly [K in keyof T]: Getter<GetterType<T[K]>> };
 
 export interface Setter<T> {
-	set(value: T): void;
+	set(value: T, force?: true): void;
 	update(fn: (prev: T) => T): void;
 }
 
@@ -99,12 +98,12 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	changed(): Promise<T>;
 	changed(fn: Subscriber<T>): Dispose;
 	static from<T>(value: T | Signal<T>): Signal<T>;
-	mutate<R>(fn: (value: T) => R, notify?: boolean): R;
+	mutate<R>(fn: (value: T) => R): R;
 	peek(): T;
 	static race<T extends readonly unknown[]>(...sigs: { [K in keyof T]: Getter<T[K]> }): GetPromise<Awaited<T[number]>>;
-	set(value: T, notify?: boolean): void;
+	set(value: T, force?: true): void;
 	subscribe(fn: Subscriber<T>): Dispose;
-	update(fn: (prev: T) => T, notify?: boolean): void;
+	update(fn: (prev: T) => T): void;
 	watch(fn: Subscriber<T>): Dispose;
 }
 

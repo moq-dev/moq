@@ -1114,31 +1114,26 @@ class Rendition {
 	#addBuffered(start: Duration, end: Duration): void {
 		if (start.gt(end)) return;
 
-		this.#buffered.mutate((current) => {
-			for (const range of current) {
-				// Check if there's any overlap, then merge
-				if (range.start.le(end) && range.end.ge(start)) {
-					range.start = range.start.min(start);
-					range.end = range.end.max(end);
-					return;
-				}
+		// A new array of new ranges, since the merged copy hands them to `buffered` by reference.
+		this.#buffered.update((current) => {
+			// Merge into the first range it overlaps.
+			const i = current.findIndex((range) => range.start.le(end) && range.end.ge(start));
+			if (i >= 0) {
+				const range = current[i];
+				return current.with(i, { start: range.start.min(start), end: range.end.max(end) });
 			}
-
-			current.push({ start, end });
-			current.sort((a, b) => a.start.cmp(b.start));
+			return [...current, { start, end }].sort((a, b) => a.start.cmp(b.start));
 		});
 	}
 
 	// Trim the decode buffer up to the rendered timestamp
 	#trimBuffered(timestamp: Duration): void {
-		this.#buffered.mutate((current) => {
-			while (current.length > 0) {
-				if (current[0].end.ge(timestamp)) {
-					current[0].start = current[0].start.max(timestamp);
-					break;
-				}
-				current.shift();
-			}
+		this.#buffered.update((current) => {
+			// Drop the ranges that ended before `timestamp` and clip the first one left.
+			const i = current.findIndex((range) => range.end.ge(timestamp));
+			if (i < 0) return [];
+			const first = current[i];
+			return [{ start: first.start.max(timestamp), end: first.end }, ...current.slice(i + 1)];
 		});
 	}
 

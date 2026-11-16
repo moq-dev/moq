@@ -503,6 +503,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 	}
 }
 
+// Signals compare a write against the value it replaced, so a range changed in place after delivery
+// is a change no subscriber hears about.
+it("never changes the buffered ranges it already reported", async () => {
+	const reads = Array.from({ length: 8 }, (_, i) => sample(0n, i * 20_000, i === 0));
+	const playback = await guardedPlayback("legacy", reads, [], false, 1000);
+	const show = (ranges: Container.BufferedRanges) =>
+		ranges.map((r) => `${r.start.asMicros()}-${r.end.asMicros()}`).join();
+	const seen: [Container.BufferedRanges, string][] = [];
+	const dispose = playback.decoder.out.buffered.subscribe((ranges) => seen.push([ranges, show(ranges)]));
+	try {
+		await microtasks();
+		expect(seen.length).toBeGreaterThan(1);
+		for (const [ranges, shown] of seen) expect(show(ranges)).toBe(shown);
+		expect(show(playback.decoder.out.buffered.peek())).toBe(seen.at(-1)?.[1] ?? "");
+	} finally {
+		dispose();
+		playback.close();
+		await microtasks();
+	}
+});
+
 it("promoting from no active track holds its picture and timestamp until a frame arrives", async () => {
 	const playback = await guardedPlayback("legacy", [sample(10n, 1000)]);
 	try {

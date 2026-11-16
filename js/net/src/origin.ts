@@ -546,9 +546,9 @@ interface Presented extends Advertised {
 class VersionedSignal<T> extends Signal<T> {
 	version = 0;
 
-	override set(value: T, notify?: boolean): void {
+	override set(value: T, force?: true): void {
 		this.version++;
-		super.set(value, notify);
+		super.set(value, force);
 	}
 }
 
