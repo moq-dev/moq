@@ -897,9 +897,14 @@ async fn a_move_overlaps_the_routes_until_the_new_one_delivers() {
 /// through the claim, a request naming `W`'s route at depth 1; once the answer's route
 /// arrives, `E1` moves onto it, now naming depth 2, and `R` serves that from another front,
 /// which asks `W` again: one Instance and track, two subscriptions on the one link,
-/// differing only in depth. The first closes once the move lands, as any move's overlap
-/// does, so one stays open, and `E2` and `E3`, asking after the answer, join it. A fix
-/// serves both depths from one subscription, so the move costs none.
+/// differing only in depth, and `E2` and `E3`, asking after the answer, join the second.
+///
+/// `W` sends the route and its answer to the first subscription at once, on two streams,
+/// and `R` may read either first. When the route wins, the move lands before the first
+/// copy delivers anything, and the first closes at once. When the answer wins, the first
+/// copy is spliced, and like any move's overlap it closes once the new copy delivers a
+/// group the reader lacks, here `W`'s next. Either way one stays open. A fix serves both
+/// depths from one subscription, so the move costs none.
 #[kio::test]
 async fn residual_two_depths_of_one_claim_subscribe_twice() {
 	use crate::claim_continues::{Worker, settle};
@@ -917,8 +922,12 @@ async fn residual_two_depths_of_one_claim_subscribe_twice() {
 		subscribed.push(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
 		settle().await;
 		assert_eq!(links.subscriptions()["w-r"], 2, "{:?}", links.subscriptions());
-		assert_eq!(links.open()["w-r"], 1, "the first closed: {:?}", links.open());
+		assert!(links.open()["w-r"] <= 2, "{:?}", links.open());
 	}
+	worker.write();
+	settle().await;
+	assert_eq!(links.subscriptions()["w-r"], 2, "{:?}", links.subscriptions());
+	assert_eq!(links.open()["w-r"], 1, "the first closed: {:?}", links.open());
 	assert_eq!(worker.served(), 1);
 }
 

@@ -1513,14 +1513,16 @@ impl UniAccept {
 								.with_stats(self.subscriber.origin.stats()),
 						},
 					});
+					// Start each child before accepting the next. The set polls by slot, from a
+					// rotating start, and reuses freed slots, so a burst started together would
+					// read its headers in no particular order: a group stream whose bytes are
+					// here opens its group in the order the streams arrived.
+					let _ = self.children.poll(waiter);
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(crate::lite::error::from_transport(err))),
 				Poll::Pending => break,
 			}
 		}
-
-		// Newly accepted children start now rather than on the next wake.
-		let _ = self.children.poll(waiter);
 		Poll::Pending
 	}
 }
@@ -1550,10 +1552,6 @@ enum UniState {
 		reader: Reader<crate::transport::boxed::RecvStream, Version>,
 	},
 	Group(GroupRecv),
-	/// The peer's lite-07 Announce Stream, which the route layer reads. The stream
-	/// lasts as long as the session, and so does this task: its place stays taken, so
-	/// the group streams accepted after it are read in the order they arrived.
-	Announce,
 	Done,
 }
 
@@ -1580,7 +1578,7 @@ impl UniServe {
 		match &mut self.state {
 			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader } => reader.abort(err),
 			UniState::Group(recv) => recv.reader.abort(err),
-			UniState::Announce | UniState::Done => {}
+			UniState::Done => {}
 		}
 	}
 
@@ -1615,7 +1613,7 @@ impl UniServe {
 							// The route layer reads it, and closes the session on a second.
 							reader.set_priority(crate::priority::RECV_CONTROL);
 							let _ = self.subscriber.announce_streams.try_push(reader);
-							UniState::Announce
+							return Poll::Ready(Ok(()));
 						}
 					};
 				}
@@ -1654,10 +1652,6 @@ impl UniServe {
 					if let Err(err) = res {
 						self.abort(&err);
 					}
-					return Poll::Ready(Ok(()));
-				}
-				UniState::Announce => {
-					let _ = ready!(self.subscriber.session.poll_closed(waiter));
 					return Poll::Ready(Ok(()));
 				}
 				UniState::Done => return Poll::Ready(Ok(())),
@@ -7811,6 +7805,66 @@ mod tests {
 			subscriber.subscribes.lock().get(&0).unwrap().parked.is_none(),
 			"released once every stream took its group"
 		);
+	}
+
+	/// Group streams accepted together open their groups in the order they arrived, even
+	/// once earlier streams freed places in the accept's task set, so a reader following the
+	/// live edge gets none of them late.
+	#[kio::test]
+	async fn a_burst_of_group_streams_opens_its_groups_in_order() {
+		let version = Version::Lite07;
+		let group = |key: u64| {
+			let mut bytes = Vec::new();
+			let mut w = crate::coding::Encoder::new(&mut bytes, version.into());
+			lite::DataType::Group.encode(&mut w, version).unwrap();
+			lite::Group {
+				subscribe: 0,
+				key,
+				frame_start: 0,
+			}
+			.encode(&mut w, version)
+			.unwrap();
+			w.varint(2).unwrap();
+			w.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
+			w.u8(key as u8);
+			bytes
+		};
+		// Streams ending before their type finish at once and free their places.
+		let session =
+			crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![Vec::new(); 3]);
+		let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
+		let track = crate::track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let live = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(60)));
+		let mut consumer = track.consume().subscribe(live).await.unwrap();
+		let mut entry = TrackEntry::new(None, Default::default());
+		let framing = lite::Framing::new(track.info(), version);
+		entry.accept(
+			Accepted {
+				producer: track.clone(),
+				framing,
+			},
+			version,
+			subscriber.runtime.now(),
+		);
+		subscriber.subscribes.lock().insert(0, entry);
+		let mut accept = UniAccept::new(subscriber.clone(), Vec::new());
+		assert!(accept.poll(&kio::Waiter::noop()).is_pending());
+
+		for key in 1..=3 {
+			session.push_incoming_uni(group(key));
+		}
+		assert!(accept.poll(&kio::Waiter::noop()).is_pending());
+		let mut read = Vec::new();
+		for _ in 0..3 {
+			read.push(consumer.recv_group().await.unwrap().unwrap().start);
+		}
+		assert_eq!(read, [1, 2, 3]);
 	}
 
 	/// A parked stream that fails before taking its group withdraws it: the accept opens none

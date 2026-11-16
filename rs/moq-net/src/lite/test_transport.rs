@@ -1125,6 +1125,11 @@ impl ScriptedSession {
 		self
 	}
 
+	/// Have the peer open one more unidirectional stream, after those already scripted.
+	pub fn push_incoming_uni(&self, script: Vec<u8>) {
+		self.incoming_unis.lock().unwrap().push_back(script);
+	}
+
 	/// Have the peer open one bidirectional stream per script, then go quiet.
 	pub fn with_incoming_bidis(mut self, scripts: Vec<Vec<u8>>) -> Self {
 		self.incoming_bidis = Arc::new(Mutex::new(scripts.into_iter().collect()));

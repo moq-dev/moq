@@ -548,6 +548,9 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 /// budget-independent drops folds them into its floor and reads on, while one holding lite-07
 /// stale reports within reach of the max age bound ends rather than forgo the re-offer: with
 /// `Lagged` on the relay itself, and `TooFarBehind` over the wire.
+///
+/// Each stale reader runs on a chain of its own: the first one the debt reaches ends and
+/// frees its record, which can pay the debt the other was about to be asked for.
 #[kio::test]
 async fn relay_pool_pressure_folds_final_runs_and_ends_stale_reports() {
 	/// The relay's readers each record this many disjoint dropped runs.
@@ -555,18 +558,26 @@ async fn relay_pool_pressure_folds_final_runs_and_ends_stale_reports() {
 	/// The groups that land on the relay at once once its pool shrinks.
 	const BURST: u64 = 1000;
 	let budget = Duration::from_secs(2);
-	for stale in [false, true] {
+	for (stale, sides) in [(false, [true, true]), (true, [true, false]), (true, [false, true])] {
 		kio::clock::timeout(TIMEOUT * 10, async {
 			let pool = cache::Pool::new(cache::Config::default().with_expiry(None));
 			let chain = Chain::new([LITE07, LITE07], [forever(), pool.clone(), forever()]).await;
-			let mut local = chain.subscribe_relay(reading(budget, [support::keys(0..)])).await;
-			let mut remote = chain.subscribe(reading(budget, [support::keys(0..)])).await;
+			let mut readers = Vec::new();
+			if sides[0] {
+				readers.push((
+					"local",
+					chain.subscribe_relay(reading(budget, [support::keys(0..)])).await,
+				));
+			}
+			if sides[1] {
+				readers.push(("remote", chain.subscribe(reading(budget, [support::keys(0..)])).await));
+			}
 			let odd = write_odd(&chain, RUNS);
-			for (reader, name) in [(&mut local, "local"), (&mut remote, "remote")] {
+			for (name, reader) in &mut readers {
 				assert_eq!(received(reader).await, odd, "stale={stale}: the {name} reader");
 			}
 			settle_even(&chain, RUNS, stale.then_some(budget * 2)).await;
-			for (reader, name) in [(&mut local, "local"), (&mut remote, "remote")] {
+			for (name, reader) in &mut readers {
 				assert_eq!(
 					received(reader).await,
 					BTreeSet::new(),
@@ -580,35 +591,34 @@ async fn relay_pool_pressure_folds_final_runs_and_ends_stale_reports() {
 			for key in 2 * RUNS..2 * RUNS + BURST {
 				write(&chain.source, key, key);
 			}
-			let mut read = [0, 0];
-			let mut ended = [None, None];
-			for (index, reader) in [&mut local, &mut remote].into_iter().enumerate() {
+			for (name, reader) in &mut readers {
+				let mut read = 0;
+				let mut ended = None;
 				while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), reader.recv_group()).await {
 					match group {
-						Ok(Some(_)) => read[index] += 1,
-						Ok(None) => panic!("stale={stale}: reader {index} ended cleanly"),
+						Ok(Some(_)) => read += 1,
+						Ok(None) => panic!("stale={stale}: the {name} reader ended cleanly"),
 						Err(err) => {
-							ended[index] = Some(err);
+							ended = Some(err);
 							break;
 						}
 					}
 				}
-			}
-			match stale {
-				false => {
-					assert!(ended.iter().all(Option::is_none), "the final runs fold: {ended:?}");
-					// Under this much pressure the relay may evict a burst group before serving it,
-					// so only the local reader's count is exact.
-					assert_eq!(read[0], BURST, "the local reader reads on");
-					assert!(read[1] > 0, "the remote reader reads on");
+				match (stale, *name) {
+					(false, _) => assert!(ended.is_none(), "the final runs fold: {name}: {ended:?}"),
+					(true, "local") => assert!(matches!(ended, Some(moq_net::Error::Lagged)), "local: {ended:?}"),
+					(true, _) => assert!(
+						matches!(ended, Some(moq_net::Error::Stream(moq_net::StreamError::TooFarBehind))),
+						"remote: {ended:?}"
+					),
 				}
-				true => {
-					let [local, remote] = ended;
-					assert!(matches!(local, Some(moq_net::Error::Lagged)), "local: {local:?}");
-					assert!(
-						matches!(remote, Some(moq_net::Error::Stream(moq_net::StreamError::TooFarBehind))),
-						"remote: {remote:?}"
-					);
+				// Under this much pressure the relay may evict a burst group before serving it,
+				// so only the local reader's count is exact.
+				if !stale {
+					match *name {
+						"local" => assert_eq!(read, BURST, "the local reader reads on"),
+						_ => assert!(read > 0, "the remote reader reads on"),
+					}
 				}
 			}
 			chain.assert_open(&format!("stale={stale}"));
