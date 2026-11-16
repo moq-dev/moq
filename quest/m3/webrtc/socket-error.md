@@ -3,7 +3,7 @@
 ## Goal
 
 When the UDP socket under a moq-webrtc client session fails to receive,
-`Client::publish` and `Client::subscribe` end with `Error::Io` carrying the
+`Client::publish` and `Client::pull` end with `Error::Io` carrying the
 socket's `io::Error`, instead of `Ok` as if the peer had disconnected. A peer
 disconnect still ends `Ok`. The first cause wins: a peer
 close that lands before the socket fails stays a close.

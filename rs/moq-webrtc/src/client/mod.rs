@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 
 use url::Url;
 
-/// Configuration shared by both `client publish` and `client subscribe`.
+/// Configuration shared by both `client publish` and `client pull`.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
@@ -34,7 +34,7 @@ pub struct Client {
 impl Client {
 	/// Build a dialer from the shared client [`Config`]. The underlying
 	/// [`reqwest::Client`] (with its connection pool and rustls config) is created
-	/// once here and reused across every [`subscribe`](Self::subscribe) /
+	/// once here and reused across every [`pull`](Self::pull) /
 	/// [`publish`](Self::publish) call.
 	///
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU
@@ -57,12 +57,12 @@ impl Client {
 		&self.http
 	}
 
-	/// `client subscribe`: pull a remote WHEP feed and publish it as `broadcast`, its tracks
+	/// `client pull`: ingest a remote WHEP feed and publish it as `broadcast`, its tracks
 	/// minted under `catalog`, until the session ends.
 	///
 	/// The caller owns the broadcast, so its announcement and any linger after the end are
 	/// the caller's too.
-	pub async fn subscribe(
+	pub async fn pull(
 		&self,
 		url: Url,
 		broadcast: moq_net::broadcast::Producer,
@@ -102,7 +102,7 @@ mod tests {
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
 			.unwrap()
-			.subscribe(url, broadcast.broadcast().clone(), Default::default())
+			.pull(url, broadcast.broadcast().clone(), Default::default())
 			.await
 			.expect_err("dial a closed port");
 
