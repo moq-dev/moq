@@ -300,6 +300,10 @@ impl<'a> Message<'a> for Publish<'a> {
 			0x20 => subscriber_priority: Option<u8> where Filter::is_draft20(version),
 			0x21 => filter: Option<Filter> where Filter::is_draft20(version),
 			0x22 => group_order: Option<GroupOrder> where Filter::is_draft20(version),
+			// Draft-23 adds two (section 9.8). Both are read and dropped: neither changes
+			// the refusal the request is headed for.
+			0x23 => _fill: Option<super::Fill> where Self::has_fill(version),
+			0x36 => _subscribe_tracks_id: Option<u64> where Self::has_fill(version),
 		);
 		let properties = Properties::decode(r, version)?;
 		// Last, so a malformed field closes the session before a token refusal.
@@ -318,6 +322,14 @@ impl<'a> Message<'a> for Publish<'a> {
 			group_order,
 			filter,
 		})
+	}
+}
+
+impl Publish<'_> {
+	/// Whether PUBLISH may carry FILL_PARAMETERS and SUBSCRIBE_TRACKS_ID (draft-23 section
+	/// 9.8). Before draft-23 neither is listed for it, so either closes the session.
+	fn has_fill(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
 	}
 }
 
@@ -413,6 +425,50 @@ mod tests {
 
 		Publish::decode_msg(&mut Decoder::new(&body, version.into()), version)
 			.expect("draft-22 PUBLISH parameters must parse");
+		Ok(())
+	}
+
+	/// Draft-23 (section 9.8) lets a PUBLISH carry FILL_PARAMETERS and SUBSCRIBE_TRACKS_ID.
+	/// Like the draft-22 ones they have to parse for the request to reach its refusal; on
+	/// draft-22 they are still unlisted, which closes the session.
+	#[test]
+	fn publish_accepts_fill_parameters_and_subscribe_tracks_id_at_draft23() -> Result<(), EncodeError> {
+		let body = |version: Version| -> Result<Vec<u8>, EncodeError> {
+			let mut body = Vec::new();
+			let w = &mut Encoder::new(&mut body, version.into());
+			RequestId(1).encode(w, version)?;
+			super::super::namespace::encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
+			w.varint(1u64)?; // track alias
+
+			// FILL_PARAMETERS (0x23) holding a Location Filter, then SUBSCRIBE_TRACKS_ID
+			// (0x36) = 4, delta encoded.
+			w.varint(2u64)?;
+			w.varint(0x23u64)?;
+			crate::ietf::Param::param_encode(
+				&super::super::Fill {
+					filter: Some(Filter::NextObject),
+					..Default::default()
+				},
+				w,
+				Version::Draft23,
+			)?;
+			w.varint(0x13u64)?;
+			w.varint(4u64)?;
+			Properties::default().encode(w, version)?;
+			Ok(body)
+		};
+
+		let version = Version::Draft23;
+		let bytes = body(version)?;
+		Publish::decode_msg(&mut Decoder::new(&bytes, version.into()), version)
+			.expect("draft-23 PUBLISH parameters must parse");
+
+		let version = Version::Draft22;
+		let bytes = body(version)?;
+		assert!(matches!(
+			Publish::decode_msg(&mut Decoder::new(&bytes, version.into()), version),
+			Err(DecodeError::InvalidValue)
+		));
 		Ok(())
 	}
 
