@@ -157,6 +157,9 @@ impl<O: Output> Video<O> {
 		// Signalled when a segment behind the front becomes the front.
 		let advanced = tokio::sync::Notify::new();
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
+		// A missing group stops being waited for once the clock reaches the group after it,
+		// whose pictures would replace any late one it held.
+		track.set_playhead(self.presentation.consume());
 		let receive = async {
 			// Video has no jitter estimate, so its target is the encoder delay alone,
 			// which holds audio back with it.
@@ -1358,5 +1361,78 @@ mod tests {
 	#[tokio::test]
 	async fn a_flush_larger_than_the_queue_keeps_its_tail() {
 		schedule(&(0..10).collect::<Vec<_>>(), 5).await;
+	}
+
+	/// A lost group behind media that arrives late: once the clock, which audio holds, reaches the
+	/// group past the hole, video shows it rather than waiting a whole playout delay from its
+	/// arrival, which would leave the picture frozen that much longer.
+	#[tokio::test]
+	async fn a_hole_ends_once_the_clock_reaches_the_group_past_it() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(100);
+		let media = media(delay);
+		let start = Instant::now();
+		// Audio arrives on time throughout, so its arrivals hold the clock.
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
+		audio.received(moq_net::Timestamp::ZERO, start);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let published = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		// The budgets `moq play` gives video: the playout delay, as the min and the max.
+		let subscriber = published
+			.consume()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay)),
+			)
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
+		// One keyframe group per 100 ms of media.
+		let write = |sequence: u64| {
+			let mut group = published
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap();
+			format().write(&mut group, &[frame(sequence * 100, true)]).unwrap();
+			group.close().unwrap();
+		};
+		let mut shown = Vec::new();
+		// Groups 0 to 4 arrive live. Group 5 is lost, and from 6 on the path holds video 300 ms.
+		for at in 0..1_200u64 {
+			if at % 100 == 0 {
+				let sequence = match at < 500 {
+					true => Some(at / 100),
+					false => (at >= 900).then(|| (at - 300) / 100),
+				};
+				if let Some(sequence) = sequence {
+					write(sequence);
+				}
+			}
+			tokio::task::yield_now().await;
+			if let Some(timestamp) = media.output.present(&media) {
+				shown.push((timestamp.as_millis().unwrap(), start.elapsed()));
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		task.abort();
+		// Group 6 lands at 0.9 s, past its 0.7 s due time, so it shows then. Waiting the playout
+		// delay from its arrival instead would skip at 1 s, when group 7 is due too and replaces it.
+		let after = shown
+			.iter()
+			.filter(|(timestamp, _)| *timestamp >= 500)
+			.copied()
+			.collect::<Vec<_>>();
+		assert_eq!(
+			after,
+			[
+				(600, Duration::from_millis(900)),
+				(700, Duration::from_millis(1_000)),
+				(800, Duration::from_millis(1_100)),
+			],
+			"shown: {shown:?}"
+		);
 	}
 }
