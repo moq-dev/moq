@@ -17,7 +17,7 @@
 use std::{collections::VecDeque, task::Poll};
 
 use super::Version;
-use crate::{Error, SessionError, auth};
+use crate::{Error, auth};
 
 /// MAX_REQUEST_UPDATES Setup Option (Option Type 0x08). Even, so the value is a bare varint.
 pub const OPTION: u64 = 0x08;

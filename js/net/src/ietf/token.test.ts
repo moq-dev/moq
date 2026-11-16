@@ -1,8 +1,8 @@
-import { IetfSessionCode } from "./error.ts";
 import { expect, test } from "bun:test";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
+import { IetfSessionCode } from "./error.ts";
 import { Parameters } from "./parameters.ts";
 import { SetupOption, SetupOptions } from "./setup_options.ts";
 import {

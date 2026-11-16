@@ -1,7 +1,7 @@
-import { IetfSessionCode } from "../ietf/error.ts";
 import { Duration } from "@moq/clock";
-import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
+import { closeReason, ProtocolViolation, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
+import { IetfSessionCode } from "../ietf/error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";

@@ -1707,7 +1707,10 @@ impl<R: crate::transport::poll::RecvStream> ReadGoaways<R> {
 			match msg.request_id {
 				None if version == Version::Draft18 => return Poll::Ready(Err(Error::ProtocolViolation)),
 				Some(request_id) if request_id.0 % 2 != u64::from(!self.client) => {
-					return Poll::Ready(Err(DecodeError::Session(crate::ietf::error::session::INVALID_REQUEST_ID).into()));
+					return Poll::Ready(Err(DecodeError::Session(
+						crate::ietf::error::session::INVALID_REQUEST_ID,
+					)
+					.into()));
 				}
 				_ => {}
 			}
@@ -3168,8 +3171,16 @@ mod tests {
 					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS, "DELETE"),
-				(&[0x02, 0x07][..], crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS, "USE_ALIAS"),
+				(
+					&[0x00, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"DELETE",
+				),
+				(
+					&[0x02, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"USE_ALIAS",
+				),
 				(
 					&[0x03][..],
 					crate::ietf::error::session::KEY_VALUE_FORMATTING,
@@ -3280,7 +3291,10 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (param, expected) in [
 				(ietf::ParameterBytes::Path, crate::ietf::error::session::INVALID_PATH),
-				(ietf::ParameterBytes::Authority, crate::ietf::error::session::INVALID_AUTHORITY),
+				(
+					ietf::ParameterBytes::Authority,
+					crate::ietf::error::session::INVALID_AUTHORITY,
+				),
 			] {
 				let mut params = ietf::Parameters::default();
 				params.set_bytes(param, b"a".to_vec());
@@ -3455,7 +3469,10 @@ mod tests {
 
 		let closes = log.closes();
 		assert_eq!(closes.len(), 1, "{closes:?}");
-		assert_eq!(SessionError::from_code(closes[0].0), crate::ietf::error::session::INVALID_PATH);
+		assert_eq!(
+			SessionError::from_code(closes[0].0),
+			crate::ietf::error::session::INVALID_PATH
+		);
 		let before = log.before_close().unwrap();
 		assert!(
 			!before

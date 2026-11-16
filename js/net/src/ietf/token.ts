@@ -1,6 +1,6 @@
-import { IetfSessionCode } from "./error.ts";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { ProtocolViolation } from "../error.ts";
 import * as Varint from "../varint.ts";
+import { IetfSessionCode } from "./error.ts";
 import type { Parameters } from "./parameters.ts";
 import type { SetupOptions } from "./setup_options.ts";
 

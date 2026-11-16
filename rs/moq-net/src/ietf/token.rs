@@ -377,7 +377,10 @@ mod tests {
 		for version in VERSIONS {
 			let err = request(version, &[REGISTER, 7, token().kind], &token().value).unwrap_err();
 			assert!(
-				matches!(err, DecodeError::Session(crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW)),
+				matches!(
+					err,
+					DecodeError::Session(crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW)
+				),
 				"{version:?}: {err:?}"
 			);
 		}
@@ -389,7 +392,10 @@ mod tests {
 			for alias_type in [DELETE, USE_ALIAS] {
 				let err = request(version, &[alias_type, 7], &[]).unwrap_err();
 				assert!(
-					matches!(err, DecodeError::Session(crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS)),
+					matches!(
+						err,
+						DecodeError::Session(crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS)
+					),
 					"{version:?} {alias_type}: {err:?}"
 				);
 			}
@@ -411,7 +417,10 @@ mod tests {
 			] {
 				let err = request(version, fields, &[]).unwrap_err();
 				assert!(
-					matches!(err, DecodeError::Session(crate::ietf::error::session::KEY_VALUE_FORMATTING)),
+					matches!(
+						err,
+						DecodeError::Session(crate::ietf::error::session::KEY_VALUE_FORMATTING)
+					),
 					"{version:?} {why}: {err:?}"
 				);
 			}

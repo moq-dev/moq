@@ -10953,7 +10953,11 @@ mod serve_tests {
 					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS, "DELETE"),
+				(
+					&[0x00, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"DELETE",
+				),
 				(
 					&[0x02, 0x07][..],
 					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,

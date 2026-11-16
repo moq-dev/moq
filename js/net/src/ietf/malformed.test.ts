@@ -1,4 +1,3 @@
-import { IetfSessionCode } from "./error.ts";
 import { expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import type { Manual } from "@moq/clock/test";
@@ -11,6 +10,7 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
+import { IetfSessionCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import { RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";

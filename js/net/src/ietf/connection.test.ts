@@ -1,4 +1,3 @@
-import { IetfSessionCode } from "./error.ts";
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
@@ -10,6 +9,7 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
+import { IetfSessionCode } from "./error.ts";
 import { Fetch, type FetchType } from "./fetch.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";

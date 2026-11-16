@@ -1,6 +1,6 @@
-import { IetfSessionCode } from "./error.ts";
 import { describe, expect, test } from "bun:test";
-import { SessionCode, SessionError } from "../error.ts";
+import { type SessionCode, SessionError } from "../error.ts";
+import { IetfSessionCode } from "./error.ts";
 import { checkPeerRequestId } from "./session.ts";
 
 function code(id: bigint, client: boolean): SessionCode | undefined {

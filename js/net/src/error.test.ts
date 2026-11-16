@@ -9,8 +9,8 @@ import {
 	Lagged,
 	NotFound,
 	ProtocolViolation,
-	reason,
 	Retry,
+	reason,
 	retry,
 	SessionCode,
 	SessionError,
@@ -97,8 +97,8 @@ test("the error type names the registry the code came from", () => {
 
 test("a code only moq-transport defines keeps its number", () => {
 	for (const code of [0x4, 0x6, 0x8, 0x13, 0x17, 0x19, 0x1b]) {
-		expect(fromClose({ closeCode: code })?.code).toBe(code);
-		expect(Object.values(SessionCode)).not.toContain(code);
+		expect(Number(fromClose({ closeCode: code })?.code)).toBe(code);
+		expect(Object.values(SessionCode) as number[]).not.toContain(code);
 	}
 });
 

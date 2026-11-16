@@ -1,6 +1,6 @@
-import { IetfSessionCode } from "./error.ts";
-import { SessionCode, SessionError } from "../error.ts";
+import { SessionError } from "../error.ts";
 import { type OpenOptions, Stream } from "../stream.ts";
+import { IetfSessionCode } from "./error.ts";
 import type { IetfVersion } from "./version.ts";
 
 /** How {@link Session.openBi} opens: its send order, and a signal that gives up the wait. */
