@@ -18,6 +18,7 @@ mod handoff;
 mod interest;
 mod multi;
 mod multicast;
+mod multicast_search;
 mod residual;
 mod routing;
 mod scope;

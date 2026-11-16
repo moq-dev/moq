@@ -27,8 +27,10 @@ enum Spot {
 	Relay(Box<Router>),
 	/// A publisher: an endpoint that never forwards.
 	Endpoint {
+		/// The Instance its next claim serves.
 		id: Option<Id>,
-		claims: BTreeSet<Path>,
+		/// Its claims, each with the Instance it serves.
+		claims: BTreeSet<(Path, Id)>,
 		/// What each relay asked it for.
 		asked: BTreeMap<Node, BTreeSet<Path>>,
 	},
@@ -51,6 +53,12 @@ pub(super) struct RelaySim {
 	spent: usize,
 	now: Instant,
 	debounce: Duration,
+	/// Each forwarding node's claims at every revision, kept past its restart.
+	histories: BTreeMap<NodeId, Vec<relay::Claims<Id, ()>>>,
+	mutant: Option<relay::Mutant>,
+	/// Every router sends what it has after each change to the network, as the bake-off
+	/// runs it; the search flushes each router as a step of its own instead.
+	pub auto: bool,
 }
 
 fn pair(a: Node, b: Node) -> (Node, Node) {
@@ -85,6 +93,9 @@ impl RelaySim {
 			spent: 0,
 			now: Instant::ZERO,
 			debounce,
+			histories: BTreeMap::new(),
+			mutant: None,
+			auto: true,
 		};
 		sim.spots = (0..nodes).map(|node| Spot::Relay(Box::new(sim.fresh(node)))).collect();
 		sim
@@ -101,7 +112,96 @@ impl RelaySim {
 	fn fresh(&self, node: Node) -> Router {
 		let mut router = Router::new(self.id(node), self.debounce);
 		router.clock(self.now);
+		if let Some(mutant) = self.mutant {
+			router.mutate(mutant);
+		}
 		router
+	}
+
+	/// Plant `mutant` in every router, now and after a restart.
+	pub fn mutate(&mut self, mutant: relay::Mutant) {
+		self.mutant = Some(mutant);
+		for node in 0..self.spots.len() {
+			if let Some(router) = self.relay(node) {
+				router.mutate(mutant);
+			}
+		}
+	}
+
+	/// `origin`'s claims at revision `floor`, as it announced them.
+	pub fn truth(&self, origin: NodeId, floor: Rev) -> Option<&relay::Claims<Id, ()>> {
+		let current = (0..self.spots.len())
+			.filter_map(|node| self.router(node))
+			.find(|router| router.me() == origin)
+			.map(Router::history);
+		let history = current.or_else(|| self.histories.get(&origin).map(Vec::as_slice))?;
+		history.get(usize::try_from(floor).ok()?)
+	}
+
+	/// Whether `node` has output waiting for its next flush.
+	pub fn pending(&self, node: Node) -> bool {
+		self.router(node).is_some_and(Router::pending)
+	}
+
+	/// `node` sends what it has: [`Self::flush`] for one router.
+	pub fn flush_node(&mut self, node: Node) {
+		let Some(router) = self.relay(node) else {
+			return;
+		};
+		let out = router.drain();
+		let mut exchanged = Vec::new();
+		for (to, msg) in out {
+			match msg {
+				Msg::Ask(_) | Msg::Edited | Msg::Synced(_) => exchanged.push((node, to, msg)),
+				msg => self.send(node, to, msg),
+			}
+		}
+		for (from, to, msg) in exchanged {
+			self.exchange(from, to, msg);
+		}
+		self.show();
+	}
+
+	/// `node`'s next reader deadline passes.
+	pub fn fire(&mut self, node: Node) {
+		let Some(router) = self.relay(node) else {
+			return;
+		};
+		if let Some(at) = router.deadline() {
+			router.timeout(at);
+		}
+		self.show();
+	}
+
+	/// The nodes with a reader deadline set.
+	pub fn timers(&self) -> Vec<Node> {
+		(0..self.spots.len())
+			.filter(|&node| self.router(node).is_some_and(|router| router.deadline().is_some()))
+			.collect()
+	}
+
+	/// The open links.
+	pub fn up(&self) -> &BTreeSet<(Node, Node)> {
+		&self.up
+	}
+
+	/// The claims the publisher at `node` makes now, each with its Instance.
+	pub fn claims(&self, node: Node) -> &BTreeSet<(Path, Id)> {
+		match &self.spots[node] {
+			Spot::Endpoint { claims, .. } => claims,
+			Spot::Relay(_) => panic!("node {node} is a relay"),
+		}
+	}
+
+	/// Hash what decides the network's future, leaving out what only records its past.
+	pub fn fingerprint(&self, hasher: &mut impl std::hash::Hasher) {
+		for spot in &self.spots {
+			match spot {
+				Spot::Relay(router) => router.fingerprint(hasher),
+				Spot::Endpoint { id, claims, asked } => digest(hasher, &(id, claims, asked)),
+			}
+		}
+		digest(hasher, &(&self.restarts, &self.up, &self.queues, &self.held));
 	}
 
 	pub fn router(&self, node: Node) -> Option<&Router> {
@@ -160,7 +260,9 @@ impl RelaySim {
 				router.connect(y, port).expect("a new session");
 			}
 		}
-		self.flush();
+		if self.auto {
+			self.flush();
+		}
 	}
 
 	/// `peer` lets go of its session to `node`.
@@ -180,7 +282,9 @@ impl RelaySim {
 			self.held.remove(&(x, y));
 			self.drop_session(x, y);
 		}
-		self.flush();
+		if self.auto {
+			self.flush();
+		}
 	}
 
 	/// `peer` notices its session to `node` closed, which `node` has yet to.
@@ -191,7 +295,9 @@ impl RelaySim {
 			self.held.remove(&key);
 		}
 		self.drop_session(node, peer);
-		self.flush();
+		if self.auto {
+			self.flush();
+		}
 	}
 
 	/// The process at `node` exits: its sessions close and its state is lost.
@@ -202,6 +308,7 @@ impl RelaySim {
 		self.restarts[node] += 1;
 		if let Spot::Relay(router) = &self.spots[node] {
 			self.spent += router.work_done();
+			self.histories.insert(router.me(), router.history().to_vec());
 			self.spots[node] = Spot::Relay(Box::new(self.fresh(node)));
 		}
 	}
@@ -212,7 +319,9 @@ impl RelaySim {
 				router.goaway(node);
 			}
 		}
-		self.flush();
+		if self.auto {
+			self.flush();
+		}
 	}
 
 	pub fn client(&mut self, node: Node) {
@@ -235,15 +344,23 @@ impl RelaySim {
 		let Spot::Endpoint { id, claims, asked } = &mut self.spots[node] else {
 			panic!("node {node} is a relay");
 		};
-		let id = id.expect("a publisher");
 		let change = match live {
-			true if claims.insert(claim.clone()) => {
+			true if !claims.iter().any(|(path, _)| *path == claim) => {
+				let id = id.expect("a publisher");
+				claims.insert((claim.clone(), id));
 				*self.lives.entry((id, claim.clone())).or_default() += 1;
-				relay::Change::Live(own())
+				(id, relay::Change::Live(own()))
 			}
-			false if claims.remove(&claim) => relay::Change::Ended,
+			false => match claims.iter().find(|(path, _)| *path == claim).cloned() {
+				Some(gone) => {
+					claims.remove(&gone);
+					(gone.1, relay::Change::Ended)
+				}
+				None => return,
+			},
 			_ => return,
 		};
+		let (id, change) = change;
 		let tell: Vec<Node> = (asked.iter())
 			.filter(|(_, prefixes)| prefixes.iter().any(|prefix| within(&claim, prefix)))
 			.map(|(peer, _)| *peer)
@@ -277,7 +394,7 @@ impl RelaySim {
 	/// Hand `to` a message of the interest exchange, and answer it at once if `to` is a
 	/// publisher.
 	fn exchange(&mut self, from: Node, to: Node, msg: Message) {
-		let Spot::Endpoint { id, claims, asked } = &mut self.spots[to] else {
+		let Spot::Endpoint { claims, asked, .. } = &mut self.spots[to] else {
 			let router = self.relay(to).expect("a relay");
 			if let Err(err) = router.recv(from, msg.clone()) {
 				panic!("{to} refused {msg:?} from {from}: {err}");
@@ -294,8 +411,8 @@ impl RelaySim {
 		}
 		asks.extend(edit.add.iter().cloned());
 		let changes: Vec<_> = (claims.iter())
-			.filter(|claim| edit.add.iter().any(|prefix| within(claim, prefix)))
-			.map(|claim| ((claim.clone(), id.expect("a publisher")), relay::Change::Live(own())))
+			.filter(|(claim, _)| edit.add.iter().any(|prefix| within(claim, prefix)))
+			.map(|claim| (claim.clone(), relay::Change::Live(own())))
 			.collect();
 		self.exchange(to, from, Msg::Edited);
 		if !changes.is_empty() {
@@ -335,8 +452,8 @@ impl RelaySim {
 
 	fn live(&self, broadcast: &multi::Broadcast) -> bool {
 		self.spots.iter().enumerate().any(|(node, spot)| match spot {
-			Spot::Endpoint { id, claims, .. } => {
-				*id == Some(broadcast.0) && claims.contains(&broadcast.1) && !self.peers(node).is_empty()
+			Spot::Endpoint { claims, .. } => {
+				claims.contains(&(broadcast.1.clone(), broadcast.0)) && !self.peers(node).is_empty()
 			}
 			Spot::Relay(_) => false,
 		})
@@ -390,6 +507,7 @@ impl RelaySim {
 			let Some(router) = self.relay(node) else {
 				continue;
 			};
+			let forgot = router.forgets();
 			for event in router.events() {
 				let broadcast = (event.id, event.claim);
 				let seen = Seen {
@@ -398,6 +516,7 @@ impl RelaySim {
 					life: self.lives.get(&broadcast).copied().unwrap_or(0),
 					broadcast,
 					kind: event.kind,
+					forgot,
 				};
 				self.events.push(seen);
 			}
@@ -412,8 +531,8 @@ impl RelaySim {
 		let (mut at, mut named, mut hops) = (from, None, Vec::new());
 		while hops.len() <= self.spots.len() {
 			let router = match &self.spots[at] {
-				Spot::Endpoint { id: owner, claims, .. } => {
-					return Some((hops, *owner == Some(id) && claims.contains(claim)));
+				Spot::Endpoint { claims, .. } => {
+					return Some((hops, claims.contains(&(claim.clone(), id))));
 				}
 				Spot::Relay(router) => router,
 			};

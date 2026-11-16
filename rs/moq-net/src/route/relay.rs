@@ -402,6 +402,42 @@ pub(crate) struct Router<N, I, A> {
 	/// Routes, claims, hops, and neighbours visited, for per-change work checks.
 	#[cfg(test)]
 	work: std::cell::Cell<usize>,
+	/// This node's own claims at each revision, for the search's truth.
+	#[cfg(test)]
+	history: Vec<Claims<I, A>>,
+	/// How many copies of a forwarding node's claims this node dropped.
+	#[cfg(test)]
+	forgets: u32,
+	/// A defect a fixture plants, to show a check catches it.
+	#[cfg(test)]
+	mutant: Option<Mutant>,
+}
+
+/// Whether a fixture planted the defect `$mutant` in `$router`: never outside tests.
+macro_rules! mutated {
+	($router:expr, $mutant:ident) => {{
+		#[cfg(test)]
+		let planted = $router.mutant == Some(Mutant::$mutant);
+		#[cfg(not(test))]
+		let planted = false;
+		planted
+	}};
+}
+
+/// A defect a fixture plants in a router, to show the property it breaks is checked.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mutant {
+	/// A claim its announcer lost shows as ended (NoFalseEnd).
+	LostEnds,
+	/// An older copy of a node's claims is merged into a newer one (NoRevival).
+	OldFloor,
+	/// A copy that lagged is applied as if it were current (Truthful).
+	Lagging,
+	/// A closed session is never forgotten (QuietIsSettled).
+	KeepDead,
+	/// Every input re-advertises every route, changed or not (Budget).
+	Chatter,
 }
 
 impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
@@ -444,6 +480,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			out: Vec::new(),
 			#[cfg(test)]
 			work: std::cell::Cell::new(0),
+			#[cfg(test)]
+			history: vec![BTreeMap::new()],
+			#[cfg(test)]
+			forgets: 0,
+			#[cfg(test)]
+			mutant: None,
 		}
 	}
 
@@ -773,6 +815,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	fn route(&mut self, from: N, origin: NodeId, offer: Option<Offer>) -> Result<(), Error> {
 		self.visit();
+		if mutated!(self, Chatter) {
+			self.stale.extend(self.best.keys().copied().chain(self.announced.then_some(self.me)));
+		}
 		let sender = self.peers[&from].routing().expect("a routing neighbour");
 		match offer {
 			Some(offer) => {
@@ -893,6 +938,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				self.unclaim(&broadcast, origin);
 				self.dirty.insert(broadcast);
 			}
+			// Without any copy, this node no longer knows how new a claim of `origin` is:
+			// a stale one may start it again, until the newer floor behind it arrives.
+			#[cfg(test)]
+			{
+				self.forgets += u32::from(known.floor > 0);
+			}
 		}
 		for peer in self.sent_to.remove(&origin).into_iter().flatten() {
 			self.visit();
@@ -955,7 +1006,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn forget(&mut self) {
 		for hop in std::mem::take(&mut self.unnamed.0) {
 			self.visit();
-			if !self.live.contains_key(&hop) {
+			if !self.live.contains_key(&hop) && !mutated!(self, KeepDead) {
 				self.dead.remove(&hop);
 			}
 		}
@@ -1164,7 +1215,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let state = self.peers.get_mut(&peer).expect("a routing neighbour");
 		let was = state.sent.get(&origin);
 		// Unchanged, unless a closed session ended what it was sent, which it is owed.
-		if was.is_none_or(Option::is_some) && was.and_then(Option::as_ref) == offer.as_ref() {
+		let unchanged = was.is_none_or(Option::is_some) && was.and_then(Option::as_ref) == offer.as_ref();
+		if unchanged && !(mutated!(self, Chatter) && offer.is_some()) {
 			return;
 		}
 		let fresh = was.is_none();
@@ -1255,11 +1307,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		heard.floor = floor;
 		let known = self.known.entry(origin).or_default();
 		// The newest floor wins, so an older copy never revives what a newer one withdrew.
-		if floor <= known.floor {
+		if floor <= known.floor && !mutated!(self, OldFloor) {
 			return Ok(());
 		}
 		let mut visited = 0;
-		let changes = match was == known.floor {
+		let changes = match was == known.floor || mutated!(self, Lagging) {
 			// The copy matched this node's at the same revision, so the message's changes
 			// bring it to the new one.
 			true => changes,
@@ -1288,7 +1340,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 		};
 		self.count(visited);
-		self.known.get_mut(&origin).expect("known").floor = floor;
+		let known = self.known.get_mut(&origin).expect("known");
+		known.floor = known.floor.max(floor);
 		self.publish(origin, changes);
 		Ok(())
 	}
@@ -1484,6 +1537,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.stale.insert(me);
 		}
 		self.publish(me, vec![(broadcast, change)]);
+		#[cfg(test)]
+		self.history.push(self.known[&me].items.clone());
 	}
 
 	// --- Requests ---
@@ -1553,7 +1608,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						presented: false,
 					}))
 				}
-				None if self.ended.contains(broadcast) => {
+				None if self.ended.contains(broadcast) || mutated!(self, LostEnds) => {
 					self.unwait(broadcast);
 					Some(None)
 				}
@@ -1579,9 +1634,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				now.entry(instance.clone()).or_default().insert(path.clone(), shown);
 			}
 		}
+		let lost_ends = mutated!(self, LostEnds);
 		let Self { reader, ended, .. } = self;
 		for (instance, claims) in now {
-			let ended = |claim: &Path| ended.contains(&(claim.clone(), instance.clone()));
+			let ended = |claim: &Path| lost_ends || ended.contains(&(claim.clone(), instance.clone()));
 			reader.apply(instance.clone(), |_| true, claims, ended);
 		}
 		for broadcast in &dirty {
@@ -1748,9 +1804,35 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
+	/// Plant `mutant`.
+	pub fn mutate(&mut self, mutant: Mutant) {
+		self.mutant = Some(mutant);
+	}
+
+	/// This node's own claims at each revision, the first empty.
+	pub fn history(&self) -> &[Claims<I, A>] {
+		&self.history
+	}
+
+	/// How many copies of a forwarding node's claims this node dropped, after each of which
+	/// a stale copy may start a claim it saw end.
+	pub fn forgets(&self) -> u32 {
+		self.forgets
+	}
+
+	/// Whether anything waits for [`Self::drain`].
+	pub fn pending(&self) -> bool {
+		!self.out.is_empty() || !self.stale.is_empty() || !self.fresh.is_empty()
+	}
+
 	/// The route this node uses to `origin`: the neighbour, and the offer as it stands here.
 	pub fn best(&self, origin: NodeId) -> Option<(N, &Offer)> {
 		self.best.get(&origin).map(|best| (best.via, &best.offer))
+	}
+
+	/// The forwarding nodes this node routes to.
+	pub fn routes(&self) -> Vec<NodeId> {
+		self.best.keys().copied().collect()
 	}
 
 	/// What each neighbour offers for `origin`, and whether a closed session ended it.
@@ -1821,8 +1903,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			reader,
 			out,
 			work: _,
+			history: _,
+			forgets: _,
+			mutant: _,
 		} = self;
-		assert!(out.is_empty(), "drain before fingerprinting");
 		// A deadline counts by how far off it is; one due counts as zero.
 		let waiting: BTreeMap<&Broadcast<I>, Duration> = (waiting.iter())
 			.map(|(broadcast, at)| (broadcast, at.saturating_duration_since(*now)))
@@ -1830,7 +1914,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let state = (
 			(me, debounce, sessions, peers, routing, fresh, heard, unnamed),
 			(dead, closed, draining, stale, best, known, rev, announced),
-			(sources, ended, dirty, waiting, reader.shown()),
+			(sources, ended, dirty, waiting, reader.shown(), out),
 		);
 		super::digest(hasher, &state);
 	}
