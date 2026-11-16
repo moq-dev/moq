@@ -91,6 +91,11 @@ the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
   the entry, and no message or time changed on any row
   (`a_session_floor_keeps_an_entry_per_restart_unless_filed_by_relay`). A
   start that repeats or goes back gets the relay's new sessions refused.
+  The bound is then pairs of relay identities ever heard closed: fixed where
+  relays are configured, as on a CDN, and growing by a departed device's
+  pairs on a mesh whose devices mint identities. Measure that growth on the
+  mesh shapes, and list any eviction it needs as a decision in this PR; one
+  that waits on a clock is the maintainer's.
 - Not picked, with their costs on the PR: holding adverts until neighbours
   agree (`quiet`, which can wait for good on a neighbour that learned a stale
   route late), ranking the far end of a closed session as draining
@@ -98,9 +103,12 @@ the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
   flap and has no word that always lifts it), and refusing a route a
   neighbour's own offer contradicts (`agree`, a small gain).
 - Promote `bakeoff.rs`'s fixtures and `sweep_the_prototype_carries_every_failure_at_32_relays`.
-  Size the reader's debounce from the PR's `fed_ms` column: 375 ms was the
-  longest for a failure that left a path on 32 relays, a silent death aside.
+  Size the reader's debounce from the longest path a route may take times a
+  hop's delay, not from a sample: the PR's `fed_ms` column is what was seen,
+  775 ms at most for a failure that left a path on 32 relays (the
+  publisher's relay dying on the full mesh), a silent death aside, and a
+  longer path settles later.
 - Selected routes looped for a moment in partitions and deaths (up to 3 rounds
-  at 32 relays), which today's never do; requests must fail closed first.
+  at 32 relays, where today's reached 4); requests must fail closed first.
 
 Public API: none. Wire: none.
