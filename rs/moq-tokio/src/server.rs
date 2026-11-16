@@ -757,35 +757,6 @@ impl Listener {
 		crate::runtime::scope(self.server.accept_next()).await
 	}
 
-	/// Read the MoQ SETUP on a qmux session established outside this listener, such as
-	/// over a WebRTC data channel, leaving admission to the returned [`Request`].
-	///
-	/// `transport` and `link` are what the request reports about the connection. The
-	/// accept deadline counts from this call and bounds SETUP, admission, and the reply;
-	/// establishing the session is the caller's to bound. Returns [`Error::Stopped`] once
-	/// the listener is closing.
-	///
-	/// To have a drain wait for a session still being established, hold a guard from
-	/// [`Self::admission`] until this call returns.
-	pub async fn accept_with(
-		&self,
-		transport: Transport,
-		session: qmux::Session,
-		link: Link,
-	) -> crate::Result<Request> {
-		let server = &self.server;
-		let active = server.admission.enter().ok_or(Error::Stopped)?;
-		let mut incoming = Incoming::new(transport, server.moq.deadline(kio::clock::now()), active);
-		incoming.link = link;
-		crate::runtime::scope(Request::accept_qmux(&server.moq, session, incoming)).await
-	}
-
-	/// The accepted connections a drain waits for, including any session a guard from it
-	/// holds while it is established for [`Self::accept_with`].
-	pub fn admission(&self) -> &moq_net::server::Admission {
-		&self.server.admission
-	}
-
 	/// Close every listener and connection, once each QUIC peer has been sent the
 	/// close.
 	///
@@ -1274,8 +1245,7 @@ pub(crate) enum Under {
 	Opaque,
 	/// A raw QUIC or WebTransport connection.
 	Quic(crate::quic::driver::connection::Connection),
-	/// A qmux session: WebSocket, `tcp://`, `tls://`, `unix://`, or one handed over with
-	/// [`Listener::accept_with`].
+	/// A qmux session: WebSocket, `tcp://`, `tls://`, or `unix://`.
 	Qmux(qmux::Session),
 }
 
@@ -1512,8 +1482,7 @@ impl Request {
 	/// `ok` applies the other limits first, then has moq-net open `receive_window`, or
 	/// `[quic] receive_window` when it is unset, so a `receive_rate` set here paces the opened
 	/// window. A qmux session starts at the `[quic]` windows and takes the windows and stream
-	/// count set here, except a WebRTC session's receive window, which its data channel fixes;
-	/// it never paces, so `ok` refuses a rate cap on one.
+	/// count set here; it never paces, so `ok` refuses a rate cap on one.
 	pub fn with_quic_limits(mut self, limits: moq_quic::Limits) -> Result<Self, moq_quic::LimitsError> {
 		limits.validate()?;
 		self.quic_limits = limits;

@@ -6,7 +6,6 @@
 //! - WebSocket (qmux over WebSocket, the fallback when QUIC is blocked)
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; unix-only)
-//! - A qmux session established elsewhere, such as over a WebRTC data channel
 //!
 //! Every transport is compiled in, and the URL scheme or config picks one at runtime.
 //! [`client::Client`] connects to relays, [`server::Server`] accepts connections, and

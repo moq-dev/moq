@@ -366,25 +366,6 @@ impl Client {
 		Some(self.with_subscriber(origin).connect(url))
 	}
 
-	/// Run a MoQ client session over a qmux session established outside this client, such
-	/// as over a WebRTC data channel.
-	///
-	/// The connect timeout bounds the MoQ handshake from this call. A transport handed
-	/// over cannot be redialed, so there is no reconnect: the session ends with it.
-	pub async fn connect_with(&self, session: qmux::Session) -> crate::Result<moq_net::Session> {
-		let timeout = self.policy.timeout;
-		let connect = connect_session(&self.moq, session);
-		crate::runtime::scope(async move {
-			match timeout {
-				None => Ok(connect.await?),
-				Some(timeout) => Ok(kio::clock::timeout(timeout, connect)
-					.await
-					.map_err(|_| Error::ConnectTimeout(timeout))??),
-			}
-		})
-		.await
-	}
-
 	/// Dial one attempt of a [`Connection`]'s policy and complete the MoQ handshake,
 	/// presenting the URL and credential the attempt carries.
 	///
