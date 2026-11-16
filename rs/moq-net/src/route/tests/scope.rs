@@ -1622,7 +1622,7 @@ fn sent_to(router: &mut path::Router<usize, u8>, peer: usize) -> Vec<path::Out<u
 			| path::Out::Batch { to, .. }
 			| path::Out::Dead { to, .. }
 			| path::Out::Ask { to, .. }
-			| path::Out::Edited { to }
+			| path::Out::Edited { to, .. }
 			| path::Out::Synced { to, .. } => *to == peer,
 		})
 		.collect()

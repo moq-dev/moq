@@ -1,16 +1,17 @@
-//! One origin node's router, shared by every lite-07 announce stream on its origin.
+//! One origin node's router, shared by every lite-07 session on its origin.
 //!
-//! Each announce stream is its own neighbour key on the [`Router`], one per direction: a
-//! stream this node asked for receives routes and claims, and a stream it answers sends
-//! them. Every stream of one session shares the session's [`Peer`] tag: a hold on what a
-//! stream this node answers was sent waits on the routes the peer sends back on the
-//! session's newest stream this node asked for. A stream that ends while its session
-//! stays up retires quietly, as ROUTE_ENDs for its routes would; the streams that end
-//! with their session report its hop dead.
+//! Each session is one neighbour key on the [`Router`], for both directions: it sends
+//! everything it says about routing on one stream and hears the peer on another, so the
+//! node sees one ordered queue each way, as the route model has. The session's
+//! [`Stream`] lives as long as the session, and dropping it reports the session's hop
+//! dead. A handle that reads part of what the peer asks for through a mount answers that
+//! part under a key of its own ([`Stream::mount`]), which only sends: a hold on what it
+//! was sent waits on the routes the peer sends the session, and dropping it while the
+//! session stays up retires it quietly, as ROUTE_ENDs for its routes would.
 //!
-//! The node does no I/O. A stream's session feeds it what the peer sent and takes
-//! [`Output`]s from its queue: wire messages to send, and the shown claims it serves into
-//! the origin. A claim is served through each live route covering it, the narrowest one
+//! The node does no I/O. A session feeds it what the peer sent and takes [`Output`]s
+//! from its queue: wire messages to send, and the shown claims it serves into the
+//! origin. A claim is served through each live route covering it, the narrowest one
 //! marked primary: a reader here follows that one, and a request forwarded from a peer
 //! follows the route it names ([`Node::forward`]). A stream that stops carrying one lets
 //! go only once another serves it, so the origin always holds a route for it.
@@ -34,11 +35,11 @@ use rand::RngExt;
 
 use super::{
 	Error, GENERATED, Id, Link, MAX_HOPS, Metric, QUALIFIED, Rev,
-	path::{Dead, Doubt, Forward, Hop, Offer, Reach, RouteId, Router},
+	path::{Carried, Dead, Doubt, Edit, Forward, Hop, Offer, Reach, RouteId, Router},
 	view::{ancestors, below},
 };
 
-/// One announce stream in one direction.
+/// One session, or one mount a session answers through.
 pub(crate) type Key = u64;
 
 /// A claim's attributes on the route layer.
@@ -102,10 +103,17 @@ pub(crate) struct Served {
 }
 
 /// What a stream's session acts on, in order. One route's changes and batches coalesce
-/// while the session leaves them unread, but never across a DEAD, which applies to the
-/// routes the peer holds when it reads it.
+/// while the session leaves them unread, but never across a DEAD or an edit's marker,
+/// which apply to the routes the peer holds when it reads them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Output {
+	/// Send ANNOUNCE_REQUEST: this edit of the prefixes this node asks the peer for.
+	Ask(Edit),
+	/// Send ANNOUNCE_OK: the peer's last edit takes effect here, and the peer then holds
+	/// `routes`, less the claims held back, as the edit carried over what it was sent.
+	Edited { routes: Vec<Carried<Claim>> },
+	/// Send SYNCED for `prefix`, which the peer added: its initial set is out.
+	Synced(Path),
 	/// Send ROUTE_START or ROUTE_UPDATE, ROUTE_HOLD (`Held`), or for `None` ROUTE_END,
 	/// for the route to `id` covering `prefix`.
 	Route { id: Id, prefix: Path, reach: Option<Reach> },
@@ -167,15 +175,18 @@ impl std::fmt::Debug for Node {
 type Queues = HashMap<Key, kio::Shared<Outbox>>;
 
 /// What one stream has yet to read. Route changes and claim batches coalesce per route
-/// between DEADs, and a route started and ended unread leaves nothing. Serving changes
+/// between barriers, and a route started and ended unread leaves nothing. Serving changes
 /// coalesce per claim and route. A stream whose reader stalls holds one entry per route
 /// and claim per DEAD queued meanwhile, and its session closes it once it stalls too long.
 #[derive(Default)]
 struct Outbox {
-	/// Route changes pending, the DEAD closing each segment read after its routes.
+	/// Route changes pending, the barrier closing each segment read after its routes.
 	segments: VecDeque<Segment>,
-	/// Outputs to read in order: a pending entry once taken, or a DEAD.
+	/// Outputs to read in order: a pending entry once taken, or a barrier.
 	ready: VecDeque<Output>,
+	/// The session is leaving: it ends every route itself, and reads nothing more it
+	/// would send.
+	withdrawn: bool,
 	next: u64,
 	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A job
 	/// queues its Serve before the Unserve or restart of the claim it continues, and the
@@ -233,14 +244,51 @@ struct Sealing {
 	void: u64,
 }
 
-/// Route changes queued before the next DEAD.
+/// Route changes queued before the next barrier.
 #[derive(Default)]
 struct Segment {
 	/// Routes with changes pending, by when they first queued.
 	order: BTreeMap<u64, RouteId>,
 	pending: HashMap<RouteId, (u64, Pending)>,
-	/// The DEAD read once the routes are.
-	dead: Option<Dead>,
+	/// What is read once the routes are.
+	barrier: Option<Barrier>,
+}
+
+/// What closes a segment: the peer reads it against the routes it holds by then, so no
+/// change coalesces across it.
+enum Barrier {
+	Dead(Dead),
+	Ask(Edit),
+	Edited(Vec<Carried<Claim>>),
+	Synced(Path),
+}
+
+impl Barrier {
+	/// What it counts in [`Outbox::sealed`]: a DEAD, and each route it moves. The edits'
+	/// markers and SYNCEDs count nothing: each side has one edit unanswered at a time,
+	/// and the peer reads this side's ANNOUNCE_OK before it edits again, so however
+	/// many prefixes an edit adds, the reader holds back no more than about two edits.
+	fn cost(&self) -> usize {
+		match self {
+			Self::Dead(Dead::Closed { moved, .. }) => 1 + moved.len(),
+			Self::Dead(Dead::Draining { .. }) => 1,
+			Self::Ask(_) | Self::Edited(_) | Self::Synced(_) => 0,
+		}
+	}
+
+	/// Whether the route changes queued ahead of it count in [`Outbox::sealed`].
+	fn counts(&self) -> bool {
+		matches!(self, Self::Dead(_))
+	}
+
+	fn output(self) -> Output {
+		match self {
+			Self::Dead(dead) => Output::Dead(dead),
+			Self::Ask(edit) => Output::Ask(edit),
+			Self::Edited(routes) => Output::Edited { routes },
+			Self::Synced(prefix) => Output::Synced(prefix),
+		}
+	}
 }
 
 /// One route's changes and claim batches since the segment began.
@@ -323,14 +371,6 @@ impl Pending {
 	}
 }
 
-/// How many routes a DEAD moves.
-fn moved(dead: &Dead) -> usize {
-	match dead {
-		Dead::Closed { moved, .. } => moved.len(),
-		Dead::Draining { .. } => 0,
-	}
-}
-
 /// Merged batches: each claim's last change, and the last floor.
 type Batch = (Changes, Option<Rev>);
 
@@ -350,9 +390,9 @@ impl Outbox {
 		self.ready.is_empty() && self.segments.is_empty() && self.serves.is_empty()
 	}
 
-	/// The open segment, a new one after a DEAD.
+	/// The open segment, a new one after a barrier.
 	fn segment(&mut self) -> &mut Segment {
-		if self.segments.back().is_none_or(|segment| segment.dead.is_some()) {
+		if self.segments.back().is_none_or(|segment| segment.barrier.is_some()) {
 			self.segments.push_back(Segment::default());
 		}
 		self.segments.back_mut().expect("just pushed")
@@ -363,7 +403,7 @@ impl Outbox {
 		let was = self.known.contains_key(key);
 		let next = &mut self.next;
 		let segment = {
-			if self.segments.back().is_none_or(|segment| segment.dead.is_some()) {
+			if self.segments.back().is_none_or(|segment| segment.barrier.is_some()) {
 				self.segments.push_back(Segment::default());
 			}
 			self.segments.back_mut().expect("just pushed")
@@ -563,17 +603,24 @@ impl Outbox {
 				}
 			}
 		}
+		self.seal(Barrier::Dead(dead));
+	}
+
+	/// Close the open segment with `barrier`, read once every route change queued before
+	/// it is.
+	fn seal(&mut self, barrier: Barrier) {
 		self.segment();
 		let segment = self.segments.back_mut().expect("just opened");
-		let mut sealed = 1 + moved(&dead);
+		let mut sealed = barrier.cost();
+		let counts = barrier.counts();
 		for (key, (seq, pending)) in &mut segment.pending {
-			pending.sealed = self.known.contains_key(key);
+			pending.sealed = counts && self.known.contains_key(key);
 			if pending.sealed {
 				self.sealing.entry(key.clone()).or_default().sealed += 1;
 				sealed += 1;
 			}
-			// Claims held back go after the DEAD, so the floor waits for them: the release
-			// closes them with it.
+			// Claims held back go after the barrier, so the floor waits for them: the
+			// release closes them with it.
 			if let Some((_, last)) = self.withheld.get_mut(key) {
 				pending.uncertified = true;
 				if let Some((_, floor)) = &pending.batch {
@@ -581,8 +628,81 @@ impl Outbox {
 				}
 			}
 		}
-		segment.dead = Some(dead);
+		segment.barrier = Some(barrier);
 		self.sealed += sealed;
+	}
+
+	/// Queue the marker of the peer's edit for the stream `stream`, read once every route
+	/// change queued before it is. The reader then holds `routes`, as the edit carried
+	/// over what it was sent, less each claim `awaits` a confirmation, which is held back.
+	fn edited(
+		&mut self,
+		stream: Key,
+		mut routes: Vec<Carried<Claim>>,
+		awaits: impl Fn(Id, &Path, &Claim) -> Option<bool>,
+		waiting: &mut Waiting,
+	) {
+		// What was queued for the routes as they were is read first, and counts against
+		// none the reader holds after.
+		if let Some(segment) = self.segments.back_mut().filter(|segment| segment.barrier.is_none()) {
+			for (key, (_, pending)) in &mut segment.pending {
+				// Claims held back under the old key never go under it.
+				pending.uncertified |= self.withheld.contains_key(key);
+			}
+		}
+		let before: Vec<RouteId> = self.known.keys().cloned().collect();
+		for key in &before {
+			self.unseal(key);
+			self.unwithhold(stream, key, waiting);
+		}
+		self.known.clear();
+		self.claims.clear();
+		for route in &mut routes {
+			let key = (route.id, route.prefix.clone());
+			let mut held = Held::new();
+			route.claims.retain(|path, claim| {
+				let waits = awaits(key.0, path, claim) == Some(true);
+				if waits {
+					held.insert(path.clone(), claim.clone());
+				}
+				!waits
+			});
+			self.known.insert(key.clone(), route.offer.path.clone());
+			if !route.claims.is_empty() {
+				self.claims.insert(key.clone(), route.claims.keys().cloned().collect());
+			}
+			if held.is_empty() {
+				continue;
+			}
+			for path in held.keys() {
+				let waits = waiting.entry(key.0).or_default().entry(path.clone()).or_default();
+				waits.insert((stream, key.1.clone()));
+			}
+			// The floor cannot cover what is held back, whose release closes with it.
+			let floor = HeldFloor {
+				rev: route.floor.take(),
+				seq: self.next,
+			};
+			self.next += 1;
+			self.withheld.insert(key, (held, floor));
+		}
+		self.seal(Barrier::Edited(routes));
+	}
+
+	/// The session is leaving and ends every route itself: drop what it has yet to read
+	/// of what it would send, and queue no more.
+	fn withdraw(&mut self, stream: Key, waiting: &mut Waiting) {
+		self.withdrawn = true;
+		let keys: Vec<RouteId> = self.withheld.keys().cloned().collect();
+		for key in keys {
+			self.unwithhold(stream, &key, waiting);
+		}
+		self.segments.clear();
+		self.ready.clear();
+		self.known.clear();
+		self.claims.clear();
+		self.sealing.clear();
+		self.sealed = 0;
 	}
 
 	/// The reader stops holding the route `key` once everything queued is read, so what a
@@ -599,6 +719,7 @@ impl Outbox {
 	/// moved entry, and a change queued after, so a reader holding more than that unread
 	/// for every route it holds is slower than the routes fail: a peer that reads a
 	/// trickle while its routes churn would otherwise hold a DEAD per failure forever.
+	/// What the edits queue counts nothing (see [`Barrier::cost`]).
 	fn overrun(&self) -> bool {
 		self.sealed > 3 * MAX_HOPS * (self.known.len() + 1)
 	}
@@ -629,9 +750,9 @@ impl Outbox {
 				}
 				None => {
 					let segment = self.segments.pop_front().expect("matched above");
-					if let Some(dead) = segment.dead {
-						self.sealed -= 1 + moved(&dead);
-						self.ready.push_back(Output::Dead(dead));
+					if let Some(barrier) = segment.barrier {
+						self.sealed -= barrier.cost();
+						self.ready.push_back(barrier.output());
 					}
 				}
 			}
@@ -802,9 +923,9 @@ struct State {
 	clock: Deadlines,
 	next_key: Key,
 	queues: Queues,
-	/// Each stream's session tag.
+	/// Each key's session tag.
 	streams: HashMap<Key, u64>,
-	/// Each session's streams.
+	/// Each session's keys.
 	sessions: HashMap<u64, Session>,
 	/// Each shown claim of another identity, and the streams serving it.
 	homes: Homes,
@@ -815,22 +936,12 @@ struct State {
 	routes: HashMap<Id, Routes>,
 }
 
-/// One session's streams on the node.
-#[derive(Default)]
+/// One session's keys on the node.
 struct Session {
-	/// The newest stream this node asked the peer for, whose routes answer the holds on
-	/// what the streams answering the peer were sent.
-	receive: Option<Key>,
-	/// The streams answering the peer.
-	answers: BTreeSet<Key>,
-	/// How many streams it has open.
-	open: usize,
-	/// How many [`Closing`] guards are held: while any is, a dropped stream joins
-	/// `closed` instead of retiring on its own.
-	closing: usize,
-	/// The streams dropped while a guard was held, disconnected together once the last is
-	/// released: the session closed.
-	closed: Vec<Key>,
+	/// The session's own key, for both directions.
+	main: Key,
+	/// The keys answering the peer through a mount each.
+	mounts: BTreeSet<Key>,
 }
 
 /// Each shown claim of another identity, and the streams serving it.
@@ -921,6 +1032,11 @@ impl Node {
 		Self::new(id, rng.random(), clock)
 	}
 
+	/// Whether `other` is this node, rather than another origin's.
+	pub fn same(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.state, &other.state)
+	}
+
 	fn lock(&self) -> Locked<'_> {
 		let state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
 		Locked {
@@ -961,61 +1077,50 @@ impl Node {
 		}
 	}
 
-	/// Register a stream this node asked `peer` for, which becomes the session's stream
-	/// whose routes answer the holds on what its other streams were sent.
-	pub fn receive(&self, peer: Peer, link: Link) -> Result<Stream, Error> {
+	/// Register `peer`'s session, which asks it for what `link` wants and answers what
+	/// it asks for.
+	pub fn connect(&self, peer: Peer, link: Link) -> Result<Stream, Error> {
 		let mut state = self.lock();
 		let key = state.register(peer, link)?;
-		let session = state.sessions.get_mut(&peer.tag).expect("registered");
-		session.receive = Some(key);
-		let answers: Vec<Key> = session.answers.iter().copied().collect();
-		for answer in answers {
-			state.router.pair(answer, key);
-		}
+		state.sessions.insert(
+			peer.tag,
+			Session {
+				main: key,
+				mounts: BTreeSet::new(),
+			},
+		);
 		state.flush();
-		Ok(self.stream(&state, key))
+		Ok(Stream {
+			node: self.clone(),
+			key,
+			main: true,
+			queue: state.queues[&key].clone(),
+			clock: None,
+		})
 	}
 
-	/// Register a stream answering `peer`'s request for `prefix`.
+	/// A session whose peer asks for `prefix` and is asked for nothing.
+	#[cfg(test)]
 	pub fn answer(&self, peer: Peer, link: Link, prefix: Path) -> Result<Stream, Error> {
-		let mut state = self.lock();
-		let key = state.register(peer, link)?;
-		let session = state.sessions.get_mut(&peer.tag).expect("registered");
-		session.answers.insert(key);
-		if let Some(receive) = session.receive {
-			state.router.pair(key, receive);
-		}
-		let edit = super::path::Edit {
+		let link = Link {
+			interest: BTreeSet::new(),
+			..link
+		};
+		let stream = self.connect(peer, link)?;
+		let edit = Edit {
 			remove: Vec::new(),
 			add: vec![prefix],
 		};
-		if let Err(err) = state.router.edit(key, edit) {
-			state.unregister(key);
-			state.router.retire(key);
-			return Err(err);
-		}
-		state.flush();
-		Ok(self.stream(&state, key))
+		stream.edit(edit)?;
+		Ok(stream)
 	}
 
-	fn stream(&self, state: &State, key: Key) -> Stream {
-		Stream {
-			node: self.clone(),
-			key,
-			queue: state.queues[&key].clone(),
-			clock: None,
-		}
-	}
-
-	/// Hold back the disconnect of every stream of the session `tag` dropped until the
-	/// guard is released, then disconnect them together, reporting the session's hops
-	/// dead: the session closed. A stream dropped outside one retires quietly.
-	pub fn closing(&self, tag: u64) -> Closing {
-		self.lock().sessions.entry(tag).or_default().closing += 1;
-		Closing {
-			node: self.clone(),
-			tag,
-		}
+	/// A session whose peer answered what `link` asks it for, and asks for nothing.
+	#[cfg(test)]
+	pub fn receive(&self, peer: Peer, link: Link) -> Result<Stream, Error> {
+		let stream = self.connect(peer, link)?;
+		stream.edited(BTreeSet::new());
+		Ok(stream)
 	}
 
 	/// Where a request for `claim` of `id` that the session `tag`'s peer sent goes, naming
@@ -1024,11 +1129,10 @@ impl Node {
 	pub fn forward(&self, tag: u64, id: Id, claim: &Path, prefix: &Path) -> Option<Via> {
 		let state = self.lock();
 		let session = state.sessions.get(&tag)?;
-		// The stream that was sent the route, else any answering the peer.
-		let from = (session.answers.iter())
-			.find(|key| state.router.sent(**key, id, prefix))
-			.or_else(|| session.answers.first())
-			.copied()?;
+		// The key that was sent the route, else the session's own.
+		let from = (session.mounts.iter().copied())
+			.find(|key| state.router.sent(*key, id, prefix))
+			.unwrap_or(session.main);
 		match state.router.forward(id, claim, Some((from, prefix.clone())))? {
 			Forward::Here => Some(Via::Here),
 			Forward::Next { prefix, .. } => Some(Via::Route { prefix }),
@@ -1069,11 +1173,14 @@ pub(crate) enum Via {
 	Route { prefix: Path },
 }
 
-/// One announce stream's key on the node. Dropping it retires the stream, or disconnects
-/// it with its session; see [`Node::closing`].
+/// One session's key on the node, or a mount's ([`Self::mount`]). Dropping a session's
+/// disconnects it and every mount of it still held: the session closed. Dropping a mount's
+/// while its session stays up retires it quietly.
 pub(crate) struct Stream {
 	node: Node,
 	key: Key,
+	/// The session's own key, rather than a mount's.
+	main: bool,
 	queue: kio::Shared<Outbox>,
 	/// The clock of the session the stream belongs to. The origin's clock moves only as
 	/// its driver polls, so an idle origin reads an old instant: what a session hands the
@@ -1113,12 +1220,118 @@ impl Stream {
 		self.queue.poll(waiter, overrun).map(|_| ())
 	}
 
+	/// The next route message or serving change queued, leaving out the session's own
+	/// edits and their markers.
+	#[cfg(test)]
+	pub fn try_wire(&self) -> Option<Output> {
+		std::iter::from_fn(|| self.try_output())
+			.find(|output| !matches!(output, Output::Ask(_) | Output::Edited { .. } | Output::Synced(_)))
+	}
+
 	/// The next output already queued, without waiting.
 	pub fn try_output(&self) -> Option<Output> {
 		if self.queue.read().is_empty() {
 			return None;
 		}
 		self.queue.lock().pop()
+	}
+
+	/// Answer what the peer asks for beneath `interest` under a key of its own, which
+	/// only sends: what a handle reads through a mount, at the mount's target. A hold on
+	/// what it sends waits on the routes the peer sends the session.
+	pub fn mount(&self, interest: Path) -> Result<Stream, Error> {
+		let mut state = self.node.lock();
+		let tag = *state.streams.get(&self.key).ok_or(Error::UnknownNeighbor)?;
+		let link = state.router.link(self.key).ok_or(Error::UnknownNeighbor)?;
+		let peer = Peer {
+			tag,
+			node: state.router.hop_of(self.key),
+		};
+		// A mount hears nothing, so it asks for nothing and files nothing.
+		let link = Link {
+			scope: None,
+			interest: BTreeSet::new(),
+			..link
+		};
+		let key = state.register(peer, link)?;
+		state.router.pair(key, self.key);
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![interest],
+		};
+		if let Err(err) = state.router.edit(key, edit) {
+			state.unregister(key);
+			state.router.retire(key);
+			return Err(err);
+		}
+		let session = state.sessions.get_mut(&tag).expect("a registered key's session");
+		session.mounts.insert(key);
+		state.flush();
+		Ok(Stream {
+			node: self.node.clone(),
+			key,
+			main: false,
+			queue: state.queues[&key].clone(),
+			clock: self.clock.clone(),
+		})
+	}
+
+	/// The prefixes this node wants to ask the peer for, as its interest and the
+	/// session's link stand now.
+	pub fn asks(&self) -> BTreeSet<Path> {
+		let state = self.node.lock();
+		state.router.asks(self.key)
+	}
+
+	/// ANNOUNCE_REQUEST: the peer edited the prefixes it asks this node for.
+	pub fn edit(&self, edit: Edit) -> Result<(), Error> {
+		self.with(|router, key, _| router.edit(key, edit))
+	}
+
+	/// ANNOUNCE_OK: this node's last edit of what it asks the peer for takes effect.
+	/// Each route in `exact`, by the Node ID the peer names and its prefix, lies at its
+	/// own prefix, so a widening leaves it there.
+	pub fn edited(&self, exact: BTreeSet<(Id, Path)>) {
+		self.with(|router, key, _| router.edited_exact(key, &exact));
+	}
+
+	/// Replace the session's link: what this node asks the peer for follows its interest
+	/// and scope. With `refile`, the session files the peer's routes again, then calls
+	/// [`Self::relinked`]; see [`Router::relink`].
+	pub fn relink(&self, link: Link, refile: bool) -> Result<(), Error> {
+		let mut state = self.node.lock();
+		let tag = *state.streams.get(&self.key).ok_or(Error::UnknownNeighbor)?;
+		let link = Link { session: tag, ..link };
+		let out = state.router.relink(self.key, link, refile);
+		state.flush();
+		out
+	}
+
+	/// The session filed the peer's routes again after [`Self::relink`].
+	pub fn relinked(&self) {
+		self.with(|router, key, _| router.relinked(key));
+	}
+
+	/// The session is leaving: the node stops answering the peer, and the session ends
+	/// every route it sent itself. What the peer sends is still heard.
+	pub fn withdraw(&self) {
+		let mut state = self.node.lock();
+		let State {
+			router,
+			queues,
+			waiting,
+			..
+		} = &mut *state;
+		if let Some(queue) = queues.get(&self.key) {
+			queue.lock().withdraw(self.key, waiting);
+		}
+		let edit = Edit {
+			remove: router.answers(self.key).into_iter().collect(),
+			add: Vec::new(),
+		};
+		// Removing what is answered cannot nest or name an unknown prefix.
+		let _ = router.edit(self.key, edit);
+		state.flush();
 	}
 
 	/// Ready once the peer offers no route on this stream that only doubt keeps the node
@@ -1223,37 +1436,27 @@ impl Drop for Stream {
 		};
 		let now = self.now(&state);
 		state.router.clock(now);
-		let session = state.sessions.get_mut(&tag).expect("a registered stream's session");
-		match session.closing {
-			0 => state.close(vec![self.key], false),
-			_ => session.closed.push(self.key),
+		match self.main {
+			// The session closed: every key of it goes together.
+			true => {
+				// A later session under the same tag keeps its own keys.
+				let own = state.sessions.get(&tag).is_some_and(|session| session.main == self.key);
+				let mounts = match own {
+					true => state.sessions.remove(&tag).map(|session| session.mounts),
+					false => None,
+				};
+				let keys = std::iter::once(self.key).chain(mounts.unwrap_or_default()).collect();
+				state.close(keys, true);
+			}
+			false => state.close(vec![self.key], false),
 		}
 	}
 }
 
-/// Holds back the disconnect of each stream of one session dropped meanwhile, then
-/// disconnects them together on drop. See [`Node::closing`].
-pub(crate) struct Closing {
-	node: Node,
-	tag: u64,
-}
-
-impl Drop for Closing {
-	fn drop(&mut self) {
-		let mut state = self.node.lock();
-		let Some(session) = state.sessions.get_mut(&self.tag) else {
-			return;
-		};
-		session.closing -= 1;
-		if session.closing > 0 {
-			return;
-		}
-		let closed = std::mem::take(&mut session.closed);
-		if !closed.is_empty() {
-			state.close(closed, true);
-		}
-		state.forget(self.tag);
-	}
+/// The outbox of the key `to`, unless its session is leaving and sends no more.
+fn sending(queues: &Queues, to: Key) -> Option<kio::Mut<'_, Outbox>> {
+	let outbox = queues.get(&to)?.lock();
+	(!outbox.withdrawn).then_some(outbox)
 }
 
 /// Queue a serving change for the stream `key`.
@@ -1264,7 +1467,7 @@ fn serve(queues: &Queues, key: Key, output: Output) {
 }
 
 impl State {
-	/// Connect a stream of `peer`'s session.
+	/// Connect a key of `peer`'s session.
 	fn register(&mut self, peer: Peer, link: Link) -> Result<Key, Error> {
 		let key = self.next_key;
 		self.next_key += 1;
@@ -1275,16 +1478,12 @@ impl State {
 			..link
 		};
 		self.router.connect(key, peer.node, link)?;
-		// Lite-07 asks for one prefix per stream, on opening it: what the router asks the
-		// peer for takes effect at once, and no later edit comes.
-		self.router.edited(key);
 		self.queues.insert(key, kio::Shared::default());
 		self.streams.insert(key, peer.tag);
-		self.sessions.entry(peer.tag).or_default().open += 1;
 		Ok(key)
 	}
 
-	/// Forget the stream `key` and its place in its session; the router keeps it until
+	/// Forget the key `key` and its place in its session; the router keeps it until
 	/// the caller retires or disconnects it.
 	fn unregister(&mut self, key: Key) {
 		if let Some(queue) = self.queues.remove(&key) {
@@ -1297,23 +1496,8 @@ impl State {
 		let Some(tag) = self.streams.remove(&key) else {
 			return;
 		};
-		let session = self.sessions.get_mut(&tag).expect("a registered stream's session");
-		session.open -= 1;
-		session.answers.remove(&key);
-		if session.receive == Some(key) {
-			session.receive = None;
-		}
-		self.forget(tag);
-	}
-
-	/// Drop the session `tag` once it has no stream and no guard.
-	fn forget(&mut self, tag: u64) {
-		if self
-			.sessions
-			.get(&tag)
-			.is_some_and(|session| session.open == 0 && session.closing == 0)
-		{
-			self.sessions.remove(&tag);
+		if let Some(session) = self.sessions.get_mut(&tag) {
+			session.mounts.remove(&key);
 		}
 	}
 
@@ -1350,8 +1534,8 @@ impl State {
 		for out in outs {
 			match out {
 				super::path::Out::Route { to, id, prefix, reach } => {
-					if let Some(queue) = self.queues.get(&to) {
-						queue.lock().route(to, (id, prefix), reach, &mut self.waiting);
+					if let Some(mut outbox) = sending(&self.queues, to) {
+						outbox.route(to, (id, prefix), reach, &mut self.waiting);
 					}
 				}
 				super::path::Out::Batch {
@@ -1361,26 +1545,50 @@ impl State {
 					changes,
 					floor,
 				} => {
-					if let Some(queue) = self.queues.get(&to) {
+					if let Some(mut outbox) = sending(&self.queues, to) {
 						let homes = &self.homes;
 						let awaits = |path: &Path, item: &Claim| awaits(homes, id, path, &item.instance, item.epoch);
-						queue
-							.lock()
-							.batch(to, (id, prefix), (changes, floor), awaits, &mut self.waiting);
+						outbox.batch(to, (id, prefix), (changes, floor), awaits, &mut self.waiting);
 					}
 				}
 				super::path::Out::Dead { to, dead } => {
-					if let Some(queue) = self.queues.get(&to) {
-						queue.lock().dead(to, dead, &mut self.waiting);
+					if let Some(mut outbox) = sending(&self.queues, to) {
+						outbox.dead(to, dead, &mut self.waiting);
 					}
 				}
-				// The stream answering the peer sends its own once its initial set is out.
-				super::path::Out::Synced { .. } => {}
-				// Each stream's request is its only edit, sent as the session opens it, and
-				// takes effect as the stream starts: lite-07 has no marker to send.
-				super::path::Out::Ask { .. } | super::path::Out::Edited { .. } => {}
+				super::path::Out::Ask { to, edit } => {
+					if let Some(queue) = self.queues.get(&to) {
+						queue.lock().seal(Barrier::Ask(edit));
+					}
+				}
+				// A mount's one edit is its interest, in effect from the start: only a
+				// session's own key has a peer to answer.
+				super::path::Out::Edited { to, routes } => {
+					if self.main(to)
+						&& let Some(mut outbox) = sending(&self.queues, to)
+					{
+						let homes = &self.homes;
+						let awaits =
+							|id: Id, path: &Path, item: &Claim| awaits(homes, id, path, &item.instance, item.epoch);
+						outbox.edited(to, routes, awaits, &mut self.waiting);
+					}
+				}
+				super::path::Out::Synced { to, prefix } => {
+					if self.main(to)
+						&& let Some(mut outbox) = sending(&self.queues, to)
+					{
+						outbox.seal(Barrier::Synced(prefix));
+					}
+				}
 			}
 		}
+	}
+
+	/// Whether `key` is a session's own key, rather than a mount's.
+	fn main(&self, key: Key) -> bool {
+		(self.streams.get(&key))
+			.and_then(|tag| self.sessions.get(tag))
+			.is_some_and(|session| session.main == key)
 	}
 
 	/// Serve the shown claims that changed through the streams.

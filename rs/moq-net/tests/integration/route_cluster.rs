@@ -1034,12 +1034,13 @@ async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 
 /// `L` claims `live/a` and `vod/l` at a relay whose client lists `live`, then withdraws
 /// `live/a`, its last claim there. Its route to the client ends behind that batch, closed
-/// by its floor: the client sees `live/a` End where the relay certifies the request, and
-/// Offline where the relay's grant to `L` (`live/a` and `vod`) knows only part of it.
-/// Either way `L`'s later churn under `vod` costs the client nothing, so the route is gone.
+/// by its floor: the client sees `live/a` End, even where the relay's grant to `L` covers
+/// only `live/a` and `vod`, since the relay asks `L` for everything and refuses only what
+/// the grant does not cover, so `L`'s floor certifies the withdrawal. Either way `L`'s
+/// later churn under `vod` costs the client nothing, so the route is gone.
 #[kio::test]
 async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
-	for (scoped, gone) in [(false, Kind::End), (true, Kind::Offline)] {
+	for (scoped, gone) in [(false, Kind::End), (true, Kind::End)] {
 		let relay = produce_origin(1);
 		let l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
 		if scoped {

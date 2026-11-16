@@ -17,7 +17,7 @@ vendored copy before a fix has been shown to need one.
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅
 return to upstream str0m (rejected: keep the vendored stack and gate the cut
 on a browser test; keep as is). This reverses the 2026-10-30 decision below,
-and [the switch](/quest/m2/str0m-upstream.md) lands before the cut. What
+and [the switch](https://github.com/moq-dev/moq/pull/8963) lands before the cut. What
 changed: none of the four fixes that motivated vendoring had landed by the
 audit, peer-to-peer and data channels left on 2026-11-14
 ([moq-dev/moq#8771](https://github.com/moq-dev/moq/pull/8771)), upstream
@@ -40,10 +40,11 @@ What still holds from that plan:
 - **One crate.** The ICE driver lives in `moq-webrtc`, which depends on
   moq-tokio rather than the reverse, so moq-tokio needs no ICE.
 - **No SCTP.** Decided 2026-11-14 (maintainer): an offered `m=application`
-  line is answered rejected. On upstream this is a configuration, not a
-  deletion; the switch keeps the test that proves it.
-- **DTLS 1.2** is what the rind provider offers and every browser
-  negotiates today.
+  line is answered rejected. str0m 0.25 has no setting for it, so
+  moq-webrtc's `sdp.rs` takes the section out of the offer and puts it back
+  rejected in the answer; str0m still compiles sctp-proto in.
+- **DTLS 1.2** is what every browser negotiates today; moq-webrtc pins it
+  in `session::rtc_config`, str0m 0.25's default.
 
 What changes for the four fixes: each is first tried through str0m's public
 API. One that needs a change inside str0m becomes an upstream report, filed
@@ -58,5 +59,4 @@ PR that makes them stale.
 
 ## Related
 
-- [moq-webrtc runs on upstream str0m](/quest/m2/str0m-upstream.md) - deletes the vendored stack before the cut
 - [moq-webrtc paces WHEP viewers](/quest/m3/rtc-pacing.md) - needs retransmits charged to the cap, which upstream has no hook for

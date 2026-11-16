@@ -1913,7 +1913,7 @@ struct OriginScope {
 
 /// A subtree a handle reads from elsewhere on the origin: `at/rest` resolves at
 /// `target/rest`. Both absolute.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Mount {
 	at: Path,
 	target: Path,
@@ -1921,7 +1921,7 @@ struct Mount {
 
 /// A mount as a reader of a prefix sees it through a handle: where the origin holds
 /// what it presents, and how the handle names that.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Mounted {
 	mount: Mount,
@@ -1941,6 +1941,11 @@ impl Mounted {
 	/// Whether the absolute, handle-side `path` lies at or beneath the mount point.
 	pub fn holds(&self, path: &Path) -> bool {
 		path.has_prefix(&self.mount.at)
+	}
+
+	/// The absolute, handle-side mount point.
+	pub fn at(&self) -> &Path {
+		&self.mount.at
 	}
 
 	/// How many segments the handle-side `path` lies beneath the mount point: the most a
@@ -2423,13 +2428,6 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_node(&self) -> crate::route::Node {
 		self.consume().route_node()
-	}
-
-	/// See [`Consumer::route_closing`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
@@ -4845,8 +4843,9 @@ impl FrontServe {
 						}
 					}
 					// An awaited copy follows the readers, or it may never send the group
-					// they now want.
-					if asked.info.is_some() {
+					// they now want. The readers of an ended track stay on the copy it ended
+					// on, so one rerouted for its group reads subscribes nothing.
+					if asked.info.is_some() && !matches!(io.logical, Logical::Ended) {
 						follow_demand(
 							&mut asked.sub,
 							Some(&asked.copy),
@@ -4858,12 +4857,15 @@ impl FrontServe {
 					}
 					// While another copy may still deliver, a matching replacement answers only
 					// once it delivers or ends: one failing first refuses, and that copy keeps
-					// serving. Different metadata is refused at once.
+					// serving. Different metadata is refused at once. An ended track's readers
+					// stay on its last copy, so a copy rerouted for its group reads answers with
+					// its info alone: it may never deliver anything unasked.
 					if let Some(info) = &asked.info
-						&& (io
-							.copy
-							.as_ref()
-							.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
+						&& (matches!(io.logical, Logical::Ended)
+							|| io
+								.copy
+								.as_ref()
+								.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
 							|| matches!(&io.logical, Logical::Accepted(accepted) if accepted.info() != info)
 							|| asked.copy.poll_grouped(waiter).is_ready()
 							|| asked.copy.poll_complete(waiter).is_ready())
@@ -5126,6 +5128,50 @@ impl kio::Task for FrontServe {
 								None => {}
 							}
 						}
+						Action::Reroute { track: name, source } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							// Nothing reads it any more, so nothing would continue on the copy.
+							if !io.weak.is_held() {
+								continue;
+							}
+							io.ready.wake_by_ref();
+							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
+							let lookup = match self.sources.get(&source).map(|s| s.track(&name)) {
+								Some(Ok(lookup)) => lookup,
+								// Refused before any lookup, as a query would be: the front judges
+								// it the same way, so a held fetch is not left waiting on it.
+								Some(Err(err)) => {
+									self.events.push_back(Event::TrackInfo {
+										track: name,
+										source,
+										closing,
+										result: Err(err),
+										retry: None,
+									});
+									continue;
+								}
+								None => continue,
+							};
+							// No subscription: the track is over, and a read that continues on the
+							// copy asks it for what it needs.
+							let query = lookup.info().into_inner();
+							let copy = query.track();
+							io.query = Some(Asked {
+								source,
+								staged: io.routes.stage(copy.clone()),
+								copy,
+								query,
+								info: None,
+								sub: None,
+							});
+						}
+						Action::Conclude { track: name } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							io.ready.wake_by_ref();
+							io.routes.conclude();
+							io.query = None;
+							io.staged = None;
+						}
 						Action::Splice { track: name, source } => {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };
 							let Some(asked) = io.staged.take() else {
@@ -5385,10 +5431,11 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
-					// Staged only while the track has a reader: without one the machine
-					// will not splice, and a held copy would keep the source subscribed.
+					// Staged only while the track has a reader, or a read holds the finished
+					// track: without one the machine will not splice, and a held copy would
+					// keep the source subscribed.
 					if let Ok(info) = &result
-						&& io.wanted
+						&& (io.wanted || io.routes.ended())
 					{
 						io.staged = Some(Asked {
 							info: Some(info.clone()),
@@ -5408,6 +5455,13 @@ impl kio::Task for FrontServe {
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					io.copy = None;
 					io.held = None;
+					// A copy that failed may have failed with its route, which the table can
+					// already have replaced: the front takes that change first, so it fails over
+					// to the replacement rather than giving up on the route that died.
+					if result.is_err() && self.watch.poll_changed(&kio::Waiter::noop(), self.seen).is_ready() {
+						let selected = self.select();
+						self.events.push_back(selected);
+					}
 					Event::TrackEnded {
 						track: name,
 						source,
@@ -5424,9 +5478,11 @@ impl kio::Task for FrontServe {
 						continue;
 					}
 					io.wanted = !io.wanted;
-					if !io.wanted {
-						// Nothing will be spliced now: let go of the copies a query
-						// holds, or the source stays subscribed with nobody reading.
+					// Nothing will be spliced now: let go of the copies a query holds, or the
+					// source stays subscribed with nobody reading. An ended track's query is a
+					// reroute for the reads still holding it, which subscribes nothing: finishing
+					// is what closes the track, so its edge may come only after the reroute.
+					if !io.wanted && !io.routes.ended() {
 						io.query = None;
 						io.staged = None;
 					}
@@ -7513,16 +7569,6 @@ impl Consumer {
 			None => crate::route::node::declared_for(self.hop),
 		};
 		id.and_then(NonZeroU64::new)
-	}
-
-	/// Hold back the disconnect of every route stream of the session `tag` dropped until
-	/// the guard is released, so the session closing costs the route layer one recompute
-	/// and reports its hops dead; `None` while no session created the route node, which
-	/// then has no streams.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on
@@ -11375,7 +11421,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			matches!(
-				stream.try_output(),
+				stream.try_wire(),
 				Some(crate::route::node::Output::Route { reach: Some(_), .. })
 			),
 			"the new stream is sent the route to the announced claim"
@@ -15656,6 +15702,63 @@ mod tests {
 			.expect("open");
 	}
 
+	/// A fetch holds a finished track whose group its route lost, and the replacement neither
+	/// has the track nor takes requests: refused at the lookup itself, that concludes the
+	/// track as a refused query would, so the fetch fails rather than wait out its budget.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_tracks_fetch_fails_when_the_replacement_lacks_the_track() {
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		let fills = old.requests();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let video = resolved.track("video").unwrap();
+		let mut open = old.append_next().unwrap();
+		open.write_frame(open.key_time(), b"a".as_ref()).unwrap();
+		let finished = old.finish().unwrap();
+		let mut fetched = video.fetch_group(0, None).await.unwrap();
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+		// The route loses the rest of the group and refuses to fill it.
+		open.abort(Error::Cancel).unwrap();
+		assert!(fetched.read_frame().now_or_never().is_none());
+		let request = kio::clock::timeout(Duration::from_secs(1), fills.requested_fill_group())
+			.await
+			.expect("the fetch asked the route to fill the group")
+			.expect("request");
+		request.reject(Error::Cancel);
+		drop((fills, finished));
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(
+			fetched.read_frame().now_or_never().is_none(),
+			"the fetch waits for another route"
+		);
+
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let _other = newcomer
+			.broadcast()
+			.create_track("audio", crate::track::Info::timed())
+			.unwrap();
+		newcomer.announce().unwrap();
+		let res = kio::clock::timeout(Duration::from_secs(1), fetched.read_frame())
+			.await
+			.expect("the fetch fails once the replacement refused the track");
+		assert!(res.is_err(), "{res:?}");
+	}
+
 	/// The newcomer answers "video" with matching metadata but aborts before delivering a
 	/// group, all before the front polls the answer: that is a refusal, so the incumbent
 	/// keeps serving rather than the track ending on the newcomer's error.
@@ -16411,7 +16514,7 @@ mod tests {
 		drop(alice);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
-		let output = stream.try_output();
+		let output = stream.try_wire();
 		assert!(
 			matches!(
 				&output,

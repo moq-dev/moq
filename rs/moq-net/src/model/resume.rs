@@ -87,6 +87,19 @@ impl Route {
 			false => Poll::Pending,
 		}
 	}
+
+	/// The copy a read goes to first. Once the track finished, that is the copy it ended
+	/// on until that copy fails: one the front serves after the end caches nothing, so
+	/// asking it would send upstream what the last copy still answers.
+	fn answering(&self) -> Option<(u64, &track::Consumer)> {
+		match &self.phase {
+			Phase::Finished {
+				last: (generation, Some(copy)),
+				..
+			} if !copy_failed(copy) => Some((*generation, copy)),
+			_ => self.copy.as_ref().map(|copy| (self.generation, copy)),
+		}
+	}
 }
 
 #[derive(Default)]
@@ -95,8 +108,16 @@ enum Phase {
 	Open,
 	/// Readers follow the last copy to its end; no front will replace it.
 	Concluded,
-	/// The front's final verdict on the logical track.
-	Ended(Result<()>),
+	/// The front ended the track cleanly. Its readers stay on the generation and copy it
+	/// ended on (`last`), which holds everything below the end. While `routed`, the front
+	/// still replaces the serving copy when its source changes, for the group reads and
+	/// fetches still holding the track, so they move off a route that dies.
+	Finished {
+		last: (u64, Option<track::Consumer>),
+		routed: bool,
+	},
+	/// The front failed the track for good.
+	Failed(Error),
 }
 
 impl Phase {
@@ -104,10 +125,17 @@ impl Phase {
 		!matches!(self, Self::Open)
 	}
 
-	fn end(&self) -> Option<&Result<()>> {
+	/// Whether a front may still replace the copy.
+	fn moves(&self) -> bool {
+		matches!(self, Self::Open | Self::Finished { routed: true, .. })
+	}
+
+	/// The front's verdict on the track, once it gave one.
+	fn end(&self) -> Option<Result<()>> {
 		match self {
-			Self::Ended(end) => Some(end),
-			_ => None,
+			Self::Finished { .. } => Some(Ok(())),
+			Self::Failed(err) => Some(Err(err.clone())),
+			Self::Open | Self::Concluded => None,
 		}
 	}
 }
@@ -161,7 +189,7 @@ impl Producer {
 				}) if *from == preferences.ranges => sub.resolved_ranges(),
 				Some(Copy {
 					sub: Sub::Ready(sub), ..
-				}) => sub.resolve_ranges(&preferences.ranges),
+				}) => sub.resolve_ranges(&preferences),
 				Some(copy) if copy.from == preferences.ranges => copy.resolved.clone(),
 				_ => Vec::new(),
 			};
@@ -248,22 +276,31 @@ impl Producer {
 		self.state.read().phase.end().is_some()
 	}
 
-	/// The track ended: cleanly with `Ok`, or failed for good.
+	/// The track ended: cleanly with `Ok`, or failed for good. A clean end still moves to
+	/// each copy the front serves from until it concludes.
 	pub(super) fn end(&self, result: Result<()>) {
 		if let Ok(mut route) = self.state.write()
 			&& route.phase.end().is_none()
 		{
-			route.phase = Phase::Ended(result);
+			route.phase = match result {
+				Ok(()) => Phase::Finished {
+					last: (route.generation, route.copy.clone()),
+					routed: !matches!(route.phase, Phase::Concluded),
+				},
+				Err(err) => Phase::Failed(err),
+			};
 		}
 	}
 
 	/// No front will replace the serving copy: readers follow it to its end, while this
 	/// still holds it for the readers on their way.
 	pub(super) fn conclude(&self) {
-		if let Ok(mut route) = self.state.write()
-			&& !route.phase.terminal()
-		{
-			route.phase = Phase::Concluded;
+		if let Ok(mut route) = self.state.write() {
+			match &mut route.phase {
+				Phase::Open => route.phase = Phase::Concluded,
+				Phase::Finished { routed, .. } => *routed = false,
+				Phase::Concluded | Phase::Failed(_) => {}
+			}
 		}
 	}
 
@@ -274,6 +311,9 @@ impl Producer {
 			route.copy = None;
 			route.parked = None;
 			route.spliced = None;
+			if let Phase::Finished { last: (_, copy), .. } = &mut route.phase {
+				*copy = None;
+			}
 		}
 	}
 
@@ -317,9 +357,10 @@ pub(super) struct Consumer {
 }
 
 impl Consumer {
-	/// The serving route's copy, if any.
+	/// The copy a read goes to first: the serving route's, or the one a finished track
+	/// ended on while it has not failed.
 	pub(super) fn serving(&self) -> Option<track::Consumer> {
-		self.state.read().copy.clone()
+		self.state.read().answering().map(|(_, copy)| copy.clone())
 	}
 
 	/// The copy the front parked, while it serves none and may still serve one again.
@@ -345,8 +386,8 @@ impl Consumer {
 			// One read, so a copy served just before the front concluded is the one polled.
 			let (generation, copy, end) = {
 				let route = self.state.read();
-				let end = route.phase.terminal().then(|| route.phase.end().cloned());
-				(route.generation, route.copy.clone(), end)
+				let end = route.phase.terminal().then(|| route.phase.end());
+				(route.generation, route.answering().map(|(_, copy)| copy.clone()), end)
 			};
 			// A replacement copy can start below what an earlier one reported.
 			match copy.map(|copy| copy.poll_largest_after(seen, bounds, waiter)) {
@@ -367,7 +408,11 @@ impl Consumer {
 			// One read, so a copy served just before the front concluded is the one polled.
 			let (generation, copy, terminal) = {
 				let route = self.state.read();
-				(route.generation, route.copy.clone(), route.phase.terminal())
+				(
+					route.generation,
+					route.answering().map(|(_, copy)| copy.clone()),
+					route.phase.terminal(),
+				)
 			};
 			if copy.is_some_and(|copy| copy.poll_grouped(waiter).is_ready()) {
 				return Poll::Ready(());
@@ -382,7 +427,7 @@ impl Consumer {
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
-		let window = Window::new(&mirrored.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
+		let window = Window::new(&mirrored.ranges, None, None, &Unheld).expect("an unheld hop refuses nothing");
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -442,6 +487,7 @@ impl Consumer {
 			options,
 			logical,
 			pending: None,
+			left: None,
 		}
 	}
 
@@ -469,7 +515,13 @@ impl Consumer {
 	/// decision.
 	fn end(&self) -> Option<Option<Result<()>>> {
 		let route = self.state.read();
-		route.phase.terminal().then(|| route.phase.end().cloned())
+		route.phase.terminal().then(|| route.phase.end())
+	}
+
+	/// Whether a front may still replace the copy: the track is open, or finished while
+	/// its front still serves it.
+	fn moves(&self) -> bool {
+		self.state.read().phase.moves()
 	}
 }
 
@@ -552,7 +604,7 @@ impl Copy {
 			Sub::Ready(sub) if reader.ranges == self.from => self.resolved = sub.resolved_ranges(),
 			// Replaced ranges resolve against this copy's cache now, as any subscriber's do.
 			Sub::Ready(sub) => {
-				self.resolved = sub.resolve_ranges(&reader.ranges);
+				self.resolved = sub.resolve_ranges(reader);
 				self.from = reader.ranges.clone();
 			}
 			Sub::Pending(_) if reader.ranges == self.from => {}
@@ -1218,7 +1270,7 @@ impl Reader {
 		if unplaced {
 			return;
 		}
-		let window = Window::new(&ranges, None, &Placed).expect("a placed hop refuses nothing");
+		let window = Window::new(&ranges, None, None, &Placed).expect("a placed hop refuses nothing");
 		if !window.is_pending() {
 			self.window = window;
 		}
@@ -1241,7 +1293,7 @@ impl Reader {
 		if let Some(sub) = changed {
 			let replaced = sub.ranges != self.mirrored.ranges;
 			if replaced {
-				self.window = Window::new(&sub.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
+				self.window = Window::new(&sub.ranges, None, None, &Unheld).expect("an unheld hop refuses nothing");
 				// The serving copy's resume point may cut off groups the new ranges cover, judged
 				// by the reader's window.
 				self.resumed = Some((None, Vec::new()));
@@ -1267,7 +1319,13 @@ impl Reader {
 
 		let (generation, serving) = {
 			let route = self.route.state.read();
-			(route.generation, route.copy.clone())
+			match &route.phase {
+				Phase::Finished {
+					last: (generation, copy),
+					..
+				} => (*generation, copy.clone()),
+				_ => (route.generation, route.copy.clone()),
+			}
 		};
 		if self.generation == Some(generation) {
 			return;
@@ -2298,23 +2356,31 @@ impl Recover {
 			}
 		}
 		loop {
-			let (generation, serving, end, terminal) = {
+			let (generation, serving, end, moves) = {
 				let route = self.route.consumer().read();
 				(
 					route.generation,
 					route.copy.clone(),
-					route.phase.end().cloned(),
-					route.phase.terminal(),
+					route.phase.end(),
+					route.phase.moves(),
 				)
 			};
-			// Registered before looking, so a route change from here on wakes the reader. Not
-			// through the watch: `generation` is the one just read, not `self.generation`.
+			// Once no front will replace the copy, nothing comes after it.
+			let done = !moves;
+			// Registered before looking, so a route change from here on wakes the reader, a
+			// finished track's too. Not through the watch: `generation` is the one just read,
+			// not `self.generation`.
 			let moved = self
 				.route
 				.consumer()
-				.poll(waiter, |route| route.moved_past(generation))
+				.poll(waiter, |route| {
+					match route.generation != generation || !route.phase.moves() {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					}
+				})
 				.is_ready();
-			if moved && !terminal {
+			if moved && moves {
 				continue;
 			}
 			if let Some(Err(err)) = &end {
@@ -2339,13 +2405,13 @@ impl Recover {
 			// the withdrawal's cause with a refusal. None comes once the front is done.
 			let withdrawn = failed.filter(|err| generation == self.generation && err.unroutable());
 			if let Some(err) = withdrawn
-				&& terminal
+				&& done
 			{
 				return Poll::Ready(Err(err.clone()));
 			}
 			let Some(serving) = serving else {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
-				return match (failed, terminal) {
+				return match (failed, done) {
 					(Some(err), true) => Poll::Ready(Err(err.clone())),
 					_ => Poll::Pending,
 				};
@@ -2355,9 +2421,10 @@ impl Recover {
 				return Poll::Pending;
 			}
 			let res = self.poll_serving(generation, &serving, index, failed, withdrawn.is_none(), waiter);
-			// The serving route failed too, and no front is left to replace it.
+			// The serving route failed too, or will not fetch the rest while its subscription
+			// will not deliver it either, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
-				&& terminal && copy_failed(&serving)
+				&& done && (copy_failed(&serving) || self.refused(generation, &serving))
 			{
 				return Poll::Ready(Err(err.clone()));
 			}
@@ -2369,6 +2436,14 @@ impl Recover {
 			}
 			return res;
 		}
+	}
+
+	/// Whether `serving`, the copy of route `generation`, failed or refused the fetch of the
+	/// rest, and is the copy that failed or will not deliver the group otherwise, as
+	/// [`Self::poll_fetch`] judges a refusal.
+	fn refused(&self, generation: u64, serving: &track::Consumer) -> bool {
+		matches!(&self.fetch, Some((asked, Fetch::Refused(_))) if *asked == generation)
+			&& (generation == self.generation || serving.poll_group(self.key, &kio::Waiter::noop()).is_ready())
 	}
 
 	/// The group from the newest of the reader's other copies that still holds it unfailed,
@@ -2585,6 +2660,9 @@ pub(super) struct Fetching {
 	logical: kio::Consumer<track::TrackState>,
 	/// The fetch in flight, and the copy it went to.
 	pending: Option<Asked>,
+	/// The generation of a finished track's last copy that failed this fetch, which leaves
+	/// it to the copy served after the end.
+	left: Option<u64>,
 }
 
 /// Which copy a fetch went to.
@@ -2621,11 +2699,19 @@ impl Fetching {
 		}
 	}
 
-	/// Poll for the serving copy or the staged one to change, or the track to end.
+	/// Whether the serving copy or the staged one changed since the snapshot of `generation`
+	/// and `staged`.
+	fn moved(&self, generation: u64, staged: Option<u64>) -> bool {
+		let route = self.route.state.read();
+		route.generation != generation || route.staged.as_ref().map(|(id, _)| *id) != staged
+	}
+
+	/// Poll for the serving copy or the staged one to change, or for no front to be left to
+	/// change it.
 	fn poll_moved(&self, generation: u64, staged: Option<u64>, waiter: &kio::Waiter) -> Poll<()> {
 		match self.route.state.poll(waiter, |route| {
 			let moved = route.generation != generation || route.staged.as_ref().map(|(id, _)| *id) != staged;
-			match moved || route.phase.terminal() {
+			match moved || !route.phase.moves() {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -2645,10 +2731,18 @@ impl kio::Task for Fetching {
 				let route = self.route.state.read();
 				(
 					route.generation,
-					route.copy.clone(),
+					route.answering().map(|(generation, copy)| (generation, copy.clone())),
 					route.staged.clone(),
 					route.spliced,
 				)
+			};
+			// A finished track's last copy that failed this fetch leaves it to the copy served
+			// after the end.
+			let serving = match serving {
+				Some((last, _)) if last != generation && self.left == Some(last) => {
+					self.route.state.read().copy.clone().map(|copy| (generation, copy))
+				}
+				serving => serving,
 			};
 			let staged_id = staged.as_ref().map(|(id, _)| *id);
 			// A fetch sent to a staged copy carries on once that copy is spliced.
@@ -2662,28 +2756,31 @@ impl kio::Task for Fetching {
 			// The serving copy answers; with none, the copy whose info is in flight is asked
 			// at once rather than a round trip later, and judged once it is spliced.
 			let (target, copy) = match (serving, staged) {
-				(Some(serving), _) => (Target::Serving(generation), serving),
-				(None, Some((id, copy))) if self.route.end().is_none() => (Target::Staged(id), copy),
+				(Some((generation, serving)), _) => (Target::Serving(generation), serving),
+				(None, Some((id, copy))) if self.route.moves() => (Target::Staged(id), copy),
 				(None, _) => {
-					let end = self.route.end();
+					if self.route.moves() {
+						ready!(self.poll_moved(generation, staged_id, waiter));
+						continue;
+					}
+					// The route moved since the snapshot, as the front left it.
+					if self.moved(generation, staged_id) {
+						continue;
+					}
 					// A fetch whose staged copy failed reports that failure once no route
 					// follows, as one the serving copy failed does.
-					if end.is_some()
-						&& let Some(err) = self.staged_failure(waiter)
-					{
+					if let Some(err) = self.staged_failure(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					return match end {
+					return match self.route.end() {
 						Some(Some(Err(err))) => Poll::Ready(Err(err)),
-						Some(_) => Poll::Ready(Err(Error::NotFound)),
-						None => {
-							ready!(self.poll_moved(generation, staged_id, waiter));
-							continue;
-						}
+						_ => Poll::Ready(Err(Error::NotFound)),
 					};
 				}
 			};
-			if self.poll_moved(generation, staged_id, waiter).is_ready() && self.route.end().is_none() {
+			// Re-read whenever the route moved past the snapshot, even if no front is left to
+			// move it again: the copy served last may answer what the snapshot's cannot.
+			if self.poll_moved(generation, staged_id, waiter).is_ready() && self.moved(generation, staged_id) {
 				continue;
 			}
 			if self.pending.as_ref().is_none_or(|asked| asked.target != target) {
@@ -2706,14 +2803,17 @@ impl kio::Task for Fetching {
 					}
 				},
 			};
-			// Never handed out before its copy's info passes the front's check.
-			if let Target::Staged(_) = target {
-				asked.answer = Some(result);
-				return match self.route.end() {
-					Some(Some(Err(err))) => Poll::Ready(Err(err)),
-					_ => Poll::Pending,
-				};
-			}
+			let served = match target {
+				Target::Serving(served) => served,
+				// Never handed out before its copy's info passes the front's check.
+				Target::Staged(_) => {
+					asked.answer = Some(result);
+					return match self.route.end() {
+						Some(Some(Err(err))) => Poll::Ready(Err(err)),
+						_ => Poll::Pending,
+					};
+				}
+			};
 			let serving = copy;
 			return match result {
 				Ok(group) => {
@@ -2727,7 +2827,7 @@ impl kio::Task for Fetching {
 						reader: None,
 						max_delay: self.options.options.max_delay,
 						route: self.route.watch(),
-						generation,
+						generation: served,
 						copy: serving.clone(),
 						handoff,
 						lease: None,
@@ -2737,9 +2837,19 @@ impl kio::Task for Fetching {
 						recovering: false,
 					})))
 				}
-				// The route failed: ask the next one, unless none will come. Kept as the answer,
-				// since the same copy is never asked twice.
-				Err(err) if (err.retryable() || copy_failed(&serving)) && self.route.end().is_none() => {
+				// A finished track's last copy failed: the copy served after the end is already
+				// there, whether or not a front may still replace it.
+				Err(err) if (err.retryable() || copy_failed(&serving)) && served != generation => {
+					self.left = Some(served);
+					continue;
+				}
+				// The route failed: ask the next one, unless none will come and none came since
+				// the snapshot, which a front may have spliced just before concluding. Kept as
+				// the answer, since the same copy is never asked twice.
+				Err(err)
+					if (err.retryable() || copy_failed(&serving))
+						&& (self.route.moves() || self.moved(generation, staged_id)) =>
+				{
 					if let Some(asked) = &mut self.pending {
 						asked.answer = Some(Err(err));
 					}
@@ -4207,6 +4317,126 @@ mod test {
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
+	}
+
+	/// A fetched group whose route dies after the front finished the track continues on the
+	/// copy the front serves next, and fails, rather than waiting, once the front concluded.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_finished_tracks_fetch_moves_off_a_dying_route() {
+		for rerouted in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			let dynamic = a.requests();
+			routes.serve(a.consume());
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let _a = a.finish().unwrap();
+			let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+			assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
+			routes.end(Ok(()));
+
+			// The route dies under the open group, and fails the fetch of the rest too.
+			open.abort(Error::Cancel).unwrap();
+			assert!(fetched.read_frame().now_or_never().is_none(), "rerouted={rerouted}");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			request.reject(Error::Cancel);
+			assert!(fetched.read_frame().now_or_never().is_none(), "rerouted={rerouted}");
+
+			if !rerouted {
+				drop(routes);
+				let res = fetched.read_frame().now_or_never();
+				assert!(matches!(res, Some(Err(Error::Cancel))), "{res:?}");
+				continue;
+			}
+			let b = copy();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+			whole.finish().unwrap();
+			routes.serve(b.consume());
+			assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
+			assert_eq!(read(&mut fetched), None);
+		}
+	}
+
+	/// A fetch of a finished track goes to the copy it ended on, which caches what the
+	/// copy rerouted after the end does not, and to the rerouted copy only once that one
+	/// failed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_finished_tracks_fetch_goes_to_its_last_copy_first() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		let mut group = a.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(ts(0), b"a".as_ref()).unwrap();
+		group.finish().unwrap();
+		// Groups 1 and 2 are missing below the end: a fetch asks for them.
+		a.create_group(group::Info { start: 3 }).unwrap().finish().unwrap();
+		let last = a.consume();
+		let a = a.finish().unwrap();
+		routes.end(Ok(()));
+
+		let b = copy();
+		let rerouted = b.requests();
+		routes.serve(b.consume());
+		assert!(routes.consume().serving().is_some_and(|copy| copy.same_channel(&last)));
+		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+		assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
+		assert!(
+			rerouted.requested_fill_group().now_or_never().is_none(),
+			"the rerouted copy is not asked"
+		);
+
+		// The last copy failing a fetch, or failing outright, leaves it to the rerouted one,
+		// even once no front is left to replace that.
+		routes.conclude();
+		let mut fetch = logical.consume().fetch_group(1, None);
+		assert!((&mut fetch).now_or_never().is_none());
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		request.reject(Error::Cancel);
+		assert!((&mut fetch).now_or_never().is_none());
+		assert!(
+			rerouted
+				.requested_fill_group()
+				.now_or_never()
+				.is_some_and(|fill| fill.is_ok())
+		);
+		a.abort(Error::Cancel).unwrap();
+		let mut fetch = logical.consume().fetch_group(2, None);
+		assert!((&mut fetch).now_or_never().is_none());
+		assert!(
+			rerouted
+				.requested_fill_group()
+				.now_or_never()
+				.is_some_and(|fill| fill.is_ok())
+		);
+	}
+
+	/// A copy the front serves after the clean end only continues group reads and fetches: a
+	/// reader still draining the copy the track ended on stays there, rather than losing what
+	/// only that copy holds (`ResumeReader.tla`'s `CleanEndIsComplete`).
+	#[test]
+	fn a_reader_stays_on_the_copy_its_track_finished_on() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 2);
+		let _a = a.finish().unwrap();
+		routes.end(Ok(()));
+
+		let b = copy();
+		write(&b, 0);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [2]);
+		let end = sub.poll_recv_group(&kio::Waiter::noop());
+		assert!(matches!(end, Poll::Ready(Ok(None))), "the track ends cleanly");
 	}
 
 	/// A session's copy whose info is still in flight, and its fetch handler.

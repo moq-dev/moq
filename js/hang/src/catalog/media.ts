@@ -20,14 +20,13 @@ export type Join = z.infer<typeof JoinSchema>;
 /**
  * What applies to every audio and video track, at the catalog root's `media`.
  *
- * Omitted when it holds nothing. A malformed `clock` fails the catalog. A malformed `join` decodes
- * as absent, so it can never reject the media: the broadcast is merely not HLS-renderable.
+ * Omitted when it holds nothing. A malformed `clock` or `join` fails the catalog.
  */
 export const MediaSchema = z.object({
 	// The broadcast's one continuous clock, if the publisher exposes one.
 	clock: z.optional(ClockSchema),
 	// Nested so a later join mechanism that is not a fixed grid can sit beside `interval`.
-	join: z.catch(z.optional(JoinSchema), undefined),
+	join: z.optional(JoinSchema),
 });
 
 /** What applies to every audio and video track: the broadcast's clock and join interval. */

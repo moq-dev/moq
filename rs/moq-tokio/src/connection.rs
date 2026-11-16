@@ -44,8 +44,8 @@ fn verdict(client: &Client, url: &url::Url, err: &Error) -> Verdict {
 /// Three knobs, each with one job: `initial` and `multiplier` set the wait before
 /// each retry, `max` caps it, and `healthy` decides which sessions count as failed
 /// attempts. See [`moq_net::reconnect::Backoff`], which this resolves to, for how
-/// the policy applies them. It applies only once a session has been established: a first
-/// dial that reaches no session ends the connection instead of retrying.
+/// the policy applies them. Until a session has stayed up past `healthy` or been drained by
+/// a GOAWAY, a failed dial or a closed session ends the connection instead of retrying.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -889,8 +889,9 @@ pub struct Snapshot {
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
-/// redials with exponential backoff. A first dial that reaches no session never retries:
-/// the loop stops with its error, so a setup mistake surfaces at once. The read surface
+/// redials with exponential backoff. Until a session has stayed up past the healthy bar or
+/// been drained by a GOAWAY, nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
+/// credential does, stops the loop with its error, so a setup mistake surfaces at once. The read surface
 /// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
@@ -1784,6 +1785,12 @@ mod tests {
 	/// A retry delay and healthy bar short enough to stay out of a test's way.
 	const FAST: Duration = Duration::from_millis(50);
 
+	/// Hold the live session past a [`FAST`] healthy bar, so its end retries: until a
+	/// session has been healthy, a close ends the loop like a failed first dial.
+	async fn outlast_fast() {
+		kio::clock::sleep(FAST).await;
+	}
+
 	fn url(value: &str) -> Url {
 		value.parse().expect("valid url")
 	}
@@ -2129,13 +2136,13 @@ mod tests {
 	/// A connection to `host` that had a session and now redials a [`dead`] address.
 	///
 	/// A first walk that fails ends the loop rather than retrying, so a test of the retry
-	/// loop starts from a session: this serves one, repoints `host` at a dead address, and
-	/// ends the session from the server. Returns the connection, already reporting
+	/// loop starts from a healthy session: this serves one past a [`FAST`] healthy bar,
+	/// repoints `host` at a dead address, and ends the session from the server. Returns the connection, already reporting
 	/// [`Status::Disconnected`], the live server's address and its later sessions, and the
 	/// server task.
 	async fn redialing(
 		host: &str,
-		config: crate::connect::Config,
+		mut config: crate::connect::Config,
 	) -> (
 		Connection,
 		std::net::SocketAddr,
@@ -2144,6 +2151,7 @@ mod tests {
 	) {
 		let (live, mut accepted, task) = serve(crate::origin::spawn()).await;
 		crate::resolve::hosts::point(host, [live]);
+		config.backoff.healthy = Some((FAST).into());
 		let mut connection = config
 			.init(Default::default())
 			.unwrap()
@@ -2159,6 +2167,7 @@ mod tests {
 			"the failing port stays reserved"
 		);
 		crate::resolve::hosts::point(host, failing);
+		outlast_fast().await;
 		drop(session);
 		assert_eq!(connection.status().await.unwrap(), Status::Disconnected);
 		(connection, live, accepted, task)
@@ -2259,6 +2268,7 @@ mod tests {
 		};
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
+		config.backoff.healthy = Some((FAST).into());
 		let connection = config
 			.init(Default::default())
 			.unwrap()
@@ -2298,6 +2308,7 @@ mod tests {
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {
 				kio::clock::timeout(WAIT, grant.changed()).await.unwrap().unwrap();
 			}
+			outlast_fast().await;
 			session.abort(moq_net::Error::Cancel);
 		}
 		drop(connection);
@@ -2317,12 +2328,16 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
-		let connection = config
+		config.backoff.healthy = Some((FAST).into());
+		let mut connection = config
 			.init(Default::default())
 			.unwrap()
 			.connect(url(&format!("tcp://{addr}/")));
 
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		outlast_fast().await;
 		connection.auth().abort(moq_net::Error::App(9));
 		session.abort(moq_net::Error::Cancel);
 		let closed = kio::clock::timeout(WAIT, connection.closed())
@@ -2788,6 +2803,7 @@ mod tests {
 		assert_eq!(g0.start, 0);
 
 		crate::resolve::hosts::point(HOST, [addr_b]);
+		outlast_fast().await;
 		session_a.drain().send(moq_net::goaway::Goaway::new()).unwrap();
 		let session_b = kio::clock::timeout(WAIT, accepted_b.recv()).await.unwrap().unwrap();
 		let mut state = monitor.state();
@@ -2894,6 +2910,7 @@ mod tests {
 		);
 		assert!(accepted.try_recv().is_err(), "redialed while the session served");
 
+		outlast_fast().await;
 		session.abort(moq_net::Error::GoawayTimeout);
 		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Disconnected);
@@ -3105,6 +3122,8 @@ mod tests {
 		let (_, server) = sessions.recv().await.unwrap();
 		assert!(crate::websocket::won(&url));
 
+		// Past the default healthy bar, so the end redials rather than ending the loop.
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		server.abort(moq_net::Error::Cancel);
 		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);

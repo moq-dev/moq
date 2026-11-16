@@ -154,11 +154,6 @@ pub struct MoqVideo {
 	pub framerate: Option<f64>,
 	/// The framing used to carry this rendition.
 	pub container: MoqContainer,
-	/// How much media a decoder needs before its output is clean: after a join, decode from the
-	/// group start, present at the start plus this, and join that much earlier. Absent means none.
-	/// [`MoqMediaTrackConsumer::subscribe`] and the decoding consumers start this much earlier.
-	#[uniffi(default = None)]
-	pub warmup: Option<std::time::Duration>,
 }
 
 /// An audio rendition and the configuration needed to decode it.
@@ -643,7 +638,6 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					preference: config.preference,
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
-					warmup: config.warmup.map(crate::ffi::duration),
 				},
 			))
 		})
@@ -868,8 +862,9 @@ impl MoqMediaCatalogProducer {
 	/// Set an application catalog section from JSON, refusing reserved section names.
 	///
 	/// `json` is any JSON document. Errors with [`MoqError::Json`] if it doesn't parse, or with
-	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `media`, `text`, `archive`, `clock`, `json`, `binary`, or
-	/// retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
+	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `media`, `text`, `json`,
+	/// `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, and
+	/// `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
 	/// `initDataList`).
 	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -1445,10 +1440,11 @@ pub enum MoqRendition {
 }
 
 impl MoqRendition {
-	/// The decoder warmup the catalog declares for this rendition, zero when absent.
+	/// The decoder warmup the catalog declares for this rendition, zero when absent. Only audio
+	/// declares one.
 	pub(crate) fn warmup(&self) -> std::time::Duration {
 		match self {
-			Self::Video { config, .. } => config.warmup,
+			Self::Video { .. } => None,
 			Self::Audio { config, .. } => config.warmup,
 		}
 		.unwrap_or_default()
@@ -1568,14 +1564,12 @@ mod read_tests {
 	const WARMUP: Duration = Duration::from_millis(300);
 	const DELAY: Duration = Duration::from_millis(200);
 
-	/// Subscribes to a rendition whose catalog warmup is [`WARMUP`], at a [`DELAY`] min and max delay.
-	async fn subscribe_warmup(
-		video: bool,
-	) -> (
+	/// Subscribes to an audio rendition whose catalog warmup is [`WARMUP`], at a [`DELAY`] min and
+	/// max delay.
+	async fn subscribe_warmup() -> (
 		moq_net::broadcast::Producer,
 		moq_net::track::Producer,
 		Arc<MoqMediaTrackConsumer>,
-		moq_mux::container::Kind,
 	) {
 		use crate::consumer::{MoqDelay, MoqSubscription, moq_subscription_defaults};
 
@@ -1585,25 +1579,10 @@ mod read_tests {
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio.warmup = Some(WARMUP);
 		catalog.audio.renditions.insert("media".into(), audio);
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.warmup = Some(WARMUP);
-		catalog.video.renditions.insert("media".into(), config);
 		let catalog = convert_catalog(&catalog);
-		let (rendition, kind) = match video {
-			true => (
-				MoqRendition::Video {
-					id: "media".into(),
-					config: catalog.video["media"].clone(),
-				},
-				moq_mux::container::Kind::Video,
-			),
-			false => (
-				MoqRendition::Audio {
-					id: "media".into(),
-					config: catalog.audio["media"].clone(),
-				},
-				moq_mux::container::Kind::Audio,
-			),
+		let rendition = MoqRendition::Audio {
+			id: "media".into(),
+			config: catalog.audio["media"].clone(),
 		};
 		let reader = MoqMediaTrackConsumer::subscribe(
 			&MoqBroadcastConsumer::new(broadcast.consume()),
@@ -1620,19 +1599,17 @@ mod read_tests {
 		)
 		.await
 		.unwrap();
-		(broadcast, track, reader, kind)
+		(broadcast, track, reader)
 	}
 
 	/// A catalog rendition's warmup survives conversion and widens the raw subscription past the
-	/// caller's max delay, keeping the min delay as asked.
+	/// caller's min and max delay, so a live join reaches back far enough to warm the decoder.
 	#[tokio::test]
 	async fn raw_media_catalog_warmup_widens_the_subscription() {
-		for video in [false, true] {
-			let (_broadcast, track, _reader, _) = subscribe_warmup(video).await;
-			let subscription = track.subscription().unwrap();
-			assert_eq!(subscription.delay.min, Some(DELAY), "video={video}");
-			assert_eq!(subscription.delay.max, Some(DELAY + WARMUP), "video={video}");
-		}
+		let (_broadcast, track, _reader) = subscribe_warmup().await;
+		let subscription = track.subscription().unwrap();
+		assert_eq!(subscription.delay.min, Some(DELAY + WARMUP));
+		assert_eq!(subscription.delay.max, Some(DELAY + WARMUP));
 	}
 
 	/// The warmup starts the reader that much further back than the min delay.
@@ -1642,38 +1619,36 @@ mod read_tests {
 	/// writes and the read would rightly skip the groups this checks.
 	#[tokio::test(start_paused = true)]
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
-		for video in [false, true] {
-			let (_broadcast, track, reader, kind) = subscribe_warmup(video).await;
-			let mut media = reader.reads.take(|_| Ok(())).unwrap();
-			let write = |sequence: u64, micros| {
-				let mut group = track.create_group(sequence.into()).unwrap();
-				moq_mux::catalog::hang::Container::Legacy(kind)
-					.write(
-						&mut group,
-						&[moq_mux::container::Frame {
-							timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
-							payload: bytes::Bytes::from_static(b"media"),
-							keyframe: true,
-							duration: None,
-						}],
-					)
-					.unwrap();
-				group.finish().unwrap();
-			};
-			// Newest first, all before the first read. Group 4 covers the min delay alone, so
-			// without the warmup the start would skip group 3; only the warmup's reach keeps it.
-			write(5, 5_000_000);
-			write(4, 4_700_000);
-			write(3, 4_400_000);
-			let _track = track.finish().unwrap();
-			let mut micros = Vec::new();
-			while let Some(read) = media.read().await.unwrap() {
-				if let moq_mux::container::Read::Frame { frame, .. } = read {
-					micros.push(frame.timestamp.as_micros().unwrap());
-				}
+		let (_broadcast, track, reader) = subscribe_warmup().await;
+		let mut media = reader.reads.take(|_| Ok(())).unwrap();
+		let write = |sequence: u64, micros| {
+			let mut group = track.create_group(sequence.into()).unwrap();
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio)
+				.write(
+					&mut group,
+					&[moq_mux::container::Frame {
+						timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+						payload: bytes::Bytes::from_static(b"media"),
+						keyframe: true,
+						duration: None,
+					}],
+				)
+				.unwrap();
+			group.finish().unwrap();
+		};
+		// Newest first, all before the first read. Group 4 covers the min delay alone, so
+		// without the warmup the start would skip group 3; only the warmup's reach keeps it.
+		write(5, 5_000_000);
+		write(4, 4_700_000);
+		write(3, 4_400_000);
+		let _track = track.finish().unwrap();
+		let mut micros = Vec::new();
+		while let Some(read) = media.read().await.unwrap() {
+			if let moq_mux::container::Read::Frame { frame, .. } = read {
+				micros.push(frame.timestamp.as_micros().unwrap());
 			}
-			assert_eq!(micros, [4_400_000, 4_700_000, 5_000_000], "video={video}");
 		}
+		assert_eq!(micros, [4_400_000, 4_700_000, 5_000_000]);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1885,7 +1860,7 @@ impl MoqMediaTrackConsumer {
 	/// sibling broadcast or under another track name subscribes to the right track, and fails
 	/// one whose broadcast is proven to serve another stream than its instance.
 	///
-	/// A rendition's [`warmup`](MoqVideo::warmup) starts the read that much further back than
+	/// An audio rendition's [`warmup`](MoqAudio::warmup) starts the read that much further back than
 	/// the subscription's min delay, and widens the max delay the publisher serves by as much,
 	/// while the reader still skips at the max delay alone.
 	#[uniffi::constructor]

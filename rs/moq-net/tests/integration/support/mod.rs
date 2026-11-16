@@ -27,6 +27,14 @@ impl AppendNext for track::Producer {
 	}
 }
 
+/// The uni streams a session of `version` keeps open toward each side for its whole
+/// life, which a stream credit must cover besides the groups: draft 22's SETUP stream,
+/// and lite-07's Announce Stream.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn held_uni_streams(version: moq_net::Version) -> usize {
+	usize::from(!version.is_lite() || version.to_string() == "moq-lite-07-wip")
+}
+
 /// A frame time for tests whose frames carry no time of their own.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub trait AtStart {

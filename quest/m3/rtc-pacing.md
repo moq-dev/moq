@@ -34,7 +34,7 @@ WHEP enforcement needs it and nobody owned it.
   hook on that path. Decided 2026-10-30 (maintainer): add it to the vendored str0m
   ([WebRTC epic](/quest/m3/webrtc/README.md)) rather than upstream.
   Changed 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
-  moq-webrtc [returns to upstream str0m](/quest/m2/str0m-upstream.md), so
+  moq-webrtc [returns to upstream str0m](https://github.com/moq-dev/moq/pull/8963), so
   there is no vendored copy to add the hook to. Start by finding out
   whether str0m 0.25's public API can charge or withhold a resend (its RTP
   mode, or turning off its own NACK handling and serving resends from a
@@ -82,4 +82,3 @@ audit). Wire: none.
 ## Related
 
 - [SRT rate handle](/quest/m3/srt-rate-handle.md) - the same pacing and retransmit charging on SRT
-- [moq-webrtc runs on upstream str0m](/quest/m2/str0m-upstream.md) - removes the vendored copy the NACK hook was planned for
