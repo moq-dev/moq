@@ -4032,8 +4032,6 @@ export class Subscriber {
 			entry = this.#datagrams.get(id);
 			return { timed: entry?.timescale !== undefined };
 		});
-		// Padding, which names no subscription.
-		if (!dg) return undefined;
 		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
 		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
 		// A scale-less datagram's timestamp is its sequence.

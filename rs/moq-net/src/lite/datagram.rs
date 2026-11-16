@@ -2,9 +2,9 @@
 //!
 //! A body is `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
 //! timestamp present only when the subscription's track carries one (see
-//! [`Version::wire_timescale`]). Lite-07 prefixes it with type 0x0; type 0x1 is discarded
-//! padding. The payload runs to the datagram boundary, so unlike a [`super::Message`] there
-//! is no inner length prefix.
+//! [`Version::wire_timescale`]). Lite-07 prefixes it with type 0x0, its only datagram type.
+//! The payload runs to the datagram boundary, so unlike a [`super::Message`] there is no
+//! inner length prefix.
 //!
 //! On lite-05/06 a body is a single-frame group on a SUBSCRIBE subscription, its sequence
 //! the group's. On lite-07 it is a datagram of a datagram track, subscribed through a
@@ -47,7 +47,7 @@ impl Encode<Version> for Datagram {
 			return Err(EncodeError::Version);
 		}
 
-		if version.has_padding() {
+		if version.has_datagram_tracks() {
 			w.varint(0x0)?;
 		}
 		w.varint(self.subscribe)?;
@@ -66,26 +66,18 @@ impl Datagram {
 	/// The largest encoded datagram body a lite hop carries.
 	pub(super) const MAX_SIZE: usize = 1200;
 
-	/// Decode a datagram, or discard padding with `None`, without copying its payload.
+	/// Decode a datagram without copying its payload.
 	///
 	/// `timed` says whether the track of the given subscribe ID carries timestamps, which
-	/// the body itself does not.
-	pub(crate) fn decode(
-		buf: Bytes,
-		version: Version,
-		timed: impl FnOnce(u64) -> bool,
-	) -> Result<Option<Self>, DecodeError> {
+	/// the body itself does not. An unknown lite-07 type is an error, so the caller discards it.
+	pub(crate) fn decode(buf: Bytes, version: Version, timed: impl FnOnce(u64) -> bool) -> Result<Self, DecodeError> {
 		if !version.has_datagrams() {
 			return Err(DecodeError::Version);
 		}
 
 		let mut r = Decoder::new(&buf, version.into());
-		if version.has_padding() {
-			match r.varint()? {
-				0x0 => (),
-				0x1 => return Ok(None),
-				_ => return Err(DecodeError::InvalidValue),
-			}
+		if version.has_datagram_tracks() && r.varint()? != 0x0 {
+			return Err(DecodeError::InvalidValue);
 		}
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
@@ -97,12 +89,12 @@ impl Datagram {
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
 
-		Ok(Some(Self {
+		Ok(Self {
 			subscribe,
 			sequence,
 			timestamp,
 			payload,
-		}))
+		})
 	}
 }
 
@@ -268,25 +260,9 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn padding_needs_no_subscription() {
-		for mut body in [vec![1], vec![1; Datagram::MAX_SIZE], vec![0x80, 1, 0xff]] {
-			// Padding bytes need not be valid varints or any other structured encoding.
-			if body.len() == Datagram::MAX_SIZE {
-				body[1..].fill(0xff);
-			}
-			assert!(
-				Datagram::decode(body.into(), Version::Lite07, |_| panic!(
-					"padding must not look up a subscription"
-				))
-				.unwrap()
-				.is_none()
-			);
-		}
-	}
-
-	#[test]
 	fn invalid_types_never_reach_a_subscription() {
-		for body in [&[][..], &[0x80][..], &[2, 1, 2, 3][..], &[0xff; 9][..]] {
+		// Type 0x1 was lite-07's padding before it left the draft.
+		for body in [&[][..], &[0x80][..], &[1, 1, 2, 3][..], &[2, 1, 2, 3][..], &[0xff; 9][..]] {
 			assert!(
 				Datagram::decode(Bytes::copy_from_slice(body), Version::Lite07, |_| panic!(
 					"invalid type must not look up a subscription"
@@ -306,7 +282,7 @@ mod test {
 		};
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let buf = original.encode_bytes(version).unwrap();
-			let decoded = Datagram::decode(buf, version, |_| true).unwrap().unwrap();
+			let decoded = Datagram::decode(buf, version, |_| true).unwrap();
 			assert_eq!(decoded, original);
 		}
 	}
@@ -340,7 +316,6 @@ mod test {
 			assert_eq!(id, 1);
 			false
 		})
-		.unwrap()
 		.unwrap();
 		assert_eq!(decoded, dg);
 

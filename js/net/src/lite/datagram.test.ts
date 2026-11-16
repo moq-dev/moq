@@ -1,27 +1,13 @@
 import { expect, test } from "bun:test";
-import assert from "node:assert/strict";
 import { Datagram } from "./datagram.ts";
 import { Version } from "./version.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-test("lite-07 padding is discarded before looking up a subscription", async () => {
-	for (const body of [
-		new Uint8Array([1]),
-		new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]),
-		new Uint8Array([0x80, 1, 0xff]),
-	]) {
-		expect(
-			await Datagram.decode(body, Version.DRAFT_07, () => {
-				throw new Error("padding must not look up a subscription");
-			}),
-		).toBeUndefined();
-	}
-});
-
 test("invalid datagram types never reach a subscription", async () => {
-	for (const bytes of [[], [0x80], [2, 1, 2, 3], new Uint8Array(9).fill(0xff)]) {
+	// Type 0x1 was lite-07's padding before it left the draft.
+	for (const bytes of [[], [0x80], [1, 1, 2, 3], [2, 1, 2, 3], new Uint8Array(9).fill(0xff)]) {
 		let lookedUp = false;
 		await expect(
 			Datagram.decode(new Uint8Array(bytes), Version.DRAFT_07, () => {
@@ -37,7 +23,6 @@ test("datagram body round-trips", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		const dg = new Datagram(1n, 42n, 1000, enc.encode("hello"));
 		const decoded = await Datagram.decode(dg.encode(version), version, () => ({ timed: true }));
-		assert(decoded);
 		expect(decoded.subscribe).toBe(1n);
 		expect(decoded.sequence).toBe(42n);
 		expect(decoded.timestamp).toBe(1000);
@@ -63,7 +48,6 @@ test("datagram body varints follow the version's encoding", () => {
 test("datagram body round-trips an empty payload", async () => {
 	const dg = new Datagram(0n, 0n, 0, new Uint8Array());
 	const decoded = await Datagram.decode(dg.encode(Version.DRAFT_07), Version.DRAFT_07, () => ({ timed: true }));
-	assert(decoded);
 	expect(decoded.payload.byteLength).toBe(0);
 });
 
@@ -75,7 +59,6 @@ test("an untimed datagram body carries no timestamp", async () => {
 		expect(subscribe).toBe(1n);
 		return { timed: false };
 	});
-	assert(decoded);
 	expect(decoded.sequence).toBe(2n);
 	expect(decoded.timestamp).toBeUndefined();
 	expect(dec.decode(decoded.payload)).toBe("world");

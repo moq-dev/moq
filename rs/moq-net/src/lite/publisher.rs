@@ -8024,7 +8024,7 @@ mod serve_group_test {
 					let session = SinkSession::new(Log::default()).with_datagrams(transport);
 					let log = session.log.clone();
 					// Lite-07's type adds one byte to the three one-byte fields.
-					let header = if version.has_padding() { 4 } else { 3 };
+					let header = if version.has_datagram_tracks() { 4 } else { 3 };
 					datagram_send(version, session)
 						.send(crate::datagram::Datagram {
 							sequence: 1,

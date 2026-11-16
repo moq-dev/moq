@@ -11,12 +11,12 @@ import { Timescale } from "../time.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { hasDatagrams, hasDatagramTracks, hasPadding, type Version, wireTimescale } from "./version.ts";
+import { hasDatagrams, hasDatagramTracks, type Version, wireTimescale } from "./version.ts";
 
 /**
  * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
  * timestamp present only when the subscription's track carries one (see `wireTimescale`).
- * Lite-07 prefixes datagram-track bodies with type 0x0; type 0x1 is discarded padding.
+ * Lite-07 prefixes datagram-track bodies with type 0x0, its only datagram type.
  *
  * The payload runs to the datagram boundary, so unlike a size-prefixed lite message there is no
  * inner length prefix. Mirrors the Rust `lite::Datagram`; the model counterpart is
@@ -53,7 +53,7 @@ export class Datagram {
 		const subscribe = encodeVarint(this.subscribe, version);
 		const sequence = encodeVarint(this.sequence, version);
 		const timestamp = this.timestamp === undefined ? new Uint8Array() : encodeVarint(this.timestamp, version);
-		const type = hasPadding(version) ? encodeVarint(0x0, version) : new Uint8Array();
+		const type = hasDatagramTracks(version) ? encodeVarint(0x0, version) : new Uint8Array();
 
 		const out = new Uint8Array(
 			type.byteLength +
@@ -76,19 +76,19 @@ export class Datagram {
 	}
 
 	/**
-	 * Decode a group datagram or discard padding with `undefined`. `timed` reports whether the
-	 * track of the given subscribe ID carries a timestamp, which the body itself does not say.
+	 * Decode a datagram body. `timed` reports whether the track of the given subscribe ID carries
+	 * a timestamp, which the body itself does not say. An unknown lite-07 type throws, so the
+	 * caller discards it.
 	 */
 	static async decode(
 		data: Uint8Array,
 		version: Version,
 		framing: (subscribe: bigint) => { timed: boolean },
-	): Promise<Datagram | undefined> {
+	): Promise<Datagram> {
 		if (!hasDatagrams(version)) throw new Error("datagrams require lite-05 or newer");
 		const r = new Reader(undefined, data, version);
-		if (hasPadding(version)) {
+		if (hasDatagramTracks(version)) {
 			const type = await r.u62();
-			if (type === 1n) return;
 			if (type !== 0n) throw new Error(`unknown datagram type: ${type}`);
 		}
 		const subscribe = await r.u62();

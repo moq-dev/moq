@@ -366,15 +366,10 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 			continue;
 		};
 		any = true;
-		let Some(decoded) = decoded else {
-			continue;
-		};
 		let Ok(first) = decoded.encode_bytes(version) else {
 			continue;
 		};
-		let echo = lite::Datagram::decode(first, version, |_| timed)
-			.expect("could not decode our own encoding")
-			.expect("encoded datagram decoded as padding");
+		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
 		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
 	any

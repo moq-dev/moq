@@ -84,9 +84,19 @@ export function hasDatagrams(version: Version): boolean {
 	}
 }
 
-/** Whether datagram tracks have their own request and sequence space. */
+/** Whether datagram tracks have their own request and sequence space, and datagrams a leading type. */
 export function hasDatagramTracks(version: Version): boolean {
-	return hasPadding(version);
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
 }
 
 /** Whether the session supports the GOAWAY control stream (0x5) for graceful shutdown and migration. Added in lite-04. */
@@ -127,21 +137,6 @@ export function hasAuth(version: Version): boolean {
  */
 export function hasTracks(version: Version): boolean {
 	// Explicitly list older versions so future versions default to having the stream.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/** Whether datagrams have a type and either endpoint may send padding streams or datagrams. */
-export function hasPadding(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
