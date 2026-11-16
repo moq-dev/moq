@@ -550,10 +550,7 @@ impl MoqSide {
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
 	pub fn lan(&self) -> bool {
-		#[cfg(feature = "cluster-lan")]
-		return self.cluster.lan.enabled;
-		#[cfg(not(feature = "cluster-lan"))]
-		false
+		self.cluster.lan.enabled
 	}
 
 	/// The server to bind, which the LAN mesh shares with ordinary clients.
@@ -596,19 +593,15 @@ impl MoqSide {
 		);
 		// The `--connect` client and the cluster's WAN dials each bind
 		// `--connect-bind` for QUIC, so a fixed port would collide halfway through startup.
-		#[cfg(feature = "quic")]
 		anyhow::ensure!(
 			!(self.client.url.is_some()
 				&& self.cluster_dials()
 				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
 			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-api-url, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
-		#[cfg(feature = "cluster-lan")]
-		{
-			self.cluster.lan.validate()?;
-			if self.lan() {
-				moq_relay::cluster::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
-			}
+		self.cluster.lan.validate()?;
+		if self.lan() {
+			moq_relay::cluster::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
 		}
 		// A listener for ordinary clients admits nobody without a decision; a mesh
 		// listener alone admits its peers by their LAN credential.
@@ -2735,7 +2728,6 @@ mod tests {
 			}
 		}
 
-		#[cfg(feature = "cluster-lan")]
 		{
 			let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "auth", "generate"]).unwrap();
 			let err = cli.reject("auth").unwrap_err().to_string();
@@ -2853,7 +2845,7 @@ mod tests {
 
 	/// `--connect` and a WAN cluster peer each bind `--connect-bind` for QUIC, so a
 	/// fixed port is refused before anything binds; port 0 or either side alone is
-	/// fine, and a build without QUIC binds nothing to collide.
+	/// fine.
 	#[test]
 	fn a_fixed_connect_bind_serves_one_dialer() {
 		let parse = |flags: &[&str]| {
@@ -2870,12 +2862,8 @@ mod tests {
 			]
 			.concat();
 			let result = parse(&both).moq.validate();
-			if cfg!(feature = "quic") {
-				let err = result.unwrap_err().to_string();
-				assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
-			} else {
-				result.expect("without QUIC nothing binds the fixed port");
-			}
+			let err = result.unwrap_err().to_string();
+			assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
 
 			let ephemeral = [
 				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:0"][..],
@@ -2917,7 +2905,6 @@ mod tests {
 
 	/// `--cluster-lan` is a MoQ side on its own, and it supplies the listener the
 	/// user would otherwise have to spell out.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_is_a_moq_side_and_fills_in_a_listener() {
 		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "import", "ts"]).expect("parse");
@@ -2961,7 +2948,6 @@ mod tests {
 
 	/// The secret is only read by the mesh, so configuring one without it is an
 	/// error rather than a silently ignored flag.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_secret_requires_the_mesh() {
 		for lan in [None, Some("--cluster-lan=false")] {
@@ -3000,7 +2986,6 @@ mod tests {
 
 	/// The app is only read by the mesh, so configuring one without it is an
 	/// error rather than a silently ignored flag. The default is `default`.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_app_requires_the_mesh_and_defaults() {
 		for lan in [None, Some("--cluster-lan=false")] {
@@ -3041,7 +3026,6 @@ mod tests {
 
 	/// A mesh dial authenticates through its request path, which legacy moq-lite
 	/// versions do not carry.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_requires_a_path_capable_version() {
 		for (flag, reported) in [

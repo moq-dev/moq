@@ -40,7 +40,8 @@ judged, so this pass reads only the difference:
   it, inside the shipped binary rather than the crate alone: most features
   that look heavy on their crate add one or two crates to moq-relay or moq-cli.
   Diff this pass's inventory against the first pass's to find what m2 added.
-- Filed: [network stack](/quest/m2/features-network.md),
+- Filed: network stack (landed in
+  [moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)),
   [qlog](/quest/m2/features-qlog.md), and the media and gateway trims
   ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)). Check each
   landed or was dropped.

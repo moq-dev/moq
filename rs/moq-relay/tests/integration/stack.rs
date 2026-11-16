@@ -1,6 +1,6 @@
 //! The library's startup and serving futures fit a Windows main-thread stack.
 
-#![cfg(all(debug_assertions, feature = "_quic"))]
+#![cfg(debug_assertions)]
 
 use moq_relay::{Config, Relay};
 

@@ -5,8 +5,7 @@
 //! keep a prefix reliable, [`recv::Stream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`connection::Connection::set_limits`] to change flow control on a live connection.
 //!
-//! It needs no MoQ session: enable the `driver` feature and
-//! `default-features = false` to build it without moq-net. The entry point is the
+//! It needs no MoQ session. The entry point is the
 //! [`endpoint::Endpoint`], built from an [`endpoint::Config`] and a UDP socket it owns;
 //! [`endpoint::Endpoint::connect`] dials with a [`client::Config`].
 //!
@@ -67,7 +66,6 @@ pub(crate) use std::time::Duration;
 pub use moq_quic::{ConfigError, Limits, LimitsError, Rate, VarInt, client, crypto, server, stream, transport};
 pub(crate) use moq_quic::{EcnCodepoint, Transmit};
 
-#[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::{Slot, wrap_udp_socket};
 
 #[cfg(test)]

@@ -389,9 +389,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `rs uring` is a separate feature compile (off the default set), and
-        # CI_STRICT fails it below the 6.12 kernel floor. The embedding tests for
-        # io_uring live there; uring.yml also runs it on affected release PRs.
+        # `rs uring` runs the io_uring tests under CI_STRICT, which fails them below
+        # the 6.12 kernel floor; uring.yml also runs it on affected release PRs.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
