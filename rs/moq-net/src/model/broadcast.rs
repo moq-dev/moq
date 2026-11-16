@@ -26,8 +26,8 @@ mod listing;
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 #[cfg(feature = "async")]
 pub(crate) use listing::Owner;
+pub use listing::{Kind, Listed, Lister, Tracks, TracksEvent};
 pub(super) use listing::{ListOnAccept, Unlist};
-pub use listing::{Lister, Tracks, TracksEvent};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -329,17 +329,17 @@ impl Producer {
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
 			let _ = state.cache_track(track.weak());
-			let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+			let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
 			return Ok(track.listed(unlist));
 		}
 
 		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
 		state.insert_track(track.weak())?;
-		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
 		Ok(track.listed(unlist))
 	}
 
-	/// Produce a new datagram track and insert it into the broadcast.
+	/// Produce a new datagram track and insert it into the broadcast, listed until it ends.
 	///
 	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
 	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
@@ -353,24 +353,53 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: datagram::Info,
 	) -> Result<datagram::Producer, Error> {
-		let name = name.into();
+		self.insert_datagrams(name.into(), info, true)
+	}
+
+	/// [`Self::create_datagrams`] for a track no listing ever names, as a session's datagram
+	/// track riding a stream track's subscription, which serves a request rather than the
+	/// broadcast's inventory.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn create_unlisted_datagrams(
+		&self,
+		name: impl Into<Arc<str>>,
+		info: datagram::Info,
+	) -> Result<datagram::Producer, Error> {
+		self.insert_datagrams(name.into(), info, false)
+	}
+
+	fn insert_datagrams(
+		&self,
+		name: Arc<str>,
+		info: datagram::Info,
+		listed: bool,
+	) -> Result<datagram::Producer, Error> {
 		let mut state = self.state.lock();
-		if let Some(live) = state.datagrams.get(name.as_ref()) {
-			// A consumer asked for it before it existed, and no handler took the request yet:
-			// creating the track serves those consumers.
-			let queued = state
-				.datagram_requests
-				.iter()
-				.position(|request| live.same_channel(&request.weak()));
-			let Some(queued) = queued else {
-				return Err(Error::Duplicate);
-			};
-			let request = state.datagram_requests.remove(queued).expect("found above");
-			return Ok(request.with_stats(self.stats.clone()).accept(info));
+		let producer = match state.datagrams.get(name.as_ref()) {
+			Some(live) => {
+				// A consumer asked for it before it existed, and no handler took the request
+				// yet: creating the track serves those consumers.
+				let queued = state
+					.datagram_requests
+					.iter()
+					.position(|request| live.same_channel(&request.weak()));
+				let Some(queued) = queued else {
+					return Err(Error::Duplicate);
+				};
+				let request = state.datagram_requests.remove(queued).expect("found above");
+				request.with_stats(self.stats.clone()).accept(info)
+			}
+			None => {
+				let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
+				state.datagrams.insert(name.clone(), producer.weak());
+				producer
+			}
+		};
+		if !listed {
+			return Ok(producer);
 		}
-		let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
-		state.datagrams.insert(name, producer.weak());
-		Ok(producer)
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Datagrams(info));
+		Ok(producer.listed(unlist))
 	}
 
 	/// Answer datagram lookups from `source`, the broadcast an origin's front serves from,

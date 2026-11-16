@@ -81,14 +81,15 @@ impl Version {
 
 	/// Whether the session may carry unreliable QUIC datagrams (lite-05 §6.4): single-frame
 	/// groups on lite-05/06, a datagram track's datagrams on lite-07, which adds a leading
-	/// type and padding. Older than lite-05 never sends or accepts datagrams.
+	/// type. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
 	/// Whether a subscriber subscribes to a datagram track through its own Datagrams Stream
-	/// (0x9), whose datagrams carry the datagram track's own sequence. Added in lite-07;
-	/// earlier versions carry single-frame groups as datagrams on a SUBSCRIBE subscription.
+	/// (0x9), whose datagrams carry the datagram track's own sequence and a leading type.
+	/// Added in lite-07; earlier versions carry single-frame groups as datagrams on a
+	/// SUBSCRIBE subscription.
 	pub(crate) fn has_datagram_tracks(self) -> bool {
 		!matches!(
 			self,
@@ -111,14 +112,6 @@ impl Version {
 	/// Whether either endpoint may open an Auth Stream (0x7) to present a token and
 	/// learn its grant. Added in lite-07.
 	pub fn has_auth(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether datagrams have a type and either endpoint may send padding streams or datagrams.
-	pub(crate) fn has_padding(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -195,6 +188,15 @@ impl Version {
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
 	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
 	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one,
+	/// so 0 says no limit. Added in lite-07; earlier wires carry bare milliseconds.
+	pub(crate) fn has_unlimited_max_delay(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -318,9 +320,9 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count`.
-	/// Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
-	pub(crate) fn has_group_count(self) -> bool {
+	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and an exclusive
+	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
+	pub(crate) fn has_group_span(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -328,9 +330,8 @@ impl Version {
 	}
 
 	/// Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
-	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
-	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
-	/// earlier versions name every hole in SUBSCRIBE_DROP.
+	/// SUBSCRIBE_DROP, for groups that existed. Added in lite-07; earlier versions name every
+	/// hole in SUBSCRIBE_DROP.
 	pub(crate) fn has_skip(self) -> bool {
 		!matches!(
 			self,

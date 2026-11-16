@@ -18,8 +18,6 @@ export interface Counted {
 	 * waits for it at most the grace. Idempotent.
 	 */
 	excuse(): void;
-	/** Hold the end again: the drop that excused it no longer stands, as an update reopens a stale one. */
-	restore(): void;
 }
 
 /**
@@ -46,11 +44,7 @@ export class Tail {
 	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration;
-	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
-	// update names one only if it was sent before the publisher served the group, so the group won
-	// over it, even once the cache evicted it.
-	#finished: Run[] = [];
-	// Sequences a final drop named, so a stream whose header the drop overtook can be told from one
+	// Sequences a drop named, so a stream whose header the drop overtook can be told from one
 	// whose gap the grace gave up on.
 	#dropped: Run[] = [];
 
@@ -60,7 +54,6 @@ export class Tail {
 
 	/** Release what the tail keeps beside its ledger, once its subscription ended. */
 	close(): void {
-		this.#finished = [];
 		this.#dropped = [];
 	}
 
@@ -90,13 +83,6 @@ export class Tail {
 				state = "excused";
 				this.#active -= 1;
 				this.#excused.add(token);
-				this.#bump();
-			},
-			restore: () => {
-				if (state !== "excused") return;
-				state = "held";
-				this.#excused.delete(token);
-				this.#active += 1;
 				this.#bump();
 			},
 		};
@@ -134,24 +120,6 @@ export class Tail {
 		};
 	}
 
-	/** Record that the group stream for `sequence` arrived whole. */
-	finish(sequence: bigint): void {
-		insertRun(this.#finished, sequence, sequence + 1n);
-	}
-
-	/** The parts of `[start, end)` whose stream did not finish since the last update was sent. */
-	unfinished(start: bigint, end: bigint): Run[] {
-		return runGaps(this.#finished, start, end);
-	}
-
-	/**
-	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
-	 * no verdict, so none needs them.
-	 */
-	updated(): void {
-		this.#finished = [];
-	}
-
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */
 	touch(): void {
 		this.#bump();
@@ -162,21 +130,16 @@ export class Tail {
 		this.#account(start, end);
 	}
 
-	/** Record `[start, end)` as given up by a final drop, accounting for it. */
+	/** Record `[start, end)` as given up by a drop, accounting for it. */
 	drop(start: bigint, end: bigint): void {
 		insertRun(this.#dropped, start, end);
 		this.#account(start, end);
 	}
 
-	/** Whether a final drop named `sequence`. */
+	/** Whether a drop named `sequence`. */
 	dropped(sequence: bigint): boolean {
 		const run = this.#dropped[runsFrom(this.#dropped, sequence)];
 		return run !== undefined && run.start <= sequence;
-	}
-
-	/** Owe `[start, end)` again: a stale drop that accounted for it was reversed by a widening. */
-	unaccount(start: bigint, end: bigint): void {
-		this.#ledger.unaccount(start, end, now());
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */

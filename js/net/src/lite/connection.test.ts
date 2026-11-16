@@ -919,13 +919,14 @@ test("a malformed complete GOAWAY closes the session", async () => {
 	}
 });
 
-// Each write is backpressured until the receiver reads it, before FIN is sent.
+// A stream type the version doesn't define, such as lite-07's removed padding (0x2), is
+// stopped without ending the session.
 for (const [alpn, version] of [
 	[ALPN_05, Version.DRAFT_05],
 	[ALPN_06, Version.DRAFT_06],
 	[ALPN_07_WIP, Version.DRAFT_07],
 ] as const) {
-	test(`padding is discarded only on lite-07: ${alpn}`, async () => {
+	test(`an unknown stream type is stopped: ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const connection = new Connection({
 			url: new URL("https://relay.example/"),
@@ -939,15 +940,9 @@ for (const [alpn, version] of [
 		const writer = new Writer(await pair.client.createUnidirectionalStream(), version);
 		try {
 			await writer.u53(2);
-			if (version === Version.DRAFT_07) {
-				for (let i = 0; i < 32; i++) await writer.write(new Uint8Array(4096));
-				writer.close();
-				await writer.closed;
-			} else {
-				await expect(writer.closed).rejects.toThrow();
-			}
+			await expect(writer.closed).rejects.toThrow();
 			expect(closed).toBe(false);
-			// A subsequent stream is still handled after the padding finishes or resets.
+			// A subsequent stream is still handled.
 			const goaway = await Stream.open(pair.client, { version });
 			await goaway.writer.u53(StreamId.Goaway);
 			await new Goaway("").encode(goaway.writer, version);

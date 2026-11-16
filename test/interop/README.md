@@ -679,9 +679,10 @@ refusal retains its meaning and both bindings emit the same bytes.
 
 `lite_tracks_interop` checks moq-lite-07's Tracks Stream both ways: `tracks.ts`
 answers a Rust TRACKS request with js/net's publisher, whose listing (each
-TRACKS\_ADD with its TRACK\_INFO, SYNCED, a TRACKS\_REMOVE, then the FIN when
-the broadcast ends) Rust decodes, and it re-encodes Rust's listing events byte for
-byte.
+TRACKS\_ADD with its kind and info, a datagram track's DATAGRAMS\_INFO beside a
+track's TRACK\_INFO of the same name, SYNCED, a TRACKS\_REMOVE and a datagram
+track's TRACKS\_FINISH, then the FIN when the broadcast ends) Rust decodes, and it
+re-encodes Rust's listing events of both kinds byte for byte.
 
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07

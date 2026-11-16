@@ -97,6 +97,13 @@ export namespace Broadcast {
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
 	}
+	export type Listed = {
+		datagrams?: false;
+		info: Track.Info;
+	} | {
+		datagrams: true;
+		info: Datagram.Info;
+	};
 	export class Producer {
 		constructor();
 		close(): void;
@@ -113,15 +120,16 @@ export namespace Broadcast {
 		next(): Promise<Broadcast.TracksEvent | undefined>;
 	}
 	export type TracksEvent = {
-		info: Track.Info;
 		kind: "added";
 		name: string;
-	} | {
+	} & Broadcast.Listed | {
 		kind: "synced";
 	} | {
+		datagrams?: boolean;
 		kind: "removed";
 		name: string;
 	} | {
+		datagrams?: boolean;
 		kind: "finished";
 		name: string;
 	};

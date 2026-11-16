@@ -359,25 +359,14 @@ fn ietf_paths(data: &[u8], version: ietf::Version) {
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
-	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
-			continue;
-		};
-		any = true;
-		let Some(decoded) = decoded else {
-			continue;
-		};
-		let Ok(first) = decoded.encode_bytes(version) else {
-			continue;
-		};
-		let echo = lite::Datagram::decode(first, version, |_| timed)
-			.expect("could not decode our own encoding")
-			.expect("encoded datagram decoded as padding");
+	let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version) else {
+		return false;
+	};
+	if let Ok(first) = decoded.encode_bytes(version) {
+		let echo = lite::Datagram::decode(first, version).expect("could not decode our own encoding");
 		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
-	any
+	true
 }
 
 /// Decode one moq-lite wire object from arbitrary bytes.
@@ -1485,17 +1474,16 @@ impl LiteSample {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_delay: std::time::Duration::from_secs(10),
+				max_delay: Some(std::time::Duration::from_secs(10)),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
-				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
 			Self::Datagram => lite::Datagram {
 				subscribe: 3,
 				sequence: 1_234,
-				timestamp: Some(1_234_567_890),
+				timestamp: 1_234_567_890,
 				payload: bytes::Bytes::new(),
 			}
 			.encode(w, version)
@@ -1528,7 +1516,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version)
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
@@ -1686,26 +1674,24 @@ impl Default for Messages {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
-				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				// Lite-06, the bench's version, restates the ranges.
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
-				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1870,11 +1856,10 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			depth: 0,
 			track: track.into(),
 			priority: 0,
-			max_delay: std::time::Duration::ZERO,
+			max_delay: Some(std::time::Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
-			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),
