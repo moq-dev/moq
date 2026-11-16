@@ -54,20 +54,26 @@ What exists only for sockets, to check before deleting:
   (`rs/moq-net/src/model/broadcast.rs:406`), `pub(super)`: a track a peer
   who knows its name finds, never announced or listed. Sockets are its one
   caller. Kixel's copy is built on moq-net's public API and needs exactly
-  this. Recommended: make it public, with Kixel as its named consumer,
-  instead of deleting it; the alternative is that Kixel's session tracks
-  appear in track listings.
+  this. Decided 2026-11-16 (maintainer, kixel.ai's unblock triage): ✅ make
+  it public, with [Kixel's socket endpoint](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m0/mesh/sockets.md)
+  as its named consumer (rejected: deleting it, which puts Kixel's session
+  tracks in track listings).
 - `origin::Consumer::hidden_withheld` and the hold a pre-lite-07 client
   session takes on it (`rs/moq-net/src/lite/session.rs:311-315`), which make
   a dial fail `Unsupported` while a hop cannot carry hidden broadcasts.
-  Sockets are its one reader (`socket.rs:442`). Recommended: delete it,
-  unless Kixel's port names a need.
+  Sockets are its one reader (`socket.rs:442`). Delete it: Kixel's port
+  dials lite-07 only and needs none.
 - Hidden (`.`-named) broadcasts themselves are not socket-only: HLS, the CLI,
   and `RouteOptions::hidden()` use them
   (`rs/moq-hls/src/server/mod.rs:191`, `doc/concept/identity.md:196`). They
   stay.
 - `rs/moq-net/src/auth.rs` tests use `.socket` only as a pattern string;
   they stay.
+- JS keeps nothing for Kixel: it ports only the Rust endpoint, and its two
+  JS users exchange plain broadcasts instead (decided 2026-11-16, same
+  triage). The `@moq/net` internals `socket.ts` reads, such as
+  `hiddenWithheld` and `requestWanted`, go or stay as their other callers
+  need.
 
 For the PR:
 
