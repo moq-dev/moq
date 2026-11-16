@@ -211,6 +211,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Future for Driver<T> {
 	type Output = ();
 
 	fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+		// Its timers run on tokio's clock unless the executor entered a kio clock of its own.
+		let _runtime = crate::runtime::enter();
 		std::pin::Pin::new(&mut self.0).poll(cx)
 	}
 }
