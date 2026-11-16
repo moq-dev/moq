@@ -35,10 +35,10 @@ fn vectors_path() -> PathBuf {
 }
 
 /// xorshift64, so a seed always draws the same cases.
-struct Rng(u64);
+pub(super) struct Rng(pub u64);
 
 impl Rng {
-	fn below(&mut self, n: u64) -> u64 {
+	pub fn below(&mut self, n: u64) -> u64 {
 		self.0 ^= self.0 << 13;
 		self.0 ^= self.0 >> 7;
 		self.0 ^= self.0 << 17;
@@ -46,11 +46,11 @@ impl Rng {
 	}
 
 	/// True one time in `n`.
-	fn one_in(&mut self, n: u64) -> bool {
+	pub fn one_in(&mut self, n: u64) -> bool {
 		self.below(n) == 0
 	}
 
-	fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+	pub fn pick<T: Copy>(&mut self, items: &[T]) -> T {
 		items[self.below(items.len() as u64) as usize]
 	}
 }

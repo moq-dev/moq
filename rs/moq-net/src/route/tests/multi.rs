@@ -974,37 +974,44 @@ impl<N: Key> Router<N> {
 	}
 
 	fn reselect_all(&mut self) {
-		let origins: BTreeSet<Id> = self.heard.keys().chain(self.best.keys()).copied().collect();
-		for origin in origins {
+		for origin in self.origins() {
 			self.reselect(origin);
 		}
 	}
 
-	/// Pick the route to `origin` and tell every neighbour what changed.
-	fn reselect(&mut self, origin: Id) {
-		let current = self.best.get(&origin).map(|best| best.via);
-		let mut pick: Option<(Best<N>, Order<N>)> = None;
+	/// The routes to `origin` this node may take from what its neighbours last said.
+	pub fn candidates(&self, origin: Id) -> Vec<Best<N>> {
 		let here = self.here();
-		let mut visited = 0;
+		let mut out = Vec::new();
 		for (&via, heard) in self.heard.get(&origin).into_iter().flatten() {
-			visited += 1;
 			let Some(peer) = self.peers.get(&via) else {
 				continue;
 			};
 			if heard.ended || (self.tune.agree && !self.agrees(origin, via, &heard.offer)) {
 				continue;
 			}
-			let Some((offer, suspect)) = here.arrive(&peer.port, peer.draining, &heard.offer) else {
-				continue;
-			};
-			let mine = Best { via, offer, suspect };
-			let key = order(&mine, current);
-			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
-				pick = Some((mine, key));
+			if let Some((offer, suspect)) = here.arrive(&peer.port, peer.draining, &heard.offer) {
+				out.push(Best { via, offer, suspect });
 			}
 		}
-		self.work += visited;
-		let pick = pick.map(|(best, _)| best);
+		out
+	}
+
+	/// The route this node uses to `origin`.
+	pub fn best(&self, origin: Id) -> Option<&Best<N>> {
+		self.best.get(&origin)
+	}
+
+	/// Every forwarding node this node has heard a route to or uses one to.
+	pub fn origins(&self) -> BTreeSet<Id> {
+		self.heard.keys().chain(self.best.keys()).copied().collect()
+	}
+
+	/// Pick the route to `origin` and tell every neighbour what changed.
+	fn reselect(&mut self, origin: Id) {
+		let current = self.best.get(&origin).map(|best| best.via);
+		self.work += self.heard.get(&origin).map_or(0, BTreeMap::len);
+		let pick = (self.candidates(origin).into_iter()).min_by_key(|best| order(best, current));
 		if self.best.get(&origin) == pick.as_ref() {
 			return;
 		}
@@ -1487,6 +1494,15 @@ impl MultiSim {
 
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
+	}
+
+	pub fn release(&mut self, from: Node, to: Node) {
+		self.held.remove(&(from, to));
+	}
+
+	/// Whether `a` and `b` have a session open.
+	pub fn is_up(&self, a: Node, b: Node) -> bool {
+		self.up.contains(&Self::pair(a, b))
 	}
 
 	pub fn ready(&self) -> Vec<((Node, Node), usize)> {

@@ -22,6 +22,7 @@ mod residual;
 mod routing;
 mod scope;
 mod search;
+mod sticky;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
