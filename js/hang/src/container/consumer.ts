@@ -60,8 +60,8 @@ export interface ConsumerProps {
 	 * decoder that needs that much media before its output is clean starts early enough, such as an
 	 * Opus decoder. Pass the catalog audio rendition's `warmup`. Mirrors Rust's `container::Playout`.
 	 *
-	 * Put the max delay plus the warmup on the subscription, since the publisher skips what falls
-	 * outside that budget. The start is no later than the group covering the live edge less
+	 * Put the min and max delay plus the warmup on the subscription, since the publisher starts a
+	 * live join at the min and skips what falls outside the max. The start is no later than the group covering the live edge less
 	 * `delay.min` and the warmup: one that starts at or before that point. Both default to zero,
 	 * which the newest group covers, so the start waits for nothing. Otherwise groups can arrive
 	 * newest first, so when none that arrived covers that point the start waits for an earlier one,
