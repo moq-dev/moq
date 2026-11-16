@@ -30,6 +30,16 @@ pub enum Codec {
 	H265,
 }
 
+impl Codec {
+	/// What this codec needs against H.264 for the same picture, which scales the default cap.
+	fn bitrate_scale(self) -> f64 {
+		match self {
+			Self::H264 => 1.0,
+			Self::H265 => 0.7,
+		}
+	}
+}
+
 /// Which encoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -153,8 +163,8 @@ pub struct Config {
 	pub height: u32,
 	/// Encoded frame rate.
 	pub framerate: FrameRate,
-	/// Target bitrate. `None` derives a sane default
-	/// from resolution and framerate (~0.07 bits per pixel per second).
+	/// The rendition's cap: the peak the encoder is held to. `None` derives
+	/// [`resolved_bitrate`](Self::resolved_bitrate)'s default from the size, frame rate, and codec.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// The time between join points: a keyframe (an IDR with its parameter sets
 	/// in band) opens a group this often, so a subscriber joining mid-stream waits
@@ -350,17 +360,25 @@ impl Config {
 		Some(resize)
 	}
 
-	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
-	pub(crate) fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
+	/// The rendition's cap: [`bitrate`](Self::bitrate), or the default for its size, frame rate, and
+	/// codec.
+	///
+	/// The default is `7.2 Mbps x Mpx / (1 + Mpx / 1.38)`, which levels off toward 10 Mbps, for
+	/// H.264 at 30 fps: 720p30 is 4 Mbps and 1080p30 is 6 Mbps. Frame rate scales it by
+	/// `(30 + (fps - 30) / 2) / 30`, since delta frames make it less than linear, and the codec by
+	/// its efficiency against H.264 (H.265 is 0.7). The JS publisher derives the same default.
+	pub fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.bitrate
-			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate))
+			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate, self.codec))
 	}
 }
 
-/// The bitrate an unconfigured encode resolves to: 0.07 bits per pixel per second, which matches
-/// the JS publisher's default and lands ~4.4 Mbps for 1080p30.
-pub(crate) fn default_bitrate(size: Size, framerate: FrameRate) -> moq_net::bandwidth::Rate {
-	moq_net::bandwidth::Rate::from_bps((size.pixels() as f64 * framerate.as_f64() * 0.07) as u64)
+/// The cap an unconfigured encode resolves to; see [`Config::resolved_bitrate`].
+pub(crate) fn default_bitrate(size: Size, framerate: FrameRate, codec: Codec) -> moq_net::bandwidth::Rate {
+	let megapixels = size.pixels() as f64 / 1e6;
+	let frames = (30.0 + (framerate.as_f64() - 30.0) / 2.0) / 30.0;
+	let bps = 7.2e6 * megapixels / (1.0 + megapixels / 1.38) * frames * codec.bitrate_scale();
+	moq_net::bandwidth::Rate::from_bps(bps as u64)
 }
 
 /// Video encoder. Build one with [`Encoder::new`], submit raw [`Frame`]s via
@@ -1268,6 +1286,36 @@ mod tests {
 		let large = Config::new(1920, 1080, crate::FrameRate::new(30, 1).unwrap()).resolved_bitrate();
 		assert!(large > small);
 		assert!(small > moq_net::bandwidth::Rate::ZERO);
+	}
+
+	/// The anchors the formula was fit to (720p30 = 4 Mbps, 720p60 = 6 Mbps) and the 16:9 ladder it
+	/// derives, in kbps at 30 fps H.264.
+	#[test]
+	fn default_bitrate_follows_the_formula() {
+		let cap = |width, height, fps, codec| {
+			let mut config = Config::new(width, height, crate::FrameRate::new(fps, 1).unwrap());
+			config.codec = codec;
+			config.resolved_bitrate().as_bps() as f64 / 1e6
+		};
+		let h264 = Codec::H264;
+		for (width, height, mbps) in [
+			(426, 240, 0.69),
+			(640, 360, 1.4),
+			(854, 480, 2.3),
+			(1280, 720, 4.0),
+			(1920, 1080, 6.0),
+			(2560, 1440, 7.3),
+			(3840, 2160, 8.6),
+		] {
+			let got = cap(width, height, 30, h264);
+			assert!((got - mbps).abs() < 0.1, "{height}p30: {got} Mbps, want {mbps}");
+		}
+		assert!((cap(1280, 720, 60, h264) - 6.0).abs() < 0.05);
+		// Half the frames still cost more than half: 15 fps is 3/4 of 30.
+		assert!((cap(1280, 720, 15, h264) / cap(1280, 720, 30, h264) - 0.75).abs() < 1e-3);
+		assert!((cap(1280, 720, 30, Codec::H265) / cap(1280, 720, 30, h264) - 0.7).abs() < 1e-3);
+		// It levels off below 10 Mbps at 30 fps however large the picture.
+		assert!(cap(16384, 8640, 30, h264) < 10.0);
 	}
 
 	/// A backend that holds each frame back by one, like the Media Foundation MFT:

@@ -1018,7 +1018,8 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		await settle();
 		const first = accepted().at(-1);
 		expect(first).toMatchObject({ framerate: 30 });
-		expect(first?.bitrate).toBeGreaterThan(0);
+		// The default cap, the formula moq-video shares: 720p30 H.264 is 4 Mbps.
+		expect(first?.bitrate).toBe(3_978_544);
 		expect(encoder.out.resolved.peek()?.bitrate).toBe(first?.bitrate);
 
 		// A grant below the ceiling caps the live config but leaves the probe alone.
@@ -1034,7 +1035,8 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		expect(probe.mock.calls.length).toBeGreaterThan(probes);
 		const second = accepted().at(-1);
 		expect(second).toMatchObject({ framerate: 60 });
-		expect(second?.bitrate).toBeGreaterThan(first?.bitrate ?? 0);
+		// 60 fps costs 1.5x the 30 fps cap.
+		expect(second?.bitrate).toBe(5_967_816);
 		expect(encoder.out.catalog.peek()?.framerate).toBe(60);
 	} finally {
 		encoder.close();

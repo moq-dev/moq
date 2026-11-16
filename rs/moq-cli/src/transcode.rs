@@ -24,7 +24,7 @@ pub struct Args {
 	/// e.g. `--rung 720:2500000 --rung 360:600000`. Short sides and bitrates must
 	/// increase together; input order does not matter. Rungs above the source
 	/// are dropped; a same-size rung needs a lower known bitrate.
-	/// Defaults to a 240p..1080p ladder.
+	/// Defaults to a 240p..1080p ladder capped by the default video cap formula.
 	#[usage(long = "rung")]
 	rungs: Vec<RungArg>,
 

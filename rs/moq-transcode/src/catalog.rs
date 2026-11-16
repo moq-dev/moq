@@ -497,10 +497,10 @@ mod tests {
 	#[test]
 	fn rungs_never_upscale() {
 		let rungs = crate::Config::default().ladder;
-		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(2_000_000))).unwrap();
+		let resolved = resolve_rungs(&rungs, "video", &source(854, 480, Some(3_000_000))).unwrap();
 		let names: Vec<_> = resolved.iter().map(|r| r.name.as_str()).collect();
 		// A 480p source keeps only the strictly-lower rungs: the 480p rung is
-		// admitted only because its bitrate (1.2M) undercuts the source (2M).
+		// admitted only because its bitrate (2.3M) undercuts the source (3M).
 		assert_eq!(names, ["video/240p", "video/360p", "video/480p"]);
 	}
 

@@ -540,7 +540,7 @@ type TextConfig = {
   "format": "vtt" | "ttml" | "utf8" | string,
   "role": "subtitle" | "caption" | string | undefined,
   "lang": string | undefined,
-  // plus the common rendition fields, except `enabled`
+  // plus the common rendition fields, except `bitrate` and `enabled`
 }
 ~~~
 
@@ -713,6 +713,7 @@ type CommonExtensions = {
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
+  "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
   "enabled": boolean | undefined,
@@ -779,6 +780,12 @@ Multiple renditions MAY use the same label.
 ### container {#field-container}
 The container used to frame this rendition's media, as described in {{container}}.
 If absent, it defaults to `{ "kind": "legacy" }`.
+
+### bitrate {#field-bitrate}
+The maximum bitrate of the rendition in bits per second.
+For video it is the peak the encoder is held to: a quiet scene sends well below it, and a busy one at most reaches it.
+A consumer SHOULD price the rendition at this value, such as when it selects among renditions or probes for a higher one, instead of at a measured average.
+If absent, a consumer SHOULD assume no peak is known.
 
 ### jitter {#field-jitter}
 The maximum media span, in milliseconds, that a publisher hands to the transport behind a frame's presentation timestamp.
@@ -1136,6 +1143,7 @@ This document has no IANA actions.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 
+- Defined the rendition `bitrate` ({{field-bitrate}}): the peak the encoder is held to, which a consumer prices the rendition at.
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new stream Instance.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
