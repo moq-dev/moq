@@ -19,7 +19,7 @@ Decided 2026-11-14 (maintainer, /quest-plan):
 - ✅ A counter in session stats (rejected: a warning log after N seconds, which
   needs a constant; both together).
 - ✅ `main` only (rejected: backport to `release`). It adds API, and on the
-  release line [the receive-credit fix](/quest/m0/release-qmux-credit.md)
+  release line [the receive-credit fix](https://github.com/moq-dev/moq/pull/8808)
   removes the cause.
 
 Today, a received DATA_BLOCKED is only logged at trace
