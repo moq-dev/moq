@@ -1638,8 +1638,8 @@ describe("Decoder across a rename", () => {
 		}
 	});
 
-	// The probe accepts a CMAF init segment it cannot parse for Opus, so setup throws before the
-	// replacement's consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
+	// `configure` throws for the replacement's config, so setup fails before the replacement's
+	// consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
 	it("reports a replacement that fails to set up and stops holding the delay", async () => {
 		const playback = await livePlayback(12);
 		try {
