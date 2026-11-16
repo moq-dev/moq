@@ -64,6 +64,7 @@ class ReportTest(unittest.TestCase):
                 "mib_per_s",
                 "overflowed_packets",
                 "max_messages",
+                "claim_items",
                 "payload_bytes",
                 "bytes",
                 "frames_per_chunk",
@@ -83,6 +84,7 @@ class ReportTest(unittest.TestCase):
                 "mib_per_s": "MiB/s",
                 "overflowed_packets": "packets",
                 "max_messages": "messages",
+                "claim_items": "items",
                 # Workload dimensions, as the JS benchmarks name them.
                 "payload_bytes": None,
                 "bytes": None,

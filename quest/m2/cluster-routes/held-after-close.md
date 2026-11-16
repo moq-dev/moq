@@ -11,7 +11,7 @@ route recovers.
 
 Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
 multicast](/quest/m2/multicast/README.md)): this waits on the
-[bake-off](/quest/m2/multicast/bakeoff.md). The new rule has no hold: a reader
+[bake-off](https://github.com/moq-dev/moq/pull/8880). The new rule has no hold: a reader
 debounces unavailable to offline locally, which answers the same symptom. If
 the new rule goes ahead, [the switch](/quest/m2/multicast/switch.md) deletes
 this quest with the fixtures that pin it; if it does not, this starts as
@@ -42,7 +42,8 @@ three pinned fixtures into the contract's held-then-available sequence.
 
 ## Required
 
-- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the hold this shows remains
+- [The switch](/quest/m2/multicast/switch.md) - deletes this with the old rule, unless the maintainer keeps today's rule on [moq-dev/moq#8880](https://github.com/moq-dev/moq/pull/8880)
+
 
 ## Related
 
