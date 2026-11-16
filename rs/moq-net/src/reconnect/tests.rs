@@ -428,7 +428,10 @@ async fn a_goaway_before_healthy_establishes_the_policy() {
 			run.dials.len() == dials + 2
 		})
 		.await;
-		assert!(ended.is_none(), "{restart:?}: a drained first session gave up: {ended:?}");
+		assert!(
+			ended.is_none(),
+			"{restart:?}: a drained first session gave up: {ended:?}"
+		);
 	}
 }
 
