@@ -1,3 +1,4 @@
+import { IetfSessionCode } from "../ietf/error.ts";
 import { Duration } from "@moq/clock";
 import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
@@ -154,10 +155,10 @@ async function receiveSetup(
 
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
-		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
+		throw new ProtocolViolation("server SETUP carries PATH", { code: IetfSessionCode.InvalidPath });
 	}
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Authority) !== undefined) {
-		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
+		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: IetfSessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
 	// session (draft-22 section 8.9).

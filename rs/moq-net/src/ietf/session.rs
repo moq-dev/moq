@@ -750,10 +750,10 @@ pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: boo
 	let path = params.get_bytes(ietf::ParameterBytes::Path);
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if client && path.is_some() {
-		return Err(SessionError::InvalidPath.into());
+		return Err(crate::ietf::error::session::INVALID_PATH.into());
 	}
 	if client && params.get_bytes(ietf::ParameterBytes::Authority).is_some() {
-		return Err(SessionError::InvalidAuthority.into());
+		return Err(crate::ietf::error::session::INVALID_AUTHORITY.into());
 	}
 	let path = match path {
 		Some(bytes) => Some(
@@ -1707,7 +1707,7 @@ impl<R: crate::transport::poll::RecvStream> ReadGoaways<R> {
 			match msg.request_id {
 				None if version == Version::Draft18 => return Poll::Ready(Err(Error::ProtocolViolation)),
 				Some(request_id) if request_id.0 % 2 != u64::from(!self.client) => {
-					return Poll::Ready(Err(DecodeError::Session(SessionError::InvalidRequestId).into()));
+					return Poll::Ready(Err(DecodeError::Session(crate::ietf::error::session::INVALID_REQUEST_ID).into()));
 				}
 				_ => {}
 			}
@@ -3165,19 +3165,19 @@ mod tests {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
-					SessionError::AuthTokenCacheOverflow,
+					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], SessionError::UnknownAuthTokenAlias, "DELETE"),
-				(&[0x02, 0x07][..], SessionError::UnknownAuthTokenAlias, "USE_ALIAS"),
+				(&[0x00, 0x07][..], crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS, "DELETE"),
+				(&[0x02, 0x07][..], crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS, "USE_ALIAS"),
 				(
 					&[0x03][..],
-					SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"USE_VALUE without a type",
 				),
 				(
 					&[0x04, 0x00][..],
-					SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"an unknown alias type",
 				),
 			] {
@@ -3279,8 +3279,8 @@ mod tests {
 	async fn a_server_setup_with_path_or_authority_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (param, expected) in [
-				(ietf::ParameterBytes::Path, SessionError::InvalidPath),
-				(ietf::ParameterBytes::Authority, SessionError::InvalidAuthority),
+				(ietf::ParameterBytes::Path, crate::ietf::error::session::INVALID_PATH),
+				(ietf::ParameterBytes::Authority, crate::ietf::error::session::INVALID_AUTHORITY),
 			] {
 				let mut params = ietf::Parameters::default();
 				params.set_bytes(param, b"a".to_vec());
@@ -3298,7 +3298,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (token, expected) in [
 				// An Alias Type of 4 does not exist.
-				(&[0x04][..], Some(SessionError::KeyValueFormatting)),
+				(&[0x04][..], Some(crate::ietf::error::session::KEY_VALUE_FORMATTING)),
 				// REGISTER alias 7, type 0, empty value.
 				(&[0x01, 0x07, 0x00][..], None),
 			] {
@@ -3455,7 +3455,7 @@ mod tests {
 
 		let closes = log.closes();
 		assert_eq!(closes.len(), 1, "{closes:?}");
-		assert_eq!(SessionError::from_code(closes[0].0), SessionError::InvalidPath);
+		assert_eq!(SessionError::from_code(closes[0].0), crate::ietf::error::session::INVALID_PATH);
 		let before = log.before_close().unwrap();
 		assert!(
 			!before
@@ -3477,8 +3477,8 @@ mod tests {
 		for (request_id, expected) in [
 			(Some(0), None),
 			(Some(4), None),
-			(Some(1), Some(SessionError::InvalidRequestId)),
-			(Some(5), Some(SessionError::InvalidRequestId)),
+			(Some(1), Some(crate::ietf::error::session::INVALID_REQUEST_ID)),
+			(Some(5), Some(crate::ietf::error::session::INVALID_REQUEST_ID)),
 			// Required on the control stream.
 			(None, Some(SessionError::ProtocolViolation)),
 		] {
@@ -3617,7 +3617,7 @@ mod tests {
 			for (payload, expected, why) in [
 				(
 					frame(version, ietf::SubscribeNamespace::ID, &[0, 0, 0]),
-					SessionError::InvalidRequestId,
+					crate::ietf::error::session::INVALID_REQUEST_ID,
 					"a Request ID with our parity",
 				),
 				(

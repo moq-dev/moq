@@ -114,15 +114,13 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_UNAUTHORIZED = 2,
 	/// Protocol violation.
 	MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION = 3,
-	/// Key value formatting.
-	MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING = 4,
 	/// Goaway timeout.
 	MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT = 5,
 	/// Timeout.
 	MOQ_PROTOCOL_KIND_TIMEOUT = 6,
 	/// Version.
 	MOQ_PROTOCOL_KIND_VERSION = 7,
-	// 8 through 10 are unassigned; the values that follow stay put for compiled consumers.
+	// 4 and 8 through 10 are unassigned; the values that follow stay put for compiled consumers.
 	/// Delivery timeout.
 	MOQ_PROTOCOL_KIND_DELIVERY_TIMEOUT = 11,
 	/// Session closed.
@@ -155,20 +153,8 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS = 25,
 	/// The authorization token expired and can be refreshed.
 	MOQ_PROTOCOL_KIND_EXPIRED = 26,
-	/// A token registration exceeded the advertised cache size.
-	MOQ_PROTOCOL_KIND_AUTH_TOKEN_CACHE_OVERFLOW = 27,
 	/// The peer could not parse an authorization token.
 	MOQ_PROTOCOL_KIND_MALFORMED_AUTH_TOKEN = 28,
-	/// A token referred to an alias that was never registered.
-	MOQ_PROTOCOL_KIND_UNKNOWN_AUTH_TOKEN_ALIAS = 29,
-	/// The peer reused or sent an invalid request ID.
-	MOQ_PROTOCOL_KIND_INVALID_REQUEST_ID = 30,
-	/// The peer sent a path it may not send.
-	MOQ_PROTOCOL_KIND_INVALID_PATH = 31,
-	/// The peer sent an authority it may not send.
-	MOQ_PROTOCOL_KIND_INVALID_AUTHORITY = 32,
-	/// The peer exceeded its outstanding request update limit.
-	MOQ_PROTOCOL_KIND_TOO_MANY_REQUEST_UPDATES = 33,
 }
 
 /// A protocol failure a peer sent: scope, verbatim wire code, and recognized kind.
@@ -457,18 +443,11 @@ fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
 		moq_net::SessionError::Unauthorized => MOQ_PROTOCOL_KIND_UNAUTHORIZED,
 		moq_net::SessionError::Expired => MOQ_PROTOCOL_KIND_EXPIRED,
 		moq_net::SessionError::ProtocolViolation => MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION,
-		moq_net::SessionError::KeyValueFormatting => MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING,
 		moq_net::SessionError::GoawayTimeout => MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT,
 		moq_net::SessionError::Timeout => MOQ_PROTOCOL_KIND_TIMEOUT,
 		moq_net::SessionError::Version => MOQ_PROTOCOL_KIND_VERSION,
 		moq_net::SessionError::TooManyRequests => MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS,
-		moq_net::SessionError::AuthTokenCacheOverflow => MOQ_PROTOCOL_KIND_AUTH_TOKEN_CACHE_OVERFLOW,
 		moq_net::SessionError::MalformedAuthToken => MOQ_PROTOCOL_KIND_MALFORMED_AUTH_TOKEN,
-		moq_net::SessionError::UnknownAuthTokenAlias => MOQ_PROTOCOL_KIND_UNKNOWN_AUTH_TOKEN_ALIAS,
-		moq_net::SessionError::InvalidRequestId => MOQ_PROTOCOL_KIND_INVALID_REQUEST_ID,
-		moq_net::SessionError::InvalidPath => MOQ_PROTOCOL_KIND_INVALID_PATH,
-		moq_net::SessionError::InvalidAuthority => MOQ_PROTOCOL_KIND_INVALID_AUTHORITY,
-		moq_net::SessionError::TooManyRequestUpdates => MOQ_PROTOCOL_KIND_TOO_MANY_REQUEST_UPDATES,
 		moq_net::SessionError::App(_) => MOQ_PROTOCOL_KIND_APP,
 		moq_net::SessionError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
 		_ => MOQ_PROTOCOL_KIND_UNKNOWN,
@@ -597,19 +576,20 @@ mod tests {
 			(0x1, MOQ_PROTOCOL_KIND_INTERNAL),
 			(0x2, MOQ_PROTOCOL_KIND_UNAUTHORIZED),
 			(0x3, MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION),
-			(0x4, MOQ_PROTOCOL_KIND_INVALID_REQUEST_ID),
-			(0x6, MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING),
 			(0x7, MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS),
-			(0x8, MOQ_PROTOCOL_KIND_INVALID_PATH),
 			(0x10, MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT),
 			(0x11, MOQ_PROTOCOL_KIND_TIMEOUT),
-			(0x13, MOQ_PROTOCOL_KIND_AUTH_TOKEN_CACHE_OVERFLOW),
 			(0x15, MOQ_PROTOCOL_KIND_VERSION),
 			(0x16, MOQ_PROTOCOL_KIND_MALFORMED_AUTH_TOKEN),
-			(0x17, MOQ_PROTOCOL_KIND_UNKNOWN_AUTH_TOKEN_ALIAS),
 			(0x18, MOQ_PROTOCOL_KIND_EXPIRED),
-			(0x19, MOQ_PROTOCOL_KIND_INVALID_AUTHORITY),
-			(0x1b, MOQ_PROTOCOL_KIND_TOO_MANY_REQUEST_UPDATES),
+			// Only moq-transport defines these, so they are no kind of ours.
+			(0x4, MOQ_PROTOCOL_KIND_UNKNOWN),
+			(0x6, MOQ_PROTOCOL_KIND_UNKNOWN),
+			(0x8, MOQ_PROTOCOL_KIND_UNKNOWN),
+			(0x13, MOQ_PROTOCOL_KIND_UNKNOWN),
+			(0x17, MOQ_PROTOCOL_KIND_UNKNOWN),
+			(0x19, MOQ_PROTOCOL_KIND_UNKNOWN),
+			(0x1b, MOQ_PROTOCOL_KIND_UNKNOWN),
 		] {
 			let error = super::from_session(&moq_net::SessionError::from_code(code));
 			assert_eq!(error.scope, super::moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);

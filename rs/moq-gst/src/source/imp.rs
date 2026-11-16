@@ -1029,23 +1029,10 @@ impl Session {
 }
 
 /// Whether a failure is the source going away (its session closing, or its route going), which
-/// holds the pads for the next start. A refusal is not: no restart answers a path that names
-/// nothing or a token that doesn't grant it, so it fails the session, as a malformed catalog does.
+/// holds the pads for the next start. A verdict is not: no restart answers a path that names
+/// nothing, a token that doesn't grant it, or malformed content, so it fails the session.
 fn source_lost(err: &moq_net::Error) -> bool {
-	if matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized) {
-		return false;
-	}
-	let code = match err {
-		moq_net::Error::Stream(moq_net::StreamError::Session(code)) => code.clone(),
-		_ => moq_net::SessionError::from(err),
-	};
-	!matches!(
-		code,
-		moq_net::SessionError::Unauthorized
-			| moq_net::SessionError::ProtocolViolation
-			| moq_net::SessionError::KeyValueFormatting
-			| moq_net::SessionError::InvalidRequestId
-	)
+	err.retry() != moq_net::Retry::Never
 }
 
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
@@ -2594,20 +2581,28 @@ mod session_tests {
 		})
 	}
 
+	/// A refusal or malformed input fails the session, wherever it was judged. A session ending,
+	/// whatever its code, is the source going away: the connection decides whether it returns.
 	#[test]
-	fn malformed_input_is_not_a_lost_source() {
+	fn a_verdict_is_not_a_lost_source() {
 		for err in [
 			moq_net::Error::ProtocolViolation,
 			moq_net::Error::WrongSize,
-			moq_net::Error::Session(moq_net::SessionError::ProtocolViolation),
-			moq_net::Error::Session(moq_net::SessionError::KeyValueFormatting),
+			moq_net::Error::NotFound,
+			moq_net::Error::Unauthorized,
+			moq_net::Error::Stream(moq_net::StreamError::NotFound),
+			moq_net::Error::Stream(moq_net::StreamError::Unauthorized),
+			moq_net::Error::Stream(moq_net::StreamError::MalformedTrack),
 		] {
 			assert!(!super::source_lost(&err), "{err:?}");
 		}
 		for err in [
 			moq_net::Error::Closed,
-			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
 			moq_net::Error::Cancel,
+			moq_net::Error::Unroutable,
+			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
+			moq_net::Error::Session(moq_net::SessionError::ProtocolViolation),
+			moq_net::Error::Session(moq_net::SessionError::from_code(0x6)),
 		] {
 			assert!(super::source_lost(&err), "{err:?}");
 		}

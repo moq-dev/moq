@@ -2074,7 +2074,7 @@ mod tests {
 		let truncated = [0x3]; // USE_VALUE with no Token Type
 		for (raw, code) in [
 			(&delete[..], SessionError::ProtocolViolation),
-			(&truncated[..], SessionError::KeyValueFormatting),
+			(&truncated[..], crate::ietf::error::session::KEY_VALUE_FORMATTING),
 		] {
 			let mut params = ietf::Parameters::default();
 			params.set_bytes(ietf::ParameterBytes::AuthorizationToken, raw.to_vec());

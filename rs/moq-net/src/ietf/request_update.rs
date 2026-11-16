@@ -9,12 +9,10 @@
 //!
 //! The option is draft-22 (Option Type 0x08). Advertising it lets a conforming peer
 //! self-limit, so a peer that exceeds the advertised value broke a negotiated rule, which
-//! the draft answers with a session close ([`SessionError::TooManyRequestUpdates`]). Drafts
+//! the draft answers with a session close (TOO_MANY_REQUEST_UPDATES). Drafts
 //! below 19 carry no such option, so a peer there agreed to no ceiling: the receiver keeps
 //! a generous local guard that ends only the one request rather than fault a peer at
 //! session scope for a limit it never saw.
-//!
-//! [`SessionError::TooManyRequestUpdates`]: crate::SessionError::TooManyRequestUpdates
 
 use std::{collections::VecDeque, task::Poll};
 
@@ -130,7 +128,7 @@ pub(super) struct Verdict {
 #[cfg(feature = "async")]
 pub(super) fn too_many(session: &mut crate::driver::Transport) -> Error {
 	use crate::transport::poll::Session as _;
-	let err = SessionError::TooManyRequestUpdates;
+	let err = crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES;
 	session.close(super::error::to_session_code(&err), "too many request updates");
 	Error::Session(err)
 }

@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Instance, Error as NetError, Path, StreamCode, Track } from "@moq/net";
+import { Instance, Error as NetError, Path, Track } from "@moq/net";
 import {
 	Derived,
 	Effect,
@@ -544,9 +544,9 @@ export class Broadcast {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
 			// A follower outlives its instances, so only a refusal ends it. A plain request
-			// ends with its accepted instance, which reads as offline rather than an error.
-			const offline =
-				!follow && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
+			// ends with its accepted instance losing its route, which reads as offline rather
+			// than an error.
+			const offline = !follow && resolved && NetError.retry(closed) === NetError.Retry.Reroute;
 			if (!offline) nested.set(this.#out.error, closed, undefined);
 		});
 	}

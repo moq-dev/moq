@@ -6558,7 +6558,7 @@ impl GroupServe {
 			Err(err) => {
 				self.settle_open(false);
 				self.state = GroupState::Done;
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+				return Poll::Ready(Err(Error::from_transport(err)));
 			}
 		};
 		self.settle_open(true);

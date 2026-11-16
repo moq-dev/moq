@@ -1,3 +1,4 @@
+import { IetfSessionCode } from "./error.ts";
 import { expect, test } from "bun:test";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -124,7 +125,7 @@ test("a SETUP alias reference is a protocol violation", () => {
 test("an undecodable structure is a formatting error", () => {
 	for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x4n, 0n]]) {
 		const params = structure(fields);
-		expect(sessionCode(() => tokenFromSetup(params))).toBe(SessionCode.KeyValueFormatting);
+		expect(sessionCode(() => tokenFromSetup(params))).toBe(IetfSessionCode.KeyValueFormatting);
 	}
 });
 
@@ -148,13 +149,13 @@ test("a request token by value decodes", () => {
 /** Only SETUP falls back to a value: on a request, a registration overflows the cache. */
 test("a request registration overflows the cache", () => {
 	const token = raw([0x1n, 7n, TOKEN.kind], TOKEN.value);
-	expect(sessionCode(() => tokenFromRequest(token))).toBe(SessionCode.AuthTokenCacheOverflow);
+	expect(sessionCode(() => tokenFromRequest(token))).toBe(IetfSessionCode.AuthTokenCacheOverflow);
 });
 
 test("a request alias reference is an unknown alias", () => {
 	for (const aliasType of [0x0n, 0x2n]) {
 		const token = raw([aliasType, 7n]);
-		expect(sessionCode(() => tokenFromRequest(token))).toBe(SessionCode.UnknownAuthTokenAlias);
+		expect(sessionCode(() => tokenFromRequest(token))).toBe(IetfSessionCode.UnknownAuthTokenAlias);
 	}
 });
 
@@ -163,6 +164,6 @@ test("an undecodable request token is a formatting error", () => {
 	// carrying a token type.
 	for (const fields of [[], [0x3n], [0x1n], [0x1n, 7n], [0x0n], [0x2n], [0x2n, 7n, 0n], [0x4n, 0n]]) {
 		const token = raw(fields);
-		expect(sessionCode(() => tokenFromRequest(token))).toBe(SessionCode.KeyValueFormatting);
+		expect(sessionCode(() => tokenFromRequest(token))).toBe(IetfSessionCode.KeyValueFormatting);
 	}
 });

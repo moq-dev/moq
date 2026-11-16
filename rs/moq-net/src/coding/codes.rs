@@ -46,10 +46,6 @@ pub trait StreamCodes {
 /// moq-lite's registry, specified by draft-lcurley-moq-lite (Error Codes). A code a version
 /// lacks is sent there as the closest one it has, and not read back there.
 impl StreamCodes for lite::Version {
-	fn decode_session_code(&self, code: u32) -> crate::SessionError {
-		lite::error::from_session_code(code)
-	}
-
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
 		err.to_code()
 	}
@@ -61,6 +57,10 @@ impl StreamCodes for lite::Version {
 
 /// moq-transport's registry.
 impl StreamCodes for ietf::Version {
+	fn decode_session_code(&self, code: u32) -> crate::SessionError {
+		ietf::error::from_session_code(code)
+	}
+
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
 		ietf::error::to_stream_code(err)
 	}

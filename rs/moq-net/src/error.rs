@@ -2,14 +2,14 @@ use crate::coding;
 
 /// A code sent when terminating the session.
 ///
-/// One of the two wire registries specified by moq-lite, which reuse moq-transport's codes
-/// unchanged; 64+ are the application's. The stream registry is [`StreamError`] and the two
+/// moq-lite's session registry, which reuses moq-transport's value for each code the two
+/// share; 64+ are the application's. The stream registry is [`StreamError`] and the two
 /// are disjoint, so the same integer means different things in each.
 ///
-/// Shared codes round-trip through [`to_code`](Self::to_code) and
-/// [`from_code`](Self::from_code). Protocol drivers translate Lite-only variants at
-/// their wire boundary; the shared decoder keeps those numbers [`Unknown`](Self::Unknown).
-/// Codes 32 through 47 are reserved and have no assigned meaning.
+/// Every variant is a code moq-lite assigns, and round-trips through
+/// [`to_code`](Self::to_code) and [`from_code`](Self::from_code). A code moq-lite does not
+/// assign, including those only moq-transport defines, is [`Unknown`](Self::Unknown) with
+/// its number. Codes 32 through 47 are reserved and have no assigned meaning.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -34,10 +34,6 @@ pub enum SessionError {
 	#[error("protocol violation")]
 	ProtocolViolation,
 
-	/// A key-value pair was malformed or repeated more than allowed.
-	#[error("key-value formatting error")]
-	KeyValueFormatting,
-
 	/// The peer went past what the session allows, such as more announcements than its
 	/// `crate::session::Limits`.
 	#[error("too many requests")]
@@ -51,11 +47,6 @@ pub enum SessionError {
 	#[error("control message timeout")]
 	Timeout,
 
-	/// A token registration would exceed the advertised `MAX_AUTH_TOKEN_CACHE_SIZE`, which is
-	/// 0 when unadvertised.
-	#[error("auth token cache overflow")]
-	AuthTokenCacheOverflow,
-
 	/// No version could be negotiated.
 	#[error("version negotiation failed")]
 	Version,
@@ -64,42 +55,22 @@ pub enum SessionError {
 	#[error("malformed auth token")]
 	MalformedAuthToken,
 
-	/// A token named an alias that was never registered.
-	#[error("unknown auth token alias")]
-	UnknownAuthTokenAlias,
-
-	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
-	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
-	#[error("too many request updates")]
-	TooManyRequestUpdates,
-
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
 	App(u16),
 
-	/// A code this version does not recognize, kept verbatim.
+	/// A code moq-lite does not assign, kept verbatim: one this version does not recognize,
+	/// or one only moq-transport defines.
 	#[error("unknown code={0}")]
 	Unknown(u32),
 
-	/// The peer cannot support the requested feature; moq-lite only.
+	/// The peer cannot support the requested feature, token, or grant.
 	#[error("not supported")]
 	Unsupported,
-
-	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
-	#[error("invalid request id")]
-	InvalidRequestId,
-
-	/// The peer sent a PATH it may not send, such as a server sending one at all.
-	#[error("invalid path")]
-	InvalidPath,
-
-	/// The peer sent an AUTHORITY it may not send, such as a server sending one at all.
-	#[error("invalid authority")]
-	InvalidAuthority,
 }
 
 impl SessionError {
-	/// The shared session code; Lite-only conditions fall back to an internal error.
+	/// The code moq-lite sends for this error.
 	pub fn to_code(&self) -> u32 {
 		match self {
 			Self::Cancel => 0x0,
@@ -107,29 +78,23 @@ impl SessionError {
 			Self::Unauthorized => 0x2,
 			Self::Expired => 0x18,
 			Self::ProtocolViolation => 0x3,
-			Self::InvalidRequestId => 0x4,
-			Self::KeyValueFormatting => 0x6,
 			Self::TooManyRequests => 0x7,
-			Self::InvalidPath => 0x8,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
-			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
 			Self::MalformedAuthToken => 0x16,
-			Self::UnknownAuthTokenAlias => 0x17,
-			Self::InvalidAuthority => 0x19,
-			Self::Unsupported => 0x1,
-			Self::TooManyRequestUpdates => 0x1B,
+			Self::Unsupported => 0x30,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
 	}
 
-	/// Decode a shared session code, leaving protocol-specific codes unknown.
+	/// Decode a code from moq-lite's registry.
 	///
 	/// Unlike a raw peer code, the registered ones are specified, so decoding them is a
 	/// wire contract rather than an assumption. Anything unregistered stays
-	/// [`Self::Unknown`], including the reserved 32-47.
+	/// [`Self::Unknown`], including the reserved 32-47 and the codes only moq-transport
+	/// defines.
 	pub fn from_code(code: u32) -> Self {
 		match code {
 			0x0 => Self::Cancel,
@@ -137,18 +102,12 @@ impl SessionError {
 			0x2 => Self::Unauthorized,
 			0x18 => Self::Expired,
 			0x3 => Self::ProtocolViolation,
-			0x4 => Self::InvalidRequestId,
-			0x6 => Self::KeyValueFormatting,
 			0x7 => Self::TooManyRequests,
-			0x8 => Self::InvalidPath,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
-			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
 			0x16 => Self::MalformedAuthToken,
-			0x17 => Self::UnknownAuthTokenAlias,
-			0x19 => Self::InvalidAuthority,
-			0x1B => Self::TooManyRequestUpdates,
+			0x30 => Self::Unsupported,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -604,40 +563,64 @@ impl Error {
 		}
 	}
 
-	/// Whether asking again may succeed: the route failed to deliver rather than judging what
-	/// it carried, which would repeat on every attempt. Mirrors `routeFailed` in
-	/// `js/net/src/resume.ts`.
+	/// What to do after a request failed with this error: ask the same source again, find
+	/// another route, or give up. Mirrors `retry` in `js/net/src/error.ts`.
+	///
+	/// A session closing, whatever its code, is the route failing to deliver: whether the
+	/// session comes back is the connection's call, not the request's.
+	pub fn retry(&self) -> Retry {
+		match self {
+			Self::Unroutable | Self::Stream(StreamError::Unroutable) => Retry::Reroute,
+			Self::Transport(_)
+			| Self::IdleTimeout
+			| Self::Session(_)
+			| Self::GoingAway
+			| Self::GoawayTimeout
+			| Self::Dropped
+			| Self::Closed
+			| Self::Cancel
+			| Self::Stream(
+				StreamError::Session(_)
+				| StreamError::Internal
+				| StreamError::Cancel
+				| StreamError::GoingAway
+				| StreamError::ControlTimeout,
+			) => Retry::Same,
+			_ => Retry::Never,
+		}
+	}
+
+	/// Whether asking again may succeed, on this route or another.
 	pub(crate) fn retryable(&self) -> bool {
-		self.unroutable() || self.transient()
+		self.retry() != Retry::Never
 	}
 
 	/// Whether a source lost its route to the content: only another route continues it.
 	pub(crate) fn unroutable(&self) -> bool {
-		matches!(self, Self::Unroutable | Self::Stream(StreamError::Unroutable))
+		self.retry() == Retry::Reroute
 	}
 
-	/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
-	/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+	/// Whether the same source may deliver a fresh copy.
 	pub(crate) fn transient(&self) -> bool {
-		matches!(
-			self,
-			Self::Transport(_)
-				| Self::IdleTimeout
-				| Self::Session(_)
-				| Self::GoingAway
-				| Self::GoawayTimeout
-				| Self::Dropped
-				| Self::Closed
-				| Self::Cancel
-				| Self::Stream(
-					StreamError::Session(_)
-						| StreamError::Internal
-						| StreamError::Cancel
-						| StreamError::GoingAway
-						| StreamError::ControlTimeout
-				)
-		)
+		self.retry() == Retry::Same
 	}
+}
+
+/// What a caller does after a request fails, as [`Error::retry`] answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Retry {
+	/// The source failed to deliver rather than judging the request, so asking it again may
+	/// succeed: its connection dropped, its session ended, or it is going away.
+	Same,
+
+	/// The source lost its route to the content, so only another route continues it. Asking
+	/// the same source again can only replace the withdrawal's cause with a refusal.
+	Reroute,
+
+	/// The answer judged the request or what it carried, so it repeats on every attempt:
+	/// refused, not found, or malformed.
+	Never,
 }
 
 /// Preserve the session registry when carrying a protocol error.
@@ -810,33 +793,22 @@ mod tests {
 	// Both registries are wire contracts now (draft-lcurley-moq-lite, Error Codes), so
 	// every code we send must decode back to what we meant.
 	#[test]
-	fn lite_unsupported_is_not_in_the_shared_session_registry() {
-		assert_eq!(SessionError::from(&Error::Unsupported).to_code(), 0x1);
-		assert_eq!(SessionError::from_code(0x30), SessionError::Unknown(0x30));
-	}
-
-	#[test]
 	fn session_codes_round_trip() {
 		// Only the registered codes are a wire contract, so only they round trip, each on
 		// the value the drafts assign (moq-transport's, where we reuse its code).
+		assert_eq!(SessionError::from(&Error::Unsupported), SessionError::Unsupported);
 		for (err, spec) in [
+			(SessionError::Unsupported, 0x30),
 			(SessionError::Cancel, 0x0),
 			(SessionError::Internal, 0x1),
 			(SessionError::Unauthorized, 0x2),
 			(SessionError::ProtocolViolation, 0x3),
-			(SessionError::InvalidRequestId, 0x4),
-			(SessionError::KeyValueFormatting, 0x6),
 			(SessionError::TooManyRequests, 0x7),
-			(SessionError::InvalidPath, 0x8),
 			(SessionError::GoawayTimeout, 0x10),
 			(SessionError::Timeout, 0x11),
-			(SessionError::AuthTokenCacheOverflow, 0x13),
 			(SessionError::Version, 0x15),
 			(SessionError::MalformedAuthToken, 0x16),
-			(SessionError::UnknownAuthTokenAlias, 0x17),
 			(SessionError::Expired, 0x18),
-			(SessionError::InvalidAuthority, 0x19),
-			(SessionError::TooManyRequestUpdates, 0x1B),
 			(SessionError::App(0), 0x40),
 			(SessionError::App(404), 0x40 + 404),
 		] {
@@ -845,9 +817,15 @@ mod tests {
 		}
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
-		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
-		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f, 0x30] {
+		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here, as
+		// does every code only moq-transport defines.
+		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f, 0x31] {
 			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
+		}
+		for code in [0x4, 0x6, 0x8, 0x13, 0x17, 0x19, 0x1b] {
+			let err = SessionError::from_code(code);
+			assert_eq!(err, SessionError::Unknown(code));
+			assert_eq!(err.to_code(), code);
 		}
 
 		// A disallowed stream fails the session as a protocol violation, and resets just
@@ -958,6 +936,42 @@ mod tests {
 		// A producer dropped without an end is a bug, never given a meaning.
 		assert_eq!(StreamError::from(&Error::Dropped), StreamError::Internal);
 		assert_eq!(SessionError::from(&Error::Dropped), SessionError::Internal);
+	}
+
+	/// A failed delivery asks again, a lost route asks elsewhere, and a verdict on the
+	/// request or its content ends it, whether raised here or received from a peer.
+	#[test]
+	fn retry_separates_delivery_from_verdicts() {
+		for err in [
+			Error::Transport("reset".into()),
+			Error::IdleTimeout,
+			Error::Cancel,
+			Error::Closed,
+			Error::GoingAway,
+			Error::Session(SessionError::Unauthorized),
+			Error::Session(SessionError::Unknown(0x4)),
+			Error::Stream(StreamError::Session(SessionError::Cancel)),
+			Error::Stream(StreamError::ControlTimeout),
+		] {
+			assert_eq!(err.retry(), Retry::Same, "{err:?}");
+		}
+		for err in [Error::Unroutable, Error::Stream(StreamError::Unroutable)] {
+			assert_eq!(err.retry(), Retry::Reroute, "{err:?}");
+		}
+		for err in [
+			Error::NotFound,
+			Error::Unauthorized,
+			Error::Expired,
+			Error::ProtocolViolation,
+			Error::WrongSize,
+			Error::Remote(0x7),
+			Error::Stream(StreamError::NotFound),
+			Error::Stream(StreamError::Unauthorized),
+			Error::Stream(StreamError::MalformedTrack),
+			Error::Stream(StreamError::Unknown(0x22)),
+		] {
+			assert_eq!(err.retry(), Retry::Never, "{err:?}");
+		}
 	}
 
 	// The registry a code is read with depends on what failed, and picking the wrong one

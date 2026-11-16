@@ -1,3 +1,4 @@
+import { IetfSessionCode } from "./error.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import * as Varint from "../varint.ts";
 import type { Parameters } from "./parameters.ts";
@@ -122,7 +123,7 @@ export function tokenFromRequest(raw: Uint8Array): Token {
 function decode(raw: Uint8Array, setup: boolean): Token {
 	// Section 8.9: a structure that cannot be decoded closes with KEY_VALUE_FORMATTING_ERROR.
 	const malformed = (cause?: unknown) =>
-		new ProtocolViolation("malformed AUTHORIZATION TOKEN", { cause, code: SessionCode.KeyValueFormatting });
+		new ProtocolViolation("malformed AUTHORIZATION TOKEN", { cause, code: IetfSessionCode.KeyValueFormatting });
 	const unvarint = (buf: Uint8Array): [bigint, Uint8Array] => {
 		try {
 			return Varint.decodeLeadingOnes(buf);
@@ -144,7 +145,7 @@ function decode(raw: Uint8Array, setup: boolean): Token {
 			if (!setup) {
 				unvarint(rest);
 				throw new ProtocolViolation("AUTHORIZATION TOKEN registration", {
-					code: SessionCode.AuthTokenCacheOverflow,
+					code: IetfSessionCode.AuthTokenCacheOverflow,
 				});
 			}
 			break;
@@ -158,7 +159,7 @@ function decode(raw: Uint8Array, setup: boolean): Token {
 			// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2),
 			// so the session closes; doc/concept/standard.md records the deviation.
 			throw new ProtocolViolation("unknown AUTHORIZATION TOKEN alias", {
-				code: SessionCode.UnknownAuthTokenAlias,
+				code: IetfSessionCode.UnknownAuthTokenAlias,
 			});
 		}
 		default:

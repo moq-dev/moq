@@ -10950,18 +10950,18 @@ mod serve_tests {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
-					crate::SessionError::AuthTokenCacheOverflow,
+					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], crate::SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(&[0x00, 0x07][..], crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS, "DELETE"),
 				(
 					&[0x02, 0x07][..],
-					crate::SessionError::UnknownAuthTokenAlias,
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
 					"USE_ALIAS",
 				),
 				(
 					&[0x03][..],
-					crate::SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"USE_VALUE without a type",
 				),
 			] {
@@ -17529,7 +17529,7 @@ mod serve_tests {
 			h.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == crate::SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			h.log.closes()
 		);

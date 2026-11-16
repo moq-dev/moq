@@ -1,3 +1,4 @@
+import { IetfSessionCode } from "./error.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { type OpenOptions, Stream } from "../stream.ts";
 import type { IetfVersion } from "./version.ts";
@@ -80,5 +81,5 @@ export class NativeSession implements Session {
  */
 export function checkPeerRequestId(id: bigint, client: boolean): void {
 	// No peer reaches 2^62 requests; refusing past it matches moq-net, whose counter would overflow.
-	if (id >= 1n << 62n || id % 2n !== (client ? 1n : 0n)) throw new SessionError(SessionCode.InvalidRequestId);
+	if (id >= 1n << 62n || id % 2n !== (client ? 1n : 0n)) throw new SessionError(IetfSessionCode.InvalidRequestId);
 }

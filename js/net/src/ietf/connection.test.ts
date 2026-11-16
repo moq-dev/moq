@@ -1,3 +1,4 @@
+import { IetfSessionCode } from "./error.ts";
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
@@ -380,11 +381,11 @@ function updateWithTokens(...tokens: (readonly number[])[]): Uint8Array {
  */
 for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 	for (const [name, token, code] of [
-		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
-		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
-		["an unknown alias type", [0x04, 0x00], SessionCode.KeyValueFormatting],
+		["REGISTER", [0x01, 0x07, 0x00], IetfSessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], IetfSessionCode.KeyValueFormatting],
+		["an unknown alias type", [0x04, 0x00], IetfSessionCode.KeyValueFormatting],
 	] as const) {
 		test(`a request token with ${name} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);
@@ -418,10 +419,10 @@ for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
  */
 for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 	for (const [name, token, code] of [
-		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
-		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
+		["REGISTER", [0x01, 0x07, 0x00], IetfSessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], IetfSessionCode.KeyValueFormatting],
 	] as const) {
 		test(`an update token with ${name} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);

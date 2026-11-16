@@ -13841,7 +13841,7 @@ mod tests {
 		};
 		assert_eq!(
 			SessionError::from(&err),
-			SessionError::TooManyRequestUpdates,
+			crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES,
 			"the flood must surface TOO_MANY_REQUEST_UPDATES"
 		);
 		assert!(
@@ -13849,7 +13849,7 @@ mod tests {
 				.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			session.log.closes()
 		);
@@ -14399,7 +14399,7 @@ mod tests {
 			matches!(
 				result,
 				Err(Error::Decode(DecodeError::Session(
-					crate::SessionError::UnknownAuthTokenAlias
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS
 				)))
 			),
 			"the queued update's unknown alias closes the session: {result:?}"

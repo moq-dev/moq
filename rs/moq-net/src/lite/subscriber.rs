@@ -1517,7 +1517,7 @@ impl UniAccept {
 						},
 					});
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(crate::lite::error::from_transport(err))),
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::from_transport(err))),
 				Poll::Pending => break,
 			}
 		}
@@ -2411,7 +2411,7 @@ impl DatagramRecv {
 					for payload in std::mem::take(&mut self.held) {
 						self.route(payload, false);
 					}
-					return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+					return Poll::Ready(Err(Error::from_transport(err)));
 				}
 			};
 			self.route(payload, hold);
@@ -3468,7 +3468,7 @@ impl DatagramServe {
 		let version = self.subscriber.version;
 		loop {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+				return Poll::Ready(Err(Error::from_transport(err)));
 			}
 			if self.poll_unused(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
@@ -12494,7 +12494,7 @@ impl Establish {
 		// teardown instead.
 		let resp = wait!(WaitOk => {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+				return Poll::Ready(Err(Error::from_transport(err)));
 			}
 			stream.reader.poll_decode::<lite::SubscribeResponse>(waiter)
 		})?;
@@ -12640,7 +12640,7 @@ impl FinishedServe {
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				if let Some(serving) = self.serving.take() {
-					let _ = serving.abort(crate::lite::error::from_transport(err));
+					let _ = serving.abort(Error::from_transport(err));
 				}
 				return Poll::Ready(());
 			}
@@ -13252,7 +13252,7 @@ impl TrackInfoFetch {
 
 		let (ietf, info) = wait!(Read => {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+				return Poll::Ready(Err(Error::from_transport(err)));
 			}
 			match serve.subscriber.peer_setup.poll_ietf(waiter) {
 				Poll::Ready(ietf) => stream.reader.poll_decode::<lite::TrackInfo>(waiter).map_ok(|info| (ietf, info)),
@@ -13272,7 +13272,7 @@ impl TrackInfoFetch {
 		// Reading the TRACK_PROPERTIES the `ietf` extension sends after TRACK_INFO.
 		let properties = wait!(Properties => {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
-				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+				return Poll::Ready(Err(Error::from_transport(err)));
 			}
 			stream.reader.poll_decode::<lite::ietf::TrackProperties>(waiter)
 		})?;
@@ -14154,7 +14154,7 @@ impl ServeLoop {
 						if !serve.subscriber.version.has_track_stream() {
 							let _ = self.serving.finish_shared();
 						}
-						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
+						return Poll::Ready(ServeEnd::GiveBack(Error::from_transport(err)));
 					}
 					return Poll::Pending;
 				}
@@ -14375,7 +14375,7 @@ impl ServeLoop {
 						if poll_unparked(&self.sub, serve, waiter).is_pending() {
 							return Poll::Pending;
 						}
-						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
+						return Poll::Ready(ServeEnd::GiveBack(Error::from_transport(err)));
 					}
 
 					return Poll::Pending;

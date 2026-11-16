@@ -18,12 +18,14 @@ export type SessionCode = number & { readonly [SESSION_CODE]: true };
 /**
  * Codes a peer sends when terminating the session, mirroring the Rust `Session`.
  *
- * Specified by moq-lite, which reuses moq-transport's codes unchanged. Call `SessionCode(code)`
- * to construct an application code in the 64+ range. {@link StreamCode} is the other registry,
- * and the two are disjoint, so the same integer means different things in each.
+ * moq-lite's registry, which reuses moq-transport's value for each code the two share. Call
+ * `SessionCode(code)` to construct an application code in the 64+ range. {@link StreamCode} is
+ * the other registry, and the two are disjoint, so the same integer means different things in
+ * each.
  *
  * Codes 32-47 are reserved: nothing is sent there, and the draft gives a received one no
- * meaning, so treat anything not listed below as an unspecified error rather than guessing.
+ * meaning. A code only moq-transport defines arrives as its number too, so treat anything not
+ * listed below as an unspecified error rather than guessing.
  *
  * @public
  */
@@ -39,32 +41,18 @@ export const SessionCode = Object.freeze(
 		Expired: 0x18 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
-		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
-		InvalidRequestId: 0x4 as SessionCode,
-		/** A key-value pair was malformed or repeated more than allowed. */
-		KeyValueFormatting: 0x6 as SessionCode,
 		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements. */
 		TooManyRequests: 0x7 as SessionCode,
-		/** A PATH the peer may not send, such as a server sending one at all. */
-		InvalidPath: 0x8 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
 		Timeout: 0x11 as SessionCode,
-		/** A token registration would exceed the advertised token cache size, which is 0 when unadvertised. */
-		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
 		/** The token could not be parsed. Retrying with the same token will fail again. */
 		MalformedAuthToken: 0x16 as SessionCode,
-		/** A token named an alias that was never registered. */
-		UnknownAuthTokenAlias: 0x17 as SessionCode,
-		/** An AUTHORITY the peer may not send, such as a server sending one at all. */
-		InvalidAuthority: 0x19 as SessionCode,
-		/** The peer cannot support the requested feature; moq-lite only. */
+		/** The peer cannot support the requested feature, token, or grant. */
 		Unsupported: 0x30 as SessionCode,
-		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
-		TooManyRequestUpdates: 0x1b as SessionCode,
 	} as const),
 );
 
@@ -408,6 +396,58 @@ function localStreamCode(err: unknown): StreamCode {
 	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
 	if (source === "session") return StreamCode.Unroutable;
 	return StreamCode.Internal;
+}
+
+/**
+ * What a caller does after a request fails, as {@link retry} answers it. Mirrors the Rust `Retry`.
+ *
+ * @public
+ */
+export const Retry = Object.freeze({
+	/**
+	 * The source failed to deliver rather than judging the request, so asking it again may
+	 * succeed: its connection dropped, its session ended, or it is going away.
+	 */
+	Same: "same",
+	/**
+	 * The source lost its route to the content, so only another route continues it. Asking the
+	 * same source again can only replace the withdrawal's cause with a refusal.
+	 */
+	Reroute: "reroute",
+	/**
+	 * The answer judged the request or what it carried, so it repeats on every attempt: refused,
+	 * not found, or malformed.
+	 */
+	Never: "never",
+} as const);
+
+/** One of the {@link Retry} answers. @public */
+export type Retry = (typeof Retry)[keyof typeof Retry];
+
+// Stream codes that report the source failing to deliver rather than judging what it carried.
+const DELIVERY_FAILURES: ReadonlySet<number> = new Set([
+	StreamCode.Internal,
+	StreamCode.Cancel,
+	StreamCode.SessionClosed,
+	StreamCode.GoingAway,
+	StreamCode.ControlTimeout,
+]);
+
+/**
+ * What to do after a request failed with `err`: ask the same source again, find another route,
+ * or give up. Mirrors the Rust `Error::retry`.
+ *
+ * A session closing, whatever its code, is the route failing to deliver: whether the session
+ * comes back is the connection's call, not the request's.
+ *
+ * @public
+ */
+export function retry(err: unknown): Retry {
+	if (err instanceof Stream) {
+		if (err.code === StreamCode.Unroutable) return Retry.Reroute;
+		return DELIVERY_FAILURES.has(err.code) ? Retry.Same : Retry.Never;
+	}
+	return err instanceof Session || sessionClosed(err) ? Retry.Same : Retry.Never;
 }
 
 /**
