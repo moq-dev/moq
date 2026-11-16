@@ -2630,10 +2630,7 @@ async fn one_shot_goaway_ends_the_connection() {
 		let session = request.ok().await?;
 
 		// No deadline, so nothing on the peer's side ever force-closes us.
-		session
-			.drain()
-			.send(moq_net::goaway::Goaway::default())
-			.expect("send goaway");
+		session.goaway(moq_net::goaway::Goaway::default()).expect("send goaway");
 
 		// Wait for the client to leave, exactly as a draining peer does. If the
 		// client ignores the GOAWAY, both sides wait here forever.
@@ -2747,7 +2744,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	client_config.tls.insecure = Some(true);
 	// Retry forever with a fast cadence: the worst case for a stale announce.
 	client_config.backoff.initial = Some((Duration::from_millis(10)).into());
-	client_config.backoff.timeout = Some((Duration::ZERO).into());
+	client_config.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = kio::clock::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
@@ -3218,8 +3215,10 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 		start_drain_rx.await.expect("drain signal");
 		session
-			.drain()
-			.send(moq_net::goaway::Goaway::redirect("https://elsewhere.example/").with_timeout(Duration::from_secs(5)))
+			.goaway(
+				moq_net::goaway::Goaway::redirect("https://elsewhere.example/")
+					.with_timeout(Some(Duration::from_secs(5))),
+			)
 			.expect("send goaway");
 
 		// Keep producers alive while the client finishes reading.
@@ -3344,8 +3343,7 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		session
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_millis(200)))
+			.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(Duration::from_millis(200))))
 			.expect("send goaway");
 		// The client deliberately overstays; this resolves via the force-close.
 		session.closed().await;

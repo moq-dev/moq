@@ -4,7 +4,7 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway as Received } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
@@ -510,7 +510,7 @@ export class Subscriber {
 	#peerSetup?: Signal<Setup | undefined>;
 
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
-	#goaway?: GetPromise<Drain>;
+	#goaway?: GetPromise<Received>;
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
@@ -539,7 +539,7 @@ export class Subscriber {
 		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
-		goaway?: GetPromise<Drain>,
+		goaway?: GetPromise<Received>,
 		grant?: Getter<Grant | undefined>,
 		limits: Limits = LIMITS,
 		auth?: AuthSession,

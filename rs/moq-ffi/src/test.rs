@@ -131,7 +131,8 @@ fn fast_backoff() -> MoqBackoff {
 		initial: Some(Duration::from_millis(50)),
 		multiplier: Some(2),
 		max: Some(Duration::from_millis(200)),
-		timeout: Some(Duration::ZERO),
+		max_unlimited: false,
+		timeout: None,
 	}
 }
 
@@ -6744,8 +6745,15 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.websocket.enabled, Some(true));
 	let backoff = moq_tokio::connection::Backoff::default();
 	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
-	assert_eq!(defaults.backoff.max, Some(backoff.max().unwrap_or_default()));
-	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout().unwrap_or_default()));
+	assert_eq!(defaults.backoff.max, backoff.max());
+	assert!(!defaults.backoff.max_unlimited);
+	assert_eq!(defaults.backoff.timeout, backoff.timeout());
+	let mut reapplied = moq_tokio::connection::Backoff::default();
+	defaults.backoff.clone().apply(&mut reapplied).unwrap();
+	assert_eq!(
+		(reapplied.initial(), reapplied.max(), reapplied.timeout()),
+		(backoff.initial(), backoff.max(), backoff.timeout())
+	);
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -6756,6 +6764,54 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.quic.keylog, None);
 
 	assert!(MoqClient::new(defaults).is_ok());
+}
+
+/// `max` and `timeout` each read unset as the default, off as no bound, and zero as zero,
+/// resolving to what moq-tokio's flags `none` and `0s` do.
+#[test]
+fn a_backoff_bound_is_unset_off_zero_or_a_value() {
+	let resolve = |backoff: MoqBackoff| {
+		let mut out = moq_tokio::connection::Backoff::default();
+		backoff.apply(&mut out).map(|()| (out.max(), out.timeout()))
+	};
+	let defaults = moq_tokio::connection::Backoff::default();
+	let three = Duration::from_secs(3);
+	for (backoff, expected) in [
+		(MoqBackoff::default(), (defaults.max(), defaults.timeout())),
+		(
+			MoqBackoff {
+				max_unlimited: true,
+				..Default::default()
+			},
+			(None, None),
+		),
+		(
+			MoqBackoff {
+				max: Some(Duration::ZERO),
+				timeout: Some(Duration::ZERO),
+				..Default::default()
+			},
+			(Some(Duration::ZERO), Some(Duration::ZERO)),
+		),
+		(
+			MoqBackoff {
+				max: Some(three),
+				timeout: Some(three),
+				..Default::default()
+			},
+			(Some(three), Some(three)),
+		),
+	] {
+		assert_eq!(resolve(backoff.clone()).unwrap(), expected, "{backoff:?}");
+	}
+	assert!(defaults.timeout().is_none(), "unset is already off");
+
+	let both = MoqBackoff {
+		max: Some(three),
+		max_unlimited: true,
+		..Default::default()
+	};
+	assert!(matches!(resolve(both), Err(MoqError::Config { .. })));
 }
 
 /// Every listed version is one `versions` accepts.

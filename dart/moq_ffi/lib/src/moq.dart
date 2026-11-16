@@ -3629,11 +3629,13 @@ class MoqBackoff {
   final Duration? initial;
   final int? multiplier;
   final Duration? max;
+  final bool maxUnlimited;
   final Duration? timeout;
   MoqBackoff({
     this.initial = null,
     this.multiplier = null,
     this.max = null,
+    this.maxUnlimited = false,
     this.timeout = null,
   });
 }
@@ -3660,6 +3662,11 @@ class FfiConverterMoqBackoff {
     );
     final max = max_lifted.value;
     new_offset += max_lifted.bytesRead;
+    final maxUnlimited_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final maxUnlimited = maxUnlimited_lifted.value;
+    new_offset += maxUnlimited_lifted.bytesRead;
     final timeout_lifted = FfiConverterOptionalDuration.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -3670,6 +3677,7 @@ class FfiConverterMoqBackoff {
         initial: initial,
         multiplier: multiplier,
         max: max,
+        maxUnlimited: maxUnlimited,
         timeout: timeout,
       ),
       new_offset - buf.offsetInBytes,
@@ -3681,6 +3689,7 @@ class FfiConverterMoqBackoff {
         FfiConverterOptionalDuration.allocationSize(value.initial) +
         FfiConverterOptionalUInt32.allocationSize(value.multiplier) +
         FfiConverterOptionalDuration.allocationSize(value.max) +
+        FfiConverterBool.allocationSize(value.maxUnlimited) +
         FfiConverterOptionalDuration.allocationSize(value.timeout) +
         0;
     final buf = Uint8List(total_length);
@@ -3702,6 +3711,10 @@ class FfiConverterMoqBackoff {
       value.max,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterBool.write(
+      value.maxUnlimited,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterOptionalDuration.write(
       value.timeout,
       Uint8List.view(buf.buffer, new_offset),
@@ -3713,6 +3726,7 @@ class FfiConverterMoqBackoff {
     return FfiConverterOptionalDuration.allocationSize(value.initial) +
         FfiConverterOptionalUInt32.allocationSize(value.multiplier) +
         FfiConverterOptionalDuration.allocationSize(value.max) +
+        FfiConverterBool.allocationSize(value.maxUnlimited) +
         FfiConverterOptionalDuration.allocationSize(value.timeout) +
         0;
   }

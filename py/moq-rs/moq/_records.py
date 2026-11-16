@@ -9,7 +9,7 @@ characters.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from importlib import metadata
 from typing import ClassVar, cast
@@ -351,14 +351,16 @@ class Backoff:
     rather than retrying.
 
     The delay starts at ``initial``, multiplies by ``multiplier`` after each failed
-    attempt, and caps at ``max``. After ``timeout`` of consecutive failures the
-    connection gives up; ``timedelta(0)`` retries forever. ``None`` keeps each
-    default: 1s, x2, 5s, and no give-up.
+    attempt, and caps at ``max``; ``max_unlimited=True`` lifts the cap instead. After
+    ``timeout`` of consecutive failures the connection gives up. ``None`` keeps each
+    default: 1s, x2, 5s, and no give-up. Zero means zero: ``timedelta(0)`` retries
+    at once as ``initial`` or ``max``, and gives up at the first failure as ``timeout``.
     """
 
     initial: timedelta | None = None
     multiplier: int | None = None
     max: timedelta | None = None
+    max_unlimited: bool = field(default=False, kw_only=True)
     timeout: timedelta | None = None
 
     def _ffi(self) -> MoqBackoff:
@@ -366,6 +368,7 @@ class Backoff:
             initial=self.initial,
             multiplier=self.multiplier,
             max=self.max,
+            max_unlimited=self.max_unlimited,
             timeout=self.timeout,
         )
 

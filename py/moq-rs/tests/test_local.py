@@ -593,6 +593,13 @@ def test_default_subscription_skips_superseded_groups_at_once():
     assert (delay.min, delay.max) == (None, None)
 
 
+def test_backoff_keeps_its_positional_timeout():
+    """``max_unlimited`` is keyword-only, so the fourth positional argument is still ``timeout``."""
+    backoff = moq.Backoff(None, None, None, timedelta(seconds=3))._ffi()
+    assert (backoff.timeout, backoff.max_unlimited) == (timedelta(seconds=3), False)
+    assert moq.Backoff(max_unlimited=True)._ffi().max_unlimited
+
+
 def test_string_sequences_refuse_a_bare_string():
     """A bare str would split into characters, so the config refuses it up front."""
     with pytest.raises(TypeError, match="roots"):

@@ -2309,8 +2309,8 @@ impl Cluster {
 	/// redial moves to a fresh socket rather than retrying one the path may be
 	/// dropping.
 	///
-	/// Every peer client's reconnect loop gives up eventually: a zero backoff
-	/// timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
+	/// Every peer client's reconnect loop gives up eventually: an unset or `none`
+	/// backoff timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
 	/// redial loop already retries forever, and only it re-reads `cluster.token`,
 	/// so an unending inner loop could keep presenting a rotated-out token.
 	///
