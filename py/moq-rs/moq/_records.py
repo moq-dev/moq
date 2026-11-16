@@ -346,8 +346,9 @@ def _track_info(info: TrackInfo | None) -> MoqTrackInfo | None:
 class Backoff:
     """Retry pacing for the automatic reconnect.
 
-    It applies only once a session has been established: a first dial that reaches no
-    session ends the connection with its error rather than retrying.
+    Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or
+    a closed session, such as a refused credential, ends the connection with its error
+    rather than retrying.
 
     The delay starts at ``initial``, multiplies by ``multiplier`` after each failed
     attempt, and caps at ``max``. After ``timeout`` of consecutive failures the

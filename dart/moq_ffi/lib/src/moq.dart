@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -2379,7 +2377,6 @@ class MoqVideo {
   final int preference;
   final double? framerate;
   final MoqContainer container;
-  final Duration? warmup;
   MoqVideo({
     this.label = null,
     this.broadcast = null,
@@ -2394,7 +2391,6 @@ class MoqVideo {
     this.preference = 0,
     this.framerate,
     required this.container,
-    this.warmup = null,
   });
 }
 
@@ -2470,11 +2466,6 @@ class FfiConverterMoqVideo {
     );
     final container = container_lifted.value;
     new_offset += container_lifted.bytesRead;
-    final warmup_lifted = FfiConverterOptionalDuration.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final warmup = warmup_lifted.value;
-    new_offset += warmup_lifted.bytesRead;
     return LiftRetVal(
       MoqVideo(
         label: label,
@@ -2490,7 +2481,6 @@ class FfiConverterMoqVideo {
         preference: preference,
         framerate: framerate,
         container: container,
-        warmup: warmup,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -2511,7 +2501,6 @@ class FfiConverterMoqVideo {
         FfiConverterInt32.allocationSize(value.preference) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
-        FfiConverterOptionalDuration.allocationSize(value.warmup) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -2572,10 +2561,6 @@ class FfiConverterMoqVideo {
       value.container,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.warmup,
-      Uint8List.view(buf.buffer, new_offset),
-    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -2593,7 +2578,6 @@ class FfiConverterMoqVideo {
         FfiConverterInt32.allocationSize(value.preference) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
-        FfiConverterOptionalDuration.allocationSize(value.warmup) +
         0;
   }
 }
@@ -25815,7 +25799,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 30086) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 47197) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_allocator() != 12118) {
@@ -25863,7 +25847,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtokens_answered() != 11571) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtokens_set() != 20110) {
+  if (uniffi_moq_ffi_checksum_method_moqtokens_set() != 52050) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_accept_track() !=
@@ -26030,7 +26014,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediatrackconsumer_subscribe() !=
-      16252) {
+      25805) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediatrackproducer_audio() !=

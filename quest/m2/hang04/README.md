@@ -24,13 +24,9 @@ read the catalog as a frozen format: hang-03 is what the datatracker and
 readers are the first that check `version` at all. Each child's Plan records
 its own decisions.
 
-The children land in any order. They overlap in three places, so whichever
+The children land in any order. They overlap in two places, so whichever
 lands second merges main first:
 
-- [Entry versions](/quest/m2/hang04/entry-version.md) and
-  [video warmup](/quest/m2/hang04/video-warmup.md) both edit the version
-  computation (`min_version` in `rs/hang/src/catalog/root.rs`, `minVersion`
-  in `js/hang/src/catalog/root.ts`) and the draft's Version section.
 - [The sync section](/quest/m2/hang04/sync.md) is born strict, under the
   rule [one strict rule](/quest/m2/hang04/shape.md) applies to the sections
   that exist today.

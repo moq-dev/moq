@@ -314,11 +314,7 @@ impl<E> Catalog<E> {
 			|| renamed(&self.json.tracks)
 			|| renamed(&self.binary.tracks);
 
-		// moq-hang-04: a reader that ignores video `warmup` assumes every group starts at a
-		// keyframe, and hands its decoder one that starts at a converging picture instead.
-		let warmup = (self.video.renditions.values()).any(|config| config.warmup.is_some_and(|w| !w.is_zero()));
-
-		(renamed || warmup).then_some(4)
+		renamed.then_some(4)
 	}
 
 	/// Copy the media sections into a catalog with no application extension.
@@ -790,7 +786,6 @@ mod test {
 				reorder: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
-				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(100)),
 				delay: Some(std::time::Duration::from_millis(200)),
 			},
@@ -1590,12 +1585,19 @@ mod test {
 		chat.track = Some("chat.json".into());
 		data.json.insert("chat", chat).unwrap();
 		assert_eq!(version(&data), Some(4.into()));
+	}
 
-		let mut warmup = Catalog::<()>::default();
-		let mut config = rendition();
-		config.warmup = Some(std::time::Duration::from_millis(500));
-		warmup.video.renditions.insert("hd".into(), config);
-		assert_eq!(version(&warmup), Some(4.into()));
+	/// moq-hang-04 defines `warmup` for audio only, so a video rendition's is an unknown field: read
+	/// past, never written back, and no reason for a `version`.
+	#[test]
+	fn a_video_warmup_is_ignored() {
+		let json = r#"{"video":{"renditions":{"hd":{"codec":"vp8","container":{"kind":"legacy"},"warmup":500}}}}"#;
+		let catalog = Catalog::<()>::from_str(json).unwrap();
+		assert_eq!(catalog.video.renditions["hd"].codec, crate::catalog::VideoCodec::VP8);
+		assert_eq!(
+			catalog.to_json().unwrap(),
+			r#"{"video":{"renditions":{"hd":{"codec":"vp8","container":{"kind":"legacy"}}}}}"#
+		);
 	}
 
 	/// The version is computed, never carried: republishing a catalog that claimed more than it

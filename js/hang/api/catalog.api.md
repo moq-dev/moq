@@ -517,7 +517,6 @@ export const RootSchema: ZodMiniObject<{
 			reorder?: number & $brand<"u8"> | undefined;
 			stereo?: string | undefined;
 			track?: string | undefined;
-			warmup?: number & $brand<"u53"> | undefined;
 		}>, Record<string, unknown>>>;
 		rotation: ZodMiniOptional<ZodMiniNumber<number>>;
 	}, $strip>>;
@@ -728,7 +727,6 @@ export const VideoConfigSchema: ZodMiniObject<{
 	reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
 	stereo: ZodMiniOptional<ZodMiniString<string>>;
 	track: ZodMiniOptional<ZodMiniString<string>>;
-	warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 }, $strip>;
 
 export const VideoSchema: ZodMiniObject<{
@@ -814,7 +812,6 @@ export const VideoSchema: ZodMiniObject<{
 		reorder?: number & $brand<"u8"> | undefined;
 		stereo?: string | undefined;
 		track?: string | undefined;
-		warmup?: number & $brand<"u53"> | undefined;
 	}>, Record<string, unknown>>>;
 	rotation: ZodMiniOptional<ZodMiniNumber<number>>;
 }, $strip>;

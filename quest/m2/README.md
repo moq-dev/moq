@@ -56,7 +56,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
-  `mpegts`, one strict rule); [dead drafts](/quest/m2/drafts-retire.md);
+  `mpegts`, one strict rule);
   [the archive as version 2](/quest/m2/archive-v2.md);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
   [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),
@@ -322,7 +322,7 @@ what would need a breaking release had it landed right after the cut:
   in m2.
 - ✅ Stayed in m2 though not breaking itself:
   [the interest set](https://github.com/moq-dev/moq/pull/8728), because
-  [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
+  [the route stream](https://github.com/moq-dev/moq/pull/8835) needs it.
   The route stream stays because lite-07 would otherwise freeze with one
   router key per announce stream, which the route model doesn't check, and
   keep the reopen-and-hand-over machinery for its lifetime (rejected: moving

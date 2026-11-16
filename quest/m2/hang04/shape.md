@@ -77,9 +77,8 @@ For the PR:
   every gateway shares; `JsonSchema` and `BinarySchema` gain the `instance`
   the code carries.
 - Not here: the duplicated MPEG-TS SI section goes with
-  [the MPEG-TS section](/quest/m2/hang04/m2ts.md), the dual-decoder
-  sentences with [video warmup](/quest/m2/hang04/video-warmup.md), and the
-  marker rules with
+  [the MPEG-TS section](/quest/m2/hang04/m2ts.md), and the marker rules
+  with
   [media consumers](/quest/m2/time-addressing/consumers.md).
 
 Tests: for each key, a wrong-shaped value refuses the catalog in both

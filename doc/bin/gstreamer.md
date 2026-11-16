@@ -91,9 +91,10 @@ codec config, a pad requested again, or a stream resumed after EOS publishes as
 `url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
-`sessions`. Once connected, the sink reconnects for as long as the pipeline runs and only
-reports `failed` on an answer redialing can't change, such as a rejected token. A first
-connect that reaches no relay reports `failed` and posts an error instead of retrying.
+`sessions`. Once a session has stayed up past a second, the sink reconnects for as long as
+the pipeline runs, whatever ends each session. Before then it reports `failed` and posts an
+error instead of retrying: a first connect that reaches no relay, or a session the relay
+refuses, such as for a rejected token.
 Both elements accept the same connection properties. `connect-version` is a
 comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
