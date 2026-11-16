@@ -9,7 +9,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
 	sync::Arc,
-	task::Poll,
+	task::{Poll, ready},
 };
 
 use crate::{
@@ -868,6 +868,14 @@ impl Routed {
 				self.served.remove(&key);
 			}
 		}
+	}
+
+	/// Ready once nothing the peer offers on this stream waits on a doubt to reach the
+	/// origin, with what the node served meanwhile already in it.
+	pub(super) fn poll_undoubted(&mut self, subscriber: &Subscriber, waiter: &kio::Waiter) -> Poll<()> {
+		ready!(self.stream.poll_undoubted(waiter));
+		self.outputs(subscriber);
+		Poll::Ready(())
 	}
 
 	/// Serve requests on every claim whose queue woke.

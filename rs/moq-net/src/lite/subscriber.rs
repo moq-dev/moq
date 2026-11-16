@@ -2928,7 +2928,7 @@ impl AnnouncePrefix {
 							// be let go in between.
 							let retired = self.replacing.take().and_then(|old| old.retire());
 							// What the initial set put in the node is served before the
-							// snapshot lets readers see the origin synced.
+							// claims the old request served let go.
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
@@ -2936,7 +2936,7 @@ impl AnnouncePrefix {
 							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
-							self.snapshot = None;
+							// The snapshot lets go below, once the node shows every route.
 							continue;
 						}
 						if run.initial > 0 {
@@ -2975,6 +2975,12 @@ impl AnnouncePrefix {
 			run.announced.poll_serve(&self.subscriber, waiter);
 			if let Some(routed) = &mut run.routed {
 				routed.poll(&self.subscriber, waiter)?;
+				// The initial set is in once the node shows every route the peer sent: one
+				// that only doubt keeps the node off, as on a session redialed to a node
+				// still in doubt, reaches the origin once the doubt lifts.
+				if run.synced && self.snapshot.is_some() && routed.poll_undoubted(&self.subscriber, waiter).is_ready() {
+					self.snapshot = None;
+				}
 			}
 			Poll::Pending
 		}))
