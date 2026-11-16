@@ -224,3 +224,19 @@ async fn a_fetch_moves_off_a_dying_route_after_the_end() {
 	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
 	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }
+
+/// [`a_fetch_moves_off_a_dying_route_after_the_end`] with `A` dying only past the linger:
+/// the fetch in flight keeps `B`'s finished copy open, so `B`'s front ends the track, and
+/// starts its linger, only as `A` dies, and the fetch still moves.
+#[kio::test]
+async fn a_fetch_held_past_the_linger_moves_off_a_dying_route() {
+	let mut chain = Chain::mesh().await;
+	let mut rx = chain.read_on();
+	settle().await;
+	chain.end().await;
+	kio::clock::sleep(Duration::from_secs(40)).await;
+	chain.kill_a().await;
+	chain.finish_group0();
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
+}

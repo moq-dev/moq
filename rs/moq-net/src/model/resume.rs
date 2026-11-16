@@ -69,10 +69,6 @@ struct Route {
 	parked: Option<track::Consumer>,
 	/// Whether the front may replace the copy, or how it finished.
 	phase: Phase,
-	/// The generation and copy the track ended cleanly on. Its readers stay there, since
-	/// that copy holds everything below the end; a copy the front serves afterwards only
-	/// continues a group read on, or a fetch.
-	finished: Option<(u64, Option<track::Consumer>)>,
 	/// The copy the front asked for while its info is in flight, by stage id: a fetch goes
 	/// to it at once, and hands its group out only once that copy is spliced.
 	staged: Option<(u64, track::Consumer)>,
@@ -99,15 +95,17 @@ enum Phase {
 	Open,
 	/// Readers follow the last copy to its end; no front will replace it.
 	Concluded,
-	/// The front ended the track cleanly, and still replaces the copy when its source
-	/// changes, so a group read on it moves off a route that dies.
-	Finished,
-	/// The front's final verdict on the logical track.
-	Ended(Result<()>),
+	/// The front ended the track cleanly. Its readers stay on the generation and copy it
+	/// ended on (`last`), which holds everything below the end. While `routed`, the front
+	/// still replaces the serving copy when its source changes, for the group reads and
+	/// fetches still holding the track, so they move off a route that dies.
+	Finished {
+		last: (u64, Option<track::Consumer>),
+		routed: bool,
+	},
+	/// The front failed the track for good.
+	Failed(Error),
 }
-
-/// The clean end a [`Phase::Finished`] track reports.
-static FINISHED: Result<()> = Ok(());
 
 impl Phase {
 	fn terminal(&self) -> bool {
@@ -116,14 +114,15 @@ impl Phase {
 
 	/// Whether a front may still replace the copy.
 	fn moves(&self) -> bool {
-		matches!(self, Self::Open | Self::Finished)
+		matches!(self, Self::Open | Self::Finished { routed: true, .. })
 	}
 
-	fn end(&self) -> Option<&Result<()>> {
+	/// The front's verdict on the track, once it gave one.
+	fn end(&self) -> Option<Result<()>> {
 		match self {
-			Self::Ended(end) => Some(end),
-			Self::Finished => Some(&FINISHED),
-			_ => None,
+			Self::Finished { .. } => Some(Ok(())),
+			Self::Failed(err) => Some(Err(err.clone())),
+			Self::Open | Self::Concluded => None,
 		}
 	}
 }
@@ -271,11 +270,11 @@ impl Producer {
 			&& route.phase.end().is_none()
 		{
 			route.phase = match result {
-				Ok(()) => {
-					route.finished = Some((route.generation, route.copy.clone()));
-					Phase::Finished
-				}
-				Err(err) => Phase::Ended(Err(err)),
+				Ok(()) => Phase::Finished {
+					last: (route.generation, route.copy.clone()),
+					routed: !matches!(route.phase, Phase::Concluded),
+				},
+				Err(err) => Phase::Failed(err),
 			};
 		}
 	}
@@ -284,10 +283,10 @@ impl Producer {
 	/// still holds it for the readers on their way.
 	pub(super) fn conclude(&self) {
 		if let Ok(mut route) = self.state.write() {
-			match route.phase {
+			match &mut route.phase {
 				Phase::Open => route.phase = Phase::Concluded,
-				Phase::Finished => route.phase = Phase::Ended(Ok(())),
-				Phase::Concluded | Phase::Ended(_) => {}
+				Phase::Finished { routed, .. } => *routed = false,
+				Phase::Concluded | Phase::Failed(_) => {}
 			}
 		}
 	}
@@ -299,7 +298,7 @@ impl Producer {
 			route.copy = None;
 			route.parked = None;
 			route.spliced = None;
-			if let Some((_, copy)) = &mut route.finished {
+			if let Phase::Finished { last: (_, copy), .. } = &mut route.phase {
 				*copy = None;
 			}
 		}
@@ -373,7 +372,7 @@ impl Consumer {
 			// One read, so a copy served just before the front concluded is the one polled.
 			let (generation, copy, end) = {
 				let route = self.state.read();
-				let end = route.phase.terminal().then(|| route.phase.end().cloned());
+				let end = route.phase.terminal().then(|| route.phase.end());
 				(route.generation, route.copy.clone(), end)
 			};
 			// A replacement copy can start below what an earlier one reported.
@@ -495,7 +494,7 @@ impl Consumer {
 	/// decision.
 	fn end(&self) -> Option<Option<Result<()>>> {
 		let route = self.state.read();
-		route.phase.terminal().then(|| route.phase.end().cloned())
+		route.phase.terminal().then(|| route.phase.end())
 	}
 
 	/// Whether a front may still replace the copy: the track is open, or finished while
@@ -1278,9 +1277,12 @@ impl Reader {
 
 		let (generation, serving) = {
 			let route = self.route.state.read();
-			match &route.finished {
-				Some((generation, copy)) => (*generation, copy.clone()),
-				None => (route.generation, route.copy.clone()),
+			match &route.phase {
+				Phase::Finished {
+					last: (generation, copy),
+					..
+				} => (*generation, copy.clone()),
+				_ => (route.generation, route.copy.clone()),
 			}
 		};
 		if self.generation == Some(generation) {
@@ -2298,7 +2300,7 @@ impl Recover {
 				(
 					route.generation,
 					route.copy.clone(),
-					route.phase.end().cloned(),
+					route.phase.end(),
 					route.phase.moves(),
 				)
 			};
@@ -2358,10 +2360,10 @@ impl Recover {
 				return Poll::Pending;
 			}
 			let res = self.poll_serving(generation, &serving, index, failed, withdrawn.is_none(), waiter);
-			// The serving route failed too, or will not fetch the rest, and no front is left to
-			// replace it.
+			// The serving route failed too, or will not fetch the rest while its subscription
+			// will not deliver it either, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
-				&& done && (copy_failed(&serving) || self.refused(generation))
+				&& done && (copy_failed(&serving) || self.refused(generation, &serving))
 			{
 				return Poll::Ready(Err(err.clone()));
 			}
@@ -2375,9 +2377,12 @@ impl Recover {
 		}
 	}
 
-	/// Whether the copy of route `generation` failed or refused the fetch of the rest.
-	fn refused(&self, generation: u64) -> bool {
+	/// Whether `serving`, the copy of route `generation`, failed or refused the fetch of the
+	/// rest, and is the copy that failed or will not deliver the group otherwise, as
+	/// [`Self::poll_fetch`] judges a refusal.
+	fn refused(&self, generation: u64, serving: &track::Consumer) -> bool {
 		matches!(&self.fetch, Some((asked, Fetch::Refused(_))) if *asked == generation)
+			&& (generation == self.generation || serving.poll_group(self.key, &kio::Waiter::noop()).is_ready())
 	}
 
 	/// The group from the newest of the reader's other copies that still holds it unfailed,

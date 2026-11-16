@@ -4859,12 +4859,15 @@ impl FrontServe {
 					}
 					// While another copy may still deliver, a matching replacement answers only
 					// once it delivers or ends: one failing first refuses, and that copy keeps
-					// serving. Different metadata is refused at once.
+					// serving. Different metadata is refused at once. An ended track's readers
+					// stay on its last copy, so a copy rerouted for its group reads answers with
+					// its info alone: it may never deliver anything unasked.
 					if let Some(info) = &asked.info
-						&& (io
-							.copy
-							.as_ref()
-							.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
+						&& (matches!(io.logical, Logical::Ended)
+							|| io
+								.copy
+								.as_ref()
+								.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
 							|| matches!(&io.logical, Logical::Accepted(accepted) if accepted.info() != info)
 							|| asked.copy.poll_grouped(waiter).is_ready()
 							|| asked.copy.poll_complete(waiter).is_ready())
