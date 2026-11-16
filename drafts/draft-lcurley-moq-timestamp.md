@@ -132,7 +132,7 @@ The property it uses is already registered by {{loc}} in the "MOQ Properties" re
 |:------|:----------|:--------------|:----------|
 | 0x08  | TIMESCALE | Track, Object | {{loc}}   |
 
-An earlier version of this document requested its own code points (`0x915C0`, `0x915C2`, `0x915C4`, and `0x915C6`); they are abandoned.
+An earlier version of this document requested its own code points (`0x915C0` and `0x915C2`); they are abandoned.
 
 
 --- back
@@ -140,20 +140,12 @@ An earlier version of this document requested its own code points (`0x915C0`, `0
 # Appendix A: Changelog
 {:numbered="false"}
 
-## moq-timestamp-03
-{:numbered="false"}
-
-- A timed track's Group ID is its start time in the Timescale. The TIMESTAMP object property no longer carries an object's time, and a receiver ignores it.
-- Removed the MAX_AGE Setup Option and Parameter: a relay judges age against its own threshold.
-
 ## moq-timestamp-02
 {:numbered="false"}
 
-- Add a negotiated subscriber MAX_AGE parameter for SUBSCRIBE and REQUEST_UPDATE, preserving the newest group and aggregating the most tolerant budget.
-- Read TIMESTAMP only from Type `0x10`, independently of the moq-transport version.
+- A timed track's Group ID is its start time in the Timescale. The TIMESTAMP object property no longer carries an object's time, and a receiver ignores it.
 - Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, and a relay forwards it untimed. A relay MAY drop one of its groups once a later group arrived longer ago than the threshold.
-- On a track with TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, and a receiver treats one without it as malformed.
-- A receiver ignores an object-scope TIMESCALE, and no longer reads a bare TIMESTAMP on a track without TIMESCALE as microseconds.
+- A receiver ignores an object-scope TIMESCALE.
 
 # Acknowledgments
 {:numbered="false"}

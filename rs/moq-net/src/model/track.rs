@@ -26944,8 +26944,9 @@ mod test {
 						id,
 						properties: super::super::object::Properties {
 							block: Some(super::super::object::Block {
-								bytes: bytes::Bytes::from_static(&[0x20, 1]),
-								immutable: false,
+								// Each Object ID's own property, so sharing can't swap them.
+								bytes: bytes::Bytes::copy_from_slice(&[0x20, id as u8]),
+								immutable: id.is_multiple_of(2),
 							}),
 						},
 					})),
@@ -27026,11 +27027,12 @@ mod test {
 			b"c".as_slice(),
 			"the same ordinal cannot alias a different Object ID"
 		);
-		assert!(
-			a.iter()
-				.chain(&b)
-				.all(|object| object.fields.as_ref().unwrap().properties.heap() == 2)
-		);
+		for object in a.iter().chain(&b) {
+			let fields = object.fields.as_ref().unwrap();
+			let block = fields.properties.block.as_ref().unwrap();
+			assert_eq!(&block.bytes[..], [0x20, fields.id as u8], "object {}", fields.id);
+			assert_eq!(block.immutable, fields.id.is_multiple_of(2), "object {}", fields.id);
+		}
 		assert_eq!(live.handle().content().unwrap().cost().0, 3);
 	}
 
