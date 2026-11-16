@@ -98,7 +98,7 @@ fn client(bind: SocketAddr) -> Client {
 	config.tls.insecure = Some(true);
 	config.timeout = Some(DIAL.into());
 	config.backoff.initial = Some(Duration::ZERO.into());
-	config.backoff.timeout = Some(Duration::ZERO.into());
+	config.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 	config.websocket.enabled = Some(false);
 	config.init(Default::default()).unwrap()
 }

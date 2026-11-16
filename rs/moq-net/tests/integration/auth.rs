@@ -2265,7 +2265,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 			.await;
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
-		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.server.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		support::Draining::recv(&first.client.draining())
 			.await
 			.expect("the GOAWAY");
@@ -2321,7 +2321,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		// Its first poll queues the token; the driver runs only once this side drains.
 		let mut adding = Box::pin(added(&handle, "late"));
 		assert!(adding.as_mut().now_or_never().is_none());
-		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.client.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_tokens.next().now_or_never().is_none(),

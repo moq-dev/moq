@@ -2663,8 +2663,8 @@ mod tests {
 		let config = super::super::session::connect_config(&resolved);
 		assert_eq!(
 			config.backoff.timeout,
-			Some((Duration::ZERO).into()),
-			"zero is unlimited"
+			Some(moq_tokio::cli::Bound::NONE),
+			"no give-up"
 		);
 	}
 

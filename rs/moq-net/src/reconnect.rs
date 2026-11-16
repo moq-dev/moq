@@ -110,10 +110,10 @@ impl Default for Backoff {
 	}
 }
 
-/// How a connection reacts to a peer's GOAWAY.
+/// How a connection hands over to a new session after a peer's GOAWAY.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Goaway {
+pub struct Handover {
 	/// What to do with the URI the GOAWAY names. Defaults to [`Redirect::SameHost`].
 	pub redirect: Redirect,
 	/// The longest the old session keeps serving after a GOAWAY. Defaults to 10 s.
@@ -124,7 +124,7 @@ pub struct Goaway {
 	pub handover: Duration,
 }
 
-impl Default for Goaway {
+impl Default for Handover {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::default(),
@@ -133,7 +133,7 @@ impl Default for Goaway {
 	}
 }
 
-impl Goaway {
+impl Handover {
 	/// The handover window for a GOAWAY naming `deadline`: whichever is sooner.
 	fn handover(&self, deadline: Option<Duration>) -> Duration {
 		deadline.map_or(self.handover, |deadline| deadline.min(self.handover))
@@ -149,20 +149,16 @@ pub enum Restart {
 	/// off the drained one. The default.
 	#[default]
 	Redial,
-	/// Keep serving on the drained session until the peer closes it, then reconnect as after
-	/// any drop. Right for an address that names one node, where a redial only reaches the
-	/// draining process again. The peer must close the session itself, as a relay does at
-	/// its drain deadline.
-	Wait,
 	/// Redial the same addresses once, as [`Self::Redial`] does, and keep serving on the
 	/// drained session meanwhile. A redial that reaches the draining process again, which
-	/// drains it before it is [healthy](Backoff::healthy), then serves as under
-	/// [`Self::Wait`] until the peer closes it.
+	/// drains it before it is [healthy](Backoff::healthy), then keeps serving until the peer
+	/// closes it, and the connection reconnects as after any drop.
 	///
 	/// Right for an address that names one node which may start its replacement beside the
 	/// draining process, as a relay with `[handoff]` does: the one redial reaches the
 	/// replacement. A node that restarts in place costs a single extra session to the
-	/// draining process rather than one per backoff.
+	/// draining process rather than one per backoff. The peer must close the session
+	/// itself, as a relay does at its drain deadline.
 	Handoff,
 }
 
@@ -173,7 +169,7 @@ pub struct Config {
 	/// When to redial, and when to give up.
 	pub backoff: Backoff,
 	/// How to follow a peer's GOAWAY.
-	pub goaway: Goaway,
+	pub goaway: Handover,
 	/// What a GOAWAY naming no URI does.
 	pub restart: Restart,
 	/// The deadline for one dial and its handshake. `None` waits forever. Defaults to 30 s.
@@ -191,7 +187,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			backoff: Backoff::default(),
-			goaway: Goaway::default(),
+			goaway: Handover::default(),
 			restart: Restart::default(),
 			timeout: Some(Duration::from_secs(30)),
 			once: false,
@@ -600,7 +596,6 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						// only reach it again.
 						let wait = match self.config.restart {
 							Restart::Redial => false,
-							Restart::Wait => true,
 							Restart::Handoff => now.saturating_duration_since(live.since) < self.config.backoff.healthy,
 						};
 						// A one-shot policy ends on any GOAWAY instead, as `once` promises.
@@ -740,7 +735,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		};
 		// A GOAWAY naming no URI: the peer learns we are moving, and the session stops
 		// taking new work, which frees the tokens for its replacement.
-		if old.session.drain().send(goaway::Goaway::new()).is_err() {
+		if old.session.goaway(goaway::Goaway::new()).is_err() {
 			tracing::debug!("the fallback session was already draining");
 		}
 		// The fallback session served all along, so a long one still earns the healthy reset.

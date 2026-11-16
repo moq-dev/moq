@@ -208,21 +208,50 @@ pub struct MoqWebSocketConfig {
 /// `initial`, multiplies by `multiplier` after each failed attempt, and caps at `max`.
 /// After `timeout` of consecutive failures the connection gives up for good; the window
 /// resets whenever a session stays up past 1s. Each null field uses moq-tokio's default:
-/// 1s, x2, 5s, and no give-up. Zero means off: no wait, no growth, no cap, or no give-up.
+/// 1s, x2, 5s, and no give-up. Zero means zero: retry at once, or give up at the first
+/// failure.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
 	/// Delay before the first reconnect attempt. 0 retries at once.
 	#[uniffi(default = None)]
 	pub initial: Option<Duration>,
-	/// Multiplier applied to the delay after each failure.
+	/// Multiplier applied to the delay after each failure. 0 or 1 keeps it constant.
 	#[uniffi(default = None)]
 	pub multiplier: Option<u32>,
-	/// Maximum delay between reconnect attempts. 0 leaves it uncapped.
+	/// Maximum delay between reconnect attempts. Null uses 5s, and 0 retries at once.
 	#[uniffi(default = None)]
 	pub max: Option<Duration>,
-	/// Time spent retrying before giving up. 0 retries forever.
+	/// Lift the cap on the delay, which then grows without bound. Refused with `max` set.
+	#[uniffi(default = false)]
+	pub uncapped: bool,
+	/// Time spent retrying before giving up. Null never gives up, and 0 gives up at the
+	/// first failure.
 	#[uniffi(default = None)]
 	pub timeout: Option<Duration>,
+}
+
+impl MoqBackoff {
+	/// Set each field given on moq-tokio's `backoff`, leaving the rest at their defaults.
+	pub(crate) fn apply(self, backoff: &mut moq_tokio::connection::Backoff) -> Result<(), MoqError> {
+		if let Some(initial) = self.initial {
+			backoff.initial = Some(initial.into());
+		}
+		if let Some(multiplier) = self.multiplier {
+			backoff.multiplier = multiplier;
+		}
+		backoff.max = match (self.max, self.uncapped) {
+			(Some(_), true) => {
+				return Err(MoqError::Config {
+					reason: "backoff max and uncapped are exclusive".into(),
+				});
+			}
+			(Some(max), false) => Some(max.into()),
+			(None, true) => Some(moq_tokio::cli::Bound::NONE),
+			(None, false) => None,
+		};
+		backoff.timeout = self.timeout.map(Into::into);
+		Ok(())
+	}
 }
 
 /// What sessions opened through this crate advertise in SETUP: the caller's `prefix`, then
@@ -275,8 +304,9 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 		backoff: MoqBackoff {
 			initial: Some(backoff.initial()),
 			multiplier: Some(backoff.multiplier),
-			max: Some(backoff.max().unwrap_or_default()),
-			timeout: Some(backoff.timeout().unwrap_or_default()),
+			max: backoff.max(),
+			uncapped: backoff.max().is_none(),
+			timeout: backoff.timeout(),
 		},
 		..Default::default()
 	}
@@ -352,19 +382,7 @@ impl Client {
 			connect.websocket.delay = Some(delay.into());
 		}
 
-		let backoff = config.backoff;
-		if let Some(initial) = backoff.initial {
-			connect.backoff.initial = Some(initial.into());
-		}
-		if let Some(multiplier) = backoff.multiplier {
-			connect.backoff.multiplier = multiplier;
-		}
-		if let Some(max) = backoff.max {
-			connect.backoff.max = Some(max.into());
-		}
-		if let Some(timeout) = backoff.timeout {
-			connect.backoff.timeout = Some(timeout.into());
-		}
+		config.backoff.apply(&mut connect.backoff)?;
 
 		let quic = config.quic.into();
 
@@ -564,6 +582,7 @@ mod tests {
 			once: true,
 			backoff: MoqBackoff {
 				timeout: Some(Duration::ZERO),
+				uncapped: true,
 				..Default::default()
 			},
 			..Default::default()

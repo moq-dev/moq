@@ -3806,8 +3806,8 @@ mod session_tests {
 		let config = super::connect_config(&unreachable());
 		assert_eq!(
 			config.backoff.timeout,
-			Some((Duration::ZERO).into()),
-			"zero is unlimited"
+			Some(moq_tokio::cli::Bound::NONE),
+			"no give-up"
 		);
 	}
 

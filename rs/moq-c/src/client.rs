@@ -164,8 +164,16 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 	if config.has_backoff_multiplier {
 		out.connect.backoff.multiplier = config.backoff_multiplier;
 	}
+	if config.has_backoff_max && config.backoff_uncapped {
+		return Err(Error::InvalidConfig(
+			"has_backoff_max and backoff_uncapped are exclusive".into(),
+		));
+	}
 	if config.has_backoff_max {
 		out.connect.backoff.max = Some((std::time::Duration::from_micros(config.backoff_max_us)).into());
+	}
+	if config.backoff_uncapped {
+		out.connect.backoff.max = Some(moq_tokio::cli::Bound::NONE);
 	}
 	if config.has_backoff_timeout {
 		out.connect.backoff.timeout = Some((std::time::Duration::from_micros(config.backoff_timeout_us)).into());

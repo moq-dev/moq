@@ -3343,7 +3343,7 @@ mod tests {
 		));
 
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		link.drain_with(std::sync::Arc::new(goaway));
 		assert!(matches!(
 			link.present(Bytes::from_static(b"late"), false),
@@ -3358,7 +3358,7 @@ mod tests {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, false, false).unwrap();
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 		let successor = Link::attach(&handle, true, false).unwrap();
 
@@ -3381,7 +3381,7 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
@@ -3402,7 +3402,7 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
@@ -3435,7 +3435,7 @@ mod tests {
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		assert!(!link.active());
 		let err = link.reopen(id).unwrap_err();
 		assert!(matches!(err, Error::GoingAway), "{err:?}");
@@ -3492,7 +3492,7 @@ mod tests {
 		let _auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let busy = Error::Session(SessionError::TooManyRequests);

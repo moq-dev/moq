@@ -165,7 +165,7 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.backoff.initial = Some((Duration::from_millis(20)).into());
 	config.backoff.max = Some((Duration::from_millis(40)).into());
-	config.backoff.timeout = Some((Duration::ZERO).into());
+	config.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 	config.goaway.redirect = redirect;
 	config.init(Default::default()).expect("failed to init client")
 }
@@ -205,8 +205,7 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 		.expect("server A stopped accepting");
 
 	first
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
+		.goaway(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
 	let err = kio::clock::timeout(Duration::from_secs(10), connection.closed())
@@ -239,8 +238,7 @@ async fn follow_still_honors_a_cross_host_redirect() {
 		.expect("server A stopped accepting");
 
 	first
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
+		.goaway(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
 	kio::clock::timeout(Duration::from_secs(10), sessions_b.recv())
@@ -267,8 +265,7 @@ async fn a_refused_redirect_skips_configured_fallbacks() {
 	task_a.abort();
 	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
 	first
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect("tcp://127.0.0.1:1/"))
+		.goaway(moq_net::goaway::Goaway::redirect("tcp://127.0.0.1:1/"))
 		.expect("send goaway");
 
 	let err = kio::clock::timeout(Duration::from_secs(10), connection.closed())
@@ -299,7 +296,7 @@ async fn an_empty_goaway_preserves_configured_fallbacks() {
 	// Stop accepting before GOAWAY so the migration must use the configured fallback.
 	task_a.abort();
 	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
-	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	first.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 
 	kio::clock::timeout(Duration::from_secs(10), sessions_b.recv())
 		.await
@@ -361,8 +358,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 			};
 			if held.len() < drained {
 				session
-					.drain()
-					.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_secs(30)))
+					.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(Duration::from_secs(30))))
 					.expect("send goaway");
 				held.push(session);
 			} else {
@@ -402,7 +398,7 @@ fn bounce(
 			let uri = uri(n);
 			tokio::spawn(async move {
 				kio::clock::sleep(LIFE).await;
-				let _ = session.drain().send(moq_net::goaway::Goaway::redirect(uri));
+				let _ = session.goaway(moq_net::goaway::Goaway::redirect(uri));
 				session.closed().await;
 			});
 		}
@@ -440,7 +436,7 @@ async fn ping_pong(
 
 /// A backoff starting at 50ms that doubles up to `max`, giving up after `timeout`, and that
 /// counts a session as healthy once it outlives the initial delay.
-fn bounced_backoff(max: Duration, timeout: Duration) -> moq_tokio::Backoff {
+fn bounced_backoff(max: Duration, timeout: Option<Duration>) -> moq_tokio::Backoff {
 	let mut backoff = moq_tokio::Backoff::default();
 	backoff.initial = Some((Duration::from_millis(50)).into());
 	backoff.healthy = Some((Duration::from_millis(50)).into());
@@ -477,7 +473,7 @@ async fn redial_waits(
 async fn two_peers_redirecting_to_each_other_escalate_the_backoff() {
 	for rotate in [false, true] {
 		let (url, mut accepts, _tasks) = ping_pong(rotate).await;
-		let backoff = bounced_backoff(Duration::from_millis(400), Duration::ZERO);
+		let backoff = bounced_backoff(Duration::from_millis(400), None);
 		let _connection = client(backoff).connect(url);
 
 		let delays = [0, 50, 100, 200, 400, 400].map(Duration::from_millis);
@@ -496,7 +492,7 @@ async fn two_peers_redirecting_to_each_other_escalate_the_backoff() {
 #[tokio::test]
 async fn a_redirect_loop_stops_at_the_retry_window() {
 	let (url, mut accepts, _tasks) = ping_pong(false).await;
-	let backoff = bounced_backoff(Duration::from_millis(400), Duration::from_millis(300));
+	let backoff = bounced_backoff(Duration::from_millis(400), Some(Duration::from_millis(300)));
 	let connection = client(backoff).connect(url);
 	let closed = connection.closed();
 	tokio::pin!(closed);
@@ -538,7 +534,7 @@ async fn migrates_without_backing_off(
 async fn a_loop_no_faster_than_the_capped_delay_migrates_without_backing_off() {
 	let (url, mut accepts, _tasks) = ping_pong(false).await;
 	// The cap is the initial delay, well under each session's life.
-	let backoff = bounced_backoff(Duration::from_millis(50), Duration::from_millis(60));
+	let backoff = bounced_backoff(Duration::from_millis(50), Some(Duration::from_millis(60)));
 	migrates_without_backing_off(client(backoff).connect(url), &mut accepts, 6).await;
 }
 
@@ -558,7 +554,7 @@ async fn a_one_way_rolling_restart_migrates_without_backing_off() {
 		_ => String::new(),
 	});
 
-	let backoff = bounced_backoff(Duration::from_millis(400), Duration::from_millis(60));
+	let backoff = bounced_backoff(Duration::from_millis(400), Some(Duration::from_millis(60)));
 	let url: url::Url = format!("tcp://127.0.0.1:{port_a}/").parse().expect("parse url");
 	migrates_without_backing_off(client(backoff).connect(url), &mut accepts, 6).await;
 }
