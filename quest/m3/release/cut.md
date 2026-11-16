@@ -15,8 +15,8 @@ minor up per later API or wire cut, following
 [Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
-from moq-dev/web-transport, and 0.3.5 follows for
-[the release line's credit fix](/quest/m0/release-qmux-credit.md), while `js/qmux` is at 0.3.3. Publishing 0.3.3
+from moq-dev/web-transport, and 0.3.5 for
+[the release line's credit fix](https://github.com/moq-dev/moq/pull/8808), while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
 web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
