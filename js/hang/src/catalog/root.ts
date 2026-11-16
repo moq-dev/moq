@@ -106,11 +106,7 @@ function minVersion(root: Root): number | undefined {
 		root.binary?.tracks,
 	].some((entries) => Object.entries(entries ?? {}).some(([id, config]) => track(id, config) !== id));
 
-	// moq-hang-04: a reader that ignores video `warmup` assumes every group starts at a keyframe,
-	// and hands its decoder one that starts at a converging picture instead.
-	const warmup = Object.values(root.video?.renditions ?? {}).some((config) => (config.warmup ?? 0) > 0);
-
-	return renamed || warmup ? 4 : undefined;
+	return renamed ? 4 : undefined;
 }
 
 /** A catalog update used one rendition ID for both a video and an audio rendition. */

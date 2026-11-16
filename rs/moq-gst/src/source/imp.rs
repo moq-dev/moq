@@ -412,8 +412,8 @@ impl MoqSrc {
 /// pad. Caps cover codec/resolution; the container descriptor covers the wire framing (e.g. legacy
 /// -> cmaf); the broadcast and track identify the media, apart from its catalog ID.
 ///
-/// The catalog `warmup` rides along without being part of the shape: it matters only to a join,
-/// so a changed one reaches the next reader without restarting the current one.
+/// An audio rendition's catalog `warmup` rides along without being part of the shape: it matters
+/// only to a join, so a changed one reaches the next reader without restarting the current one.
 #[derive(Clone)]
 struct Shape {
 	caps: gst::Caps,
@@ -1109,7 +1109,7 @@ fn reconcile(
 			TrackKind::Video,
 			video_caps(config),
 			&config.container,
-			config.warmup,
+			None,
 			config,
 		);
 	}
@@ -3029,54 +3029,54 @@ mod session_tests {
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
-	/// A rendition's catalog warmup widens its subscription past the session max delay, so the
-	/// publisher keeps the media its decoder needs before the start.
+	/// An audio rendition's catalog warmup widens its subscription past the session max delay, so
+	/// the publisher keeps the media its decoder needs before the start.
 	#[test]
 	fn a_rendition_subscribes_with_its_catalog_warmup() {
 		let warmup = Duration::from_millis(300);
-		for kind in [TrackKind::Video, TrackKind::Audio] {
-			let element = element();
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
-			let mut dynamic = broadcast.requests();
-			let mut catalog =
-				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-			{
-				let mut guard = catalog.modify().unwrap();
-				match kind {
-					TrackKind::Video => {
-						let mut video = video_rendition();
-						video.warmup = Some(warmup);
-						guard.video.renditions = BTreeMap::from([("media".to_string(), video)]);
-					}
-					TrackKind::Audio => {
-						let mut audio = audio_rendition();
-						audio.warmup = Some(warmup);
-						guard.audio.renditions = BTreeMap::from([("media".to_string(), audio)]);
-					}
-				}
-			}
-
-			let max_delay = Duration::from_secs(5);
-			let (shutdown, mut cancelled) = watch::channel(false);
-			let weak = element.downgrade();
-			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
-			let session = super::RUNTIME.spawn(async move {
-				let stopping = cancelled.clone();
-				Session::new(weak, stopping, max_delay)
-					.follow_catalog(source, &mut cancelled)
-					.await
-			});
-
-			let request = await_request(&mut dynamic);
-			assert_eq!(
-				request.subscription().unwrap().delay.max,
-				Some(max_delay + warmup),
-				"{kind:?}"
-			);
-
-			let _ = shutdown.send(true);
-			super::RUNTIME.block_on(session).unwrap().unwrap();
+		let element = element();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.requests();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			let mut audio = audio_rendition();
+			audio.warmup = Some(warmup);
+			guard.audio.renditions = BTreeMap::from([("media".to_string(), audio)]);
 		}
+
+		let max_delay = Duration::from_secs(5);
+		let (shutdown, mut cancelled) = watch::channel(false);
+		let weak = element.downgrade();
+		let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
+		let session = super::RUNTIME.spawn(async move {
+			let stopping = cancelled.clone();
+			Session::new(weak, stopping, max_delay)
+				.follow_catalog(source, &mut cancelled)
+				.await
+		});
+
+		let request = await_request(&mut dynamic);
+		assert_eq!(request.subscription().unwrap().delay.max, Some(max_delay + warmup));
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	/// A changed warmup alone is the same shape, so it never restarts the reader playing the
+	/// rendition, while the shape a plan carries holds the new value for the next reader.
+	#[test]
+	fn a_warmup_is_not_part_of_the_shape() {
+		gst::init().unwrap();
+		let shape = |warmup| super::Shape {
+			caps: gst::Caps::new_empty_simple("audio/x-opus"),
+			container: Container::Legacy,
+			track: "audio".into(),
+			broadcast: None,
+			instance: None,
+			warmup,
+		};
+		assert!(shape(Duration::from_millis(300)) == shape(Duration::from_millis(600)));
 	}
 
 	/// A rendition delisted while its reader is still subscribing ends that reader, and answering
@@ -3876,8 +3876,6 @@ mod session_tests {
 		video: Option<moq_mux::container::Producer<moq_mux::catalog::hang::Container>>,
 		/// The video track once [`Self::finish_video`] finished it.
 		finished: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container>>,
-		/// The video track, for what its readers subscribe with.
-		track: moq_net::track::Producer,
 		start: kio::clock::Instant,
 	}
 
@@ -3921,7 +3919,6 @@ mod session_tests {
 				let mut guard = catalog.modify().unwrap();
 				guard.video.renditions = BTreeMap::from([("video".to_string(), config)]);
 			}
-			let track = video.clone();
 			let video = moq_mux::container::Producer::new(
 				video,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
@@ -3932,7 +3929,6 @@ mod session_tests {
 				catalog,
 				video: Some(video),
 				finished: None,
-				track,
 				start: kio::clock::now(),
 			}
 		}
@@ -4539,83 +4535,6 @@ mod session_tests {
 			"no new stream on the kept pad"
 		);
 		recorder.assert_one_pad_held();
-	}
-
-	/// A warmup-only catalog update neither restarts the reader playing the rendition nor is lost:
-	/// the next instance's reader subscribes with the updated warmup.
-	#[test]
-	fn a_warmup_update_keeps_the_reader_and_reaches_the_next_one() {
-		let _pad_ids = pad_ids();
-		let element = element();
-		let recorder = Recorder::attach(&element);
-		let origin = origin();
-		let mut config = video_rendition();
-		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
-		config.warmup = Some(Duration::from_millis(300));
-		let mut room = Publisher::new(&origin, Default::default(), config);
-		let session = follow(&element, &origin);
-
-		let mut first = Publisher::sibling(&origin, Default::default());
-		let pad = recorder.written(&mut first, 1);
-		assert_eq!(
-			first.track.subscription().unwrap().delay.max,
-			Some(DEFAULT_MAX_DELAY + Duration::from_millis(300))
-		);
-
-		// Change only the warmup, then list an audio rendition in the same catalog. Its pad shows
-		// the run took the warmup too, since a catalog snapshot carries both, and the cam follower
-		// takes a plan before any instance event.
-		let audio = room
-			.broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
-		let mut audio = moq_mux::container::Producer::new(
-			audio,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
-		);
-		{
-			let mut guard = room.catalog.modify().unwrap();
-			guard.video.renditions.get_mut("video").unwrap().warmup = Some(Duration::from_millis(600));
-			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
-		}
-		audio.write(room.frame(9)).unwrap();
-		await_pad(&element, "audio_");
-		assert_eq!(recorder.written(&mut first, 2), pad);
-
-		let mut follow = watch(&origin, "cam");
-		await_event(&mut follow, |event| {
-			matches!(
-				event,
-				moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::Start,
-					..
-				}
-			)
-		});
-		drop(first);
-		await_event(&mut follow, |event| {
-			matches!(
-				event,
-				moq_net::origin::RouteEvent {
-					kind: moq_net::origin::RouteKind::End,
-					..
-				}
-			)
-		});
-		let mut second = Publisher::sibling(&origin, Default::default());
-		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
-		assert_eq!(
-			second.track.subscription().unwrap().delay.max,
-			Some(DEFAULT_MAX_DELAY + Duration::from_millis(600))
-		);
-		stop(session);
-
-		let seen = recorder.seen();
-		assert_eq!(
-			recorder.count(|seen| matches!(seen, Seen::Start(start) if *start == pad)),
-			1,
-			"only the next instance starts a new stream on the pad: {seen:?}"
-		);
 	}
 
 	/// A rendition that joins a sibling instance after another started on it shares that instance's
