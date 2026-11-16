@@ -395,6 +395,30 @@ async def test_catalog_update_on_new_track():
         break
 
 
+async def test_holding_catalog_reader_reads_every_update_within_its_delay():
+    """Updates published before the reader joins reach a holding reader in order, each with its
+    timestamp; an arrival reader takes only the newest."""
+    broadcast = moq.BroadcastProducer()
+    catalog = moq.media.CatalogProducer(broadcast)
+    for value in [1, 2]:
+        catalog.set_section("app", value)
+    consumer = broadcast.consume()
+
+    for delay, expected in [(timedelta(0), ["2"]), (timedelta(minutes=1), ["1", "2"])]:
+        async with await moq.media.CatalogConsumer.subscribe(consumer, delay=delay) as reader:
+            read: list[str] = []
+            last = 0
+            while not read or read[-1] != "2":
+                update = await asyncio.wait_for(anext(reader), timeout=10)
+                assert update.timestamp.scale is not None
+                assert update.timestamp.value > last, f"{delay} delay"
+                last = update.timestamp.value
+                # The broadcast's first catalog, published before any section, is not one of ours.
+                if "app" in update.sections:
+                    read.append(update.sections["app"])
+        assert read == expected, f"{delay} delay"
+
+
 def test_close_twice_is_a_noop():
     broadcast = moq.BroadcastProducer()
     _media = moq.media.TrackProducer.audio(

@@ -465,6 +465,39 @@ class SmokeTest {
         catalog.close()
     }
 
+    /**
+     * Updates published before the reader joins reach a holding reader in order, each with its
+     * timestamp; an arrival reader takes only the newest.
+     */
+    @Test
+    fun `a holding catalog reader reads every update within its delay`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val catalog = CatalogProducer(broadcast)
+            for (value in listOf("1", "2")) catalog.setSection("app", value)
+            val consumer = broadcast.consume()
+
+            for ((delay, expected) in
+                listOf(
+                    java.time.Duration.ZERO to listOf("2"),
+                    java.time.Duration.ofMinutes(1) to listOf("1", "2"),
+                )) {
+                val reader = CatalogConsumer.subscribe(consumer, delay)
+                val read = mutableListOf<String>()
+                var last = 0uL
+                while (read.lastOrNull() != "2") {
+                    val update = assertNotNull(reader.next(), "$delay delay")
+                    assertNotNull(update.timestamp.scale)
+                    assertTrue(update.timestamp.value > last, "$delay delay")
+                    last = update.timestamp.value
+                    // The broadcast's first catalog, published before any section, is not ours.
+                    update.sections["app"]?.let { read.add(it) }
+                }
+                reader.cancel()
+                assertEquals(expected, read, "$delay delay")
+            }
+        }
+    }
+
     /** A fetched media group streams its decoded frames and then completes. */
     @Test
     fun `media group helper streams fetched frames`() = runTest {
@@ -1250,7 +1283,8 @@ class SmokeTest {
                     route.announce()
 
                     val consumer = origin.consume().request("audio-delay")
-                    val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                    val catalog =
+                        CatalogConsumer.subscribe(consumer, java.time.Duration.ZERO).next()!!
                     val rendition = catalog.audio["mic"]!!
 
                     // No max delay: a zero one skips a group once its successor is a warmup old by
@@ -1339,7 +1373,8 @@ class SmokeTest {
                     }
 
                     val consumer = origin.consume().request("video-decode-frame")
-                    val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                    val catalog =
+                        CatalogConsumer.subscribe(consumer, java.time.Duration.ZERO).next()!!
                     val rendition = catalog.video["camera"]!!
 
                     val decoder =

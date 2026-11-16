@@ -38,6 +38,9 @@ typealias StreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 /** Configures a lossy latest-value JSON producer. */
 typealias SnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 
+/** A snapshot consumer's subscription priority and playout delay. */
+typealias SnapshotConsumerConfig = uniffi.moq.MoqJsonSnapshotConsumerConfig
+
 /** A JSON string and the timestamp of the frame that carried it. */
 typealias Value = uniffi.moq.MoqJsonValue
 

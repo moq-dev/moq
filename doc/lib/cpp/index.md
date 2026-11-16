@@ -92,7 +92,9 @@ auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes ever
 auto session = ok(client->connect("https://relay.example.com").get());
 auto announced = ok(session->consume()->follow("my-stream.hang", nullptr));
 auto broadcast = ok(announced->available().get());   // the first call is never null
-auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
+// A zero delay reads only the newest catalog; a player that holds each update until its
+// media reaches the catalog's `timestamp` passes its playout delay instead.
+auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast, {}).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[id, video] : catalog->video) {
         // The rendition carries its own broadcast and track, which the subscribe follows.

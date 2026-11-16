@@ -1173,6 +1173,67 @@ class FfiConverterMoqJsonSnapshotConfig {
   }
 }
 
+class MoqJsonSnapshotConsumerConfig {
+  final int priority;
+  final Duration delay;
+  MoqJsonSnapshotConsumerConfig({this.priority = 0, required this.delay});
+}
+
+class FfiConverterMoqJsonSnapshotConsumerConfig {
+  static MoqJsonSnapshotConsumerConfig lift(RustBuffer buf) {
+    return FfiConverterMoqJsonSnapshotConsumerConfig.read(
+      buf.asUint8List(),
+    ).value;
+  }
+
+  static LiftRetVal<MoqJsonSnapshotConsumerConfig> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final priority_lifted = FfiConverterInt8.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final priority = priority_lifted.value;
+    new_offset += priority_lifted.bytesRead;
+    final delay_lifted = FfiConverterDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final delay = delay_lifted.value;
+    new_offset += delay_lifted.bytesRead;
+    return LiftRetVal(
+      MoqJsonSnapshotConsumerConfig(priority: priority, delay: delay),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqJsonSnapshotConsumerConfig value) {
+    final total_length =
+        FfiConverterInt8.allocationSize(value.priority) +
+        FfiConverterDuration.allocationSize(value.delay) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqJsonSnapshotConsumerConfig value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterInt8.write(
+      value.priority,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterDuration.write(
+      value.delay,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqJsonSnapshotConsumerConfig value) {
+    return FfiConverterInt8.allocationSize(value.priority) +
+        FfiConverterDuration.allocationSize(value.delay) +
+        0;
+  }
+}
+
 class MoqJsonValue {
   final String value;
   final MoqTimestamp timestamp;
@@ -1634,6 +1695,7 @@ class MoqCatalog {
   final double? rotation;
   final bool? flip;
   final Map<String, String> sections;
+  final MoqTimestamp timestamp;
   MoqCatalog({
     required this.video,
     required this.audio,
@@ -1641,6 +1703,7 @@ class MoqCatalog {
     this.rotation,
     this.flip,
     required this.sections,
+    required this.timestamp,
   });
 }
 
@@ -1681,6 +1744,11 @@ class FfiConverterMoqCatalog {
     );
     final sections = sections_lifted.value;
     new_offset += sections_lifted.bytesRead;
+    final timestamp_lifted = FfiConverterMoqTimestamp.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final timestamp = timestamp_lifted.value;
+    new_offset += timestamp_lifted.bytesRead;
     return LiftRetVal(
       MoqCatalog(
         video: video,
@@ -1689,6 +1757,7 @@ class FfiConverterMoqCatalog {
         rotation: rotation,
         flip: flip,
         sections: sections,
+        timestamp: timestamp,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -1702,6 +1771,7 @@ class FfiConverterMoqCatalog {
         FfiConverterOptionalDouble64.allocationSize(value.rotation) +
         FfiConverterOptionalBool.allocationSize(value.flip) +
         FfiConverterMapStringToString.allocationSize(value.sections) +
+        FfiConverterMoqTimestamp.allocationSize(value.timestamp) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -1734,6 +1804,10 @@ class FfiConverterMoqCatalog {
       value.sections,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterMoqTimestamp.write(
+      value.timestamp,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -1744,6 +1818,7 @@ class FfiConverterMoqCatalog {
         FfiConverterOptionalDouble64.allocationSize(value.rotation) +
         FfiConverterOptionalBool.allocationSize(value.flip) +
         FfiConverterMapStringToString.allocationSize(value.sections) +
+        FfiConverterMoqTimestamp.allocationSize(value.timestamp) +
         0;
   }
 }
@@ -11992,12 +12067,12 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
   MoqJsonSnapshotConsumer({
     required MoqBroadcastConsumer broadcast,
     required String name,
-    int priority = 0,
+    MoqJsonSnapshotConsumerConfig? config = null,
   }) : _ptr = rustCall(
          (status) => uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
            FfiConverterMoqBroadcastConsumer.lower(broadcast),
            FfiConverterString.lower(name),
-           FfiConverterInt8.lower(priority),
+           FfiConverterOptionalMoqJsonSnapshotConsumerConfig.lower(config),
            status,
          ),
          moqExceptionErrorHandler,
@@ -12694,10 +12769,12 @@ class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
   }
   static UniffiRustFuture<MoqMediaCatalogConsumer> subscribe({
     required MoqBroadcastConsumer broadcast,
+    required Duration delay,
   }) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_constructor_moqmediacatalogconsumer_subscribe(
         FfiConverterMoqBroadcastConsumer.lower(broadcast),
+        FfiConverterDuration.lower(delay),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
@@ -18854,6 +18931,58 @@ class FfiConverterOptionalMoqInstance {
   }
 }
 
+class FfiConverterOptionalMoqJsonSnapshotConsumerConfig {
+  static MoqJsonSnapshotConsumerConfig? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqJsonSnapshotConsumerConfig.read(
+      buf.asUint8List(),
+    ).value;
+  }
+
+  static LiftRetVal<MoqJsonSnapshotConsumerConfig?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqJsonSnapshotConsumerConfig.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqJsonSnapshotConsumerConfig?>(
+      result.value,
+      result.bytesRead + 1,
+    );
+  }
+
+  static int allocationSize([MoqJsonSnapshotConsumerConfig? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqJsonSnapshotConsumerConfig.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqJsonSnapshotConsumerConfig? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqJsonSnapshotConsumerConfig.allocationSize(value),
+    );
+    FfiConverterOptionalMoqJsonSnapshotConsumerConfig.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqJsonSnapshotConsumerConfig? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqJsonSnapshotConsumerConfig.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqJsonValue {
   static MoqJsonValue? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqJsonValue.read(buf.asUint8List()).value;
@@ -21361,7 +21490,7 @@ external void uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(
   Pointer<Void> Function(
     Pointer<Void>,
     RustBuffer,
-    Int8,
+    RustBuffer,
     Pointer<RustCallStatus>,
   )
 >(assetId: _uniffiAssetId)
@@ -21369,7 +21498,7 @@ external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
   Pointer<Void> broadcast,
   RustBuffer name,
-  int priority,
+  RustBuffer config,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -21659,10 +21788,13 @@ external void uniffi_moq_ffi_fn_free_moqmediacatalogconsumer(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+@Native<Pointer<Void> Function(Pointer<Void>, RustBuffer)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqmediacatalogconsumer_subscribe(
   Pointer<Void> broadcast,
+  RustBuffer delay,
 );
 
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -25313,7 +25445,7 @@ void _checkApiChecksums() {
       44590) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqmediacatalogconsumer_next() != 43296) {
+  if (uniffi_moq_ffi_checksum_method_moqmediacatalogconsumer_next() != 9591) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediacatalogproducer_finish() !=
@@ -25837,7 +25969,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotconsumer_new() !=
-      47962) {
+      24793) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotproducer_new() !=
@@ -25859,7 +25991,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediacatalogconsumer_subscribe() !=
-      2004) {
+      29179) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediacatalogproducer_new() !=
