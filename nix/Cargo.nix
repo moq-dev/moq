@@ -1535,25 +1535,9 @@ rec {
             optional = true;
           }
           {
-            name = "tokio";
-            packageId = "tokio";
-            optional = true;
-            usesDefaultFeatures = false;
-          }
-          {
             name = "zbus";
             packageId = "zbus";
             usesDefaultFeatures = false;
-          }
-        ];
-        devDependencies = [
-          {
-            name = "tokio";
-            packageId = "tokio";
-            features = [
-              "rt-multi-thread"
-              "macros"
-            ];
           }
         ];
         features = {
@@ -1649,9 +1633,9 @@ rec {
           "wayland-protocols" = [ "dep:wayland-protocols" ];
         };
         resolvedDefaultFeatures = [
+          "async-io"
           "camera"
           "screencast"
-          "tokio"
         ];
       };
       "askama" = rec {
@@ -2112,6 +2096,54 @@ rec {
         ];
 
       };
+      "async-channel" = rec {
+        crateName = "async-channel";
+        version = "2.5.0";
+        edition = "2021";
+        sha256 = "1ljq24ig8lgs2555myrrjighycpx2mbjgrm3q7lpa6rdsmnxjklj";
+        libName = "async_channel";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "concurrent-queue";
+            packageId = "concurrent-queue";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "event-listener-strategy";
+            packageId = "event-listener-strategy";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "portable-atomic" = [
+            "concurrent-queue/portable-atomic"
+            "event-listener-strategy/portable-atomic"
+            "dep:portable-atomic-util"
+            "dep:portable-atomic"
+          ];
+          "std" = [
+            "concurrent-queue/std"
+            "event-listener-strategy/std"
+          ];
+        };
+        resolvedDefaultFeatures = [
+          "default"
+          "std"
+        ];
+      };
       "async-compression" = rec {
         crateName = "async-compression";
         version = "0.4.48";
@@ -2210,6 +2242,131 @@ rec {
           "tokio"
         ];
       };
+      "async-executor" = rec {
+        crateName = "async-executor";
+        version = "1.14.1";
+        edition = "2021";
+        sha256 = "0dsg3ijjbrky4qas8g7nyjpryg1646jsfpmwjxi14df74q8s69pl";
+        libName = "async_executor";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+          "John Nunley <dev@notgull.net>"
+        ];
+        dependencies = [
+          {
+            name = "async-task";
+            packageId = "async-task";
+          }
+          {
+            name = "concurrent-queue";
+            packageId = "concurrent-queue";
+          }
+          {
+            name = "fastrand";
+            packageId = "fastrand";
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+            usesDefaultFeatures = false;
+            target = { target, features }: (builtins.elem "wasm" target."family");
+            features = [ "std" ];
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+          {
+            name = "slab";
+            packageId = "slab";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "fastrand";
+            packageId = "fastrand";
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+          }
+        ];
+        features = {
+        };
+      };
+      "async-io" = rec {
+        crateName = "async-io";
+        version = "2.6.0";
+        edition = "2021";
+        sha256 = "1z16s18bm4jxlmp6rif38mvn55442yd3wjvdfhvx4hkgxf7qlss5";
+        libName = "async_io";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "cfg-if";
+            packageId = "cfg-if";
+          }
+          {
+            name = "concurrent-queue";
+            packageId = "concurrent-queue";
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "parking";
+            packageId = "parking";
+          }
+          {
+            name = "polling";
+            packageId = "polling";
+          }
+          {
+            name = "rustix";
+            packageId = "rustix 1.1.6";
+            usesDefaultFeatures = false;
+            features = [
+              "fs"
+              "net"
+              "std"
+            ];
+          }
+          {
+            name = "slab";
+            packageId = "slab";
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys 0.61.2";
+            target = { target, features }: (target."windows" or false);
+            features = [ "Win32_Foundation" ];
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "autocfg";
+            packageId = "autocfg";
+          }
+        ];
+        features = {
+          "tracing" = [ "dep:tracing" ];
+        };
+      };
       "async-lock" = rec {
         crateName = "async-lock";
         version = "3.4.2";
@@ -2251,6 +2408,73 @@ rec {
           "std"
         ];
       };
+      "async-process" = rec {
+        crateName = "async-process";
+        version = "2.5.0";
+        edition = "2021";
+        sha256 = "0xfswxmng6835hjlfhv7k0jrfp7czqxpfj6y2s5dsp05q0g94l7w";
+        libName = "async_process";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "async-channel";
+            packageId = "async-channel";
+            target = { target, features }: ((target."windows" or false) || ("linux" == target."os" or null));
+          }
+          {
+            name = "async-io";
+            packageId = "async-io";
+          }
+          {
+            name = "async-lock";
+            packageId = "async-lock";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "async-signal";
+            packageId = "async-signal";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "async-task";
+            packageId = "async-task";
+            target = { target, features }: ((target."windows" or false) || ("linux" == target."os" or null));
+          }
+          {
+            name = "blocking";
+            packageId = "blocking";
+            target = { target, features }: (target."windows" or false);
+          }
+          {
+            name = "cfg-if";
+            packageId = "cfg-if";
+          }
+          {
+            name = "event-listener";
+            packageId = "event-listener";
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+          }
+          {
+            name = "rustix";
+            packageId = "rustix 1.1.6";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target."unix" or false);
+            features = [
+              "std"
+              "fs"
+              "process"
+            ];
+          }
+        ];
+        features = {
+          "tracing" = [ "dep:tracing" ];
+        };
+      };
       "async-recursion" = rec {
         crateName = "async-recursion";
         version = "1.2.0";
@@ -2287,6 +2511,101 @@ rec {
           }
         ];
 
+      };
+      "async-signal" = rec {
+        crateName = "async-signal";
+        version = "0.2.14";
+        edition = "2021";
+        sha256 = "11dlpb15la279r5cazppy18gbk2xzzl60ahzl19m1kr0l2psmdaj";
+        libName = "async_signal";
+        authors = [
+          "John Nunley <dev@notgull.net>"
+        ];
+        dependencies = [
+          {
+            name = "async-io";
+            packageId = "async-io";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "async-lock";
+            packageId = "async-lock";
+            target = { target, features }: (target."windows" or false);
+          }
+          {
+            name = "atomic-waker";
+            packageId = "atomic-waker";
+            target = { target, features }: (target."windows" or false);
+          }
+          {
+            name = "cfg-if";
+            packageId = "cfg-if";
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "rustix";
+            packageId = "rustix 1.1.6";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target."unix" or false);
+            features = [
+              "process"
+              "std"
+            ];
+          }
+          {
+            name = "signal-hook-registry";
+            packageId = "signal-hook-registry";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "slab";
+            packageId = "slab";
+            target = { target, features }: (target."windows" or false);
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys 0.61.2";
+            usesDefaultFeatures = false;
+            target = { target, features }: (target."windows" or false);
+            features = [
+              "Win32_Foundation"
+              "Win32_System_Console"
+            ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "async-io";
+            packageId = "async-io";
+          }
+        ];
+
+      };
+      "async-task" = rec {
+        crateName = "async-task";
+        version = "4.7.1";
+        edition = "2021";
+        sha256 = "1pp3avr4ri2nbh7s6y9ws0397nkx1zymmcr14sq761ljarh3axcb";
+        libName = "async_task";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+        ];
+        features = {
+          "default" = [ "std" ];
+          "portable-atomic" = [ "dep:portable-atomic" ];
+        };
+        resolvedDefaultFeatures = [
+          "default"
+          "std"
+        ];
       };
       "async-trait" = rec {
         crateName = "async-trait";
@@ -3597,6 +3916,46 @@ rec {
           "default"
           "std"
         ];
+      };
+      "blocking" = rec {
+        crateName = "blocking";
+        version = "1.7.0";
+        edition = "2021";
+        sha256 = "1ykd0gj18r4v4b8r692hds5dsg2w6y9fq4nlxs2l7fbcvwll63m7";
+        dependencies = [
+          {
+            name = "async-channel";
+            packageId = "async-channel";
+          }
+          {
+            name = "async-task";
+            packageId = "async-task";
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
+          }
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "piper";
+            packageId = "piper";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "futures-lite";
+            packageId = "futures-lite";
+          }
+        ];
+        features = {
+          "tracing" = [ "dep:tracing" ];
+        };
       };
       "boytacean" = rec {
         crateName = "boytacean";
@@ -9872,9 +10231,11 @@ rec {
         };
         resolvedDefaultFeatures = [
           "alloc"
+          "default"
           "fastrand"
           "futures-io"
           "parking"
+          "race"
           "std"
         ];
       };
@@ -22321,7 +22682,7 @@ rec {
             usesDefaultFeatures = false;
             target = { target, features }: ("linux" == target."os" or null);
             features = [
-              "tokio"
+              "async-io"
               "screencast"
               "camera"
             ];
@@ -37973,6 +38334,52 @@ rec {
         libName = "pin_project_lite";
 
       };
+      "piper" = rec {
+        crateName = "piper";
+        version = "0.2.5";
+        edition = "2018";
+        sha256 = "1hd3j94mw5dwc457gs9ssb2r5b9iipywndf5srqx7pj38jd4fdf8";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+          "John Nunley <dev@notgull.net>"
+        ];
+        dependencies = [
+          {
+            name = "atomic-waker";
+            packageId = "atomic-waker";
+          }
+          {
+            name = "fastrand";
+            packageId = "fastrand";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            optional = true;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "futures-io" = [ "dep:futures-io" ];
+          "portable-atomic" = [
+            "atomic-waker/portable-atomic"
+            "portable_atomic_crate"
+            "portable-atomic-util"
+          ];
+          "portable-atomic-util" = [ "dep:portable-atomic-util" ];
+          "portable_atomic_crate" = [ "dep:portable_atomic_crate" ];
+          "std" = [
+            "fastrand/std"
+            "futures-io"
+          ];
+        };
+        resolvedDefaultFeatures = [
+          "default"
+          "futures-io"
+          "std"
+        ];
+      };
       "pipewire" = rec {
         crateName = "pipewire";
         version = "0.10.1";
@@ -48481,14 +48888,6 @@ rec {
             optional = true;
           }
           {
-            name = "tracing";
-            packageId = "tracing";
-            optional = true;
-            usesDefaultFeatures = false;
-            target = { target, features }: (target."tokio_unstable" or false);
-            features = [ "std" ];
-          }
-          {
             name = "windows-sys";
             packageId = "windows-sys 0.61.2";
             optional = true;
@@ -48611,7 +49010,6 @@ rec {
           "test-util"
           "time"
           "tokio-macros"
-          "tracing"
           "windows-sys"
         ];
       };
@@ -59423,20 +59821,6 @@ rec {
             ];
           }
           {
-            name = "tokio";
-            packageId = "tokio";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [ "tracing" ];
-          }
-          {
-            name = "tokio";
-            packageId = "tokio";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
-            features = [ "tracing" ];
-          }
-          {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
             usesDefaultFeatures = false;
@@ -60894,20 +61278,6 @@ rec {
             ];
           }
           {
-            name = "tokio";
-            packageId = "tokio";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [ "tracing" ];
-          }
-          {
-            name = "tokio";
-            packageId = "tokio";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
-            features = [ "tracing" ];
-          }
-          {
             name = "tokio-rustls";
             packageId = "tokio-rustls";
             usesDefaultFeatures = false;
@@ -62215,6 +62585,26 @@ rec {
             packageId = "async-broadcast";
           }
           {
+            name = "async-executor";
+            packageId = "async-executor";
+            optional = true;
+          }
+          {
+            name = "async-io";
+            packageId = "async-io";
+            optional = true;
+          }
+          {
+            name = "async-lock";
+            packageId = "async-lock";
+            optional = true;
+          }
+          {
+            name = "async-process";
+            packageId = "async-process";
+            optional = true;
+          }
+          {
             name = "async-recursion";
             packageId = "async-recursion";
             target = { target, features }: (target."unix" or false);
@@ -62225,8 +62615,18 @@ rec {
             target = { target, features }: (target."windows" or false);
           }
           {
+            name = "async-task";
+            packageId = "async-task";
+            optional = true;
+          }
+          {
             name = "async-trait";
             packageId = "async-trait";
+          }
+          {
+            name = "blocking";
+            packageId = "blocking";
+            optional = true;
           }
           {
             name = "enumflags2";
@@ -62282,22 +62682,6 @@ rec {
             packageId = "serde_repr";
           }
           {
-            name = "tokio";
-            packageId = "tokio";
-            optional = true;
-            features = [
-              "rt"
-              "rt-multi-thread"
-              "net"
-              "time"
-              "fs"
-              "io-util"
-              "process"
-              "sync"
-              "tracing"
-            ];
-          }
-          {
             name = "tracing";
             packageId = "tracing";
           }
@@ -62346,22 +62730,6 @@ rec {
             features = [ "enumflags2" ];
           }
         ];
-        devDependencies = [
-          {
-            name = "tokio";
-            packageId = "tokio";
-            features = [
-              "macros"
-              "rt-multi-thread"
-              "fs"
-              "io-util"
-              "net"
-              "sync"
-              "time"
-              "test-util"
-            ];
-          }
-        ];
         features = {
           "async-executor" = [ "dep:async-executor" ];
           "async-io" = [
@@ -62402,7 +62770,15 @@ rec {
             "async-io"
           ];
         };
-        resolvedDefaultFeatures = [ "tokio" ];
+        resolvedDefaultFeatures = [
+          "async-executor"
+          "async-fs"
+          "async-io"
+          "async-lock"
+          "async-process"
+          "async-task"
+          "blocking"
+        ];
       };
       "zbus_macros" = rec {
         crateName = "zbus_macros";
