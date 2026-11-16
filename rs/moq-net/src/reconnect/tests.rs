@@ -1315,6 +1315,14 @@ fn each_pacing_knob_turns_off() {
 	assert_eq!(delay, defaults.initial * 1024, "no max leaves the delay uncapped");
 	assert_eq!(pacing.settled(), defaults.healthy);
 
+	// Zero is a real cap, not "uncapped": every redial goes at once.
+	let pacing = Pacing::new(&Backoff {
+		max: Some(Duration::ZERO),
+		..defaults
+	});
+	assert_eq!(pacing.initial, Duration::ZERO);
+	assert_eq!(pacing.next(defaults.initial), Duration::ZERO, "zero max never waits");
+
 	let pacing = Pacing::new(&Backoff {
 		multiplier: 0,
 		..defaults

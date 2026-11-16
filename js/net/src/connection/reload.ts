@@ -21,7 +21,7 @@ import {
 } from "./connect.ts";
 import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
-import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
+import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
@@ -121,7 +121,7 @@ export type ReloadProps = Omit<
 	delay?: ReloadDelay;
 
 	/** How to react to the peer's GOAWAY; every field falls back to its default. */
-	goaway?: GoawayProps;
+	goaway?: Handover;
 };
 
 /**
@@ -304,7 +304,7 @@ export class Reload {
 	delay: ReloadDelay;
 
 	/** How to react to the peer's GOAWAY (not reactive). */
-	goaway: GoawayProps;
+	goaway: Handover;
 
 	/**
 	 * The URL an accepted GOAWAY redirect assigned, or undefined while the loop dials
@@ -769,7 +769,7 @@ export class Reload {
 	 * to go next and leave the old session serving until it drains. Returns false when the
 	 * redirect is refused, which ends the sequence rather than redialing.
 	 */
-	#migrate(connection: Session, dialing: URL, drain: Drain): boolean {
+	#migrate(connection: Session, dialing: URL, drain: Goaway): boolean {
 		// The pin is a WebTransport option. A WebSocket that won the race never used it.
 		const pinned = pinnedTransport(connection.transport, this.#pinned());
 
