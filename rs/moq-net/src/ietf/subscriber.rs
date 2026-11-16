@@ -7691,9 +7691,13 @@ impl FetchRun {
 	/// when the answer covers nothing it can take.
 	fn answered(&self, req: FetchRequest, ok: ietf::FetchOk, timescale: Option<Timescale>) -> FetchRunStep {
 		let (run, last, start) = (self.run.clone(), self.last, self.start);
+		// Draft-23 has no End Location: the answer ends at its LARGEST_OBJECT, inclusive like
+		// draft-22's End Location, or without one at the end this FETCH asked for, the whole
+		// of its last group (section 3.2).
+		let requested = ietf::FetchOk::id(self.this.version) != ietf::FetchOk::ID && ok.largest.is_none();
 		// Draft-22's End Location is inclusive; older drafts spell a bounded object one past it.
 		let mut end = ok.end_location;
-		if self.draft20 {
+		if self.draft20 && !requested {
 			let Some(object) = end.object.checked_add(1) else {
 				return self.refuse(req, run, Error::ProtocolViolation);
 			};
@@ -7702,12 +7706,13 @@ impl FetchRun {
 
 		// Before draft-22, Object 0 covers the whole named group. Legacy answers one
 		// group past it still pass the exclusive comparison below.
-		let whole_last = !self.draft20 && end.group == last && end.object == 0;
+		let whole_last = requested || (!self.draft20 && end.group == last && end.object == 0);
 
 		// Draft-22's answer ends at or after its start and never past the requested end, which
 		// a publisher following section 9.11 cuts at the Largest Object. Validate before accepting a group or letting End of
 		// Track mark where the track ends.
 		if self.draft20
+			&& !requested
 			&& (end.group < run.start || end.group > last || (end.group == run.start && end.object <= start))
 		{
 			let err = Error::ProtocolViolation;
@@ -7822,7 +7827,8 @@ impl Subscriber {
 		let mut data = body.decoder(self.version);
 
 		Poll::Ready(match type_id {
-			ietf::FetchOk::ID => Ok(ietf::FetchOk::decode_msg(&mut data, self.version)?),
+			// FETCH_OK through draft-22, REQUEST_OK from draft-23 on; each refuses the other's.
+			id if id == ietf::FetchOk::id(self.version) => Ok(ietf::FetchOk::decode_msg(&mut data, self.version)?),
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				Err(request::from_code(msg.error_code, request::Kind::Fetch, self.version))
@@ -17660,6 +17666,7 @@ mod joining_fetch_tests {
 			&ietf::FetchOk {
 				end_of_track: false,
 				end_location: ietf::Location { group: 4, object: 2 },
+				largest: None,
 				properties: Default::default(),
 			},
 			version,
@@ -18765,6 +18772,7 @@ mod joining_fetch_tests {
 						group: GROUP,
 						object: 0,
 					},
+					largest: None,
 					properties: Default::default(),
 				},
 				version,
@@ -18924,6 +18932,7 @@ mod joining_fetch_tests {
 					group: GROUP,
 					object: 0,
 				},
+				largest: None,
 				properties: Default::default(),
 			},
 			VERSION,
@@ -18988,6 +18997,7 @@ mod joining_fetch_tests {
 					&ietf::FetchOk {
 						end_of_track,
 						end_location,
+						largest: None,
 						properties: Default::default(),
 					},
 					version,
@@ -19087,6 +19097,7 @@ mod joining_fetch_tests {
 			&ietf::FetchOk {
 				end_of_track: ended,
 				end_location,
+				largest: None,
 				properties: Default::default(),
 			},
 			version,

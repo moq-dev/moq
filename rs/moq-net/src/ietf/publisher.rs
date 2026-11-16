@@ -271,16 +271,7 @@ impl PrepareFetch {
 	/// Judge the range against the track, now that its info resolved.
 	fn judge(&mut self, track: &track::Consumer) -> Result<FetchRange, (Error, String)> {
 		let range = &mut self.range;
-		// The cache's newest object is Largest Object while a live feed writes the track, or once
-		// the track ended at its newest group. A fetch-only copy retains its publisher's report
-		// independently. A joining FETCH ends where its subscription starts instead.
-		let finished = track.final_key();
-		let known =
-			track.is_live() || finished.is_some_and(|end| Some(end) == track.latest_key().map(|latest| latest + 1));
-		let largest = match !self.joined && (known || track.reported_object().is_some()) {
-			true => live_edge(track).largest,
-			false => None,
-		};
+		let largest = fetch_largest(track, self.joined);
 		if let Some(filter) = self.largest_filter {
 			let Some(largest) = largest else {
 				return Err((
@@ -326,6 +317,19 @@ impl PrepareFetch {
 			}
 		}
 		Ok(*range)
+	}
+}
+
+/// The track's Largest Object as a FETCH is answered against it. The cache's newest object
+/// is Largest Object while a live feed writes the track, or once the track ended at its
+/// newest group. A fetch-only copy retains its publisher's report independently. A joining
+/// FETCH ends where its subscription starts instead.
+fn fetch_largest(track: &track::Consumer, joined: bool) -> Option<Location> {
+	let finished = track.final_key();
+	let known = track.is_live() || finished.is_some_and(|end| Some(end) == track.latest_key().map(|latest| latest + 1));
+	match !joined && (known || track.reported_object().is_some()) {
+		true => live_edge(track).largest,
+		false => None,
 	}
 }
 
@@ -5147,6 +5151,13 @@ impl FetchOpen {
 			range.end
 		};
 
+		// Draft-23 (section 3.2) names the Largest Object when the requested range reaches it,
+		// and the answer then ends there. A one-group range reaches it only in the group that
+		// holds it, read past it.
+		let largest = fetch_largest(&track, joined)
+			.filter(|_| ietf::FetchOk::id(version) != ietf::FetchOk::ID)
+			.filter(|largest| largest.group == key && until.is_none_or(|until| largest.object < until));
+
 		// Capped only where the range ends inside the group: a finished group read to its end
 		// has nothing missing.
 		let slice = GroupSlice {
@@ -5159,15 +5170,17 @@ impl FetchOpen {
 			Err(err) => return self.reject(&err, &err.to_string()),
 		};
 
-		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
-		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
-		// requests it answers without ever naming this one.
+		// FETCH_OK through draft-22, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK
+		// or REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the
+		// other requests it answers without naming this one. Draft-23 reserves FETCH_OK's type
+		// and answers with REQUEST_OK (section 9.3), which `FetchOk` encodes as.
 		self.state = FetchState::Answer {
 			admitted,
 			track,
 			ok: Some(ietf::FetchOk {
 				end_of_track,
 				end_location,
+				largest,
 				properties,
 			}),
 			start: range.start,
@@ -5381,7 +5394,9 @@ impl FetchOpen {
 							break 'ok Err(Error::Unauthorized);
 						}
 						if let Some(ok) = ok.take()
-							&& let Err(err) = stream.writer.buffer_message(ietf::FetchOk::ID, &ok)
+							&& let Err(err) = stream
+								.writer
+								.buffer_message(ietf::FetchOk::id(self.publisher.version), &ok)
 						{
 							break 'ok Err(err);
 						}

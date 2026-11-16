@@ -325,19 +325,50 @@ impl<'a> Message<'a> for Fetch<'a> {
 	}
 }
 
+/// The answer to a FETCH: the FETCH_OK message (0x18) through draft-22, and a REQUEST_OK
+/// (0x07) from draft-23 on, which the draft still calls FETCH_OK (section 9.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchOk {
+	/// Through draft-22 only: draft-23 has no such field.
 	pub end_of_track: bool,
 	/// Draft 18 uses the last object plus one, or Object 0 for the whole End Group;
-	/// draft 22 and later use an inclusive End Location.
+	/// draft 22 uses an inclusive End Location. Draft-23 has no such field: the answer ends
+	/// at [`Self::largest`] when that is set, and at the requested End Location otherwise
+	/// (section 3.2), so a decoded one holds [`Self::largest`] or a zero placeholder here.
 	pub end_location: Location,
+	/// Draft-23's LARGEST_OBJECT parameter: the track's Largest Object, a MUST when it is
+	/// within the requested range, where the answer then ends (section 3.2). Not on the
+	/// wire before draft-23.
+	pub largest: Option<Location>,
 	/// The track's properties, as SUBSCRIBE_OK carries them.
 	pub properties: super::Properties,
 }
+
+impl FetchOk {
+	/// The message type answering a FETCH: its own FETCH_OK through draft-22, and
+	/// REQUEST_OK from draft-23 on, where 0x18 is reserved (section 9).
+	pub fn id(version: Version) -> u64 {
+		match Self::is_request_ok(version) {
+			true => super::RequestOk::ID,
+			false => Self::ID,
+		}
+	}
+
+	fn is_request_ok(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
+}
+
 impl<'a> Message<'a> for FetchOk {
 	const ID: u64 = 0x18;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		if Self::is_request_ok(version) {
+			// REQUEST_OK: the parameters, then the Track Properties to the end of the message.
+			encode_params!(w, version, 0x09 => self.largest);
+			self.properties.encode(w, version)?;
+			return Ok(());
+		}
 		// GROUP_ORDER is not a legal FETCH_OK parameter; the order of the response is
 		// whatever the FETCH asked for.
 		w.bool(self.end_of_track);
@@ -349,6 +380,20 @@ impl<'a> Message<'a> for FetchOk {
 	}
 
 	fn decode_msg(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		if Self::is_request_ok(version) {
+			// EXPIRES is read and ignored, like SUBSCRIBE_OK's.
+			decode_params!(buf, version,
+				0x08 => _expires: Option<u64>,
+				0x09 => largest: Option<Location>,
+			);
+			let properties = super::Properties::decode(buf, version)?;
+			return Ok(Self {
+				end_of_track: false,
+				end_location: largest.unwrap_or(Location { group: 0, object: 0 }),
+				largest,
+				properties,
+			});
+		}
 		let end_of_track = buf.bool()?;
 		let end_location = Location::decode(buf, version)?;
 		// FETCH_OK lists no parameters, so any closes the session.
@@ -360,6 +405,7 @@ impl<'a> Message<'a> for FetchOk {
 		Ok(Self {
 			end_of_track,
 			end_location,
+			largest: None,
 			properties,
 		})
 	}
@@ -634,6 +680,7 @@ mod tests {
 		let msg = FetchOk {
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			largest: None,
 			properties: Default::default(),
 		};
 
@@ -651,6 +698,7 @@ mod tests {
 		let msg = FetchOk {
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			largest: None,
 			properties: Default::default(),
 		};
 
@@ -662,6 +710,62 @@ mod tests {
 			0, // zero message parameters
 		];
 		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+	}
+
+	/// Draft-23 (section 9.3) answers a FETCH with REQUEST_OK: the parameters, then the Track
+	/// Properties, with no End Of Track or End Location. Drafts 18 to 22 keep FETCH_OK, and
+	/// never write the Largest Object.
+	#[test]
+	fn fetch_ok_is_a_request_ok_at_draft23() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(FetchOk::id(version), 0x18, "{version:?}");
+		}
+		assert_eq!(FetchOk::id(Version::Draft23), 0x07);
+
+		let msg = FetchOk {
+			end_of_track: false,
+			end_location: Location { group: 5, object: 3 },
+			largest: Some(Location { group: 5, object: 3 }),
+			properties: Default::default(),
+		};
+		#[rustfmt::skip]
+		let expected = vec![
+			1, // one message parameter
+			0x09, 5, 3, // LARGEST_OBJECT = 5/3
+		];
+		assert_eq!(encode_message(&msg, Version::Draft23), expected);
+		let decoded: FetchOk = decode_message(&expected, Version::Draft23).unwrap();
+		assert_eq!(decoded, msg);
+
+		// Draft-22 writes its own fields, and nothing of the Largest Object.
+		assert_eq!(encode_message(&msg, Version::Draft22), vec![0, 5, 3, 0]);
+
+		// An answer that ends at the requested End Location names no Largest Object.
+		let bounded = FetchOk { largest: None, ..msg };
+		assert_eq!(encode_message(&bounded, Version::Draft23), vec![0]);
+		let decoded: FetchOk = decode_message(&[0], Version::Draft23).unwrap();
+		assert_eq!(decoded.largest, None);
+		assert!(!decoded.end_of_track);
+	}
+
+	/// A draft-23 answer may carry EXPIRES, which is read and dropped; any parameter the
+	/// draft does not list for it is refused, since none can be skipped (section 9.19).
+	#[test]
+	fn fetch_ok_reads_expires_and_refuses_the_rest_at_draft23() {
+		#[rustfmt::skip]
+		let body = [
+			2, // two message parameters
+			0x08, 5, // EXPIRES = 5
+			0x01, 7, 0, // LARGEST_OBJECT (0x09) = 7/0
+		];
+		let decoded: FetchOk = decode_message(&body, Version::Draft23).unwrap();
+		assert_eq!(decoded.largest, Some(Location { group: 7, object: 0 }));
+
+		// GROUP_ORDER (0x22) is not a FETCH_OK parameter.
+		assert!(matches!(
+			decode_message::<FetchOk>(&[1, 0x22, 1], Version::Draft23),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	/// The head of a draft-22 FETCH up to its Number of Parameters: Request ID 1, Track
