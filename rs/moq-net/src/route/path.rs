@@ -45,8 +45,9 @@
 //! SYNCED for each. At the marker both sides rekey the stream's routes alike
 //! ([`rekey`]): a route inside a prefix both sets cover stays, a route at a
 //! removed prefix that an added one widens moves to the wider prefix with its
-//! claims, and a wider route carries its claims and floor to each added prefix
-//! inside it. So a swap re-sends nothing both sets cover.
+//! claims, unless its sender marked it as lying at its own prefix, and a wider
+//! route carries its claims and floor to each added prefix inside it. So a swap
+//! re-sends nothing both sets cover.
 //!
 //! A node sends a neighbour one edit at a time: the next waits for the marker
 //! answering the last, so neither side holds more than one edit in flight.
@@ -829,8 +830,9 @@ fn preferred<A, T: Carries<A>>(a: &T, b: &T, receiver: Id) -> bool {
 /// was heard, so they stay in step and nothing both sets cover is sent again.
 /// `receiver` names the stream's receiving node.
 ///
-/// A route inside a prefix the new set covers stays. A route at a removed prefix
-/// that an added prefix widens moves to the wider prefix, with the claim presented
+/// A route inside a prefix the new set covers stays, and so does one at a removed
+/// prefix that is its own (`exact`), as its ROUTE_START said. A route at a removed
+/// prefix that an added prefix widens moves to the wider prefix, with the claim presented
 /// at the removed prefix and every floor gone, since that claim may stand for a
 /// broader one and the floors certified only the narrower prefix. A route at a
 /// removed prefix is carried, as presented there, to each added prefix inside it,
@@ -846,6 +848,7 @@ fn rekey<A: Clone + Eq, T: Carries<A>>(
 	new: &BTreeSet<Path>,
 	routes: BTreeMap<RouteId, T>,
 	receiver: Id,
+	exact: &BTreeSet<RouteId>,
 ) -> Rekeyed<T> {
 	let mut kept: BTreeMap<RouteId, T> = BTreeMap::new();
 	let mut gone = Vec::new();
@@ -857,7 +860,7 @@ fn rekey<A: Clone + Eq, T: Carries<A>>(
 			gone.push(key.clone());
 			continue;
 		};
-		if within_any(prefix, new) && (new.contains(&region) || *prefix != region) {
+		if within_any(prefix, new) && (new.contains(&region) || *prefix != region || exact.contains(key)) {
 			kept.insert(key.clone(), route.clone());
 			continue;
 		}
@@ -1173,7 +1176,9 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				}
 				self.unreflect(neighbor, key, &sent.src);
 			}
-			let rekeyed = rekey(&old, &new, tx.clone(), self.hop_of(neighbor));
+			// This node marks no route it sends exact: its own edits move a route at a
+			// removed prefix up, whatever prefix it is filed at.
+			let rekeyed = rekey(&old, &new, tx.clone(), self.hop_of(neighbor), &BTreeSet::new());
 			// A child that learned a route this stream no longer carries under its key
 			// may still owe an answer to the route it reflected.
 			let rx = self.listen(neighbor);
@@ -1668,7 +1673,15 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 	/// `from` sent the marker for this node's oldest edit in flight: the edit takes
 	/// effect, and the routes `from` sent are rekeyed as it rekeyed them ([`rekey`]).
 	/// A marker with no edit in flight is ignored.
+	#[cfg(any(test, feature = "fuzz"))]
 	pub fn edited(&mut self, from: N) {
+		self.edited_exact(from, &BTreeSet::new());
+	}
+
+	/// [`Self::edited`], where each route in `exact`, by the Node ID `from` names and
+	/// its prefix, lies at its own prefix as its ROUTE_START said, so it stays there
+	/// when the edit widens the prefix it was requested under.
+	pub fn edited_exact(&mut self, from: N, exact: &BTreeSet<RouteId>) {
 		let Some(session) = self.sessions.get_mut(&from) else {
 			return;
 		};
@@ -1691,10 +1704,18 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 			.iter()
 			.map(|key| (key.clone(), self.rx[key][&from].clone()))
 			.collect();
+		// Filed under this node's names for them.
+		let exact: BTreeSet<RouteId> = (keys.iter())
+			.filter(|(id, prefix)| {
+				let named = self.filed.get(&(*id, from)).copied().unwrap_or(*id);
+				exact.contains(&(named, prefix.clone()))
+			})
+			.cloned()
+			.collect();
 		for key in &keys {
 			self.forget_heard(key, from);
 		}
-		let rekeyed = rekey(&old, &new, heard, self.hop);
+		let rekeyed = rekey(&old, &new, heard, self.hop, &exact);
 		for (key, heard) in rekeyed.routes {
 			self.hear(key, from, heard);
 		}

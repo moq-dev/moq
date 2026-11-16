@@ -232,7 +232,7 @@ export class Answer {
 				claims.set(path, id);
 				snaps.set(id, snap);
 			}
-			table.set(sent.id, { node: sent.node, prefix, region: prefix, order, claims });
+			table.set(sent.id, { node: sent.node, prefix, region: prefix, exact: false, order, claims });
 			sources.set(sent.id, sent);
 		}
 		const plan = rekey.plan(old, next, added, table, this.#nextRoute, this.#nextAnnounce);
@@ -340,12 +340,14 @@ export class Answer {
 			if (!route) {
 				route = { id: this.#nextRoute++, node: identity.node, live: new Map() };
 				this.#routes.set(prefix.path, route);
-				// The origin's own route covers every path, so the requested prefix too.
+				// The origin's own route covers every path, so the requested prefix too, from above
+				// it: not exact.
 				msgs.push({
 					status: "routeStart",
 					node: identity.node,
 					prefix: id,
 					suffix: Path.empty(),
+					exact: false,
 					offer: this.#offer(),
 				});
 			}

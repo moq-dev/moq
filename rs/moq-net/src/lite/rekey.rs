@@ -37,6 +37,9 @@ pub(crate) struct Route {
 	pub prefix: Path,
 	/// The requested prefix it lies in.
 	pub region: Path,
+	/// It lies at its own prefix, which its ROUTE_START said is the requested prefix, so
+	/// a widening leaves it there rather than moving it up.
+	pub exact: bool,
 	pub order: Order,
 	/// The Announce ID of each of its live claims with a path.
 	pub claims: BTreeMap<Path, u64>,
@@ -74,6 +77,9 @@ pub(crate) struct Carried {
 	pub kind: Kind,
 	pub prefix: Path,
 	pub region: Path,
+	/// It lies at its own prefix: one that stays keeps it, and one that widens or
+	/// narrows is presented at a prefix that is not its own.
+	pub exact: bool,
 	pub claims: BTreeMap<Path, Claim>,
 }
 
@@ -104,7 +110,8 @@ pub(crate) fn plan(
 	for (id, route) in routes {
 		debug_assert!(old.contains(&route.region), "a route lies in a requested prefix");
 		let covered = region(&route.prefix).is_some();
-		if covered && (new.contains(&route.region) || route.prefix != route.region) {
+		// A route at its own prefix stays there, as one strictly inside the region does.
+		if covered && (new.contains(&route.region) || route.prefix != route.region || route.exact) {
 			stays.insert((route.node, route.prefix.clone()), *id);
 		} else if let Some(wider) = region(&route.region) {
 			widening.entry((route.node, wider)).or_default().push(*id);
@@ -140,6 +147,7 @@ pub(crate) fn plan(
 			kind: Kind::Widens,
 			prefix: wider.clone(),
 			region: wider,
+			exact: false,
 			claims,
 		};
 		carried.insert(winner, route);
@@ -178,6 +186,7 @@ pub(crate) fn plan(
 			kind: Kind::Narrows,
 			prefix: inside.clone(),
 			region: inside,
+			exact: false,
 			claims,
 		};
 		carried.insert(id, route);
@@ -190,6 +199,7 @@ pub(crate) fn plan(
 			kind: Kind::Stays,
 			region: region(&prefix).expect("a route that stays is covered"),
 			prefix,
+			exact: route.exact,
 			claims: kept(&route.claims),
 		};
 		carried.insert(id, route);
@@ -221,6 +231,7 @@ mod tests {
 			node,
 			prefix: path(prefix),
 			region: path(region),
+			exact: false,
 			order,
 			claims: claims.iter().map(|(p, id)| (path(p), *id)).collect(),
 		}
@@ -306,5 +317,56 @@ mod tests {
 				(2, 2, Kind::Stays, "b".to_string())
 			]
 		);
+	}
+
+	/// A route at its own prefix stays there when an edit widens the prefix it was
+	/// requested under, keeping its id, claims, and floor, while a route presented there
+	/// because it covers it widens. Narrowed, it is presented below its own prefix.
+	#[test]
+	fn an_exact_route_stays_at_its_own_prefix() {
+		let exact = |route: Route| Route { exact: true, ..route };
+		let routes = BTreeMap::from([
+			(0, exact(route(7, "a/b", "a/b", BEST, &[("a/b", 0), ("a/b/x", 1)]))),
+			(1, route(8, "a/b", "a/b", BEST, &[("a/b", 2), ("a/b/y", 3)])),
+		]);
+		let planned = plan(&set(&["a/b"]), &set(&["a"]), &[path("a")], &routes, 2, 4);
+		assert_eq!(
+			ids(&planned),
+			vec![
+				(0, 0, Kind::Stays, "a/b".to_string()),
+				(1, 1, Kind::Widens, "a".to_string())
+			]
+		);
+		let stays = &planned.routes[0];
+		assert_eq!((stays.region.clone(), stays.exact), (path("a"), true));
+		assert_eq!(
+			stays.claims,
+			BTreeMap::from([
+				(path("a/b"), Claim { id: 0, from: 0 }),
+				(path("a/b/x"), Claim { id: 1, from: 1 })
+			])
+		);
+		assert!(!planned.routes[1].exact);
+
+		// Asked at its own prefix again, it lies there exactly once more.
+		let routes = BTreeMap::from([(
+			0,
+			Route {
+				region: path("a"),
+				..exact(route(7, "a/b", "a", BEST, &[]))
+			},
+		)]);
+		let planned = plan(&set(&["a"]), &set(&["a/b"]), &[path("a/b")], &routes, 2, 4);
+		assert_eq!(ids(&planned), vec![(0, 0, Kind::Stays, "a/b".to_string())]);
+		assert_eq!(
+			(planned.routes[0].region.clone(), planned.routes[0].exact),
+			(path("a/b"), true)
+		);
+
+		// Narrowed, it covers the narrower prefix from its own.
+		let routes = BTreeMap::from([(0, exact(route(7, "a/b", "a/b", BEST, &[("a/b", 0)])))]);
+		let planned = plan(&set(&["a/b"]), &set(&["a/b/c"]), &[path("a/b/c")], &routes, 1, 1);
+		assert_eq!(ids(&planned), vec![(1, 0, Kind::Narrows, "a/b/c".to_string())]);
+		assert!(!planned.routes[0].exact);
 	}
 }

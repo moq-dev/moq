@@ -1105,7 +1105,7 @@ impl Node {
 	#[cfg(test)]
 	pub fn receive(&self, peer: Peer, link: Link) -> Result<Stream, Error> {
 		let stream = self.connect(peer, link)?;
-		stream.edited();
+		stream.edited(BTreeSet::new());
 		Ok(stream)
 	}
 
@@ -1275,8 +1275,10 @@ impl Stream {
 	}
 
 	/// ANNOUNCE_OK: this node's last edit of what it asks the peer for takes effect.
-	pub fn edited(&self) {
-		self.with(|router, key, _| router.edited(key));
+	/// Each route in `exact`, by the Node ID the peer names and its prefix, lies at its
+	/// own prefix, so a widening leaves it there.
+	pub fn edited(&self, exact: BTreeSet<(Id, Path)>) {
+		self.with(|router, key, _| router.edited_exact(key, &exact));
 	}
 
 	/// Replace the session's link: what this node asks the peer for follows its interest

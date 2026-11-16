@@ -15,6 +15,7 @@ function route(node: bigint, prefix: string, region: string, rank: Order, claims
 		node,
 		prefix: Path.from(prefix),
 		region: Path.from(region),
+		exact: false,
 		order: rank,
 		claims: new Map(claims.map(([path, id]) => [Path.from(path), id])),
 	};
@@ -126,4 +127,49 @@ test("a route ranks unheld, then off the subscriber's path, then by its offer", 
 			expect(Math.sign(compare(ranked[i], ranked[j]))).toBe(Math.sign(i - j));
 		}
 	}
+});
+
+test("an exact route stays at its own prefix", () => {
+	const exact = (r: Route): Route => ({ ...r, exact: true });
+	let routes = new Map([
+		[
+			0n,
+			exact(
+				route(7n, "a/b", "a/b", BEST, [
+					["a/b", 0n],
+					["a/b/x", 1n],
+				]),
+			),
+		],
+		[
+			1n,
+			route(8n, "a/b", "a/b", BEST, [
+				["a/b", 2n],
+				["a/b/y", 3n],
+			]),
+		],
+	]);
+	let carried = plan(set("a/b"), set("a"), [Path.from("a")], routes, 2n, 4n);
+	expect(ids(carried)).toEqual([
+		[0n, 0n, "stays", "a/b"],
+		[1n, 1n, "widens", "a"],
+	]);
+	expect([carried.routes[0].region, carried.routes[0].exact]).toEqual([Path.from("a"), true]);
+	expect(claims(carried, 0)).toEqual([
+		["a/b", 0n, 0n],
+		["a/b/x", 1n, 1n],
+	]);
+	expect(carried.routes[1].exact).toBe(false);
+
+	// Asked at its own prefix again, it lies there exactly once more.
+	routes = new Map([[0n, exact(route(7n, "a/b", "a", BEST, []))]]);
+	carried = plan(set("a"), set("a/b"), [Path.from("a/b")], routes, 2n, 4n);
+	expect(ids(carried)).toEqual([[0n, 0n, "stays", "a/b"]]);
+	expect([carried.routes[0].region, carried.routes[0].exact]).toEqual([Path.from("a/b"), true]);
+
+	// Narrowed, it covers the narrower prefix from its own.
+	routes = new Map([[0n, exact(route(7n, "a/b", "a/b", BEST, [["a/b", 0n]]))]]);
+	carried = plan(set("a/b"), set("a/b/c"), [Path.from("a/b/c")], routes, 1n, 1n);
+	expect(ids(carried)).toEqual([[1n, 0n, "narrows", "a/b/c"]]);
+	expect(carried.routes[0].exact).toBe(false);
 });

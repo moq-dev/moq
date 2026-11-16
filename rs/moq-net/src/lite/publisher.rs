@@ -3790,26 +3790,77 @@ mod announce_test {
 		assert_eq!(again[0], lite::AnnounceBroadcast::Ok);
 		assert!(!ends(&again), "{again:?}");
 
-		// Widened past the mount point, the mount's stream stays, and its route, which
-		// both ends widened off its own prefix, is started again there in the same answer.
+		// Widened past the mount point, the mount's stream stays, and so does its route,
+		// which its ROUTE_START marked as lying at its own prefix: nothing ends or starts.
 		answer
 			.request(false, vec![1], vec![(crate::Path::empty(), true)])
 			.unwrap();
 		kio::clock::sim::yield_now().await;
 		let wider = sent(&mut answer);
-		assert_eq!(wider[0], lite::AnnounceBroadcast::Ok);
-		assert!(
-			!wider
-				.iter()
-				.any(|msg| matches!(msg, lite::AnnounceBroadcast::EndedId { .. })),
-			"{wider:?}"
+		assert_eq!(
+			wider,
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 2 }
+			]
 		);
-		assert!(
-			wider
-				.iter()
-				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { .. })),
-			"{wider:?}"
+	}
+
+	/// A lite-07 mount's route at its mount point, asked for exactly there, starts
+	/// marked exact, and a route the session's own key presents there is not.
+	#[kio::test]
+	async fn a_lite07_mount_point_route_starts_exact() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin
+			.announce("tenant-a/public/cam", origin::RouteInfo::new())
+			.unwrap();
+		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
+			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let _own = origin.announce("tenant-b/own", origin::RouteInfo::new()).unwrap();
+		let mut answer = super::routed::Answer::alone(consumer);
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
 		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		let starts = |msgs: &[lite::AnnounceBroadcast]| -> Vec<(u64, bool)> {
+			(msgs.iter())
+				.filter_map(|msg| match msg {
+					lite::AnnounceBroadcast::RouteStart { prefix, exact, .. } => Some((*prefix, *exact)),
+					_ => None,
+				})
+				.collect()
+		};
+		answer
+			.request(
+				false,
+				Vec::new(),
+				vec![
+					(crate::Path::from_static("shared"), false),
+					(crate::Path::from_static("own"), false),
+				],
+			)
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut first = sent(&mut answer);
+		kio::clock::sim::yield_now().await;
+		first.extend(sent(&mut answer));
+		let mut starts = starts(&first);
+		starts.sort_unstable();
+		assert_eq!(starts, [(0, true), (1, false)], "{first:?}");
 	}
 
 	/// A lite-07 stream holds a route on the wire only while it shows one of the

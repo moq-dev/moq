@@ -45,77 +45,98 @@
 		"name": "a Route Offer counting more hops than its body holds is malformed, though a count past the hop limit is otherwise refused as content",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "064a07000083e80100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f0020002100008001",
+		"hex": "064b0700000083e80100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f0020002100008001",
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE_START names its publisher, Prefix ID, suffix, and offer: a path of node and session hops, then flags, priority, and metric",
+		"name": "a ROUTE_START names its publisher, Prefix ID, suffix, whether the route is exact, and offer: a path of node and session hops, then flags, priority, and metric",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060c923400000207000903018005",
+		"hex": "060d92340000000207000903018005",
 		"expect": "decoded"
 	},
 	{
 		"name": "a ROUTE_START's suffix extends the requested prefix",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060b923400016101090000ff00",
+		"hex": "060c92340001610001090000ff00",
 		"expect": "decoded"
+	},
+	{
+		"name": "a ROUTE_START's Exact marks a route at the requested prefix whose own prefix it is",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "060d92340000010207000903018005",
+		"expect": "decoded"
+	},
+	{
+		"name": "a ROUTE_START marking a route below the requested prefix Exact is malformed",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "060c92340001610101090000ff00",
+		"expect": "refused"
+	},
+	{
+		"name": "a ROUTE_START's Exact other than 0 or 1 is malformed",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "060d92340000020207000903018005",
+		"expect": "refused"
 	},
 	{
 		"name": "a Route Offer's 0x2 flag marks a path through a draining node",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060a92340000010900027f03",
+		"hex": "060b9234000000010900027f03",
 		"expect": "decoded"
 	},
 	{
 		"name": "a Route Offer flag no version defines is withdrawn, with whatever field it adds",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060b923400000109000880032a",
+		"hex": "060c92340000000109000880032a",
 		"expect": "withdrawn"
 	},
 	{
 		"name": "a Route Offer with more than 32 hops is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "064a92340000210100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f0020002100008001",
+		"hex": "064b9234000000210100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f0020002100008001",
 		"expect": "withdrawn"
 	},
 	{
 		"name": "a Route Offer with no hops is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "06089234000000008001",
+		"hex": "0609923400000000008001",
 		"expect": "refused"
 	},
 	{
 		"name": "a Route Offer missing a hop it counts is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060a92340000030700008003",
+		"hex": "060b9234000000030700008003",
 		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE_START naming Node ID 0 is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0609000000010700008001",
+		"hex": "060a00000000010700008001",
 		"expect": "withdrawn"
 	},
 	{
 		"name": "a Route Offer hop naming Node ID 0 is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060a92340000010000008001",
+		"hex": "060b9234000000010000008001",
 		"expect": "withdrawn"
 	},
 	{
 		"name": "a ROUTE_START suffix no path spells is withdrawn",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "060d923400032f2f78010700008001",
+		"hex": "060e923400032f2f7800010700008001",
 		"expect": "withdrawn"
 	},
 	{

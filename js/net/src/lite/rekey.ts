@@ -46,6 +46,9 @@ export interface Route {
 	prefix: Path.Valid;
 	/** The requested prefix it lies in. */
 	region: Path.Valid;
+	/** It lies at its own prefix, which its ROUTE_START said is the requested prefix, so a widening
+	 * leaves it there rather than moving it up. */
+	exact: boolean;
 	order: Order;
 	/** The Announce ID of each of its live claims with a path. */
 	claims: ReadonlyMap<Path.Valid, bigint>;
@@ -72,6 +75,9 @@ export interface Carried {
 	kind: Kind;
 	prefix: Path.Valid;
 	region: Path.Valid;
+	/** It lies at its own prefix: one that stays keeps it, and one that widens or narrows is
+	 * presented at a prefix that is not its own. */
+	exact: boolean;
 	claims: Map<Path.Valid, Claim>;
 }
 
@@ -111,11 +117,12 @@ export function plan(
 	const widening = new Map<string, { wider: Path.Valid; sources: bigint[] }>();
 	const narrowing: { from: bigint; inside: Path.Valid }[] = [];
 	for (const id of ids) {
-		const { node, prefix, region: lies } = route(id);
+		const { node, prefix, region: lies, exact } = route(id);
 		if (!old.has(lies)) throw new Error("a route lies in a requested prefix");
 		const covered = region(prefix) !== undefined;
 		const wider = region(lies);
-		if (covered && (next.has(lies) || prefix !== lies)) {
+		// A route at its own prefix stays there, as one strictly inside the region does.
+		if (covered && (next.has(lies) || prefix !== lies || exact)) {
 			stays.set(key(node, prefix), id);
 		} else if (wider !== undefined) {
 			const entry = widening.get(key(node, wider));
@@ -139,7 +146,15 @@ export function plan(
 			const source = route(id);
 			for (const [path, claim] of kept(source.claims)) if (path !== source.prefix) claims.set(path, claim);
 		}
-		carried.set(winner, { id: winner, from: winner, kind: "widens", prefix: wider, region: wider, claims });
+		carried.set(winner, {
+			id: winner,
+			from: winner,
+			kind: "widens",
+			prefix: wider,
+			region: wider,
+			exact: false,
+			claims,
+		});
 	}
 	for (const { from, inside } of narrowing) {
 		const source = route(from);
@@ -162,13 +177,13 @@ export function plan(
 			claims.set(inside, { id, from: above[1] });
 		}
 		const id = nextRoute++;
-		carried.set(id, { id, from, kind: "narrows", prefix: inside, region: inside, claims });
+		carried.set(id, { id, from, kind: "narrows", prefix: inside, region: inside, exact: false, claims });
 	}
 	for (const id of stays.values()) {
-		const { prefix, claims } = route(id);
+		const { prefix, exact, claims } = route(id);
 		const lies = region(prefix);
 		if (lies === undefined) throw new Error("a route that stays is covered");
-		carried.set(id, { id, from: id, kind: "stays", prefix, region: lies, claims: new Map(kept(claims)) });
+		carried.set(id, { id, from: id, kind: "stays", prefix, region: lies, exact, claims: new Map(kept(claims)) });
 	}
 	return {
 		routes: [...carried.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),

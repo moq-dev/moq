@@ -452,8 +452,13 @@ test("the route layer round-trips on draft-07", async () => {
 	const cases: [AnnounceBroadcast, number[]][] = [
 		// The path first, the publisher first, then flags, priority (offset by 128), and metric.
 		[
-			{ status: "routeStart", node: 0x1234n, prefix: 3n, suffix: Path.empty(), offer },
-			[6, 12, 0x92, 0x34, 3, 0, 2, 7, 0, 9, 2, 1, 128, 5],
+			{ status: "routeStart", node: 0x1234n, prefix: 3n, suffix: Path.empty(), exact: false, offer },
+			[6, 13, 0x92, 0x34, 3, 0, 0, 2, 7, 0, 9, 2, 1, 128, 5],
+		],
+		// Exact: a route at the requested prefix whose own prefix it is.
+		[
+			{ status: "routeStart", node: 7n, prefix: 0n, suffix: Path.empty(), exact: true, offer: one },
+			[6, 10, 7, 0, 0, 1, 1, 7, 0, 0, 128, 0],
 		],
 		// Flag 0x2: a node on the path drains.
 		[
@@ -549,7 +554,9 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	};
 	const encode = (msg: AnnounceBroadcast) => bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
 	// No node sends an offer it would refuse.
-	await expect(encode({ status: "routeStart", node: 0n, prefix: 0n, suffix: Path.empty(), offer })).rejects.toThrow();
+	await expect(
+		encode({ status: "routeStart", node: 0n, prefix: 0n, suffix: Path.empty(), exact: false, offer }),
+	).rejects.toThrow();
 	await expect(encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: [] } })).rejects.toThrow();
 	await expect(
 		encode({ status: "routeUpdate", id: 0n, offer: { ...offer, path: [{ node: 0n, session: 0n }] } }),
@@ -584,6 +591,8 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 			await w.u62(node);
 			await w.u62(5n);
 			await w.u53(0);
+			// Not exact.
+			await w.u8(0);
 			await w.u62(BigInt(path.length));
 			for (const hop of path) {
 				await w.u62(hop);
@@ -599,7 +608,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	const path = [{ node: 1n, session: 0n }];
 	expect(await decode(await start(0n, [1n], 0))).toEqual({
 		status: "refused",
-		message: { kind: "routeStart", node: 0n, prefix: 5n, suffix: Path.empty(), path },
+		message: { kind: "routeStart", node: 0n, prefix: 5n, suffix: Path.empty(), exact: false, path },
 		reason: "node",
 	});
 	expect(await decode(await start(1n, [0n], 0))).toMatchObject({ status: "refused", reason: "node" });
@@ -607,7 +616,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	for (const flags of [4, 8]) {
 		expect(await decode(await start(1n, [1n], flags))).toEqual({
 			status: "refused",
-			message: { kind: "routeStart", node: 1n, prefix: 5n, suffix: Path.empty(), path },
+			message: { kind: "routeStart", node: 1n, prefix: 5n, suffix: Path.empty(), exact: false, path },
 			reason: "flags",
 		});
 	}
@@ -622,6 +631,30 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	expect(kept.message.path).toHaveLength(ROUTE_MAX_HOPS + 1);
 	// An empty path is the sender's own error: it names itself last.
 	await expect(decode(await start(1n, [], 0))).rejects.toThrow(ProtocolViolation);
+	// Only a route at the requested prefix itself is exact, and Exact is a boolean.
+	await expect(
+		encode({ status: "routeStart", node: 1n, prefix: 0n, suffix: Path.from("room"), exact: true, offer }),
+	).rejects.toThrow();
+	const exact = (suffix: string, flag: number) =>
+		forged(6, async (w) => {
+			await w.u62(1n);
+			await w.u62(0n);
+			await w.string(suffix);
+			await w.u8(flag);
+			await w.u62(1n);
+			await w.u62(1n);
+			await w.u62(0n);
+			await w.u8(0);
+			await w.u8(128);
+			await w.u62(0n);
+		});
+	for (const [suffix, flag] of [
+		["room", 1],
+		["x//y", 1],
+		["", 2],
+	] as const) {
+		await expect(decode(await exact(suffix, flag))).rejects.toThrow();
+	}
 
 	// A DEAD counts the ROUTE_UPDATEs that follow, each refused on its own.
 	const dead = await forged(15, async (w) => {

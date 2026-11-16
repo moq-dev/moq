@@ -444,7 +444,7 @@ Until then the publisher's messages answer the set before it, so they may still 
 At the ANNOUNCE_OK both endpoints carry the stream's live routes over to the new set alike, so the publisher sends nothing again that both sets cover.
 Each route lies in one prefix of the old set, and in Route ID order:
 
-- It stays when the new set covers its prefix, and either the old prefix it lies in is in the new set or the route lies strictly below that old prefix.
+- It stays when the new set covers its prefix, and the old prefix it lies in is in the new set, the route lies strictly below that old prefix, or its ROUTE_START set `Exact`.
 - Otherwise, when an added prefix is above the old prefix it lies in, it widens: it becomes its origin node's route at that added prefix, without the claim at its own prefix, and certifies nothing until its next ANNOUNCE_FLOOR.
 - Otherwise, when it lies at the old prefix itself, it narrows: for each added prefix below it, in the order the ANNOUNCE_REQUEST added them, it becomes a route of its origin node at that prefix, with its claims strictly below that prefix and, at that prefix itself, its most specific claim at or above it. Each keeps its last floor.
 - Otherwise it ends, as on ROUTE_END.
@@ -454,6 +454,7 @@ Of the routes that would share one, the one that remains is the first of: one th
 A widened route that remains takes the claims of the widened routes that do not, and every other route that does not remain ends.
 
 A route that stays or widens keeps its Route ID, and its claims keep their Announce IDs.
+A route that stays keeps its `Exact`; a widened or narrowed route lies at a prefix that is not its own, as one whose `Exact` is 0.
 Each narrowed route that remains is assigned the next Route ID, in the order above; its claims keep their Announce IDs, except that its claim at its prefix is assigned the next Announce ID when the claim it comes from lies above it.
 Whether a Route Suffix, a Route Offer, or a claim's path is refused (see [Refused Content](#refused-content)) depends only on what the publisher sent and the requested prefixes, so both endpoints carry the routes over alike and assign the same Route IDs and Announce IDs: a route whose Route Suffix is refused is carried as one at its requested prefix, a refused Route Offer ranks after every other, and a claim whose path is refused is not among its route's claims.
 A path the subscriber cannot hold for a limit of its own, such as one it joins beneath a local root, is carried as the stream names it.
@@ -1294,6 +1295,7 @@ ROUTE_START Message {
   Node ID (i),
   Prefix ID (i),
   Route Suffix (s),
+  Exact (8),
   Route Offer (..),
 }
 ~~~
@@ -1311,6 +1313,11 @@ The requested prefix the route lies in: the Prefix ID an Add of the peer's ANNOU
 **Route Suffix**:
 The route's prefix, relative to that requested prefix: the route covers the requested prefix joined with it, and is empty for a route at the requested prefix itself.
 A suffix that is not a valid path, or that joins the requested prefix past the limits of a broadcast path, is refused.
+
+**Exact**:
+1 when the route's own prefix is the requested prefix itself, so an edit that widens the request leaves the route there (see [Edits](#edits)), as a route below the requested prefix stays; 0 when the route covers the requested prefix from a broader prefix of its own, or lies below it.
+A publisher MAY send 0 for a route at its own prefix: it then widens as a covering route does, and the publisher sends whatever the carried routes lack, such as the route again under its own prefix.
+1 with a non-empty Route Suffix, or any value other than 0 or 1, is a PROTOCOL_VIOLATION.
 
 **Route Offer**:
 The route, as below.
@@ -2464,7 +2471,7 @@ An application-specific payload.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session.
 - ANNOUNCE_REQUEST (0x10) edits a set of prefixes, none at or below another, one edit at a time, and ANNOUNCE_OK (0x11) marks where each edit takes effect. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints carry the routes and claims that both sets cover over to the new set, so none is sent again. ROUTE_START and SYNCED name the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix. A finished Announce Stream means its endpoint is leaving.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, for the paths under a prefix, with an additive metric and a down-only bit. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin and prefix rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
-- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x2) and priority, which rank before its metric.
+- ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and `Exact`, marking a route at the requested prefix whose own prefix it is, which an edit widening the request leaves in place. The offer carries the route's drain (Flags 0x2) and priority, which rank before its metric.
 - Added ROUTE_HOLD (0xB), which holds a route while it may recover, for at most 10 seconds; ROUTE_END lets it go. Neither withdraws the origin's claims.
 - Added DEAD (0xF): a node that loses a session names that hop once to each neighbour it sent a route through it, counting the routes that moved, each a ROUTE_UPDATE right behind it, and every node drops every route through the hop and doubts the node at the far end for a second, keeping nodes off routes through it but not off one it originates, except over a session to it opened since; a DRAIN names a node that sent a GOAWAY, whose routes rank draining. The path, the dead hop, holds, and the doubt keep routes free of stale copies, and of loops except briefly when an origin on three or more relays leaves them all at once, with no distance, sequence number, route request, or echo. On a scoped session a DEAD applies only to the routes heard there.
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.

@@ -188,7 +188,7 @@ fn a_region_inside_two_routes_stays_online_through_either() {
 	};
 	let down = relay.connect(peer(3, 3), answering).unwrap();
 	down.edit(asked).unwrap();
-	up.edited();
+	up.edited(Default::default());
 	pump(&down, &up);
 	let online = || (leaf.shown().iter()).any(|((_, path), (_, available))| *path == p("live/a/x") && *available);
 	assert!(online(), "{:?}", leaf.shown());
@@ -650,6 +650,7 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 				prefix: 0,
 				node: 100,
 				suffix: Path::empty(),
+				exact: false,
 				offer,
 			};
 			crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();

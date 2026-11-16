@@ -57,6 +57,7 @@ async fn a_withheld_announce_ok_holds_no_more_than_the_cap() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	routed.receive(route).unwrap();
@@ -92,12 +93,14 @@ async fn a_route_past_the_root_carries_over_as_the_peer_carries_it() {
 		node: 8,
 		prefix: 0,
 		suffix: deep,
+		exact: false,
 		offer: offer(),
 	};
 	let near = Msg::RouteStart {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	routed.receive(far).unwrap();
@@ -138,6 +141,7 @@ async fn the_limit_admits_each_claim() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
@@ -178,6 +182,7 @@ async fn an_excluded_claim_never_enters_the_node() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	for msg in [
@@ -238,6 +243,7 @@ async fn a_new_scope_certifies_against_its_own_regions() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
@@ -275,6 +281,7 @@ async fn a_claim_is_served_only_where_the_limit_admits_it() {
 			node: 7,
 			prefix: 0,
 			suffix: Path::empty(),
+			exact: false,
 			offer: offer(),
 		};
 		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
@@ -302,6 +309,7 @@ async fn pending_changes_net_out() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	for msg in [route, start("room/host"), floor] {
@@ -386,6 +394,7 @@ async fn a_refused_claim_forwards_no_withdrawal() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: offer(),
 	};
 	for msg in [route, start("live/a"), start("live/b"), floor(0)] {
@@ -450,6 +459,7 @@ async fn a_dead_and_its_updates_apply_as_one() {
 				node,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: false,
 				offer: through(node, 3),
 			};
 			routed.receive(start).unwrap();
@@ -459,6 +469,7 @@ async fn a_dead_and_its_updates_apply_as_one() {
 			node: 9,
 			prefix: 0,
 			suffix: Path::empty(),
+			exact: false,
 			offer: Offer {
 				path: [Hop { node: 9, session: 0 }].into(),
 				..offer()
@@ -555,6 +566,7 @@ async fn a_refused_route_still_follows_a_dead() {
 			node: 7,
 			prefix: 0,
 			suffix: Some(Path::empty()),
+			exact: false,
 			path: path(3),
 		},
 		reason: Refusal::Flags(8),
@@ -580,6 +592,7 @@ async fn a_refused_route_still_follows_a_dead() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: usable(session),
 	};
 	for msg in [
@@ -588,6 +601,7 @@ async fn a_refused_route_still_follows_a_dead() {
 				node: 7,
 				prefix: 0,
 				suffix: Some(Path::empty()),
+				exact: false,
 				path: path(3),
 			},
 			reason: Refusal::Flags(8),
@@ -647,6 +661,7 @@ async fn an_uncredited_dead_keeps_the_node_in_step() {
 			node: 7,
 			prefix: 0,
 			suffix: Path::empty(),
+			exact: false,
 			offer: Offer {
 				path: [Hop { node: 7, session: 0 }, Hop { node: 5, session: 3 }].into(),
 				..offer()
@@ -698,6 +713,7 @@ async fn a_scoped_drain_survives_a_new_limit() {
 			node: 9,
 			prefix: 0,
 			suffix: Path::empty(),
+			exact: false,
 			offer: Offer {
 				path: [Hop { node: 9, session: 0 }, Hop { node: 7, session: 1 }].into(),
 				..offer()
@@ -741,6 +757,7 @@ async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
 		node: 7,
 		prefix: 0,
 		suffix: Path::empty(),
+		exact: false,
 		offer: along(MAX_HOPS),
 	};
 	let floor = Msg::Floor {
@@ -760,4 +777,64 @@ async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
 	routed.receive(update).unwrap();
 	routed.outputs(&subscriber);
 	assert_eq!(shown(&routed), ["live"]);
+}
+
+/// A route whose ROUTE_START marked it exact stays at its own prefix when the request
+/// widens past it, as the peer keeps it, while one presented there because it covers
+/// it widens. The node keeps the exact one where the peer names it, so a claim the
+/// peer later sends under it is served.
+#[kio::test]
+async fn an_exact_route_stays_where_a_widening_leaves_it() {
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let narrow = Path::from_static("a/b");
+	let mut routed = super::Routed::asking(&subscriber, &narrow, 1, &Default::default()).unwrap();
+	// Node 7 is the peer itself; node 8 lies past it.
+	let route = |node, exact| Msg::RouteStart {
+		node,
+		prefix: 0,
+		suffix: Path::empty(),
+		exact,
+		offer: Offer {
+			path: [Hop { node, session: 0 }, Hop { node: 7, session: 1 }][usize::from(node == 7)..].into(),
+			..offer()
+		},
+	};
+	let floor = |id, revision| Msg::Floor {
+		id,
+		revision: Some(revision),
+	};
+	for msg in [
+		route(7, true),
+		start_on(0, "a/b/x"),
+		floor(0, 0),
+		route(8, false),
+		start_on(1, "a/b/y"),
+		floor(1, 0),
+	] {
+		routed.receive(msg).unwrap();
+	}
+	routed.outputs(&subscriber);
+	assert_eq!(served(&routed), ["a/b/x", "a/b/y"]);
+
+	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
+	routed.unwant(&narrow);
+	let requests = routed.outputs(&subscriber);
+	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
+	routed.receive(Msg::Ok).unwrap();
+	let routes: Vec<_> = (routed.routes.iter())
+		.map(|(id, route)| (*id, route.node, route.wire.clone(), route.exact))
+		.collect();
+	assert_eq!(
+		routes,
+		[
+			(0, 7, Some(Path::from_static("a/b")), true),
+			(1, 8, Some(Path::from_static("a")), false)
+		]
+	);
+
+	for msg in [start_on(0, "a/b/z"), floor(0, 1)] {
+		routed.receive(msg).unwrap();
+	}
+	routed.outputs(&subscriber);
+	assert!(served(&routed).contains(&"a/b/z".to_string()), "{:?}", served(&routed));
 }

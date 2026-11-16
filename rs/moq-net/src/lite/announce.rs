@@ -129,11 +129,14 @@ pub enum AnnounceBroadcast {
 	Ok,
 	/// ROUTE_START (lite-07+): the sender has a route to the publisher `node` covering
 	/// the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and
-	/// assigns it the next Route ID.
+	/// assigns it the next Route ID. `exact` marks a route at the requested prefix whose
+	/// own prefix it is, rather than a broader one covering it, so it stays there when an
+	/// edit widens the request; it is never set with a suffix.
 	RouteStart {
 		node: route::Id,
 		prefix: u64,
 		suffix: Path,
+		exact: bool,
 		offer: Offer,
 	},
 	/// ROUTE_UPDATE (lite-07+): the route with this id changed, and is usable.
@@ -163,11 +166,12 @@ pub enum AnnounceBroadcast {
 pub(crate) enum Refusable {
 	/// ROUTE_START: assigns the next Route ID to the publisher `node`, covering the
 	/// prefix with the Prefix ID `prefix` joined with `suffix`, or no prefix when the
-	/// suffix itself was refused, along `path`.
+	/// suffix itself was refused, along `path`, at its own prefix when `exact`.
 	RouteStart {
 		node: route::Id,
 		prefix: u64,
 		suffix: Option<Path>,
+		exact: bool,
 		path: Arc<[route::path::Hop]>,
 	},
 	/// ROUTE_UPDATE of the route with this Route ID, now along `path`.
@@ -809,14 +813,16 @@ impl Encode<Version> for AnnounceBroadcast {
 					node,
 					prefix,
 					suffix,
+					exact,
 					offer,
 				} => {
-					if *node == 0 {
+					if *node == 0 || (*exact && !suffix.is_empty()) {
 						return Err(EncodeError::InvalidState);
 					}
 					w.varint(*node)?;
 					w.varint(*prefix)?;
 					suffix.encode(w, version)?;
+					w.bool(*exact);
 					encode_offer(w, offer)?;
 				}
 				Self::RouteUpdate { id, offer } => {
@@ -928,12 +934,18 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						let prefix = body.varint()?;
 						// The suffix is sized, so the offer's path reads even when it is refused.
 						let suffix = decode_path(&mut body)?;
+						// Only a route at the requested prefix itself lies exactly there.
+						let exact = body.bool()?;
+						if exact && !suffix.as_ref().is_ok_and(|suffix| suffix.is_empty()) {
+							return Err(DecodeError::InvalidValue);
+						}
 						let heard = decode_offer(&mut body)?;
 						match (node, suffix, heard) {
 							(1.., Ok(suffix), Ok(offer)) => Self::RouteStart {
 								node,
 								prefix,
 								suffix,
+								exact,
 								offer,
 							},
 							(node, suffix, heard) => {
@@ -948,6 +960,7 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 										node,
 										prefix,
 										suffix: suffix.ok(),
+										exact,
 										path: heard.map_or_else(|unusable| unusable.path, |offer| offer.path),
 									},
 									reason,
@@ -2050,12 +2063,14 @@ mod tests {
 				node: 0x7a3f,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: true,
 				offer: offer(&[(0x7a3f, 0)], 0, false),
 			},
 			AnnounceBroadcast::RouteStart {
 				node: route::QUALIFIED | 9,
 				prefix: 0,
 				suffix: Path::from_static("room/a"),
+				exact: false,
 				offer: offer(&[(9, 0), (4, u64::MAX >> 2)], route::MAX, true),
 			},
 			AnnounceBroadcast::RouteUpdate {
@@ -2070,6 +2085,7 @@ mod tests {
 				node: 0x7a40,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: false,
 				offer: Offer {
 					priority: i8::MAX,
 					..offer(&[(5, 0), (route::MAX, 7), (9, 2)], 0, false)
@@ -2149,6 +2165,7 @@ mod tests {
 				node: 1,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: false,
 				offer: offer(&[(1, 0)], 0, false),
 			},
 			AnnounceBroadcast::RouteUpdate {
@@ -2184,12 +2201,14 @@ mod tests {
 				node: 0,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: false,
 				offer: offer(&[(1, 0)], 1, false),
 			},
 			AnnounceBroadcast::RouteStart {
 				node: 1,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: false,
 				offer: offer(&[], 1, false),
 			},
 			AnnounceBroadcast::RouteUpdate {
@@ -2237,9 +2256,10 @@ mod tests {
 		let start = |node: u64, offer: Box<dyn FnOnce(&mut Encoder<'_>)>| {
 			forge(ROUTE_START, move |w| {
 				w.varint(node).unwrap();
-				// Prefix ID 0, and an empty suffix.
+				// Prefix ID 0, an empty suffix, and not exact.
 				w.varint(0u64).unwrap();
 				w.varint(0u64).unwrap();
+				w.u8(0);
 				offer(w);
 			})
 		};
@@ -2252,6 +2272,7 @@ mod tests {
 			node,
 			prefix: 0,
 			suffix: Some(Path::empty()),
+			exact: false,
 			path,
 		};
 		let over = route::MAX_HOPS as u64 + 1;
@@ -2296,12 +2317,14 @@ mod tests {
 					w.varint(1u64).unwrap();
 					w.varint(5u64).unwrap();
 					w.bytes(b"x//y").unwrap();
+					w.u8(0);
 					path(0, 1, 1, 1)(w);
 				}),
 				Refusable::RouteStart {
 					node: 1,
 					prefix: 5,
 					suffix: None,
+					exact: false,
 					path: hops(1, 1),
 				},
 				Refusal::Path,
@@ -2325,6 +2348,34 @@ mod tests {
 				"{wire:?}"
 			);
 		}
+
+		// Only a route at the requested prefix itself is exact, and Exact is a boolean.
+		let exact = |suffix: &'static [u8], exact: u8| {
+			forge(ROUTE_START, move |w| {
+				w.varint(1u64).unwrap();
+				w.varint(0u64).unwrap();
+				w.bytes(suffix).unwrap();
+				w.u8(exact);
+				path(0, 1, 1, 1)(w);
+			})
+		};
+		for (suffix, flag) in [(&b"room"[..], 1), (&b"x//y"[..], 1), (&b""[..], 2)] {
+			let res = decode_broadcast(&exact(suffix, flag), Version::Lite07);
+			assert!(
+				matches!(res, Err(DecodeError::InvalidValue)),
+				"{suffix:?} {flag}: {res:?}"
+			);
+		}
+		let mut buf = Vec::new();
+		let msg = AnnounceBroadcast::RouteStart {
+			node: 1,
+			prefix: 0,
+			suffix: Path::from_static("room"),
+			exact: true,
+			offer: offer(&[(1, 0)], 1, false),
+		};
+		let res = msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07);
+		assert!(matches!(res, Err(EncodeError::InvalidState)), "{res:?}");
 
 		// A DEAD has a fixed size: it counts the ROUTE_UPDATEs following it.
 		let wire = forge(DEAD, |w| {

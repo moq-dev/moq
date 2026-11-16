@@ -10156,6 +10156,7 @@ mod tests {
 				node,
 				prefix: 0,
 				suffix: Path::empty(),
+				exact: false,
 				offer,
 			}
 			.encode(w, Version::Lite07)
@@ -10645,10 +10646,11 @@ mod tests {
 	/// the reserved node, and ROUTE_END retires it like any other.
 	#[kio::test]
 	async fn a_refused_route_start_holds_its_route_id() {
-		let mut cases = refused_offers(&[7, 0, 0])
+		// Node ID 7, Prefix ID 0, an empty suffix, and not exact.
+		let mut cases = refused_offers(&[7, 0, 0, 0])
 			.map(|(what, body)| (what, body, true))
 			.to_vec();
-		cases.push(("node 0", offer_body(&[0, 0, 0], 1, 7, 0, &[]), false));
+		cases.push(("node 0", offer_body(&[0, 0, 0, 0], 1, 7, 0, &[]), false));
 		for (what, body, revives) in cases {
 			let script = announce_script(
 				Version::Lite07,

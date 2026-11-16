@@ -95,6 +95,8 @@ interface Route {
 	/** The prefix it covers, or undefined when this node refused the suffix the peer forwarded,
 	 * which leaves the route refused for good. */
 	prefix: Path.Valid | undefined;
+	/** Its ROUTE_START said it lies at its own prefix, so a widening leaves it there. */
+	exact: boolean;
 	/** The path the peer last named, kept while this node refuses the rest, so a DEAD finds it. */
 	path: RouteHop[];
 	/** Undefined while this node refuses what the peer forwarded: no route at all, its claims
@@ -530,7 +532,13 @@ export class Routed {
 	#blank(
 		id: bigint,
 		from: Pick<Route, "node" | "path" | "offer" | "drain" | "held">,
-		at: { region: Path.Valid; prefix: Path.Valid | undefined; hidden: boolean; revision: bigint | undefined },
+		at: {
+			region: Path.Valid;
+			prefix: Path.Valid | undefined;
+			exact: boolean;
+			hidden: boolean;
+			revision: bigint | undefined;
+		},
 	): Route {
 		const view: Route["view"] = {
 			prefix: at.prefix ?? at.region,
@@ -543,6 +551,7 @@ export class Routed {
 			node: from.node,
 			region: at.region,
 			prefix: at.prefix,
+			exact: at.exact,
 			path: from.path,
 			offer: from.offer,
 			drain: from.drain,
@@ -567,12 +576,13 @@ export class Routed {
 	}
 
 	// The peer started a route to `node` with the next Route ID, covering the requested prefix
-	// with the Prefix ID `asked` joined with `suffix`, along `offer`, or along `path` when this
-	// node refuses the offer.
+	// with the Prefix ID `asked` joined with `suffix`, at its own prefix when `exact`, along
+	// `offer`, or along `path` when this node refuses the offer.
 	#startRoute(
 		node: bigint,
 		asked: bigint,
 		suffix: Path.Valid | undefined,
+		exact: boolean,
 		offer: Offer | undefined,
 		path: RouteHop[],
 	) {
@@ -590,7 +600,7 @@ export class Routed {
 		const wire = this.#blank(
 			id,
 			{ node, path, offer, drain: false, held: false },
-			{ region: region.path, prefix: at, hidden: region.hidden, revision: undefined },
+			{ region: region.path, prefix: at, exact, hidden: region.hidden, revision: undefined },
 		);
 		this.#routes.set(id, wire);
 		if (named !== undefined) this.#named.set(named, id);
@@ -780,7 +790,14 @@ export class Routed {
 		switch (message.kind) {
 			case "routeStart":
 				console.warn(`refusing a forwarded route: node=${message.node} reason=${reason}`);
-				return this.#startRoute(message.node, message.prefix, message.suffix, undefined, message.path);
+				return this.#startRoute(
+					message.node,
+					message.prefix,
+					message.suffix,
+					message.exact,
+					undefined,
+					message.path,
+				);
 			case "routeUpdate":
 				return this.#move(this.#route(message.id), { refused: reason, path: message.path });
 			case "start":
@@ -875,6 +892,7 @@ export class Routed {
 				node: wire.node,
 				prefix: wire.prefix ?? wire.region,
 				region: wire.region,
+				exact: wire.exact,
 				order: rekey.order(wire.held, wire.offer, wire.path, this.#session.hop),
 				claims: wire.claims,
 			});
@@ -919,6 +937,7 @@ export class Routed {
 			const wire = this.#blank(carried.id, source, {
 				region: carried.region,
 				prefix: source.prefix === undefined ? undefined : carried.prefix,
+				exact: carried.exact,
 				hidden: source.view.hidden && this.#hidden(carried.region),
 				// A widened route's floors certified only the narrower prefix.
 				revision: carried.kind === "widens" ? undefined : source.view.revision,
@@ -1045,7 +1064,7 @@ export class Routed {
 				// arrive outside a DEAD's updates.
 				break;
 			case "routeStart":
-				this.#startRoute(msg.node, msg.prefix, msg.suffix, msg.offer, msg.offer.path);
+				this.#startRoute(msg.node, msg.prefix, msg.suffix, msg.exact, msg.offer, msg.offer.path);
 				break;
 			case "routeUpdate":
 				this.#move(this.#route(msg.id), msg.offer);

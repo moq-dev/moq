@@ -1914,6 +1914,11 @@ impl Mounted {
 	pub fn holds(&self, path: &Path) -> bool {
 		path.has_prefix(&self.mount.at)
 	}
+
+	/// The absolute, handle-side mount point.
+	pub fn at(&self) -> &Path {
+		&self.mount.at
+	}
 }
 
 impl Mount {

@@ -689,7 +689,7 @@ impl RouteRelay {
 				let peer = route_peer(answers as u64 + i + 1, Self::ORIGIN);
 				let receive = node.connect(peer, crate::route::Link::default()).unwrap();
 				// The peer answered what the node asks it for.
-				receive.edited();
+				receive.edited(Default::default());
 				let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
 				receive.route(Self::ORIGIN, Path::empty(), Some(reach));
 				let snapshot = (0..claims)
@@ -860,7 +860,7 @@ impl RouteFollower {
 		};
 		let stream = self.node.connect(peer, link).unwrap();
 		// The peer answered what the node asks it for.
-		stream.edited();
+		stream.edited(Default::default());
 		let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
 		stream.route(Self::ORIGIN, prefix.clone(), Some(reach));
 		let claim = crate::route::node::Claim {

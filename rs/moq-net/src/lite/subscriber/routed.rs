@@ -66,6 +66,8 @@ struct WireRoute {
 	/// The prefix it covers, absolute, or `None` when its suffix is refused or joins
 	/// the root past the path limits.
 	prefix: Option<Path>,
+	/// Its ROUTE_START said it lies at its own prefix, so a widening leaves it there.
+	exact: bool,
 	/// What the peer offers, or the path of an offer this node refuses, which a DEAD
 	/// still matches.
 	offer: Result<Offer, Arc<[Hop]>>,
@@ -478,6 +480,7 @@ impl Routed {
 					node: route.node,
 					prefix: route.wire.clone().unwrap_or_else(|| route.region.clone()),
 					region: route.region.clone(),
+					exact: route.exact,
 					order: rekey::order(route.held, route.offer.as_ref().map_err(|path| &**path), own),
 					claims,
 				};
@@ -485,6 +488,12 @@ impl Routed {
 			})
 			.collect();
 		let plan = rekey::plan(&old, &new, &added, &table, self.next_route, self.decoder.next());
+		// The node carries the routes it holds over as the plan does, leaving the ones
+		// marked exact at their own prefix.
+		let exact: BTreeSet<(route::Id, Path)> = (self.routes.values())
+			.filter(|route| route.exact)
+			.filter_map(|route| Some((route.node, route.prefix.clone()?)))
+			.collect();
 		let routes = std::mem::take(&mut self.routes);
 		let claims = std::mem::take(&mut self.claims);
 		let mut moved = Vec::new();
@@ -496,6 +505,7 @@ impl Routed {
 				region: carried.region,
 				prefix: wire.as_ref().and_then(|wire| self.root.join(wire).ok()),
 				wire,
+				exact: carried.exact,
 				offer: source.offer.clone(),
 				held: source.held,
 				claims: BTreeMap::new(),
@@ -583,7 +593,7 @@ impl Routed {
 
 		// The node carries what it holds over the same way. A route this node refused
 		// is not there to carry, so each route that moved is filed as it now stands.
-		self.stream.edited();
+		self.stream.edited(exact);
 		moved.sort_unstable();
 		for id in moved {
 			file_route(&self.stream, &self.routes[&id]);
@@ -633,8 +643,9 @@ impl Routed {
 				node,
 				prefix,
 				suffix,
+				exact,
 				offer,
-			} => self.route_start(node, prefix, Some(suffix), Ok(offer))?,
+			} => self.route_start(node, prefix, Some(suffix), exact, Ok(offer))?,
 			Msg::RouteUpdate { id, offer } => self.offer(id, Ok(offer))?,
 			Msg::RouteHold { id } => {
 				let route = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
@@ -733,6 +744,7 @@ impl Routed {
 		node: route::Id,
 		asked: u64,
 		suffix: Option<Path>,
+		exact: bool,
 		offer: Result<Offer, Arc<[Hop]>>,
 	) -> Result<(), Error> {
 		// The peer names a prefix in effect on its stream.
@@ -760,6 +772,7 @@ impl Routed {
 			region,
 			wire,
 			prefix,
+			exact,
 			offer,
 			held: false,
 			claims: BTreeMap::new(),
@@ -951,10 +964,11 @@ impl Routed {
 				node,
 				prefix,
 				suffix,
+				exact,
 				path,
 			} => {
 				tracing::warn!(node, %reason, "refusing a forwarded route");
-				self.route_start(node, prefix, suffix, Err(path))?;
+				self.route_start(node, prefix, suffix, exact, Err(path))?;
 			}
 			Refusable::RouteUpdate { id, path } => {
 				let node = self.routes.get(&id).ok_or(Error::ProtocolViolation)?.node;

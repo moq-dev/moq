@@ -160,8 +160,10 @@ export type AnnounceBroadcast =
 	| { status: "ok" }
 	/** Lite07+ ROUTE_START: the publisher reaches the publisher node `node` along `offer`, covering
 	 * the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and assigns the
-	 * route the next Route ID. */
-	| { status: "routeStart"; node: bigint; prefix: bigint; suffix: Path.Valid; offer: Offer }
+	 * route the next Route ID. `exact` marks a route at the requested prefix whose own prefix it is,
+	 * rather than a broader one covering it, so it stays there when an edit widens the request; it
+	 * is never set with a suffix. */
+	| { status: "routeStart"; node: bigint; prefix: bigint; suffix: Path.Valid; exact: boolean; offer: Offer }
 	/** Lite07+ ROUTE_UPDATE: the route with this id changed, and is usable. */
 	| { status: "routeUpdate"; id: bigint; offer: Offer }
 	/** Lite07+ ROUTE_HOLD: the publisher has no usable route with this id, but holds it and its
@@ -191,8 +193,8 @@ export interface Add {
 export type Refusable =
 	/** ROUTE_START: assigns the next Route ID to the publisher `node`, covering the prefix with the
 	 * Prefix ID `prefix` joined with `suffix`, or no prefix when the suffix itself was refused,
-	 * along `path`. */
-	| { kind: "routeStart"; node: bigint; prefix: bigint; suffix?: Path.Valid; path: RouteHop[] }
+	 * along `path`, at its own prefix when `exact`. */
+	| { kind: "routeStart"; node: bigint; prefix: bigint; suffix?: Path.Valid; exact: boolean; path: RouteHop[] }
 	/** ROUTE_UPDATE of the route with this Route ID, now along `path`. */
 	| { kind: "routeUpdate"; id: bigint; path: RouteHop[] }
 	/** ANNOUNCE_START under Route ID `route`: assigns the next Announce ID, to `path`, or to no path
@@ -562,9 +564,11 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			break;
 		case "routeStart":
 			if (msg.node === 0n) throw new Error("Node ID 0 names no origin");
+			if (msg.exact && msg.suffix !== "") throw new Error("only a route at the requested prefix is exact");
 			await w.u62(msg.node);
 			await w.u62(msg.prefix);
 			await w.string(Path.encode(msg.suffix));
+			await w.bool(msg.exact);
 			await encodeOffer(w, msg.offer);
 			break;
 		case "routeUpdate":
@@ -686,13 +690,16 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			// The suffix is sized, so the offer's path reads even when it is refused.
 			const text = utf8(await r.read(await r.u53()));
 			const suffix = text === undefined ? undefined : Path.tryDecode(text);
+			// Only a route at the requested prefix itself lies exactly there.
+			const exact = await r.bool();
+			if (exact && suffix !== "") throw new ProtocolViolation("ROUTE_START marks a route below its prefix exact");
 			const offer = await decodeOffer(r);
 			if (node !== 0n && suffix !== undefined && !("refused" in offer))
-				return { status: "routeStart", node, prefix, suffix, offer };
+				return { status: "routeStart", node, prefix, suffix, exact, offer };
 			const reason = node === 0n ? "node" : suffix === undefined ? "path" : (offer as Unusable).refused;
 			return {
 				status: "refused",
-				message: { kind: "routeStart", node, prefix, suffix, path: offer.path },
+				message: { kind: "routeStart", node, prefix, suffix, exact, path: offer.path },
 				reason,
 			};
 		}

@@ -4004,7 +4004,14 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 	};
 	try {
 		await ok();
-		expect(await next()).toEqual({ status: "routeStart", node, prefix: 0n, suffix: Path.empty(), offer });
+		expect(await next()).toEqual({
+			status: "routeStart",
+			node,
+			prefix: 0n,
+			suffix: Path.empty(),
+			exact: false,
+			offer,
+		});
 		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
 		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
@@ -4025,7 +4032,14 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 
 		// The next claim starts the route again at once, under the next Route ID: no echo waits.
 		const again = publish(origin, Path.from("again"));
-		expect(await next()).toEqual({ status: "routeStart", node, prefix: 0n, suffix: Path.empty(), offer });
+		expect(await next()).toEqual({
+			status: "routeStart",
+			node,
+			prefix: 0n,
+			suffix: Path.empty(),
+			exact: false,
+			offer,
+		});
 		expect(await next()).toMatchObject({ status: "active", suffix: "again", route: 1n });
 		expect(await next()).toMatchObject({ status: "floor", id: 1n });
 		again.close();

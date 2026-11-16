@@ -715,7 +715,9 @@ Reflects(x, y, r, Held(_)) ==
 \* without its floor, which certified only "a". The route at a removed "root"
 \* is carried, presented at "a", to an added "a", so its floor carries too,
 \* unless the route "a" already carries is the one the sender would reflect
-\* there. The rest go, with no ROUTE_END.
+\* there. The rest go, with no ROUTE_END. No route here is marked exact,
+\* which only a mount at its mount point sends (path.rs: `rekey`'s `exact`):
+\* the model has no mounts.
 Carries(O, N, R, r, Held(_)) ==
     /\ "root" \in O /\ "a" \in N /\ R["root"].on
     /\ ~R["a"].on \/ Reflects(R["root"], R["a"], r, Held)

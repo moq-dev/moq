@@ -65,6 +65,8 @@ struct Wire {
 	told: Reached,
 	/// The requested prefix it lies in.
 	region: Path,
+	/// Its ROUTE_START said it lies at its own prefix (see [`Answer::start`]).
+	exact: bool,
 }
 
 /// A route the node sends the session.
@@ -574,6 +576,7 @@ impl Answer {
 				node: key.0,
 				prefix: key.1.clone(),
 				region: wire.region.clone(),
+				exact: wire.exact,
 				order: rekey::order(wire.told.held, Ok(&wire.told.offer), peer),
 				claims: claims.remove(key).unwrap_or_default(),
 			};
@@ -607,6 +610,7 @@ impl Answer {
 				id: carried.id,
 				told: told.clone(),
 				region: carried.region,
+				exact: carried.exact,
 			});
 		}
 		for id in states.keys() {
@@ -887,6 +891,12 @@ impl Answer {
 	}
 
 	/// The route's Route ID, sending ROUTE_START if the peer does not hold it.
+	///
+	/// A route at the requested prefix is marked exact when a mount presents it at its
+	/// mount point: nothing above the mount point names it, so it stays there however
+	/// the peer widens the request, and so does the mount's stream. The session's own
+	/// key presents a route covering the requested prefix there too, and the node moves
+	/// it up at an edit as the peer does an unmarked one.
 	fn start(&mut self, writer: &mut Writer, key: &RouteKey) -> Result<u64, Error> {
 		if let Some(wire) = &self.routes[key].wire {
 			return Ok(wire.id);
@@ -894,6 +904,9 @@ impl Answer {
 		let (prefix, region) = self.region(&key.1).expect("a route named within a requested prefix");
 		let region = region.clone();
 		let suffix = key.1.strip_prefix(&region).expect("within the region");
+		let exact = suffix.is_empty()
+			&& (self.routes[key].reach.keys())
+				.any(|source| (self.mounts.get(source)).is_some_and(|mount| mount.mount.at() == &key.1));
 		let sent = self.routes.get_mut(key).expect("only a held route starts");
 		let reached = sent.reach().expect("a route stands while a source carries it").clone();
 		let id = self.next_route;
@@ -902,6 +915,7 @@ impl Answer {
 			node: key.0,
 			prefix,
 			suffix,
+			exact,
 			offer: reached.offer.clone(),
 		})?;
 		if reached.held {
@@ -911,6 +925,7 @@ impl Answer {
 			id,
 			told: reached,
 			region,
+			exact,
 		});
 		Ok(id)
 	}
