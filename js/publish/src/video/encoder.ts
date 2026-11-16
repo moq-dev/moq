@@ -63,7 +63,7 @@ export interface Config {
 	 */
 	join?: Duration;
 
-	/** The most the encoder sends. If not provided, the cap is derived from the width, height, framerate, and codec. */
+	/** The highest bitrate the encoder is configured for (a target, not a hard output peak). If not provided, it is derived from the width, height, framerate, and codec. */
 	maxBitrate?: number;
 
 	/**

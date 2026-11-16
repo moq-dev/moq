@@ -163,7 +163,7 @@ pub struct Config {
 	pub height: u32,
 	/// Encoded frame rate.
 	pub framerate: FrameRate,
-	/// The rendition's cap: the peak the encoder is held to. `None` derives
+	/// The rendition's cap: the highest bitrate the encoder is configured for. `None` derives
 	/// [`resolved_bitrate`](Self::resolved_bitrate)'s default from the size, frame rate, and codec.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// The time between join points: a keyframe (an IDR with its parameter sets
