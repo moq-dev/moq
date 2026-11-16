@@ -25,11 +25,6 @@ readers are the first that check `version` at all. Each child's Plan records
 its own decisions.
 
 The children land in any order.
-[Entry versions](/quest/m2/hang04/entry-version.md) and
-[video warmup](/quest/m2/hang04/video-warmup.md) both edit the version
-computation (`min_version` in `rs/hang/src/catalog/root.rs`, `minVersion` in
-`js/hang/src/catalog/root.ts`) and the draft's Version section, so whichever
-lands second merges main first.
 
 Every root section already reads under the hang draft's one rule (a root
 member the draft defines has its shape, or the catalog is refused), so

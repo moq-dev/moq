@@ -2144,23 +2144,6 @@
 		"refused": true
 	},
 	{
-		"name": "video warmup 0",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"ok": {
-						"codec": "avc1.64001f"
-					},
-					"probe": {
-						"codec": "avc1.64001f",
-						"warmup": 0
-					}
-				}
-			}
-		},
-		"video": ["ok", "probe"]
-	},
-	{
 		"name": "audio warmup 0",
 		"catalog": {
 			"audio": {
@@ -2180,23 +2163,6 @@
 			}
 		},
 		"audio": ["ok", "probe"]
-	},
-	{
-		"name": "video warmup 9007199254740991",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"ok": {
-						"codec": "avc1.64001f"
-					},
-					"probe": {
-						"codec": "avc1.64001f",
-						"warmup": 9007199254740991
-					}
-				}
-			}
-		},
-		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio warmup 9007199254740991",
@@ -2220,23 +2186,6 @@
 		"audio": ["ok", "probe"]
 	},
 	{
-		"name": "video warmup 9007199254740992",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"ok": {
-						"codec": "avc1.64001f"
-					},
-					"probe": {
-						"codec": "avc1.64001f",
-						"warmup": 9007199254740992
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
 		"name": "audio warmup 9007199254740992",
 		"catalog": {
 			"audio": {
@@ -2258,7 +2207,7 @@
 		"refused": true
 	},
 	{
-		"name": "video warmup -1",
+		"name": "video warmup is an unknown field",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -2272,7 +2221,7 @@
 				}
 			}
 		},
-		"refused": true
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio warmup -1",
@@ -2289,23 +2238,6 @@
 						"sampleRate": 48000,
 						"numberOfChannels": 2,
 						"warmup": -1
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
-		"name": "video warmup 1.5",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"ok": {
-						"codec": "avc1.64001f"
-					},
-					"probe": {
-						"codec": "avc1.64001f",
-						"warmup": 1.5
 					}
 				}
 			}

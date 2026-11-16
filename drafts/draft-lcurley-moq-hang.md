@@ -154,12 +154,9 @@ A consumer MUST refuse a catalog whose `version` is above the draft it implement
 
 A publisher writes the highest draft whose fields the catalog uses that an older consumer would misread, and omits `version` while that is 3.
 A change raises the version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
-This draft needs `version` 4 for:
+This draft needs `version` 4 only for a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead.
 
-- a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
-- a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
-
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `media` ({{media}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `media` ({{media}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup` ({{field-warmup}}), and the data track estimates are hints.
 
 ## Media {#media}
 The catalog's root `media` field holds what applies to every audio and video track:
@@ -448,6 +445,7 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 ~~~
 type AudioDecoderConfigExtensions = {
   "layout": string | undefined,
+  "warmup": number | undefined,
 }
 ~~~
 
@@ -457,6 +455,14 @@ type AudioDecoderConfigExtensions = {
 `layout` is not part of the track's identity.
 
 An Opus frame timestamp counts the samples the OpusHead pre-skip trims: a consumer presents each decoded sample the pre-skip, at 48 kHz, earlier than its frame timestamp places it, so the first sample kept plays at the first decoded frame's timestamp.
+
+### warmup {#field-warmup}
+
+An audio rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group: the decoder's pre-roll, for example 80 milliseconds for Opus.
+A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
+Absent or `0` means every group start is immediately presentable.
+After a non-continuous join, a consumer MUST decode from the group start and MUST NOT present samples stamped before the group's start plus `warmup`.
+It SHOULD join `warmup` earlier to obtain the requested presentation time.
 
 ### PCM {#audio-pcm}
 
@@ -771,19 +777,6 @@ For example:
 - A B-frame stream contributes its reorder delay, the presentation timestamp minus the decode timestamp.
 - A fragment or packet batch contributes the media span between its earliest and latest timestamps.
 
-### warmup {#field-warmup}
-
-An audio or video rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group.
-A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
-Absent or `0` means every group start is immediately presentable.
-After a non-continuous join, a consumer MUST decode from the group start.
-It SHOULD join `warmup` earlier to obtain the requested presentation time.
-Unless it also decodes from an earlier group start, it MUST NOT present frames stamped before the group's start plus `warmup`.
-A consumer that does MAY present those frames, which can show decoding artifacts, but MUST switch to the earlier decoder's frames once that decoder reaches the presented timestamp.
-
-For video, `warmup` can describe a refresh cycle during which decoding converges without an initial keyframe.
-For audio, it describes decoder pre-roll, for example 80 milliseconds for Opus, and does not change the group-start rule.
-
 ### delay {#field-delay}
 How far, in milliseconds, a rendition's frames persistently trail the media other renditions of the broadcast had already written.
 If absent, a consumer SHOULD assume the rendition does not trail the others.
@@ -896,11 +889,9 @@ The `kind` field selects the framing; a consumer MUST ignore a rendition whose `
 A container without a string `kind`, or with a recognized `kind` missing its fields, makes the rendition malformed ({{malformed}}).
 Every container shares the same group rules:
 
-A video group MUST start at a random access point: a keyframe unless the rendition declares `warmup` ({{field-warmup}}), in which case it MAY start at a picture from which decoding converges within that duration.
-Other groups MUST start with a keyframe.
-A group containing only a discontinuity marker is exempt from these rules.
+Each group MUST start with a keyframe, except a group that contains only a discontinuity marker.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
-Otherwise, a group MUST consist of its random access picture followed by zero or more delta frames.
+Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
 A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
 An empty payload is data on a data track, so in every container a data track's marker is one object with no bytes, which is no frame; it ends at the furthest point the consumer has read.
@@ -1096,7 +1087,7 @@ This document has no IANA actions.
 - Replaced the root `archive` section and its per-track timelines with the root `media` section ({{media}}). Its `join.interval` is the longest group of any audio or video track, fixed for the broadcast, and the grid an edge numbers HLS and DASH segments on, each segment the smallest whole multiple of it at least a second long, from each group's first timestamp ({{hls}}); the root `clock` moved to `media.clock`. Segment indexes, frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
-- Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
+- Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Removed the viewer feedback `latency` field.
@@ -1113,7 +1104,7 @@ This document has no IANA actions.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
-- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures. A consumer also decoding from an earlier group start may present frames before `warmup`, switching to that decoder once it reaches the presented timestamp.
+- Added the optional audio `warmup` ({{field-warmup}}): the decoder pre-roll after a group start, rounded up to whole milliseconds, that a consumer decodes but does not present after a join.
 - Defined `jitter` from media timestamps alone, the reorder delay and batch spans a publisher writes, replacing fixed frame-duration hints and wall-clock flush lateness.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.

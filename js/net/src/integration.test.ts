@@ -2429,8 +2429,9 @@ test("origin: a blind request ends with its session, and the next session answer
 	try {
 		const first = await waitFor(request.active, (b) => b !== undefined);
 
-		// The answering session dies, and the request it answered ends with it: the next session
-		// is another publisher instance as far as anything here can tell.
+		// The answering session dies once healthy, and the request it answered ends with it: the
+		// next session is another publisher instance as far as anything here can tell.
+		await clock.advance(Duration.millis(1000));
 		servers[0]?.session.close();
 		await Promise.resolve(request.closed);
 		expect(request.active.peek()).toBeUndefined();

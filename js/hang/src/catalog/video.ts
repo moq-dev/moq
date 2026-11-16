@@ -205,10 +205,6 @@ export const VideoConfigSchema = z.object({
 		),
 	),
 
-	// After a non-continuous join, decode from the group start, present at start plus warmup,
-	// and join that many milliseconds earlier.
-	warmup: z.optional(u53Schema),
-
 	// How far this rendition's frames persistently trail what the broadcast's other renditions
 	// already wrote: the least any frame trails within a window of a second or more, and the
 	// largest of those windows, in whole milliseconds rounded up. A player holds `delay + jitter`

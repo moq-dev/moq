@@ -41,8 +41,8 @@ pub enum ConnectionStatus {
 	/// A session is connected and publishing.
 	#[enum_value(name = "Connected: session established", nick = "connected")]
 	Connected,
-	/// The reconnect loop gave up permanently (an auth rejection, or a CONNECT status that isn't an
-	/// invitation to retry). Terminal.
+	/// The reconnect loop gave up permanently (a first session that failed or was refused before it
+	/// was healthy, or a bounded backoff that ran out). Terminal.
 	#[enum_value(name = "Failed: connection rejected, gave up", nick = "failed")]
 	Failed,
 }
@@ -293,9 +293,9 @@ impl Session {
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
 		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
 		// outages of any length, which is the trade this element wants: a pipeline nobody is watching
-		// should still be publishing when the relay comes back. The loop still ends on the two answers
-		// a server states outright (an auth rejection, or a CONNECT status that isn't an invitation to
-		// retry), posting the bus error below. During an outage the pad threads keep writing (bounded
+		// should still be publishing when the relay comes back. The loop still ends when no session
+		// stays up past the healthy bar, such as a relay refusing the token, posting the bus error
+		// below. During an outage the pad threads keep writing (bounded
 		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
 		// reconnect. A bounded policy is available via `ClientConfig::backoff`.
 		let client = connect_config(&settings)
@@ -412,8 +412,8 @@ impl Drop for Session {
 /// only to `notify` the bitrate properties (the getters read the estimates directly). Each source is
 /// notified on its own change: a status edge notifies `status`/`connected`/`moq-version` together, a
 /// presence change notifies `sessions` and `connection-stats`, and a bitrate change notifies just that
-/// bitrate. The loop stops only on a terminal error (a non-retryable auth failure, or a bounded backoff's
-/// give-up), which the `Err` arm posts as a bus error.
+/// bitrate. The loop stops only on a terminal error (a first session that never became healthy, or a
+/// bounded backoff's give-up), which the `Err` arm posts as a bus error.
 /// [`Session`] aborts this task on stop or drop, and dropping its own `Connection` handle with it quietly
 /// tears the loop down.
 async fn forward(
@@ -478,8 +478,8 @@ async fn forward_registered(
 					let Err(err) = reconnect.closed().await else {
 						return;
 					};
-					// The reconnect loop stopped on a terminal error (a non-retryable auth failure, or a
-					// bounded backoff's give-up). Ending the publication stops the pad threads feeding a
+					// The reconnect loop stopped on a terminal error (a first session that never became
+					// healthy, or a bounded backoff's give-up). Ending the publication stops the pad threads feeding a
 					// dead session; losing that race means it already ended, so there is nothing to report.
 					let won = completion.fail();
 					status.set(ConnectionStatus::Failed, None);
