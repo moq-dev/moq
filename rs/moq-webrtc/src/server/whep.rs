@@ -343,7 +343,10 @@ mod tests {
 			.expect("create broadcast");
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
+		let server = crate::server::Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), Default::default())
+			.await
+			.unwrap();
+		let _router = super::router(server, sub_origin.consume());
 		let missing = kio::clock::timeout(TIMEOUT, sub_origin.consume().request("missing", None))
 			.await
 			.expect("sync timed out");

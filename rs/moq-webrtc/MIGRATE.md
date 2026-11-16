@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Server::bind` binds the media socket
+
+`Server::new(config)` is `Server::bind(addr, config).await?`: it binds the shared UDP socket at `addr` and fails if it cannot, instead of on the first accept.
+`server::Socket` and `server::Config::socket` are gone; pass the address you set as `Socket::Bind(addr)`, or `"0.0.0.0:0"` for the old default.
+`Server::local_addr` reports the bound address.
+
+### Advertised candidates keep their port
+
+`server::Config::ice_candidates` are advertised as given, port included, instead of with the bound port.
+Write the public port you forward to the bound one, or port 0 to keep advertising the bound port.
+
+### `client::Config::ice_candidates` is gone
+
+Nothing read a client's advertised candidates usefully: the server learns a client's address from its ICE checks. Drop the field; `client::Config` has no options yet.
+
 ### `Config::max_age` of `None` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `server::Config::max_age` and `client::Config::max_age` default to `Some(hang::container::MAX_AGE)` (30 s), and `None` now sets no publisher limit instead of keeping that default.

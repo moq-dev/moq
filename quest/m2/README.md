@@ -66,7 +66,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [device and cursor](/quest/m2/native-media-config.md),
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
-  [the WebRTC bind](/quest/m2/webrtc-bind.md),
   [gateway admission](/quest/m2/gateway-align.md), and
   [upstream str0m](/quest/m2/str0m-upstream.md), which reverses the
   2026-10-30 vendoring.

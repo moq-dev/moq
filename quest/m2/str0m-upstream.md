@@ -102,5 +102,4 @@ toward browsers; record any change step 1 finds.
 ## Related
 
 - [MoQ builds against rind 0.4](/quest/m0/rind-adapters.md) - moves the rind pin the adapters must match, and edits vendored files this deletes
-- [moq-webrtc's server binds at startup](/quest/m2/webrtc-bind.md) - changes the same crate's server
 - [The gateways admit a session the same way](/quest/m2/gateway-align.md) - changes the same crate's request types

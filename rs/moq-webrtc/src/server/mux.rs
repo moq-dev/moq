@@ -50,14 +50,24 @@ struct Entry {
 
 /// The shared media socket plus its demux routing table.
 ///
-/// One per [`Server`](crate::server::Server), bound lazily on the first
-/// WHIP/WHEP accept so `Server::new` can stay synchronous.
+/// One per [`Server`](crate::server::Server), bound when the server is.
 pub(crate) struct Mux {
 	socket: Arc<UdpSocket>,
+	/// The address `socket` is bound to.
+	local: SocketAddr,
 	registry: Arc<Mutex<Registry>>,
-	/// ICE host candidates to advertise: the configured public IP(s) (or the
-	/// bound address if none) paired with the shared socket's actual port.
+	/// ICE host candidates to advertise: the configured addresses (or the
+	/// bound address if none).
 	candidates: Vec<SocketAddr>,
+	/// The task reading `socket`, which holds it open until aborted.
+	demux: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Mux {
+	fn drop(&mut self) {
+		// Release the port once the server and every session it accepted are gone.
+		self.demux.abort();
+	}
 }
 
 /// Removes a session's ufrag entry (and sweeps any dead address entries) when
@@ -98,22 +108,30 @@ impl Registry {
 
 impl Mux {
 	/// Bind the shared socket to `udp_bind` and spawn the demux task. The
-	/// advertised candidates are `ice_candidates` (each reusing the socket's
-	/// real port), or the bound address when none are configured. An unspecified
-	/// bind falls back to loopback for local testing.
+	/// advertised candidates are `ice_candidates` as given (a port of 0 taking
+	/// the bound port), or the bound address when none are configured. An
+	/// unspecified bind falls back to loopback for local testing.
 	pub(crate) async fn bind(udp_bind: SocketAddr, ice_candidates: &[SocketAddr]) -> Result<Self> {
 		let socket = Arc::new(UdpSocket::bind(udp_bind).await?);
-		let candidates = advertised_candidates(ice_candidates, socket.local_addr()?)?;
+		let local = socket.local_addr()?;
+		let candidates = advertised_candidates(ice_candidates, local)?;
 
 		let registry = Arc::new(Mutex::new(Registry::default()));
-		tokio::spawn(demux(socket.clone(), registry.clone()));
+		let demux = tokio::spawn(demux(socket.clone(), registry.clone()));
 
-		tracing::info!(?candidates, bound = %socket.local_addr()?, "webrtc media mux listening");
+		tracing::info!(?candidates, bound = %local, "webrtc media mux listening");
 		Ok(Self {
 			socket,
+			local,
 			registry,
 			candidates,
+			demux,
 		})
+	}
+
+	/// The address the shared socket is bound to.
+	pub(crate) fn local_addr(&self) -> SocketAddr {
+		self.local
 	}
 
 	/// Mint ICE credentials for a new session and register its inbox. Returns
@@ -292,7 +310,7 @@ mod tests {
 			SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
 		];
 		let mux = Mux::bind(bind, &advertise).await.expect("dual-stack bind");
-		let port = mux.socket.local_addr().unwrap().port();
+		let port = mux.local_addr().port();
 		let (creds, mut rx, registration) = mux.register();
 
 		// Dial the mux over IPv4, which a dual-stack socket accepts as v4-mapped.

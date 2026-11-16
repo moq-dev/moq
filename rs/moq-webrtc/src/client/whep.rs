@@ -24,7 +24,7 @@ pub(crate) async fn dial(
 ) -> Result<()> {
 	let sink = Box::new(IngestSink::new(broadcast, catalog)?);
 
-	let socket = session::bind_udp(&client.config().ice_candidates).await?;
+	let socket = session::bind_udp().await?;
 	let mut rtc = session::rtc_config()?.build(kio::clock::now().into_std());
 	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;

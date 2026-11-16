@@ -270,7 +270,9 @@ mod tests {
 	/// a description str0m still parses, and an uncapped one carries no bandwidth line.
 	#[tokio::test]
 	async fn a_capped_answer_carries_tias() {
-		let server = Server::new(crate::server::Config::default());
+		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), crate::server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let cap = moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_mbps(1));
 		let offer = offer();
@@ -286,12 +288,40 @@ mod tests {
 		assert!(!uncapped.answer.contains("\r\nb="), "{}", uncapped.answer);
 	}
 
+	/// An advertised address reaches the answer as given, its port included, so a NAT can
+	/// forward another public port to the bound one; a port of 0 takes the bound port.
+	#[tokio::test]
+	async fn an_advertised_candidate_keeps_its_port() {
+		let config = crate::server::Config {
+			ice_candidates: vec![
+				"203.0.113.1:5000".parse().unwrap(),
+				"[2001:db8::1]:0".parse().unwrap(),
+			],
+		};
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), config).await.unwrap();
+		let bound = server.local_addr().port();
+		let origin = moq_tokio::origin::spawn();
+		let offer = offer();
+		let path = moq_net::Path::from_static("live/nat");
+		let response = accept(&server, Request::new(&origin, path, &offer)).await.unwrap();
+
+		let hosts: Vec<_> = response
+			.answer
+			.lines()
+			.filter(|line| line.starts_with("a=candidate:"))
+			.map(|line| line.split(' ').skip(4).take(2).collect::<Vec<_>>().join(" "))
+			.collect();
+		assert_eq!(hosts, ["203.0.113.1 5000".to_string(), format!("2001:db8::1 {bound}")]);
+	}
+
 	/// A session that ends without a DELETE, here one that never connects, ends its tracks
 	/// with the transport cause, so a reader sees the publisher go rather than a producer
 	/// dropped unfinished.
 	#[tokio::test(start_paused = true)]
 	async fn a_session_ending_without_a_delete_ends_its_tracks() {
-		let server = Server::new(crate::server::Config::default());
+		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), crate::server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let session = accept(
@@ -325,7 +355,9 @@ mod tests {
 	/// it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_session() {
-		let server = Server::new(crate::server::Config::default());
+		let server = Server::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), crate::server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let _stale_session = accept(

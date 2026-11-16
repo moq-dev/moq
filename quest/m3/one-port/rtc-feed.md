@@ -56,7 +56,8 @@ read loop: moq-webrtc's `ice::Socket`'s `udp: Arc<UdpSocket>` becomes
 implements it, so the bound case behaves as today), and a fed mux routes
 datagrams from the demux hook instead of reading a bound socket. Adapt the
 sketch above to that: `advertised` is `ice_candidates`, and `recv` feeds
-the mux's existing router. Address-family mapping follows the real socket,
+the mux's existing router; the `Socket` enum is replaced by a second
+constructor (below). Address-family mapping follows the real socket,
 not the advertisement: a dual-stack socket bound to `[::]` may advertise a
 public IPv4 address, so the `Transmit` impl owns the IPv4-mapped conversion
 moq-webrtc's ICE module applies today. Received and pinned addresses use the same
@@ -78,13 +79,15 @@ returns a guard that releases the pin on drop. So the fed `Socket` takes a
 selected pair, dropped when its session ends or ICE moves. A feed's `recv`
 returns `None` once the listener is gone.
 
-Things to watch: the server config is `Clone` today and a receiver is not, so
-the fed socket may belong in the server's constructor rather than the
-config. Since 2026-11-16 (maintainer, /quest-plan of the pre-cut audit)
-[the bind at startup](/quest/m2/webrtc-bind.md) settles this before the cut:
-the server becomes `Server::bind(config)`, and that PR picks where the
-socket lives and writes it here, so the feed is an addition, not a break. The fed mux has nothing to bind lazily, and a dropped feed should
-fail the server loudly rather than idle.
+Settled 2026-11-16 by the bind at startup: the socket is the constructor's,
+not the config's. `Server::bind(addr, config).await` binds its own socket, and
+`server::Config` holds only `ice_candidates` and stays `Clone`; there is no
+`Socket` enum. The feed adds a second constructor, such as
+`Server::feed(webrtc, config)`, taking the `WebRtc` handle by value, so it is
+an addition, not a break. Its `ice_candidates` are the shared address to
+advertise, sent as given (port 0 takes the socket's port). The fed mux has
+nothing to bind, and a dropped feed should fail the server loudly rather than
+idle.
 
 Noted 2026-10-31 from [moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095):
 its demux `Datagram` carries no ECN marks or kernel receive timestamp. If

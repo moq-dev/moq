@@ -8,18 +8,15 @@
 mod whep;
 mod whip;
 
-use std::net::SocketAddr;
-
 use url::Url;
 
 /// Configuration shared by both `client publish` and `client subscribe`.
+///
+/// No options yet; it is where a later one, such as a dial policy, goes without
+/// changing [`Client::new`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct Config {
-	/// Public UDP socket addresses to advertise as ICE host candidates in
-	/// our outbound offer. Same semantics as [`crate::server::Config::ice_candidates`].
-	pub ice_candidates: Vec<SocketAddr>,
-}
+pub struct Config {}
 
 /// Outbound WHIP/WHEP dialer.
 ///
@@ -27,7 +24,6 @@ pub struct Config {
 /// rustls config survive between resources.
 #[derive(Clone)]
 pub struct Client {
-	config: Config,
 	http: reqwest::Client,
 }
 
@@ -40,17 +36,13 @@ impl Client {
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU
 	/// rind can't run on.
 	pub fn new(config: Config) -> crate::Result<Self> {
+		let Config {} = config;
 		// reqwest reads rustls's process default and panics without one, so install rind's
 		// unless the host already chose a provider.
 		moq_crypto::provider::install_default()?;
 		Ok(Self {
-			config,
 			http: reqwest::Client::builder().build()?,
 		})
-	}
-
-	pub(crate) fn config(&self) -> &Config {
-		&self.config
 	}
 
 	pub(crate) fn http(&self) -> &reqwest::Client {

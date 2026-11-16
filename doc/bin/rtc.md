@@ -29,8 +29,11 @@ the highest-bitrate enabled Opus rendition (then sample rate, then channels). It
 follows the catalog: a peer whose rendition is disabled moves to the next best at
 that rendition's first keyframe, a better one that re-enables wins the peer back,
 and with none enabled the peer receives nothing until one is. `--cors-origin`
-opens the endpoint to browsers on other origins, and `--udp-bind` plus
-`--public-addr` pin one media port for firewalls. The listener is plain HTTP;
+opens the endpoint to browsers on other origins. Every session shares one UDP
+media port, `--udp-bind` (OS-picked by default), bound at startup so a taken port
+fails before the listener reports ready. Behind NAT, `--public-addr` advertises
+the public address as written, so `--public-addr 203.0.113.1:5000` reaches a port
+the NAT forwards to `--udp-bind`; port 0 advertises the bound port. The listener is plain HTTP;
 put a TLS-terminating proxy in front for WHIP clients that require HTTPS. A fresh WHEP peer joins at the current group, so it
 starts at a keyframe without waiting for the next one. `DELETE` on the
 resource URL tears a session down per the RFC. Each WHIP session publishes

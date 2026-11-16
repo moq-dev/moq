@@ -25,7 +25,7 @@ pub(crate) async fn dial(client: &Client, url: Url, source: moq_mux::Source) -> 
 		return Err(Error::NoRenditions);
 	}
 
-	let socket = session::bind_udp(&client.config().ice_candidates).await?;
+	let socket = session::bind_udp().await?;
 	// Restrict to codecs the catalog can actually source so the remote
 	// answer doesn't pick a codec we have no rendition for.
 	let mut rtc = session::rtc_with_codecs(&codecs)?;
