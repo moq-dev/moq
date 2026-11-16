@@ -35,17 +35,17 @@ use windows::core::{IInspectable, Interface, PWSTR, factory, h};
 
 use super::super::settle::{Settle, Settled};
 use super::super::{Config, Display, FrameChannel, Source, Stream, Window};
-use super::{Delivery, Event, Signal, Startup, display_index, window_handle};
+use super::{Event, Pace, Signal, Startup, display_index, window_handle};
 use crate::frame::{Surface, d3d11};
 use crate::{Error, FrameRate, Size};
 
 const BUFFERS: i32 = 2;
 
 pub(in crate::capture) async fn open(config: &Config) -> Result<Stream, Error> {
-	let chan = FrameChannel::new();
+	let rate = framerate(config);
+	let chan = FrameChannel::repeating(interval(rate));
 	let signal = Arc::new(Signal::default());
 	let label = config.source.label();
-	let rate = config.framerate.unwrap_or(FrameRate::integer(30));
 	let handle = std::thread::Builder::new()
 		.name("moq-wgc".into())
 		.spawn({
@@ -82,6 +82,14 @@ pub(in crate::capture) async fn open(config: &Config) -> Result<Stream, Error> {
 		Some(first),
 		Box::new(guard),
 	))
+}
+
+fn framerate(config: &Config) -> FrameRate {
+	config.framerate.unwrap_or(FrameRate::integer(30))
+}
+
+fn interval(rate: FrameRate) -> Duration {
+	Duration::from_nanos(1_000_000_000 * u64::from(rate.denominator()) / u64::from(rate.numerator()))
 }
 
 struct Guard {
@@ -272,20 +280,17 @@ impl Capture {
 			.StartCapture()
 			.map_err(|e| error("start WGC", e))?;
 		let mut startup = Startup::new(Instant::now());
-		let rate = config.framerate.unwrap_or(FrameRate::integer(30));
-		let interval =
-			Duration::from_nanos(1_000_000_000 * u64::from(rate.denominator()) / u64::from(rate.numerator()));
+		let interval = interval(framerate(config));
 		let mut opened = None;
 		let mut settle = None;
 		let mut pending: Option<Captured> = None;
-		let mut delivery = Delivery::new(interval, Instant::now());
+		let mut pace = Pace::new(interval, Instant::now());
 		loop {
 			let resize_deadline = settle.as_ref().and_then(Settle::deadline);
 			let deadline = resize_deadline
 				.into_iter()
 				.chain(startup.deadline)
-				.chain(delivery.deadline())
-				.chain(pending.as_ref().map(|_| delivery.next))
+				.chain(pending.as_ref().map(|_| pace.deadline()))
 				.min();
 			match signal.wait(deadline) {
 				Event::Stop => return Ok(()),
@@ -313,7 +318,7 @@ impl Capture {
 					));
 				}
 				pending = None;
-				delivery.clear();
+				chan.forget();
 				settle = opened.map(Settle::new);
 				continue;
 			}
@@ -321,7 +326,7 @@ impl Capture {
 				let native = frame.0.ContentSize().map_err(|e| error("read WGC content size", e))?;
 				if native.Width < 2 || native.Height < 2 {
 					pending = None;
-					delivery.clear();
+					chan.forget();
 					settle = opened.map(Settle::new);
 					continue;
 				}
@@ -334,7 +339,7 @@ impl Capture {
 					Settled::Open => {}
 					Settled::Waiting => {
 						pending = None;
-						delivery.clear();
+						chan.forget();
 					}
 					Settled::Changed => return Ok(()),
 				}
@@ -347,9 +352,7 @@ impl Capture {
 				tracing::info!(source = %config.source.label(), "WGC source resized; ending capture for reopen");
 				return Ok(());
 			}
-			if now >= delivery.next
-				&& let Some(frame) = pending.take()
-			{
+			if let Some(frame) = pending.take_if(|_| pace.take(now)) {
 				let ticks = frame
 					.0
 					.SystemRelativeTime()
@@ -362,19 +365,9 @@ impl Capture {
 				let access: IDirect3DDxgiInterfaceAccess = surface.cast().map_err(|e| error("query WGC surface", e))?;
 				let texture: ID3D11Texture2D =
 					unsafe { access.GetInterface() }.map_err(|e| error("read WGC texture", e))?;
+				// An owned NV12 copy, so the channel can hold it to repeat without
+				// keeping a WGC pool frame.
 				let texture = d3d11::Texture::capture(&self.device, &texture, opened.unwrap())?;
-				delivery.replace(texture, timestamp, now);
-			}
-			if let Some((texture, timestamp)) = delivery.next(now)? {
-				// Only AddRef the owned NV12 output. The WGC pool frame was released
-				// after conversion, and the cached texture is never written again.
-				let texture = d3d11::Texture {
-					device: texture.device.clone(),
-					texture: texture.texture.clone(),
-					width: texture.width,
-					height: texture.height,
-					color: texture.color,
-				};
 				chan.push_native(Surface::Texture(texture), timestamp);
 				startup.delivered();
 			}

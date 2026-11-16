@@ -1,5 +1,5 @@
-import { Instant, now } from "@moq/clock";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Duration, Instant, now, sleepUntil } from "@moq/clock";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, race, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
 import { normalizeSource, type Source } from "./types";
@@ -32,7 +32,8 @@ export type CaptureOutput = {
  * Split out of the encoders so one capture feeds every rendition, the preview, and the stats. Each
  * reader gets its own copy of every frame and closes what it receives; a reader that falls behind
  * loses its own oldest rather than stalling the capture. A new reader starts with the current
- * picture, so a still source (a screen share of an unchanging slide) is visible to it.
+ * picture, so a still source (a screen share of an unchanging slide) is visible to it, and a source
+ * that goes quiet repeats its last picture at least every 250 ms while anyone reads.
  */
 export class Capture {
 	/** The wired inputs, read-only. */
@@ -94,9 +95,15 @@ export class Capture {
 	}
 }
 
+// The longest a still source goes without a frame. A player shows a stall after 500 ms without one,
+// and a viewer joining mid-stillness waits for the next frame to open its group. An unchanged
+// picture encodes as a skip frame of a few dozen bytes, so this costs next to nothing.
+const REPEAT = Duration.millis(250);
+
 // A fanout that holds the newest frame and opens every new reader with a copy of it. A still source
 // delivers a frame only when its picture changes, so without this a reader that attaches later (a
-// late viewer, an encoder resuming after a demand gap) waits for a change that may never come.
+// late viewer, an encoder resuming after a demand gap) waits for a change that may never come. For
+// the readers already attached, the held frame repeats once the source is quiet for REPEAT.
 // Video only: replaying audio would repeat sound.
 class Frames extends Fanout<VideoFrame> {
 	// The newest frame through, owned here and dropped once closed. Boxed because the source pull
@@ -150,26 +157,66 @@ class Frames extends Fanout<VideoFrame> {
 		const reader = stream.getReader();
 		// The first picture supplies dimensions for encoder setup and a replay for still sources.
 		let initial = true;
+		// A read that lost to a repeat, kept for the next pull so its frame is not lost.
+		let pending: ReturnType<typeof reader.read> | undefined;
+		// Hold `frame` as the newest and pass it on.
+		const deliver = (controller: ReadableStreamDefaultController<VideoFrame>, frame: VideoFrame) => {
+			held.frame?.close();
+			held.frame = frame.clone();
+			held.at = now();
+			controller.enqueue(frame);
+		};
 		const demand = new ReadableStream<VideoFrame>(
 			{
 				async pull(controller) {
-					while (!initial && active.peek() === 0) await active.changed();
-					if (active.peek() < 0) return;
-					initial = false;
-					const { value } = await reader.read();
-					if (active.peek() < 0) value?.close();
-					else if (value) {
-						const frame = measure(value);
-						held.frame?.close();
-						held.frame = frame.clone();
-						held.at = now();
-						controller.enqueue(frame);
-					} else {
-						// A finished source has no current picture to replay, so a reader attaching
-						// now gets a clean end. Frames already queued or replayed still drain.
-						held.frame?.close();
-						held.frame = undefined;
-						controller.close();
+					for (;;) {
+						while (!initial && active.peek() === 0) await active.changed();
+						if (active.peek() < 0) return;
+						initial = false;
+						pending ??= reader.read();
+						const read = pending;
+
+						const last = held.frame;
+						if (last) {
+							const stop = new AbortController();
+							const due = sleepUntil(held.at.saturatingAdd(REPEAT), { signal: stop.signal }).then(
+								() => undefined,
+								() => undefined,
+							);
+							const result = await race([read, due]);
+							stop.abort();
+							if (!result) {
+								// Every reader left while this waited; park instead of repeating to nobody.
+								if (active.peek() <= 0 || held.frame !== last) continue;
+								// Stamped on the source's own timeline, which can run ahead of the clock.
+								const elapsed = now().since(held.at).asMicros();
+								const timestamp = Math.max(Math.round(last.timestamp + elapsed), last.timestamp + 1);
+								deliver(controller, new VideoFrame(last, { timestamp }));
+								return;
+							}
+						}
+
+						const { value } = await read;
+						pending = undefined;
+						if (active.peek() < 0) value?.close();
+						else if (value) {
+							let frame = measure(value);
+							// A frame captured before a repeat was stamped would run time backwards, so it goes
+							// just past the repeat instead.
+							if (held.frame && frame.timestamp <= held.frame.timestamp) {
+								const after = new VideoFrame(frame, { timestamp: held.frame.timestamp + 1 });
+								frame.close();
+								frame = after;
+							}
+							deliver(controller, frame);
+						} else {
+							// A finished source has no current picture to replay, so a reader attaching
+							// now gets a clean end. Frames already queued or replayed still drain.
+							held.frame?.close();
+							held.frame = undefined;
+							controller.close();
+						}
+						return;
 					}
 				},
 				async cancel(reason) {

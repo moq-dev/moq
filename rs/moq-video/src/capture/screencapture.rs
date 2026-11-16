@@ -161,7 +161,9 @@ async fn open(config: &Config, filter: &SCContentFilter, size: (u32, u32)) -> Re
 		configuration.setShowsCursor(config.cursor);
 	}
 
-	let chan = FrameChannel::new();
+	// A still screen delivers only image-less buffers, which carry nothing to
+	// encode, so the channel repeats the last picture instead.
+	let chan = FrameChannel::repeating(Duration::from_micros(1_000_000 / fps as u64));
 	let delegate = Delegate::new(chan.clone());
 	let dispatch = DispatchQueue::new("dev.moq.video.screen", None);
 
@@ -443,9 +445,8 @@ define_class!(
 		#[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
 		unsafe fn did_output(&self, _stream: &SCStream, sample_buffer: &CMSampleBuffer, kind: SCStreamOutputType) {
 			if kind.0 == SCStreamOutputType::Screen.0 {
-				// ScreenCaptureKit calls this at the configured rate even when nothing
-				// changed, handing back an image-less buffer; there's no new content to
-				// encode, so drop it.
+				// ScreenCaptureKit calls this even when nothing changed, handing back an
+				// image-less buffer: drop it, and let the channel repeat the last picture.
 				if let Some(frame) = surface_frame(sample_buffer) {
 					self.ivars().chan.push(frame);
 				}

@@ -723,3 +723,53 @@ test("capture parks after its bootstrap and last reader, and cancels while parke
 	expect(cancelled).toBe(true);
 	expect(open()).toEqual([]);
 });
+
+test("a quiet source repeats its last picture every 250 ms on its own timeline", async () => {
+	using input = frameSource();
+	const clock = new Manual();
+	const installed = clock.install();
+	clock.jump(Duration.secs(1));
+	const capture = new Capture({ source: input.source });
+	const effect = new Effect();
+	const read = async (reader: ReadableStreamDefaultReader<VideoFrame>) => {
+		const frame = (await clock.drive(reader.read())).value as unknown as Frame;
+		frame.close();
+		return frame.timestamp;
+	};
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		const reader = fanout.subscribe(effect).getReader();
+
+		// Capture stamps 200ms ahead of the clock.
+		input.push(1_200_000);
+		expect(await read(reader)).toBe(1_200_000);
+		expect(await read(reader)).toBe(1_450_000);
+		expect(await read(reader)).toBe(1_700_000);
+
+		// A change postpones the next repeat.
+		clock.jump(Duration.millis(100));
+		input.push(1_800_000);
+		expect(await read(reader)).toBe(1_800_000);
+		expect(await read(reader)).toBe(2_050_000);
+
+		// Captured before that repeat was stamped, so it goes just past it.
+		input.push(2_000_000);
+		expect(await read(reader)).toBe(2_050_001);
+
+		// Nobody reading, so nothing repeats.
+		effect.close();
+		await flush();
+		const built = Frame.all.length;
+		clock.jump(Duration.secs(10));
+		await flush();
+		expect(Frame.all.length).toBe(built);
+	} finally {
+		effect.close();
+		capture.close();
+		installed.close();
+	}
+
+	expect(open()).toEqual([]);
+});

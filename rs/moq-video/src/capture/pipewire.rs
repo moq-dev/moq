@@ -19,10 +19,10 @@
 //!   (`Selection::restore_token`). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
 //!   grant is asked for again rather than silently resumed.
-//! - Compositors only deliver frames on damage, so a static screen would starve
-//!   the encoder. A loop timer re-emits the last frame whenever a frame interval
-//!   passes without a fresh one.
-//!   Cameras deliver every interval, so their streams have no such timer.
+//! - Compositors only deliver frames on damage, so a still screen would starve
+//!   the encoder and stall the player. The screen's channel repeats the last
+//!   frame at a 4 Hz floor (see [`FrameChannel::repeating`]). Cameras deliver
+//!   every interval, so their channels never repeat.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -123,11 +123,14 @@ enum Target {
 /// Spawn the PipeWire loop for `capture` and wait for its format and first frame.
 async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>) -> Result<Stream, Error> {
 	let kind = capture.kind;
-	let chan = FrameChannel::new();
 	let framerate = config
 		.framerate
 		.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE))
 		.rounded();
+	let chan = match kind {
+		Kind::Screen => FrameChannel::repeating(Duration::from_micros(1_000_000 / u64::from(framerate.max(1)))),
+		Kind::Camera => FrameChannel::new(),
+	};
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
 	let (return_tx, return_rx) = pw::channel::channel::<Lease>();
@@ -140,8 +143,6 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 				geometry: None,
 				color: None,
 				geo_tx: Some(geo_tx),
-				last: None,
-				fresh: false,
 				generation: 0,
 				dmabuf_modifier: None,
 				terminal: None,
@@ -347,7 +348,7 @@ impl Drop for LoopGuard {
 	}
 }
 
-/// Shared by the stream callbacks and the pacing timer, all on the loop thread.
+/// Shared by the stream callbacks, all on the loop thread.
 struct State {
 	format: VideoInfoRaw,
 	/// The even-clamped size sent to `open`.
@@ -355,10 +356,6 @@ struct State {
 	/// The NV12 color space used to configure the encoder.
 	color: Option<Color>,
 	geo_tx: Option<tokio::sync::oneshot::Sender<Result<Geometry, Error>>>,
-	/// Most recent converted frame, re-emitted while the screen is static.
-	last: Option<Last>,
-	/// Whether a fresh frame arrived since the last pacing tick.
-	fresh: bool,
 	/// Buffer-pool generation. Returns from superseded pools are discarded.
 	generation: u64,
 	/// Explicit DRM modifier from the negotiated DMA-BUF format.
@@ -369,25 +366,9 @@ struct State {
 
 impl State {
 	/// PipeWire freed a buffer of the pool: a lease still out on it must not be
-	/// queued back, and the retained frame may point into it.
+	/// queued back.
 	fn buffer_removed(&mut self) {
 		self.generation = self.generation.wrapping_add(1);
-		self.last = None;
-	}
-}
-
-/// A retained frame for the static-screen pacing tick.
-enum Last {
-	I420(I420),
-	DmaBuf(DmaBuf),
-}
-
-impl Last {
-	fn surface(&self) -> Surface {
-		match self {
-			Self::I420(frame) => Surface::I420(frame.clone()),
-			Self::DmaBuf(frame) => Surface::DmaBuf(frame.clone()),
-		}
 	}
 }
 
@@ -901,6 +882,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		})
 		.param_changed({
 			let state = state.clone();
+			let chan = chan.clone();
 			let mainloop = mainloop.downgrade();
 			move |stream, _, id, param| {
 				let Some(param) = param else { return };
@@ -950,7 +932,8 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					}
 				};
-				state.last = None;
+				// A repeat in the old format would not match the new one.
+				chan.forget();
 				state.dmabuf_modifier = dmabuf_modifier;
 				let buffers = buffer_offer(state.dmabuf_modifier.is_some());
 				if let Some(param) = spa::pod::Pod::from_bytes(&buffers) {
@@ -1155,15 +1138,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						},
 						inner,
 					) {
-						Ok(frame) => {
-							chan.push(Surface::DmaBuf(frame.clone()));
-							// Only the pacing timer reads `last`. A camera must not
-							// hold a leased buffer back from its producer's pool.
-							if kind == Kind::Screen {
-								state.last = Some(Last::DmaBuf(frame));
-							}
-							state.fresh = true;
-						}
+						Ok(frame) => chan.push(Surface::DmaBuf(frame)),
 						Err(e) => tracing::warn!(error = %e, "invalid PipeWire DMA-BUF"),
 					}
 					return;
@@ -1230,13 +1205,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				};
 				match converted {
 					Ok(None) => {}
-					Ok(Some(i420)) => {
-						chan.push(Surface::I420(i420.clone()));
-						if kind == Kind::Screen {
-							state.last = Some(Last::I420(i420));
-						}
-						state.fresh = true;
-					}
+					Ok(Some(i420)) => chan.push(Surface::I420(i420)),
 					Err(e) => {
 						// Persistent (bad format), not per-frame; stop rather than spam.
 						tracing::warn!(?kind, error = %e, "frame conversion failed; stopping capture");
@@ -1250,7 +1219,12 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		})
 		.remove_buffer({
 			let state = state.clone();
-			move |_, _, _| state.borrow_mut().buffer_removed()
+			let chan = chan.clone();
+			move |_, _, _| {
+				state.borrow_mut().buffer_removed();
+				// The repeated frame may point into the freed buffer.
+				chan.forget();
+			}
 		})
 		.register()
 		.map_err(|e| err("pipewire listener", e))?;
@@ -1297,30 +1271,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 			&mut params,
 		)
 		.map_err(|e| err("pipewire stream connect", e))?;
-
-	// Re-emit the last frame when an interval passes without a fresh one, so a
-	// static screen still produces a steady stream for the encoder. A camera
-	// never retains a `last` frame and never arms the timer.
-	let timer = mainloop.loop_().add_timer({
-		let state = state.clone();
-		let chan = chan.clone();
-		move |_| {
-			let mut state = state.borrow_mut();
-			if std::mem::take(&mut state.fresh) {
-				return;
-			}
-			if let Some(last) = &state.last {
-				chan.push(last.surface());
-			}
-		}
-	});
-	if kind == Kind::Screen {
-		let interval = Duration::from_micros(1_000_000 / framerate as u64);
-		timer
-			.update_timer(Some(interval), Some(interval))
-			.into_result()
-			.map_err(|e| err("pipewire timer", e))?;
-	}
 
 	// Quit when the Stream drops.
 	let _quit = quit_rx.attach(mainloop.loop_(), {
@@ -2135,26 +2085,14 @@ mod tests {
 	}
 
 	/// A buffer PipeWire removes is freed, so a lease taken from it before must
-	/// not be queued back, and the retained frame is dropped with it.
+	/// not be queued back.
 	#[test]
-	fn removed_buffer_retires_its_leases_and_the_retained_frame() {
-		let frame = nv12_to_i420(
-			&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-			FrameLayout {
-				stride: 4,
-				width: 4,
-				height: 2,
-				source_height: 2,
-			},
-		)
-		.unwrap();
+	fn removed_buffer_retires_its_leases() {
 		let mut state = State {
 			format: VideoInfoRaw::default(),
 			geometry: None,
 			color: None,
 			geo_tx: None,
-			last: Some(Last::I420(frame)),
-			fresh: false,
 			generation: 1,
 			dmabuf_modifier: None,
 			terminal: None,
@@ -2166,7 +2104,6 @@ mod tests {
 		};
 		state.buffer_removed();
 		assert_eq!(lease.current(state.generation), None);
-		assert!(state.last.is_none());
 	}
 
 	#[test]
