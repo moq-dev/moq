@@ -38,16 +38,8 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "nvidia", "vaapi", "s3", "gcs", "azure"]
-# LAN discovery and meshing (`--cluster-lan`).
-cluster-lan = ["moq-relay/cluster-lan"]
+default = ["nvidia", "v4l2", "vaapi", "s3", "gcs", "azure"]
 jemalloc = ["moq-tokio/jemalloc"]
-quic = ["moq-tokio/quic"]
-# qlog trace capture (`--client-quic-qlog <DIR>`). Off by default: it compiles the
-# qlog machinery into the enabled backends and is only wanted for debugging or
-# congestion-control testing.
-qlog = ["moq-tokio/qlog"]
-websocket = ["moq-tokio/websocket"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`), signing through rind and connecting through reqwest. Local
 # `file://` URLs need none of them.
@@ -76,7 +68,7 @@ play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playbac
 # the matching moq-video feature, so it only bites when something else pulls in
 # moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
 # dependencies, drop it:
-#   cargo build -p moq-cli --no-default-features --features "quic,websocket,capture"
+#   cargo build -p moq-cli --no-default-features --features capture
 nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # The vendored OpenH264 software H.264 fallback (C++), opt-in like the moq-video
 # feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
@@ -88,9 +80,9 @@ openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
 # `capture`, `transcode`, or `play` pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
-# opt-in like the moq-video feature it turns on. Costs the build nothing: moq-v4l
-# checks its bindings in. Only applies when `capture`, `transcode`, or `play`
-# pulls in moq-video.
+# on by default like the moq-video feature it turns on: moq-v4l checks its
+# bindings in, so nothing is needed on the build host. Only applies when
+# `capture`, `transcode`, or `play` pulls in moq-video.
 v4l2 = ["moq-video?/v4l2", "moq-transcode?/v4l2"]
 # Software VP8 / VP9 decode through libvpx, opt-in like the moq-video feature it
 # turns on because libvpx comes from the build host. Only applies when `play`
@@ -118,7 +110,7 @@ hang = { workspace = true, features = ["async"] }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 moq-archive = { workspace = true }
-moq-audio = { workspace = true, optional = true, features = ["aac"] }
+moq-audio = { workspace = true, optional = true }
 moq-auth = { workspace = true, features = ["serve"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
@@ -126,14 +118,12 @@ moq-hls = { workspace = true, features = ["server"] }
 moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
-# Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
-# CLI's own feature set (quic, cluster-lan) is what selects them.
+# Cluster, LAN mesh, and inbound `/.cluster` auth.
 moq-relay = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
-# Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
-moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds", "watch"] }
+moq-tokio = { workspace = true }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 moq-webrtc = { workspace = true }

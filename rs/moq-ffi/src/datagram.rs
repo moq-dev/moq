@@ -99,7 +99,7 @@ impl Child for MoqDatagramProducer {
 
 impl Drop for MoqDatagramProducer {
 	fn drop(&mut self) {
-		Child::abort(self, moq_net::Error::Unroutable);
+		Child::abort(self, moq_net::Error::Dropped);
 	}
 }
 

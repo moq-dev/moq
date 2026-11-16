@@ -3,8 +3,6 @@
 //! Dials over plain TCP (`tcp://`): no TLS material and no QUIC handshake, so the assertions are
 //! about the loop rather than about how a particular backend connects.
 
-#![cfg(feature = "tcp")]
-
 use std::time::Duration;
 
 /// The default healthy bar: a session held this long establishes the loop, so its end retries.

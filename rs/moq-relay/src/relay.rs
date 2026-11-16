@@ -109,17 +109,15 @@ pub struct Relay {
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
 	/// and run. `None` unless `runtime.workers` is configured, in which case
 	/// `server` carries no QUIC listener of its own.
-	#[cfg(feature = "_quic")]
 	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
 	/// [`serve`](crate::uring::Spawned::serve). `None` unless both
 	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
 	/// they own the QUIC listen address instead of `workers`.
-	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	#[cfg(target_os = "linux")]
 	uring: Option<crate::uring::Workers>,
 	/// The tokio QUIC listener's demux, which every worker shares. `None` when
 	/// nothing on tokio serves QUIC: a stream-only relay, or the io_uring workers.
-	#[cfg(feature = "_quic")]
 	demux: Option<moq_tokio::quic::demux::Demux>,
 	/// The sockets this relay hands to the relay that replaces it. `None` unless
 	/// `handoff.socket` is set.
@@ -180,10 +178,6 @@ impl Relay {
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
-		#[cfg_attr(
-			not(feature = "_quic"),
-			allow(unused_variables, reason = "only the worker groups read it")
-		)]
 		let io_uring = config.runtime.io_uring();
 
 		// Workers and the stream server split one relay across listeners, so they share
@@ -196,10 +190,8 @@ impl Relay {
 
 		// Shared by whichever tokio listener serves QUIC, so one feed and one set of
 		// counters covers every worker.
-		#[cfg(feature = "_quic")]
 		let demux = moq_tokio::quic::demux::Demux::default();
 
-		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
 				let mut server = moq_tokio::server::Config::default();
@@ -216,16 +208,10 @@ impl Relay {
 
 		// What the rest of setup reads off the group, so it has one shape whether or
 		// not a QUIC backend gave us one to read.
-		#[cfg(feature = "_quic")]
 		let workers_addr = workers.as_ref().map(moq_tokio::worker::Workers::local_addr);
-		#[cfg(not(feature = "_quic"))]
-		let workers_addr: Option<std::net::SocketAddr> = None;
-		#[cfg(feature = "_quic")]
 		let workers_certificates = workers.as_ref().map(moq_tokio::worker::Workers::certificates);
-		#[cfg(not(feature = "_quic"))]
-		let workers_certificates: Option<moq_tokio::tls::Certificates> = None;
 
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let uring = match config.runtime.workers() {
 			Some(worker) if io_uring => {
 				let mut server = moq_tokio::server::Config::default();
@@ -240,16 +226,16 @@ impl Relay {
 			_ => None,
 		};
 
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let quic_owned_elsewhere = workers_addr.is_some() || uring.is_some();
-		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+		#[cfg(not(target_os = "linux"))]
 		let quic_owned_elsewhere = workers_addr.is_some();
 
 		let mut server_config = moq_tokio::server::Config::default();
 		if let Some(addr) = listen.tcp.bind {
 			server_config.streams.tcp = sockets.tcp(crate::handoff::Role::Tcp, addr)?;
 		}
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		if let Some(path) = &listen.unix.bind {
 			server_config.streams.unix = sockets.unix(crate::handoff::Role::Unix, path)?;
 		}
@@ -257,19 +243,16 @@ impl Relay {
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
 		server_config.admission = shutdown.admission.clone();
-		#[cfg(feature = "_quic")]
-		{
-			server_config.demux = demux.clone();
-		}
+		server_config.demux = demux.clone();
 		let server = match quic_owned_elsewhere {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
 		};
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let uring_addr = uring.as_ref().map(crate::uring::Workers::local_addr);
-		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+		#[cfg(not(target_os = "linux"))]
 		let uring_addr: Option<std::net::SocketAddr> = None;
 		let addr = match (workers_addr, uring_addr) {
 			(Some(addr), _) => Some(addr),
@@ -283,17 +266,17 @@ impl Relay {
 
 		// The io_uring workers serve QUIC without the demux, and a stream-only relay
 		// has no UDP port at all.
-		#[cfg(all(feature = "_quic", target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let demux = (addr.is_some() && uring.is_none()).then_some(demux);
-		#[cfg(all(feature = "_quic", not(all(target_os = "linux", feature = "_uring"))))]
+		#[cfg(not(target_os = "linux"))]
 		let demux = addr.is_some().then_some(demux);
 
 		let cache = config.cache.init()?;
 		// Whichever worker group owns QUIC holds the certificates; the shared
 		// server then has none of its own.
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let uring_certificates = uring.as_ref().map(crate::uring::Workers::certificates);
-		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+		#[cfg(not(target_os = "linux"))]
 		let uring_certificates: Option<moq_tokio::tls::Certificates> = None;
 		let certificates = match (workers_certificates, uring_certificates) {
 			(Some(certificates), _) => certificates,
@@ -368,12 +351,11 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
-		#[cfg(feature = "_quic")]
 		let internal = internal.with_demux(demux.as_ref().map(|demux| demux.counters().clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
 		// scrape, including one that is about to fail setup.
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let internal = match uring.as_ref() {
 			Some(uring) => internal.with_uring(uring.metrics()),
 			None => internal,
@@ -406,11 +388,9 @@ impl Relay {
 			web_routes: None,
 			internal_routes: None,
 			sessions,
-			#[cfg(feature = "_quic")]
 			workers,
-			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			#[cfg(target_os = "linux")]
 			uring,
-			#[cfg(feature = "_quic")]
 			demux,
 			handoff,
 			alone,
@@ -470,7 +450,6 @@ impl Relay {
 	/// dropped and counted. `None` once taken, or when no tokio listener serves
 	/// QUIC: a stream-only relay, or one on the io_uring workers, which do not
 	/// split the port yet.
-	#[cfg(feature = "_quic")]
 	pub fn webrtc(&mut self) -> Option<moq_tokio::quic::demux::WebRtc> {
 		self.demux.take().map(|demux| demux.webrtc())
 	}
@@ -628,9 +607,8 @@ impl Relay {
 			web_routes,
 			internal_routes,
 			sessions,
-			#[cfg(feature = "_quic")]
 			workers,
-			#[cfg(all(target_os = "linux", feature = "_uring"))]
+			#[cfg(target_os = "linux")]
 			uring,
 			handoff,
 			alone,
@@ -657,7 +635,7 @@ impl Relay {
 		// before it: an unsupported kernel, a refused ring, or a certificate
 		// identity rustls will not load fails here, and reporting ready first would
 		// release the units depending on a relay that is about to exit.
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let mut uring = uring
 			.map(|uring| {
 				uring
@@ -692,7 +670,7 @@ impl Relay {
 			false => None,
 		};
 
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		if let Some(uring) = uring.as_mut() {
 			uring.serve();
 		}
@@ -717,9 +695,9 @@ impl Relay {
 		#[cfg(not(feature = "jemalloc"))]
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let uring_serving = uring.is_some();
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let uring_failed = {
 			let uring = uring.as_mut();
 			async move {
@@ -729,20 +707,18 @@ impl Relay {
 				}
 			}
 		};
-		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+		#[cfg(not(target_os = "linux"))]
 		let uring_failed = std::future::pending::<anyhow::Error>();
 
 		// Each worker serves from its own thread, so the future built here only
 		// reports the outcome. The group owns those threads and ends serving
 		// when the first member finishes, so it has to outlive the loop below
 		// and is torn down after it.
-		#[cfg(feature = "_quic")]
 		let mut workers = workers.map(|workers| workers.split());
 
 		// Pends forever with no workers, so it composes into the `select!` either
 		// way. A worker only stops on error or on shutdown, so the first one to
 		// finish ends the relay the same way the shared accept loop does.
-		#[cfg(feature = "_quic")]
 		let quic_workers = {
 			let mut running = futures::stream::FuturesUnordered::new();
 			if let Some(workers) = workers.as_mut() {
@@ -770,24 +746,17 @@ impl Relay {
 				}
 			}
 		};
-		// No group to run, so this leg never resolves and the shared accept loop
-		// below decides the `select!` on its own.
-		#[cfg(not(feature = "_quic"))]
-		let quic_workers = std::future::pending::<anyhow::Result<()>>();
 
-		#[cfg(feature = "_quic")]
 		let has_workers = workers.is_some();
-		#[cfg(not(feature = "_quic"))]
-		let has_workers = false;
 
 		// With the QUIC listener owned by a worker group, the shared server has
 		// only the `tcp`/`unix` stream listeners left, and a config with none
 		// of those has nothing to accept: its loop would fail with
 		// `NoBackend` immediately and take the healthy relay down. Pend instead;
 		// the workers are what serve.
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		let quic_on_workers = has_workers || uring_serving;
-		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
+		#[cfg(not(target_os = "linux"))]
 		let quic_on_workers = has_workers;
 		// Set once the relay replacing this one serves: every accept loop stops, since
 		// that relay accepts on the same sockets, and the drain starts.
@@ -865,11 +834,10 @@ impl Relay {
 
 		// Explicitly, so the joins land on the blocking pool rather than on the
 		// executor thread this future happens to be running on.
-		#[cfg(feature = "_quic")]
 		if let Some(workers) = workers {
 			workers.shutdown().await;
 		}
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		#[cfg(target_os = "linux")]
 		if let Some(uring) = uring {
 			uring.shutdown().await;
 		}
@@ -944,7 +912,6 @@ async fn drain(
 ///
 /// The accept loop for a single [`moq_tokio::Server`]. [`Relay::run`] owns
 /// worker selection and shutdown for embedders.
-#[cfg(feature = "_quic")]
 async fn serve(
 	server: moq_tokio::Server,
 	cluster: cluster::Cluster,
@@ -1110,20 +1077,5 @@ mod tests {
 
 		let err = relay.run().await.expect_err("the relay kept running");
 		assert_eq!(err.root_cause().to_string(), "origin driver panicked: injected");
-	}
-
-	#[cfg(not(feature = "_quic"))]
-	#[tokio::test]
-	async fn workers_require_a_quic_backend() {
-		let mut config = crate::Config::default();
-		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
-		let error = match super::Relay::load(config).await {
-			Ok(_) => panic!("workers accepted without a QUIC backend"),
-			Err(error) => error,
-		};
-		assert_eq!(
-			error.to_string(),
-			"runtime.workers needs moq-relay built with the `quic` feature"
-		);
 	}
 }

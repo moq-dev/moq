@@ -8,8 +8,10 @@ moq's bindings (Kotlin, Swift, Python, Go, Dart, C++, and C) come from
 attributes. moq-ffi shrinks to the remainder that is genuinely new API.
 `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, the per-generator pins, and the
 UniFFI dependency are deleted, and the three `kixelated/uniffi-*` generator
-forks are archived. Wrapper APIs do not change except where a decision below
-says so.
+forks are archived. The switch is a breaking release of every binding
+(decided 2026-11-16): the hand-written parts of each wrapper keep their API
+except where a decision below says so, and the generated names the wrappers
+re-export may change.
 
 ## Plan
 
@@ -109,14 +111,48 @@ dependency, so crates.io moq-ffi still builds (see the
   with an error, which the fork still leaks (moq-ffi's errors hold no
   handles today).
 
-Public API: moq-ffi's dependency names change, generated C type names become
-CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
-`MoqAudioEncoderFinish` in every language; wrapper APIs do not change except
-Dart's `MoqRoute.instanceId()`, which takes the exporter's name. Wire: none.
+Deferred 2026-11-15 (maintainer, /quest-complete): the `Waiting` decision on
+the generated binding renames stays open, kept out of that run's m0 to m2
+scope, since the binding API changes anyway in the rust2 migration expected
+around 2026-12-15.
 
-## Waiting
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit), settling
+that `Waiting` item: ✅ accept two breaks. 0.22 ships the bindings on
+UniFFI, and the switch is a second breaking binding release (rejected:
+announcing the binding packages as a preview that freezes at the switch;
+holding the binding packages off the shared minor until the switch; counting
+only the hand-written wrappers as public API, the old option B).
 
-- Maintainer: whether the generated binding renames may land after the cut. The switch renames C types to CamelCase, `MoqAudioEncoderFinished` to `MoqAudioEncoderFinish` in every generated binding, and Dart `moq_ffi`'s `instanceId`, which would force a binding-breaking release. (A) Accept one binding-breaking release when the switch lands. (B) Count only the hand-written wrappers as public API, since they already alias these names (for example `instance()` in `dart/moq/lib/src/client.dart`), so the generated renames ship as non-breaking. I recommend B; C costs nothing either way, since no `c-v*` tag ships before the cut.
+Option B's premise does not hold, which is why it was not offered again: the
+generated layer is public API in most languages, counted 2026-11-16.
+
+- Kotlin: 187 `typealias` lines under `kt/moq/src/jvmAndAndroidMain` onto
+  `uniffi.moq.*` classes, handles included (104 in `Aliases.kt`), and a test
+  requires one for every generated record and handle
+  (`SmokeTest.kt:224`).
+- Dart: 157 `typedef` lines under `dart/moq/lib`.
+- Swift wraps handles but has 102 `typealias` lines under
+  `swift/Sources/Moq` (46 in `Aliases.swift`), among them `MoqError`,
+  `ProtocolKind`, `AnnounceEvent`, and `ConnectionPhase`.
+- C++ and the generated C are generated entirely.
+
+So "wrapper APIs do not change" in the bullets above, carried over from the
+abandoned fork plan, is a property to measure, not assume: the switch's PR diffs each
+language's public API (`sh/api-diff`) and its Impact section lists every
+rename for the packages' `MIGRATE.md`. Reshapes that outlive the generator
+land before the cut instead, in
+[the selector quest](/quest/m2/ffi-open-selectors.md) and
+[the group rename](/quest/m2/time-addressing/bindings.md); the switch keeps
+those shapes. The audit's other binding findings were not picked: the `Moq`
+facade Kotlin and Dart start from stays, and `MoqError`'s variants stay as
+they are.
+
+Public API: breaking in every binding. moq-ffi's dependency names change,
+generated C type names become CamelCase, the generated record
+`MoqAudioEncoderFinished` becomes `MoqAudioEncoderFinish` in every language,
+Dart's `MoqRoute.instanceId()` takes the exporter's name, and any other
+generated name the wrappers re-export may change, each listed in the PR.
+Wire: none.
 
 ## Required
 

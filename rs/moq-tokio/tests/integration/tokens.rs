@@ -2,8 +2,6 @@
 //! negotiated version carries one, and in the URL query where it might not. A refusal of
 //! the first session ends the connection, even once the client has a new credential.
 
-#![cfg(feature = "quic")]
-
 use std::{sync::Arc, time::Duration};
 
 /// What the server saw on one handshake.

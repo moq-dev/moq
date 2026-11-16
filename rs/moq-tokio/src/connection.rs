@@ -200,7 +200,6 @@ impl Backoff {
 
 	/// Refuse a zero healthy threshold, which would count every session as healthy and
 	/// reset the timeout forever under a peer that drops each one on sight.
-	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		if self.resolve().healthy.is_zero() {
 			return Err(Error::BackoffHealthy);
@@ -369,7 +368,6 @@ impl Goaway {
 	}
 
 	/// The policy these knobs configure, with each unset one at its default.
-	#[cfg(any(feature = "_transport", test))]
 	pub(crate) fn resolve(&self) -> moq_net::reconnect::Goaway {
 		let mut goaway = moq_net::reconnect::Goaway::default();
 		goaway.redirect = self.redirect.into();
@@ -1102,7 +1100,6 @@ impl Connection {
 
 	/// Drive moq-net's policy: dial each attempt it asks for and publish what it does.
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
-		#[cfg(feature = "quic")]
 		let mut client = client;
 		let mut policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
 			.map_err(|_| Error::BackoffHealthy)?
@@ -1112,14 +1109,12 @@ impl Connection {
 		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial>>)> = None;
 		// The QUIC probe in flight while the live session runs on the WebSocket fallback, and
 		// the address whose race that fallback won, which its end makes QUIC's again.
-		#[cfg(all(feature = "websocket", feature = "quic"))]
 		let (mut probe, mut fallback): (Option<Probing>, Option<url::Url>) = (None, None);
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
 		// Consecutive walks that failed since the last session, and whether a dial failed
 		// since then, which tells a failed walk from a session that ended too soon.
-		#[cfg(feature = "quic")]
 		let (mut failed_walks, mut dial_failed) = (0, false);
 
 		loop {
@@ -1132,30 +1127,22 @@ impl Connection {
 						match res {
 							Ok(crate::client::Dialed { session, transport }) => {
 								tracing::info!(peer = %Endpoint(&url), %transport, "connected");
-								#[cfg(feature = "quic")]
-								{
-									(failed_walks, dial_failed) = (0, false);
-								}
+								(failed_walks, dial_failed) = (0, false);
 								shared.connected(&session, transport);
 								forward = Some(Forward::new(&session));
 								policy.connected(kio::clock::now(), session);
-								#[cfg(all(feature = "websocket", feature = "quic"))]
 								if client.on_fallback(&url, transport) {
 									policy.fallback(kio::clock::now());
 									fallback = Some(url);
 								}
 							}
 							Err(err) => {
-								#[cfg(feature = "quic")]
-								{
-									dial_failed = true;
-								}
+								dial_failed = true;
 								let verdict = verdict(&client, &url, &err);
 								policy.failed(kio::clock::now(), err, verdict);
 							}
 						}
 					}
-					#[cfg(all(feature = "websocket", feature = "quic"))]
 					if let Some((_, attempt)) = probe.as_mut()
 						&& let Poll::Ready(res) = waiter.poll_future(attempt.as_mut())
 					{
@@ -1202,26 +1189,18 @@ impl Connection {
 				}
 				// The policy already counted the timeout; dropping the dial cancels it.
 				Action::Abandon => {
-					#[cfg(feature = "quic")]
 					if dial.is_some() {
 						dial_failed = true;
 					}
 					dial = None;
-					#[cfg(all(feature = "websocket", feature = "quic"))]
-					{
-						probe = None;
-					}
+					probe = None;
 				}
-				#[cfg(all(feature = "websocket", feature = "quic"))]
 				Action::Probe(attempt) => {
 					let url = attempt.target().url().clone();
 					let client = client.clone();
 					probe = Some((url, Box::pin(async move { client.probe(attempt).await })));
 				}
-				#[cfg(not(all(feature = "websocket", feature = "quic")))]
-				Action::Probe(_) => unreachable!("only a WebSocket fallback probes"),
 				Action::Migrating => {
-					#[cfg(all(feature = "websocket", feature = "quic"))]
 					left_fallback(&mut probe, &mut fallback);
 					forward = None;
 					// One write publishes the predecessor with this status, so a close woken by
@@ -1232,7 +1211,6 @@ impl Connection {
 				}
 				Action::Retired => shared.retired(),
 				Action::Offline(failure) => {
-					#[cfg(all(feature = "websocket", feature = "quic"))]
 					left_fallback(&mut probe, &mut fallback);
 					forward = None;
 					shared.offline(failure.as_ref());
@@ -1243,7 +1221,6 @@ impl Connection {
 					// socket, then try another flow before the next walk. Only a retry window
 					// that allows a third walk gets there: a black-holed handshake outlasts the
 					// default window after the first walk.
-					#[cfg(feature = "quic")]
 					if std::mem::take(&mut dial_failed) && policy.targets().iter().any(|addr| quic_scheme(addr.url())) {
 						failed_walks += 1;
 						if failed_walks >= 2 {
@@ -1260,7 +1237,6 @@ impl Connection {
 				// The terminal snapshot does the offline bookkeeping, so a watcher never sees a
 				// `Disconnected` the loop will not redial from.
 				Action::Done(res) => {
-					#[cfg(all(feature = "websocket", feature = "quic"))]
 					left_fallback(&mut probe, &mut fallback);
 					shared.retired();
 					return res;
@@ -1460,11 +1436,9 @@ impl Connection {
 pub(crate) type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
 
 /// A QUIC probe in flight, resolving to the MoQ handshake to finish over what it reached.
-#[cfg(all(feature = "websocket", feature = "quic"))]
 type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send;
 
 /// The address a probe dials, and the probe in flight.
-#[cfg(all(feature = "websocket", feature = "quic"))]
 type Probing = (url::Url, std::pin::Pin<Box<Probe>>);
 
 /// A random non-zero hop id within 2^53, which older `@moq/lite` clients still decode.
@@ -1475,7 +1449,6 @@ fn random_hop() -> std::num::NonZeroU64 {
 
 /// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
 /// on the next race, since the outage that lost the last one may be over.
-#[cfg(all(feature = "websocket", feature = "quic"))]
 fn left_fallback(probe: &mut Option<Probing>, fallback: &mut Option<url::Url>) {
 	*probe = None;
 	if let Some(url) = fallback.take() {
@@ -1484,7 +1457,6 @@ fn left_fallback(probe: &mut Option<Probing>, fallback: &mut Option<url::Url>) {
 }
 
 /// Whether a dial to `url` runs over the QUIC endpoint, whose socket a fresh port replaces.
-#[cfg(feature = "quic")]
 fn quic_scheme(url: &url::Url) -> bool {
 	matches!(url.scheme(), "http" | "https" | "moqt" | "moql")
 }
@@ -1834,7 +1806,6 @@ mod tests {
 	/// SYN to a socket that is bound but not listening, while macOS drops it and
 	/// each attempt waits out its timeout. Listening also keeps the port reserved,
 	/// so no other listener (or an ephemeral self-connect) can take it mid-test.
-	#[cfg(feature = "tcp")]
 	async fn dead() -> Url {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
 		let addr = listener.local_addr().expect("local addr");
@@ -1844,7 +1815,6 @@ mod tests {
 	}
 
 	/// A bound stream listener and the URL that reaches it.
-	#[cfg(feature = "tcp")]
 	async fn live() -> (crate::Listener, Url) {
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -1859,7 +1829,6 @@ mod tests {
 	}
 
 	/// A client that trusts the self-signed [`live`] listener.
-	#[cfg(feature = "tcp")]
 	fn client() -> Client {
 		crate::crypto::install_default().unwrap();
 
@@ -1987,7 +1956,6 @@ mod tests {
 		assert!(matches!(woken.phases()[..], [Phase::Closed { .. }]));
 	}
 
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn aborting_before_the_loop_is_polled_publishes_its_final_snapshot() {
 		// The current-thread runtime cannot poll the spawned loop before our first await.
@@ -2020,7 +1988,6 @@ mod tests {
 	/// The first address that answers wins, however many dead ones precede it.
 	/// This is what keeps a peer reachable when discovery advertises an interface
 	/// that doesn't route from here ahead of the one that does.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn the_walk_lands_past_the_dead_addresses() {
 		let (mut server, live) = live().await;
@@ -2050,7 +2017,6 @@ mod tests {
 	}
 
 	/// With nothing reachable the walk reports a failure rather than hanging.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn the_walk_fails_when_nothing_answers() {
 		let dead_a = dead().await;
@@ -2070,7 +2036,6 @@ mod tests {
 	/// anyone who can read logs. This drives the real `tracing` stack rather than
 	/// [`Endpoint`]'s `Display`, so it also catches a log site that forgot to use
 	/// it. moq-net's own log sites have a test of their own.
-	#[cfg(feature = "tcp")]
 	#[tracing_test::traced_test]
 	#[tokio::test]
 	async fn dialing_never_logs_the_credential() {
@@ -2093,7 +2058,6 @@ mod tests {
 	}
 
 	/// Invalid local configuration must end an unlimited reconnect loop without waiting.
-	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test(start_paused = true)]
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
@@ -2110,20 +2074,13 @@ mod tests {
 	}
 
 	/// A URL host that parses but can never be a TLS server name ends an unlimited reconnect loop.
-	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test(start_paused = true)]
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).expect("build client");
-		for target in [
-			"https://a!b:1/",
-			"wss://a!b:1/",
-			"moqt://a!b:1/",
-			#[cfg(feature = "tcp")]
-			"tls://a!b:1/",
-		] {
+		for target in ["https://a!b:1/", "wss://a!b:1/", "moqt://a!b:1/", "tls://a!b:1/"] {
 			let connection = client.connect(url(target));
 			let _ = kio::clock::timeout(Duration::from_secs(1), connection.closed())
 				.await
@@ -2135,7 +2092,6 @@ mod tests {
 	/// A refused first dial ends the loop with its error at once, spending none of an
 	/// unlimited retry window: a peer that never answered is more likely a setup mistake
 	/// than a restart.
-	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_first_dial_fails_at_once() {
 		// Refusal is what's under test, so this can't use [`dead`]. Only Linux
@@ -2184,7 +2140,6 @@ mod tests {
 	/// repoints `host` at a dead address, and ends the session from the server. Returns the connection, already reporting
 	/// [`Status::Disconnected`], the live server's address and its later sessions, and the
 	/// server task.
-	#[cfg(feature = "tcp")]
 	async fn redialing(
 		host: &str,
 		mut config: crate::connect::Config,
@@ -2221,7 +2176,6 @@ mod tests {
 	/// A redial that keeps failing reports why while it retries, and the connect that
 	/// finally lands clears it. Without this a caller only learns the reason once the
 	/// loop gives up, which with no retry window is never.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_failing_redial_reports_why_until_it_connects() {
 		// Unique to this test: the table is process-wide.
@@ -2264,7 +2218,6 @@ mod tests {
 	}
 
 	/// Closing a connection between retries ends the retry, so its reason goes with it.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn closing_between_retries_clears_the_failure() {
 		// Unique to this test: the table is process-wide.
@@ -2298,7 +2251,6 @@ mod tests {
 
 	/// The connection's auth handle presents its token on every session the loop makes,
 	/// without the application adding it again.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_token_is_presented_on_every_session() {
 		const WAIT: Duration = Duration::from_secs(10);
@@ -2368,7 +2320,6 @@ mod tests {
 
 	/// Ending the connection's auth handle ends the loop at its next reconnect, rather than
 	/// redialing sessions the handle refuses.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn an_ended_auth_handle_ends_the_loop() {
 		const WAIT: Duration = Duration::from_secs(10);
@@ -2399,7 +2350,6 @@ mod tests {
 	}
 
 	/// A session that ends the loop reports through `closed`, not as a retry reason.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_session_that_ends_the_loop_reports_no_failure() {
 		const WAIT: Duration = Duration::from_secs(10);
@@ -2435,7 +2385,6 @@ mod tests {
 
 	/// A loop that gives up reports its error next, never a `Disconnected` it will not redial
 	/// from, whether or not a session ever connected.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_stopped_loop_reports_its_error_next() {
 		const WAIT: Duration = Duration::from_secs(10);
@@ -2491,7 +2440,6 @@ mod tests {
 
 	/// An auth rejection settles the walk like a status, an unreachable scheme is unusable, and
 	/// every other failure, a protocol violation included, is just a failed dial.
-	#[cfg(feature = "tcp")]
 	#[test]
 	fn a_verdict_reads_the_address_and_the_answer_not_the_error_kind() {
 		let client = client();
@@ -2513,7 +2461,6 @@ mod tests {
 		assert_eq!(verdict(Error::MoqNet(moq_net::Error::Expired)), Verdict::Retry);
 		assert_eq!(verdict(Error::NoBackend("none")), Verdict::Retry);
 		let unknown = url("moqz://localhost/");
-		#[cfg(feature = "websocket")]
 		{
 			let mut config = crate::connect::Config::default();
 			config.websocket.enabled = Some(false);
@@ -2533,12 +2480,10 @@ mod tests {
 	///
 	/// Holding is what decides the transport race without depending on timing: the
 	/// QUIC dial cannot finish until the test says so.
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	struct Forwarder {
 		gate: tokio::sync::watch::Sender<bool>,
 	}
 
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	impl Forwarder {
 		async fn start(front: tokio::net::UdpSocket, server: std::net::SocketAddr) -> Self {
 			use std::sync::Arc;
@@ -2597,7 +2542,6 @@ mod tests {
 
 	/// When QUIC wins the race the WebSocket dial is cancelled at once: its socket
 	/// closes without carrying a session, and the one session runs over QUIC.
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn quic_winning_cancels_the_websocket_dial() {
 		use tokio::io::AsyncReadExt;
@@ -2676,7 +2620,6 @@ mod tests {
 	///
 	/// Returns its address, a receiver yielding each accepted session (so the test
 	/// can drain it), and the listener task.
-	#[cfg(feature = "tcp")]
 	async fn serve(
 		origin: moq_net::origin::Producer,
 	) -> (
@@ -2705,7 +2648,6 @@ mod tests {
 	/// name again. The drained relay still accepts, so a cached resolve would land
 	/// right back on it. The live track hands over at a group boundary, and the old
 	/// session closes at our handover cap, well before the peer's own deadline.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_fleet_drain_redials_through_a_fresh_resolve() {
 		const WAIT: Duration = Duration::from_secs(10);
@@ -2805,7 +2747,6 @@ mod tests {
 	/// A replacement that drops while the drained session still serves leaves the handle
 	/// on that session, reporting Migrating rather than a Disconnected that would claim
 	/// nothing serves. Its subscription keeps delivering through the handover.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_dropped_replacement_hands_back_to_the_draining_session() {
 		kio::clock::host_time(); // real TCP sockets
@@ -2917,7 +2858,6 @@ mod tests {
 
 	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps
 	/// the session: no migration and no redial. Its close then reconnects like any drop.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_waited_restart_redials_only_once_the_session_closes() {
 		use futures::FutureExt;
@@ -2974,7 +2914,6 @@ mod tests {
 			.unwrap();
 	}
 
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn fallback_version() -> moq_net::Version {
 		"moq-lite-07-wip".parse().unwrap()
 	}
@@ -2986,7 +2925,6 @@ mod tests {
 	/// A dial lands on WebSocket, as the race does while UDP is blocked, and records the win
 	/// the way the race would. A probe fails while `blocked` holds and otherwise reaches what
 	/// stands in for QUIC.
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn fallback_client(
 		origin: moq_net::origin::Producer,
 		blocked: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -3060,7 +2998,6 @@ mod tests {
 	}
 
 	/// The MoQ handshake a test dial runs over `transport`.
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	async fn connect_session(moq: &moq_net::Client, transport: qmux::Session) -> crate::Result<moq_net::Session> {
 		let (session, driver) = moq.connect(moq_net::time::Instant::now(), transport).await?;
 		tokio::spawn(moq_net::time::run(driver));
@@ -3071,7 +3008,6 @@ mod tests {
 	/// probe gets through, without dropping the subscription it carries, and gives the race
 	/// back QUIC's head start. Until then it stays on WebSocket, probing no faster than the
 	/// backoff allows.
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test(start_paused = true)]
 	async fn a_websocket_fallback_returns_to_quic_once_udp_works() {
 		use std::sync::atomic::{AtomicBool, Ordering};
@@ -3160,7 +3096,6 @@ mod tests {
 
 	/// A WebSocket win is provisional: once the session it brought up ends, the redial
 	/// gives QUIC its head start again, since the outage that lost the race may be over.
-	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test(start_paused = true)]
 	async fn a_websocket_session_ending_restores_the_quic_head_start() {
 		const WAIT: Duration = Duration::from_secs(5);
@@ -3188,7 +3123,6 @@ mod tests {
 	/// A configured token is held before its dial starts the session, so a broadcast
 	/// published before the dial, which only that token's grant covers, waits for its
 	/// answer instead of closing the session against the connection credential's grant.
-	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
 	async fn a_publication_waits_for_a_configured_token() {
 		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();

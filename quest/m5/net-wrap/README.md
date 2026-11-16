@@ -39,7 +39,7 @@ and its trait-versus-bridge comparison:
   `next_frame`, `read_chunk`,
   the broadcast consumer's `tracks` listing (maintainer, 2026-10-24), and
   their `poll_*` forms. A wrapper adapts
-  to moq-net, not the other way around: `moq_crypto::e2ee::Error` converts into
+  to moq-net, not the other way around: `moq_e2ee::Error` converts into
   `moq_net::Error`.
 - **Datagrams follow the datagram types.** Datagram tracks have their own
   producer and consumer types (`datagram::Producer::append` and `insert`,

@@ -1,9 +1,10 @@
 {
-	"version": 3,
-	"source": "https://cdn.moq.dev/anon aq-kixtop-mic-1793728306.hang, <moq-publish> in Chrome 156 on a MacBook Air (macOS 26.6.2) capturing its built-in microphone, recorded 2026-11-03 by headless Chromium on a Linux host",
+	"version": 4,
+	"source": "https://cdn.moq.dev/anon aq-kixtop-mic-1793728306.hang, <moq-publish> in Chrome 156 on a MacBook Air (macOS 26.6.2) capturing its built-in microphone, recorded 2026-11-03 by headless Chromium on a Linux host. Version 4 adds largest, the publisher's largest group as the subscription began. This recording predates it, so it is derived (2026-11-15): the newest group whose first frame's media timestamp plus the trace's lowest lag (the smallest at minus timestamp) falls at or before the first arrival, the live edge as the first frame arrived.",
 	"description": "A browser publisher through the public relay: getUserMedia, the capture worklet, and WebCodecs Opus, with the relay's round trip in between.",
 	"transport": "webtransport",
 	"rtt": 2,
+	"largest": 32142,
 	"config": {
 		"codec": "opus",
 		"container": {

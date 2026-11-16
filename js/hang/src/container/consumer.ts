@@ -58,7 +58,7 @@ export interface ConsumerProps {
 	/**
 	 * How much further than the min delay the start reaches, in milliseconds (default: 0), so a
 	 * decoder that needs that much media before its output is clean starts early enough, such as an
-	 * Opus decoder or the max-delay decoder of an intra-refresh rendition. Pass the catalog
+	 * Opus decoder or an intra-refresh video decoder. Pass the catalog
 	 * rendition's `warmup`. Mirrors Rust's `container::Playout`.
 	 *
 	 * Put the max delay plus the warmup on the subscription, since the publisher skips what falls
@@ -81,6 +81,21 @@ export interface ConsumerProps {
 	 * switch neither lowers nor raises {@link Consumer.spread} on its own.
 	 */
 	predecessor?: Consumer;
+	/**
+	 * The playout clock this reader feeds, such as the player's `Sync` (default: none). A missing
+	 * group whose successor starts at or before the media time it presents now could only arrive
+	 * too late to play, so it is skipped then rather than waited for: a reader resuming behind the
+	 * live edge moves on once the clock passes the hole, not a whole {@link ConsumerProps.wait} later.
+	 */
+	playhead?: Playhead;
+}
+
+/** A playout clock, which a {@link Consumer} reads to tell when a missing group could no longer play. */
+export interface Playhead {
+	/** The media time presenting now, or undefined while nothing presents. */
+	now(): Duration | undefined;
+	/** Changes whenever {@link Playhead.now} jumps rather than advancing with the wall clock: a re-anchor, a new delay, or a pause. */
+	readonly anchor: Getter<unknown>;
 }
 
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
@@ -189,6 +204,7 @@ export class Consumer {
 	#format: Format;
 	#delay: Getter<Moq.Track.Delay>;
 	#wait: Getter<Duration | undefined>;
+	#playhead?: Playhead;
 	#maxBuffer: number;
 	// How much further than the min delay the start reaches, and the age skip tolerates while warming.
 	#warmup: Duration;
@@ -279,6 +295,7 @@ export class Consumer {
 		this.#format = props.format;
 		this.#delay = getter(props.delay ?? {});
 		this.#wait = getter(props.wait);
+		this.#playhead = props.playhead;
 		this.#maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
 		this.#warmup = (props.warmup ?? Duration.ZERO).min(DELAY_MAX);
 		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
@@ -908,7 +925,8 @@ export class Consumer {
 			// A missing sequence also expires on elapsed monotonic time, so timestamp-free markers
 			// behind a hole can end a paused track without more arrivals. It is late since a group
 			// past it arrived, not since the cursor got here: once the edge stops moving, a backlog
-			// with every other group missing would otherwise drain one budget per hole.
+			// with every other group missing would otherwise drain one budget per hole. And once the
+			// playout clock reaches where the first group past it begins, nothing missing can still play.
 			if (starting === undefined && this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
@@ -918,19 +936,30 @@ export class Consumer {
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp.asMicros());
 					const empty = head.empty && head.consumer.done;
 					const wait = this.#holeWait(this.#delay.peek(), this.#wait.peek());
-					const bound = this.#groups.find((group) => group.start !== undefined)?.start;
+					const bound = this.#bound();
 					const edge = this.#liveEdge();
 					// Measured against the max delay, not the wait: a reader starved of CPU takes in a burst of
 					// groups at once, and the missing one may land in the same burst.
 					const aged =
 						bound !== undefined && edge !== undefined && edge - bound >= maxMicros(this.#delay.peek());
 					const elapsed = now().since(this.#hole).asMicros() >= wait;
+					const passed = this.#passed(bound) === 0;
 					// The ranges ask for nothing in between, so nothing there is owed.
 					const next = this.#track.nextInRange(this.#active);
 					const excluded = next === undefined || next >= head.consumer.sequence;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
-					if (startup || empty || contiguous || aged || elapsed || excluded || full || ended !== undefined) {
+					if (
+						startup ||
+						empty ||
+						contiguous ||
+						aged ||
+						elapsed ||
+						passed ||
+						excluded ||
+						full ||
+						ended !== undefined
+					) {
 						if (!contiguous && !empty) {
 							this.#lost = true;
 							if (!startup) {
@@ -1040,11 +1069,19 @@ export class Consumer {
 				timer = new Effect();
 				timer.run((effect) => {
 					const delay = effect.get(this.#delay);
+					// A clock that jumps moves when it reaches the group past a hole.
+					if (this.#playhead) effect.get(this.#playhead.anchor);
 					// The start waits out its reach, and a hole the wait, which an unlimited one never does.
 					const budget =
 						starting === undefined ? this.#holeWait(delay, effect.get(this.#wait)) : this.#reach(delay);
-					if (!Number.isFinite(budget)) return;
-					effect.timer(() => this.#notify?.(), Duration.micros(budget).saturatingSub(now().since(since)));
+					let left = Number.isFinite(budget)
+						? Duration.micros(budget).saturatingSub(now().since(since))
+						: undefined;
+					// A hole also ends once the playout clock reaches the first group past it.
+					const passing = starting === undefined ? this.#passed(this.#bound()) : undefined;
+					if (passing !== undefined) left = Duration.micros(Math.min(passing, left?.asMicros() ?? passing));
+					if (left === undefined) return;
+					effect.timer(() => this.#notify?.(), left);
 				});
 			}
 
@@ -1061,6 +1098,19 @@ export class Consumer {
 			this.#notify = undefined;
 			if (aborted) return undefined;
 		}
+	}
+
+	// Where the first stamped buffered group begins, which bounds everything a missing group before it presents.
+	#bound(): number | undefined {
+		return this.#groups.find((group) => group.start !== undefined)?.start;
+	}
+
+	// How long until the playout clock reaches `bound`, in microseconds: zero once it has, undefined
+	// without a clock that is presenting or without a bound.
+	#passed(bound: number | undefined): number | undefined {
+		const playhead = this.#playhead?.now()?.asMicros();
+		if (bound === undefined || playhead === undefined) return undefined;
+		return Math.max(0, bound - playhead);
 	}
 
 	// How long a missing group is waited for, in microseconds: the wait, at most the max delay.

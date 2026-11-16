@@ -6,8 +6,6 @@
 //! dials: `a` is rooted at `tenant-a`, `b` at `tenant-b` with a read-only
 //! mount of `tenant-a/public` at `shared`.
 
-#![cfg(feature = "quic")]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -515,7 +513,7 @@ async fn tokio_keeps_tenants_apart() {
 	matrix(false).await;
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_keeps_tenants_apart() {
 	if !crate::runtime_uring::supported() {

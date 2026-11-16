@@ -8,14 +8,14 @@ use crate::{Color, Error, I420, Output, Size, Surface};
 pub(super) enum Layout {
 	/// One packed RGBA or BGRA texture. The fragment shader ignores alpha so
 	/// both XRGB and ARGB DMA-BUFs produce an opaque frame.
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	Rgba,
 	/// Luma plane plus one interleaved chroma plane. What every hardware
 	/// decoder hands back, so only a zero-copy import produces it: the CPU
 	/// upload path is always I420. Gated to the platforms that have such an
 	/// importer: macOS and iOS via CoreVideo, and Linux by importing an NV12 DMA-BUF's
 	/// two memory planes as two Vulkan images.
-	#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
+	#[cfg(any(apple, target_os = "linux"))]
 	Nv12,
 	/// Three separate planes.
 	I420,
@@ -63,7 +63,7 @@ impl Cache {
 	/// [`output`] that keeps such frames away from the renderer.
 	pub fn import(&mut self, device: &wgpu::Device, surface: &Surface) -> Result<Source, Error> {
 		match surface {
-			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			#[cfg(target_os = "linux")]
 			Surface::DmaBuf(buffer) => super::dmabuf::import(device, buffer),
 			#[cfg(apple)]
 			Surface::PixelBuffer(buffer) => {
@@ -130,7 +130,7 @@ pub fn output(device: &wgpu::Device) -> Output {
 /// [`output`] for `device` as if it had been opened with `features`, which
 /// lets a test cover both answers on a device that has only one of them.
 pub(super) fn output_with(device: &wgpu::Device, features: wgpu::Features) -> Output {
-	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[cfg(target_os = "linux")]
 	let imports = {
 		let _ = device;
 		super::dmabuf::supports(features)
@@ -140,7 +140,7 @@ pub(super) fn output_with(device: &wgpu::Device, features: wgpu::Features) -> Ou
 		let _ = features;
 		super::metal::supports(device)
 	};
-	#[cfg(not(any(apple, all(target_os = "linux", feature = "dmabuf"))))]
+	#[cfg(not(any(apple, target_os = "linux")))]
 	let imports = {
 		let _ = (device, features);
 		false
@@ -152,7 +152,7 @@ pub(super) fn output_with(device: &wgpu::Device, features: wgpu::Features) -> Ou
 /// [`Output::Render`] for: what that output keeps on the GPU.
 pub(crate) fn imports(surface: &Surface) -> bool {
 	match surface {
-		#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+		#[cfg(target_os = "linux")]
 		Surface::DmaBuf(buffer) => super::dmabuf::imports(buffer.format()),
 		#[cfg(apple)]
 		Surface::PixelBuffer(buffer) => super::metal::imports(buffer),

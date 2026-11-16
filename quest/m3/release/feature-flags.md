@@ -40,9 +40,11 @@ judged, so this pass reads only the difference:
   it, inside the shipped binary rather than the crate alone: most features
   that look heavy on their crate add one or two crates to moq-relay or moq-cli.
   Diff this pass's inventory against the first pass's to find what m2 added.
-- Filed: [network stack](/quest/m2/features-network.md),
-  [qlog](/quest/m2/features-qlog.md), and [media and gateway
-  trims](/quest/m2/features-leaf-trims.md). Check each landed or was dropped.
+- Filed: network stack (landed in
+  [moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)), qlog (landed
+  in [moq-dev/moq#8853](https://github.com/moq-dev/moq/pull/8853)), and the
+  media and gateway trims
+  ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)).
 - Kept, with the reason a new feature has to match:
   - `async` in kio, moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
     moq-crypto, and moq-auth: the poll-first design (decided 2026-11-05 in
@@ -56,8 +58,11 @@ judged, so this pass reads only the difference:
     build); moq-cli's `s3`, `gcs`, and `azure`.
   - Large HTTP stacks a library embedder owns: moq-auth's `client`
     (reqwest) and `serve` (axum), moq-hls's and moq-webrtc's `server` (axum).
-  - moq-crypto's `sign`, `e2ee`, `cpu`, and `provider`: they keep moq-net out
-    of moq-quic's graph, a layering need rather than a trim.
+  - moq-crypto's `endpoint`, `cpu`, and `provider`: they keep moq-net out
+    of moq-quic's graph, a layering need rather than a trim. Corrected
+    2026-11-16: `sign` left in
+    [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855), and `e2ee`
+    leaves with [the crate move](/quest/m2/e2ee-crate.md).
   - `serde` in kio, moq-pattern, and moq-crypto: an optional dependency, by
     ecosystem convention.
   - moq-video's `capture`: device I/O the bindings deliberately leave to the

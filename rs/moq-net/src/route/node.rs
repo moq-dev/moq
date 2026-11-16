@@ -24,7 +24,6 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use kio::clock::{Deadlines, Instant};
@@ -57,11 +56,25 @@ pub(crate) struct Claim {
 	/// older version: sent only to a peer this node proxies for, so a node that does
 	/// not proxy is never transit. Always unset on a claim off the wire.
 	pub learned: bool,
+	/// How many segments the claim's own prefix lacks of the path it is announced at: 0
+	/// for a claim exactly there, more for a broader claim presented at a narrower
+	/// request (see [`super::Item::lowered`]). A claim exactly at a path outranks every
+	/// broader one there.
+	pub above: u64,
 	/// The hop chain of a claim learned over moq-lite-06 or moq-transport, which
 	/// lite-07 carries as the Lite-06 Chain; empty for a native claim. A relay
 	/// translating the claim back to lite-06 extends it, so a node the claim reaches
 	/// again recognizes its own hop and drops it. Deleted with lite-06 compatibility.
 	pub chain: crate::Hops,
+}
+
+impl super::Item for Claim {
+	fn lowered(&self, by: u64) -> Self {
+		Self {
+			above: self.above.saturating_add(by),
+			..self.clone()
+		}
+	}
 }
 
 /// A shown claim as the origin serves it through one live route.
@@ -70,8 +83,6 @@ pub(crate) struct Served {
 	pub claim: Claim,
 	/// The route's metric: a path through the claim costs the Announce Cost plus this.
 	pub metric: Metric,
-	/// The round trip to the route's publisher, informational.
-	pub rtt: Option<Duration>,
 	/// Whether a usable route serves it; a held one leaves it shown but unavailable.
 	pub available: bool,
 	/// A node on the route's path sent GOAWAY: it ranks below every route avoiding one.
@@ -1110,6 +1121,22 @@ impl Stream {
 		self.queue.lock().pop()
 	}
 
+	/// Ready once the peer offers no route on this stream that only doubt keeps the node
+	/// off ([`Router::doubted`]). Such a route waits on a doubt's timer, so this checks
+	/// again whenever the node's next deadline moves.
+	pub fn poll_undoubted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let armed = {
+				let state = self.node.lock();
+				if !state.router.doubted(self.key) {
+					return Poll::Ready(());
+				}
+				state.router.deadline()
+			};
+			ready!(self.node.poll_deadline(armed, waiter));
+		}
+	}
+
 	/// Date what the stream hands the node by its session's clock too.
 	pub fn with_clock(mut self, clock: Deadlines) -> Self {
 		self.clock = Some(clock);
@@ -1162,11 +1189,6 @@ impl Stream {
 	/// The peer sent GOAWAY: its routes rank below every other.
 	pub fn goaway(&self) {
 		self.with(|router, key, now| router.goaway(key, now));
-	}
-
-	/// The link to the peer has `rtt`, or `None` unmeasured.
-	pub fn rtt(&self, rtt: Option<Duration>) {
-		self.with(|router, key, _| router.rtt(key, rtt));
 	}
 
 	/// This stream's session now serves `claim` of `id` along its route covering `prefix`
@@ -1442,7 +1464,6 @@ impl State {
 						let served = Served {
 							claim: item.clone(),
 							metric: offer.metric,
-							rtt: offer.rtt,
 							available,
 							draining: offer.draining,
 							priority: offer.priority,

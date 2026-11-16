@@ -18,7 +18,7 @@ use crate::json::{
 use crate::media::*;
 use crate::session::{
 	MoqBackoff, MoqCongestionControl, MoqConnectionPhase, MoqQuicConfig, MoqWebSocketConfig, moq_client_defaults,
-	moq_qlog_supported, moq_versions,
+	moq_versions,
 };
 
 use std::future::Future;
@@ -334,7 +334,6 @@ fn referencing(reference: Option<&str>, instance: Option<&str>) -> MoqRendition 
 }
 
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
-#[cfg(feature = "audio")]
 fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	use crate::media::{MoqAudio, MoqContainer};
 
@@ -355,7 +354,6 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	}
 }
 
-#[cfg(feature = "audio")]
 fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 	use crate::audio::{MoqAudioDecoderOutput, MoqAudioSampleFormat};
 	MoqAudioDecoderOutput {
@@ -563,7 +561,6 @@ async fn raw_track_activity() {
 		.unwrap();
 }
 
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_activity() {
 	use crate::audio::*;
@@ -680,7 +677,6 @@ async fn raw_audio_activity() {
 }
 
 /// Distinct channel tones, continuous across calls from different producer threads.
-#[cfg(feature = "audio")]
 fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
 	(start..start + frames)
 		.flat_map(|sample| {
@@ -692,7 +688,6 @@ fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
 		.collect()
 }
 
-#[cfg(feature = "audio")]
 fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 	let coefficient = 2.0 * (std::f64::consts::TAU * frequency / 48_000.0).cos();
 	let (mut previous, mut older) = (0.0, 0.0);
@@ -705,7 +700,6 @@ fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 }
 
 /// PCM written and finished from separate host threads survives the binding's locking and drain.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_raw_publish_from_many_threads() {
 	use crate::audio::*;
@@ -804,7 +798,6 @@ async fn audio_raw_publish_from_many_threads() {
 }
 
 /// Reject incomplete PCM channel frames before feeding the codec.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_raw_publish_rejects_bad_frames() {
 	use crate::audio::*;
@@ -846,7 +839,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 
 /// The decoder's playout delay is configurable and stays observable while a read waits:
 /// the decoder sits behind the read's lock, so the getter must not need it.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_decode_delay() {
 	use crate::audio::*;
@@ -951,7 +943,6 @@ async fn raw_audio_decode_delay() {
 
 /// Each encoder the publisher stops, by a reanchor or a finish, reaches the caller as an
 /// end in microseconds rather than vanishing between frames.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_decode_reports_encoder_ends() {
 	use crate::audio::*;
@@ -1043,7 +1034,6 @@ async fn raw_audio_decode_reports_encoder_ends() {
 
 /// Opus' 2.5 ms frame survives the trip to the encoder, and a duration Opus can't frame is
 /// refused.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_frame_durations() {
 	use crate::audio::*;
@@ -1101,7 +1091,6 @@ async fn raw_audio_frame_durations() {
 
 /// An absent frame duration takes the codec's own frame, and AAC, which encodes only
 /// through a platform encoder, is refused where there is none.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_codec_default_frame() {
 	use crate::audio::*;
@@ -1942,17 +1931,14 @@ async fn track_request_demand_survives_accept() {
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
 	demand.until_unwanted().await.unwrap();
-	// Released unfinished, the track aborts, and its watcher keeps the cause.
+	// Released unfinished, the track ends dropped, which its watcher reports as `Closed`, as a
+	// track released without an abort.
 	drop(track);
 	broadcast.close().unwrap();
 	let Err(err) = demand.until_wanted().await else {
 		panic!("the watcher outlived its track");
 	};
-	assert_protocol(
-		&err,
-		crate::error::MoqErrorScope::Stream,
-		crate::error::MoqProtocolKind::Unroutable,
-	);
+	assert!(matches!(err, MoqError::Closed), "{err:?}");
 }
 
 /// A datagram handler keeps its broadcast alive independently of the stream handler.
@@ -3405,7 +3391,6 @@ async fn follow_keeps_the_requested_path() {
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
 /// there, not on the broadcast the catalog came from. Dropping the reference either fails to
 /// find the track or silently decodes a same-named local one with mismatched metadata.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -4056,7 +4041,6 @@ async fn video_publish_consume() {
 /// The raw-video publish path: hand mid-gray RGBA to `MoqVideoProducer` and check
 /// that the encoder's own output reaches a subscriber, described by a catalog
 /// rendition the importer built from the encoded keyframe.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_consume() {
 	use crate::video::*;
@@ -4182,7 +4166,6 @@ async fn video_raw_publish_consume() {
 /// readable after its consumer is cancelled and dropped and the track is gone.
 /// A surface decode keeps the decoder's pixel buffer and still downloads on
 /// demand, where the platform has one (macOS) and is refused where it has none.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_frame_ownership() {
 	use crate::video::*;
@@ -4333,7 +4316,6 @@ async fn video_decode_frame_ownership() {
 
 /// The default start decodes a cached track from its oldest group, while
 /// `Latest` skips that backlog and joins at the newest group.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_start() {
 	use crate::media::MoqDecodeStart;
@@ -4454,7 +4436,6 @@ async fn video_decode_start() {
 /// whichever thread dropped the object. The confinement itself is asserted in
 /// moq-video (`encode::sink`); this pins that the binding supports the usage
 /// end to end, including the drain on `finish`.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_from_many_threads() {
 	use crate::video::*;
@@ -4537,7 +4518,6 @@ async fn video_raw_publish_from_many_threads() {
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it, and rejects any write
 /// after `finish`.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_rejects_bad_frames() {
 	use crate::video::*;
@@ -4853,6 +4833,18 @@ async fn assert_left<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
 	}
 }
 
+/// Each reader ends without a cause, as a handle released before its finish or abort leaves it:
+/// `Dropped`, which keeps `Unroutable` for a route losing the content.
+async fn assert_released<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
+	for reader in readers {
+		let read = kio::clock::timeout(TIMEOUT, reader.read_frame()).await;
+		let Err(err) = read.expect("the track carried on") else {
+			panic!("the track ended cleanly");
+		};
+		assert!(matches!(err, MoqError::Internal { .. }), "{err:?}");
+	}
+}
+
 /// Closing a broadcast ends every track handle still open on it the way a publisher leaving
 /// does, and the handles refuse later calls.
 #[tokio::test(start_paused = true)]
@@ -4872,14 +4864,14 @@ async fn closing_a_broadcast_ends_its_open_tracks() {
 	assert!(matches!(media.finish(), Err(MoqError::Closed)));
 }
 
-/// A track handle released without a finish, as a garbage collector does, ends its track as a
-/// publisher leaving rather than a cause-less drop.
+/// A track handle released without a finish, as a garbage collector does, ends its track as
+/// dropped: its broadcast stays, so no route was lost.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_track_handle_ends_it() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (raw, media, readers) = children(&broadcast).await;
 	drop((raw, media));
-	assert_left(readers).await;
+	assert_released(readers).await;
 	broadcast.close().unwrap();
 }
 
@@ -4949,13 +4941,13 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 	assert!(matches!(json_window.push("1".into(), us(0)), Err(MoqError::Closed)));
 }
 
-/// A data writer released without a finish ends its track as a publisher leaving.
+/// A data writer released without a finish ends its track as dropped.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_data_writer_ends_it() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (writers, readers) = data_children(&broadcast).await;
 	drop(writers);
-	assert_left(readers).await;
+	assert_released(readers).await;
 	broadcast.close().unwrap();
 }
 
@@ -6627,20 +6619,6 @@ async fn server_new_validates_the_config() {
 		..Default::default()
 	});
 	assert!(matches!(version, Err(MoqError::Config { .. })));
-
-	// A build that cannot write qlog refuses the directory here, not later as a bind error.
-	let qlog = MoqServer::new(MoqServerConfig {
-		quic: MoqQuicConfig {
-			qlog: Some(std::env::temp_dir().display().to_string()),
-			..Default::default()
-		},
-		..Default::default()
-	});
-	if moq_qlog_supported() {
-		assert!(qlog.is_ok());
-	} else {
-		assert!(matches!(qlog, Err(MoqError::Config { .. })));
-	}
 }
 
 /// The defaults convert back to moq-net's own, so they mean the same as no subscription.
@@ -6716,12 +6694,11 @@ async fn client_new_validates_the_connection_knobs() {
 		Err(MoqError::Config { .. })
 	));
 
-	// A build that cannot write qlog refuses the directory rather than dropping it.
 	let qlog = MoqQuicConfig {
 		qlog: Some(std::env::temp_dir().display().to_string()),
 		..Default::default()
 	};
-	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
+	assert!(client(MoqClientTls::default(), qlog).is_ok());
 }
 
 /// A client with `quic.keylog` on, dialing `localhost` pinned to `fingerprints`.
@@ -6849,7 +6826,7 @@ async fn client_connects_with_every_knob_set() {
 			keep_alive: Some(Duration::ZERO),
 			gso: Some(false),
 			mtu_discovery: Some(true),
-			congestion_control: Some(MoqCongestionControl::Loss),
+			congestion_control: Some(MoqCongestionControl::loss()),
 			qlog: None,
 			keylog: Some(false),
 		},
@@ -7711,7 +7688,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 }
 
 /// The built-in encoder's applied bitrate follows a shrinking grant.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
 	use crate::bandwidth::MoqAllocator;
@@ -7771,7 +7747,6 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	broadcast.close().unwrap();
 }
 
-#[cfg(feature = "video")]
 fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::video::MoqVideoEncoderOutput) {
 	use crate::video::*;
 	(
@@ -7795,7 +7770,6 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 
 /// Dropping a producer parked in `changed()` must stop the follow thread, not
 /// leak it until the session allocator dies.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn dropping_a_video_producer_stops_the_rate_follower() {
 	use crate::bandwidth::MoqAllocator;
@@ -7825,7 +7799,6 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 }
 
 /// `set_bitrate` is the manual ceiling: a later grant cannot retune above it.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	use crate::bandwidth::MoqAllocator;
@@ -9602,7 +9575,6 @@ async fn demand_cancelled_before_free_leaves_the_change() {
 }
 
 /// Setup, rather than the first packet, decides whether a rendition is usable.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_subscribe_configuration_boundary() {
 	use crate::audio::MoqAudioConsumer;
@@ -9695,7 +9667,6 @@ async fn audio_subscribe_configuration_boundary() {
 	broadcast.close().unwrap();
 }
 
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_subscribe_configuration_boundary() {
 	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};
@@ -10048,4 +10019,14 @@ async fn group_calls_wake_ready_after_unlocking() {
 	group.abort(1).unwrap();
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
+}
+
+/// An endpoint's broadcast is told apart from media by path, and a malformed path fails.
+#[test]
+fn socket_is_endpoint() {
+	use crate::socket::moq_socket_is_endpoint;
+	assert!(moq_socket_is_endpoint("room/.server/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room/.client/a".into()).unwrap());
+	assert!(!moq_socket_is_endpoint("room/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room//a".into()).is_err());
 }

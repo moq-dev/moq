@@ -14,11 +14,11 @@ const CLIP: &[u8] = include_bytes!("test_data/scte35/bbb5s.ts");
 const HZ: i64 = 90_000;
 const WRAP: i64 = 1 << 33;
 /// The step the issue's contribution took: two encoders started about 4 h 40 m apart.
-const SWITCH: i64 = 16_844 * HZ + HZ / 2;
+pub(super) const SWITCH: i64 = 16_844 * HZ + HZ / 2;
 
 /// Which clock a timestamp belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Clock {
+pub(super) enum Clock {
 	Pcr,
 	Pes(u16),
 }
@@ -76,7 +76,7 @@ fn write_timestamp(field: &mut [u8], t: i64) {
 }
 
 /// `ts` with each PCR and PES timestamp moved by `by(clock)` 90 kHz ticks, modulo the wrap.
-fn shift(ts: &[u8], by: impl Fn(Clock) -> i64) -> Vec<u8> {
+pub(super) fn shift(ts: &[u8], by: impl Fn(Clock) -> i64) -> Vec<u8> {
 	let mut out = ts.to_vec();
 	for pkt in out.as_chunks_mut::<188>().0 {
 		let pid = pid(pkt);

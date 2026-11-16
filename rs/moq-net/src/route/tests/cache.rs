@@ -30,6 +30,11 @@
 //! broadcast's pulls form a cycle, which stale offers allow until the change crossing a
 //! link is delivered, and once quiet that every reader is fed and the offers are the
 //! fixed point computed centrally.
+//!
+//! No lite-07 wire carries the rule: WARM_START, WARM_UPDATE, WARM_END, and SUBSCRIBE's
+//! `Warm` byte were stripped until `quest/m3/cache-routing/select.md` brings them back
+//! with a production rule, and the draft's Warm Routes section went with them. Only
+//! the nightly sweep runs the churned meshes.
 
 use std::{
 	cmp::Reverse,
@@ -1146,7 +1151,10 @@ fn equal_relays_pull_one_copy_owned_by_the_lower_hash() {
 /// but one of those links while every link of the ring is held, so each relay acts on
 /// what it last heard. Delivered in any order, once quiet every reader is fed through
 /// the one link left, and the pulls formed a cycle only while a change was still
-/// crossing a link.
+/// crossing a link. A relay that lost its link may take a neighbour's direct route
+/// that the neighbour's own close made stale, until that close's DEAD crosses the
+/// link between them: the transient loop the routes epic's Plan item 27 accepts. The
+/// budget pins the seeded total, so a change in the rate shows here.
 #[test]
 fn a_ring_of_stale_offers_settles_on_the_link_left() {
 	const RING: usize = 5;
@@ -1192,7 +1200,7 @@ fn a_ring_of_stale_offers_settles_on_the_link_left() {
 		assert_eq!(mesh.parent(relays[0], &x), Some(o), "seed {seed}");
 		loops += mesh.loops;
 	}
-	assert!(loops <= 40, "{loops} steps with a cycle across 20 seeds");
+	assert!(loops <= 204, "{loops} steps with a cycle across 20 seeds");
 }
 
 /// `b` withdraws its copy while `c`'s subscription to it is on its way. The
@@ -1488,23 +1496,15 @@ fn a_copy_that_goes_takes_its_offers_along() {
 /// a lower priority. Once churn stops every mesh settles on the steady state, and a
 /// broadcast nobody reads has sent no copy offer. The pulls form a cycle only while a
 /// change crosses a link, which the sweep counts.
-#[test]
-fn sweep_cache_routing() {
-	for holds in [true, false] {
-		sweep(SEED, 100, holds);
-	}
-}
-
-/// The gate's seed, and the long sweep's unless `MOQ_ROUTE_SEED` names another.
-const SEED: u64 = 0xcac4_e5ee;
-
-/// The sweep at length from `MOQ_ROUTE_SEED` over `MOQ_ROUTE_CASES` scenarios each way,
-/// which prints what it measured.
+///
+/// Nightly alone (`test/route-sweep.sh`): the warm wire is frozen out of lite-07 until
+/// a production rule brings it back, so the gate does not pay for it. Runs from
+/// `MOQ_ROUTE_SEED` over `MOQ_ROUTE_CASES` scenarios each way, and prints what it measured.
 #[test]
 #[ignore = "slow: nightly"]
 fn sweep_cache_routing_long() {
 	let setting = |name: &str, fallback: u64| std::env::var(name).map_or(fallback, |value| value.parse().expect(name));
-	let seed = setting("MOQ_ROUTE_SEED", SEED);
+	let seed = setting("MOQ_ROUTE_SEED", 0xcac4_e5ee);
 	let cases = setting("MOQ_ROUTE_CASES", 3000) as usize;
 	println!("MOQ_ROUTE_SEED={seed} MOQ_ROUTE_CASES={cases}");
 	for holds in [true, false] {

@@ -55,9 +55,8 @@ public typealias Datagram = MoqFFI.MoqDatagram
 /// Names one continuous stream at a path: `Instance.parse(text:)` names one, only a session mints
 /// one, and `==` also compares `isMinted()`, so pin a reported stream with the instance, not its text.
 public typealias Instance = MoqFFI.MoqInstance
-/// The read-only facts on a received route: the `Instance` of the stream it serves,
-/// relay hop ids (oldest first), its static production and link cost, lower wins, and its
-/// informational `rtt` to the origin node.
+/// The read-only facts on a received route: the `Instance` of the stream it serves, its static
+/// production and link cost, lower wins, and whether a usable path reaches it.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
@@ -104,7 +103,8 @@ public typealias ServerTls = MoqFFI.MoqServerTls
 /// QUIC transport tuning, such as the peer's inbound stream cap.
 public typealias QuicConfig = MoqFFI.MoqQuicConfig
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control family for a QUIC connection. Build one with `CongestionControl.delay()`,
+/// `.loss()`, or `.none()`; a new algorithm joins as a new constructor.
 public typealias CongestionControl = MoqFFI.MoqCongestionControl
 
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.

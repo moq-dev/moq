@@ -1,9 +1,11 @@
-# [M] Compressed frames have no size cap and inflate as a bounded stream
+# [M] Compressed frames are capped only like plain ones and inflate as a bounded stream
 
 ## Goal
 
-A compressed frame of any size publishes and is received in Rust and
-`@moq/net`, like a plain one. The 32 MiB guard on a compressed frame goes.
+A compressed frame publishes and is received in Rust and `@moq/net` at any
+size a plain one may have: any size in `@moq/net`, and up to a plain frame's
+32 MiB cap (`MAX_CACHE_BYTES`) in Rust. The separate 32 MiB guard on a
+compressed slice goes.
 The wire still declares each compressed slice's size (and its `Inflated
 Size`) up front, so a publisher still compresses a frame whole before it
 sends it. A receiver never inflates a frame whole in memory: it inflates as
@@ -39,20 +41,21 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   `write_frames` (`group.rs:1719`, `:1798`) check only the plain payload
   against 32 MB, so an incompressible frame near the cap encodes to a slice
   every receiver refuses. With no compressed cap, there is nothing to
-  mismatch; [Byte holes](/quest/m3/unbounded-groups/byte-holes.md) removes
-  the plain cap.
+  mismatch: the inflated size stays checked against the plain cap.
+- Rust frames stay capped at 32 MiB. Decided 2026-11-15 (maintainer, on
+  [moq-dev/moq#8837](https://github.com/moq-dev/moq/pull/8837)): Byte holes,
+  which would have lifted the plain cap, was deleted, since no consumer sends
+  frames over 32 MiB. So this quest no longer waits on it, and its Rust half
+  drops only the compressed-slice guard and inflates in segments.
 - The lite draft's FRAME text ("a receiver MUST check it against its limits
   before inflating") stays; add that a receiver may inflate incrementally and
   must stop at the declared size. Update `doc/concept` and the compression
   docs that state the 32 MiB cap.
-- Tests, both languages: a compressed frame several times 32 MB round-trips
-  over lite-07 and a relay chain with memory held near the tail; a slice
+- Tests: in JS, a compressed frame several times 32 MB round-trips over
+  lite-07 with memory held near the tail; in Rust, an incompressible frame at
+  the plain cap round-trips over lite-07 and a relay chain. Both: a slice
   whose payload inflates past its declared size fails as malformed without
   allocating the excess.
 
 Public API: removes the compressed-frame `FrameTooLarge` refusal (JS, Rust,
 JSON preflight). Wire: none.
-
-## Required
-
-- [Byte holes](/quest/m3/unbounded-groups/byte-holes.md) - Rust frames past 32 MB at all

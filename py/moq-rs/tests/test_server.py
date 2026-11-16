@@ -369,7 +369,7 @@ async def test_client_connection_knobs():
                     keep_alive=timedelta(0),
                     gso=False,
                     mtu_discovery=True,
-                    congestion_control=moq.CongestionControl.LOSS,
+                    congestion_control=moq.CongestionControl.loss(),
                     keylog=False,
                 ),
                 websocket=moq.WebSocketConfig(enabled=False),

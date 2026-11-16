@@ -6,8 +6,6 @@
 //! the work: the in-memory `session_delivery_datagram` benchmark owns protocol CPU, which
 //! here would mix with QUIC, the shaper and the kernel.
 
-#![cfg(feature = "quic")]
-
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;

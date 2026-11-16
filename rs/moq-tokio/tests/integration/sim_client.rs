@@ -3,8 +3,6 @@
 //! dial, from the Happy Eyeballs race through the reconnect loop, runs with no sockets and no
 //! host clock.
 
-#![cfg(feature = "quic")]
-
 use std::{
 	net::{IpAddr, Ipv4Addr, SocketAddr},
 	time::Duration,
