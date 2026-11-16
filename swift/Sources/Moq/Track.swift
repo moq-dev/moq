@@ -124,6 +124,8 @@ public final class TrackDemand: Sendable {
     }
 
     /// Suspend until `wanted` changes and return it. The first call returns at once.
+    /// End a track nobody wants with `TrackProducer.abortUnwanted(errorCode:)`, which keeps it
+    /// for a reader that joined since.
     public func wantedChanged() async throws -> UInt64? {
         try await ffi.wantedChanged()
     }
@@ -183,6 +185,14 @@ public final class TrackProducer: Sendable {
     /// Abort the track with an application error code, failing active consumers.
     public func abort(errorCode: UInt16) throws {
         try ffi.abort(errorCode: errorCode)
+    }
+
+    /// Abort the track with an application error code, but only while nobody wants it: call it
+    /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+    /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+    /// the next nil.
+    public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+        try ffi.abortUnwanted(errorCode: errorCode)
     }
 
     /// Finish the track. No more groups can be appended.

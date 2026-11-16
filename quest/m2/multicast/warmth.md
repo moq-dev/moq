@@ -2,7 +2,7 @@
 
 ## Goal
 
-The [bake-off](/quest/m2/multicast/bakeoff.md)'s harness runs three ways for
+The [bake-off](https://github.com/moq-dev/moq/pull/8880)'s harness runs three ways for
 a relay to learn that a neighbour already has demand for a broadcast, over
 the prototype route rule, and the PR reports for each: whether a CDN join
 skips every pop without demand and whether drones with an uplink each settle
@@ -108,7 +108,3 @@ lands in whichever wip is current with its implementation, as decided
 2026-11-14; the PR says whether the pick changes bytes lite-07 would freeze.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The bake-off](/quest/m2/multicast/bakeoff.md) - the harness and the route rule the three run over
