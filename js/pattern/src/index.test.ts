@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compareSpecificity, IntersectionError, InvalidPattern, Pattern, Patterns, type Segment } from "./index.ts";
+import {
+	compareSpecificity,
+	escape,
+	IntersectionError,
+	InvalidPattern,
+	Pattern,
+	Patterns,
+	parts,
+	type Segment,
+	unescape,
+} from "./index.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
@@ -557,6 +567,39 @@ describe("Patterns", () => {
 				}
 			}
 		});
+	});
+});
+
+describe("parts", () => {
+	test("splits only at an unescaped separator", () => {
+		const cases: [string, string[]][] = [
+			["", []],
+			["a/b/c", ["a", "b", "c"]],
+			["a\\/b", ["a\\/b"]],
+			["a\\\\/b", ["a\\\\", "b"]],
+			["a\\\\\\/b", ["a\\\\\\/b"]],
+			["\\//\\/", ["\\/", "\\/"]],
+			["/a//b/", ["", "a", "", "b", ""]],
+		];
+		for (const [path, want] of cases) expect(parts(path)).toEqual(want);
+		expect(parts("a/b\\/c/d", 2)).toEqual(["a", "b\\/c"]);
+	});
+
+	test("rejoining the parts gives back the path", () => {
+		let texts = [""];
+		for (let n = 0; n < 7; n++) {
+			texts = texts.flatMap((text) => ["a", "/", "\\"].map((c) => text + c));
+			for (const text of texts) expect(parts(text).join("/")).toBe(text);
+		}
+	});
+
+	test("escape and unescape are inverses", () => {
+		for (const content of ["", "plain", "/", "\\", "a/\\b", "\\\\//", "café/"]) {
+			const segment = escape(content);
+			expect(parts(segment)).toHaveLength(content === "" ? 0 : 1);
+			expect(unescape(segment)).toBe(content);
+		}
+		expect(escape("a/b\\c")).toBe("a\\/b\\\\c");
 	});
 });
 

@@ -444,17 +444,22 @@ test("Namespace: literal backslash round trips", async () => {
 	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
-test("Namespace: slashes at tuple part boundaries", async () => {
-	// A leading slash escapes to a non-empty `\` segment.
-	const tuple = await encodeNamespaceTuple(["/foo", "/bar"]);
-	const decoded = await decodeNamespace(tuple);
-	expect(decoded).toBe("\\/foo/\\/bar" as Path.Valid);
-	expect(await encodeNamespace(decoded)).toEqual(tuple);
-
-	// A trailing slash escapes to an empty segment, which every later path operation assumes away.
-	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"]]) {
-		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow(ProtocolViolation);
+test("Namespace: slashes at field boundaries", async () => {
+	// A slash anywhere in a field escapes to content of one segment, never an empty one.
+	for (const fields of [["/foo", "/bar"], ["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"], ["//", "/"]]) {
+		const tuple = await encodeNamespaceTuple(fields);
+		const decoded = await decodeNamespace(tuple);
+		expect(Path.parts(decoded).map(Path.unescape)).toEqual(fields);
+		expect(await encodeNamespace(decoded)).toEqual(tuple);
 	}
+	expect(await decodeNamespace(await encodeNamespaceTuple(["a//", "b"]))).toBe("a\\/\\//b" as Path.Valid);
+
+	// A namespace of 32 fields stays 32 segments however many of them hold a slash.
+	const fields = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}/${i}`);
+	const tuple = await encodeNamespaceTuple(fields);
+	const decoded = await decodeNamespace(tuple);
+	expect(Path.parts(decoded)).toHaveLength(Path.MAX_PARTS);
+	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
 test("Namespace: Subscribe with empty namespace round trip", async () => {

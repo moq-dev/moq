@@ -16,6 +16,11 @@
  * - `lit*lit`, with one `*` matching bytes inside one segment;
  * - `**`, matching zero or more complete segments, at most once per pattern.
  *
+ * Segments are split as {@link parts} splits a path: a `\` escapes the `\` or `/` after it,
+ * so `a\/b` is one literal segment holding a `/`, and any other `\` is refused. A literal
+ * matches the segment spelled the same way, which is how a grant names a moq-transport
+ * namespace field holding a `/`. There is no escape for `*`.
+ *
  * Patterns are exact: `foo` matches only `foo`, `foo/**` matches its subtree including
  * `foo`, `**` matches every path, and the empty pattern matches only the current root.
  * Parse rejects leading, trailing, or repeated `/`, more than one `*` in a segment,
@@ -36,7 +41,8 @@
  *
  * Common Access Token and `draft-ietf-moq-c4m-01` match namespace fields positionally:
  * exact, prefix, or suffix per field, with a trailing `nil` for exact depth. Without
- * `nil`, longer namespaces that start with the matching fields are in scope.
+ * `nil`, longer namespaces that start with the matching fields are in scope. A pattern
+ * segment is one field, compared by its {@link unescape}d content.
  *
  * That common subset is `foo/bar` (exact fields plus `nil`), `foo/bar/**` (no `nil`),
  * `foo*` / `*foo` (prefix / suffix on a field), `*` (prefix of the empty byte string),
@@ -55,12 +61,66 @@
  */
 
 /**
+ * The segments of `path`, split only at a `/` no `\` escapes and still escaped as written.
+ *
+ * The empty path has none. Anything else yields one more segment than it has separators,
+ * empty ones included, so a caller that requires non-empty segments checks them itself.
+ * With `limit`, stops after that many segments.
+ *
+ * @example
+ * ```typescript
+ * parts("room/a\\/b/cam"); // ["room", "a\\/b", "cam"]
+ * ```
+ */
+export function parts(path: string, limit?: number): string[] {
+	if (path === "") return [];
+	// Without a `\`, every `/` separates.
+	if (!path.includes("\\")) return limit === undefined ? path.split("/") : path.split("/", limit);
+	const max = limit ?? Number.POSITIVE_INFINITY;
+	const out: string[] = [];
+	let start = 0;
+	for (let i = 0; i < path.length && out.length < max; i++) {
+		const c = path[i];
+		if (c === "\\") {
+			// The escaped character is never a separator.
+			i++;
+		} else if (c === "/") {
+			out.push(path.slice(start, i));
+			start = i + 1;
+		}
+	}
+	if (out.length < max) out.push(path.slice(start));
+	return out;
+}
+
+/**
+ * A segment's content: each escaped `\` or `/` as the character itself.
+ *
+ * Expects a segment as {@link parts} yields it from a valid path, where every `\` escapes
+ * the character after it.
+ */
+export function unescape(segment: string): string {
+	return segment.includes("\\") ? segment.replace(/\\(.)/gs, "$1") : segment;
+}
+
+/** The segment holding `content`: each `\` or `/` escaped by a `\`. The inverse of {@link unescape}. */
+export function escape(content: string): string {
+	return /[\\/]/.test(content) ? content.replace(/[\\/]/g, "\\$&") : content;
+}
+
+// Whether `segment` is one escaped segment: every `\` escapes a `\` or `/`, and no `/` is bare.
+function isSegment(segment: string): boolean {
+	return /^(?:[^\\/]|\\[\\/])*$/.test(segment);
+}
+
+/**
  * One segment of a {@link Pattern}.
  *
- * A literal is never empty and never contains `/` or `*`. A wildcard (`*`) matches any
- * one segment. A partial (`prefix*suffix`) matches any one segment that starts with the
- * prefix and ends with the suffix without overlap; either may be empty, not both. A
- * globstar (`**`) matches any run of zero or more segments, at most once per pattern.
+ * A literal is spelled as in a path: never empty, no `*`, and every `/` or `\` it holds
+ * escaped by a `\`. A wildcard (`*`) matches any one segment. A partial (`prefix*suffix`)
+ * matches any one segment that starts with the prefix and ends with the suffix without
+ * overlap; either may be empty, not both, and each is spelled like a literal. A globstar
+ * (`**`) matches any run of zero or more segments, at most once per pattern.
  */
 export type Segment =
 	| { readonly kind: "literal"; readonly value: string }
@@ -144,7 +204,7 @@ const MAX_INTERSECTION_PATTERNS = 1024;
 
 /** The non-empty segments of a path, normalized like a broadcast path. */
 function splitPath(path: string): string[] {
-	return path.split("/").filter((part) => part !== "");
+	return parts(path).filter((part) => part !== "");
 }
 
 function invalidSegment(text: string): InvalidPattern {
@@ -155,13 +215,15 @@ function parseSegment(text: string): Segment {
 	if (text === "") throw new InvalidPattern("empty-segment", "empty path segment");
 	if (text === "*") return WILDCARD;
 	if (text === "**") return GLOBSTAR;
-	if (text.includes("/")) throw invalidSegment(text);
 	const star = text.indexOf("*");
-	if (star < 0) return { kind: "literal", value: text };
+	if (star < 0) {
+		if (!isSegment(text)) throw invalidSegment(text);
+		return { kind: "literal", value: text };
+	}
 	const prefix = text.slice(0, star);
 	const suffix = text.slice(star + 1);
-	// More than one star in a segment is reserved.
-	if (suffix.includes("*")) throw invalidSegment(text);
+	// More than one star in a segment is reserved, and so is a malformed escape.
+	if (suffix.includes("*") || !isSegment(prefix) || !isSegment(suffix)) throw invalidSegment(text);
 	return { kind: "partial", prefix, suffix };
 }
 
@@ -355,13 +417,19 @@ export class Pattern {
 					throw new InvalidPattern("invalid-segment", "literal value must be a string");
 				}
 				if (segment.value === "") throw new InvalidPattern("empty-segment", "empty path segment");
-				if (segment.value.includes("*") || segment.value.includes("/")) throw invalidSegment(segment.value);
+				if (segment.value.includes("*") || !isSegment(segment.value)) throw invalidSegment(segment.value);
 			} else if (segment.kind === "partial") {
 				const { prefix, suffix } = segment;
 				if (typeof prefix !== "string" || typeof suffix !== "string") {
 					throw new InvalidPattern("invalid-segment", "partial prefix and suffix must be strings");
 				}
-				if ((prefix === "" && suffix === "") || /[*/]/.test(prefix) || /[*/]/.test(suffix)) {
+				if (
+					(prefix === "" && suffix === "") ||
+					prefix.includes("*") ||
+					suffix.includes("*") ||
+					!isSegment(prefix) ||
+					!isSegment(suffix)
+				) {
 					throw invalidSegment(`${prefix}*${suffix}`);
 				}
 			} else if (segment.kind === "globstar") {
@@ -405,7 +473,7 @@ export class Pattern {
 		if (text === "") return new Pattern([]);
 		// One past the limit is enough for the constructor to refuse, without splitting
 		// a peer's megabytes of `a/a/...` into segments first.
-		return new Pattern(text.split("/", MAX_PATTERN_SEGMENTS + 1).map(parseSegment));
+		return new Pattern(parts(text, MAX_PATTERN_SEGMENTS + 1).map(parseSegment));
 	}
 
 	/** A pattern from its segments, validating the grammar. Throws {@link InvalidPattern}. */

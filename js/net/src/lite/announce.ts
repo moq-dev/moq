@@ -727,8 +727,7 @@ export class AnnounceHistory {
 		const head = Path.parts(base);
 		const keep = msg.pathBase.keep;
 		if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
-		// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`. A path
-		// that does not resolve is refused as content, as rs/moq-net does.
+		// A path that does not resolve, such as one too deep, is refused as content, as rs/moq-net does.
 		const kept = head.slice(0, keep);
 		if (suffix !== Path.empty()) kept.push(suffix);
 		return Path.tryDecode(kept.join("/"));

@@ -621,15 +621,17 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 	);
 });
 
-test("AnnounceHistory keeps segments split at an escaped slash", () => {
+test("AnnounceHistory keeps whole segments across an escaped slash", () => {
 	const history = new AnnounceHistory();
-	history.start({ suffix: Path.from("a\\/b") });
-	// The kept `a\` is half an escape, which the rest completes, or nothing does and the path is
-	// refused, its id assigned all the same.
-	const suffix = history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 1 } });
-	expect(suffix).toBe(Path.from("a\\/c"));
-	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 1n, keep: 1 } })).toBeUndefined();
-	expect(history.next).toBe(3n);
+	history.start({ suffix: Path.from("a\\/b/c") });
+	// `a\/b` is one segment, so keeping one keeps all of it.
+	expect(history.start({ suffix: Path.from("d"), pathBase: { distance: 1n, keep: 1 } })).toBe(
+		Path.from("a\\/b/d"),
+	);
+	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 2n, keep: 1 } })).toBe(Path.from("a\\/b"));
+	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 3n, keep: 3 } })).toThrow(
+		ProtocolViolation,
+	);
 });
 
 test("AnnounceHistory refuses a resolved path past the byte limit", () => {

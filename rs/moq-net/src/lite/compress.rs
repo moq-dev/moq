@@ -422,6 +422,27 @@ mod tests {
 		assert_eq!(wire, path(2, 2, "d"));
 	}
 
+	/// A head counts whole segments, so an escaped `/` is never a place to cut.
+	#[test]
+	fn keeps_whole_segments_across_an_escaped_slash() {
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		start(&mut encoder, &mut decoder, r"room/a\/b/cam-1");
+		let (_, wire) = encoder.start(Path::from_static(r"room/a\/b/cam-2"));
+		assert_eq!(wire, path(1, 2, "cam-2"));
+		let (_, wire) = encoder.start(Path::from_static(r"room/a\/c"));
+		assert_eq!(wire, path(1, 1, r"a\/c"));
+
+		let suffix = decoder.start(Some(path(1, 2, "cam-2"))).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/b/cam-2");
+		let suffix = decoder.start(Some(path(2, 2, ""))).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/b");
+		assert!(matches!(
+			decoder.start(Some(path(3, 4, ""))),
+			Err(Error::ProtocolViolation)
+		));
+	}
+
 	#[test]
 	fn encoder_sends_literal_when_nothing_is_shared() {
 		let mut encoder = AnnounceEncoder::new(VERSION);

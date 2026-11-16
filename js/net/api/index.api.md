@@ -563,8 +563,10 @@ export namespace Path {
 	export function decode(raw: string): Path.Valid;
 	export function empty(): Path.Valid;
 	export function encode(path: Path.Valid): Path.Valid;
+	export { escape } from "@moq/pattern";
 	export function from(...paths: string[]): Path.Valid;
 	export function hasPrefix(prefix: Path.Valid, path: Path.Valid): boolean;
+	export function head(path: Path.Valid, n: number): Path.Valid | undefined;
 	export function join(path: Path.Valid, other: Path.Valid): Path.Valid;
 	export function normalizeRelative(rel: string): Path.Relative;
 	export function parts(path: Path.Valid): string[];
@@ -572,6 +574,7 @@ export namespace Path {
 	export function resolve(base: Path.Valid, rel: Path.Relative): Path.Valid;
 	export function stripPrefix(prefix: Path.Valid, path: Path.Valid): Path.Valid | null;
 	export function tryResolve(base: Path.Valid, rel: Path.Relative): Path.Valid | undefined;
+	export { unescape } from "@moq/pattern";
 }
 
 export const SessionCode: ((code: number) => SessionCode) & {
