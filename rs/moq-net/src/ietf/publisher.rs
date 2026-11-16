@@ -14477,20 +14477,40 @@ mod serve_tests {
 		version: Version,
 		order: GroupOrder,
 	) -> (ietf::FetchOk, Vec<(u64, u64, String)>) {
+		let (ok, objects, _) = fetch_answer_tail(wire, version, order);
+		(ok, objects)
+	}
+
+	/// Decode the answer to a FETCH and the fetch stream after it, its groups in `order`,
+	/// with draft-23's End of Group (`false`) or End of Track (`true`) if one ends the stream.
+	fn fetch_answer_tail(
+		wire: bytes::Bytes,
+		version: Version,
+		order: GroupOrder,
+	) -> (ietf::FetchOk, Vec<(u64, u64, String)>, Option<bool>) {
 		let mut buf = Decoder::new(&wire, version.into());
-		assert_eq!(buf.varint().unwrap(), ietf::FetchOk::ID, "{version}: not a FETCH_OK");
+		assert_eq!(
+			buf.varint().unwrap(),
+			ietf::FetchOk::id(version),
+			"{version}: not a FETCH_OK"
+		);
 		let ok = ietf::FetchOk::decode(&mut buf, version).unwrap();
 		assert_eq!(buf.varint().unwrap(), FetchHeader::TYPE);
 		assert_eq!(FetchHeader::decode(&mut buf, version).unwrap().request_id, FETCH_ID);
 
 		let mut objects = Vec::new();
 		let mut prior: Option<(u64, u64)> = None;
+		let mut tail = None;
 		while !buf.is_empty() {
 			let (group, object) = {
-				let ietf::FetchObject::Object { group, object, .. } =
-					ietf::FetchObject::decode(&mut buf, version).unwrap()
-				else {
-					panic!("{version}: unexpected End of Range");
+				let (group, object) = match ietf::FetchObject::decode(&mut buf, version).unwrap() {
+					ietf::FetchObject::Object { group, object, .. } => (group, object),
+					ietf::FetchObject::EndOfGroup { track } => {
+						assert!(buf.is_empty(), "{version}: objects after the group's end");
+						tail = Some(track);
+						break;
+					}
+					ietf::FetchObject::EndOfRange { .. } => panic!("{version}: unexpected End of Range"),
 				};
 				match (prior, group) {
 					(None, group) => (group.unwrap(), object.unwrap()),
@@ -14513,7 +14533,7 @@ mod serve_tests {
 			objects.push((group, object, payload));
 			prior = Some((group, object));
 		}
-		(ok, objects)
+		(ok, objects, tail)
 	}
 
 	/// The `(group, object, payload)` a range of two-frame groups holds.
@@ -14550,6 +14570,40 @@ mod serve_tests {
 			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
 		}
+	}
+
+	/// Draft-23 answers with REQUEST_OK, which has no End Location and no End Of Track. A
+	/// group below the newest ends at the requested end, so the answer names no Largest
+	/// Object, and End of Group follows its last object. The last group of a finished track
+	/// reaches the Largest Object, which the answer names, and End of Track follows.
+	#[kio::test]
+	async fn a_draft23_fetch_is_answered_with_request_ok() {
+		let version = Version::Draft23;
+		let mut h = serve(version);
+		publish_pairs(&mut h, 5, None);
+		settle().await;
+
+		let whole = Location { group: 2, object: 0 };
+		let buf = standalone_fetch(&h, whole, whole, GroupOrder::Ascending).await;
+		let (ok, objects, tail) = fetch_answer_tail(buf, version, GroupOrder::Ascending);
+		assert_eq!(ok.largest, None, "an older group ends below the Largest Object");
+		assert_eq!(objects, pairs([2]));
+		assert_eq!(tail, Some(false), "End of Group follows the group's last object");
+
+		h.track.finish_shared().unwrap();
+		settle().await;
+		let buf = standalone_fetch(
+			&h,
+			Location { group: 4, object: 1 },
+			Location { group: 4, object: 0 },
+			GroupOrder::Any,
+		)
+		.await;
+		let (ok, objects, tail) = fetch_answer_tail(buf, version, GroupOrder::Ascending);
+		assert_eq!(ok.largest, Some(Location { group: 4, object: 1 }));
+		assert_eq!(objects, pairs([4])[1..].to_vec());
+		assert_eq!(tail, Some(true), "End of Track follows the track's last object");
+		assert!(h.log.resets().is_empty());
 	}
 
 	/// Where a token FETCH waits when its grant ends.
