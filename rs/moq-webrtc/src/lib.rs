@@ -59,8 +59,6 @@ mod ice;
 mod ingest;
 mod sdp;
 mod session;
-// str0m, dimpl, and `is`, vendored and trimmed; see the module docs.
-mod vendor;
 
 pub use client::Client;
 pub use error::*;
