@@ -116,15 +116,19 @@ for the wire:
   near one does, not a debounce later. The route exchange between routing
   nodes keeps no timer (decided by the coordinator on 2026-11-16, pending the
   maintainer, in [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
-- The unavailable bit counts only as a change to a claim the receiver already
-  holds from that sender. A sender still tells a new asker what its reader
-  shows, the bit included, but a receiver never takes a claim it is first told
-  unavailable, which nothing can serve: that claim is not there until it is
-  told available, and then is taken as usual. A gateway whose session opens
-  while a claim is unavailable therefore announces nothing and starts no
-  route, and a claim that comes back unavailable across a second grant starts
-  none either (decided by the coordinator on 2026-11-16, pending the
-  maintainer, in [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
+- The unavailable bit counts only as a change to a run the receiver already
+  holds from that sender, a run being the claim's distance and epoch. A sender
+  still tells a new asker what its reader shows, the bit included, but a
+  receiver never takes a run it is first told unavailable, which nothing can
+  serve: that run is not there until it is told available, and then is taken
+  as usual. A sender that moves to such a run no longer gives the one it gave,
+  which the receiver drops as lost. A gateway whose session opens while a
+  claim is unavailable therefore announces nothing and starts no route, a
+  claim that comes back unavailable across a second grant starts none either,
+  and an unreachable newer run never fences an older one another neighbour
+  still serves (decided by the coordinator on 2026-11-16, pending the
+  maintainer, in [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901);
+  per run rather than per claim by the implementer, on review).
 - A message names each claim once, and a receiver refuses one that names a
   claim twice, so no order within a message decides what it says (decided by
   the implementer on 2026-11-16, pending the maintainer, in
