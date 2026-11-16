@@ -2051,6 +2051,7 @@ fn publish_track_invalid_broadcast() {
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
+		meta: false,
 	};
 	assert!(unsafe { moq_consume_track_update(9999, &subscription) } < 0);
 }
@@ -2345,6 +2346,7 @@ fn raw_track_publish_consume() {
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
+		meta: false,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -2770,6 +2772,7 @@ fn raw_track_subscription_options_and_update() {
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
+		meta: false,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -2893,6 +2896,7 @@ fn raw_track_time_anchor() {
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
+		meta: false,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -2992,6 +2996,7 @@ fn raw_track_update_refuses_a_scaled_time_anchor() {
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
+		meta: false,
 	};
 	assert!(unsafe { moq_consume_track_update(consumer, &update) } < 0);
 
@@ -3777,6 +3782,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
+		meta: false,
 	};
 	id(unsafe {
 		moq_consume_track(
@@ -8145,6 +8151,127 @@ fn dial_pinned(url: &str, fingerprint: &str, publish: u32, consume: u32, user_da
 			user_data,
 		)
 	})
+}
+
+/// A metadata subscription over moq-lite-07 delivers each frame's header without its payload:
+/// the frame info declares the size it was never sent, and a payload read is refused.
+#[test]
+fn a_metadata_subscription_reads_headers_alone() {
+	let served = id(moq_origin_create());
+	let broadcast = publish_broadcast(served, b"demo");
+	let versions = [moq_str("moq-lite-07-wip")];
+
+	let server_cb = Callback::new();
+	let bind = "127.0.0.1:0";
+	let generate = [moq_str("localhost")];
+	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
+	config.bind = bind.as_ptr() as *const c_char;
+	config.bind_len = bind.len();
+	config.tls_generate = generate.as_ptr();
+	config.tls_generate_len = generate.len();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	let server = id(unsafe { moq_server_listen(&config, Some(channel_callback), server_cb.ptr) });
+	let mut addr = moq_str("");
+	assert_eq!(unsafe { moq_server_addr(server, &mut addr) }, 0);
+	let addr = borrowed_string(addr.data, addr.len).unwrap();
+	let mut fingerprint = moq_str("");
+	assert_eq!(unsafe { moq_server_fingerprints(server, &mut fingerprint, 1) }, 1);
+	let fingerprints = [fingerprint];
+
+	let received = id(moq_origin_create());
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	config.tls_fingerprints = fingerprints.as_ptr();
+	config.tls_fingerprints_len = fingerprints.len();
+	config.tls_host_name = "localhost".as_ptr() as *const c_char;
+	config.tls_host_name_len = "localhost".len();
+	let url = format!("https://{addr}/");
+	let client_cb = States::new();
+	let client = id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			&config,
+			0,
+			received,
+			Some(state_callback),
+			client_cb.ptr,
+		)
+	});
+	let request = id(server_cb.recv());
+	let session_cb = States::new();
+	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(state_callback), session_cb.ptr) });
+	assert_eq!(
+		client_cb.recv().phase,
+		moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED
+	);
+
+	let path = b"demo";
+	let announced_cb = Callback::new();
+	let task = id(unsafe {
+		moq_origin_follow(
+			received,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			0,
+			Some(follow_channel_callback),
+			announced_cb.ptr,
+		)
+	});
+	let consumed = id(announced_cb.recv());
+	assert_eq!(moq_origin_follow_cancel(task), 0);
+	assert_eq!(announced_cb.recv_terminal(), 0);
+
+	let track = publish_named_track(broadcast, b"headers");
+	let subscription = moq_subscription {
+		meta: true,
+		..moq_subscription_defaults()
+	};
+	let frames = Callback::new();
+	let name = b"headers";
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consumed,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&subscription,
+			Some(channel_callback),
+			frames.ptr,
+		)
+	});
+	let payload = vec![7; 1000];
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(5)) },
+		0
+	);
+	let frame_id = id(frames.recv());
+	let mut info: moq_frame_info = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { moq_consume_track_frame_info(frame_id, &mut info) }, 0);
+	assert!(info.meta, "the frame arrived as its header");
+	assert_eq!(info.size, payload.len() as u64);
+	assert_eq!(unsafe { *info.timestamp }.value, 5);
+	let mut frame: moq_frame = unsafe { std::mem::zeroed() };
+	assert_eq!(
+		unsafe { moq_consume_track_frame(frame_id, &mut frame) },
+		MOQ_ERROR_UNSUPPORTED
+	);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	// Every callback's terminal fires before its user data is dropped.
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	frames.recv_terminal();
+	assert_eq!(moq_consume_close(consumed), 0);
+	assert_eq!(moq_session_close(session), 0);
+	session_cb.recv_terminal();
+	assert_eq!(moq_session_close(client), 0);
+	client_cb.recv_terminal();
+	assert_eq!(moq_server_close(server), 0);
+	assert_eq!(server_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(served), 0);
+	assert_eq!(moq_origin_close(received), 0);
 }
 
 /// A received route accumulates each session's cost across a relay and carries an instance.

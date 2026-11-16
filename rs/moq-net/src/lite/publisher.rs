@@ -4779,11 +4779,14 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// whole. `None` means the group's head is missing and the subscriber never asked for a
 /// partial group, so it must be skipped: a group is the unit of decodability, and only
 /// the subscriber knows whether a partial one is any use to it.
-fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Consumer> {
+///
+/// It starts no lower than frame `from`: where a promotion resumes the payload, which a copy
+/// holding only the frames from there serves whole.
+fn position_group(group: group::Consumer, frames: &Frames, from: u64) -> Option<group::Consumer> {
 	if group.start < frames.floor {
 		return None;
 	}
-	let expected = frames.start(group.start);
+	let expected = frames.start(group.start).max(from);
 	let end = frames.end(group.start).map_or(Bound::Unbounded, Bound::Included);
 
 	// The start clamps up to the first frame the group still holds, so landing higher
@@ -6164,15 +6167,13 @@ impl TrackRun {
 	/// range, and after a promotion, the payload position the update named, whichever path
 	/// serves that group's payload. `None` when the cache no longer holds that frame.
 	fn position(&mut self, group: group::Consumer) -> Option<group::Consumer> {
-		let group = position_group(group, &self.frames)?;
-		match self.payload_from {
-			Some(from) if from.group == group.start && !group.is_meta() => {
-				self.payload_from = None;
-				let group = group.with_range((Bound::Included(from.frame), Bound::Unbounded));
-				(group.index() == from.frame).then_some(group)
-			}
-			_ => Some(group),
+		let from = self
+			.payload_from
+			.filter(|from| from.group == group.start && !group.is_meta());
+		if from.is_some() {
+			self.payload_from = None;
 		}
+		position_group(group, &self.frames, from.map_or(0, |from| from.frame))
 	}
 
 	/// Open a group machine for `group`, which waits for stream credit. The cursor hands it
@@ -7139,8 +7140,8 @@ mod serve_group_test {
 		);
 		let four = track.append_group(4).unwrap();
 		let seven = track.append_group(7).unwrap();
-		assert!(position_group(four.consume(), &legacy.frames).is_none());
-		assert!(position_group(seven.consume(), &legacy.frames).is_some());
+		assert!(position_group(four.consume(), &legacy.frames, 0).is_none());
+		assert!(position_group(seven.consume(), &legacy.frames, 0).is_some());
 	}
 
 	/// A range inside one group keeps both of its bounds there.
@@ -7176,19 +7177,19 @@ mod serve_group_test {
 		};
 
 		// Asked for whole groups, so the missing frames 0..5 make this unservable.
-		assert!(position_group(group.consume(), &Frames::default()).is_none());
+		assert!(position_group(group.consume(), &Frames::default(), 0).is_none());
 
 		// Asked for exactly where it starts: servable, and positioned there.
-		let consumer = position_group(group.consume(), &starting(5)).unwrap();
+		let consumer = position_group(group.consume(), &starting(5), 0).unwrap();
 		assert_eq!(consumer.index(), 5);
 
 		// Asked for an earlier frame than the group holds: still a hole, still skipped.
-		assert!(position_group(group.consume(), &starting(2)).is_none());
+		assert!(position_group(group.consume(), &starting(2), 0).is_none());
 
 		// The offset belongs to the start group only; a later group is served whole.
 		let mut other = track.create_group(group::Info { start: 4 }).unwrap();
 		other.write_frame(other.key_time(), b"whole".to_vec()).unwrap();
-		let consumer = position_group(other.consume(), &starting(5)).unwrap();
+		let consumer = position_group(other.consume(), &starting(5), 0).unwrap();
 		assert_eq!(consumer.index(), 0);
 	}
 
@@ -7210,7 +7211,7 @@ mod serve_group_test {
 			..Frames::default()
 		};
 
-		let mut consumer = position_group(group.consume(), &ending(7, 1)).unwrap();
+		let mut consumer = position_group(group.consume(), &ending(7, 1), 0).unwrap();
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -7225,7 +7226,7 @@ mod serve_group_test {
 		);
 
 		// A cap naming another group leaves this one uncapped.
-		let mut consumer = position_group(group.consume(), &ending(8, 1)).unwrap();
+		let mut consumer = position_group(group.consume(), &ending(8, 1), 0).unwrap();
 		for i in 0..4u8 {
 			assert_eq!(
 				consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
@@ -8177,7 +8178,14 @@ mod serve_group_test {
 
 		// A cache holding only frames past the position cannot serve it.
 		run.payload_from = Some(track::Position { group: 0, frame: 1 });
-		assert!(run.position(copy.with_range(2..)).is_none());
+		assert!(run.position(copy.clone().with_range(2..)).is_none());
+
+		// One holding exactly the frames from the position serves them all.
+		run.payload_from = Some(track::Position { group: 0, frame: 1 });
+		let served = run
+			.position(copy.with_range(1..))
+			.expect("the frames from the position");
+		assert_eq!(served.index(), 1);
 	}
 
 	fn write_group(track: &mut track::Producer, key: u64, millis: u64) {

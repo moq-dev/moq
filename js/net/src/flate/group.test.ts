@@ -160,3 +160,23 @@ test("refresh measures stored slices without inflating a compressed group", () =
 		track.close();
 	}
 });
+
+test("a header read of a compressed group declares each plain size without inflating", async () => {
+	const track = new Track("compressed").accept({ compression: "deflate" });
+	const group = track.appendGroup();
+	const reader = group.mirror();
+	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload: payload.subarray(1), timestamp: Timestamp.unscaled(group.sequence) });
+	group.finish();
+	const inflating = spyOn(Decoder.prototype, "frame");
+	try {
+		expect((await reader.readInfo())?.size).toBe(payload.length);
+		expect((await reader.readInfo())?.size).toBe(payload.length - 1);
+		expect(await reader.readInfo()).toBeUndefined();
+		expect(inflating).toHaveBeenCalledTimes(0);
+	} finally {
+		inflating.mockRestore();
+		track.finish();
+		track.close();
+	}
+});

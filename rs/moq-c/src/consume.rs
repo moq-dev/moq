@@ -12,9 +12,17 @@ use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{
-	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_json_window_event,
-	moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config, moq_video_properties,
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_frame_info, moq_json_value,
+	moq_json_window_event, moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config,
+	moq_video_properties,
 };
+
+/// A raw track frame as read: its payload, or only its header from a metadata group.
+enum RawFrame {
+	Payload(bytes::Bytes),
+	/// The declared size of a payload that was never sent.
+	Header(u64),
+}
 
 struct DatagramTaskEntry {
 	task: Task,
@@ -302,7 +310,7 @@ pub struct Consume {
 	raw_task: NonZeroSlab<RawTaskEntry>,
 
 	/// Buffered raw frames ready for consumption.
-	raw_frame: NonZeroSlab<Timed<bytes::Bytes>>,
+	raw_frame: NonZeroSlab<Timed<RawFrame>>,
 
 	/// Live datagram consumer tasks, independent of stream-track readers.
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
@@ -908,12 +916,20 @@ impl Consume {
 		group: &mut moq_net::group::Consumer,
 		close: &mut oneshot::Receiver<()>,
 	) -> Result<bool, Error> {
+		// A metadata group holds only its frames' headers.
+		let meta = group.is_meta();
 		loop {
-			let frame = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
+			let frame = match kio::wait(|waiter| -> Poll<Result<RawStep<Timed<RawFrame>>, Error>> {
 				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}
-				match ready!(group.poll_read_frame(waiter))? {
+				let frame = match meta {
+					true => ready!(group.poll_read_info(waiter))?
+						.map(|info| Timed::new(RawFrame::Header(info.size), info.timestamp)),
+					false => ready!(group.poll_read_frame(waiter))?
+						.map(|frame| Timed::new(RawFrame::Payload(frame.payload), frame.timestamp)),
+				};
+				match frame {
 					Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
 					None => Poll::Ready(Ok(RawStep::End)),
 				}
@@ -928,7 +944,6 @@ impl Consume {
 			};
 
 			// Hold the lock only to buffer the read; release it before the callback.
-			let frame = Timed::new(frame.payload, frame.timestamp);
 			let frame_id = State::lock().consume.raw_frame.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}
@@ -986,14 +1001,33 @@ impl Consume {
 	/// frame is released with [`Self::raw_frame_close`].
 	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+		let RawFrame::Payload(payload) = &frame.item else {
+			return Err(moq_net::Error::Unsupported.into());
+		};
 
 		*dst = moq_frame {
-			payload: frame.item.as_ptr(),
-			payload_size: frame.item.len(),
+			payload: payload.as_ptr(),
+			payload_size: payload.len(),
 			timestamp: frame.timestamp(),
 			keyframe: false,
 		};
 
+		Ok(())
+	}
+
+	/// Fill `dst` with a raw frame's header, which a metadata group's frame has alone. The
+	/// timestamp pointer is valid until the frame is released with [`Self::raw_frame_close`].
+	pub fn raw_frame_info(&self, frame: Id, dst: &mut moq_frame_info) -> Result<(), Error> {
+		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+		let (size, meta) = match &frame.item {
+			RawFrame::Payload(payload) => (payload.len() as u64, false),
+			RawFrame::Header(size) => (*size, true),
+		};
+		*dst = moq_frame_info {
+			size,
+			timestamp: frame.timestamp(),
+			meta,
+		};
 		Ok(())
 	}
 

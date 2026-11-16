@@ -680,6 +680,18 @@ pub struct moq_frame {
 	pub keyframe: bool,
 }
 
+/// A raw track frame's header, as [moq_consume_track_frame_info] reads it.
+#[repr(C)]
+pub struct moq_frame_info {
+	/// The payload's size in bytes. A header-only frame declares the size it was never sent.
+	pub size: u64,
+	/// The frame's timestamp, as [moq_frame]'s. Never NULL; valid until the frame is freed.
+	pub timestamp: *const moq_timestamp,
+	/// Whether the frame arrived as a header alone, for a `moq_subscription.meta` subscriber,
+	/// so it has no payload to read.
+	pub meta: bool,
+}
+
 /// One encoded media read; `kind` selects the filled field and the others are zeroed.
 #[repr(C)]
 pub struct moq_media_read {
@@ -874,6 +886,12 @@ pub struct moq_subscription {
 
 	/// `moq_order` discriminant: which pending group the publisher sends first.
 	pub order: u32,
+
+	/// Ask for each frame's header without its payload. Such a frame's
+	/// [moq_consume_track_frame] fails with `MOQ_ERROR_UNSUPPORTED`; read its declared size
+	/// and timestamp with [moq_consume_track_frame_info]. A frame still comes with its payload
+	/// when another subscriber of the track wants it, so check `moq_frame_info.meta`.
+	pub meta: bool,
 }
 
 /// A span of a track to deliver: from `start` up to `end`, or onward without one.
@@ -971,7 +989,8 @@ pub(crate) unsafe fn parse_subscription(
 	};
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
-		.with_order(order);
+		.with_order(order)
+		.with_meta(subscription.meta);
 	out = out.with_delay(subscription.delay.into());
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
@@ -1496,6 +1515,7 @@ pub extern "C" fn moq_subscription_defaults() -> moq_subscription {
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: order as u32,
+		meta: defaults.meta,
 	}
 }
 
@@ -4960,7 +4980,8 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 /// the group's unscaled key on a scale-less track. `dst.keyframe` is reported as false because raw tracks
 /// do not parse codec metadata.
 ///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns a zero on success, or a negative code on failure: `MOQ_ERROR_UNSUPPORTED` for a
+/// frame that arrived as a header alone (see [moq_consume_track_frame_info]).
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
@@ -4970,6 +4991,24 @@ pub unsafe extern "C" fn moq_consume_track_frame(frame: u32, dst: *mut moq_frame
 		let frame = ffi::parse_id(frame)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.raw_frame(frame, dst)
+	})
+}
+
+/// Read a raw frame's header delivered via the [moq_consume_track] callback: its size,
+/// timestamp, and whether it arrived without its payload (see `moq_subscription.meta`).
+///
+/// `dst.timestamp` is valid until the frame is released with [moq_consume_track_frame_free].
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_frame_info] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track_frame_info(frame: u32, dst: *mut moq_frame_info) -> i32 {
+	ffi::enter(move || {
+		let frame = ffi::parse_id(frame)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.raw_frame_info(frame, dst)
 	})
 }
 

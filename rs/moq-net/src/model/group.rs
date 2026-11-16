@@ -4376,6 +4376,30 @@ impl Consumer {
 		self.poll_flown(waiter, Self::poll_next_frame_copy)
 	}
 
+	/// [`Self::poll_next_frame`] for the header alone, on the same route and budget.
+	fn poll_next_info(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Info>>> {
+		let res = match self.recover().is_none() {
+			true => self.poll_flown(waiter, Self::poll_next_info_copy),
+			false => self.poll_resumed(waiter, |this, waiter| {
+				this.poll_flown(waiter, Self::poll_next_info_copy)
+			}),
+		};
+		let res = self.ended_on(res);
+		if let Poll::Ready(Ok(Some(_))) = &res {
+			Idle::disarm(&mut self.idle);
+		}
+		res
+	}
+
+	fn poll_next_info_copy(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Info>>> {
+		if self.expired {
+			return Poll::Ready(Err(Error::Old));
+		}
+		let stats = self.stats.clone();
+		let res = self.cursor.poll_next_info(waiter, &stats);
+		self.poll_expired_if_blocked(waiter, res)
+	}
+
 	fn poll_next_frame_copy(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
@@ -4416,6 +4440,11 @@ impl Consumer {
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read_info(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Info>>> {
 		if !self.is_meta() {
+			// A compressed copy's headers come from its stored slices: no frame is inflated, and
+			// none is waited for.
+			if self.cursor.compressed && !self.cursor.raw {
+				return self.poll_next_info(waiter);
+			}
 			let frame = ready!(self.poll_next_frame(waiter))?;
 			return Poll::Ready(Ok(frame.map(|frame| *frame)));
 		}
@@ -5001,6 +5030,49 @@ impl Cursor {
 		self.prefetch = Prefetch::default();
 		// The frame handed out partly is given up below the skip, so a failure tears nothing.
 		self.partial = false;
+	}
+
+	/// The next frame's header, read from a compressed group's stored slice with the inflated
+	/// size it declares, so nothing is inflated and nothing waits for the frame's bytes.
+	fn poll_next_info(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Info>>> {
+		if self.capped() {
+			return Poll::Ready(Ok(None));
+		}
+		// Frames a whole read inflated ahead are plain already.
+		if let Some(frame) = self.prefetch.pop_cached() {
+			self.refresh_if_stale();
+			self.index += 1;
+			self.partial = false;
+			self.prefetch.take_fields();
+			return Poll::Ready(Ok(Some(frame::Info {
+				size: frame.payload.len() as u64,
+				timestamp: frame.timestamp,
+			})));
+		}
+		let index = self.index;
+		let committed = self.log.read().get(index as u64).ok().flatten().map(|entry| {
+			self.alive.pace.took(entry.end);
+			entry.read(self.compressed).0
+		});
+		let header = match committed {
+			Some(header) => {
+				self.refresh_if_stale();
+				header
+			}
+			// The stored slice, unless the copy kept only the inflated frame.
+			None => match ready!(self.poll(waiter, |state| state.poll_frame_source(index, index >= state.held()))?) {
+				None => return Poll::Ready(Ok(None)),
+				Some(Source::Ready(header, _)) => header,
+				Some(Source::Inflate { .. }) => unreachable!("a stored or held read inflates nothing"),
+			},
+		};
+		self.index += 1;
+		self.partial = false;
+		stats.frames(1);
+		Poll::Ready(Ok(Some(frame::Info {
+			size: header.inflated.unwrap_or(header.info.size),
+			timestamp: header.info.timestamp,
+		})))
 	}
 
 	fn poll_next_frame(
@@ -7663,6 +7735,45 @@ mod test {
 		let group = group.close().unwrap();
 
 		assert!(matches!(read_plain(&mut group.consume()), Err(Error::WrongSize)));
+	}
+
+	/// A plain reader's header read of a received compressed group returns each frame's
+	/// declared inflated size as soon as its header arrived: it neither waits for the stored
+	/// slice nor inflates it.
+	#[test]
+	fn a_compressed_header_read_waits_for_no_bytes() {
+		let pool = cache::Pool::unbounded();
+		let group = compressed_group(&pool);
+		let mut reader = group.consume();
+		let slice = flate::Encoder::new().frame(&verbose(0));
+		let header = frame::Header {
+			info: untimed(slice.len()),
+			fields: None,
+			inflated: Some(verbose(0).len() as u64),
+		};
+		let mut frame = group.create_object(header).unwrap();
+		frame.write(slice.slice(..1)).unwrap();
+		let Poll::Ready(Ok(Some(info))) = reader.poll_read_info(&kio::Waiter::noop()) else {
+			panic!("the header is readable before its bytes");
+		};
+		assert_eq!(info.size, verbose(0).len() as u64, "the declared inflated size");
+		frame.write(slice.slice(1..)).unwrap();
+		let mut group = frame.finish().unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), verbose(1))
+			.unwrap();
+		let group = group.close().unwrap();
+		let used = pool.used();
+		let Poll::Ready(Ok(Some(info))) = reader.poll_read_info(&kio::Waiter::noop()) else {
+			panic!("a committed header is readable");
+		};
+		assert_eq!(info.size, verbose(1).len() as u64);
+		assert!(matches!(
+			reader.poll_read_info(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+		assert_eq!(pool.used(), used, "nothing inflated");
+		drop(group);
 	}
 
 	/// A declared inflated size past the cache budget is refused before anything inflates,

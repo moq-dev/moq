@@ -22,6 +22,7 @@ import {
 	makeConsumer as makeFrameConsumer,
 	makeProducer as makeFrameProducer,
 	payloadBytes,
+	plainBytes,
 	pollChunk,
 	WAIT,
 } from "./frame.ts";
@@ -1487,9 +1488,11 @@ export class Consumer {
 	 * `read_info`. A {@link meta} group has only these.
 	 */
 	async readInfo(): Promise<FrameInfo | undefined> {
-		const frame = await this.nextFrame();
-		if (!frame) return undefined;
-		return { size: frame.size, timestamp: frame.timestamp };
+		// A compressed frame's header comes from its stored slice, which declares its plain size:
+		// nothing is inflated.
+		const read = await this.#readFrame(0, true, true);
+		if (!read) return undefined;
+		return { size: read.inflated ?? plainBytes(read.frame), timestamp: read.frame.timestamp };
 	}
 
 	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
