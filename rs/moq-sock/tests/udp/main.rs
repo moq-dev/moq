@@ -372,76 +372,6 @@ fn gso_stale_batch_is_resent() {
 	}
 }
 
-#[test]
-fn socket_buffers() {
-	const BUFFER_SIZE: usize = 123456;
-	const FACTOR: usize = if cfg!(any(target_os = "linux", target_os = "android")) {
-		2 // Linux and Android set the buffer to double the requested size
-	} else {
-		1 // Everyone else is sane.
-	};
-
-	let send = Socket::new(
-		socket2::Domain::IPV4,
-		socket2::Type::DGRAM,
-		Some(socket2::Protocol::UDP),
-	)
-	.unwrap();
-	let recv = Socket::new(
-		socket2::Domain::IPV4,
-		socket2::Type::DGRAM,
-		Some(socket2::Protocol::UDP),
-	)
-	.unwrap();
-	for sock in [&send, &recv] {
-		sock.bind(&socket2::SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
-			.unwrap();
-
-		let socket_state = UdpSocketState::new(sock.into()).expect("created socket state");
-
-		// Change the send buffer size.
-		let buffer_before = socket_state.send_buffer_size(sock.into()).unwrap();
-		assert_ne!(
-			buffer_before,
-			BUFFER_SIZE * FACTOR,
-			"make sure buffer is not already desired size"
-		);
-		socket_state
-			.set_send_buffer_size(sock.into(), BUFFER_SIZE)
-			.expect("set send buffer size {buffer_before} -> {BUFFER_SIZE}");
-		let buffer_after = socket_state.send_buffer_size(sock.into()).unwrap();
-		assert_eq!(
-			buffer_after,
-			BUFFER_SIZE * FACTOR,
-			"setting send buffer size to {BUFFER_SIZE} resulted in {buffer_before} -> {buffer_after}",
-		);
-
-		// Change the receive buffer size.
-		let buffer_before = socket_state.recv_buffer_size(sock.into()).unwrap();
-		socket_state
-			.set_recv_buffer_size(sock.into(), BUFFER_SIZE)
-			.expect("set recv buffer size {buffer_before} -> {BUFFER_SIZE}");
-		let buffer_after = socket_state.recv_buffer_size(sock.into()).unwrap();
-		assert_eq!(
-			buffer_after,
-			BUFFER_SIZE * FACTOR,
-			"setting recv buffer size to {BUFFER_SIZE} resulted in {buffer_before} -> {buffer_after}",
-		);
-	}
-
-	test_send_recv(
-		&send,
-		&recv,
-		Transmit {
-			destination: recv.local_addr().unwrap().as_socket().unwrap(),
-			ecn: None,
-			contents: b"hello",
-			segment_size: None,
-			src_ip: None,
-		},
-	);
-}
-
 fn test_send_recv(send: &Socket, recv: &Socket, transmit: Transmit<'_>) {
 	let send_state = UdpSocketState::new(send.into()).unwrap();
 	let recv_state = UdpSocketState::new(recv.into()).unwrap();
@@ -574,8 +504,7 @@ fn sndbuf_cmsg_boundary() {
 /// Asserts `UdpSocketState`'s `SO_SNDBUF` floor holds on `send`.
 #[cfg(apple)]
 fn assert_min_sndbuf_enforced(state: &UdpSocketState, send: &Socket, dst: SocketAddr, clen: usize) {
-	let _ = state.set_send_buffer_size(send.into(), 1);
-	let sndbuf = state.send_buffer_size(send.into()).unwrap();
+	let sndbuf = send.send_buffer_size().unwrap();
 	assert!(sndbuf >= 65535 + clen);
 
 	let transmit = Transmit {

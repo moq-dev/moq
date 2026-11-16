@@ -36,9 +36,9 @@ pub struct UdpSocketState {
 	/// which is not supported on Linux <3.13 and results in not sending the UDP packet at all.
 	sendmsg_einval: AtomicBool,
 
-	/// Cached `SO_SNDBUF`.
+	/// `SO_SNDBUF` once [`Self::new`] raised it to the safe minimum.
 	#[cfg(apple)]
-	send_buffer_size: AtomicUsize,
+	send_buffer_size: usize,
 }
 
 impl UdpSocketState {
@@ -153,7 +153,7 @@ impl UdpSocketState {
 			may_fragment,
 			sendmsg_einval: AtomicBool::new(false),
 			#[cfg(apple)]
-			send_buffer_size: AtomicUsize::new(io.send_buffer_size().unwrap_or(usize::MAX)),
+			send_buffer_size: io.send_buffer_size().unwrap_or(usize::MAX),
 		})
 	}
 
@@ -220,43 +220,6 @@ impl UdpSocketState {
 		self.gro_segments
 	}
 
-	/// Resize the send buffer of `socket` to `bytes`
-	///
-	/// On Apple platforms, `bytes` is silently raised to a safe minimum if smaller.
-	#[inline]
-	pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-		#[cfg(apple)]
-		let bytes = if bytes < Self::MIN_SAFE_SNDBUF {
-			crate::udp::log::debug!("raising requested SO_SNDBUF from {bytes} to {}", Self::MIN_SAFE_SNDBUF);
-			Self::MIN_SAFE_SNDBUF
-		} else {
-			bytes
-		};
-		socket.0.set_send_buffer_size(bytes)?;
-		#[cfg(apple)]
-		self.send_buffer_size
-			.store(socket.0.send_buffer_size().unwrap_or(bytes), Ordering::Relaxed);
-		Ok(())
-	}
-
-	/// Resize the receive buffer of `socket` to `bytes`
-	#[inline]
-	pub fn set_recv_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-		socket.0.set_recv_buffer_size(bytes)
-	}
-
-	/// Get the size of the `socket` send buffer
-	#[inline]
-	pub fn send_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-		socket.0.send_buffer_size()
-	}
-
-	/// Get the size of the `socket` receive buffer
-	#[inline]
-	pub fn recv_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-		socket.0.recv_buffer_size()
-	}
-
 	/// Whether transmitted datagrams might get fragmented by the IP layer
 	///
 	/// Returns `false` on targets which employ e.g. the `IPV6_DONTFRAG` socket option.
@@ -286,7 +249,7 @@ impl UdpSocketState {
 	#[cfg(apple)]
 	pub(crate) fn check_send_buffer_limit(&self, resid: usize, hdr: &impl cmsg::MsgHdr) -> io::Result<()> {
 		let needed = resid.saturating_add(hdr.control_len());
-		let sndbuf = self.send_buffer_size.load(Ordering::Relaxed);
+		let sndbuf = self.send_buffer_size;
 		if needed > sndbuf {
 			crate::udp::log::debug!("EMSGSIZE for {needed}-byte send: exceeds SO_SNDBUF ({sndbuf})");
 			return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
