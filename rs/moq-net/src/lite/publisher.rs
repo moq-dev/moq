@@ -3776,16 +3776,39 @@ mod announce_test {
 			"{first:?}"
 		);
 
+		let ends = |msgs: &[lite::AnnounceBroadcast]| {
+			msgs.iter().any(|msg| {
+				matches!(
+					msg,
+					lite::AnnounceBroadcast::RouteEnd { .. } | lite::AnnounceBroadcast::EndedId { .. }
+				)
+			})
+		};
 		answer.request(false, vec![0], vec![(shared, true)]).unwrap();
 		kio::clock::sim::yield_now().await;
 		let again = sent(&mut answer);
 		assert_eq!(again[0], lite::AnnounceBroadcast::Ok);
+		assert!(!ends(&again), "{again:?}");
+
+		// Widened past the mount point, the mount's stream stays, and its route, which
+		// both ends widened off its own prefix, is started again there in the same answer.
+		answer
+			.request(false, vec![1], vec![(crate::Path::empty(), true)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let wider = sent(&mut answer);
+		assert_eq!(wider[0], lite::AnnounceBroadcast::Ok);
 		assert!(
-			!again.iter().any(|msg| matches!(
-				msg,
-				lite::AnnounceBroadcast::RouteEnd { .. } | lite::AnnounceBroadcast::EndedId { .. }
-			)),
-			"{again:?}"
+			!wider
+				.iter()
+				.any(|msg| matches!(msg, lite::AnnounceBroadcast::EndedId { .. })),
+			"{wider:?}"
+		);
+		assert!(
+			wider
+				.iter()
+				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { .. })),
+			"{wider:?}"
 		);
 	}
 

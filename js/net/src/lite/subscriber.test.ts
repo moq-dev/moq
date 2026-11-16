@@ -5667,6 +5667,47 @@ test("a lite-07 edit to a wider prefix keeps the claims the route carried", asyn
 	subscriber.close();
 });
 
+// Two routes of one node, each showing its covering claim at its own prefix, merge when a reader
+// widens the request past both: each claim stays shown until the merged route's next floor.
+test("a lite-07 edit merging two routes keeps each one's covering claim", async () => {
+	const [a, b] = [Path.from("a"), Path.from("b")];
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(
+		undefined,
+		Path.Pattern.subtree(a),
+	);
+	const instance = Instance.parse("i");
+	const other = await another(Path.Pattern.subtree(b));
+	expect(edits).toMatchObject([{ add: [{ prefix: a }] }, { add: [{ prefix: b }] }]);
+	// NODE_A claims the root, which each route presents at its requested prefix.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: a, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({ status: "routeStart", prefix: 1n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: b, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
+	expect(await other.announced.next()).toMatchObject({ prefix: b, kind: "start" });
+
+	// A reader of everything widens the request to the root, which the harness answers.
+	const wide = await another();
+	await settled();
+	expect(edits.at(-1)).toMatchObject({ remove: [0n, 1n], add: [{ prefix: Path.empty() }] });
+	const seen: { kind: string }[] = [];
+	const reading = (async () => {
+		for (const reader of [announced, other.announced]) {
+			const event = await Promise.race([reader.next(), settled().then(() => undefined)]);
+			if (event) seen.push(event);
+		}
+	})();
+	await reading;
+	expect(seen.filter((event) => event.kind === "end")).toEqual([]);
+
+	wide.announced.close();
+	other.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // DRAIN: a node on a route's path sent GOAWAY, so it ranks below every route without one, until
 // its next offer.
 test("a lite-07 DRAIN ranks the routes through its node last", async () => {

@@ -112,9 +112,9 @@ interface Route {
 	withheld: Set<bigint>;
 	/** How the claims differ from the view's, applied whole at the next floor. */
 	pending: Map<Path.Valid, Claim | undefined>;
-	/** The claim an edit that widened the route took from its old prefix, which the view keeps
-	 * until the route's next floor says what covers that prefix now. */
-	stale: Path.Valid | undefined;
+	/** The prefixes whose claims an edit that widened the route took from the routes it merged,
+	 * which the view keeps until the route's next floor says what covers each now. */
+	stale: Set<Path.Valid>;
 	/** The claims as of the last floor, and the revision it certified them at, if any. */
 	view: { prefix: Path.Valid; hidden: boolean; revision: bigint | undefined; claims: Map<Path.Valid, Claim> };
 	/** The view's claims no other route's newer floor withdrew or replaced, each as the newest
@@ -343,7 +343,7 @@ export class Routed {
 	// The claim at `path` under `id` is now `claim`, pending the route's next floor.
 	#change(id: bigint, path: Path.Valid, claim: Claim | undefined) {
 		const wire = this.#route(id);
-		if (same(wire.view.claims.get(path), claim) && wire.stale !== path) wire.pending.delete(path);
+		if (same(wire.view.claims.get(path), claim) && !wire.stale.has(path)) wire.pending.delete(path);
 		else wire.pending.set(path, claim);
 	}
 
@@ -551,7 +551,7 @@ export class Routed {
 			unnamed: new Set(),
 			withheld: new Set(),
 			pending: new Map(),
-			stale: undefined,
+			stale: new Set(),
 			view,
 			shown: new Map(),
 			carrier: {
@@ -812,8 +812,8 @@ export class Routed {
 		if (filed && certified !== undefined && (revision === undefined || revision < certified))
 			floors.regress(wire.node, wire.carrier);
 		// The floor says what covers the prefix a widening edit took the route's claim from.
-		if (wire.stale !== undefined && !wire.pending.has(wire.stale)) wire.pending.set(wire.stale, undefined);
-		wire.stale = undefined;
+		for (const path of wire.stale) if (!wire.pending.has(path)) wire.pending.set(path, undefined);
+		wire.stale.clear();
 		const touched = new Map<Path.Valid, boolean>();
 		for (const [path, claim] of wire.pending) {
 			// Another instance or epoch: what was consumed through the claim may be stale.
@@ -899,6 +899,8 @@ export class Routed {
 		const placed = new Map<bigint, { route: bigint; path?: Path.Valid; claim?: Claim }>();
 		// The claims an edit presents below their own path, in the order it assigned their ids.
 		const inserted: { id: bigint; path: Path.Valid }[] = [];
+		// The routes the plan carries on, each of which keeps its own claims.
+		const carriedFrom = new Set(plan.routes.map((carried) => carried.from));
 
 		for (const carried of plan.routes) {
 			const source = sources.get(carried.from);
@@ -936,11 +938,20 @@ export class Routed {
 					wire.unnamed.add(id);
 					placed.set(id, { route: wire.id });
 				}
-				// The claim at its old prefix shows until the next floor says what covers it now.
-				const own = source.prefix === undefined ? undefined : source.view.claims.get(source.prefix);
-				if (own && source.prefix !== undefined && !wire.view.claims.has(source.prefix)) {
-					wire.view.claims.set(source.prefix, own);
-					wire.stale = source.prefix;
+				// The claim at each merged route's old prefix shows until the next floor says what
+				// covers it now: the routes the edit merged into this one end without a successor.
+				const merged = [...sources.values()].filter(
+					(other) =>
+						other.id === source.id ||
+						(!carriedFrom.has(other.id) &&
+							other.node === source.node &&
+							Path.hasPrefix(carried.region, other.region)),
+				);
+				for (const other of merged) {
+					const own = other.prefix === undefined ? undefined : other.view.claims.get(other.prefix);
+					if (!own || other.prefix === undefined || wire.view.claims.has(other.prefix)) continue;
+					wire.view.claims.set(other.prefix, own);
+					wire.stale.add(other.prefix);
 				}
 			}
 			fresh.push(wire);

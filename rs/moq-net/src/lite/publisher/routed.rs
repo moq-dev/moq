@@ -442,30 +442,9 @@ impl Answer {
 			.values()
 			.filter_map(|prefix| prefix.path.clone())
 			.collect();
-		// A prefix removed and added again in one edit, as a change of Hidden is, keeps
-		// its mounts under its new Prefix ID: their routes and claims carry over rather
-		// than ending until the mount sends them again.
-		let readded: HashMap<Path, u64> = (request.add.iter())
-			.filter_map(|(id, prefix)| Some((prefix.path.clone()?, *id)))
-			.collect();
-		let mut kept = BTreeSet::new();
-		for id in &request.remove {
-			let again = (self.prefixes.remove(id))
-				.and_then(|prefix| prefix.path)
-				.and_then(|path| Some((readded.get(&path).copied()?, path)));
-			let mounts = self.mounts.iter_mut().filter(|(_, mount)| mount.prefix == *id);
-			let mut gone = Vec::new();
-			for (source, mount) in mounts {
-				match &again {
-					Some((now, _)) => mount.prefix = *now,
-					None => gone.push(*source),
-				}
-			}
-			kept.extend(again.map(|(_, path)| path));
-			for source in gone {
-				self.unsource(source);
-				self.mounts.remove(&source);
-			}
+		let removed: BTreeSet<u64> = request.remove.iter().copied().collect();
+		for id in &removed {
+			self.prefixes.remove(id);
 		}
 		let mut added = Vec::new();
 		let mut ids = Vec::new();
@@ -502,8 +481,17 @@ impl Answer {
 			}
 			sent.floor = route.floor;
 		}
-		for (id, path) in added.iter().filter(|(_, path)| !kept.contains(path)) {
+		for (id, path) in &added {
 			for mount in self.origin.mounted(path) {
+				// A removed prefix's mount that an added one reads alike, as when a prefix is
+				// asked again with another Hidden or widened past the mount point, keeps its
+				// stream under the new Prefix ID: its routes and claims carry over rather than
+				// ending until a new stream sends them again.
+				let mut mounts = self.mounts.values_mut();
+				if let Some(kept) = mounts.find(|kept| removed.contains(&kept.prefix) && kept.mount == mount) {
+					kept.prefix = *id;
+					continue;
+				}
 				let interest = mount.interest.clone();
 				let stream = self.main.mount(interest).map_err(|_| Error::ProtocolViolation)?;
 				let source = self.next_source;
@@ -515,6 +503,16 @@ impl Answer {
 				};
 				self.mounts.insert(source, mount);
 			}
+		}
+
+		// Every other mount of a removed prefix goes with it.
+		let gone: Vec<Source> = (self.mounts.iter())
+			.filter(|(_, mount)| removed.contains(&mount.prefix))
+			.map(|(source, _)| *source)
+			.collect();
+		for source in gone {
+			self.unsource(source);
+			self.mounts.remove(&source);
 		}
 
 		let added: Vec<Path> = added.into_iter().map(|(_, path)| path).collect();
