@@ -218,7 +218,8 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - ✅ The cut waits on [the rind 0.4 adapters](/quest/m0/rind-adapters.md)
   ([moq-dev/moq#8432](https://github.com/moq-dev/moq/pull/8432)), so the
   `UnsupportedCpu` error that exists only for rind 0.3 is never published.
-- ✅ [The FFI abort](/quest/m1/ffi-abort-unwanted.md) lands first: it adds a
+- ✅ The FFI's `abort_unwanted`
+  ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
   method to an existing binding object, which the API diff counts as a
   break once 0.22 is published.
 - ✅ End-to-end encryption does not publish at this cut
@@ -236,7 +237,6 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [Relay memory](/quest/m2/relay-memory.md) - the relay's memory growth since `release` is fixed or recorded before 0.22 is announced
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
-- [FFI abort](/quest/m1/ffi-abort-unwanted.md) - a new method on an existing binding object is a break once 0.22 is out
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
