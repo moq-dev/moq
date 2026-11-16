@@ -416,8 +416,8 @@ impl RangeFills {
 		}
 		self.reading.retain(|key, _| draining.contains(key));
 		self.draining = draining;
-		// A run being recovered leaves the subscription, even out of a run kept whole: any later
-		// update reopens its stale drop there, and the publisher would serve it on both.
+		// A run being recovered leaves the subscription, even out of a run kept whole: the
+		// subscription dropped it for good, so naming it there again only costs the publisher.
 		for run in self.recovering.iter() {
 			groups.remove(run.clone());
 		}
