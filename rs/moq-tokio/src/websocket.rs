@@ -586,7 +586,7 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &ht
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
 /// `&[]`, which qmux expands to every draft it knows about.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22", "moqt-23"];
 
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	if QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -1194,10 +1194,15 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
-			.into_iter()
-			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
-			.collect();
+		let drafts: Vec<_> = [
+			"moq-transport-18",
+			"moq-transport-20",
+			"moq-transport-22",
+			"moq-transport-23",
+		]
+		.into_iter()
+		.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
+		.collect();
 		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
 			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);
