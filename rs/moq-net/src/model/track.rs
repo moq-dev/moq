@@ -5687,6 +5687,12 @@ impl TrackWeak {
 		!self.state.is_closed() && self.state.wanted()
 	}
 
+	/// Whether any handle still reads the track, closed or not, such as a fetch of a finished
+	/// track still reading its group.
+	pub(super) fn is_held(&self) -> bool {
+		self.state.wanted()
+	}
+
 	/// A [`Demand`] on the cached track, for a broadcast to watch.
 	pub(super) fn demand(&self) -> Demand {
 		Demand::new(self.name.clone(), self.state.clone())
