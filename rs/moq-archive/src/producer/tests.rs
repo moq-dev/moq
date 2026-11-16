@@ -140,11 +140,7 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, Vec<String>)>> 
 		.collect()
 }
 
-fn key(group: u64, frame: u64, pts: u64) -> String {
-	format!("{group:019}-{frame:019}-{pts:019}")
-}
-
-fn untimed(group: u64, frame: u64) -> String {
+fn key(group: u64, frame: u64) -> String {
 	format!("{group:019}-{frame:019}")
 }
 
@@ -176,7 +172,7 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(2, 0, 2000), key(4, 0, 4000)]
+		[key(0, 0), key(2, 0), key(4, 0)]
 	);
 	assert_eq!(
 		contents(&objects)[0],
@@ -209,10 +205,7 @@ async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	// Nothing waits on 1, so every group is stored within the flush.
 	sleep(SECOND + SECOND / 2).await;
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(2, 0, 2000)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(2, 0)]);
 	assert_eq!(
 		contents(&stored)[1],
 		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
@@ -254,7 +247,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 2, 2000), key(0, 5, 4000)]
+		[key(0, 0), key(0, 2), key(0, 5)]
 	);
 	let stored: Vec<String> = contents(&objects)
 		.into_iter()
@@ -280,7 +273,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	open.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
-	let head = untimed(0, 0);
+	let head = key(0, 0);
 	let first = get(&store, &format!("data/{head}")).await.unwrap();
 
 	open.write_frame(moq_net::Timestamp::unscaled(0), "b").unwrap();
@@ -288,7 +281,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	sleep(SECOND).await;
 	assert_eq!(get(&store, &format!("data/{head}")).await.unwrap(), first);
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, untimed(0, 1)]);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, key(0, 1)]);
 	assert_eq!(
 		contents(&stored),
 		[[(0, vec!["a".to_string()])], [(0, vec!["b".to_string()])]]
@@ -333,7 +326,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		[untimed(0, 0), untimed(0, 4), untimed(1, 0)]
+		[key(0, 0), key(0, 4), key(1, 0)]
 	);
 	let strings = |frames: &[&str]| frames.iter().map(|frame| frame.to_string()).collect::<Vec<_>>();
 	assert_eq!(
@@ -362,7 +355,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	sleep(SECOND / 2).await;
 	assert_eq!(
 		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0)]
+		[key(0, 0)]
 	);
 
 	// The open group continues in the next object.
@@ -374,7 +367,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	finished(task).await;
 	assert_eq!(
 		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 1, 100)]
+		[key(0, 0), key(0, 1)]
 	);
 }
 
@@ -418,10 +411,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	finished(task).await;
 
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 2, 200)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(0, 2)]);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -431,10 +421,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 
 	// The untimed group continues in its own object too.
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[untimed(0, 0), untimed(0, 2)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(0, 2)]);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -476,7 +463,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(1, 2, 500), key(1, 3, 600)]
+		[key(0, 0), key(1, 2), key(1, 3)]
 	);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
@@ -524,18 +511,19 @@ async fn changed_properties_fail_the_resume() {
 	);
 }
 
-/// A reader still reads a version 2 `.info`, but a producer never appends to one.
+/// A prefix in another format version, such as one a main build wrote before the format shipped,
+/// is refused before anything is written to it.
 #[tokio::test(start_paused = true)]
-async fn an_older_version_fails_the_resume() {
+async fn another_version_fails_the_resume() {
 	let store = store();
 	let info = object_store::path::Path::from("rec/video/.info");
-	let v2 = br#"{"version":2,"priority":128,"timescale":1000}"#;
-	store.inner().put(&info, v2.as_ref().into()).await.unwrap();
+	let v4 = br#"{"version":4,"priority":0,"timescale":1000}"#;
+	store.inner().put(&info, v4.as_ref().into()).await.unwrap();
 	let broadcast = broadcast::Info::new().produce();
 	let _video = broadcast.create_track("video", timed()).unwrap();
 	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
-	assert!(matches!(err, Error::Version(2)), "{err}");
-	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v2[..]));
+	assert!(matches!(err, Error::Version(4)), "{err}");
+	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v4[..]));
 }
 
 #[tokio::test(start_paused = true)]
@@ -561,7 +549,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 
 	let stored = keys(&store).await;
 	for dir in ["a%2Fb", "%2Ehidden", "end"] {
-		assert!(stored.contains(&format!("{dir}/{}", untimed(0, 0))), "{stored:?}");
+		assert!(stored.contains(&format!("{dir}/{}", key(0, 0))), "{stored:?}");
 		assert!(stored.contains(&format!("{dir}/.info")), "{stored:?}");
 	}
 

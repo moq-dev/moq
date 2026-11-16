@@ -445,7 +445,7 @@ mod tests {
 			}
 			assert!(
 				files.contains(&format!(
-					"{path}/@{instance}/video/0000000000000000000-0000000000000000000-0000000000000000000"
+					"{path}/@{instance}/video/0000000000000000000-0000000000000000000"
 				)),
 				"{files:?}"
 			);
