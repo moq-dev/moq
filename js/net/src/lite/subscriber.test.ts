@@ -6027,6 +6027,39 @@ test("a lite-07 edit to a wider prefix leaves an exact route at its own prefix",
 	subscriber.close();
 });
 
+// A reader below the shared request is shown a broader claim at its own prefix as that much above
+// it, so a claim exactly there outranks the broader one however cheaper that is, as a consume of
+// the path picks.
+test("a lite-07 reader below the request ranks a broader claim as above its prefix", async () => {
+	const { subscriber, announced, send, edits, settled, another } = await routedStream();
+	const [x, xa] = [Path.from("x"), Path.from("x/a")];
+	const narrow = await another(Path.Pattern.subtree(xa));
+	// The root covers the narrow reader, so its request is the root's alone.
+	expect(edits).toHaveLength(1);
+	const instance = Instance.parse("i");
+	for (const [id, node, path, cost] of [
+		[0n, NODE_A, x, 0n],
+		[1n, NODE_B, xa, 10n],
+	] as const) {
+		await send({ status: "routeStart", prefix: 0n, node, suffix: Path.empty(), exact: false, offer: offer(node) });
+		await send({ status: "active", suffix: path, route: id, instance, cost });
+		await send({ status: "floor", id, revision: 0n });
+	}
+	await settled();
+	// The root's claim shows first, one segment above the reader's prefix, until the exact one
+	// arrives.
+	expect(await narrow.announced.next()).toMatchObject({
+		prefix: xa,
+		kind: "start",
+		route: { node: NODE_A, above: 1n },
+	});
+	expect(await narrow.announced.next()).toMatchObject({ prefix: xa, route: { node: NODE_B, above: 0n } });
+
+	narrow.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
 // Two routes of one node, each showing its covering claim at its own prefix, merge when a reader
 // widens the request past both: each claim stays shown until the merged route's next floor.
 test("a lite-07 edit merging two routes keeps each one's covering claim", async () => {

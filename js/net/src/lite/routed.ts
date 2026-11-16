@@ -415,11 +415,13 @@ export class Routed {
 
 	// The usable claims `reader` is shown at `path`: those at the path itself, and at the
 	// reader's own prefix each route's most specific claim at or above it, as the peer presents
-	// a claim covering more than a requested prefix.
+	// a claim covering more than a requested prefix: that many segments more above the path, so a
+	// claim exactly there still outranks it, as `covering` in rs/moq-net's `route/view.rs`.
 	#candidates(reader: Reader, path: Path.Valid): WireRoute[] {
 		const candidates: WireRoute[] = [];
 		const seen = new Set<bigint>();
 		for (const at of path === reader.prefix ? coveringPrefixes(path) : [path]) {
+			const by = BigInt(Path.parts(path).length - Path.parts(at).length);
 			for (const id of this.#byPath.get(at) ?? []) {
 				const wire = this.#route(id);
 				const claim = wire.shown.get(at);
@@ -428,7 +430,8 @@ export class Routed {
 				// A claim above the path covers it only where the newest floor certifying the path
 				// leaves it, as a consume of the path picks.
 				if (!this.#session.floors.covers(wire.node, at, path)) continue;
-				if (this.#usable(wire)) candidates.push(this.#candidate(wire, claim));
+				const shown = by === 0n ? claim : { ...claim, above: claim.above + by };
+				if (this.#usable(wire)) candidates.push(this.#candidate(wire, shown));
 			}
 		}
 		return candidates;
