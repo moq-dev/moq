@@ -1183,8 +1183,9 @@ impl Subscriber {
 		};
 		// A scale-less datagram's timestamp is bare, which the track checks is its sequence.
 		let timestamp = match timescale {
-			Some(scale) => Timestamp::new(dg.timestamp, scale)
-				.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
+			Some(scale) => {
+				Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
+			}
 			None => Timestamp::unscaled(dg.timestamp),
 		};
 		producer.insert(crate::datagram::Datagram {
@@ -13872,10 +13873,10 @@ impl ServeLoop {
 							}
 							let mut owed = rangemap::RangeSet::new();
 							for given in given.iter() {
-								owed.extend(
-									self.serving
-										.give_up(given.clone(), track::Hole::stale(active.max_delay.unwrap_or(Duration::MAX))),
-								);
+								owed.extend(self.serving.give_up(
+									given.clone(),
+									track::Hole::stale(active.max_delay.unwrap_or(Duration::MAX)),
+								));
 							}
 							// Owed again by the next update, save what a stream may have won.
 							for overtaken in overtaken {

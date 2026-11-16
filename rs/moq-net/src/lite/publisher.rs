@@ -8500,7 +8500,10 @@ mod serve_group_test {
 		// SUBSCRIBE_START with group 0 ended as the largest and the range starting at 0, a
 		// SKIP for group 1, and
 		// SUBSCRIBE_FINISH at 3.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 5, 1, 0, 1, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 5, 1, 0, 1, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]
+		);
 	}
 
 	/// A relay forwards a SKIP over a DROP it already forwarded for the same groups, since the

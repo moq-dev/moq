@@ -251,7 +251,13 @@ mod test {
 	#[test]
 	fn invalid_types_never_reach_a_subscription() {
 		// 0x0 is the only type.
-		for body in [&[][..], &[0x80][..], &[1, 1, 2, 3][..], &[2, 1, 2, 3][..], &[0xff; 9][..]] {
+		for body in [
+			&[][..],
+			&[0x80][..],
+			&[1, 1, 2, 3][..],
+			&[2, 1, 2, 3][..],
+			&[0xff; 9][..],
+		] {
 			assert!(Datagram::decode(Bytes::copy_from_slice(body), Version::Lite07).is_err());
 		}
 	}

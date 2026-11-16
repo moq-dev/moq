@@ -395,10 +395,9 @@ fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, Option<u64>), 
 		Some(Anchor::Time(time)) => (1, Some(time)),
 		Some(Anchor::Relative(back)) => (2, Some(back)),
 		Some(Anchor::Absolute(position)) if position.frame != 0 => return Err(EncodeError::Version),
-		Some(Anchor::Absolute(position)) if end => (
-			1,
-			Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
-		),
+		Some(Anchor::Absolute(position)) if end => {
+			(1, Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?))
+		}
 		Some(Anchor::Absolute(position)) => (1, Some(position.group)),
 	})
 }
