@@ -889,6 +889,7 @@ impl Sim {
 			out.heard += r.heard;
 			out.sent += r.sent;
 			out.routes += r.routes;
+			out.offers += r.offers;
 			out.dead += r.dead;
 			out.doubt += r.doubt;
 			out.draining += r.draining;

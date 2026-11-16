@@ -570,6 +570,8 @@ pub(crate) struct Retained {
 	/// Claims on routes sent.
 	pub sent: usize,
 	pub routes: usize,
+	/// Routes heard, one per neighbour offering one.
+	pub offers: usize,
 	pub dead: usize,
 	pub doubt: usize,
 	pub draining: usize,
@@ -1897,6 +1899,7 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 				.keys()
 				.filter(|(id, _)| !self.origins.contains_key(id))
 				.count(),
+			offers: self.sessions.values().map(|session| session.heard.len()).sum(),
 			dead: self.dead.len(),
 			doubt: self.doubted.len(),
 			draining: self.draining.len(),

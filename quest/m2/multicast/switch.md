@@ -46,7 +46,10 @@ for the wire, pending the maintainer's pick there:
   neighbour: flagging each route cost 158,462 route messages for one GOAWAY on
   32 relays, against 1,454 with it and 116 today.
 - A claim's end carries one bit, ended or lost, and a claim carries the lowest
-  link priority to its publisher beside its cost and chain.
+  link priority to its publisher and a draining bit beside its cost and chain.
+- A claims message with no change still carries its floor.
+- A node offers a route to itself only once it announces a claim, so a relay
+  that only forwards or only serves viewers has no route on the wire.
 - A scoped neighbour is sent the node's closest claim per broadcast, and never
   one that came from that neighbour.
 - Today's rule cost 300,100 route messages when a publisher left two meshes

@@ -32,6 +32,7 @@ impl Arm {
 		batch: false,
 		agree: false,
 		drain: false,
+		claimed: false,
 	});
 	/// The epic's rule with what the bake-off found worth adding.
 	pub const TUNED: Self = Self::Multi(Tune {
@@ -41,6 +42,17 @@ impl Arm {
 		batch: true,
 		agree: false,
 		drain: true,
+		claimed: false,
+	});
+	/// [`Self::TUNED`], and a node with nothing to announce offers no route to itself.
+	pub const LEAN: Self = Self::Multi(Tune {
+		suspect: Suspect::Never,
+		quiet: false,
+		floor: true,
+		batch: true,
+		agree: false,
+		drain: true,
+		claimed: true,
 	});
 
 	/// The epic's rule with `tune` changed from how it is written.
@@ -63,6 +75,7 @@ impl Arm {
 			(tune.batch, "+batch"),
 			(tune.agree, "+agree"),
 			(tune.drain, "+drain"),
+			(tune.claimed, "+claimed"),
 		];
 		(parts.into_iter().filter(|(on, _)| *on)).fold("multi".to_string(), |name, (_, part)| name + part)
 	}
@@ -84,8 +97,10 @@ impl From<Rule> for Arm {
 /// What the routers retain, summed over every node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Held {
-	/// Routes heard and used.
+	/// Routes selected: one per publisher today, one per forwarding node in the prototype.
 	pub routes: usize,
+	/// Routes heard, one per neighbour offering one, selected or not.
+	pub offers: usize,
 	/// Claims, in every copy a node keeps.
 	pub claims: usize,
 	/// What waits on another node: dead hops, doubts, and suspected nodes.
@@ -315,6 +330,7 @@ impl Net for Sim {
 		let kept = self.kept();
 		Held {
 			routes: kept.routes,
+			offers: kept.offers,
 			claims: kept.items + kept.heard + kept.sent,
 			pending: kept.dead + kept.doubt + kept.draining,
 			lasting: 0,
@@ -424,7 +440,8 @@ impl Net for MultiSim {
 	fn held(&self) -> Held {
 		let kept = self.kept();
 		Held {
-			routes: kept.routes,
+			routes: kept.used,
+			offers: kept.routes,
 			claims: kept.items + kept.heard + kept.foreign,
 			pending: kept.pending,
 			lasting: kept.closed,
@@ -583,6 +600,9 @@ pub(super) struct Lab {
 	linked: BTreeSet<(Node, Node)>,
 	down: BTreeSet<Node>,
 	order: XorShift,
+	/// The order a dying relay's neighbours notice in: its own, so every rule sees the
+	/// same failure whatever it sent before.
+	notice: XorShift,
 	cost: Cost,
 	/// Look for loops once a round rather than after every delivery, on meshes too
 	/// large to walk that often.
@@ -604,6 +624,7 @@ impl Lab {
 			linked: BTreeSet::new(),
 			down: BTreeSet::new(),
 			order: XorShift(0x5eed_0001),
+			notice: XorShift(0x5eed_0002),
 			cost: Cost::default(),
 			coarse: false,
 		};
@@ -819,7 +840,7 @@ impl Lab {
 			self.net.mute(relay, peer);
 		}
 		for i in (1..peers.len()).rev() {
-			peers.swap(i, self.order.next(i as u64 + 1) as usize);
+			peers.swap(i, self.notice.next(i as u64 + 1) as usize);
 		}
 		self.down.insert(relay);
 		for peer in peers {
@@ -848,7 +869,7 @@ impl Lab {
 			self.net.mute(relay, peer);
 		}
 		for i in (1..peers.len()).rev() {
-			peers.swap(i, self.order.next(i as u64 + 1) as usize);
+			peers.swap(i, self.notice.next(i as u64 + 1) as usize);
 		}
 		self.down.insert(relay);
 		let gap = rounds / peers.len().max(2).saturating_sub(1);

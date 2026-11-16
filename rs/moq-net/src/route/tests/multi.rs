@@ -66,6 +66,10 @@ pub(super) struct Tune {
 	/// A node that sent GOAWAY is named once per neighbour, as a closed session is,
 	/// so every route through it ranks as draining at once.
 	pub drain: bool,
+	/// A node offers a route to itself only once it has a claim to announce, its
+	/// endpoints' or one it announces again across a scoped grant, and from then on:
+	/// nothing routes to a node that announces nothing.
+	pub claimed: bool,
 }
 
 /// One node on a route's path, and the session it learned the route on. The
@@ -109,6 +113,8 @@ pub(super) struct Claim {
 	pub cost: Metric,
 	/// The lowest link priority between the two.
 	pub priority: i8,
+	/// The way to the publisher crosses a node that sent GOAWAY.
+	pub draining: bool,
 	/// The nodes that announced it again across a scoped grant, the first first.
 	pub chain: Vec<Id>,
 }
@@ -241,6 +247,8 @@ pub(super) struct Event {
 pub(super) struct Kept {
 	/// Routes heard, one per neighbour offering a forwarding node.
 	pub routes: usize,
+	/// Routes selected, one per forwarding node.
+	pub used: usize,
 	/// Hops on those routes' paths.
 	pub hops: usize,
 	/// Routes sent, one per neighbour and forwarding node.
@@ -281,6 +289,8 @@ pub(super) struct Router<N> {
 	known: BTreeMap<Id, Known<N>>,
 	/// This node's revision of its own claims.
 	rev: Rev,
+	/// It has announced a claim, so it offers a route to itself.
+	announced: bool,
 	/// Claims heard from endpoints and scoped neighbours, by neighbour.
 	local: BTreeMap<N, BTreeMap<Broadcast, Claim>>,
 	/// The neighbour behind each of this node's own claims.
@@ -316,6 +326,7 @@ impl<N: Key> Router<N> {
 			sent: BTreeMap::new(),
 			known: BTreeMap::new(),
 			rev: 0,
+			announced: false,
 			local: BTreeMap::new(),
 			sources: BTreeMap::new(),
 			foreign: BTreeMap::new(),
@@ -636,9 +647,7 @@ impl<N: Key> Router<N> {
 				}
 			}
 		}
-		if changes.is_empty() {
-			return;
-		}
+		// Even with nothing changed: the floor alone outranks an older copy elsewhere.
 		for (&peer, sent) in &self.sent {
 			if sent.contains_key(&origin) {
 				self.out.push((
@@ -702,7 +711,15 @@ impl<N: Key> Router<N> {
 	fn restate(&mut self, broadcast: Broadcast, cause: Change) {
 		let cheapest = (self.local.iter())
 			.filter_map(|(&peer, claims)| Some((claims.get(&broadcast)?, peer)))
-			.min_by_key(|(claim, peer)| (Reverse(claim.priority), claim.cost, claim.chain.len(), *peer))
+			.min_by_key(|(claim, peer)| {
+				(
+					claim.draining,
+					Reverse(claim.priority),
+					claim.cost,
+					claim.chain.len(),
+					*peer,
+				)
+			})
 			.map(|(claim, peer)| (claim.clone(), peer));
 		let me = self.me;
 		let was = self.known.entry(me).or_default().items.get(&broadcast).cloned();
@@ -726,6 +743,11 @@ impl<N: Key> Router<N> {
 		};
 		self.rev += 1;
 		self.known.entry(me).or_default().floor = self.rev;
+		if !self.announced {
+			// Its first claim: the route starts, and brings the claim with it.
+			self.announced = true;
+			self.stale.insert(me);
+		}
 		self.publish(me, vec![(broadcast, change)]);
 	}
 
@@ -911,6 +933,9 @@ impl<N: Key> Router<N> {
 	fn offer_for(&self, origin: Id, peer: N) -> Option<Offer> {
 		let to = self.peers.get(&peer).filter(|to| to.port.role == Role::Routing)?;
 		if origin == self.me {
+			if self.tune.claimed && !self.announced {
+				return None;
+			}
 			return Some(Offer {
 				path: vec![Hop {
 					node: self.me,
@@ -984,10 +1009,14 @@ impl<N: Key> Router<N> {
 			.filter_map(|&origin| {
 				let claim = self.known.get(&origin)?.items.get(broadcast)?;
 				let rank = match origin == self.me {
-					true => (false, Reverse(claim.priority), claim.cost),
+					true => (claim.draining, Reverse(claim.priority), claim.cost),
 					false => {
 						let (draining, Reverse(priority), cost) = self.best.get(&origin)?.rank();
-						(draining, Reverse(priority.min(claim.priority)), cost + claim.cost)
+						(
+							draining || claim.draining,
+							Reverse(priority.min(claim.priority)),
+							cost + claim.cost,
+						)
 					}
 				};
 				Some(((rank, claim.chain.len(), origin), claim))
@@ -1052,17 +1081,23 @@ impl<N: Key> Router<N> {
 	/// from that neighbour.
 	fn export(&mut self, broadcast: &Broadcast, peer: N) {
 		let claim = self.closest(broadcast).and_then(|(origin, claim)| {
-			let (cost, priority) = match origin == self.me {
+			let (cost, priority, draining) = match origin == self.me {
 				true if self.sources.get(broadcast) == Some(&peer) => return None,
-				true => (claim.cost, claim.priority),
+				true => (claim.cost, claim.priority, claim.draining),
 				false => {
-					let offer = &self.best[&origin].offer;
-					(claim.cost + offer.cost, claim.priority.min(offer.priority))
+					let best = &self.best[&origin];
+					let (draining, ..) = best.rank();
+					(
+						claim.cost + best.offer.cost,
+						claim.priority.min(best.offer.priority),
+						claim.draining || draining,
+					)
 				}
 			};
 			Some(Claim {
 				cost,
 				priority,
+				draining,
 				chain: claim.chain.clone(),
 			})
 		});
@@ -1095,6 +1130,7 @@ impl<N: Key> Router<N> {
 		let heard = || self.heard.values().flat_map(BTreeMap::values);
 		Kept {
 			routes: heard().count(),
+			used: self.best.len(),
 			hops: heard().map(|heard| heard.offer.path.len()).sum(),
 			sent: self.sent.values().map(BTreeMap::len).sum(),
 			items: self.known.values().map(|known| known.items.len()).sum(),
@@ -1235,6 +1271,7 @@ impl MultiSim {
 						let claim = Claim {
 							cost: 0,
 							priority: i8::MAX,
+							draining: false,
 							chain: Vec::new(),
 						};
 						((id.expect("a publisher"), path.clone()), Change::Live(claim))
@@ -1320,6 +1357,7 @@ impl MultiSim {
 				Change::Live(Claim {
 					cost: 0,
 					priority: i8::MAX,
+					draining: false,
 					chain: Vec::new(),
 				})
 			}
@@ -1465,6 +1503,7 @@ impl MultiSim {
 		for router in (0..self.spots.len()).filter_map(|node| self.router(node)) {
 			let kept = router.kept();
 			out.routes += kept.routes;
+			out.used += kept.used;
 			out.hops += kept.hops;
 			out.sent += kept.sent;
 			out.items += kept.items;

@@ -49,21 +49,43 @@ whose prototype is `rs/moq-net/src/route/tests/multi.rs`; its recommendations
 stand until the maintainer picks otherwise on that PR:
 
 - The rule as written hunts: 6.6 million route messages for a partition of a
-  32-relay CDN, against 579 today. Build these three with it, each an arm of
+  32-relay CDN, against 579 today. Build these four with it, each an arm of
   the bake-off: the highest session known closed per pair of nodes, kept for
   good and refusing any path at or below it (`floor`, a departure from the
   epic's "no dead hop remembered"); advertising once per burst of input read
   rather than after every message (`batch`); and a node that sent GOAWAY named
-  once per neighbour as a closed session is (`drain`).
+  once per neighbour as a closed session is (`drain`); and a node offering a
+  route to itself only once it has a claim to announce, its endpoints' or one
+  it announces again across a scoped grant, and from then on until it restarts
+  (`claimed`). With all four that partition cost 690.
+- `claimed` makes the route per announcing relay, not per forwarding node:
+  held routes fell from 6,576 to 207 on 32 relays with one publisher, under
+  today's 221. A publisher's first claim on a relay then starts a route at
+  every node (201 route messages on that CDN), and across scoped grants a
+  leaving claim's echo can make a gateway announce for the first time
+  (`a_first_claim_starts_a_route`). Keep the route standing after the last
+  claim leaves: withdrawing it races the claim's own end, which would show a
+  reader offline where the publisher ended cleanly.
 - A closed session's message ends, on that stream, every route its sender
   offered through the session; the sender owes each one its next offer or an
   explicit end. A neighbour's copy of the claims stays through that, so a
   reroute sends no claim again.
 - A claim's withdrawal says whether its publisher ended it or its announcer
   lost it, so a publisher's session closing shows readers offline and never a
-  clean end. A claim carries the lowest link priority to its publisher, or a
-  node prefers its own echo of a claim that crossed two grants and never
-  settles.
+  clean end. A claim carries the lowest link priority to its publisher and
+  whether the way there is draining, or a node prefers its own echo of a claim
+  that crossed two grants and never settles: two relays sharing a draining
+  neighbour and a scoped link traded places for good without the second
+  (`a_claim_across_a_grant_keeps_its_drain`).
+- A node that takes a newer copy of a forwarding node's claims passes the floor
+  on even when nothing in the copy differs, or a neighbour that heard a claim
+  in between keeps it after its publisher ended it
+  (`a_newer_floor_travels_with_nothing_changed`).
+- Bound the session floor before it ships: a restarted relay is a new node, so
+  each restart leaves every node that heard of it entries nothing removes
+  (`a_session_floor_keeps_an_entry_per_restart`: 4 more per restart of one
+  relay in three). A node identity that survives a restart, with sessions and
+  claim revisions that never repeat, bounds it by pairs of nodes.
 - Not picked, with their costs on the PR: holding adverts until neighbours
   agree (`quiet`, which can wait for good on a neighbour that learned a stale
   route late), ranking the far end of a closed session as draining

@@ -51,8 +51,9 @@ lemmas if its recommendations stand:
 - A named drain sets a route's drain from its path and the nodes known
   draining, and the drain still travels in the offer, so the order stays one
   order.
-- A claim ranks by the route to its announcer joined with its own priority and
-  cost; show an echo across two grants never beats the claim it echoes.
+- A claim ranks by the route to its announcer joined with its own drain,
+  priority, and cost; show an echo across two grants never beats the claim it
+  echoes.
 
 A node advertising once per burst changes no fixed point.
 

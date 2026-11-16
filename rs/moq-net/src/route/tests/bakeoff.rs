@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use super::compare::*;
-use super::multi::{Suspect, Tie};
+use super::multi::{MultiSim, Suspect, Tie};
 use super::*;
 
 /// The arms measured, in the report's order.
@@ -34,6 +34,8 @@ fn arms() -> Vec<Arm> {
 			tune.batch = true;
 		}),
 		Arm::TUNED,
+		Arm::LEAN,
+		Arm::with(|tune| tune.claimed = true),
 		Arm::with(|tune| {
 			tune.suspect = Suspect::Flagged;
 			tune.floor = true;
@@ -44,7 +46,7 @@ fn arms() -> Vec<Arm> {
 }
 
 /// The prototype's arms.
-const MULTI: [Arm; 2] = [Arm::PLAIN, Arm::TUNED];
+const MULTI: [Arm; 3] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN];
 
 /// How long a silent death takes its neighbours to notice, in hops of delay: an idle
 /// timeout of 3 s.
@@ -522,6 +524,7 @@ fn the_prototype_carries_every_failure_on_every_shape() {
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn sweep_the_prototype_carries_every_failure_at_32_relays() {
 	carries(Arm::TUNED, 32);
+	carries(Arm::LEAN, 32);
 }
 
 /// A publisher is an endpoint of its relay, so one leaving, moving, or losing a home
@@ -537,6 +540,54 @@ fn an_endpoint_changes_no_route() {
 				assert_eq!(row.cost.sent.msgs, 0, "{} on {}", failure.as_str(), shape.name);
 			}
 		}
+	}
+}
+
+/// With routes only to relays that announce, a publisher leaving still changes no
+/// route, since its relay's route stands, but one arriving at a relay that never
+/// announced starts that relay's route at every node. Across a scoped grant a
+/// leaving claim can do the same: a gateway that hears the other mesh's echo of it
+/// for a moment announces it again, its first claim.
+#[test]
+fn a_first_claim_starts_a_route() {
+	let (mut echoed, mut started) = (0, 0);
+	for shape in shapes(9, 2) {
+		let scoped = shape.mesh.ties.values().any(|tie| *tie == Tie::Scoped);
+		for (failure, row) in fail(Arm::LEAN, &shape.mesh, false) {
+			let case = format!("{} on {}", failure.as_str(), shape.name);
+			match failure {
+				Failure::Leave | Failure::LoseOne | Failure::LoseBoth if scoped => echoed += row.cost.sent.msgs,
+				Failure::Leave | Failure::LoseOne | Failure::LoseBoth => assert_eq!(row.cost.sent.msgs, 0, "{case}"),
+				// Unless the relay it moves to has announced before.
+				Failure::Move => started += row.cost.sent.msgs,
+				_ => {}
+			}
+		}
+	}
+	assert!(started > 0, "no move started a route");
+	assert!(echoed > 0, "no gateway announced an echo");
+}
+
+/// A relay with nothing to announce costs no route anywhere: the routes a mesh
+/// holds follow the relays that announce, not the relays.
+#[test]
+fn a_relay_with_no_claim_offers_no_route() {
+	let held = |arm: Arm, publishers: usize| {
+		let lab = Lab::new(arm, &tiers(3, 3, true, publishers));
+		lab.net.held()
+	};
+	for publishers in [1, 2, 9] {
+		let (all, lean, today) = (
+			held(Arm::TUNED, publishers),
+			held(Arm::LEAN, publishers),
+			held(Arm::TODAY, publishers),
+		);
+		println!("{publishers} publishers: {all:?} {lean:?} {today:?}");
+		assert!(
+			lean.offers * 15 <= all.offers * publishers.min(9) + all.offers,
+			"{publishers}"
+		);
+		assert!(lean.routes <= today.routes, "{publishers}");
 	}
 }
 
@@ -569,6 +620,128 @@ fn a_session_floor_stops_most_of_the_hunting() {
 	};
 	let (plain, floored) = (cost(Arm::PLAIN), cost(Arm::with(|tune| tune.floor = true)));
 	assert!(floored * 10 < plain, "{floored} against {plain}");
+}
+
+/// Deliver everything queued, as one hop of delay. False once nothing is left.
+fn deliver(net: &mut MultiSim) -> bool {
+	let ready = net.ready();
+	for &((from, to), count) in &ready {
+		for _ in 0..count {
+			net.deliver(from, to);
+		}
+	}
+	net.flush();
+	!ready.is_empty()
+}
+
+fn quiesce(net: &mut MultiSim) {
+	for _ in 0..200 {
+		if !deliver(net) {
+			return;
+		}
+	}
+	panic!("never settles");
+}
+
+fn tune(arm: Arm) -> multi::Tune {
+	match arm {
+		Arm::Multi(tune) => tune,
+		Arm::Path(_) => panic!("today's rule"),
+	}
+}
+
+/// Two relays that share a draining neighbour and a scoped link each hold the
+/// other's copy of its claim. The copy says it is draining too, so neither prefers
+/// it to its own route and the two never trade places.
+#[test]
+fn a_claim_across_a_grant_keeps_its_drain() {
+	for arm in MULTI {
+		let mut net = MultiSim::new(tune(arm), 4);
+		net.client(3);
+		net.publish(3, 100);
+		net.link(0, 1, 1, Tie::Peer);
+		net.link(0, 2, 1, Tie::Peer);
+		net.link(1, 2, 1, Tie::Scoped);
+		net.link(3, 0, 1, Tie::Peer);
+		net.claim(3, "live/0", true);
+		quiesce(&mut net);
+		// Both read the GOAWAY before either hears from the other.
+		net.goaway(0);
+		quiesce(&mut net);
+		let broadcast = (100, p("live/0"));
+		for relay in [1, 2] {
+			let router = net.router(relay).expect("a relay");
+			assert_eq!(
+				router.pick(&broadcast),
+				Some(hop(0, 0)),
+				"relay {relay} under {}",
+				arm.name()
+			);
+		}
+	}
+}
+
+/// A relay that takes a newer copy of a node's claims from another neighbour tells
+/// its own neighbours the floor even when nothing in the copy differs from what it
+/// had, so one that heard a claim in between, by a route since gone, lets go of it.
+#[test]
+fn a_newer_floor_travels_with_nothing_changed() {
+	for arm in MULTI {
+		// 0 announces. 3 hears it through 1, and later 2; 4 hears it through 3 and 5.
+		let mut net = MultiSim::new(tune(arm), 7);
+		net.client(6);
+		net.publish(6, 100);
+		for (a, b) in [(0, 1), (0, 2), (1, 3), (3, 4), (0, 5), (5, 4), (6, 0)] {
+			net.link(a, b, 1, Tie::Peer);
+		}
+		net.claim(6, "live/a", true);
+		quiesce(&mut net);
+		let late = (100, p("live/b"));
+		let shown = |net: &MultiSim, relay: Node| net.router(relay).expect("a relay").shown(&late);
+
+		// 3 misses the claim starting, which reaches 4 through 5.
+		net.hold(1, 3);
+		net.hold(4, 3);
+		net.claim(6, "live/b", true);
+		quiesce(&mut net);
+		assert_eq!((shown(&net, 3), shown(&net, 4)), (None, Some(true)));
+
+		// 5 misses it ending, and then 4 loses its route through 5.
+		net.hold(0, 5);
+		net.claim(6, "live/b", false);
+		quiesce(&mut net);
+		net.close(5, 4);
+		quiesce(&mut net);
+		assert_eq!(shown(&net, 4), Some(true), "nothing has told it yet");
+
+		// 3 hears a newer copy from 2 that matches what it holds.
+		net.link(2, 3, 1, Tie::Peer);
+		quiesce(&mut net);
+		assert_eq!(shown(&net, 4), None, "under {}", arm.name());
+	}
+}
+
+/// The floor's cost: a relay that restarts is a new node, so each restart leaves
+/// its neighbours an entry nothing removes.
+#[test]
+fn a_session_floor_keeps_an_entry_per_restart() {
+	let mut net = MultiSim::new(tune(Arm::TUNED), 3);
+	for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+		net.link(a, b, 1, Tie::Peer);
+	}
+	quiesce(&mut net);
+	let mut kept = Vec::new();
+	for _ in 0..8 {
+		net.reset(0);
+		quiesce(&mut net);
+		for peer in [1, 2] {
+			net.open(0, peer);
+		}
+		quiesce(&mut net);
+		kept.push(net.kept().closed);
+	}
+	assert!(kept.windows(2).all(|pair| pair[1] > pair[0]), "{kept:?}");
+	println!("pairs kept after each of 8 restarts of one relay in three: {kept:?}");
 }
 
 /// Every failure on every shape, per arm: what it cost and what readers saw.
@@ -638,7 +811,7 @@ fn benchmark_bakeoff_failures() {
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_growth() {
 	println!(
-		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_messages,held_routes,held_claims,held_lasting,close_route_messages,death_route_messages,death_claim_messages,work"
+		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_messages,held_routes,heard_routes,held_claims,held_lasting,close_route_messages,death_route_messages,death_claim_messages,work"
 	);
 	let tiers_of = |relays: usize, publishers: usize, claims: usize| {
 		let (regions, edges) = match relays {
@@ -657,7 +830,7 @@ fn benchmark_bakeoff_growth() {
 	cases.extend([1, 8, 64].map(|claims| ("broadcasts", tiers_of(32, 8, claims))));
 	cases.extend([8, 16, 32].map(|relays| ("links", clique(relays, 8))));
 	for (grows, mesh) in cases {
-		for arm in [Arm::TODAY, Arm::TUNED] {
+		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN] {
 			let tree = mesh.tree();
 			let mut lab = Lab::new(arm, &mesh);
 			lab.coarse = true;
@@ -670,7 +843,7 @@ fn benchmark_bakeoff_growth() {
 			});
 			let death = transit(&mesh, &tree).map(|relay| lab.measure(&|lab| lab.crash(relay)));
 			println!(
-				"{grows},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				"{grows},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 				mesh.relays,
 				mesh.links.len(),
 				mesh.homes.len(),
@@ -679,6 +852,7 @@ fn benchmark_bakeoff_growth() {
 				built.msgs,
 				built.claims,
 				held.routes,
+				held.offers,
 				held.claims,
 				lab.net.held().lasting,
 				close.unwrap_or(0),
@@ -696,7 +870,7 @@ fn benchmark_bakeoff_growth() {
 fn benchmark_bakeoff_baseline() {
 	println!("case,rule,route_messages,claim_messages,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
-	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED] {
+	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN] {
 		let mut rng = XorShift(0x6d6f_7100 + 24);
 		let sparse: Vec<Mesh> = (0..16).map(|_| Mesh::sparse(24, &mut rng)).collect();
 		let groups = [
