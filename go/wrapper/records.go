@@ -191,7 +191,7 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		Priority:    info.Priority,
 		Refresh:     info.Refresh,
 		Timescale:   info.Timescale,
-		Compression: info.Compression,
+		Compression: optional(info.Compression),
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
@@ -205,10 +205,12 @@ func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 		MaxAgeUnlimited: info.MaxAge == nil,
 		Refresh:         info.Refresh,
 		Timescale:       info.Timescale,
-		Compression:     info.Compression,
 	}
 	if info.MaxAge != nil {
 		out.MaxAge = *info.MaxAge
+	}
+	if info.Compression != nil {
+		out.Compression = *info.Compression
 	}
 	return out
 }

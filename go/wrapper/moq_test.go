@@ -650,6 +650,34 @@ func TestTrackInfoMaxAge(t *testing.T) {
 	}
 }
 
+// A compression survives the record mapping both ways, and nil reads back as none.
+func TestTrackInfoCompression(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, in := range []*moq.Compression{nil, moq.DeflateCompression()} {
+		track, err := broadcast.PublishTrack(fmt.Sprint(i), &moq.TrackInfo{Compression: in})
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer, err := track.Consume(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := consumer.Info().Compression
+		if in == nil && got != nil {
+			t.Errorf("case %d: Compression = %s, want none", i, got.Name())
+		}
+		if in != nil && (got == nil || got.Name() != "deflate") {
+			t.Errorf("case %d: Compression = %v, want deflate", i, got)
+		}
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBroadcastConsumerClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
