@@ -46,8 +46,8 @@ export interface Route {
 	prefix: Path.Valid;
 	/** The requested prefix it lies in. */
 	region: Path.Valid;
-	/** It lies at its own prefix, which its ROUTE_START said is the requested prefix, so a widening
-	 * leaves it there rather than moving it up. */
+	/** Its ROUTE_START said its sender keeps it at its own prefix, so a widening leaves it there
+	 * rather than moving it up. */
 	exact: boolean;
 	order: Order;
 	/** The Announce ID of each of its live claims with a path. */

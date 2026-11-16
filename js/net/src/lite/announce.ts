@@ -160,9 +160,8 @@ export type AnnounceBroadcast =
 	| { status: "ok" }
 	/** Lite07+ ROUTE_START: the publisher reaches the publisher node `node` along `offer`, covering
 	 * the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and assigns the
-	 * route the next Route ID. `exact` marks a route at the requested prefix whose own prefix it is,
-	 * rather than a broader one covering it, so it stays there when an edit widens the request; it
-	 * is never set with a suffix. */
+	 * route the next Route ID. `exact` marks a route the publisher keeps at its own prefix whatever
+	 * prefix the request lies at, so an edit widening the request past it leaves it there. */
 	| { status: "routeStart"; node: bigint; prefix: bigint; suffix: Path.Valid; exact: boolean; offer: Offer }
 	/** Lite07+ ROUTE_UPDATE: the route with this id changed, and is usable. */
 	| { status: "routeUpdate"; id: bigint; offer: Offer }
@@ -564,7 +563,6 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			break;
 		case "routeStart":
 			if (msg.node === 0n) throw new Error("Node ID 0 names no origin");
-			if (msg.exact && msg.suffix !== "") throw new Error("only a route at the requested prefix is exact");
 			await w.u62(msg.node);
 			await w.u62(msg.prefix);
 			await w.string(Path.encode(msg.suffix));
@@ -690,9 +688,7 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			// The suffix is sized, so the offer's path reads even when it is refused.
 			const text = utf8(await r.read(await r.u53()));
 			const suffix = text === undefined ? undefined : Path.tryDecode(text);
-			// Only a route at the requested prefix itself lies exactly there.
 			const exact = await r.bool();
-			if (exact && suffix !== "") throw new ProtocolViolation("ROUTE_START marks a route below its prefix exact");
 			const offer = await decodeOffer(r);
 			if (node !== 0n && suffix !== undefined && !("refused" in offer))
 				return { status: "routeStart", node, prefix, suffix, exact, offer };

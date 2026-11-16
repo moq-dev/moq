@@ -129,9 +129,9 @@ pub enum AnnounceBroadcast {
 	Ok,
 	/// ROUTE_START (lite-07+): the sender has a route to the publisher `node` covering
 	/// the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and
-	/// assigns it the next Route ID. `exact` marks a route at the requested prefix whose
-	/// own prefix it is, rather than a broader one covering it, so it stays there when an
-	/// edit widens the request; it is never set with a suffix.
+	/// assigns it the next Route ID. `exact` marks a route the sender keeps at its own
+	/// prefix whatever prefix the request lies at, so an edit widening the request past
+	/// it leaves it there.
 	RouteStart {
 		node: route::Id,
 		prefix: u64,
@@ -816,7 +816,7 @@ impl Encode<Version> for AnnounceBroadcast {
 					exact,
 					offer,
 				} => {
-					if *node == 0 || (*exact && !suffix.is_empty()) {
+					if *node == 0 {
 						return Err(EncodeError::InvalidState);
 					}
 					w.varint(*node)?;
@@ -934,11 +934,7 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						let prefix = body.varint()?;
 						// The suffix is sized, so the offer's path reads even when it is refused.
 						let suffix = decode_path(&mut body)?;
-						// Only a route at the requested prefix itself lies exactly there.
 						let exact = body.bool()?;
-						if exact && !suffix.as_ref().is_ok_and(|suffix| suffix.is_empty()) {
-							return Err(DecodeError::InvalidValue);
-						}
 						let heard = decode_offer(&mut body)?;
 						match (node, suffix, heard) {
 							(1.., Ok(suffix), Ok(offer)) => Self::RouteStart {
@@ -2349,33 +2345,16 @@ mod tests {
 			);
 		}
 
-		// Only a route at the requested prefix itself is exact, and Exact is a boolean.
-		let exact = |suffix: &'static [u8], exact: u8| {
-			forge(ROUTE_START, move |w| {
-				w.varint(1u64).unwrap();
-				w.varint(0u64).unwrap();
-				w.bytes(suffix).unwrap();
-				w.u8(exact);
-				path(0, 1, 1, 1)(w);
-			})
-		};
-		for (suffix, flag) in [(&b"room"[..], 1), (&b"x//y"[..], 1), (&b""[..], 2)] {
-			let res = decode_broadcast(&exact(suffix, flag), Version::Lite07);
-			assert!(
-				matches!(res, Err(DecodeError::InvalidValue)),
-				"{suffix:?} {flag}: {res:?}"
-			);
-		}
-		let mut buf = Vec::new();
-		let msg = AnnounceBroadcast::RouteStart {
-			node: 1,
-			prefix: 0,
-			suffix: Path::from_static("room"),
-			exact: true,
-			offer: offer(&[(1, 0)], 1, false),
-		};
-		let res = msg.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07);
-		assert!(matches!(res, Err(EncodeError::InvalidState)), "{res:?}");
+		// Exact is a boolean.
+		let wire = forge(ROUTE_START, |w| {
+			w.varint(1u64).unwrap();
+			w.varint(0u64).unwrap();
+			w.varint(0u64).unwrap();
+			w.u8(2);
+			path(0, 1, 1, 1)(w);
+		});
+		let res = decode_broadcast(&wire, Version::Lite07);
+		assert!(matches!(res, Err(DecodeError::InvalidValue)), "{res:?}");
 
 		// A DEAD has a fixed size: it counts the ROUTE_UPDATEs following it.
 		let wire = forge(DEAD, |w| {

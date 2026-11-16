@@ -3863,6 +3863,63 @@ mod announce_test {
 		assert_eq!(starts, [(0, true), (1, false)], "{first:?}");
 	}
 
+	/// A lite-07 mount's route starts exact below the requested prefix too, so a
+	/// narrowing to its mount point and a widening back carry it over with nothing
+	/// ended or started again.
+	#[kio::test]
+	async fn a_lite07_mount_route_stays_through_a_narrowing_and_a_widening() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin
+			.announce("tenant-a/public/cam", origin::RouteInfo::new())
+			.unwrap();
+		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
+			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let mut answer = super::routed::Answer::alone(consumer);
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		answer
+			.request(false, Vec::new(), vec![(crate::Path::empty(), true)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut first = sent(&mut answer);
+		kio::clock::sim::yield_now().await;
+		first.extend(sent(&mut answer));
+		let shared = crate::Path::from_static("shared");
+		assert!(
+			first.iter().any(|msg| matches!(
+				msg,
+				lite::AnnounceBroadcast::RouteStart { suffix, exact: true, .. } if *suffix == shared
+			)),
+			"{first:?}"
+		);
+
+		// Narrowed to the mount point, then widened back to the root.
+		for (remove, add, prefix) in [(0, shared.clone(), 1), (1, crate::Path::empty(), 2)] {
+			answer.request(false, vec![remove], vec![(add, true)]).unwrap();
+			kio::clock::sim::yield_now().await;
+			assert_eq!(
+				sent(&mut answer),
+				[lite::AnnounceBroadcast::Ok, lite::AnnounceBroadcast::Synced { prefix }]
+			);
+		}
+	}
+
 	/// A lite-07 stream holds a route on the wire only while it shows one of the
 	/// route's claims: an origin whose only claim is hidden from the peer starts no
 	/// route, the route ends after the floor once its last shown claim goes, and it

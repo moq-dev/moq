@@ -63,18 +63,18 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_START's Exact marks a route at the requested prefix whose own prefix it is",
+		"name": "a ROUTE_START's Exact marks a route its sender keeps at its own prefix",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "060d92340000010207000903018005",
 		"expect": "decoded"
 	},
 	{
-		"name": "a ROUTE_START marking a route below the requested prefix Exact is malformed",
+		"name": "a ROUTE_START's Exact marks a route below the requested prefix too",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "060c92340001610101090000ff00",
-		"expect": "refused"
+		"expect": "decoded"
 	},
 	{
 		"name": "a ROUTE_START's Exact other than 0 or 1 is malformed",

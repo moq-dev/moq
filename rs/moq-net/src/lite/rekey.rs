@@ -37,8 +37,8 @@ pub(crate) struct Route {
 	pub prefix: Path,
 	/// The requested prefix it lies in.
 	pub region: Path,
-	/// It lies at its own prefix, which its ROUTE_START said is the requested prefix, so
-	/// a widening leaves it there rather than moving it up.
+	/// Its ROUTE_START said its sender keeps it at its own prefix, so a widening leaves
+	/// it there rather than moving it up.
 	pub exact: bool,
 	pub order: Order,
 	/// The Announce ID of each of its live claims with a path.

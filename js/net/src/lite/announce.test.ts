@@ -631,30 +631,20 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 	expect(kept.message.path).toHaveLength(ROUTE_MAX_HOPS + 1);
 	// An empty path is the sender's own error: it names itself last.
 	await expect(decode(await start(1n, [], 0))).rejects.toThrow(ProtocolViolation);
-	// Only a route at the requested prefix itself is exact, and Exact is a boolean.
-	await expect(
-		encode({ status: "routeStart", node: 1n, prefix: 0n, suffix: Path.from("room"), exact: true, offer }),
-	).rejects.toThrow();
-	const exact = (suffix: string, flag: number) =>
-		forged(6, async (w) => {
-			await w.u62(1n);
-			await w.u62(0n);
-			await w.string(suffix);
-			await w.u8(flag);
-			await w.u62(1n);
-			await w.u62(1n);
-			await w.u62(0n);
-			await w.u8(0);
-			await w.u8(128);
-			await w.u62(0n);
-		});
-	for (const [suffix, flag] of [
-		["room", 1],
-		["x//y", 1],
-		["", 2],
-	] as const) {
-		await expect(decode(await exact(suffix, flag))).rejects.toThrow();
-	}
+	// Exact is a boolean.
+	const notBoolean = await forged(6, async (w) => {
+		await w.u62(1n);
+		await w.u62(0n);
+		await w.string("");
+		await w.u8(2);
+		await w.u62(1n);
+		await w.u62(1n);
+		await w.u62(0n);
+		await w.u8(0);
+		await w.u8(128);
+		await w.u62(0n);
+	});
+	await expect(decode(notBoolean)).rejects.toThrow();
 
 	// A DEAD counts the ROUTE_UPDATEs that follow, each refused on its own.
 	const dead = await forged(15, async (w) => {
