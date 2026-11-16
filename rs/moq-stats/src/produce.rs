@@ -636,7 +636,7 @@ impl<V: Serialize> Output<V> {
 
 	fn new(track: track::Producer) -> Self {
 		Self {
-			snapshot: Snapshot::new(track, config()).fresh(),
+			snapshot: Snapshot::new(track, config()),
 			frame: Frame::default(),
 		}
 	}
