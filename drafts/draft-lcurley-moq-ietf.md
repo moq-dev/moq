@@ -135,8 +135,6 @@ Every property of the object, serialized as the track's Version serializes an ob
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
 It MUST NOT be empty or longer than 65,536 bytes.
 A track without a Version carries no properties: a Property Block on one is malformed.
-On a timed track an object with a FRAME, or a datagram without a Status, MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
-A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block the track's Version would refuse as malformed, as it MUST a block on an object that Version could not send with properties.
 Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record needs a Version of draft 14, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of its Version carries ([Datagrams](#datagrams)).
 The Version also gives each property its meaning: drafts 18 and 19 serialize a block alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward a 0x06 to a draft that would read it differently.
@@ -144,17 +142,12 @@ Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
 A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
-A nonzero Version identifies timestamps from MoQ Transport, which may be arrival times and need not rise with Group Sequence.
+A nonzero Version identifies a track from MoQ Transport, whose objects take their time from their Group ID, in the track's Timescale.
 The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
 Without this extension, or in a listing ({{track}}), the receiver may check them like native moq-lite timestamps and refuse a Group that rewinds.
 
-On a timed track, the FRAME's Timestamp, or the datagram's for a datagram, is the object's time, and nothing else carries it.
-The Property Block MUST NOT contain a mutable Timestamp (0x10) there; a receiver MUST treat one as malformed.
-A relay forwarding the object to {{moqt}} restates the time as the mutable Timestamp, unless a Timestamp inside the Immutable Properties already says it.
-A sealed Timestamp is in the track's Timescale ({{moql}} TRACK_INFO), and a relay MUST NOT forward one to a peer of other units, which would change its meaning.
-
-On an untimed track there is no FRAME Timestamp, so a mutable Timestamp stays in the Property Block as an opaque property.
-Likewise, an object without a FRAME, such as the END_OF_GROUP record or a datagram with a non-zero Status, has no time of its own beside the block, so its mutable Timestamp stays there on any track.
+The FRAME's Timestamp, or the datagram's for a datagram, is the object's time.
+A Timestamp property (0x10) a {{moqt}} publisher attached, mutable or sealed, is opaque like any other: it stays in the Property Block, and a relay neither reads nor restates it.
 
 
 # Track Stream {#track}
@@ -266,6 +259,7 @@ A high, distinctive value is used to avoid collisions with the low values {{moql
 ## Since draft-lcurley-moq-ietf-00 (in progress)
 
 - A relay never restates the Max Age as MAX_CACHE_DURATION, and a sealed MAX_CACHE_DURATION is advisory.
+- A MoQ Transport object takes its time from its Group ID. A Timestamp property stays opaque in the Property Block, so a relay no longer restates one or reserves room for it.
 - Preserve relayed track timestamps and their unchecked MoQ Transport provenance across negotiated hops. Without the extension a relay serves them as native moq-lite timestamps rather than untimed.
 - Initial version.
 

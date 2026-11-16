@@ -86,4 +86,3 @@ with the `ietf` extension only; a moq-lite track loses its records.
 ## Related
 
 - [YIELDED deferred](/quest/m2/yield-defer.md) - deletes the extension's yield exception
-- [moq-transport time addressing](/quest/m2/ietf-time-addressing.md) - changes what moq-transport state a track carries

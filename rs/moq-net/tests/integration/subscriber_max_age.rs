@@ -32,10 +32,11 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 	.unwrap_or_else(|_| panic!("{version}: wanted {millis}ms, publisher has {:?}", track.subscription()));
 }
 
+/// moq-transport carries no subscriber budget, so only moq-lite forwards one.
 #[kio::test]
 async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
-	for draft in [18, 22] {
-		let version: Version = format!("moq-transport-{draft}").parse().unwrap();
+	for alpn in ["moq-lite-06", "moq-lite-07-wip"] {
+		let version: Version = alpn.parse().unwrap();
 		let publisher = origin(1);
 		let relay = origin(2);
 		let viewer = origin(3);

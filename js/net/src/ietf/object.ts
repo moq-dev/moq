@@ -2,8 +2,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { decodePayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import { concat, encodeVarint, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
-import { toNumber } from "../util/bigint.ts";
+import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -19,9 +18,9 @@ export function statusDefined(status: number): boolean {
 	return status === 0 || status === GROUP_END || status === END_OF_TRACK;
 }
 
-// MOQ Object Property ids, shared with draft-ietf-moq-loc-04. An object-scope Timescale
-// (0x08) is never applied: a track's timeline is its TIMESCALE Track Property alone.
-const PROP_TIMESTAMP = 0x10n;
+// MOQ Object Property ids. Prior Group ID Gap is even, so its value is a bare varint.
+const PRIOR_GROUP_ID_GAP = 0x3cn;
+const IMMUTABLE_PROPERTIES = 0x0bn;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
 // 11.4.2. Set on emit unless a filter trimmed the group's head. On parse a
@@ -29,60 +28,68 @@ const PROP_TIMESTAMP = 0x10n;
 // object 0 is still the payload head; a standalone terminal may name a later ID.
 const FIRST_OBJECT_BIT = 0x40;
 
-/**
- * Encode an object's Properties block: its Timestamp in `timescale` units, or nothing.
- *
- * Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one,
- * and an unscaled one, a scale-less track's group key, is no time to write.
- * Synchronous, like the rest of an object's header: every object of a timed track pays for it.
- */
-export function encodeObjectExtensions(
-	timestamp: Timestamp | undefined,
-	timescale: Timescale | undefined,
-	version: IetfVersion,
-): Uint8Array {
-	if (timestamp?.scale === undefined || timescale === undefined) {
-		return new Uint8Array();
-	}
+const MAX_SAFE_KEY = BigInt(Number.MAX_SAFE_INTEGER);
 
-	// The units come from the track's TIMESCALE property, not from here: repeating the
-	// timescale on every object would cost bytes per frame to restate something fixed for
-	// the track's lifetime. The timestamp is converted into the track's units so the value
-	// on the wire matches what the track declared, rounded down exactly as Rust does, and
-	// refused before anything is written when the result leaves the range a Timestamp, and so
-	// the receiver, can hold.
-	const value = floorAt(timestamp, timescale);
-	// The only property, so its type's delta from the previous one is from zero.
-	return concat([encodeVarint(PROP_TIMESTAMP, version), encodeVarint(value, version)]);
+/**
+ * A received object's timestamp: its group's `key`, in the track's `timescale` when it declared
+ * one, else {@link Timestamp.unscaled}. Nothing reads time from an object's properties, so every
+ * object of a group shares its start. Throws a `RangeError` for a key no timestamp at that scale holds.
+ */
+export function objectTime(timescale: Timescale | undefined, key: bigint): Timestamp {
+	if (timescale === undefined) return Timestamp.unscaled(key);
+	if (key > MAX_SAFE_KEY) throw new RangeError(`group ${key} is past the latest timestamp`);
+	return new Timestamp(Number(key), timescale);
 }
 
-/** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
-export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
-	let timestamp: bigint | undefined;
-	let prevType = 0n;
-	let first = true;
+/** Encode the Properties block of an object naming `gap` Group IDs just below its own as never produced. */
+export function encodeGroupGap(gap: bigint, version: IetfVersion): Uint8Array {
+	// The only property, so its type's delta from the previous one is from zero.
+	return concat([encodeVarint(PRIOR_GROUP_ID_GAP, version), encodeVarint(gap, version)]);
+}
 
+/**
+ * Decode an object's Properties block, consuming all of it, for the Prior Group ID Gap, outside
+ * or inside Immutable Properties. Every other property is skipped.
+ */
+export function decodeGroupGap(c: Cursor): bigint | undefined {
+	return decodeProperties(c, false);
+}
+
+function decodeProperties(c: Cursor, immutable: boolean): bigint | undefined {
+	let gap: bigint | undefined;
+	let sealed = false;
+	let prevType = 0n;
+	const malformed = (message: string) => new StreamError(StreamCode.MalformedTrack, { message });
 	while (c.remaining > 0) {
-		const step = c.u62();
-		const id = first ? step : prevType + step;
-		first = false;
+		const id = prevType + c.u62();
 		prevType = id;
 
 		if (id % 2n === 0n) {
 			const value = c.u62();
-			if (id === PROP_TIMESTAMP) {
-				timestamp = value;
-			}
-		} else {
-			c.read(c.u53());
+			if (id !== PRIOR_GROUP_ID_GAP) continue;
+			if (gap !== undefined) throw malformed("repeated Prior Group ID Gap");
+			gap = value;
+			continue;
 		}
+		const length = c.u53();
+		if (id !== IMMUTABLE_PROPERTIES) {
+			c.read(length);
+			continue;
+		}
+		if (immutable || sealed) throw malformed("nested or repeated Immutable Properties");
+		sealed = true;
+		let inner: bigint | undefined;
+		try {
+			inner = c.exact(length, (e) => decodeProperties(e, true));
+		} catch (err: unknown) {
+			if (err instanceof StreamError) throw err;
+			throw malformed("unreadable Immutable Properties");
+		}
+		if (inner === undefined) continue;
+		if (gap !== undefined) throw malformed("repeated Prior Group ID Gap");
+		gap = inner;
 	}
-
-	if (timestamp === undefined) {
-		return undefined;
-	}
-
-	return new Timestamp(toNumber(timestamp), timescale);
+	return gap;
 }
 
 export interface GroupFlags {
@@ -243,8 +250,11 @@ export class Frame {
 	payload?: Uint8Array;
 	/** The payload length of an object past one segment, which follows on the stream instead of in {@link payload}. */
 	streamed?: number;
-	/** The presentation timestamp carried in object properties, when present. */
-	timestamp?: Timestamp;
+	/**
+	 * The Prior Group ID Gap in the object's properties: how many Group IDs just below its own
+	 * the publisher will never produce. Only the group's first object sends one.
+	 */
+	groupGap?: bigint;
 	/**
 	 * An END_OF_TRACK marker: no object at or past its location exists. At object 0 its group
 	 * does not exist either, so the track ends at that group; later in a group it ends after it.
@@ -258,12 +268,12 @@ export class Frame {
 	constructor({
 		payload,
 		streamed,
-		timestamp,
+		groupGap,
 		endOfTrack = false,
-	}: { payload?: Uint8Array; streamed?: number; timestamp?: Timestamp; endOfTrack?: boolean } = {}) {
+	}: { payload?: Uint8Array; streamed?: number; groupGap?: bigint; endOfTrack?: boolean } = {}) {
 		this.payload = payload;
 		this.streamed = streamed;
-		this.timestamp = timestamp;
+		this.groupGap = groupGap;
 		this.endOfTrack = endOfTrack;
 	}
 
@@ -275,25 +285,19 @@ export class Frame {
 	/**
 	 * Encode this frame using the group flags and negotiated IETF version.
 	 *
-	 * The timestamp goes out in `timescale`, the units the track declared, and not at all when
-	 * it declared none. `idDelta` is the first object's absolute Object ID and zero for every
+	 * `idDelta` is the first object's absolute Object ID and zero for every
 	 * later one, so a group whose head was trimmed by a filter still puts the true numbering
 	 * on the wire. A {@link streamed} object writes only its header; the caller writes its payload.
 	 */
-	async encode(
-		w: Writer,
-		flags: GroupFlags,
-		timescale: Timescale | undefined,
-		version: IetfVersion,
-		idDelta = 0,
-	): Promise<void> {
+	async encode(w: Writer, flags: GroupFlags, version: IetfVersion, idDelta = 0): Promise<void> {
 		// Everything before the payload is built in memory and goes out as one write: a stream
 		// write is far costlier than a varint, and a backlog pays it for every object.
 		const header = [encodeVarint(idDelta, version)];
 
 		if (flags.hasExtensions) {
-			const extensions = encodeObjectExtensions(this.timestamp, timescale, version);
-			header.push(encodeVarint(extensions.byteLength, version), extensions);
+			const properties = this.groupGap ? encodeGroupGap(this.groupGap, version) : undefined;
+			header.push(encodeVarint(properties?.byteLength ?? 0, version));
+			if (properties) header.push(properties);
 		}
 
 		const payload = this.endOfTrack ? undefined : this.payload;
@@ -319,7 +323,7 @@ export class Frame {
 	 * in `idDelta` rather than throwing {@link ObjectIdGap}: that is the live tail of a group
 	 * whose head a joining FETCH or a fill brings.
 	 */
-	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined, offset = false): Frame {
+	static decode(c: Cursor, flags: GroupFlags, offset = false): Frame {
 		// The first object's delta is its absolute Object ID; every later one is the prior ID
 		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
 		// a sequential group is a zero delta throughout, and any other value means the group
@@ -335,7 +339,7 @@ export class Frame {
 			delta = c.u53();
 		}
 
-		let timestamp: Timestamp | undefined;
+		let groupGap: bigint | undefined;
 		let hasProperties = false;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
@@ -343,13 +347,8 @@ export class Frame {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
 			hasProperties = extensionsLength !== 0;
-			// A track that declared no timescale is untimed, so its objects stay untimed even
-			// if one carries a Timestamp: there are no units to read it in.
-			if (timescale !== undefined) {
-				timestamp = c.exact(extensionsLength, (e) => decodeObjectTime(e, timescale));
-			} else {
-				c.read(extensionsLength);
-			}
+			// Nothing reads time from an object: a Timestamp is skipped like any other property.
+			groupGap = c.exact(extensionsLength, decodeGroupGap);
 		}
 
 		const payloadLength = c.u53();
@@ -360,7 +359,7 @@ export class Frame {
 			const frame = new Frame({
 				payload,
 				streamed: payload === undefined ? payloadLength : undefined,
-				timestamp,
+				groupGap,
 			});
 			frame.idDelta = delta;
 			return frame;
@@ -388,7 +387,7 @@ export class Frame {
 		}
 
 		if (status === 0) {
-			const frame = new Frame({ payload: new Uint8Array(0), timestamp });
+			const frame = new Frame({ payload: new Uint8Array(0), groupGap });
 			frame.idDelta = delta;
 			return frame;
 		}
@@ -431,48 +430,27 @@ export class FetchFrame {
 	payload: Uint8Array;
 	/** The payload length when the caller streams its bytes after the header. */
 	streamed?: number;
-	/** The presentation timestamp carried in object properties, when present. */
-	timestamp?: Timestamp;
 	/**
 	 * The track's Publisher Priority on the wire, which the stream's first object states for
 	 * every object after it, as a subgroup header does.
 	 */
 	priority: number;
 
-	constructor({
-		payload,
-		streamed,
-		timestamp,
-		priority,
-	}: { payload?: Uint8Array; streamed?: number; timestamp?: Timestamp; priority: number }) {
+	constructor({ payload, streamed, priority }: { payload?: Uint8Array; streamed?: number; priority: number }) {
 		this.payload = payload ?? new Uint8Array(0);
 		this.streamed = streamed;
-		this.timestamp = timestamp;
 		this.priority = priority;
 	}
 
-	/**
-	 * Encode this object at `position`, stamping it in the track's timescale, or not at all
-	 * when the track declared none.
-	 */
-	async encode(
-		w: Writer,
-		position: FetchPosition,
-		timescale: Timescale | undefined,
-		version: IetfVersion,
-	): Promise<void> {
-		const stamped = this.timestamp?.scale !== undefined && timescale !== undefined;
+	/** Encode this object at `position`, without properties. */
+	async encode(w: Writer, position: FetchPosition, version: IetfVersion): Promise<void> {
 		const previous = position.previousGroup;
 		// Everything before the payload goes out as one write, as in Frame.encode.
 		const header: Uint8Array[] = [];
 		if (position.first || previous !== undefined) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
-			const properties = stamped ? FETCH_PROPERTIES : 0;
 			header.push(
-				encodeVarint(
-					FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | properties,
-					version,
-				),
+				encodeVarint(FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0), version),
 				encodeVarint(
 					previous === undefined
 						? position.group
@@ -484,14 +462,7 @@ export class FetchFrame {
 			if (position.first) header.push(Uint8Array.of(this.priority));
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			header.push(encodeVarint(stamped ? FETCH_PROPERTIES : 0, version));
-		}
-
-		// Omitted entirely rather than written empty when the object carries no timestamp:
-		// the track declared no units, so there is no property to send.
-		if (stamped) {
-			const extensions = encodeObjectExtensions(this.timestamp, timescale, version);
-			header.push(encodeVarint(extensions.byteLength, version), extensions);
+			header.push(encodeVarint(0, version));
 		}
 
 		header.push(encodeVarint(this.streamed ?? this.payload.byteLength, version));
@@ -570,8 +541,6 @@ export type FetchedObject =
 			object?: number;
 			/** The Publisher Priority, absent when it repeats the prior object's. */
 			priority?: number;
-			/** The Timestamp in the track's units, when it declared some. */
-			timestamp?: Timestamp;
 			/** The object payload; empty for an empty object, and `undefined` when it streams after the object. */
 			payload?: Uint8Array;
 			/** The payload length; past one segment, the payload follows on the stream. */
@@ -579,11 +548,8 @@ export type FetchedObject =
 	  }
 	| { kind: "endOfRange"; reason: EndOfRange; group: bigint; object: number };
 
-/**
- * Decode the next object on a fetch stream, in the track's `timescale`, or not at all when
- * it declared none.
- */
-export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): FetchedObject {
+/** Decode the next object on a fetch stream. Its properties are skipped. */
+export function decodeFetchObject(c: Cursor): FetchedObject {
 	const flags = c.u53();
 	if (flags >= FETCH_NAMED) {
 		if (!END_OF_RANGE.includes(flags)) {
@@ -617,21 +583,16 @@ export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): 
 	const object = flags & FETCH_OBJECT_ID ? c.u53() : undefined;
 	const priority = flags & FETCH_PRIORITY ? c.u8() : undefined;
 
-	let timestamp: Timestamp | undefined;
 	if (flags & FETCH_PROPERTIES) {
 		const length = c.u53();
 		if (length > MAX_OBJECT_EXTENSIONS) {
 			throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 		}
-		if (timescale !== undefined) {
-			timestamp = c.exact(length, (e) => decodeObjectTime(e, timescale));
-		} else {
-			c.read(length);
-		}
+		c.read(length);
 	}
 
 	// A fetch stream carries no Object Status: a zero length is simply an empty object.
 	const length = c.u53();
 	const payload = decodePayload(c, length);
-	return { kind: "object", group, subgroup, subgroupId, object, priority, timestamp, payload, size: length };
+	return { kind: "object", group, subgroup, subgroupId, object, priority, payload, size: length };
 }

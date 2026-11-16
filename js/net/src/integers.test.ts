@@ -4,7 +4,7 @@ import { ObjectDatagram } from "./ietf/datagram.ts";
 import * as Filter from "./ietf/filter.ts";
 import { GoAway } from "./ietf/goaway.ts";
 import * as Message from "./ietf/message.ts";
-import { decodeFetchObject, decodeObjectTime, Frame, Group, type GroupFlags } from "./ietf/object.ts";
+import { decodeFetchObject, decodeGroupGap, Frame, Group, type GroupFlags } from "./ietf/object.ts";
 import { Parameters } from "./ietf/parameters.ts";
 import { PublishDone } from "./ietf/publish.ts";
 import { RequestError } from "./ietf/request.ts";
@@ -97,10 +97,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 			body: { payload: new Uint8Array([1]) },
 		});
 		expect(await ObjectDatagram.decode(datagram.encode(version), version)).toEqual(datagram);
-		const fetched = decodeFetchObject(
-			new Cursor(fields(version, 0x1f, UNSAFE, UNSAFE + 1n, 0, 0, 0), version),
-			undefined,
-		);
+		const fetched = decodeFetchObject(new Cursor(fields(version, 0x1f, UNSAFE, UNSAFE + 1n, 0, 0, 0), version));
 		expect(fetched).toMatchObject({ kind: "object", group: UNSAFE, subgroupId: UNSAFE + 1n });
 	});
 
@@ -129,15 +126,15 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(Filter.decodeFill(fields(version, 1, 0x0a, max), version)).toEqual({ rangeFilters: false });
 	});
 
-	test(`${version}: object indices, timestamps, lengths and statuses refuse unsafe numbers`, () => {
+	test(`${version}: object indices, lengths and statuses refuse unsafe numbers`, () => {
 		const cursor = (...values: (number | bigint)[]) => new Cursor(fields(version, ...values), version);
-		expect(() => Frame.decode(cursor(UNSAFE), FLAGS, undefined, true)).toThrow(RangeError);
-		expect(() => Frame.decode(cursor(0, UNSAFE), FLAGS, undefined)).toThrow(RangeError);
-		expect(() => Frame.decode(cursor(0, 0, UNSAFE), FLAGS, undefined)).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0x0c, 0, UNSAFE), undefined)).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0x8c, 0, UNSAFE), undefined)).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0, UNSAFE), undefined)).toThrow(RangeError);
-		expect(() => decodeObjectTime(cursor(0x10, UNSAFE), Timescale.NANO)).toThrow(RangeError);
+		expect(() => Frame.decode(cursor(UNSAFE), FLAGS, true)).toThrow(RangeError);
+		expect(() => Frame.decode(cursor(0, UNSAFE), FLAGS)).toThrow(RangeError);
+		expect(() => Frame.decode(cursor(0, 0, UNSAFE), FLAGS)).toThrow(RangeError);
+		expect(() => decodeFetchObject(cursor(0x0c, 0, UNSAFE))).toThrow(RangeError);
+		expect(() => decodeFetchObject(cursor(0x8c, 0, UNSAFE))).toThrow(RangeError);
+		expect(() => decodeFetchObject(cursor(0, UNSAFE))).toThrow(RangeError);
+		expect(() => decodeGroupGap(cursor(0x0b, UNSAFE))).toThrow(RangeError);
 	});
 }
 

@@ -999,6 +999,18 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
+	/// The longest run of keys just below `key` any copy knows were never produced.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn skipped_below(&self, key: u64) -> u64 {
+		let reader = self.reader();
+		reader
+			.copies
+			.iter()
+			.map(|copy| copy.track.skipped_below(key))
+			.max()
+			.unwrap_or(0)
+	}
+
 	/// Poll for a largest location within `bounds` newer than `seen`; see [`Consumer::poll_largest`].
 	pub(super) fn poll_largest(
 		&mut self,

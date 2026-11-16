@@ -12,8 +12,6 @@
 import type { Datagram } from "../datagram.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import { type Cursor, encodeVarint, Reader } from "../stream.ts";
-import type { Timescale } from "../time.ts";
-import { encodeObjectExtensions } from "./object.ts";
 import type { IetfVersion } from "./version.ts";
 
 // The bits of an OBJECT_DATAGRAM Type.
@@ -44,7 +42,7 @@ export class ObjectDatagram {
 	publisherPriority?: number;
 	/** No Object past this one exists in the group. */
 	endOfGroup: boolean;
-	/** The Object Properties block without its length prefix, which carries the Timestamp. */
+	/** The Object Properties block without its length prefix. */
 	properties?: Uint8Array;
 	body: DatagramBody;
 
@@ -120,23 +118,18 @@ export class ObjectDatagram {
 
 /**
  * Encode a datagram the way a publisher sends it: Object 0 of a group that has no other, so it
- * ends its group, stamped in `timescale` units when the subscription declared one.
+ * ends its group, without properties.
  */
 export async function encodeDatagram(
 	datagram: Datagram,
-	options: { trackAlias: bigint; publisherPriority: number; timescale?: Timescale },
+	options: { trackAlias: bigint; publisherPriority: number },
 	version: IetfVersion,
 ): Promise<Uint8Array> {
-	const properties =
-		options.timescale !== undefined
-			? encodeObjectExtensions(datagram.timestamp, options.timescale, version)
-			: undefined;
 	return new ObjectDatagram({
 		trackAlias: options.trackAlias,
 		groupId: datagram.sequence,
 		publisherPriority: options.publisherPriority,
 		endOfGroup: true,
-		properties: properties?.byteLength ? properties : undefined,
 		body: { payload: datagram.payload },
 	}).encode(version);
 }

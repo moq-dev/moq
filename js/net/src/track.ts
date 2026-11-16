@@ -702,6 +702,14 @@ function bufferInsert(groups: GroupConsumer[], group: GroupConsumer): void {
 	else groups.splice(timelineIndex(groups, group.sequence + 1n), 0, group);
 }
 
+// How many keys just below `key` the publisher declared it never produced: the skip run that
+// ends at `key`. Mirrors the Rust `TrackState::skipped_below`.
+function skippedBelow(state: TrackState, key: bigint): bigint {
+	if (key === 0n) return 0n;
+	const run = state.drops.at(key - 1n);
+	return run?.skip ? key - run.start : 0n;
+}
+
 // The shared state behind a Producer / Subscriber pair. Package-internal
 // wiring, unexported so it never appears in the published type declarations.
 class TrackState {
@@ -3858,6 +3866,8 @@ export class Subscriber {
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
 		hooks.subscriberEndError = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
+		hooks.skippedBelow = (subscriber, key) =>
+			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);

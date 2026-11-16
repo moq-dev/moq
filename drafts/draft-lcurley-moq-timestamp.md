@@ -1,5 +1,5 @@
 ---
-title: "MoQ Object Timestamp Extension"
+title: "MoQ Group ID Timescale"
 abbrev: "moq-timestamp"
 category: info
 
@@ -24,10 +24,8 @@ informative:
 
 --- abstract
 
-This document specifies the transport-level use of the TIMESTAMP and TIMESCALE properties registered by {{loc}}, independent of the LOC container itself.
-A track-level Timescale property establishes the units, and an object-level Timestamp property carries the presentation time of each object.
-Exposing media time to the transport lets relays make consistent age-based decisions (e.g. dropping stale objects) without parsing the media container, and it remains consistent across hops regardless of buffering or jitter.
-A negotiated subscriber max age bounds delivery of superseded groups without expiring the newest group.
+This document specifies the transport-level use of the TIMESCALE property registered by {{loc}}: a track that declares it numbers its groups in those units, so each Group ID is the group's start time.
+Exposing media time in the Group ID lets relays make consistent age-based decisions (e.g. dropping stale groups) without parsing the media container or any object property, and it remains consistent across hops regardless of buffering or jitter.
 
 --- note_Note_to_Readers
 
@@ -43,26 +41,24 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Introduction
 {{moqt}} treats object payloads as opaque, leaving timing to the application's container format.
 This works for endpoints that parse the media, but not for relays.
-A relay frequently needs a notion of *when* an object is meant to be presented:
+A relay frequently needs a notion of *when* a group is meant to be presented:
 
-- **Age-based dropping**: a relay serving a live subscription wants to drop objects too old to be useful. Wall-clock arrival time drifts across hops and is corrupted by buffering and jitter.
-- **Consistent expiration across hops**: a timestamp embedded in the object is identical at every hop, so every relay makes the same drop decision.
-- **Synchronization hints**: a subscriber can align objects from multiple tracks (e.g. audio and video) without first decoding each container.
+- **Age-based dropping**: a relay serving a live subscription wants to drop groups too old to be useful. Wall-clock arrival time drifts across hops and is corrupted by buffering and jitter.
+- **Consistent expiration across hops**: a time carried in the Group ID is identical at every hop, so every relay makes the same drop decision.
+- **Addressing by time**: a subscriber can start at, or fetch from, a point in time by naming the Group ID.
 
-This extension exposes media time to the transport with two Key-Value-Pairs ({{moqt}} Section 2.5): a track-level **Timescale** and an object-level **Timestamp**.
-The transport does not interpret the *meaning* of the timeline; it only uses the timestamp for relative age comparisons.
+This document gives a Group ID a unit with one track-level Key-Value-Pair ({{moqt}} Section 2.5), the **Timescale**.
+The transport does not interpret the *meaning* of the timeline; it only compares Group IDs.
+Group IDs already ascend, need no per-object property, and survive every hop and every cache unchanged, so the time costs nothing on the wire.
+Groups need not be consecutive: a track keyed by time skips most Group IDs, and a publisher MAY say so with Prior Group ID Gap ({{moqt}}).
 
-Both properties are already registered by {{loc}}, which defines them for use inside the LOC container.
-This document reuses those registrations verbatim and specifies what a *transport* does with them: a timestamp is only useful to a relay if every publisher writes it the same way, so a second set of code points for the same concept would defeat the purpose.
-An endpoint that implements both this document and LOC writes one copy of each property, not two.
-
-The properties are self-describing and require no SETUP negotiation: a receiver that understands them uses them directly, and one that does not ignores them per {{moqt}}.
-TIMESCALE is what opts a track in: a track that carries it has media times in the stated units, and a track without it has no timeline at all.
-There is deliberately no default timescale; a wrong guess is off by a factor of 1000 rather than detectably broken, and making presence the signal avoids contradicting {{loc}}, which reads a bare Timestamp as microseconds.
+The property is self-describing and requires no SETUP negotiation: a receiver that understands it uses it directly, and one that does not ignores it per {{moqt}}.
+TIMESCALE is what opts a track in: a track that carries it has Group IDs in the stated units, and a track without it has no timeline at all.
+There is deliberately no default timescale; a wrong guess is off by a factor of 1000 rather than detectably broken.
 
 
 # TIMESCALE Track Property
-The TIMESCALE property opts a track into timestamps and establishes the units for every Timestamp on it.
+The TIMESCALE property opts a track into a timeline and establishes the units of its Group IDs.
 It is a track-level Key-Value-Pair, carried with the track's properties (see {{moqt}} Section 2.5 and Section 12).
 Because the value is a single integer, TIMESCALE uses an even Type so the value is a bare varint with no length prefix:
 
@@ -74,140 +70,81 @@ TIMESCALE Track Property {
 ~~~
 
 **Value**:
-The number of timestamp units per second.
+The number of Group ID units per second.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (a typical audio sample rate), and `90000` (the RTP video clock).
 A value of `0` is invalid; a receiver MUST treat a track that declares it as carrying no timeline.
 
+Each Group ID on a track that declares TIMESCALE is the presentation time of the group's start, in those units.
+Every object in the group takes that time: this document carries no finer time, which stays in the media container.
+A receiver MAY refuse a group whose Group ID is too large to represent as a time.
+
 Absence is meaningful and is not an error.
-A track with no TIMESCALE is untimed ({{untimed}}): a receiver MUST NOT infer units for it, and every object on it is untimed, even one that carries a TIMESTAMP.
-A publisher that emits Timestamps MUST send TIMESCALE, even for units a receiver might otherwise assume.
-{{loc}} permits a bare Timestamp and reads it as microseconds; a receiver following this document MUST NOT apply that interpretation, or any other, to a track that omits TIMESCALE.
+A track with no TIMESCALE is untimed ({{untimed}}): a receiver MUST NOT infer units for its Group IDs.
 
 The Timescale is fixed for the lifetime of the track and MUST NOT change.
 {{loc}} also registers TIMESCALE with Object scope.
 Whether a track is timed, and its units, are properties of the track, so a receiver MUST ignore an object-scope TIMESCALE, and a publisher SHOULD NOT send one.
 
-The track's properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12).
+The track's properties are delivered in SUBSCRIBE_OK, FETCH_OK, or TRACK_STATUS ({{moqt}} Section 12).
 A receiver decides whether a track is timed when it accepts the track; a track accepted without its properties is untimed.
 
-
-# TIMESTAMP Object Property
-The TIMESTAMP property carries the presentation time of an object, in the track's Timescale.
-It is an object-level Key-Value-Pair carried in the object's properties ({{moqt}} Section 2.5, 11.2.1.2).
-It uses an even Type so the value is a bare varint:
-
-~~~
-TIMESTAMP Object Property {
-  Type (vi64) = 0x10
-  Value (vi64)  ; absolute presentation time, in Timescale units
-}
-~~~
-
-**Value**:
-The absolute presentation timestamp of the object, expressed in the track's Timescale.
-Any value (including 0) is valid.
-
-A receiver MUST read TIMESTAMP only from Type `0x10`, independently of the moq-transport version.
-Type `0x06` MUST NOT be interpreted as a Timestamp.
-
-Each Timestamp is absolute, not delta-encoded against a previous object: {{moqt}} does not guarantee delivery of every object, and a delta would be corrupted by any missing predecessor.
-
-On a track that declares a TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, including an empty one.
-A receiver MUST treat such an object without a TIMESTAMP as malformed ({{moqt}}) rather than substitute a time.
-An object that only signals a status, such as End of Group or End of Track, carries no media time and needs no TIMESTAMP.
+## The TIMESTAMP Property
+{{loc}} also registers an object-level TIMESTAMP (0x10).
+This document gives it no transport meaning: a publisher following it sends none, and a receiver neither reads one nor lets one change an object's time.
+A relay forwards one it receives like any other object property ({{moqt}} Section 2.5).
 
 ## Untimed Tracks {#untimed}
-A track that declares no TIMESCALE is untimed: it has no media timeline, and none of its objects has a media time.
-A track is either timed or untimed for its whole lifetime; no track mixes timed and untimed objects.
-A receiver MUST NOT substitute a time for an untimed object, such as its arrival time, and a relay MUST forward an untimed track untimed, declaring no TIMESCALE downstream.
+A track that declares no TIMESCALE is untimed: it has no media timeline, and none of its groups has a media time.
+A track is either timed or untimed for its whole lifetime.
+A receiver MUST NOT substitute a time for an untimed group, such as its arrival time, and a relay MUST forward an untimed track untimed, declaring no TIMESCALE downstream.
 Arrival time differs at every hop and changes when a route fails over, so a substituted time would not be the same timeline downstream.
 
-Age-based dropping ({{age}}) does not apply to an untimed object.
-A relay MAY instead drop a group of an untimed track once its immediate successor arrived at it at least the threshold ago, measured on its own clock ({{max-age}}).
+Age-based dropping ({{age}}) does not apply to an untimed group.
+A relay MAY instead drop a group of an untimed track once its immediate successor arrived at it at least the threshold ago, measured on its own clock.
 
 ## Age-Based Dropping {#age}
-Given two objects on the same track, both with TIMESTAMP, a relay computes their relative age as the difference of their timestamps divided by the Timescale.
-A relay serving a live subscription MAY drop a group once a newer group supersedes it and either of these bounds reaches the subscriber's max age ({{max-age}}):
+Given two groups on the same timed track, a relay computes their relative age as the difference of their Group IDs divided by the Timescale.
+A relay serving a live subscription MAY drop a group once a newer group supersedes it and either of these bounds reaches its age threshold:
 
-- Its reach, bounded by the first timestamp of its immediate successor, trails the live media edge by at least the max age.
-- Its immediate successor arrived at this hop at least the max age ago, measured on the hop's clock.
+- Its reach, bounded by its immediate successor's Group ID, trails the live media edge by at least the threshold.
+- Its immediate successor arrived at this hop at least the threshold ago, measured on the hop's clock.
 
-The newest group has no successor and MUST NOT expire under either bound, including when the max age is zero.
+The newest group has no successor and MUST NOT expire under either bound, including when the threshold is zero.
 Media time permits dropping an old backlog immediately; the hop's clock also bounds untimed groups and a stalled media timeline.
 
-A relay MUST NOT use timestamps to reorder delivery beyond what {{moqt}} already permits; this property informs *dropping*, not transmission order.
-
-
-# Subscriber Max Age {#max-age}
-
-An endpoint declares that it understands subscriber max age with this Setup Option ({{moqt}} Section 10.3):
-
-~~~
-MAX_AGE Setup Option {
-  Type (vi64) = 0x915C4
-  Value (vi64) = 1
-}
-~~~
-
-The value is reserved and MUST be ignored on receipt.
-An endpoint MUST NOT send the MAX_AGE parameter to a peer that did not declare this option.
-The Timestamp and Timescale properties themselves still require no negotiation.
-
-~~~
-MAX_AGE Parameter {
-  Type (vi64) = 0x915C6
-  Value (vi64)  ; milliseconds
-}
-~~~
-
-MAX_AGE is a subscriber parameter on SUBSCRIBE and REQUEST_UPDATE (SUBSCRIBE_UPDATE on older drafts).
-Its value MUST be at most `2^53 - 1` milliseconds; a larger value is malformed.
-Zero expires superseded groups immediately, but never the newest group.
-On SUBSCRIBE, absence leaves the publisher's existing delivery policy unchanged.
-On an update, absence leaves the subscription's budget unchanged; presence replaces it.
-A publisher receiving MAX_AGE MUST apply the budget as specified in {{age}} and MUST NOT translate it into OBJECT_DELIVERY_TIMEOUT or SUBGROUP_DELIVERY_TIMEOUT.
-Those timeouts can expire the newest group and do not express this policy.
-
-A relay combining subscribers MUST request at least the most tolerant subscriber's max age upstream, bounded by any age limit the publisher declares.
-One subscriber's shorter budget MUST NOT tighten another subscriber's budget.
+A relay MUST NOT use Group IDs to reorder delivery beyond what {{moqt}} already permits; this property informs *dropping*, not transmission order.
 
 
 # Security Considerations
-Timestamps expose the media timeline to relays, which is the point of the extension, but a relay still treats payloads as opaque and gains no access to media content.
+A timescale exposes the media timeline to relays, which is the point of the extension, but a relay still treats payloads as opaque and gains no access to media content.
 
-A malicious publisher could supply misleading timestamps (e.g. always claiming an object is fresh) to defeat age-based dropping, or wildly out-of-range timestamps to cause a receiver to mis-estimate age.
-A receiver SHOULD bound the age it computes and SHOULD NOT make security decisions based on timestamps.
-Because age-based dropping only affects which objects a live subscription receives, the worst case is degraded delivery for that subscription, not a cross-subscription effect.
+A malicious publisher could choose misleading Group IDs (e.g. far in the future) to defeat age-based dropping.
+A receiver SHOULD bound the age it computes and SHOULD NOT make security decisions based on it.
+Because age-based dropping only affects which groups a live subscription receives, the worst case is degraded delivery for that track, not a cross-track effect.
 
 
 # IANA Considerations
 
-This document requests these registrations in the "MOQ Setup Options" and "MOQ Message Parameters" registries, respectively:
-
-| Value | Name | Reference |
-|:------|:-----|:----------|
-| 0x915C4 | MAX_AGE | This Document |
-
-| Value | Name | Messages | Reference |
-|:------|:-----|:---------|:----------|
-| 0x915C6 | MAX_AGE | SUBSCRIBE, REQUEST_UPDATE | This Document |
-
-Both properties it uses are already registered by {{loc}} in the "MOQ Properties" registry ({{moqt}} Section 15.8), and this document changes neither their code points nor their value encodings:
+This document requests no registrations.
+The property it uses is already registered by {{loc}} in the "MOQ Properties" registry ({{moqt}} Section 15.8), and this document changes neither its code point nor its value encoding:
 
 | Value | Name      | Scope         | Reference |
 |:------|:----------|:--------------|:----------|
 | 0x08  | TIMESCALE | Track, Object | {{loc}}   |
-| 0x10  | TIMESTAMP | Object        | {{loc}}   |
 
-Both Types are even, so each value is a bare varint with no length prefix (see {{moqt}} Section 2.5).
-
-An earlier version of this document requested its own code points (`0x915C0` and `0x915C2`); they are abandoned in favor of the {{loc}} registrations.
+An earlier version of this document requested its own code points (`0x915C0`, `0x915C2`, `0x915C4`, and `0x915C6`); they are abandoned.
 
 
 --- back
 
 # Appendix A: Changelog
 {:numbered="false"}
+
+## moq-timestamp-03
+{:numbered="false"}
+
+- A timed track's Group ID is its start time in the Timescale. The TIMESTAMP object property no longer carries an object's time, and a receiver ignores it.
+- Removed the MAX_AGE Setup Option and Parameter: a relay judges age against its own threshold.
 
 ## moq-timestamp-02
 {:numbered="false"}

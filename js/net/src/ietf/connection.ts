@@ -122,7 +122,6 @@ export class Connection implements Session {
 		publish,
 		solicit,
 		hidden = false,
-		maxAge = false,
 		activeCount = false,
 		cluster,
 		handle,
@@ -145,8 +144,6 @@ export class Connection implements Session {
 		solicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
-		/** Whether the peer accepts subscriber max age. */
-		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/**
@@ -211,7 +208,6 @@ export class Connection implements Session {
 		this.#declaredSolicit = extensions?.solicit ?? true;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
-			maxAge,
 			session: this.#session,
 			quic,
 			cluster,
