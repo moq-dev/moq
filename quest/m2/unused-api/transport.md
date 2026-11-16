@@ -118,5 +118,4 @@ methods. The bindings are unchanged. Wire: none.
 ## Related
 
 - [Transport names](/quest/m2/transport-names.md) - adds `Tls` to the enum item 3 trims
-- [Congestion control by algorithm name](/quest/m2/congestion-names.md) - removes `quic::Config::controller`, the other unused transport hook
 - [A runtime-free QUIC driver](/quest/m4/quic-sansio-driver.md) - rebuilds the modules item 1 hides

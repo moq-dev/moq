@@ -15921,26 +15921,28 @@ class MoqCongestionControl implements MoqCongestionControlInterface {
   MoqCongestionControl._(this._ptr) {
     _MoqCongestionControlFinalizer.attach(this, _ptr, detach: this);
   }
-  MoqCongestionControl.delay()
+  MoqCongestionControl.bbr()
     : _ptr = rustCall(
         (status) =>
-            uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_delay(status),
+            uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_bbr(status),
         null,
       ) {
     _MoqCongestionControlFinalizer.attach(this, _ptr, detach: this);
   }
-  MoqCongestionControl.loss()
+  MoqCongestionControl.cubic()
     : _ptr = rustCall(
         (status) =>
-            uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_loss(status),
+            uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_cubic(status),
         null,
       ) {
     _MoqCongestionControlFinalizer.attach(this, _ptr, detach: this);
   }
-  MoqCongestionControl.none()
+  MoqCongestionControl.unlimited()
     : _ptr = rustCall(
         (status) =>
-            uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_none(status),
+            uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_unlimited(
+              status,
+            ),
         null,
       ) {
     _MoqCongestionControlFinalizer.attach(this, _ptr, detach: this);
@@ -23159,21 +23161,22 @@ external void uniffi_moq_ffi_fn_free_moqcongestioncontrol(
 @Native<Pointer<Void> Function(Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_delay(
+external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_bbr(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Pointer<Void> Function(Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_loss(
+external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_cubic(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Pointer<Void> Function(Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_none(
+external Pointer<Void>
+uniffi_moq_ffi_fn_constructor_moqcongestioncontrol_unlimited(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -24996,13 +24999,14 @@ external int uniffi_moq_ffi_checksum_constructor_moqserver_new();
 external int uniffi_moq_ffi_checksum_constructor_moqclient_new();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_delay();
+external int uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_bbr();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_loss();
+external int uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_cubic();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_none();
+external int
+uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_unlimited();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_constructor_moqsocketendpoint_new();
@@ -25925,16 +25929,15 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_constructor_moqclient_new() != 48355) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_delay() !=
-      62385) {
+  if (uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_bbr() != 31661) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_loss() !=
-      53409) {
+  if (uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_cubic() !=
+      37486) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_none() !=
-      50250) {
+  if (uniffi_moq_ffi_checksum_constructor_moqcongestioncontrol_unlimited() !=
+      45780) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqsocketendpoint_new() != 25288) {

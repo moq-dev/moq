@@ -7597,11 +7597,21 @@ fn config_rejects_unknown_congestion_control() {
 	config.quic_congestion_control_len = bogus.len();
 	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
 
+	// A released family name is refused like any unknown word.
 	let delay = "delay";
 	let mut config = client_config();
 	config.quic_congestion_control = delay.as_ptr() as *const c_char;
 	config.quic_congestion_control_len = delay.len();
-	assert!(parsed(&config).quic.congestion_control.is_some());
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+
+	let cubic = "cubic";
+	let mut config = client_config();
+	config.quic_congestion_control = cubic.as_ptr() as *const c_char;
+	config.quic_congestion_control_len = cubic.len();
+	assert_eq!(
+		parsed(&config).quic.congestion_control,
+		Some(moq_tokio::quic::CongestionControl::Cubic)
+	);
 
 	// NULL leaves it on the backend default, so the knob can stay automatic.
 	assert!(parsed(&client_config()).quic.congestion_control.is_none());

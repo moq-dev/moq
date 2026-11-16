@@ -798,7 +798,7 @@ stop_shaper() {
     }
     # The shaper accepts a silent profile while silence is still likely, and never requires a
     # rate limit to act; a lossy run needs loss, and a congested one a rate limit that held
-    # datagrams back. A loss-based sender (MOQ_QUIC_CONGESTION_CONTROL=loss) grows until it
+    # datagrams back. A loss-based sender (MOQ_QUIC_CONGESTION_CONTROL=cubic) grows until it
     # loses, and the queue's tail drop is the only loss here, so its run must overflow too.
     local counter overflow=""
     [[ -n "$RATE" && "${MOQ_QUIC_CONGESTION_CONTROL:-}" == loss ]] && overflow=overflowed

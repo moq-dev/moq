@@ -43,7 +43,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
 - **Relay and transports.** [Memory](/quest/m2/relay-memory.md), which the
-  cut waits on by name; [congestion names](/quest/m2/congestion-names.md);
+  cut waits on by name;
   [config names](/quest/m2/relay-config-names.md),
   [the two dial keys](/quest/m2/relay-connect-keys.md), and
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md);

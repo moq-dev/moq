@@ -6881,7 +6881,7 @@ async fn client_connects_with_every_knob_set() {
 			keep_alive: Some(Duration::ZERO),
 			gso: Some(false),
 			mtu_discovery: Some(true),
-			congestion_control: Some(MoqCongestionControl::loss()),
+			congestion_control: Some(MoqCongestionControl::cubic()),
 			qlog: None,
 			keylog: Some(false),
 		},

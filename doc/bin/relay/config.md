@@ -116,7 +116,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR v3, the default), "loss" (CUBIC), or "none".
+congestion_control = "bbr"           # "bbr" (BBR v3, the default), "cubic", or "unlimited".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.
@@ -129,8 +129,8 @@ qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 
-`congestion_control = "none"` runs no congestion control and no pacing. It is
-meant for tests and controlled links, where nothing else shares the path.
+`congestion_control = "unlimited"` runs no congestion control and no pacing. It
+is meant for tests and controlled links, where nothing else shares the path.
 
 Set `keylog` only while debugging, since the file decrypts every captured session.
 Tokio and io\_uring open the configured path at initialization. New Unix files are
