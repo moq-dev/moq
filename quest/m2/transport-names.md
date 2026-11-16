@@ -84,4 +84,3 @@ and logs. Wire: none.
 ## Related
 
 - [Open-set selectors in the bindings](/quest/m2/ffi-open-selectors.md) - makes `MoqTransport` able to grow without a break
-- [The unused transport API](/quest/m2/unused-api/transport.md) - removes `Transport::WebRtc` from the same enum
