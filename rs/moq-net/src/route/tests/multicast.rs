@@ -1060,14 +1060,17 @@ mod watch {
 	pub const VIEWER: Node = 6;
 	pub const CLAIM: &str = "live";
 
-	pub fn mesh() -> RelaySim {
+	/// The mesh, settled, with relay 2's grant open or still to open.
+	pub fn mesh(granted: bool) -> RelaySim {
 		let mut sim = RelaySim::new(7, relay::debounce(HOP));
 		sim.client(PUBLISHER);
 		sim.publish(PUBLISHER, 100);
 		sim.client(VIEWER);
 		sim.link(HOME, RELAY, 1, Tie::Peer);
 		sim.link(NEXT, RELAY, 1, Tie::Peer);
-		sim.link(RELAY, SCOPED, 1, Tie::Scoped);
+		if granted {
+			sim.link(RELAY, SCOPED, 1, Tie::Scoped);
+		}
 		sim.link(SCOPED, FAR, 1, Tie::Peer);
 		sim.link(PUBLISHER, HOME, 1, Tie::Peer);
 		sim.link(VIEWER, RELAY, 1, Tie::Peer);
@@ -1105,6 +1108,17 @@ mod watch {
 			.map(|seen| seen.kind)
 			.collect()
 	}
+
+	/// Deliver every message ready now, the first half of a round. Whether any was.
+	pub fn deliver(sim: &mut RelaySim) -> bool {
+		let ready = sim.ready();
+		for &((from, to), count) in &ready {
+			for _ in 0..count {
+				sim.deliver(from, to);
+			}
+		}
+		!ready.is_empty()
+	}
 }
 
 /// An endpoint or scoped neighbour is told what the relay's own reader shows, never more:
@@ -1118,7 +1132,7 @@ mod watch {
 fn a_viewer_is_told_what_the_relay_reads() {
 	use watch::*;
 	let kinds = |said: Vec<(Instant, Said)>| said.into_iter().map(|(_, said)| said).collect::<Vec<_>>();
-	let mut sim = mesh();
+	let mut sim = mesh(true);
 	for to in [VIEWER, SCOPED] {
 		assert_eq!(kinds(said(&sim, to, 0)), [Said::Live], "{to} before");
 	}
@@ -1148,17 +1162,12 @@ fn a_viewer_is_told_what_the_relay_reads() {
 	// As `quiesce`, noting when the mesh beyond the grant lets the claim go.
 	let mut far = None;
 	for _ in 0..200 {
-		let ready = sim.ready();
-		for &((from, to), count) in &ready {
-			for _ in 0..count {
-				sim.deliver(from, to);
-			}
-		}
+		let delivered = deliver(&mut sim);
 		let waiting = sim.tick();
 		if far.is_none() && read(&sim, FAR, events).contains(&Kind::Offline) {
 			far = Some(sim.now());
 		}
-		if ready.is_empty() && !waiting && sim.ready().is_empty() {
+		if !delivered && !waiting && sim.ready().is_empty() {
 			break;
 		}
 	}
@@ -1187,7 +1196,7 @@ fn a_viewer_is_told_what_the_relay_reads() {
 	);
 
 	// A publisher that ends its claim is withdrawn at once, as ended.
-	let mut sim = mesh();
+	let mut sim = mesh(true);
 	let (told, events) = (sim.told.len(), sim.events.len());
 	sim.claim(PUBLISHER, CLAIM, false);
 	quiesce(&mut sim);
@@ -1195,6 +1204,93 @@ fn a_viewer_is_told_what_the_relay_reads() {
 		assert_eq!(kinds(said(&sim, to, told)), [Said::Ended], "{to} on an end");
 	}
 	assert_eq!(read(&sim, FAR, events), [Kind::End], "beyond the grant");
+}
+
+/// A gateway whose first session to the mesh opens while the claim it is told is
+/// unavailable takes none: nothing can serve it, so the gateway's reader shows nothing,
+/// it announces nothing, and no route starts toward it. Its mesh hears of the claim one
+/// message after the gateway is told it is live again, and never if it is lost.
+#[test]
+fn a_gateway_takes_no_claim_it_first_hears_unavailable() {
+	use watch::*;
+	let kinds = |said: Vec<(Instant, Said)>| said.into_iter().map(|(_, said)| said).collect::<Vec<_>>();
+	for returns in [true, false] {
+		let mut sim = mesh(false);
+		let (told, events, left) = (sim.told.len(), sim.events.len(), sim.now());
+		sim.close(PUBLISHER, HOME);
+		while read(&sim, RELAY, events).is_empty() {
+			deliver(&mut sim);
+			sim.tick();
+		}
+		assert_eq!(read(&sim, RELAY, events), [Kind::Unavailable]);
+		let route_msgs = sim.stats.route_msgs;
+		sim.link(RELAY, SCOPED, 1, Tie::Scoped);
+		for _ in 0..3 {
+			deliver(&mut sim);
+			sim.tick();
+		}
+		assert!(
+			sim.now() < left.saturating_add(relay::debounce(HOP)),
+			"under the debounce"
+		);
+		assert_eq!(
+			kinds(said(&sim, SCOPED, told)),
+			[Said::Unavailable],
+			"returns: {returns}"
+		);
+		let gateway = sim.id(SCOPED);
+		let unseen = |sim: &RelaySim| {
+			assert!(
+				sim.router(SCOPED).expect("a relay").own().1.is_empty(),
+				"the gateway takes nothing"
+			);
+			assert!(read(sim, SCOPED, events).is_empty(), "the gateway's reader");
+			assert!(read(sim, FAR, events).is_empty(), "its mesh");
+			assert!(
+				!sim.router(FAR).expect("a relay").routes().contains(&gateway),
+				"no route to it"
+			);
+			assert_eq!(sim.stats.route_msgs, route_msgs, "no route message");
+			assert_eq!(sim.chase(FAR, 100, &p(CLAIM)), None);
+		};
+		unseen(&sim);
+
+		if !returns {
+			quiesce(&mut sim);
+			assert_eq!(kinds(said(&sim, SCOPED, told)), [Said::Unavailable, Said::Lost]);
+			unseen(&sim);
+			continue;
+		}
+		sim.link(PUBLISHER, NEXT, 1, Tie::Peer);
+		let mut heard = None;
+		for _ in 0..200 {
+			let delivered = deliver(&mut sim);
+			if heard.is_none() && !read(&sim, FAR, events).is_empty() {
+				heard = Some(sim.now());
+			}
+			let waiting = sim.tick();
+			if !delivered && !waiting && sim.ready().is_empty() {
+				break;
+			}
+		}
+		let said = said(&sim, SCOPED, told);
+		assert_eq!(kinds(said.clone()), [Said::Unavailable, Said::Live]);
+		assert_eq!(read(&sim, SCOPED, events), [Kind::Start]);
+		assert_eq!(read(&sim, FAR, events), [Kind::Start], "its mesh");
+		assert_eq!(
+			heard,
+			Some(said[1].0.saturating_add(HOP)),
+			"one message after the gateway"
+		);
+		assert_eq!(
+			sim.chase(FAR, 100, &p(CLAIM)),
+			Some((vec![SCOPED, RELAY, NEXT, PUBLISHER], true))
+		);
+		assert!(
+			sim.router(FAR).expect("a relay").routes().contains(&gateway),
+			"a route to it"
+		);
+	}
 }
 
 /// A relay that restarts is a new node, but its neighbours file the session floor per

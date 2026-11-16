@@ -42,7 +42,9 @@
 //! within what it asks, a broader claim presented at the prefix it asks for. That is the
 //! closest claim while one is reachable, and the claim marked unavailable, never
 //! withdrawn, while none is and while a lost claim waits out the debounce. A scoped
-//! neighbour announces it again unavailable, so its domain sees the claim stay. A request
+//! neighbour that took the claim announces it again unavailable, so its domain sees the
+//! claim stay; one first told it unavailable, which nothing can serve, takes nothing until
+//! it is told available. A request
 //! follows the claim at the most specific path covering it that the reader shows, at its
 //! claimant too, and fails closed while that one is unavailable or lost. Among the claims
 //! of one Instance at one path, only the one shown closest to its own path, at the newest
@@ -1637,6 +1639,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				{
 					Change::Lost
 				}
+				// Unavailable is only ever news of a claim this neighbour gave before: one
+				// first seen unavailable, which nothing can serve, is not there until it is
+				// available.
+				Change::Live(claim) if claim.unavailable && !self.peers[&from].given.contains_key(&broadcast) => {
+					continue;
+				}
 				Change::Live(mut claim) => {
 					// Saturating, as `model::origin`'s claim cost does, so a claim's cost
 					// never decides whether it can serve.
@@ -1749,14 +1757,18 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> Option<Next<N>> {
 		match origin == self.me {
 			// As `pick`, the claim at the most specific path covering it that the reader
-			// shows: the neighbour behind it if it is this node's own and available, and
-			// closed while it is unavailable, lost, or another node's.
+			// shows: the neighbour behind it if it is this node's own, available, and of the
+			// best precedence there, and closed while it is unavailable, lost, outranked,
+			// or another node's.
 			true => {
 				let from = (ancestors(path).rev()).find(|above| self.reader.get(instance.clone(), above).is_some())?;
 				let claim = (from, instance.clone());
 				let source = *self.sources.get(&claim)?;
-				let own = self.known.get(&self.me).and_then(|own| own.items.get(&claim));
-				(!own.is_some_and(|claim| claim.unavailable)).then_some(Next::Local(source))
+				let own = self.known.get(&self.me)?.items.get(&claim)?;
+				// Only a claim of the best precedence there may serve, reachable or not, as
+				// in `closest`; among those, this node's own serves whatever its rank.
+				let best = (self.claims_of(&claim)).map(|(_, claim)| precedence(&claim.item)).min();
+				(!own.unavailable && best == Some(precedence(&own.item))).then_some(Next::Local(source))
 			}
 			false => self.best.get(&origin).map(|best| Next::Via(best.via)),
 		}
@@ -2569,10 +2581,18 @@ mod tests {
 		};
 		router.recv(4, claims(run(1), 1)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(me), "an older claim, however close");
-		router.recv(4, claims(Run { epoch: 4, above: 1 }, 2)).unwrap();
+		router.recv(4, claims(run(2), 2)).unwrap();
+		assert_eq!(router.pick(&broadcast), Some(node(5)), "the same run, closer");
+		assert_eq!(
+			router.step(me, &broadcast),
+			Some(Next::Local(3)),
+			"named, its own run serves"
+		);
+		router.recv(4, claims(Run { epoch: 4, above: 1 }, 3)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(me), "a broader claim, however new");
-		router.recv(4, claims(run(3), 3)).unwrap();
+		router.recv(4, claims(run(3), 4)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(node(5)), "a newer claim");
+		assert_eq!(router.step(me, &broadcast), None, "named, its older run never serves");
 		// The newer claim's route goes while its claim stays known: the older run never
 		// stands in for it.
 		router.recv(4, route(5, 4, Metric::MAX)).unwrap();
@@ -3095,6 +3115,69 @@ mod tests {
 		router.recv(2, claim(Change::Lost)).unwrap();
 		assert_eq!(kinds(&mut router), [Kind::Start, Kind::Unavailable, Kind::Offline]);
 		assert_eq!(router.deadline(), None);
+	}
+
+	/// A scoped neighbour's claim first told unavailable is not there: nothing can serve
+	/// it, so it is not taken until it is told available. Of the claims neighbours gave at
+	/// one precedence, an available one is announced and serves, and with every one
+	/// unavailable a request naming this node fails closed. A newer run first told
+	/// unavailable leaves an older one standing, as one never told would; taken, it
+	/// outranks the older run, unavailable or not.
+	#[test]
+	fn a_claim_first_told_unavailable_is_not_there() {
+		use super::super::Kind;
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		for peer in [2, 3, 4] {
+			open(&mut router, peer, Role::Scoped(vec![p(ROOT)]));
+		}
+		let broadcast = (p("live"), 7);
+		let told = |epoch, unavailable| {
+			let Change::Live(claim) = claim(run(epoch), 0) else {
+				unreachable!()
+			};
+			Msg::Announce {
+				changes: vec![(broadcast.clone(), Change::Live(Claim { unavailable, ..claim }))],
+			}
+		};
+		let me = router.me();
+		let own = |router: &Router<usize, u64, Run>| {
+			(router.own().1.get(&broadcast)).map(|claim| (claim.item.epoch, claim.unavailable))
+		};
+
+		router.recv(2, told(1, true)).unwrap();
+		assert_eq!(own(&router), None, "first told unavailable");
+		assert_eq!(router.pick(&broadcast), None);
+		assert!(router.events().is_empty());
+		router.recv(2, told(1, false)).unwrap();
+		assert_eq!(own(&router), Some((1, false)), "then available");
+		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+
+		// Two neighbours give the run; the one still available serves.
+		router.recv(3, told(1, false)).unwrap();
+		router.recv(2, told(1, true)).unwrap();
+		assert_eq!(own(&router), Some((1, false)));
+		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
+		router.recv(3, told(1, true)).unwrap();
+		assert_eq!(own(&router), Some((1, true)), "every one unavailable");
+		assert_eq!(router.step(me, &broadcast), None, "fails closed");
+		assert_eq!(router.pick(&broadcast), None, "fails closed");
+		router.recv(2, told(1, false)).unwrap();
+		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+		assert_eq!(
+			(router.events().into_iter().map(|event| event.kind)).collect::<Vec<_>>(),
+			[Kind::Start, Kind::Unavailable, Kind::Available]
+		);
+
+		// A newer run first told unavailable is not there either.
+		router.recv(4, told(2, true)).unwrap();
+		assert_eq!(own(&router), Some((1, false)), "the older run stands");
+		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+		router.recv(4, told(2, false)).unwrap();
+		assert_eq!(own(&router), Some((2, false)), "taken, the newer run outranks");
+		assert_eq!(router.step(me, &broadcast), Some(Next::Local(4)));
+		router.recv(4, told(2, true)).unwrap();
+		assert_eq!(own(&router), Some((2, true)), "unavailable or not");
+		assert_eq!(router.step(me, &broadcast), None);
 	}
 
 	/// An endpoint asking for a prefix under a broader claim is shown that claim at the
