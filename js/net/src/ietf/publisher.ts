@@ -1293,6 +1293,11 @@ export class Publisher {
 			});
 			// Either ends serving the group: made once, so each read and write races one promise for both.
 			const stopped = race([cancelled, excluded.promise]).then(() => false as const);
+			// The stream closing ends the read too, told apart from the group finishing. Made once,
+			// so a long group's reads all race the same promise.
+			const closed = stream.closed.then(() => false as const);
+			// A reset with no read left to race it is handled where the stream is.
+			closed.catch(() => {});
 			const write = async (op: () => Promise<unknown>) => {
 				const stop = await givenUp.write(op);
 				if (stop) throw stop;
@@ -1326,11 +1331,7 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([
-						hooks.readGroupFrame(group, false, slice.skip),
-						stream.closed.then(() => false as const),
-						stopped,
-					]);
+					const read = await race([hooks.readGroupFrame(group, false, slice.skip), closed, stopped]);
 					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (read === undefined) ended = true;
