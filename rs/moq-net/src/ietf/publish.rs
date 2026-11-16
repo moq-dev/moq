@@ -131,11 +131,27 @@ pub(crate) enum PublishDoneStatus {
 	UpdateFailed,
 	/// A relay found the track malformed, so it ended every subscription to it.
 	MalformedTrack,
+	/// The authorization token that authorized the subscription expired. Registered from
+	/// draft-23 on (section 12.4), so only [`PublishDoneStatus::token_expired`] picks it.
+	ExpiredAuthToken,
 }
 
 impl PublishDoneStatus {
+	/// The status for a subscription whose authorization token expired.
+	///
+	/// Draft-23 registers EXPIRED_AUTH_TOKEN for it (section 12.4, moq-transport PR 1970).
+	/// Earlier drafts register no token expiry, and their EXPIRED means the subscription's
+	/// own lifetime ran out, so there the subscriber is told it is no longer authorized.
+	pub(crate) const fn token_expired(version: Version) -> Self {
+		match version {
+			Version::Draft18 | Version::Draft20 | Version::Draft22 => Self::Unauthorized,
+			_ => Self::ExpiredAuthToken,
+		}
+	}
+
 	/// Return the registered wire code. Draft-22 removed SUBSCRIPTION_ENDED (0x3), which
-	/// this implementation never emitted, and left the rest of the registry alone.
+	/// this implementation never emitted, and draft-23 added EXPIRED_AUTH_TOKEN (0x7); the
+	/// rest of the registry is the same in every draft.
 	pub(crate) const fn code(self) -> u64 {
 		match self {
 			Self::InternalError => 0x0,
@@ -143,6 +159,7 @@ impl PublishDoneStatus {
 			Self::TrackEnded => 0x2,
 			Self::UpdateFailed => 0x8,
 			Self::MalformedTrack => 0x12,
+			Self::ExpiredAuthToken => 0x7,
 		}
 	}
 }
@@ -179,6 +196,15 @@ impl PublishDone<'_> {
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-22 removed it and left 0x3 unassigned.
 			0x3 if matches!(version, Version::Draft18) => Ok(()),
+			// EXPIRED_AUTH_TOKEN, registered from draft-23: the token that authorized the
+			// subscription expired. Read as the UNAUTHORIZED an earlier draft's publisher
+			// sends for the same end, so a subscriber and a relay act on it as they always
+			// have. Before draft-23 the value is unassigned and stays the peer's code.
+			code if code == PublishDoneStatus::ExpiredAuthToken.code()
+				&& !matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22) =>
+			{
+				Err(crate::Error::Unauthorized)
+			}
 			code => Err(crate::Error::Remote(u32::try_from(code).unwrap_or(u32::MAX))),
 		}
 	}
@@ -568,6 +594,17 @@ mod tests {
 		}
 	}
 
+	/// An expired token ends a subscription with EXPIRED_AUTH_TOKEN (0x7) on draft-23, which
+	/// registers it (section 12.4). Earlier drafts have no such status, so they say
+	/// UNAUTHORIZED.
+	#[test]
+	fn publish_done_names_an_expired_token_from_draft23() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(PublishDoneStatus::token_expired(version).code(), 0x1, "{version:?}");
+		}
+		assert_eq!(PublishDoneStatus::token_expired(Version::Draft23).code(), 0x7);
+	}
+
 	/// A subscriber ends the track the way the publisher said it ended: cleanly for a
 	/// finished track or a reached filter end, with the publisher's code otherwise.
 	#[test]
@@ -595,6 +632,18 @@ mod tests {
 				),
 				"{version:?}"
 			);
+			// EXPIRED_AUTH_TOKEN is registered from draft-23, and reads as the UNAUTHORIZED an
+			// earlier publisher sends when a token expires. Before that 0x7 is unassigned.
+			match version {
+				Version::Draft18 | Version::Draft20 | Version::Draft22 => assert!(
+					matches!(done(0x7).end(version), Err(crate::Error::Remote(0x7))),
+					"{version:?}"
+				),
+				Version::Draft23 => assert!(
+					matches!(done(0x7).end(version), Err(crate::Error::Unauthorized)),
+					"{version:?}"
+				),
+			}
 		}
 
 		// SUBSCRIPTION_ENDED is clean until draft-22 unassigned it.

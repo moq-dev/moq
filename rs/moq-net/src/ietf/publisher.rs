@@ -833,8 +833,8 @@ enum Subscribed {
 }
 
 impl Served {
-	/// The PUBLISH_DONE status and reason this end reports.
-	fn status(&self) -> (ietf::PublishDoneStatus, &'static str) {
+	/// The PUBLISH_DONE status and reason this end reports on `version`.
+	fn status(&self, version: Version) -> (ietf::PublishDoneStatus, &'static str) {
 		match self {
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
 			Self::Track(Err(
@@ -842,11 +842,12 @@ impl Served {
 				| Error::Session(crate::SessionError::Unauthorized)
 				| Error::Stream(crate::StreamError::Unauthorized),
 			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
-			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
-			// own lifetime ran out, so an expired token is reported as no longer granted. Its
-			// group streams said EXPIRED_AUTH_TOKEN (see [`Lapse`]).
+			// Draft-23 registers EXPIRED_AUTH_TOKEN for this. Before it PUBLISH_DONE registers
+			// no token expiry, and its EXPIRED means the subscription's own lifetime ran out,
+			// so an expired token is reported as no longer granted. Its group streams said
+			// EXPIRED_AUTH_TOKEN on every draft (see [`Lapse`]).
 			Self::Track(Err(err)) if super::error::token_expired(err) => {
-				(ietf::PublishDoneStatus::Unauthorized, "token expired")
+				(ietf::PublishDoneStatus::token_expired(version), "token expired")
 			}
 			// The code its group streams reset with, so a relay passes a malformed upstream on
 			// rather than hiding it behind INTERNAL_ERROR.
@@ -1283,7 +1284,7 @@ impl SubscribeRequest {
 			_slot: slot,
 		});
 		SubscribeServe::PublishDone {
-			done: WritePublishDone::new(self.stream, served, streams, retain),
+			done: WritePublishDone::new(self.stream, self.publisher.version, served, streams, retain),
 			publisher: self.publisher,
 			credit: self.credit,
 		}
@@ -2566,8 +2567,14 @@ enum PublishDoneState {
 }
 
 impl WritePublishDone {
-	fn new(mut stream: Stream<Transport, Version>, served: Served, streams: u64, retain: Option<Retain>) -> Self {
-		let (status, reason) = served.status();
+	fn new(
+		mut stream: Stream<Transport, Version>,
+		version: Version,
+		served: Served,
+		streams: u64,
+		retain: Option<Retain>,
+	) -> Self {
+		let (status, reason) = served.status(version);
 		let res = match served {
 			Served::Track(res) => res,
 			Served::UpdateFailed(err) => Err(err),
@@ -10450,9 +10457,9 @@ mod serve_tests {
 			.await
 			.expect("the track's error ends the subscription");
 		assert!(matches!(served, Served::Track(Err(Error::Unsupported))), "{served:?}");
-		assert_eq!(served.status().0, ietf::PublishDoneStatus::InternalError);
+		assert_eq!(served.status(version).0, ietf::PublishDoneStatus::InternalError);
 		assert_eq!(
-			Served::UpdateFailed(Error::Unsupported).status().0,
+			Served::UpdateFailed(Error::Unsupported).status(version).0,
 			ietf::PublishDoneStatus::UpdateFailed
 		);
 		// A revocation bridged from upstream, however it was received, is still one.
@@ -10462,7 +10469,7 @@ mod serve_tests {
 			Error::Stream(crate::StreamError::Unauthorized),
 		] {
 			assert_eq!(
-				Served::Track(Err(err)).status().0,
+				Served::Track(Err(err)).status(version).0,
 				ietf::PublishDoneStatus::Unauthorized
 			);
 		}
@@ -14177,7 +14184,8 @@ mod serve_tests {
 
 	/// A token subscription's group stream still open when its grant ends resets with
 	/// EXPIRED_AUTH_TOKEN once the token expired, so the subscriber knows to renew it, and
-	/// with CANCELLED when it was revoked. PUBLISH_DONE says UNAUTHORIZED either way.
+	/// with CANCELLED when it was revoked. PUBLISH_DONE says UNAUTHORIZED either way through
+	/// draft-22; draft-23 says EXPIRED_AUTH_TOKEN for the expired token (section 12.4).
 	#[kio::test]
 	async fn a_lapsed_token_resets_its_groups_as_expired() {
 		for version in ALL_VERSIONS {
@@ -14231,11 +14239,11 @@ mod serve_tests {
 				assert_eq!(resets, vec![expected], "{version} {end:?}");
 				let wire = Wire::read(&h.log, version);
 				let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
-				assert_eq!(
-					status,
-					ietf::PublishDoneStatus::Unauthorized.code(),
-					"{version} {end:?}"
-				);
+				let done = match (end, version) {
+					(TokenEnd::Revoked, _) | (_, Version::Draft18 | Version::Draft20 | Version::Draft22) => 0x1,
+					(TokenEnd::Lapsed | TokenEnd::RevokedExpired, _) => 0x7,
+				};
+				assert_eq!(status, done, "{version} {end:?}");
 				wire.assert_streams_closed_before_publish_done();
 				drop(group);
 			}
