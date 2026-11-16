@@ -30,7 +30,7 @@ jobs:
     uses: ./.github/workflows/release-ffi.yml
     with:
       language: dart
-      # The raw bindings are checked in under dart/moq_ffi, so none here.
+      # The package job generates the raw bindings itself: they are not checked in.
       bindings: false
       targets: >-
         [
@@ -97,7 +97,14 @@ jobs:
 
       - uses: ./.github/actions/just
 
+      - uses: ./.github/actions/nix
+
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+
+      # dart/moq_ffi/lib/src is not in git. The package must carry the generated
+      # bindings, since a consumer installing from pub.dev has no generator.
+      - name: Generate bindings
+        run: nix develop --command just dart generate
 
       - name: Stage and check package
         env:
@@ -110,7 +117,9 @@ jobs:
           cd "release-out/moq_ffi-$BUILD_VERSION"
           dart pub get --enforce-lockfile
           dart analyze
-          dart pub publish --dry-run
+          dart pub publish --dry-run 2>&1 | tee publish.log
+          grep -q -- '── moq.dart (' publish.log
+          grep -q -- '── uniffi_runtime.dart (' publish.log
 
       - name: Upload pub package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
