@@ -103,6 +103,43 @@ impl<'a> RequestError<'a> {
 	}
 }
 
+impl RequestError<'_> {
+	/// The most Error Details one REQUEST_ERROR may carry before we refuse to walk them.
+	const MAX_DETAILS: usize = 64;
+
+	/// Whether Error Details follow the Reason Phrase (draft-23 section 9.4.2).
+	fn has_details(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
+
+	/// Read past the Error Details: Key-Value-Pairs running to the end of the message.
+	///
+	/// We act on none of them (a REDIRECT is not followed), and unknown ones must be
+	/// ignored, so each only has to be a well-formed pair: an even type is a varint, an odd
+	/// one length-prefixed bytes. A type may repeat.
+	fn skip_details(r: &mut Decoder<'_>) -> Result<(), DecodeError> {
+		let mut kind = 0u64;
+		let mut count = 0;
+		while !r.is_empty() {
+			if count == Self::MAX_DETAILS {
+				return Err(DecodeError::TooMany);
+			}
+			count += 1;
+			// The first Delta Type counts from 0, so one sum covers every pair.
+			kind = kind.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
+			match kind % 2 {
+				0 => {
+					r.varint()?;
+				}
+				_ => {
+					r.bytes()?;
+				}
+			}
+		}
+		Ok(())
+	}
+}
+
 impl<'a> Message<'a> for RequestError<'a> {
 	const ID: u64 = 0x05;
 
@@ -113,10 +150,13 @@ impl<'a> Message<'a> for RequestError<'a> {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let error_code = r.varint()?;
 		let retry_interval = r.varint()?;
 		let reason_phrase = Cow::Borrowed(r.str()?);
+		if Self::has_details(version) {
+			Self::skip_details(r)?;
+		}
 		Ok(Self {
 			error_code,
 			reason_phrase,
@@ -168,6 +208,48 @@ mod tests {
 				assert_eq!(decoded.active, count, "{version:?}");
 			}
 		}
+	}
+
+	/// Draft-23 (section 9.4.2) appends Error Details to REQUEST_ERROR. None is acted on
+	/// and unknown ones must be ignored, so they are read past rather than left as trailing
+	/// bytes, which would close the session.
+	#[test]
+	fn draft23_request_error_reads_past_error_details() {
+		#[rustfmt::skip]
+		let body = [
+			0x10, // Error Code
+			0x00, // Retry Interval
+			0x02, b'n', b'o', // Reason Phrase
+			0x01, 0x03, 0x00, 0x00, 0x00, // REDIRECT (0x01), three bytes
+			0x01, 0x07, // UNSUPPORTED_PROPERTY (0x02) = 7
+			0x00, 0x09, // and a second one, which the type allows
+		];
+		let version = Version::Draft23;
+		let mut buf = Decoder::new(&body, version.into());
+		let msg = RequestError::decode_msg(&mut buf, version).unwrap();
+		assert!(buf.is_empty());
+		assert_eq!(msg.error_code, 0x10);
+		assert_eq!(msg.reason_phrase, "no");
+
+		// A detail cut short is malformed, not skipped.
+		let mut buf = Decoder::new(&body[..7], version.into());
+		assert!(RequestError::decode_msg(&mut buf, version).is_err());
+
+		// Before draft-23 nothing follows the Reason Phrase, so the same bytes are left over
+		// for the message framing to refuse.
+		let version = Version::Draft22;
+		let mut buf = Decoder::new(&body, version.into());
+		RequestError::decode_msg(&mut buf, version).unwrap();
+		assert!(!buf.is_empty());
+
+		// We send no Error Details, so our own REQUEST_ERROR is the same on both drafts.
+		let msg = RequestError {
+			error_code: 0x10,
+			reason_phrase: "no".into(),
+			retry_interval: 0,
+		};
+		assert_eq!(encode_message(&msg, Version::Draft23), body[..5]);
+		assert_eq!(encode_message(&msg, Version::Draft22), body[..5]);
 	}
 
 	#[test]
