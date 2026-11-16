@@ -135,7 +135,7 @@ pub enum Error {
 
 	/// A client on a simulated host dials only QUIC, since every other transport opens a real
 	/// socket. The payload is the scheme.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	#[error("{0}:// can't be dialed from a simulated host; dial https://, moqt://, or moql:// instead")]
 	SimScheme(String),
 

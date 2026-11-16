@@ -9,8 +9,7 @@
 //!
 //! Every transport is compiled in, and the URL scheme or config picks one at runtime.
 //! [`client::Client`] connects to relays, [`server::Server`] accepts connections, and
-//! [`mdns`] finds peers on the local network. [`quic::driver`] is an async QUIC stack
-//! for any application, MoQ or not.
+//! [`mdns`] finds peers on the local network.
 //!
 //! Cryptography always comes from rind. TLS setup checks CPU support and returns
 //! an error naming a missing CPU feature. Older x86_64 CPUs and aarch64 boards without
@@ -40,7 +39,7 @@ mod resolve;
 mod runtime;
 pub mod secret;
 pub mod server;
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 pub mod sim;
 pub mod tcp;
 pub mod tls;

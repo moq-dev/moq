@@ -189,7 +189,7 @@ pub struct Config {
 
 	/// The simulated host the QUIC endpoint binds on, at the configured bind port, in place of
 	/// a UDP socket. For tests on `kio::clock::sim`; see [`crate::quic::driver::sim`].
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub sim: Option<crate::quic::driver::sim::Host>,
 }
 
@@ -235,7 +235,7 @@ impl Config {
 			admission: self.admission.clone(),
 			demux: self.demux.clone(),
 			streams: Streams::default(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: self.sim.clone(),
 		}
 	}
@@ -283,7 +283,7 @@ impl Server {
 			stats,
 			demux,
 			streams: prebound,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim,
 		} = config;
 
@@ -364,7 +364,7 @@ impl Server {
 					member,
 					tls: tls.clone().expect("QUIC needs TLS"),
 					demux: demux.clone(),
-					#[cfg(feature = "sim")]
+					#[cfg(feature = "test-support")]
 					sim: sim.clone(),
 				})
 			})

@@ -28,7 +28,7 @@ pub struct Config {
 
 	/// The simulated host the QUIC endpoint binds on, at the configured bind port, in place of
 	/// a UDP socket. For tests on `kio::clock::sim`; see [`crate::quic::driver::sim`].
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub sim: Option<crate::quic::driver::sim::Host>,
 }
 
@@ -84,7 +84,7 @@ pub struct Client {
 	#[cfg(test)]
 	pub(crate) prober: Option<std::sync::Arc<Prober>>,
 	/// Where every dial goes instead of the network, set by [`Self::with_network`].
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	network: Option<crate::sim::Network>,
 }
 
@@ -107,7 +107,7 @@ impl Client {
 		let Config {
 			connect: config,
 			quic,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim,
 		} = config;
 
@@ -127,9 +127,9 @@ impl Client {
 		let tls = config.tls.build()?;
 
 		let qmux = crate::qmux_config(&quic.resolve());
-		#[cfg(not(feature = "sim"))]
+		#[cfg(not(feature = "test-support"))]
 		let quic = crate::quic::Client::new(&config, &quic);
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		let quic = match sim {
 			Some(host) => crate::quic::Client::simulated(&config, &quic, host),
 			None => crate::quic::Client::new(&config, &quic),
@@ -177,7 +177,7 @@ impl Client {
 			dialer: None,
 			#[cfg(test)]
 			prober: None,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			network: None,
 		})
 	}
@@ -235,7 +235,7 @@ impl Client {
 	}
 
 	/// Dial through `network` instead of opening sockets, whatever a URL's scheme.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub fn with_network(mut self, network: crate::sim::Network) -> Self {
 		self.network = Some(network);
 		self
@@ -290,7 +290,7 @@ impl Client {
 		if self.dialer.is_some() {
 			return true;
 		}
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if self.network.is_some() {
 			return true;
 		}
@@ -300,7 +300,7 @@ impl Client {
 		}
 		// An explicitly closed QUIC endpoint cannot open another socket.
 		let quic = !self.quic.is_closed();
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if self.simulated() {
 			return quic && simulated_scheme(scheme);
 		}
@@ -316,7 +316,7 @@ impl Client {
 	}
 
 	/// Whether QUIC binds on a simulated host, where no other transport can dial.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	fn simulated(&self) -> bool {
 		self.quic.is_simulated()
 	}
@@ -385,7 +385,7 @@ impl Client {
 		if self.client_cert && matches!(addr.url().scheme(), "http" | "ws" | "tcp" | "unix") {
 			return Err(Error::ClientCertScheme(addr.url().scheme().to_string()));
 		}
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if self.simulated() && !simulated_scheme(addr.url().scheme()) {
 			return Err(Error::SimScheme(addr.url().scheme().to_string()));
 		}
@@ -393,7 +393,7 @@ impl Client {
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr, client.moq.clone()).await;
 		}
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if let Some(network) = &self.network {
 			let link = network.dial(addr.url().clone(), self.versions.clone()).await?;
 			// As a socket dial does, so a SETUP that carries the target carries this one.
@@ -666,7 +666,7 @@ where
 
 /// Whether a client on a simulated host can dial `scheme`: only QUIC's, without the `http://`
 /// bootstrap's fetch over TCP.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 fn simulated_scheme(scheme: &str) -> bool {
 	matches!(scheme, "https" | "moqt" | "moql")
 }
