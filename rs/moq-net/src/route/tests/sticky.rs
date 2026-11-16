@@ -4,7 +4,7 @@
 //! The route proof (`rs/moq-net/verify/route-algebra`) breaks ties between routes
 //! of equal draining, priority, cost, and mark by a fixed order, so it has one
 //! fixed point. Staying on the next hop in use makes the choice depend on what
-//! came first, which the proof does not cover. `rs/moq-net/verify/README.md`
+//! came first, which the proof does not cover. `rs/moq-net/verify/route-algebra/README.md`
 //! argues on paper that the rule still settles, at every node on the rank and mark
 //! the fixed order would give it; these tests check both.
 

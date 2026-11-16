@@ -9,7 +9,7 @@
 -- grant. Each step only adds: it may make the claim draining, raise its penalty,
 -- add cost, and prepends the node that took it, which refuses a claim that names
 -- it already. How Rust's claims map onto this, and where Rust's chain names fewer
--- nodes than this path, is in `rs/moq-net/verify/README.md`.
+-- nodes than this path, is in this directory's `README.md`.
 --------------------------------------------------------------------------------
 
 module Claim where
