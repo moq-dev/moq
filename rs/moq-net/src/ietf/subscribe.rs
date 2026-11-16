@@ -1029,6 +1029,21 @@ mod tests {
 		}
 	}
 
+	/// Draft-23's FILL_PARAMETERS has no length, so the parameter after it is found by
+	/// reading the fill's own Parameters to the last one counted.
+	#[test]
+	fn draft23_subscribe_reads_past_a_counted_fill() {
+		#[rustfmt::skip]
+		let body = subscribe_body(&[
+			0x02, // Number of Parameters
+			0x23, 0x01, 0x21, 0x01, 0x01, // FILL_PARAMETERS: one Parameter, LOCATION_FILTER Relative Start 1
+			0x0F, 0x07, // NEW_GROUP_REQUEST (0x32) = 7
+		]);
+		let msg: Subscribe = decode_message(&body, Version::Draft23).unwrap();
+		assert_eq!(msg.fill.and_then(|fill| fill.filter), Some(Filter::Relative(1)));
+		assert_eq!(msg.new_group, Some(7));
+	}
+
 	/// FORWARD=0 is legal on every draft, a paused request rather than a session error.
 	#[test]
 	fn subscribe_decodes_forward_zero() {
