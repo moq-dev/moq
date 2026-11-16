@@ -816,6 +816,13 @@ export const hooks: {
 	cachedGroup: (subscriber: Subscriber, sequence: bigint, from?: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
+	/**
+	 * The start of the group before `start` on the subscriber's track, as a lite-07 GROUP's
+	 * Previous Start names it: just below the run of starts declared skipped directly under
+	 * `start`, else `start - 1` when a group starts there, else undefined. Mirrors the Rust
+	 * crate-private `track::Subscriber::previous_start`.
+	 */
+	previousStart: (subscriber: Subscriber, start: bigint) => bigint | undefined;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
@@ -929,6 +936,11 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
+	/**
+	 * Whether the subscription's budget gave the group up, rather than its copy failing or the
+	 * cache evicting it. Mirrors the Rust crate-private `group::Consumer::is_expired`.
+	 */
+	groupExpired: (group: GroupConsumer) => boolean;
 	/**
 	 * Carry a group across its logical track's route changes. Attached before the group is handed
 	 * out, so its `closed` never settles on a failure the recovery continues past.
@@ -1155,6 +1167,9 @@ export const hooks: {
 	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	previousStart: () => {
+		throw new Error("track.ts not loaded");
+	},
 	staleHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1300,6 +1315,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupFailed: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {

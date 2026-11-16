@@ -833,8 +833,9 @@ async function servedSubscription(
 			group.finish();
 		},
 		// Makes the next group stream withhold its FIN from the client, the way a stream the
-		// browser never finishes sending looks; resolves with the reason the publisher resets it.
-		stall(): Promise<unknown> {
+		// browser never finishes sending looks, unless `fin`; resolves with the reason the
+		// publisher resets it.
+		stall(fin = false): Promise<unknown> {
 			const open = pair.server.createUnidirectionalStream.bind(pair.server);
 			return new Promise((resolve) => {
 				pair.server.createUnidirectionalStream = async (options) => {
@@ -850,7 +851,7 @@ async function servedSubscription(
 							});
 						},
 						write: (chunk) => writer.write(chunk),
-						close: () => new Promise(() => undefined),
+						close: () => (fin ? writer.close() : new Promise(() => undefined)),
 					});
 				};
 			});
@@ -879,16 +880,27 @@ async function servedSubscription(
 			const header = await GroupMessage.decode(reader, version);
 
 			const payloads: string[] = [];
+			let end: bigint | undefined;
 			while (!(await reader.done())) {
 				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
-				// leads with the size plus one instead.
+				// leads with the size plus one instead, where 0 is GROUP_END and its End.
 				const lengthFirst = hasLengthFirst(version);
 				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
+				if (length === -1) {
+					end = await reader.u62();
+					continue;
+				}
 				await reader.u62();
 				const size = length ?? (await reader.u53());
 				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
-			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
+			return {
+				sequence: header.sequence,
+				frameStart: header.frameStart,
+				payloads,
+				previous: header.previous,
+				end,
+			};
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
 		// as a subscriber that discards a stream unread does.
@@ -1299,6 +1311,76 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+// The SUBSCRIBE_SKIP and SUBSCRIBE_DROP ranges a lite-07 subscribe stream carried, in order, up to
+// SUBSCRIBE_FINISH, or the first `count` of them.
+async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): Promise<[string, bigint, bigint][]> {
+	const holes: [string, bigint, bigint][] = [];
+	for (;;) {
+		if (holes.length >= count) return holes;
+		const resp = await decodeSubscribeResponseMaybe(reader, Version.DRAFT_07);
+		if (!resp || "finish" in resp) return holes;
+		if ("skip" in resp) holes.push(["skip", resp.skip.start, resp.skip.end]);
+		if ("drop" in resp) holes.push(["drop", resp.drop.start, resp.drop.end]);
+	}
+}
+
+// Lite-07 ends a finished group's stream with GROUP_END, naming where the group ends, and a closed
+// one's with a bare FIN. Mirrors the Rust `lite07_ends_a_finished_group_with_group_end`.
+test("lite-07 ends a finished group with GROUP_END and a closed one with a bare FIN", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		const whole = sub.track.createGroup(0n);
+		whole.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		whole.finish(500n);
+		expect(await sub.servedGroup()).toMatchObject({ sequence: 0n, payloads: ["x"], end: 500n });
+		sub.serve(1000n);
+		const closed = await sub.servedGroup();
+		expect([closed?.sequence, closed?.payloads, closed?.end]).toEqual([1000n, ["hello"], undefined]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A lite-07 GROUP names the previous group's start, so a skipped run just below a group it serves
+// goes out in that GROUP rather than as a SUBSCRIBE_SKIP. Mirrors the Rust
+// `lite07_skips_a_declared_skip`.
+test("lite-07 passes over a skipped run in the GROUP above it", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedGroup()).toMatchObject({ sequence: 0n, previous: undefined });
+		sub.serve(3n);
+		sub.track.skipGroups(1n, 3n);
+		expect(await sub.servedGroup()).toMatchObject({ sequence: 3n, previous: 0n });
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToFinish(sub.client.reader)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A skipped run a GROUP passed over goes out as SUBSCRIBE_SKIP ahead of a drop of that group, since
+// the GROUP may never have arrived. Mirrors the Rust `lite07_sends_an_elided_skip_ahead_of_a_drop`.
+test("lite-07 sends a passed-over skip ahead of a drop of the group above it", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		// Left open, so only the stop ends its stream.
+		const above = sub.track.createGroup(3n);
+		above.writeFrame(textFrame("hello", Timestamp.fromMillis(3)));
+		sub.track.skipGroups(1n, 3n);
+		await sub.stopServed(StreamCode.Cancel);
+		expect(await holesToFinish(sub.client.reader, 2)).toEqual([
+			["skip", 1n, 3n],
+			["drop", 3n, 4n],
+		]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A huge declared skip goes out as one SUBSCRIBE_SKIP, at a cost independent of its length.
 // Mirrors Rust.
 test("lite-07 skips a huge run at once", async () => {
@@ -1408,9 +1490,10 @@ async function holesToEnd(reader: Reader): Promise<unknown[]> {
 	}
 }
 
-// A lite-07 stream that expired as stale is dropped for good: a final drop the reader reaches for it
-// later does not go out over it (one still arriving, as a relay's copy from upstream, is cut by
-// it), and a widening that admits it again does not re-offer it (one cached whole).
+// A lite-07 stream that expired as stale is closed rather than reset, and accounts for its group, so
+// no drop names it: a final drop the reader reaches for it later does not go out over it (one still
+// arriving, as a relay's copy from upstream, is cut by it), and a widening that admits it again does
+// not re-offer it (one cached whole, whose FIN went out first).
 test.each([
 	["still arriving", true],
 	["cached whole", false],
@@ -1432,7 +1515,10 @@ test.each([
 		// The restated range resolves at once.
 		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 
-		const reset = sub.stall();
+		let reset = false;
+		void sub.stall(true).then(() => {
+			reset = true;
+		});
 		if (arriving) sub.track.createGroup(1n).writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		else sub.serve(1n);
 		expect(await sub.servedHeader()).toBe(1n);
@@ -1441,10 +1527,8 @@ test.each([
 		sub.serve(2n);
 		expect(await sub.servedSequence()).toBe(2n);
 		await clock.advance(Duration.millis(budget));
-		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.Old);
-		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
-		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([first.drop.start, first.drop.end, first.drop.error]).toEqual([1n, 2n, StreamCode.Old]);
+		await flush();
+		expect(reset).toBe(false);
 
 		hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode(70), { message: "cut" }) });
 		await update(budget * 100, 1n);
@@ -1455,6 +1539,7 @@ test.each([
 		sub.track.finish();
 		sub.track.close();
 		expect(await holesToEnd(sub.client.reader)).toEqual([]);
+		expect(reset).toBe(false);
 	} finally {
 		await sub.close();
 		installed.close();
@@ -2454,7 +2539,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 });
 
 /** One group stream the publisher put on the wire. */
-type Served = { sequence: bigint; frameStart: number; payloads: string[] };
+type Served = { sequence: bigint; frameStart: number; payloads: string[]; previous?: bigint; end?: bigint };
 
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and

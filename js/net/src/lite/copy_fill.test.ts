@@ -348,7 +348,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 
 		// The history reader leaves mid-group, and the live one reads past it: nobody holds the
 		// group any more, so the copy cancels its FETCH and aborts the truncated group rather
-		// than keep downloading it.
+		// than keep downloading it. The publisher may close the group's stream first, once the
+		// narrower budget left it stale, which leaves the copy a closed group: either way the
+		// source loses its last reader.
 		group?.close();
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
@@ -357,7 +359,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 			timeout(
 				Duration.millis(2000),
 				(async () => {
-					while (hooks.holdsGroup(reader, 0n)) await sleep(Duration.millis(10));
+					while (source.demand().wanted.peek()) await sleep(Duration.millis(10));
 				})(),
 			),
 		);

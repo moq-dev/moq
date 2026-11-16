@@ -2685,7 +2685,7 @@ export class Subscriber {
 		try {
 			// One guard covers both header waits and a stalled payload. Abandonment aborts
 			// the group before resetting the stream, releasing the shared frame pump too.
-			await untilAbandoned(
+			const end = await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, {
 					scale: info.timescale ?? 0,
@@ -2694,7 +2694,8 @@ export class Subscriber {
 				}),
 			);
 
-			group.finish();
+			// Whole at a GROUP_END's end, else closed: every frame sent arrived.
+			group.finish(end);
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -3030,7 +3031,7 @@ export class Subscriber {
 		try {
 			// Once no reader holds the group or waits to pick it up, cancel upstream and abort the
 			// truncated group rather than cache it whole, as the Rust fetch's ingest does.
-			await untilAbandoned(
+			const end = await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, {
 					scale: framing.timescale,
@@ -3038,7 +3039,8 @@ export class Subscriber {
 					lengthFirst: hasLengthFirst(this.version),
 				}),
 			);
-			group.finish();
+			// Whole at a GROUP_END's end, else closed: every frame sent arrived.
+			group.finish(end);
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -3247,21 +3249,26 @@ export class Subscriber {
 				hooks.dropTrackGroups(entry.track, start, end, hole);
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
-				// Never produced, so nothing is waited for and no reader ends. A skip replaces any drop of
-				// the same groups; a reader a drop already ended stays ended.
 				const { start, end } = resp.skip;
-				entry.tail.account(start, end);
-				// A fill owing them is answered: the source never had them.
-				entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
-				// A group that arrived was produced after all, so the skip contradicts it: it keeps
-				// the group, and the session goes on, since the draft requires no more.
-				const [cached] = hooks.skipTrackGroups(entry.track, start, end);
-				if (cached) {
-					console.warn(
-						`protocol error: SUBSCRIBE_SKIP [${start}, ${end}) names group ${cached.start}, which arrived; keeping it`,
-					);
-				}
+				this.#skipped(entry, start, end, "SUBSCRIBE_SKIP");
 			}
+		}
+	}
+
+	// The publisher never produced `[start, end)`, as `by` (a SUBSCRIBE_SKIP, or a GROUP's Previous
+	// Start) says, so nothing is waited for and no reader ends. A skip replaces any drop of the same
+	// groups; a reader a drop already ended stays ended.
+	#skipped(entry: SubscribeEntry, start: bigint, end: bigint, by: string): void {
+		entry.tail.account(start, end);
+		// A fill owing them is answered: the source never had them.
+		entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
+		// A group that arrived was produced after all, so the skip contradicts it: it keeps the
+		// group, and the session goes on, since the draft requires no more.
+		const [cached] = hooks.skipTrackGroups(entry.track, start, end);
+		if (cached) {
+			console.warn(
+				`protocol error: ${by} skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
+			);
 		}
 	}
 
@@ -3552,6 +3559,16 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
+		// The group before it must start below it, or the header contradicts itself: only this
+		// stream ends, as a malformed FRAME does.
+		if (group.previous !== undefined && group.previous >= group.sequence) {
+			stream.stop(
+				new StreamError(StreamCode.MalformedTrack, {
+					message: `group ${group.sequence} names group ${group.previous} as the one before it`,
+				}),
+			);
+			return;
+		}
 		// Lite-07: a YIELDED reset pauses the group, for a later stream to continue.
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
@@ -3616,6 +3633,11 @@ export class Subscriber {
 				start: group.frameStart,
 				fill: entry.filling,
 			});
+			// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
+			// would say. Recorded once the group is, so a relay serving the copy sees the group the
+			// skip runs up to, whose own GROUP passes over it again.
+			const passed = group.passedOver();
+			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.sequence}`);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 			let superseded: Promise<void> | undefined;
@@ -3639,8 +3661,11 @@ export class Subscriber {
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const reading = readFrames(stream, producer, format, ingest);
 			const reads = entry.filling ? untilAbandoned(producer, reading) : reading;
-			if (!superseded) await reads;
-			else if ((await race([reads, superseded.then(() => SUPERSEDED)])) === SUPERSEDED) {
+			const end =
+				superseded !== undefined
+					? await race([reads, superseded.then((): typeof SUPERSEDED => SUPERSEDED)])
+					: await reads;
+			if (end === SUPERSEDED) {
 				// Stopping makes the read end at the next frame boundary as if finished, so wait it out
 				// and treat the stream as the YIELDED reset it was: the later stream starts no later.
 				stream.stop(new StreamError(StreamCode.Cancel));
@@ -3648,7 +3673,8 @@ export class Subscriber {
 				throw new StreamError(StreamCode.Yielded, { message: "continued on a later stream" });
 			}
 
-			producer.finish();
+			// Whole at a GROUP_END's end, else closed: every frame sent arrived.
+			producer.finish(end);
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything

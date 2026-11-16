@@ -755,10 +755,30 @@ export function hasImplementation(version: Version): boolean {
 }
 
 /**
- * Whether FRAME leads with its `Payload Length`, the payload size plus one, leaving 0 for a
- * future GROUP_END. Added in lite-07; an earlier FRAME ends its header with the payload size.
+ * Whether FRAME leads with its `Payload Length`, the payload size plus one, leaving 0 for
+ * GROUP_END. Added in lite-07; an earlier FRAME ends its header with the payload size.
  */
 export function hasLengthFirst(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream ends a
+ * finished group with GROUP_END and a closed one with a bare FIN. A publisher then closes an
+ * expired group's stream rather than resetting it. Added in lite-07; earlier versions end every
+ * group with a bare FIN.
+ */
+export function hasGroupEnd(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

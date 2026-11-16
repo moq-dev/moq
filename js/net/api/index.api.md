@@ -399,6 +399,7 @@ export namespace Group {
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
+		get end(): bigint | undefined;
 		get frameCount(): number;
 		get isClosed(): boolean;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
@@ -434,7 +435,7 @@ export namespace Group {
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
-		finish(): Group.Finished;
+		finish(end?: bigint): Group.Finished;
 		get isClosed(): boolean;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;

@@ -3770,6 +3770,16 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, sequence);
 		};
+		hooks.previousStart = (subscriber, start) => {
+			// A reader following route copies knows only what the serving copy holds, which this
+			// one does not: unknown, so the skips below go out on their own.
+			if (subscriber.#resume || start === 0n) return undefined;
+			const below = start - 1n;
+			const run = subscriber.#state.drops.at(below);
+			if (run?.skip) return run.start > 0n ? run.start - 1n : undefined;
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && cachedIn(producer, below, start).length > 0 ? below : undefined;
+		};
 		hooks.staleHeld = (subscriber, start, end) => {
 			const held: Run[] = [];
 			for (const run of subscriber.#state.drops.overlapping(start, end)) {

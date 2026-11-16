@@ -148,9 +148,9 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				await Writer.collect(version, (w) => LiteMessage.encode(w, (w) => w.write(body))),
 				version,
 			);
-		await expect(LiteGroup.decode(await framed(fields(version, 0, 0, UNSAFE)), version)).rejects.toThrow(
-			RangeError,
-		);
+		// Lite-07 carries the Previous Start ahead of the Frame Start.
+		const group = version === Lite.DRAFT_07 ? fields(version, 0, 0, 0, UNSAFE) : fields(version, 0, 0, UNSAFE);
+		await expect(LiteGroup.decode(await framed(group), version)).rejects.toThrow(RangeError);
 		if (version === Lite.DRAFT_07)
 			await expect(SubscribeStart.decode(await framed(fields(version, 1, UNSAFE)), version)).rejects.toThrow(
 				RangeError,

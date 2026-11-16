@@ -62,7 +62,7 @@ import {
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
-import { Group as GroupMessage } from "./group.ts";
+import { Group as GroupMessage, passedOver } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
@@ -90,6 +90,7 @@ import {
 	hasDatagrams,
 	hasDatagramTracks,
 	hasEndError,
+	hasGroupEnd,
 	hasLargest,
 	hasLengthFirst,
 	hasProbeRtt,
@@ -138,10 +139,21 @@ export function frameHeader(
 	return concat(parts);
 }
 
+/**
+ * Lite-07 GROUP_END, after a finished group's last frame: a zero `Payload Length`, where a frame
+ * would start, then the group's exclusive `end` in the track's timescale.
+ */
+function groupEnd(version: StreamVersion, end: bigint): Uint8Array {
+	return concat([encodeVarint(0, version), encodeVarint(end, version)]);
+}
+
 /** How a lite hop stamps a track's frames and datagrams. */
 interface Stamp {
-	/** The wire timescale TRACK_INFO declared (see `wireTimescale`). */
-	timescale: Timescale;
+	/**
+	 * The wire timescale TRACK_INFO declared (see `wireTimescale`), or undefined on a scale-less
+	 * lite-07 track, whose timestamps go out as bare numbers: a frame's its group's start.
+	 */
+	timescale?: Timescale;
 	/**
 	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
 	 * equals. Lite-05/06 cannot encode a scale-less track, so a scale-less one carries its send
@@ -150,17 +162,24 @@ interface Stamp {
 	timed?: { timescale?: Timescale | null };
 }
 
-/** How `version` stamps a track with `info`, or undefined when it carries no timestamps. */
+/**
+ * How `version` stamps a track with `info`, or undefined when it carries no timestamps: before
+ * lite-05. Lite-05/06 declare milliseconds for a scale-less track, and lite-07 stamps it bare.
+ */
 function stamping(version: Version, info: { timescale?: Timescale | null }): Stamp | undefined {
 	const timescale = info.timescale ?? undefined;
 	const wire = wireTimescale(version, timescale);
-	if (wire === undefined) return undefined;
+	if (wire === undefined) return hasLengthFirst(version) ? {} : undefined;
 	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
 }
 
-/** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out scale-less. */
-function wireTime(timestamp: Timestamp, stamp: Stamp): number {
-	return stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale);
+/**
+ * A frame or datagram's `timestamp` as its raw wire value: bare on a scale-less lite-07 track, or
+ * its send time when a lite-05/06 track goes out scale-less.
+ */
+function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
+	if (stamp.timescale === undefined) return bareTime(timestamp);
+	return BigInt(stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale));
 }
 
 /** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
@@ -238,6 +257,9 @@ interface RunGroup {
 
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
 	end?: number;
+
+	/** Lite-07: the previous group's start the GROUP names, undefined when unknown. */
+	previous?: bigint;
 }
 
 /**
@@ -1519,10 +1541,44 @@ export class Publisher {
 			return { kind: hole.skip ? "skip" : "dropped" };
 		};
 
+		// Lite-07: the skipped runs not sent as SUBSCRIBE_SKIP, each by the start of the cached group
+		// just above it, whose GROUP's Previous Start passes over the run instead. Each waits for that
+		// group to be served, when its stream carries the run, or given up, when the run goes out
+		// ahead of the drop. At most one per cached group. Mirrors the Rust `TrackRun::elided`.
+		const elided = new Map<bigint, bigint>();
+		// Whether the cached group `key` is still owed a stream or a drop on this subscription.
+		const owesGroup = (key: bigint): boolean =>
+			hooks.holdsGroup(track, key) && !record?.told(key) && hooks.servingRuns(track, key, key + 1n).length > 0;
+		// Whether the skipped `[start, end)` goes unsent, since the GROUP of the cached group just
+		// above it passes over it: that group is still owed, and its previous start is below the run.
+		const elides = (start: bigint, end: bigint): boolean => {
+			if (!hasGroupEnd(this.version) || !owesGroup(end)) return false;
+			const previous = hooks.previousStart(track, end);
+			return previous !== undefined && previous < start;
+		};
+		const skip = (start: bigint, end: bigint) =>
+			controls.response(
+				encodeSubscribeResponse(stream, { skip: new SubscribeSkip({ start, end }) }, this.version),
+			);
+		// Send as SUBSCRIBE_SKIP each run elided for a group in `[start, end)`, which is given up,
+		// or, with no range, for each group no longer owed, after an update moved the ranges.
+		const sendElided = async (start?: bigint, end?: bigint): Promise<boolean> => {
+			for (const [above, from] of [...elided]) {
+				const given =
+					start === undefined || end === undefined ? !owesGroup(above) : above >= start && above < end;
+				if (!given) continue;
+				elided.delete(above);
+				if (!(await skip(from, above))) return false;
+			}
+			return true;
+		};
+
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record) return true;
+			// A run elided for a group given up goes out ahead of its drop.
+			if (!(await sendElided(start, end))) return false;
 			const report = reportOf(hole);
 			for (const gap of record.untold(start, end)) {
 				record.tell(gap.start, gap.end, report);
@@ -1534,12 +1590,26 @@ export class Publisher {
 
 		// Forward a verdict the reader reached on `[start, end)`, which its record already took in,
 		// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
-		// earlier drop ended stays ended.
+		// earlier drop ended stays ended. A run elided for a group in the range goes out ahead of a
+		// drop, or joins a skip, since no GROUP passes over it now.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
 			record.tell(start, end, reportOf(hole));
-			const msg = holeMessage(start, end, hole);
-			return controls.response(encodeSubscribeResponse(stream, msg, this.version));
+			if (!hole.skip) {
+				if (!(await sendElided(start, end))) return false;
+				return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
+			}
+			let from = start;
+			for (const [above, below] of [...elided]) {
+				if (above < start || above >= end) continue;
+				elided.delete(above);
+				from = min(from, below);
+			}
+			if (elides(from, end)) {
+				elided.set(end, min(elided.get(end) ?? from, from));
+				return true;
+			}
+			return controls.response(encodeSubscribeResponse(stream, holeMessage(from, end, hole), this.version));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
@@ -1589,8 +1659,10 @@ export class Publisher {
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
 		const drops = new Signal(0);
-		// Groups whose stream failed, with why, for the control stream to name, as runs.
-		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
+		// Groups whose stream failed, with why, for the control stream to name, as runs, each with the
+		// skipped starts its GROUP passed over, which go out first since that GROUP may never have
+		// arrived.
+		const pendingDrops: { start: bigint; end: bigint; error: Error; passed: { start: bigint; end: bigint } }[] = [];
 		// Lite-07: a fresh read of the group `serving` served, whose stream the session reset to make
 		// room, for a new stream to continue it at the same frames; undefined once the subscription's
 		// budget or the cache gave it up. The Rust publisher keeps an unread clone of the reset
@@ -1627,7 +1699,8 @@ export class Publisher {
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { start, end, error } of pendingDrops.splice(0)) {
+					for (const { start, end, error, passed } of pendingDrops.splice(0)) {
+						if (passed.start < passed.end && !(await skip(passed.start, passed.end))) return false;
 						record?.tell(start, end, reportOf({ error }));
 						const msg = SubscribeDrop.given(start, end, error, this.version);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
@@ -1690,6 +1763,8 @@ export class Publisher {
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
 							moveCursor();
+							// A run elided for a group the ranges no longer name goes out after all.
+							if (!(await sendElided())) return false;
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary usually lets the decoder finish whatever the transport
@@ -1898,6 +1973,9 @@ export class Publisher {
 						return false;
 				}
 				record?.tell(group.sequence, group.sequence + 1n, { kind: "settled" });
+				// Its GROUP passes over the run elided below it, and a drop of it sends the run first.
+				elided.delete(group.sequence);
+				const previous = hasGroupEnd(this.version) ? hooks.previousStart(track, group.sequence) : undefined;
 
 				const options: RunGroup = {
 					sub,
@@ -1909,6 +1987,7 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
+					previous,
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet,
 				// and a paused group's continuation.
@@ -1944,7 +2023,12 @@ export class Publisher {
 							failed = fate instanceof Error ? fate : new StreamError(StreamCode.Old);
 						}
 						if (emitRange) {
-							pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
+							pendingDrops.push({
+								start: group.sequence,
+								end: group.sequence + 1n,
+								error: failed,
+								passed: passedOver(serving.previous, group.sequence),
+							});
 							drops.update((revision) => revision + 1);
 						}
 						return;
@@ -2300,16 +2384,16 @@ export class Publisher {
 				const datagram = await track.recv();
 				if (!datagram) return end;
 				end = max(end, datagram.sequence + 1n);
-				const stamp = options.stamp;
-				// An old subscription uses its stream track's timescale for both kinds. Without a
-				// stamp the track is a scale-less lite-07 one, whose timestamp goes out bare.
+				// An old subscription uses its stream track's timescale for both kinds. Without one
+				// the track is a scale-less lite-07 one, whose timestamp goes out bare.
+				const timescale = options.stamp?.timescale;
 				const timestamp =
-					stamp === undefined
+					timescale === undefined
 						? bareTime(datagram.timestamp)
 						: BigInt(
 								datagram.timestamp.scale === undefined
-									? floorAt(Timestamp.now(), stamp.timescale)
-									: floorAt(datagram.timestamp, stamp.timescale),
+									? floorAt(Timestamp.now(), timescale)
+									: floorAt(datagram.timestamp, timescale),
 							);
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
 					this.version,
@@ -2364,7 +2448,7 @@ export class Publisher {
 
 			let delta: bigint | undefined;
 			if (stamp !== undefined) {
-				const ts = BigInt(wireTime(frame.timestamp, stamp));
+				const ts = wireTime(frame.timestamp, stamp);
 				delta = ts - prevTs;
 				prevTs = ts;
 			}
@@ -2375,6 +2459,10 @@ export class Publisher {
 			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
 			else if (frame.payload.length > 0) await stream.write(frame.payload);
 		}
+		// Lite-07: a response that reached a finished group's end says so before the FIN.
+		const end = group.end;
+		if (hasGroupEnd(this.version) && end !== undefined && hooks.groupIndex(group) >= group.frameCount)
+			await stream.write(groupEnd(stream.version, end));
 	}
 
 	/**
@@ -2432,13 +2520,23 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, givenUp, stamp, compress, priority, previous, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
-		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, previous, frameStart: startFrame });
+		// Lite-07 ends a finished group with GROUP_END and closes, rather than resets, the stream of
+		// a group that expires on it: the stream accounts for the group, so no drop names it.
+		const closes = hasGroupEnd(this.version);
+		// The write under way, which an expiry close lets complete, so the stream ends on a frame.
+		let writing: Promise<unknown> | undefined;
+		// Whether the stream's end went out, after which it is never reset for expiry on lite-07.
+		let ended = false;
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
-			const stop = await givenUp.write(op);
+			const stop = await givenUp.write(() => {
+				writing = op();
+				return writing;
+			});
 			if (stop) throw stop;
 		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
@@ -2458,6 +2556,8 @@ export class Publisher {
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below. A received tail may already begin there.
 			let reached = hooks.groupIndex(group) === startFrame;
+			// Whether every frame went out, which a finished group's GROUP_END then claims.
+			let whole = false;
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
@@ -2467,6 +2567,7 @@ export class Publisher {
 					// would claim an empty group under that index; reset so it reads
 					// as the gap it is.
 					if (!reached) throw new Error(`group ended before frame ${startFrame}`);
+					whole = true;
 					break;
 				}
 
@@ -2480,7 +2581,7 @@ export class Publisher {
 				let delta: bigint | undefined;
 				if (stamp !== undefined) {
 					// Convert each frame to the track's wire timescale.
-					const ts = BigInt(wireTime(read.frame.timestamp, stamp));
+					const ts = wireTime(read.frame.timestamp, stamp);
 					delta = ts - prevTs;
 					prevTs = ts;
 				}
@@ -2502,15 +2603,31 @@ export class Publisher {
 				});
 			}
 
+			const end = closes && whole ? group.end : undefined;
+			if (end !== undefined) await write(() => stream.write(groupEnd(stream.version, end)));
 			stream.close();
+			ended = true;
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// Its bytes still hold the connection until acknowledged, so a group gone stale
-			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
-			await write(() => stream.closed);
+			// Its bytes still hold the connection until acknowledged, so before lite-07 a group gone
+			// stale meanwhile is reset like one still serving, as the Rust `GroupServe` does.
+			if (closes) await stream.closed;
+			else await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
+			if (closes && !ended && hooks.groupExpired(group)) {
+				// Expired on its stream: what went out stands as a closed group, and the frame
+				// being written completes first. Mirrors the Rust `GroupServe`'s expiry close.
+				console.debug(`closing expired group: subscribe=${sub} sequence=${group.sequence}`);
+				await writing?.catch(() => {});
+				stream.close();
+				group.close();
+				return await stream.closed.then(
+					() => undefined,
+					(err: unknown) => error(err),
+				);
+			}
 			stream.reset(e);
 			// A reset that pauses the group leaves the reader to the caller, which reads its fate
 			// first. A reset stream is never preempted after, so the caller sees the same flag.

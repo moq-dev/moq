@@ -1962,9 +1962,9 @@ test("a duplicate stream waiting out its copy holds the end", async () => {
 });
 
 // Lite-07: a malformed FRAME on a Group Stream ends only that stream and its group, never the
-// session: a Payload Length of 0, or a continuation that resends the cut frame at another size, ends
+// session: bytes after GROUP_END, or a continuation that resends the cut frame at another size, ends
 // before completing it, or starts past the frames held. Mirrors the Rust `UniState::Group`.
-test.each(["zero length", "resized", "unfinished", "past held"] as const)(
+test.each(["after GROUP_END", "resized", "unfinished", "past held"] as const)(
 	"a malformed lite-07 group stream ends only its group (%s)",
 	async (fault) => {
 		const version = Version.DRAFT_07;
@@ -1985,13 +1985,22 @@ test.each(["zero length", "resized", "unfinished", "past held"] as const)(
 			const header = new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 });
 			const first = handStream(version);
 			first.write(await liteFrame(300, zero));
-			if (fault === "zero length") first.write(await Writer.collect(version, (w) => w.u53(0)));
-			else first.write(await liteFrame(10, cut, SEGMENT_BYTES / 2));
+			if (fault === "after GROUP_END") {
+				// A zero Payload Length, the End, then a byte where only the FIN may follow.
+				first.write(
+					await Writer.collect(version, async (w) => {
+						await w.u53(0);
+						await w.u62(1000n);
+						await w.u53(0);
+					}),
+				);
+				first.finish();
+			} else first.write(await liteFrame(10, cut, SEGMENT_BYTES / 2));
 			let running = subscriber.runGroup(header, first.reader);
 			const group = await track.recvGroup();
 			expect((await group?.readFrame())?.payload).toEqual(zero);
 
-			if (fault !== "zero length") {
+			if (fault !== "after GROUP_END") {
 				first.reset(StreamCode.Yielded);
 				await running;
 				await drainReactions();
