@@ -940,6 +940,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			return None;
 		};
 		let redirect = predecessor.redirect.take()?;
+		// The peer accepted the fallback session and asked us to move, so its GOAWAY
+		// establishes the policy as one off the live session does.
+		if msg.is_ok() {
+			self.established = true;
+		}
 		let target = match msg.map(|msg| {
 			self.config
 				.goaway

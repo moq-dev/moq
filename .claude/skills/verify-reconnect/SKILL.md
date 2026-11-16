@@ -29,7 +29,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartHandoff.cfg
 ```
 
-The first checks every rule over four sessions: about 1.7M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 370k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule over four sessions: about 1.5M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 330k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 

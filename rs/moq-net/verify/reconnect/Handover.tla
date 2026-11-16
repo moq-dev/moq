@@ -252,7 +252,8 @@ FollowPred ==
             /\ UNCHANGED <<phase, target, timer, dial, probing>>
     /\ UNCHANGED <<live, watch, probe, pred, queue, used, dialTo, misdials,
                    lc, lcSess, migrating, spred, started, ended>>
-    /\ UNCHANGED lifeVars
+    \* Its GOAWAY establishes the policy, as one off the live session does.
+    /\ established' = TRUE
 
 \* `Phase::Next`: ask for a dial.
 Dial ==

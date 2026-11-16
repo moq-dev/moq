@@ -1133,6 +1133,33 @@ async fn a_redirect_after_a_probe_got_through_is_followed() {
 	assert!(machine.predecessor().is_some(), "the redirected session still drains");
 }
 
+/// The draining fallback's peer accepted that session and asked us to move, which no refusal
+/// does, so its redirect establishes the policy however young the session was: the redirected
+/// dial failing retries rather than ending it.
+#[kio::test]
+async fn a_fallback_peer_redirect_establishes_the_policy() {
+	let mut config = Config::default();
+	// Longer than the probe takes, so the fallback session is never healthy.
+	config.backoff.healthy = Duration::from_secs(3600);
+	let (mut machine, fallback_server) = on_fallback(config).await;
+	probe(&mut machine).await;
+	assert!(machine.probed(kio::clock::now(), Ok(())));
+	assert!(matches!(next(&mut machine).await, Action::Migrating));
+
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::redirect(url("https://peer:2/").to_string()))
+		.expect("the fallback peer sends a GOAWAY");
+	assert!(matches!(next(&mut machine).await, Action::Abandon));
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Retry);
+	let action = next(&mut machine).await;
+	assert!(
+		!matches!(action, Action::Done(_)),
+		"the redirected dial's failure ended the policy"
+	);
+}
+
 /// A redirect from the draining fallback's peer during the backoff after a failed
 /// handshake keeps the wait, and the redial goes where the peer named.
 #[kio::test]

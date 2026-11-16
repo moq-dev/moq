@@ -8183,14 +8183,17 @@ fn announce_route_crosses_a_relay_session() {
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	for (session, cb) in [
-		(downstream, &downstream_cb),
-		(downstream_client, &downstream_client_cb),
-		(upstream, &upstream_cb),
-		(upstream_client, &upstream_client_cb),
+	// Each client first: closed by its peer before it was healthy, it would end on its own.
+	// Its peer gone, the accepted session ends too.
+	for (client, client_cb, accepted, accepted_cb) in [
+		(downstream_client, &downstream_client_cb, downstream, &downstream_cb),
+		(upstream_client, &upstream_client_cb, upstream, &upstream_cb),
 	] {
-		assert_eq!(moq_session_close(session), 0);
-		cb.recv_terminal();
+		assert_eq!(moq_session_close(client), 0);
+		client_cb.recv_terminal();
+		accepted_cb.recv_terminal();
+		// The terminal snapshot already released the handle.
+		assert!(moq_session_close(accepted) < 0);
 	}
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
@@ -8297,10 +8300,12 @@ fn a_minted_instance_pins_request_and_follow() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	for (session, cb) in [(session, &session_cb), (client, &client_cb)] {
-		assert_eq!(moq_session_close(session), 0);
-		cb.recv_terminal();
-	}
+	// The client first: closed by its peer before it was healthy, it would end on its own.
+	assert_eq!(moq_session_close(client), 0);
+	client_cb.recv_terminal();
+	// Its peer gone, the accepted session ends too, which releases its handle.
+	session_cb.recv_terminal();
+	assert!(moq_session_close(session) < 0);
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
 	assert_eq!(moq_route_free(route), 0);

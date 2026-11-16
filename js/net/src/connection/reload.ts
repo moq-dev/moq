@@ -687,7 +687,7 @@ export class Reload {
 					// backoff already paces it, so its replacement dials at once. A fallback that
 					// served past the healthy bar still earns the healthy reset.
 					if (reached) {
-						this.#follow(connection, at, pinnedTransport(connection.transport, this.#pinned()));
+						this.#follow(connection, at, pinnedTransport(connection.transport, this.#pinned()), href);
 						if (now().since(connected).ge(this.#pacing().healthy)) {
 							this.#delay = undefined;
 							this.#deadline = undefined;
@@ -839,8 +839,11 @@ export class Reload {
 	 * place or a refused redirect is ignored, since we are already leaving. No loop scoring:
 	 * only a probe that got through leads here, and the probe's backoff paces those.
 	 */
-	#follow(connection: Session, dialing: URL, pinned: boolean): void {
+	#follow(connection: Session, dialing: URL, pinned: boolean, href: string): void {
 		void connection.draining.then((drain) => {
+			// The peer accepted the fallback session and asked us to move, so its GOAWAY establishes
+			// the URL as one off the live session does, while the sequence still targets it.
+			if (this.#sequenceHref === href) this.#establishedHref = href;
 			let next: URL | undefined;
 			try {
 				next = target(this.goaway.redirect ?? "same-host", drain.uri, dialing, pinned);

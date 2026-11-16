@@ -736,8 +736,13 @@ test("a first session drained before it is healthy keeps retrying once its relay
 		await waitUntil(() => dials.length === 1 && reload.status.peek() === "connected");
 		const started = clock.now();
 		// A page opened while its relay drains: the GOAWAY comes at once, which no refusal sends.
+		const predecessor = reload.established.peek();
 		await goaway(dials[0]?.server as WebTransport, "");
-		await elapse(clock, () => dials.length === 2 && reload.status.peek() === "connected");
+		// The replacement serves, not merely dialed.
+		await elapse(clock, () => {
+			const serving = reload.established.peek();
+			return dials.length === 2 && serving !== undefined && serving !== predecessor;
+		});
 		// The relay exits before any session it served was healthy.
 		for (const dial of dials) dial.server.close();
 		await elapse(clock, () => dials.length === 3 || reload.error.peek() !== undefined);
