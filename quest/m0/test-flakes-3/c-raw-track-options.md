@@ -15,11 +15,16 @@ times at the base commit 949406e072: at `rs/moq-c/src/test.rs:2794`, it
 receives `two` where it expects `one`, the group starting at 20 ms.
 
 The test publishes three groups 20 ms apart, then subscribes with a 25 ms
-`max_us` and a range starting at 20 ms. Under load, the read likely comes
-after group `one` went stale by its successor's arrival on the host clock, so
-the read skips it. That is correct behaviour for a 25 ms budget, so the fix is
-in the test, as the epic's rules ask: drive it on a paused or manual clock,
-or give it a budget that does not depend on how fast the suite runs. Confirm
-the cause before fixing.
+`max_us` and two ranges: `[20000, 20001)`, holding only group `one`, and an
+open one from 100,000,000 µs. Group `two` (40,000 µs) is in neither, so a
+stale skip of `one` under load would explain the read missing `one` but not
+receiving `two`: that read should then wait on the open range. Trace how the
+consumer hands out `two` first. If a path admits a group outside the
+requested ranges (such as a read before the ranges resolve, a drop or skip
+that widens the range, or moq-c's own frame pump), that is a range-delivery
+bug in the library, and the fix belongs there with a regression test. Only
+if the trace shows `two` arrives by a path the ranges allow is the fix in
+the test, as the epic's rules ask: drive it on a paused or manual clock, or
+give it a budget that does not depend on how fast the suite runs.
 
 Public API: none. Wire: none.

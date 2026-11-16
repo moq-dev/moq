@@ -355,7 +355,12 @@ pub const DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 /// both bounds widened, so a live join reaches back far enough and the budget keeps what it reaches.
 fn warmed(delay: Delay, warmup: std::time::Duration) -> Delay {
 	Delay {
-		min: delay.min.map(|min| min.saturating_add(warmup)),
+		// An unstated minimum reads as zero, so a warmup still reaches back for it.
+		min: match delay.min {
+			Some(min) => Some(min.saturating_add(warmup)),
+			None if warmup.is_zero() => None,
+			None => Some(warmup),
+		},
 		max: delay.max.map(|max| max.saturating_add(warmup)),
 	}
 }
@@ -4033,6 +4038,17 @@ mod tests {
 			read_all(&mut consumer).await.unwrap().is_empty(),
 			"the earlier group is old"
 		);
+	}
+
+	/// An unstated min delay reads as zero, so the warmup still reaches a live join back for it;
+	/// without a warmup it stays unstated.
+	#[test]
+	fn the_warmup_widens_an_unstated_min() {
+		let warmup = Duration::from_millis(300);
+		let unstated = Delay::default().with_min(None);
+		assert_eq!(warmed(unstated, warmup).min, Some(warmup));
+		assert_eq!(warmed(unstated, Duration::ZERO).min, None);
+		assert_eq!(warmed(unstated.with_min(Duration::ZERO), warmup).min, Some(warmup));
 	}
 
 	/// The warmup reaches past the min delay for the start, waiting for the group covering the live

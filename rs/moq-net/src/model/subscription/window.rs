@@ -76,9 +76,10 @@ pub(in crate::model) trait Holdings {
 	fn complete(&self) -> bool;
 
 	/// Where a live join holding `min` behind the live edge starts, `latest` being the latest
-	/// group: the time that far behind the newest frame held, a group that starts at or
-	/// before it, or [`Anchor::Oldest`] when none held does. `None` while nothing held can
-	/// measure it, so the join waits for a group as a relative start does.
+	/// group: a group held, the newest one starting at or before the newest frame held less
+	/// `min`, or the oldest one held when none does, never a raw time a copy would ask its
+	/// upstream to fill. `None` while nothing held can measure it, so the join waits for a
+	/// group as a relative start does.
 	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
 		let _ = (latest, min);
 		None
@@ -142,6 +143,10 @@ pub(in crate::model) struct Window {
 	/// The spans whose time start waits on a group arriving, which read only the groups from
 	/// that time meanwhile.
 	waiting: Vec<usize>,
+	/// The ranges, by index, of a live join whose reach back waits on the groups held to
+	/// measure the live edge, which read nothing meanwhile: a group held is no reason to
+	/// start at it.
+	reaching: Vec<usize>,
 	/// The groups the spans cover, shared with what reads them.
 	groups: Layered,
 	/// The part of `groups` a miss may ask for: see [`Self::missable`].
@@ -202,6 +207,7 @@ impl Window {
 			spans: Vec::new(),
 			looking: Vec::new(),
 			waiting: Vec::new(),
+			reaching: Vec::new(),
 			groups: Layered::default(),
 			missable: Layered::default(),
 			pending: false,
@@ -230,6 +236,12 @@ impl Window {
 		self.min = min;
 	}
 
+	/// Whether a live join's reach back waits on a group held starting, to measure the live
+	/// edge by.
+	pub fn is_reaching(&self) -> bool {
+		!self.reaching.is_empty()
+	}
+
 	/// Whether a time start still waits on the groups held to place it.
 	pub fn is_waiting(&self) -> bool {
 		!self.waiting.is_empty()
@@ -246,7 +258,18 @@ impl Window {
 			let _ = self.place(latest, holdings);
 			return !self.pending;
 		}
-		let moved = !self.waiting.is_empty() && self.start_waiting(holdings);
+		let mut moved = false;
+		if !self.reaching.is_empty() {
+			let placed = self.spans.len();
+			for index in std::mem::take(&mut self.reaching) {
+				self.place_range(index, latest, holdings);
+			}
+			if self.spans.len() > placed {
+				self.name();
+				moved = true;
+			}
+		}
+		moved |= !self.waiting.is_empty() && self.start_waiting(holdings);
 		if moved {
 			self.rebuild(holdings);
 		}
@@ -301,7 +324,7 @@ impl Window {
 	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
 	/// nowhere: group 0.
 	pub fn floor(&self) -> Option<u64> {
-		match self.pending || !self.waiting.is_empty() {
+		match self.pending || self.unplaced() {
 			true => None,
 			false => Some(self.groups.lowest().unwrap_or(0)),
 		}
@@ -310,7 +333,7 @@ impl Window {
 	/// The lowest group the ranges name, `None` while one reaches back to the oldest group
 	/// or an anchor waits.
 	pub fn start(&self) -> Option<u64> {
-		match self.pending || !self.all_named {
+		match self.pending || !self.reaching.is_empty() || !self.all_named {
 			true => None,
 			false => self.named,
 		}
@@ -319,7 +342,7 @@ impl Window {
 	/// The lowest group a range names, `None` when none does or an anchor waits.
 	/// Unlike [`Self::start`], a range reaching back to the oldest group names nothing.
 	pub fn named(&self) -> Option<u64> {
-		match self.pending || !self.waiting.is_empty() {
+		match self.pending || self.unplaced() {
 			true => None,
 			false => self.named,
 		}
@@ -501,69 +524,88 @@ impl Window {
 		self.spans.clear();
 		self.looking.clear();
 		self.waiting.clear();
+		self.reaching.clear();
 		self.pending = false;
-		for (index, range) in self.ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
-			let Some(end) = end(range.end, latest, holdings) else {
-				self.pending = true;
-				continue;
-			};
-			let anchor = match joins(range, self.min, holdings) {
-				None => range.start,
-				Some(min) => match latest.map(|latest| holdings.reach_back(latest, min)) {
-					Some(Some(anchor)) => anchor,
-					// Nothing to measure the live edge by yet.
-					_ => {
-						self.pending = true;
-						continue;
-					}
-				},
-			};
-			let (start, floored) = match start(anchor, latest, holdings) {
-				Start::At(start, floored) => (start, floored),
-				Start::Pending => {
-					self.pending = true;
-					continue;
-				}
-				// Reads only the groups from its time until the groups held place it; see
-				// [`Self::start_waiting`].
-				Start::Waiting => {
-					self.waiting.push(self.spans.len());
-					self.spans.push(Span {
-						index,
-						anchor,
-						start: 0,
-						end,
-						floored: false,
-						looking: None,
-						waiting: true,
-					});
-					continue;
-				}
-			};
-			// A time start the groups held can't place reads nothing until its lookup answers. A
-			// join's reach back never looks one up: it starts from what this hop holds.
-			let looking = match (range.start, anchor) {
-				(Anchor::Time(_), Anchor::Time(time)) => {
-					unresolved(time, start, floored, holdings).map(|below| Looking { time, below })
-				}
-				_ => None,
-			};
-			if looking.is_some() {
-				self.looking.push(self.spans.len());
+		for index in 0..self.ranges.len() {
+			if !self.ranges[index].is_empty() {
+				self.place_range(index, latest, holdings);
 			}
-			self.spans.push(Span {
-				index,
-				anchor,
-				start,
-				end,
-				floored,
-				looking,
-				waiting: false,
-			});
 		}
 		self.name();
 		self.rebuild(holdings);
 		Ok(())
+	}
+
+	/// Resolve the non-empty range at `index` into a span, or note what it waits on.
+	fn place_range(&mut self, index: usize, latest: Option<u64>, holdings: &impl Holdings) {
+		let range = self.ranges[index];
+		let Some(end) = end(range.end, latest, holdings) else {
+			self.pending = true;
+			return;
+		};
+		let anchor = match joins(&range, self.min, holdings) {
+			None => range.start,
+			Some(min) => match latest.map(|latest| holdings.reach_back(latest, min)) {
+				Some(Some(anchor)) => anchor,
+				// Nothing to measure the live edge by yet: with groups held, read none of them
+				// until one measures it; with none, wait as a relative start does.
+				Some(None) => {
+					self.reaching.push(index);
+					return;
+				}
+				None => {
+					self.pending = true;
+					return;
+				}
+			},
+		};
+		let (start, floored) = match start(anchor, latest, holdings) {
+			Start::At(start, floored) => (start, floored),
+			Start::Pending => {
+				self.pending = true;
+				return;
+			}
+			// Reads only the groups from its time until the groups held place it; see
+			// [`Self::start_waiting`].
+			Start::Waiting => {
+				self.waiting.push(self.spans.len());
+				self.spans.push(Span {
+					index,
+					anchor,
+					start: 0,
+					end,
+					floored: false,
+					looking: None,
+					waiting: true,
+				});
+				return;
+			}
+		};
+		// A time start the groups held can't place reads nothing until its lookup answers. A
+		// join's reach back never looks one up: it starts from what this hop holds.
+		let looking = match (range.start, anchor) {
+			(Anchor::Time(_), Anchor::Time(time)) => {
+				unresolved(time, start, floored, holdings).map(|below| Looking { time, below })
+			}
+			_ => None,
+		};
+		if looking.is_some() {
+			self.looking.push(self.spans.len());
+		}
+		self.spans.push(Span {
+			index,
+			anchor,
+			start,
+			end,
+			floored,
+			looking,
+			waiting: false,
+		});
+	}
+
+	/// Whether a time start or a join's reach back waits on the groups held to place it.
+	fn unplaced(&self) -> bool {
+		!self.waiting.is_empty() || !self.reaching.is_empty()
 	}
 
 	/// Keep [`Self::named`] and [`Self::start`] current with where the spans start.
@@ -582,7 +624,7 @@ impl Window {
 	fn rebuild(&mut self, holdings: &impl Holdings) {
 		self.covered = None;
 		// A span still looking up its start reads nothing until it knows which group that is.
-		self.settled = !self.pending && self.looking.is_empty() && self.waiting.is_empty();
+		self.settled = !self.pending && self.looking.is_empty() && !self.unplaced();
 		let (mut groups, mut missable) = (Vec::new(), Vec::new());
 		for span in self.spans.iter().filter(|span| span.looking.is_none()) {
 			let Some(last) = span.end.map_or(Some(u64::MAX), |end| end.checked_sub(1)) else {

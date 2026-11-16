@@ -922,6 +922,40 @@ test("a live join without a min age starts at the latest group, and the oldest s
 	expect(readable(named)).toEqual([9n, 10n]);
 });
 
+test("a live join reads nothing until the groups held measure the live edge", () => {
+	const producer = new TrackProducer("test");
+	// Groups written before accept say nothing yet of whether the track is timed.
+	const groups = Array.from({ length: 11 }, (_, sequence) => producer.createGroup(BigInt(sequence)));
+	const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(reader)).toEqual([]);
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	// Accepted, but still only headers: nothing to measure by.
+	expect(readable(reader)).toEqual([]);
+	for (const [sequence, group] of groups.entries()) {
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 500)));
+		group.finish();
+	}
+	expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+});
+
+test("a live join reaches back by ticks rounded up, at any timestamp the track accepts", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	// Past what microseconds can hold as a safe number.
+	const base = 10_000_000_000_000;
+	for (let sequence = 0; sequence <= 2; sequence++) {
+		const group = producer.createGroup(BigInt(sequence));
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(base + sequence)));
+		group.finish();
+	}
+	// 1.5 ms back from 2 ms past the base is 0.5 ms past it, which only group 0 starts by.
+	const reader = producer.subscribe({
+		delay: { min: Duration.micros(1500), max: Duration.secs(30) },
+		ranges: [LIVE],
+	});
+	expect(readable(reader)).toEqual([0n, 1n, 2n]);
+});
+
 test("a scale-less join reaches back by arrival", () => {
 	const clock = manualTime(0);
 	try {

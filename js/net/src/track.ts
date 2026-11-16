@@ -3377,15 +3377,27 @@ export class Subscriber {
 			return at && { anchor: { absolute: at.sequence } };
 		};
 		const info = this.#state.info.peek();
-		if (info?.timescale == null) {
+		// Until the track is accepted, whether it is timed at all is unknown.
+		if (info === undefined) return undefined;
+		const scale = info.timescale;
+		if (scale == null) {
 			const at = now();
 			return held(newest((group) => at.since(hooks.groupArrived(group)).ge(min)));
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
 		const started = stamped && hooks.groupTimestamp(stamped);
 		if (!stamped || !started) return undefined;
-		const target = Math.max(0, (hooks.groupLatest(stamped) ?? started).asMicros() - min.asMicros());
-		return held(newest((group) => (hooks.groupTimestamp(group)?.asMicros() ?? Infinity) <= target));
+		// In the track's own scale, which holds every timestamp it accepted. The Min Age rounds up
+		// to whole ticks, so the start is never newer than it allows.
+		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
+		const edge = BigInt((hooks.groupLatest(stamped) ?? started).as(scale));
+		const target = edge > back ? edge - back : 0n;
+		return held(
+			newest((group) => {
+				const start = hooks.groupTimestamp(group);
+				return start !== undefined && BigInt(start.as(scale)) <= target;
+			}),
+		);
 	}
 
 	// Resolve what the groups now held settle: a relative anchor waiting on a first group once

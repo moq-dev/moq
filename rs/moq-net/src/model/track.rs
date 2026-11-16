@@ -1069,23 +1069,27 @@ impl Holdings for TrackState {
 	/// Groups keyed by their start are found by key; on a copy whose wire keys groups
 	/// otherwise, by when each one's first frame presented. Pending until a group is held.
 	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
-		let oldest = || self.live(..).next().map(|(&key, _)| Anchor::Time(key));
+		let oldest = || self.walked(..).next().map(|(&key, _)| Anchor::Time(key));
 		let Some(scale) = self.info.as_ref()?.timescale else {
-			let key = self.live(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
+			let key = self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
 			return key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest);
 		};
 		let newest = self
 			.live_edge(&Servable::ALL)
 			.and_then(|edge| edge.timestamp.convert(scale).ok())
 			.map(Timestamp::value);
-		// A Min Age past every timestamp reaches back to the oldest group.
-		let back = Timestamp::try_from(min)
-			.and_then(|min| min.convert(scale))
-			.map_or(u64::MAX, Timestamp::value);
+		// Rounded up to whole ticks, so the start is never newer than the Min Age allows; one
+		// past every timestamp reaches back to the oldest group.
+		let back = u64::try_from(
+			min.as_nanos()
+				.saturating_mul(u128::from(scale.as_u64()))
+				.div_ceil(1_000_000_000),
+		)
+		.unwrap_or(u64::MAX);
 		if self.anchors != Anchors::Refused && !self.starts_at_keys {
 			let edge = newest.map_or(latest, |newest| newest.max(latest));
 			let target = edge.saturating_sub(back);
-			let key = self.live(..=target).next_back();
+			let key = self.walked(..=target).next_back();
 			return key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest);
 		}
 		let target = newest?.saturating_sub(back);
@@ -1094,7 +1098,7 @@ impl Holdings for TrackState {
 				.and_then(|start| start.convert(scale).ok())
 				.is_some_and(|start| start.value() <= target)
 		};
-		let key = self.live(..).rev().find(|(_, slot)| started(slot));
+		let key = self.walked(..).rev().find(|(_, slot)| started(slot));
 		key.map(|(&key, _)| Anchor::Time(key)).or_else(oldest)
 	}
 
@@ -1886,6 +1890,20 @@ impl TrackState {
 			presentation: self.live_edge(servable),
 			servable: servable.clone(),
 		}
+	}
+
+	/// Wake `waiter` once a live group held starts: a group starting wakes no reader parked on
+	/// the track, and a live join's reach back waits on one to measure the live edge by.
+	fn watch_starts(&self, waiter: &kio::Waiter) {
+		for (_, slot) in self.walked(..) {
+			let _ = slot.group.poll_started(waiter);
+		}
+	}
+
+	/// The live-feed groups in `range` still served: an aborted one cannot start a join, whose
+	/// floor would then pass the usable group before it.
+	fn walked(&self, range: impl ops::RangeBounds<u64>) -> impl DoubleEndedIterator<Item = (&u64, &Slot)> {
+		self.live(range).filter(|(_, slot)| slot.is_walked())
 	}
 
 	/// The live feed's cached groups within `range`, by key: never fetched backfill.
@@ -8469,7 +8487,11 @@ impl Cursor {
 				self.filter.window.set_min(min);
 				self.filter.window.settle(state.first_live(), holdings)
 			}
-			None => self.filter.window.settle(state.latest_live(), holdings),
+			None => {
+				// A live join waiting on a group to measure the live edge by has not started either.
+				self.filter.window.set_min(min);
+				self.filter.window.settle(state.latest_live(), holdings)
+			}
 		};
 		drop(state);
 		if moved {
@@ -8810,6 +8832,9 @@ impl Cursor {
 			if res.is_pending() {
 				// The end can settle with no write: when the grace for a missing group passes.
 				state.watch_tail(waiter);
+				if self.filter.window.is_reaching() {
+					state.watch_starts(waiter);
+				}
 			}
 			res
 		});
@@ -12310,6 +12335,68 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![5, 6, 7, 8, 9]);
 		let mut far = producer.subscribe(joining(Range::live(), Duration::from_secs(60)));
 		assert_eq!(ready_groups(&mut far), (0..10).collect::<Vec<_>>());
+	}
+
+	/// A live join reads none of the groups held until one measures the live edge: a copy
+	/// holding only group headers gives nothing to reach back by, so no group is handed out
+	/// before a first frame says where the join starts.
+	#[test]
+	fn a_live_join_reads_nothing_until_a_frame_measures_the_live_edge() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.starts_at_keys();
+		let groups: Vec<_> = (0..10)
+			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
+			.collect();
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "nothing to measure by");
+		for (key, mut group) in (0..).zip(groups) {
+			group
+				.write_frame(Timestamp::from_millis(key * 500).unwrap(), &b"x"[..])
+				.unwrap();
+			group.close().unwrap();
+		}
+		let mut got = ready_groups(&mut reader);
+		got.sort_unstable();
+		assert_eq!(got, vec![5, 6, 7, 8, 9]);
+	}
+
+	/// A join skips a group the publisher gave up: it starts at the newest group still served
+	/// that began by the target, never at an aborted one that would floor it past that group.
+	#[test]
+	fn a_live_join_reaches_back_past_an_aborted_group() {
+		let mut producer = track_producer("test", Info::timed());
+		for _ in (0..=2500).step_by(500) {
+			append_half_second(&mut producer);
+		}
+		let aborted = producer.create_group(group::Info { start: 3000 }).unwrap();
+		aborted.abort(Error::Cancel).unwrap();
+		let mut group = producer.create_group(group::Info { start: 3500 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(3500).unwrap(), &b"x"[..])
+			.unwrap();
+		group.close().unwrap();
+		for _ in (4000..=5000).step_by(500) {
+			append_half_second(&mut producer);
+		}
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(ready_groups(&mut reader)[0], 2500);
+	}
+
+	/// A Min Age that is not a whole number of ticks rounds up, so the join never starts newer
+	/// than it allows.
+	#[test]
+	fn a_live_join_rounds_its_min_age_up_to_whole_ticks() {
+		let producer = track_producer("test", Info::timed());
+		for start in 0..=2 {
+			let mut group = producer.create_group(group::Info { start }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+				.unwrap();
+			group.close().unwrap();
+		}
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_micros(1500)));
+		assert_eq!(ready_groups(&mut reader), vec![0, 1, 2]);
 	}
 
 	/// A lite-07 copy reaches back only to groups it holds, so the join starts at once and
