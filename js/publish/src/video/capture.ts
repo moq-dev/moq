@@ -149,6 +149,9 @@ class Frames extends Fanout<VideoFrame> {
 			}
 		};
 		const held: Held = { at: Instant.ZERO, replayed: 0 };
+		// A stopped track is no longer live, so its last picture stops repeating. Stopping fires no
+		// event, and the <video> fallback never ends the read it has pending, so check before each repeat.
+		const ended = () => !("frames" in source) && normalizeSource(source).track.readyState === "ended";
 		const active = new Signal(0);
 		const reader = stream.getReader();
 		// The first picture supplies dimensions for encoder setup and a replay for still sources.
@@ -173,7 +176,7 @@ class Frames extends Fanout<VideoFrame> {
 						const read = pending;
 
 						const last = held.frame;
-						if (last) {
+						if (last && !ended()) {
 							const stop = new AbortController();
 							const due = sleepUntil(held.at.saturatingAdd(REPEAT), { signal: stop.signal }).then(
 								() => undefined,
@@ -183,7 +186,7 @@ class Frames extends Fanout<VideoFrame> {
 							stop.abort();
 							if (!result) {
 								// Every reader left while this waited; park instead of repeating to nobody.
-								if (active.peek() <= 0 || held.frame !== last) continue;
+								if (active.peek() <= 0 || held.frame !== last || ended()) continue;
 								// Stamped on the source's own timeline, which can run ahead of the clock, but never
 								// below the clock or a replay: a frame that resolved while capture was parked is held
 								// with its old stamp, and a reader that attached since drops anything not past its own.

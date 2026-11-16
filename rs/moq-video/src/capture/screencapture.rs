@@ -19,14 +19,15 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
-	SCContentFilter, SCDisplay, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
-	SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
+	SCContentFilter, SCDisplay, SCFrameStatus, SCRunningApplication, SCShareableContent, SCStream,
+	SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use super::surface::surface_frame;
@@ -447,13 +448,33 @@ define_class!(
 			if kind.0 == SCStreamOutputType::Screen.0 {
 				// ScreenCaptureKit calls this even when nothing changed, handing back an
 				// image-less buffer: drop it, and let the channel repeat the last picture.
-				if let Some(frame) = surface_frame(sample_buffer) {
+				// A blank or suspended source no longer shows that picture, so it stops
+				// repeating until the next one.
+				let status = frame_status(sample_buffer);
+				if status == Some(SCFrameStatus::Blank) || status == Some(SCFrameStatus::Suspended) {
+					self.ivars().chan.forget();
+				} else if let Some(frame) = surface_frame(sample_buffer) {
 					self.ivars().chan.push(frame);
 				}
 			}
 		}
 	}
 );
+
+/// The frame status ScreenCaptureKit attached to a sample, if any.
+fn frame_status(sample_buffer: &CMSampleBuffer) -> Option<SCFrameStatus> {
+	let attachments = unsafe { sample_buffer.sample_attachments_array(false) }?;
+	// SAFETY: CFArray and CFDictionary are toll-free bridged to their Foundation
+	// counterparts, and the retained array outlives these borrows.
+	let attachments: &NSArray<NSDictionary<NSString, AnyObject>> =
+		unsafe { &*(CFRetained::as_ptr(&attachments).as_ptr() as *const NSArray<NSDictionary<NSString, AnyObject>>) };
+	let status = attachments
+		.firstObject()?
+		.objectForKey(unsafe { SCStreamFrameInfoStatus })?
+		.downcast::<NSNumber>()
+		.ok()?;
+	Some(SCFrameStatus(status.integerValue()))
+}
 
 impl Delegate {
 	fn new(chan: Arc<FrameChannel>) -> Retained<Self> {

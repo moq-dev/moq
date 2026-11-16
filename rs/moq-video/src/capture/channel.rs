@@ -206,10 +206,15 @@ impl FrameChannel {
 	}
 
 	/// Stop repeating until the next frame, because the last picture no longer
-	/// stands: the source resized or minimized, or freed the buffer it lives in.
-	/// A frame the consumer has not reached yet is the same stale picture, so it
-	/// goes too.
-	#[cfg(any(all(target_os = "linux", feature = "pipewire"), target_os = "windows", test))]
+	/// stands: the source resized, minimized, or blanked, or freed the buffer it
+	/// lives in. A frame the consumer has not reached yet is the same stale
+	/// picture, so it goes too.
+	#[cfg(any(
+		all(target_os = "linux", feature = "pipewire"),
+		target_os = "macos",
+		target_os = "windows",
+		test
+	))]
 	pub(super) fn forget(&self) {
 		let mut state = self.state.lock().unwrap();
 		state.frame = None;

@@ -724,6 +724,65 @@ test("capture parks after its bootstrap and last reader, and cancels while parke
 	expect(open()).toEqual([]);
 });
 
+test("a stopped track stops repeating its last picture", async () => {
+	const processor = Object.getOwnPropertyDescriptor(globalThis, "MediaStreamTrackProcessor");
+	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
+	let controller!: ReadableStreamDefaultController<VideoFrame>;
+	// Never closed when the track stops, as with the <video> fallback.
+	const readable = new ReadableStream<VideoFrame>({
+		start: (value) => {
+			controller = value;
+		},
+	});
+	Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
+		configurable: true,
+		value: class {
+			readonly readable = readable;
+		},
+	});
+	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: Frame });
+	Frame.all = [];
+
+	const clock = new Manual();
+	const installed = clock.install();
+	clock.jump(Duration.secs(1));
+	const track = { readyState: "live", getSettings: () => ({ width: 1280, height: 720 }) };
+	const capture = new Capture({ source: track as unknown as StreamTrack });
+	const effect = new Effect();
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		const reader = fanout.subscribe(effect).getReader();
+		const read = async () => {
+			const frame = (await clock.drive(reader.read())).value as unknown as Frame;
+			frame.close();
+			return frame.timestamp;
+		};
+
+		controller.enqueue(new Frame(undefined, { timestamp: 5 }) as unknown as VideoFrame);
+		expect(await read()).toBe(1_000_000);
+		expect(await read()).toBe(1_250_000);
+
+		// Stopping a track fires no event and, on the fallback, never ends the pending read.
+		track.readyState = "ended";
+		await flush();
+		const built = Frame.all.length;
+		clock.jump(Duration.secs(10));
+		await flush();
+		expect(Frame.all.length).toBe(built);
+	} finally {
+		effect.close();
+		capture.close();
+		installed.close();
+		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
+		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
+		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
+		else Reflect.deleteProperty(globalThis, "VideoFrame");
+	}
+
+	expect(open()).toEqual([]);
+});
+
 test("a repeat after a demand gap is stamped past the new reader's replay", async () => {
 	using input = frameSource();
 	const clock = new Manual();
