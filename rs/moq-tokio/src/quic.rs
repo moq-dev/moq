@@ -76,7 +76,9 @@ pub(crate) struct Forward {
 /// The congestion control algorithm for a QUIC connection.
 ///
 /// A new algorithm joins as a variant named after it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(
+	Clone, Copy, Debug, Default, PartialEq, Eq, Hash, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -728,7 +730,7 @@ mod tests {
 		let argv: Vec<_> = argv.iter().map(std::ffi::OsString::as_os_str).collect();
 		Cli::try_parse_from(&argv)
 			.map(|cli| cli.quic)
-			.map_err(|err| usage_rs::render_failure(&Cli::spec(), &argv, &err))
+			.map_err(|err| usage_rs::render_failure(Cli::spec(), &argv, &err))
 	}
 
 	#[test]

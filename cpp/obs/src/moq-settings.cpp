@@ -210,11 +210,10 @@ const std::vector<Field> &Fields()
 				   "forever. A first connect that reaches no server fails the stream at once."));
 
 		// QUIC transport.
-		f.push_back(Choose(
-			QUIC_CONGESTION_CONTROL, "Congestion control",
-			{{"Automatic", AUTO}, {"BBR", "bbr"}, {"CUBIC", "cubic"}}, false,
-			"BBR, the default, keeps queues short and the send rate steady enough for an "
-			"encoder to track. CUBIC chases throughput instead."));
+		f.push_back(Choose(QUIC_CONGESTION_CONTROL, "Congestion control",
+				   {{"Automatic", AUTO}, {"BBR", "bbr"}, {"CUBIC", "cubic"}}, false,
+				   "BBR, the default, keeps queues short and the send rate steady enough for an "
+				   "encoder to track. CUBIC chases throughput instead."));
 		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams",
 				   static_cast<long long>(d.quic.max_streams.value_or(0)), 1, 65536, 1,
 				   "MoQ opens a stream per group, so a busy publisher wants this high."));
@@ -351,8 +350,8 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 		else if (strcmp(algorithm, "cubic") == 0)
 			config.quic.congestion_control = moq::CongestionControl::cubic();
 		else
-			Refuse(error, std::string("unknown congestion control: ") + algorithm +
-					      " (expected bbr or cubic)");
+			Refuse(error,
+			       std::string("unknown congestion control: ") + algorithm + " (expected bbr or cubic)");
 	}
 	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS, error);
 	config.quic.idle_timeout = Milliseconds(settings, QUIC_IDLE_TIMEOUT, error);

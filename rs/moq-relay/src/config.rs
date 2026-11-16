@@ -655,7 +655,8 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("relay.toml");
 		std::fs::write(&path, "[quic]\ncongestion_control = \"delay\"\n").unwrap();
-		let err = Config::parse_and_merge(["moq-relay", path.to_str().unwrap()]).expect_err("a family name must not boot");
+		let err =
+			Config::parse_and_merge(["moq-relay", path.to_str().unwrap()]).expect_err("a family name must not boot");
 		let err = format!("{err:#}");
 		for name in ["bbr", "cubic", "unlimited"] {
 			assert!(err.contains(name), "{err}");
