@@ -8,6 +8,7 @@
 //! means a wildcard; every lite-07 claim already covers the paths below it, so
 //! the slash is dropped.
 
+mod algebra;
 mod bakeoff;
 mod cache;
 mod compare;
