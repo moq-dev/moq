@@ -888,45 +888,47 @@ impl<N: Key> Router<N> {
 		}
 	}
 
+	/// The route to `origin` through `via` as it stands here, unless it is unusable.
+	fn candidate(&self, origin: Id, via: N, heard: &Heard) -> Option<Best<N>> {
+		let peer = self.peers.get(&via)?;
+		let offer = &heard.offer;
+		let floored = offer.path.windows(2).any(|pair| {
+			let (key, at) = self.floor_of(pair[1], pair[0].node);
+			self.closed.get(&key).is_some_and(|highest| at <= *highest)
+		});
+		if heard.ended
+			|| floored
+			|| offer.names(self.me)
+			|| offer.path.len() >= MAX_HOPS
+			|| offer.path.iter().any(|hop| self.dead.contains_key(hop))
+			|| (self.tune.agree && !self.agrees(origin, via, offer))
+		{
+			return None;
+		}
+		let named = |nodes: &dyn Fn(&Id) -> bool| offer.path.iter().any(|hop| nodes(&hop.node));
+		let suspect = named(&|node| self.suspects.contains_key(node));
+		let flagged = suspect && self.tune.suspect == Suspect::Flagged;
+		Some(Best {
+			via,
+			offer: Offer {
+				path: offer.path.clone(),
+				draining: offer.draining || peer.draining || flagged || named(&|node| self.draining.contains(node)),
+				priority: offer.priority.min(peer.port.priority),
+				cost: offer.cost + peer.port.cost,
+				marked: offer.marked || peer.port.upstream,
+			},
+			suspect,
+		})
+	}
+
 	/// Pick the route to `origin` and tell every neighbour what changed.
 	fn reselect(&mut self, origin: Id) {
 		let current = self.best.get(&origin).map(|best| best.via);
 		let mut pick: Option<(Best<N>, Order<N>)> = None;
+		self.work += self.heard.get(&origin).map_or(0, BTreeMap::len);
 		for (&via, heard) in self.heard.get(&origin).into_iter().flatten() {
-			self.work += 1;
-			let Some(peer) = self.peers.get(&via) else {
+			let Some(mine) = self.candidate(origin, via, heard) else {
 				continue;
-			};
-			let offer = &heard.offer;
-			let floored = offer.path.windows(2).any(|pair| {
-				let (key, at) = self.floor_of(pair[1], pair[0].node);
-				self.closed.get(&key).is_some_and(|highest| at <= *highest)
-			});
-			if heard.ended || floored {
-				continue;
-			}
-			if offer.names(self.me)
-				|| offer.path.len() >= MAX_HOPS
-				|| offer.path.iter().any(|hop| self.dead.contains_key(hop))
-			{
-				continue;
-			}
-			if self.tune.agree && !self.agrees(origin, via, offer) {
-				continue;
-			}
-			let named = |nodes: &dyn Fn(&Id) -> bool| offer.path.iter().any(|hop| nodes(&hop.node));
-			let suspect = named(&|node| self.suspects.contains_key(node));
-			let flagged = suspect && self.tune.suspect == Suspect::Flagged;
-			let mine = Best {
-				via,
-				offer: Offer {
-					path: offer.path.clone(),
-					draining: offer.draining || peer.draining || flagged || named(&|node| self.draining.contains(node)),
-					priority: offer.priority.min(peer.port.priority),
-					cost: offer.cost + peer.port.cost,
-					marked: offer.marked || peer.port.upstream,
-				},
-				suspect,
 			};
 			let (draining, priority, cost) = mine.rank();
 			// Among equal ranks a node stays on its next hop.
@@ -1074,6 +1076,28 @@ impl<N: Key> Router<N> {
 			})
 			.min_by(|(a, _), (b, _)| a.cmp(b))
 			.map(|((_, _, origin), claim)| (origin, claim))
+	}
+
+	/// The summed cost from here to the claim [`Self::pick`] names, as it ranks it.
+	pub fn cost(&self, broadcast: &Broadcast) -> Option<Metric> {
+		let (origin, claim) = self.closest(broadcast)?;
+		match origin == self.me {
+			true => Some(claim.cost),
+			false => Some(self.best.get(&origin)?.offer.cost + claim.cost),
+		}
+	}
+
+	/// Every neighbour whose route to `origin` ranks with the one in use: the equal
+	/// next hops a request may take.
+	pub fn ties(&self, origin: Id) -> Vec<N> {
+		let Some(best) = self.best.get(&origin) else {
+			return Vec::new();
+		};
+		(self.heard.get(&origin).into_iter().flatten())
+			.filter_map(|(&via, heard)| self.candidate(origin, via, heard))
+			.filter(|candidate| candidate.rank() == best.rank())
+			.map(|candidate| candidate.via)
+			.collect()
 	}
 
 	/// Where a request for `broadcast` naming `origin` goes from here. `None` fails it.
