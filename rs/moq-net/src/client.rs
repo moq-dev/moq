@@ -197,10 +197,19 @@ impl Client {
 		self
 	}
 
-	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
-	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
-	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
-		self.extensions = extensions;
+	/// Offer the `ietf` extension on moq-lite-07: moq-relay's door for its own links, not an
+	/// API. Off by default.
+	#[doc(hidden)]
+	pub fn with_ietf(mut self, ietf: bool) -> Self {
+		self.extensions.ietf = ietf;
+		self
+	}
+
+	/// Whether to offer MoQ Solicit on moq-transport, which every session does: off only in
+	/// a test acting as a peer without it, not an API.
+	#[doc(hidden)]
+	pub fn with_solicit(mut self, solicit: bool) -> Self {
+		self.extensions.solicit = solicit;
 		self
 	}
 

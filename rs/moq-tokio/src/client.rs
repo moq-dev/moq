@@ -152,7 +152,8 @@ impl Client {
 
 		let mut moq = moq_net::Client::new()
 			.with_versions(versions.clone())
-			.with_extensions(config.extensions);
+			.with_ietf(config.ietf)
+			.with_solicit(!config.decline_solicit);
 		if let Some(implementation) = &config.implementation {
 			moq = moq.with_implementation(implementation);
 		}

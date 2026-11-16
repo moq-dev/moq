@@ -145,7 +145,6 @@ impl Workers {
 			bind,
 			versions,
 			// With the versions and timeout, mapped onto the moq handshake by `listen.server()`.
-			extensions: _,
 			implementation: _,
 			timeout,
 			tls: listen_tls,

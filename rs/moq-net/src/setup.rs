@@ -1,8 +1,7 @@
-//! The SETUP exchange, the extensions a side offers in it, and the credential a peer may
-//! present in it.
+//! The SETUP exchange and the credential a peer may present in it.
 //!
-//! Only [`Extensions`], [`Token`], and [`Role`] are public; the SETUP messages themselves
-//! are wire internals.
+//! Only [`Token`] and [`Role`] are public; the SETUP messages and the extensions a side
+//! offers in them are wire internals.
 
 use bytes::Bytes;
 
@@ -73,14 +72,12 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 
 /// The SETUP extensions this side offers.
 ///
-/// Turning one off connects as a peer that does not speak that extension. moq-lite carries
-/// solicit in its core, so that one only changes moq-transport sessions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct Extensions {
+/// Not public: every session offers Solicit, and only moq-relay offers `ietf`, through
+/// `Client::with_ietf` and `Server::with_ietf`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Extensions {
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
-	/// announcing unasked (moq-transport only).
+	/// announcing unasked (moq-transport only). Off only in tests acting as a peer without it.
 	pub solicit: bool,
 	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
 	/// moq-transport object state a relay preserves, such as Object IDs and properties.

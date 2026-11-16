@@ -66,7 +66,8 @@ impl crate::listen::Config {
 		let mut server = moq_net::Server::new()
 			.with_timeout(self.resolved_timeout())
 			.with_versions(self.versions())
-			.with_extensions(self.extensions);
+			.with_ietf(self.ietf)
+			.with_solicit(!self.decline_solicit);
 		if let Some(implementation) = &self.implementation {
 			server = server.with_implementation(implementation);
 		}

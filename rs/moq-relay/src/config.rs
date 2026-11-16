@@ -336,8 +336,8 @@ impl Config {
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
 		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
-		self.listen.extensions.ietf = true;
-		self.connect.extensions.ietf = true;
+		self.listen.ietf = true;
+		self.connect.ietf = true;
 		// Name the relay ahead of its core unless the embedder set a name (empty omits it),
 		// and dial cluster peers under the same name.
 		let implementation = self
@@ -499,21 +499,17 @@ mod tests {
 		}
 	}
 
-	/// The moq-transport extension choices are file-only, so the loader must carry them through.
+	/// The SETUP extensions are no setting: the relay always offers `ietf` on its own links,
+	/// and a file naming either table is refused.
 	#[test]
-	fn loader_keeps_toml_extension_settings() {
+	fn extension_tables_are_refused() {
 		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("relay.toml");
-		std::fs::write(
-			&path,
-			"[listen.extensions]\nietf = true\n\n[connect.extensions]\nsolicit = false\n",
-		)
-		.unwrap();
-		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
-		assert!(config.listen.extensions.ietf);
-		assert!(config.listen.extensions.solicit);
-		assert!(!config.connect.extensions.solicit);
-		assert!(!config.connect.extensions.ietf);
+		for table in ["[listen.extensions]\nietf = true\n", "[connect.extensions]\nsolicit = false\n"] {
+			let path = dir.path().join("relay.toml");
+			std::fs::write(&path, table).unwrap();
+			let parsed = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]);
+			assert!(parsed.is_err(), "{table}");
+		}
 	}
 
 	#[test]

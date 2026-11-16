@@ -5,7 +5,6 @@ import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
 import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
-import * as Extensions from "./extensions.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
 export const DEFAULT_TIMEOUT = Duration.millis(30_000);
@@ -20,8 +19,8 @@ export const DEFAULT_TIMEOUT = Duration.millis(30_000);
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
  * extension) and its Hop ID (see the MoQ Cluster extension), plus the implementation it
- * advertised. We declare our Hop ID on every session, and Solicit unless `extensions`
- * declines it: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * advertised. We declare our Hop ID and Solicit on every session: we send
+ * SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -29,7 +28,16 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	{ client, extensions, token }: { client: boolean; extensions: Extensions.Offered; token?: Uint8Array },
+	{
+		client,
+		token,
+		solicit = true,
+	}: {
+		client: boolean;
+		token?: Uint8Array;
+		/** Declare MoQ Solicit. `false` only in a test acting as a peer without it. */
+		solicit?: boolean;
+	},
 ): Promise<{
 	control: Stream;
 	early: Reader[];
@@ -42,7 +50,7 @@ export async function exchangeSetup(
 }> {
 	const params = new Ietf.SetupOptions();
 	Ietf.implementationIntoSetup(params, implementation);
-	Extensions.intoSetup(params, extensions);
+	if (solicit) Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params);

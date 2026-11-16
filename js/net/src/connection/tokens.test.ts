@@ -4,7 +4,6 @@ import type { Pending } from "../auth_session.ts";
 import * as Ietf from "../ietf/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Reader } from "../stream.ts";
-import { offered } from "./extensions.ts";
 import { exchangeSetup } from "./handshake.ts";
 import type { Session } from "./session.ts";
 import { credential, extra, fallback, Held, hold } from "./tokens.ts";
@@ -129,7 +128,7 @@ test("an IETF client presents its token in SETUP", async () => {
 	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
 	const token = new TextEncoder().encode("credential");
 	// Never answered: only the SETUP the client writes matters here.
-	void exchangeSetup(pair.client, version, "test", { client: true, extensions: offered(), token }).catch(() => {});
+	void exchangeSetup(pair.client, version, "test", { client: true, token }).catch(() => {});
 
 	const streams = pair.server.incomingUnidirectionalStreams.getReader();
 	const next = await streams.read();
