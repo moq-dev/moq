@@ -1851,7 +1851,7 @@ mod tests {
 			.accept(Import {
 				publisher: &origin,
 				broadcast: moq_net::Path::from_static("live/cam0"),
-				ingest: ingest,
+				ingest,
 			})
 			.await
 			.unwrap();
