@@ -120,7 +120,7 @@ hidden names work exactly as before.
   instance, so it never inherits those viewers.
 - **Most specific, then highest epoch, then rank.** The most specific prefix
   wins. Within one instance only its highest epoch is eligible, ahead of cost.
-  Among instances the order is link preference, cost, a broadcast published
+  Among instances the order is link priority, cost, a broadcast published
   locally, hop length, then a hash of the instance and the path, so relays
   agree and a pool's paths spread over its hosts. See
   [choosing a route](/concept/identity#choosing-a-route).
@@ -160,9 +160,9 @@ choosing instances, following restarts, and answering work on demand.
 
 An endpoint can hold sessions to several CDNs at once, each feeding one shared
 origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
-a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides
+a per-link priority the endpoint sets (higher wins, 0 is neutral, negative demotes), unrelated to a subscription's priority. It decides
 among instances before cost, so metrics from different operators are never
-compared. A subscription uses the preferred link that has a route and moves to the
+compared. A subscription uses the highest-priority link that has a route and moves to the
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same instance,

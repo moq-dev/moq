@@ -726,7 +726,7 @@ async fn accept(
 	let session = moq_uring::transport::Local::new(conn.clone());
 	let handshake = serve
 		.moq
-		.accept_request(moq_net::time::Instant::now(), session)
+		.handshake(moq_net::time::Instant::now(), session)
 		.with_deadline(deadline)
 		.await
 		.context("moq handshake failed")?;
@@ -860,8 +860,8 @@ impl crate::incoming::Sealed for Request {
 		self.handshake.role()
 	}
 
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		self.handshake.peer_hop()
+	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_node()
 	}
 
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {

@@ -99,7 +99,7 @@ async fn setup_counts_under_the_admitted_stats() {
 			session
 		};
 		let server = async {
-			let request = server.accept_request(now(), server_transport).await.unwrap();
+			let request = server.handshake(now(), server_transport).await.unwrap();
 			let (session, driver) = request.with_stats(stats).ok().await.unwrap();
 			spawn(driver);
 			session

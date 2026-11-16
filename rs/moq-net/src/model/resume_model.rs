@@ -338,7 +338,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			hop: std::num::NonZeroU64::MIN,
+			node: std::num::NonZeroU64::MIN,
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};

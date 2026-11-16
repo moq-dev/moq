@@ -479,7 +479,7 @@ async fn connect(opts: Options) -> Pair {
 	};
 	let server_fut = async {
 		let mut handshake = server
-			.accept_request(now(), server_transport)
+			.handshake(now(), server_transport)
 			.await
 			.expect("server handshake");
 		let setup_token = handshake.token().cloned();

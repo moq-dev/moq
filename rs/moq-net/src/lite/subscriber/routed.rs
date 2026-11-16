@@ -178,7 +178,7 @@ impl Routed {
 		let link = route::Link {
 			// A zero-cost link never reaches here: SETUP refuses it on lite-07.
 			cost: link_cost.max(1),
-			priority: subscriber.origin.preference().value(),
+			priority: subscriber.origin.priority().value(),
 			upstream: subscriber.origin.link() == crate::origin::Link::Upstream,
 			// Only a stream this node answers is sent routes.
 			proxy: false,

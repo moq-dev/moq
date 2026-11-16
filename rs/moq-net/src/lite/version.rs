@@ -469,13 +469,13 @@ impl fmt::Display for Version {
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
 		match v {
-			Version::Lite01 => crate::Version::Lite(Version::Lite01),
-			Version::Lite02 => crate::Version::Lite(Version::Lite02),
-			Version::Lite03 => crate::Version::Lite(Version::Lite03),
-			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-			Version::Lite05 => crate::Version::Lite(Version::Lite05),
-			Version::Lite06 => crate::Version::Lite(Version::Lite06),
-			Version::Lite07 => crate::Version::Lite(Version::Lite07),
+			Version::Lite01 => crate::Version::lite(Version::Lite01),
+			Version::Lite02 => crate::Version::lite(Version::Lite02),
+			Version::Lite03 => crate::Version::lite(Version::Lite03),
+			Version::Lite04 => crate::Version::lite(Version::Lite04),
+			Version::Lite05 => crate::Version::lite(Version::Lite05),
+			Version::Lite06 => crate::Version::lite(Version::Lite06),
+			Version::Lite07 => crate::Version::lite(Version::Lite07),
 		}
 	}
 }
@@ -484,9 +484,9 @@ impl TryFrom<crate::Version> for Version {
 	type Error = ();
 
 	fn try_from(v: crate::Version) -> Result<Self, Self::Error> {
-		match v {
-			crate::Version::Lite(v) => Ok(v),
-			crate::Version::Ietf(_) => Err(()),
+		match v.0 {
+			crate::Draft::Lite(v) => Ok(v),
+			crate::Draft::Ietf(_) => Err(()),
 		}
 	}
 }

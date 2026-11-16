@@ -181,7 +181,7 @@ the bullets below are the contract it carries.
   Switching between paths resumes only across a matching explicit epoch.
   Keep administrative identity and broadcast epoch separate. A node names
   itself in paths by a hop fresh per process, since its session numbers
-  restart with it (`Router::new`); the origin's `Config::hop` is both that
+  restart with it (`Router::new`); the origin's `Config::node` is both that
   hop and its declared identity, so one set by hand must be fresh per
   process too. A random identity alone does not keep a dead incarnation
   away. What bounds it is ordered sessions, state scoped to the session that

@@ -1018,7 +1018,7 @@ async fn a_name_announced_back_over_moq_transport_waits_without_retrying() {
 	live.broadcast().create_track("video", timed()).unwrap();
 	live.announce().unwrap();
 	let mut options = links.options("p-r", &p, &r);
-	options.client_subscribe = Some(r.clone().with_preference(origin::Preference::new(-1)));
+	options.client_subscribe = Some(r.clone().with_priority(origin::Priority::new(-1)));
 	let _p_r = connect_mock(options).await;
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let mut pairs = Vec::new();

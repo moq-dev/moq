@@ -421,8 +421,8 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		25 => roundtrip::<lite::AuthOk, _>(rest, &mut Vec::new(), version),
 		26 => roundtrip::<lite::AuthError, _>(rest, &mut Vec::new(), version),
 		27 => roundtrip::<lite::AuthReply, _>(rest, &mut Vec::new(), version),
-		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
-		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
+		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::lite(version)),
+		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::lite(version)),
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
@@ -1605,7 +1605,7 @@ fn setup<'a, T>(data: &'a [u8], scratch: &'a mut Vec<u8>, version: ietf::Version
 where
 	T: Decode<'a, crate::Version> + Encode<crate::Version>,
 {
-	let outer = crate::Version::Ietf(version);
+	let outer = crate::Version::ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
 		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
@@ -2189,7 +2189,7 @@ pub fn seeds() -> Vec<Seed> {
 
 	// SETUP has its own type prefix, which uniform bodies cannot synthesize.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
-		let outer = crate::Version::Ietf(*version);
+		let outer = crate::Version::ietf(*version);
 		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
 		let messages = vec![(26, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
 		for (kind, message) in messages {
@@ -2205,7 +2205,7 @@ pub fn seeds() -> Vec<Seed> {
 
 	// The `moql` SETUP pair, framed as lite-01/02, also has its own type prefix.
 	for (index, version) in LITE_VERSIONS.iter().enumerate() {
-		let outer = crate::Version::Lite(*version);
+		let outer = crate::Version::lite(*version);
 		let client = crate::setup::Client {
 			versions: coding::Versions::from([outer.into()]),
 			parameters: Default::default(),

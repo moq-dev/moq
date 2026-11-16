@@ -926,8 +926,8 @@ mod tests {
 			ietf::GoAway::decode(r, ietf::Version::Draft22).map(|_| ())
 		});
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
-			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::Lite(version), false);
-			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::Lite(version), false);
+			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::lite(version), false);
+			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::lite(version), false);
 		}
 	}
 
@@ -948,12 +948,12 @@ mod tests {
 			let mut prefix = vec![0x20];
 			Encoder::new(&mut prefix, version.into()).varint(65535).unwrap();
 			assert!(matches!(
-				setup::Client::decode_slice(&prefix, Version::Lite(version)),
+				setup::Client::decode_slice(&prefix, Version::lite(version)),
 				Err(DecodeError::Short)
 			));
 			prefix[0] = 0x21;
 			assert!(matches!(
-				setup::Server::decode_slice(&prefix, Version::Lite(version)),
+				setup::Server::decode_slice(&prefix, Version::lite(version)),
 				Err(DecodeError::Short)
 			));
 		}

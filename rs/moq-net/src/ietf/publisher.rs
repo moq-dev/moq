@@ -939,10 +939,10 @@ pub(super) struct Publisher {
 	// which is what makes cross-session loop detection work.
 	self_origin: crate::Hop,
 	// The identity assigned to the peer (a fresh per-session id, or one the caller
-	// pinned with `with_peer_hop`), used when the peer declares
+	// pinned with `with_peer_node`), used when the peer declares
 	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
 	// which wins unless it withheld it as the reserved 0.
-	peer_hop: Option<crate::Hop>,
+	peer_node: Option<crate::Hop>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
@@ -2820,7 +2820,7 @@ impl Publisher {
 		session: Transport,
 		origin: origin::Consumer,
 		control: Control,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		version: Version,
 	) -> Self {
@@ -2828,11 +2828,11 @@ impl Publisher {
 			withdrawal: Default::default(),
 			runtime,
 			session,
-			self_origin: crate::Hop::from(origin.hop()),
+			self_origin: crate::Hop::from(origin.node()),
 			// Serving the peer is not a local reader asking to discover anything.
 			origin: origin.serving(),
 			control,
-			peer_hop,
+			peer_node,
 			peer_setup,
 			joins: Default::default(),
 			version,
@@ -2919,12 +2919,12 @@ impl Publisher {
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_hop`
-	/// or `Request::with_peer_hop`), since moq-transport carries no identity
+	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_node`
+	/// or `Request::with_peer_node`), since moq-transport carries no identity
 	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
 	/// the fallback like any other anonymous peer.
 	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
-		peer.identity().or(self.peer_hop).unwrap_or(crate::Hop::UNKNOWN)
+		peer.identity().or(self.peer_node).unwrap_or(crate::Hop::UNKNOWN)
 	}
 
 	/// Pick what to advertise to this peer for one route.
@@ -18714,7 +18714,7 @@ mod tests {
 	}
 
 	/// A broadcast whose every route flows through the peer's assigned identity
-	/// (`Client::with_peer_hop`) is never advertised to that peer; it would only
+	/// (`Client::with_peer_node`) is never advertised to that peer; it would only
 	/// echo the peer's own content back at it. A broadcast with an independent
 	/// route still is.
 	#[kio::test]

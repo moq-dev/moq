@@ -161,11 +161,9 @@ omission. All in `rs/moq-net/src/model/origin.rs`:
   value, which AGENTS.md forbids in public API. Crate-private.
 - Before hiding each, grep Kixel and moq.pro for a caller (the maintainer's
   condition for every unused-API removal) and keep what one uses.
-- Two renames ride [the moq-net renames](/quest/m2/net-renames.md), not
-  this PR: `Config::hop` to `node`, and `with_preference` to `priority`.
-  Whichever lands second rebases; this PR must not reintroduce the old
-  names. The Route Offer's priority byte stays on the wire: the relay has
-  no key to set it yet, and
+- `Config::hop` is now `node` and `with_preference` is `with_priority`;
+  this PR must not reintroduce the old names. The Route Offer's priority
+  byte stays on the wire: the relay has no key to set it yet, and
   [outbound federation](/quest/m3/cluster-routing/federation.md) adds one.
 - moq-ffi exposes only a route's `cost` and `available`
   (`rs/moq-ffi/src/origin.rs`), so no binding changes.

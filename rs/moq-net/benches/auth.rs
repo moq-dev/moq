@@ -55,7 +55,7 @@ async fn pair(origins: Option<Origins<'_>>) -> Pair {
 		if let Some(origins) = &origins {
 			config = config.with_subscriber(origins.subscribe.clone());
 		}
-		let mut request = config.accept_request(harness::now(), server).await.unwrap();
+		let mut request = config.handshake(harness::now(), server).await.unwrap();
 		let requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		harness::spawn(driver);
@@ -143,7 +143,7 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 			.with_versions(version.into())
 			.with_extensions(server_extensions)
 			.with_subscriber(subscribe.clone())
-			.accept_request(harness::now(), server)
+			.handshake(harness::now(), server)
 			.await
 			.unwrap();
 		let requests = request.requests();

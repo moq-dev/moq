@@ -45,12 +45,10 @@ Items, each with the grep that showed no caller at `80ca9787e3` (over `rs`,
   resume keep using it inside the crate.
 - The 17 `pub fn` predicates of `lite::Version`
   (`rs/moq-net/src/lite/version.rs`, `has_track_stream` to `has_route_cost`):
-  make `pub(crate)`. They are reachable today only through the public
-  `Version::Lite` variant, and no caller exists outside moq-net; the relay
-  uses only the crate-level `Version::has_request_path`. Each would
-  otherwise be a public name to keep or break as lite-08 moves the cut-offs.
-  [The opaque `Version`](/quest/m2/net-renames.md) closes the same door from
-  the other side; either order works.
+  make `pub(crate)`. The opaque `Version` already closed the only public path
+  to them, the `Version::Lite` variant, so this only makes the module's own
+  visibility say so; the relay uses only the crate-level
+  `Version::has_request_path`.
 - `Recovery` (`rs/moq-net/src/lite/subscriber/fills.rs:691-695`) matches
   `Error::Decode(DecodeError::Short)` and then
   `matches!(err, Error::ProtocolViolation)` to tell a reset from malformed
@@ -81,5 +79,4 @@ Public API: breaking, removals only (`Position::after`, `after_group`,
 
 ## Related
 
-- [moq-net's node, version, handshake, and route priority](/quest/m2/net-renames.md) - makes `Version` opaque
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - gives the container reader the `Gap` that frees three more methods

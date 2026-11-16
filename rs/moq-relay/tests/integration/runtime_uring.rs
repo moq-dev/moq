@@ -433,7 +433,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
 	let label = version.map_or("every version", |version| version.as_str());
 	// Only moq-transport puts the deadline on the wire.
-	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
+	let ietf = version.is_some_and(|version| !version.is_lite());
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");

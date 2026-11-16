@@ -124,7 +124,7 @@ impl Backend for Relay {
 				.with_versions(version.into())
 				.with_extensions(extensions);
 			let handshake = server
-				.accept_request(moq_net::time::Instant::now(), server_link)
+				.handshake(moq_net::time::Instant::now(), server_link)
 				.await
 				.unwrap();
 			Connection::new(Accepted::new(handshake, moq_auth::Transport::Quic), cluster, auth)
