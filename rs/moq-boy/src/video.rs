@@ -146,6 +146,7 @@ async fn encoder_thread(
 			&& let Err(e) = producer.cut().await
 		{
 			tracing::error!(error = %e, "H.264 encoder cannot cut a group; stopping encoder");
+			producer.abort(moq_net::Error::Transport(e.to_string()));
 			return;
 		}
 		let start = Instant::now();
@@ -161,6 +162,8 @@ async fn encoder_thread(
 		// track is gone, which is terminal: stop rather than flooding logs every frame.
 		if let Err(e) = producer.write(moq_video::Frame::new(surface, ts)).await {
 			tracing::error!(error = %e, "video encode failed; stopping encoder");
+			// Subscribers see the cause rather than an unfinished track's `Dropped`.
+			producer.abort(moq_net::Error::Transport(e.to_string()));
 			return;
 		}
 		encode_duration.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);

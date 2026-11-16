@@ -33,7 +33,9 @@
 //!     limits it to while a subscriber is. Requires the `capture` feature.
 //!   - [`encode::Producer`] encodes [`Frame`]s you supply (from capture, a
 //!     decoder, or your own pixels via [`Surface::rgba`]) and publishes them,
-//!     following the connection's bandwidth grant between frames.
+//!     following the connection's bandwidth grant between frames when
+//!     `encode::Options::bandwidth` carries the connection's allocator (the
+//!     default holds the configured bitrate).
 //!   - [`encode::Encoder`] encodes without publishing, and
 //!     [`encode::Publisher`] publishes frames you encoded yourself.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to

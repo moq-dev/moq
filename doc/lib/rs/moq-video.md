@@ -44,7 +44,8 @@ watches, and return to the configured bitrate while nobody does.
 
 To publish frames from your own source, `encode::Producer` takes raw frames,
 owns the encoder, and follows the same send estimate between frames, like
-`moq_audio::encode::Producer`. Chain renditions through `Options::lower` for
+`moq_audio::encode::Producer`, once `Options::bandwidth` carries the
+connection's allocator; the default holds the configured bitrate. Chain renditions through `Options::lower` for
 simulcast: a higher rung stops encoding and advertises itself disabled while the
 connection cannot fund it, then resumes on a keyframe. `encode::Publisher` is
 the layer below, for frames you encoded yourself. Where the platform

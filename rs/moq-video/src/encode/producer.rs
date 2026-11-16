@@ -315,9 +315,13 @@ impl Producer {
 			*ceiling = bitrate;
 		}
 		self.reservation.update(bitrate);
-		// A new ceiling starts the grant over from it, since the encoder applied it itself.
+		// The grant follows from the rate the encoder applied itself, even when the ceiling is
+		// unchanged and the policy with it, so a grant below it retunes back down.
 		if let Some(grant) = self.grant.as_mut() {
 			grant.set_policy(policy(bitrate, self.lower.as_ref()));
+			if !matches!(self.encoding, Encoding::Disabled) {
+				grant.assume(rate::Target::Enabled(bitrate));
+			}
 		}
 		Ok(())
 	}
@@ -1093,5 +1097,47 @@ mod tests {
 		assert!(applied.iter().all(|&bps| bps <= lowered.as_bps()), "{applied:?}");
 		assert_eq!(producer.bitrate(), Some(lowered));
 		assert_eq!(producer.reservation().rate(), Some(lowered));
+	}
+
+	/// A manual retune to the unchanged ceiling hands the encoder back to the grant rather than
+	/// leaving it at the ceiling the grant cannot fund.
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_manual_retune_returns_to_the_grant() {
+		let _probe = probe::exclusive();
+		let ceiling = Rate::from_mbps(4);
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_mbps(1))).unwrap();
+		let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = probed(&broadcast, &catalog, "video", ceiling, bandwidth, None);
+		let _viewer = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut micros = 0;
+
+		producer.write(frame(&mut micros)).await.unwrap();
+		assert!(producer.bitrate().unwrap() <= Rate::from_mbps(1));
+
+		producer.set_bitrate(ceiling).await.unwrap();
+		assert_eq!(producer.bitrate(), Some(ceiling));
+		for _ in 0..10 {
+			tokio::time::advance(Duration::from_millis(100)).await;
+			producer.write(frame(&mut micros)).await.unwrap();
+		}
+		assert!(
+			producer.bitrate().unwrap() <= Rate::from_mbps(1),
+			"{:?}",
+			producer.bitrate()
+		);
 	}
 }
