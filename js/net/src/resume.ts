@@ -105,6 +105,13 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
+// Whether `err` from `source` judges its route rather than the track: a received route that lost
+// the content refuses nothing, and the read waits for the next route. A local broadcast's word is
+// the track's verdict. Mirrors the Rust front's `strands`.
+function strands(err: Error, source: Source): boolean {
+	return unroutable(err) && !source.local;
+}
+
 // Whether `err` says the route is going away rather than that it gave up on the copy: its
 // answer is no verdict, and the next route is asked. Mirrors the Rust front's `closing`.
 function closing(err: Error): boolean {
@@ -1025,7 +1032,7 @@ class Reader implements ResumeSource {
 			// Otherwise one that delivered nothing is the route refusing the track, and one that
 			// did is subscribed afresh.
 			if (serving && route.source === serving.source && !closing(ended)) {
-				if (unroutable(ended) && !serving.source.local) return { kind: "idle" };
+				if (strands(ended, serving.source)) return { kind: "idle" };
 				if (!serving.delivered) {
 					route.refuse(ended);
 					return this.#fail(ended);
@@ -1060,7 +1067,7 @@ class Reader implements ResumeSource {
 				copy.sub.closed.peek() === undefined,
 		);
 		if (!incumbent || !this.route.revert(serving.source, incumbent.source)) return false;
-		if (!closing(failed)) this.route.refuse(failed);
+		if (!closing(failed) && !strands(failed, serving.source)) this.route.refuse(failed);
 		return true;
 	}
 

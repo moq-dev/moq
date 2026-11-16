@@ -850,6 +850,37 @@ test("a replacement that answers and then aborts before its first group leaves t
 	close();
 });
 
+// Mirrors `a_stranded_track_still_draining_asks_again_when_the_table_moves` in rs/moq-net/src/model/front.rs:
+// a replacement losing its route judged the route, so it refuses nothing the next route serves.
+test("a replacement that loses its route before its first group leaves the next route free to serve", async () => {
+	const front = new Front();
+	const [a, b, c] = [new BroadcastProducer(), new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb, tc] = [copy(a), copy(b), copy(c)];
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	front.serve(c.consume());
+	tc.write(2n);
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b, c]) broadcast.close();
+});
+
 // Mirrors the Rust front: an incumbent that finished cleanly ends the track whoever serves it.
 test("a replacement that aborts before its first group after the incumbent finished ends the track cleanly", async () => {
 	const { a, b, swap, active, close } = await setup();

@@ -194,6 +194,11 @@ struct Track {
 	/// replaces it: a route being beaten keeps serving until then, and keeps serving if
 	/// the newcomer refuses the track.
 	draining: Option<u64>,
+	/// The source whose route lost the track, failing or refusing it as unroutable, which
+	/// judges the route, not the track. The track waits for another source, or for the
+	/// table to move, rather than ask that source again at once or end; a draining copy
+	/// keeps feeding it meanwhile.
+	stranded: Option<u64>,
 	/// The track finished or aborted: nothing is spliced again, and it stays only
 	/// until it goes unread for the linger.
 	ended: bool,
@@ -215,10 +220,6 @@ pub(super) struct Front {
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
 	parked: BTreeSet<(Instant, Arc<str>)>,
-	/// Tracks whose route lost them, by the source that failed or refused them as unroutable,
-	/// which judges the route, not the track. Each waits for another source, or for the
-	/// table to move, rather than ask that source again at once or end.
-	stranded: BTreeMap<Arc<str>, u64>,
 	/// Immutable track metadata, fixed by the first copy of each track. Every
 	/// source of the broadcast must serve the same content.
 	info: BTreeMap<Arc<str>, track::Info>,
@@ -246,7 +247,6 @@ impl Front {
 			resolved: false,
 			tracks: BTreeMap::new(),
 			parked: BTreeSet::new(),
-			stranded: BTreeMap::new(),
 			info: BTreeMap::new(),
 			linger,
 			armed: None,
@@ -325,6 +325,7 @@ impl Front {
 						wanted: false,
 						ended: false,
 						draining: None,
+						stranded: None,
 					},
 				);
 			}
@@ -346,7 +347,6 @@ impl Front {
 			Event::Unwanted { track, now } => self.unwanted(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
 			Event::Forgotten { track } => {
-				self.stranded.remove(&track);
 				self.tracks.remove(&track);
 			}
 			Event::Held => {
@@ -542,7 +542,7 @@ impl Front {
 			Ok(()) => {
 				track.draining = None;
 				track.lost = None;
-				self.stranded.remove(&name);
+				track.stranded = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
@@ -609,7 +609,7 @@ impl Front {
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
 				if self.serving.is_some_and(|(serving, _)| serving == source) {
-					self.stranded.insert(name, source);
+					track.stranded = Some(source);
 				} else {
 					self.redispatch(name, actions);
 				}
@@ -654,7 +654,7 @@ impl Front {
 			if let Some(draining) = track.draining {
 				track.state = TrackState::Spliced { source: draining };
 			}
-			self.stranded.insert(name, source);
+			track.stranded = Some(source);
 			return;
 		}
 		track.refused.insert(source);
@@ -679,8 +679,7 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.wanted || track.ended || track.state != TrackState::Idle || self.stranded.get(&name) == Some(&source)
-		{
+		if !track.wanted || track.ended || track.state != TrackState::Idle || track.stranded == Some(source) {
 			return;
 		}
 		if track.refused.contains(&source) {
@@ -709,17 +708,32 @@ impl Front {
 			.is_some_and(|(_, candidate)| candidate.carried && !candidate.local)
 	}
 
-	/// Ask the serving source again for every track it lost as unroutable.
+	/// Ask the serving source again for every track it lost as unroutable. One still read from
+	/// a draining copy keeps reading it until the answer, as during any handover.
 	fn unstrand(&mut self, actions: &mut Vec<Action>) {
 		let Some((source, _)) = self.serving else {
 			return;
 		};
-		let stranded: Vec<_> = (self.stranded.iter())
-			.filter(|(_, by)| **by == source)
-			.map(|(name, _)| name.clone())
-			.collect();
-		for name in stranded {
-			self.stranded.remove(&name);
+		let mut idle = Vec::new();
+		for (name, track) in &mut self.tracks {
+			if track.stranded != Some(source) {
+				continue;
+			}
+			track.stranded = None;
+			match track.state {
+				TrackState::Spliced { source: draining }
+					if track.draining == Some(draining) && track.wanted && !track.ended && !self.serving_closing =>
+				{
+					track.state = TrackState::Querying { source };
+					actions.push(Action::Query {
+						track: name.clone(),
+						source,
+					});
+				}
+				_ => idle.push(name.clone()),
+			}
+		}
+		for name in idle {
 			self.redispatch(name, actions);
 		}
 	}
@@ -1413,6 +1427,82 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// The serving source refuses a track unroutable while the copy it replaces still drains.
+	/// Once the table moves, the source is asked again with the draining copy still read, and
+	/// its answer replaces it. A request for the track after it aborted starts unstranded.
+	#[test]
+	fn a_stranded_track_still_draining_asks_again_when_the_table_moves() {
+		let replaced = || {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			let refused = Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(Error::from(crate::StreamError::Unroutable)),
+				retry: None,
+			};
+			assert_actions(front.step(refused), &[]);
+			front
+		};
+		let query = [Action::Query {
+			track: name("video"),
+			source: 200,
+		}];
+
+		let mut front = replaced();
+		let moved = Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		};
+		assert_actions(front.step(moved), &query);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+
+		// The draining copy fails for good; a fresh request asks the serving source.
+		let mut front = replaced();
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::App(7)),
+				delivered: true,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::App(7),
+				retry: None,
+			}],
+		);
+		front.step(Event::TrackAssigned {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		assert_actions(
+			front.step(Event::Wanted { track: name("video") }),
+			&[query[0].clone(), Action::Arm { at: None }],
+		);
 	}
 
 	/// A replaced copy still draining fails unroutable after its replacement refused the
