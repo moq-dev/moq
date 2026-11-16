@@ -806,8 +806,6 @@ For example:
 - A B-frame stream contributes its reorder delay, the presentation timestamp minus the decode timestamp.
 - A fragment or packet batch contributes the media span between its earliest and latest timestamps.
 
->>>
-
 ### delay {#field-delay}
 The maximum amount, in milliseconds, by which a frame's presentation timestamp has trailed one that another rendition of the broadcast had already written.
 If absent, a consumer SHOULD assume the rendition does not trail the others.
