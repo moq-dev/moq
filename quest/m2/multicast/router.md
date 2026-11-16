@@ -79,7 +79,10 @@ the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
   whether the way there is draining, or a node prefers its own echo of a claim
   that crossed two grants and never settles: two relays sharing a draining
   neighbour and a scoped link traded places for good without the second
-  (`a_claim_across_a_grant_keeps_its_drain`).
+  (`a_claim_across_a_grant_keeps_its_drain`). A scoped neighbour's
+  GOAWAY drains the claims it gave the same way
+  (`a_scoped_neighbour_draining_drains_its_claims`), and a session that
+  closes takes what was still unsent to it.
 - A node that takes a newer copy of a forwarding node's claims passes the floor
   on even when nothing in the copy differs, or a neighbour that heard a claim
   in between keeps it after its publisher ended it

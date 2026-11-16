@@ -166,13 +166,18 @@ fn leafy(core: usize, leaves: usize, publishers: usize) -> Mesh {
 
 /// `count` chorded rings of `size` relays, each joined to the next by `joins`
 /// scoped links, and the last to the first when `ring`. Publishers join the first.
-fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize) -> Mesh {
-	// Each mesh leaves by relays past the ones it is entered by.
-	let exit = (size / 2).max(2);
-	assert!(
-		exit + joins <= size,
-		"a mesh of {size} relays has no room for {joins} gateways each way"
-	);
+/// `None` when a mesh of `size` has no room for its gateways.
+fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize) -> Option<Mesh> {
+	// A mesh that is both entered and left, any but the ends of a chain, leaves by
+	// relays past the ones it is entered by, so a claim crosses it between grants.
+	let through = ring || count > 2;
+	let exit = match through {
+		true => (size / 2).max(1 + joins),
+		false => size / 2,
+	};
+	if size < 2 || exit + joins > size {
+		return None;
+	}
 	let one = chords(size, 1);
 	let mut mesh = Mesh {
 		relays: count * size,
@@ -192,14 +197,12 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 		}
 		let next = (at + 1) % count;
 		for join in 0..joins {
-			// Each boundary leaves a mesh at another relay than the one it entered by,
-			// even in a mesh of three, so a claim crosses the mesh between two grants.
 			let (a, b) = (at * size + exit + join, next * size + 1 + join);
 			mesh.links.push((a, b, 1));
 			mesh.ties.insert((a, b), Tie::Scoped);
 		}
 	}
-	mesh
+	Some(mesh)
 }
 
 /// Every shape, at about `relays` relays each.
@@ -210,32 +213,42 @@ fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 		mesh,
 		today: true,
 	};
+	// Today's rule cannot run three meshes: a qualified identity crosses one grant.
+	let grants = |name, today, mesh: Option<Mesh>| mesh.map(|mesh| Shape { name, mesh, today });
 	let (regions, edges) = match relays {
 		..12 => (2, 2),
 		12..24 => (3, 3),
 		24..48 => (4, 6),
 		_ => (6, 8),
 	};
-	vec![
+	let mut shapes = vec![
 		open("tiers", tiers(regions, edges, true, publishers)),
 		open("tiers_unpeered", tiers(regions, edges, false, publishers)),
 		open("chords", chords(relays, publishers)),
 		open("sparse", sparse(relays, publishers, &mut rng)),
 		open("clique", clique(relays, publishers)),
 		open("leaves", leafy(relays / 2, relays - relays / 2, publishers)),
-		open("two_meshes_one_grant", joined(2, relays / 2, 1, false, publishers)),
-		open("two_meshes_two_grants", joined(2, relays / 2, 2, false, publishers)),
-		Shape {
-			name: "three_meshes_chain",
-			mesh: joined(3, relays / 3, 1, false, publishers),
-			today: false,
-		},
-		Shape {
-			name: "three_meshes_ring",
-			mesh: joined(3, relays / 3, 1, true, publishers),
-			today: false,
-		},
-	]
+	];
+	// A mesh too small for its gateways is left out.
+	shapes.extend(
+		[
+			grants(
+				"two_meshes_one_grant",
+				true,
+				joined(2, relays / 2, 1, false, publishers),
+			),
+			grants(
+				"two_meshes_two_grants",
+				true,
+				joined(2, relays / 2, 2, false, publishers),
+			),
+			grants("three_meshes_chain", false, joined(3, relays / 3, 1, false, publishers)),
+			grants("three_meshes_ring", false, joined(3, relays / 3, 1, true, publishers)),
+		]
+		.into_iter()
+		.flatten(),
+	);
+	shapes
 }
 
 /// The failures measured, each from a settled mesh.
@@ -690,6 +703,30 @@ fn a_claim_across_a_grant_keeps_its_drain() {
 	}
 }
 
+/// A scoped neighbour that sends GOAWAY is draining for the claims it gave, so a
+/// node holding the same claim from another neighbour announces that one instead.
+#[test]
+fn a_scoped_neighbour_draining_drains_its_claims() {
+	for arm in MULTI {
+		// A publisher on 0 and 2, each of which grants 1 the claim, 0 the cheaper.
+		let mut net = MultiSim::new(tune(arm), 4);
+		net.client(3);
+		net.publish(3, 100);
+		net.link(3, 0, 1, Tie::Peer);
+		net.link(3, 2, 1, Tie::Peer);
+		net.link(0, 1, 1, Tie::Scoped);
+		net.link(2, 1, 2, Tie::Scoped);
+		net.claim(3, "live/0", true);
+		quiesce(&mut net);
+		let broadcast = (100, p("live/0"));
+		let source = |net: &MultiSim| net.router(1).expect("a relay").step(hop(1, 0), &broadcast);
+		assert_eq!(source(&net), Some(multi::Next::Local(0)), "under {}", arm.name());
+		net.goaway(0);
+		quiesce(&mut net);
+		assert_eq!(source(&net), Some(multi::Next::Local(2)), "under {}", arm.name());
+	}
+}
+
 /// A relay that takes a newer copy of a node's claims from another neighbour tells
 /// its own neighbours the floor even when nothing in the copy differs from what it
 /// had, so one that heard a claim in between, by a route since gone, lets go of it.
@@ -772,7 +809,7 @@ fn a_session_floor_keeps_an_entry_per_restart_unless_filed_by_relay() {
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_failures() {
 	println!(
-		"shape,relays,links,failure,rule,route_messages,claim_messages,settle_ms,fed_ms,unfed,loops,offline,unavailable,false_ends,revivals,pending,lasting,hops,right"
+		"shape,relays,links,failure,rule,route_messages,claim_items,settle_ms,fed_ms,unfed,loops,offline,unavailable,false_ends,revivals,pending,lasting,hops,right"
 	);
 	let sizes: Vec<usize> = std::env::var("MOQ_BAKEOFF_RELAYS").map_or(vec![12, 32], |sizes| {
 		sizes
@@ -834,7 +871,7 @@ fn benchmark_bakeoff_failures() {
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_growth() {
 	println!(
-		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_messages,held_routes,heard_routes,held_claims,held_lasting,close_route_messages,death_route_messages,death_claim_messages,work"
+		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_items,held_routes,heard_routes,held_claims,lasting_after_failures,close_route_messages,death_route_messages,death_claim_items,work"
 	);
 	let tiers_of = |relays: usize, publishers: usize, claims: usize| {
 		let (regions, edges) = match relays {
@@ -891,7 +928,7 @@ fn benchmark_bakeoff_growth() {
 #[test]
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_baseline() {
-	println!("case,rule,route_messages,claim_messages,settle_ms,fed_ms,loops,stale,dark");
+	println!("case,rule,route_messages,claim_items,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
 	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
 		let mut rng = XorShift(0x6d6f_7100 + 24);

@@ -908,6 +908,8 @@ impl Lab {
 	pub fn hops(&self) -> usize {
 		(0..self.mesh.homes.len())
 			.flat_map(|index| (0..self.mesh.relays).map(move |relay| (relay, index)))
+			// Only a walk that reaches its publisher over open links is in use.
+			.filter(|&(relay, index)| self.walk(relay, index) == Some(Walk::Reached))
 			.filter_map(|(relay, index)| self.net.chase(relay, self.mesh.publisher(index).1))
 			.map(|(hops, _)| hops.len())
 			.sum()
@@ -1254,7 +1256,7 @@ fn benchmark_route_churn() {
 	// Nightly's report reads stdout and keeps the columns it has a unit for, so the
 	// message counts go there and the whole table to stderr. A claim sent is one
 	// message on the wire.
-	println!("rule,route_messages,claim_messages");
+	println!("rule,route_messages,claim_items");
 	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in COMPARED {
 		let churn = churn(rule, 0..400, false);
@@ -1272,7 +1274,7 @@ fn benchmark_route_churn() {
 #[test]
 #[ignore = "a benchmark; Nightly reports it"]
 fn benchmark_route_churn_two_homes() {
-	println!("rule,homes,route_messages,claim_messages");
+	println!("rule,homes,route_messages,claim_items");
 	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in COMPARED {
 		let churn = churn(rule, 0..400, true);
@@ -1324,7 +1326,7 @@ fn path_changes_keep_claims_and_withdrawals_keep_routes() {
 fn benchmark_route_rules() {
 	// As above: message counts to stdout for the report, which keeps the largest mesh
 	// alone, and the whole table to stderr.
-	println!("shape,relays,change,rule,route_messages,claim_messages,loop_messages,reroute_ms");
+	println!("shape,relays,change,rule,route_messages,claim_items,loop_messages,reroute_ms");
 	eprintln!("shape,relays,change,rule,msgs,items,claims,rounds,right,stale,dark,loops,offline,unavailable");
 	for relays in [3, 6, 12, 24] {
 		let mut rng = XorShift(0x6d6f_7100 + relays as u64);

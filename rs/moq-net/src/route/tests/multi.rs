@@ -435,6 +435,8 @@ impl<N: Key> Router<N> {
 		let Some(gone) = self.peers.remove(&peer) else {
 			return;
 		};
+		// Nothing still unsent goes to a session that closed.
+		self.out.retain(|(to, _)| *to != peer);
 		let mut lost = Vec::new();
 		for (&origin, offers) in &mut self.heard {
 			if offers.remove(&peer).is_some() {
@@ -467,11 +469,22 @@ impl<N: Key> Router<N> {
 
 	/// `peer` sent GOAWAY: every route through it ranks as draining.
 	pub fn goaway(&mut self, peer: N) {
+		let peer_key = peer;
 		let Some(peer) = self.peers.get_mut(&peer) else {
 			return;
 		};
 		peer.draining = true;
-		let node = peer.id;
+		let (node, role) = (peer.id, peer.port.role);
+		if role != Role::Routing {
+			// The claims it gave this node now lead through a draining neighbour.
+			let claims = self.local.get(&peer_key).into_iter().flatten();
+			let broadcasts: Vec<Broadcast> = claims.map(|(broadcast, _)| broadcast.clone()).collect();
+			for broadcast in broadcasts {
+				self.restate(broadcast, Change::Lost);
+			}
+			self.done();
+			return;
+		}
 		match self.tune.drain {
 			true => self.drains(node, None),
 			false => self.reselect_all(),
@@ -617,10 +630,18 @@ impl<N: Key> Router<N> {
 					.filter(|(broadcast, claim)| known.items.get(*broadcast) != Some(claim))
 					.map(|(broadcast, claim)| (broadcast.clone(), Change::Live(claim.clone())))
 					.collect();
+				// What the newer copy lacks is lost, unless this message says its
+				// publisher ended it.
+				let ended = |broadcast: &Broadcast| {
+					(changes.iter()).any(|(named, change)| named == broadcast && *change == Change::Ended)
+				};
 				diff.extend(
 					(known.items.keys())
 						.filter(|broadcast| !heard.items.contains_key(*broadcast))
-						.map(|broadcast| (broadcast.clone(), Change::Lost)),
+						.map(|broadcast| match ended(broadcast) {
+							true => (broadcast.clone(), Change::Ended),
+							false => (broadcast.clone(), Change::Lost),
+						}),
 				);
 				self.work += heard.items.len();
 				diff
@@ -722,7 +743,12 @@ impl<N: Key> Router<N> {
 	/// withdraw it for `cause` when none is left.
 	fn restate(&mut self, broadcast: Broadcast, cause: Change) {
 		let cheapest = (self.local.iter())
-			.filter_map(|(&peer, claims)| Some((claims.get(&broadcast)?, peer)))
+			.filter_map(|(&peer, claims)| {
+				// A claim from a neighbour that sent GOAWAY is draining from here on.
+				let mut claim = claims.get(&broadcast)?.clone();
+				claim.draining |= self.peers.get(&peer).is_some_and(|peer| peer.draining);
+				Some((claim, peer))
+			})
 			.min_by_key(|(claim, peer)| {
 				(
 					claim.draining,
@@ -731,8 +757,7 @@ impl<N: Key> Router<N> {
 					claim.chain.len(),
 					*peer,
 				)
-			})
-			.map(|(claim, peer)| (claim.clone(), peer));
+			});
 		let me = self.me;
 		let was = self.known.entry(me).or_default().items.get(&broadcast).cloned();
 		let change = match cheapest {
