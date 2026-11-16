@@ -2215,7 +2215,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	group
 		.write_frame(moq_net::Timestamp::from_secs(10).unwrap(), fragment)
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let _track = track.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)

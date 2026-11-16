@@ -132,7 +132,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		..Default::default()
 	};
 	let track = broadcast.create_track("objects", info).unwrap();
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	let payload = Bytes::from_static(&[0; 64]);
 	for id in 0..frames {
 		let fields = properties.then(|| {
@@ -163,7 +163,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
-	(broadcast, track, group.close().unwrap())
+	(broadcast, track, group.finish().unwrap())
 }
 
 /// A private frame batch for the model's batch read and write benchmarks.
@@ -2495,7 +2495,7 @@ impl FrameRecv {
 
 		let streams = (0..streams)
 			.map(|_| {
-				let group = track.append_next().unwrap();
+				let group = track.append_group(None).unwrap();
 				// Each group starts at its own key, so the starts increase.
 				let info = frame::Info {
 					size: size as u64,
@@ -2558,7 +2558,7 @@ impl FrameRecv {
 					res.unwrap();
 					let stream = slot.take().unwrap();
 					let group = stream.frame.finish().unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 					open -= 1;
 				}
 			}
@@ -2661,7 +2661,7 @@ impl GroupRecv {
 
 	/// Finish the group, which stays cached until dropped or aborted.
 	pub fn finish(mut self) -> crate::Result<group::Finished> {
-		self.group.take().ok_or(crate::Error::Closed)?.close()
+		self.group.take().ok_or(crate::Error::Closed)?.finish()
 	}
 }
 

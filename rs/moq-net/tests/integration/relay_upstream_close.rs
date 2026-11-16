@@ -15,7 +15,6 @@
 
 use crate::support;
 use moq_net::track::Delay;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -149,12 +148,12 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
 		for key in 0..GROUPS {
-			let mut group = track.append_next().unwrap();
+			let mut group = track.append_group(None).unwrap();
 			for index in 0..FRAMES {
 				let at = Timestamp::from_millis(key * FRAMES + index).unwrap();
 				group.write_frame(at, index.to_string().into_bytes()).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _finished = track.clone().finish().unwrap();
 	}

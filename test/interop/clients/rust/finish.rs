@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
 			.create_track("live", moq_net::track::Info::default())?;
 		let mut group = track.append_group(0)?;
 		group.write_frame(moq_net::Timestamp::unscaled(group.start), b"session-alive".to_vec())?;
-		group.close()?;
+		group.finish()?;
 		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;

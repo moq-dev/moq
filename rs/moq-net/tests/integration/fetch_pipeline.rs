@@ -6,7 +6,6 @@
 //! `model::resume`'s staged copies.
 
 use crate::support;
-use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -51,7 +50,7 @@ async fn fetch_ahead(
 	relays: u64,
 ) -> (
 	moq_net::track::Request,
-	moq_net::track::Fill,
+	moq_net::track::FillGroups,
 	kio::clock::sim::JoinHandle<Result<moq_net::group::Consumer, Error>>,
 	Held,
 ) {
@@ -84,6 +83,7 @@ async fn fetch_ahead(
 	let fill = kio::clock::timeout(TIMEOUT, request.requests().requested_fill())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the FETCH waited for the info"))
+		.map(support::groups)
 		.unwrap();
 	let held = Held {
 		_publisher: publisher,
@@ -103,7 +103,7 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 			let _track = request.accept(timed());
 			let mut group = fill.accept(0, timed()).unwrap();
 			group.write_frame(group.at_start(), b"early".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let mut fetched = kio::clock::timeout(TIMEOUT, fetching)
 				.await
 				.expect("the fetch resolves")
@@ -146,9 +146,9 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 		.unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group.write_frame(group.at_start(), b"frame".as_ref()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut links = Vec::new();
 	let mut upstream = publisher.clone();

@@ -801,7 +801,7 @@ mod compression_tests {
 				crate::track::Info::default().with_compression(crate::track::Compression::Deflate),
 			)
 			.unwrap();
-		let group = track.append_next().unwrap();
+		let group = track.append_group(None).unwrap();
 		let header = crate::frame::Header {
 			info: crate::frame::Info {
 				size: 1,

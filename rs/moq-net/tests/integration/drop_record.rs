@@ -41,7 +41,7 @@ fn write(source: &track::Producer, key: u64, millis: u64) {
 	group
 		.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// A publisher, a relay subscribing to it, and a viewer subscribing to the relay.
@@ -413,7 +413,7 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 				group
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			};
 			for key in 0..4 {
 				write(key);

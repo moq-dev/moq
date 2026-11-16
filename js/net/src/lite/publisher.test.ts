@@ -239,7 +239,7 @@ async function subscribeEnd(
 		// arrives late opens no stream at all, so there is nothing firmer to wait on.
 		await clock.advance(Duration.ZERO);
 	}
-	if (error) track.finishAt({ group: BigInt(Math.max(-1, ...sequences) + 1), frame: 0 }, error);
+	if (error) track.fail(error);
 	else track.finish();
 	track.close();
 
@@ -2484,7 +2484,9 @@ test("lite draft-06: an errored end is not declared early", async () => {
 		const first = track.createGroup(0n);
 		first.writeFrame(textFrame("hello"));
 		first.finish();
-		track.finishAt({ group: 2n, frame: 0 }, new StreamError(StreamCode(71)));
+		// An errored end past the live edge, which only a received copy forwards: group 1 is still
+		// to come below it.
+		hooks.endTrack(track, { group: 2n, frame: 0 }, new StreamError(StreamCode(71)));
 
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
 		expect("start" in start).toBe(true);
@@ -2506,7 +2508,7 @@ test("lite draft-06: a subscription capped short of an errored end gets its boun
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0n, endGroup: 1n });
 	try {
 		for (const sequence of [0n, 1n, 2n, 3n]) sub.serve(sequence);
-		sub.track.finishAt({ group: 4n, frame: 0 }, new StreamError(StreamCode(71)));
+		sub.track.fail(new StreamError(StreamCode(71)));
 		for (;;) {
 			const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("finish" in resp)) continue;

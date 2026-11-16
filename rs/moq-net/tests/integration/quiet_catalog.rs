@@ -6,7 +6,6 @@
 //! must still get it.
 
 use crate::support;
-use support::AppendNext;
 use support::AtStart;
 
 use std::{future::Future, time::Duration};
@@ -53,9 +52,9 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Produce
 	let broadcast = origin.route("live", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group.write_frame(group.at_start(), b"snapshot").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	(broadcast, track)
 }
 

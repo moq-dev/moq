@@ -20,7 +20,7 @@ import {
 	sessionCause,
 	unauthorized,
 } from "../error.ts";
-import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
+import { type FillGroups, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -1150,6 +1150,11 @@ export class Subscriber {
 			for (;;) {
 				const fill = await untilAborted(requests.requestedFill(), signal);
 				if (!fill) break;
+				// FETCH asks by group alone, so a lookup goes unanswered and its reader falls back.
+				if (fill.kind === "lookup") {
+					fill.close();
+					continue;
+				}
 				const run = async () => {
 					try {
 						// The join may already bring a miss in this run. Let it answer first instead
@@ -1191,7 +1196,7 @@ export class Subscriber {
 	async #runRangeFetch(
 		broadcast: Path.Valid,
 		producer: track.Producer,
-		options: { fill: Fill; start: bigint; end: bigint; signal: AbortSignal },
+		options: { fill: FillGroups; start: bigint; end: bigint; signal: AbortSignal },
 	) {
 		const { fill, start, end: until, signal } = options;
 		const version = this.#session.version;

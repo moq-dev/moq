@@ -296,12 +296,7 @@ impl Producer {
 	/// while this producer is still held. Readers keep every packet published before it.
 	fn fail_track(&mut self) {
 		let _ = self.track.cut(None);
-		let track = self.track.track();
-		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
-		let _ = track.clone().finish_at(
-			moq_net::track::Position::group(next),
-			Some(moq_net::StreamError::Internal.into()),
-		);
+		let _ = self.track.track().clone().fail(moq_net::StreamError::Internal.into());
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.

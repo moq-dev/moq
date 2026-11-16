@@ -69,7 +69,7 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	// This catalog never changes, so its one group starts at zero, where the media's timeline does.
 	let mut group = catalog_track.append_group(0)?;
 	group.write_frame(moq_net::Timestamp::ZERO, catalog.to_json()?)?;
-	group.close()?;
+	group.finish()?;
 
 	// Actually create the media track now.
 	// track_info() pins the microsecond timescale that the legacy container encodes with, and

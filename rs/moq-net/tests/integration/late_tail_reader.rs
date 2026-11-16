@@ -95,7 +95,7 @@ async fn each_late_reader_reads_the_finished_group() {
 					.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			let finished = track.finish().unwrap();
 			broadcast.announce().unwrap();
 
@@ -155,7 +155,7 @@ async fn concurrent_late_readers_read_the_finished_group() {
 				.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let finished = track.finish().unwrap();
 		broadcast.announce().unwrap();
 
@@ -225,7 +225,7 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 					.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			let finished = track.finish().unwrap();
 			broadcast.announce().unwrap();
 

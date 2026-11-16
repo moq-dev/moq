@@ -8,7 +8,6 @@
 //! subscription through the claim sees another broadcast rather than a splice.
 
 use crate::support;
-use support::AppendNext;
 use support::AtStart;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -71,9 +70,9 @@ impl Worker {
 					)
 					.unwrap();
 				let tag = format!("{name}{}", served.borrow().len());
-				let mut group = track.append_next().unwrap();
+				let mut group = track.append_group(None).unwrap();
 				group.write_frame(group.at_start(), tag.into_bytes()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}

@@ -29,7 +29,7 @@ fn refreshable(track: &track::Producer, key: u64) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"delta"))
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 fn join(c: &mut Criterion) {

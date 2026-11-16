@@ -804,8 +804,8 @@ where
 		}
 		if let Some(group) = self.group.take() {
 			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
-				Some(end) => group.finish(end)?,
-				None => group.close()?,
+				Some(end) => group.finish_at(end)?,
+				None => group.finish()?,
 			};
 			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
 			if let Some(end) = reached {
@@ -964,7 +964,7 @@ where
 				}],
 			)?,
 		}
-		group.close()?;
+		group.finish()?;
 		Ok(())
 	}
 
@@ -1068,16 +1068,10 @@ where
 			let _ = self.inner.clone().abort(cause.reason());
 			return Err(cause);
 		}
+		// The producer keeps its own clone, whose appends the end refuses.
 		match err {
-			// The producer keeps its own clone, whose appends the end refuses.
 			None => drop(self.inner.clone().finish()?),
-			Some(err) => {
-				let next = self
-					.inner
-					.largest()
-					.map_or(0, |largest| largest.group.saturating_add(1));
-				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
-			}
+			Some(err) => drop(self.inner.clone().fail(err)?),
 		}
 		let published = self.publish_estimate();
 		// A track that ended before measuring declares what it saw, and no longer holds the join

@@ -895,7 +895,7 @@ mod tests {
 				})
 				.collect();
 			wire.write(&mut group, &frames).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		write(10, &[1000, 800, 900, 1100]);
 		write(11, &[2000, 1800, 1900, 2100]);
@@ -1058,7 +1058,7 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = Vec::new();
@@ -1105,7 +1105,7 @@ mod tests {
 			})
 			.collect();
 		wire.write(&mut group, &frames).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut sourced = Vec::new();
@@ -1426,7 +1426,7 @@ mod tests {
 	async fn a_join_starts_a_group_earlier_and_presents_after_the_warmup() {
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
-		group(&mut track, 4 * SECOND, &[4, 5, 6, 7]).close().unwrap();
+		group(&mut track, 4 * SECOND, &[4, 5, 6, 7]).finish().unwrap();
 		let mut live = group(&mut track, 8 * SECOND, &[8, 9]);
 
 		let mut consumer = warm(&broadcast, Start::Latest).await;
@@ -1453,7 +1453,7 @@ mod tests {
 	async fn a_huge_warmup_reaches_back_by_the_cap() {
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
-		group(&mut track, 0, &[0]).close().unwrap();
+		group(&mut track, 0, &[0]).finish().unwrap();
 		let _consumer = Consumer::new(
 			&broadcast.consume(),
 			&warmup_catalog(Some(std::time::Duration::from_secs(3600))),
@@ -1487,7 +1487,7 @@ mod tests {
 		let mut consumer = warm(&broadcast, Start::Oldest).await;
 
 		// Written as it is read: a zero budget would skip a backlog.
-		group(&mut track, 0, &[0, 1, 2, 3]).close().unwrap();
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
 		let mut shown = Vec::new();
 		for _ in 0..4 {
 			shown.push(read(&mut consumer).await);
@@ -1498,7 +1498,7 @@ mod tests {
 		shown.push(read(&mut consumer).await);
 
 		write(&mut stalled, &[5, 6, 7]);
-		stalled.close().unwrap();
+		stalled.finish().unwrap();
 		write(&mut live, &[13]);
 		shown.push(read(&mut consumer).await);
 		assert_eq!(shown, [0, 1, 2, 3, 4, 12, 13]);
@@ -1544,7 +1544,7 @@ mod tests {
 		for warmup in [None, Some(std::time::Duration::ZERO)] {
 			let (broadcast, mut track) = live_track();
 			let published = track.clone();
-			group(&mut track, 4 * SECOND, &[4, 5]).close().unwrap();
+			group(&mut track, 4 * SECOND, &[4, 5]).finish().unwrap();
 			let _track = track.finish().unwrap();
 			let max_delay = std::time::Duration::from_secs(10);
 			let mut consumer = Consumer::new(
@@ -1640,7 +1640,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
 		let _track = track.finish().unwrap();
@@ -1697,7 +1697,7 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = 0;

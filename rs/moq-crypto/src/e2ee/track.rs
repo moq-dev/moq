@@ -33,16 +33,16 @@ impl Producer {
 
 	/// Start the next group at `start`, in the track's timescale, as
 	/// [`moq_net::track::Producer::append_group`] does. `start` must be above every start this
-	/// name allocated under the generation.
+	/// name allocated under the generation; `None` takes the one just past them.
 	///
 	/// # Errors
 	///
 	/// [`Error::Reuse`](crate::e2ee::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::e2ee::Error::Identity) if
 	/// it exceeds `2^53-1`, or a net error.
-	pub fn append_group(&mut self, start: u64) -> Result<group::Producer> {
+	pub fn append_group(&mut self, start: impl Into<Option<u64>>) -> Result<group::Producer> {
 		let (_, inner) = self
 			.claim
-			.allocate(Some(start), |start| Ok(self.inner.append_group(start)?))?;
+			.allocate(start.into(), |start| Ok(self.inner.append_group(start)?))?;
 		Ok(self.group(inner))
 	}
 

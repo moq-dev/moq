@@ -14,7 +14,6 @@ use crate::support::harness::MockPair;
 
 use std::time::Duration;
 
-use crate::support::AppendNext;
 use crate::support::AtStart;
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -84,7 +83,7 @@ impl Chain {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
-		let mut group0 = track.append_next().unwrap();
+		let mut group0 = track.append_group(None).unwrap();
 		group0.write_frame(group0.at_start(), payload(0, 0)).unwrap();
 		let mut read0 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read0.start, 0);
@@ -93,9 +92,9 @@ impl Chain {
 			payload(0, 0)
 		);
 
-		let mut group1 = track.append_next().unwrap();
+		let mut group1 = track.append_group(None).unwrap();
 		group1.write_frame(group1.at_start(), payload(1, 0)).unwrap();
-		group1.close().unwrap();
+		group1.finish().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read1.start, 1);
 		assert_eq!(
@@ -146,7 +145,7 @@ impl Chain {
 
 	/// The publisher ends the track at group 2 while group 0 is still open.
 	async fn end(&mut self) {
-		self.track.finish_at(track::Position::group(2), None).unwrap();
+		self.track.finish_at(track::Position::group(2)).unwrap();
 		settle().await;
 	}
 
@@ -154,7 +153,7 @@ impl Chain {
 	fn finish_group0(&mut self) {
 		let mut group0 = self.group0.take().expect("finished once");
 		group0.write_frame(group0.at_start(), payload(0, 1)).unwrap();
-		group0.close().unwrap();
+		group0.finish().unwrap();
 	}
 }
 

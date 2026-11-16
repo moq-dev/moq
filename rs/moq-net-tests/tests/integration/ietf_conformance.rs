@@ -75,7 +75,7 @@ async fn routing(version: &str, cluster: bool) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(0), &b"conformance"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let track = track.finish().unwrap();
 	let mut received = subscription.recv_group().await.unwrap().unwrap();
 	assert_eq!(received.start, 0);

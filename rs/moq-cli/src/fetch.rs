@@ -206,7 +206,7 @@ mod tests {
 				for frame in frames(sequence) {
 					group.write_frame(at, frame).expect("frame");
 				}
-				group.close().expect("close");
+				group.finish().expect("close");
 			}
 			let empty = broadcast
 				.broadcast()
@@ -270,7 +270,7 @@ mod tests {
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
 				.expect("frame");
-			group.close().expect("close");
+			group.finish().expect("close");
 
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());

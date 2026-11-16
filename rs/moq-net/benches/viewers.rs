@@ -83,7 +83,7 @@ impl Room {
 				let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_group(0).unwrap();
 				group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				(broadcast, track)
 			})
 			.collect();

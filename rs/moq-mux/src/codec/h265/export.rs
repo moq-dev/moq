@@ -210,11 +210,11 @@ mod tests {
 
 		let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		write_length_prefixed(&mut g0, 0, &[idr]);
-		g0.close().unwrap();
+		g0.finish().unwrap();
 
 		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[trail]);
-		g1.close().unwrap();
+		g1.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let consumer = broadcast.consume();
@@ -331,7 +331,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 			let nals: &[&[u8]] = &[&[0x40, 1, 0x0c], &[0x42, 1, 1], &[0x44, 1, 0xc0], &[0x26, 1, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
-			group.close().unwrap();
+			group.finish().unwrap();
 			let _track = track.finish().unwrap();
 			let consumer = broadcast.consume();
 			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));

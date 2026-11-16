@@ -7,7 +7,6 @@
 //! an observable event.
 
 use crate::support;
-use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -384,11 +383,11 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 			.broadcast()
 			.create_track("audio", timed())
 			.expect("create track");
-		let mut audio_group = audio.append_next().expect("append group");
+		let mut audio_group = audio.append_group(None).expect("append group");
 		audio_group
 			.write_frame(audio_group.at_start(), b"audio".as_ref())
 			.expect("write frame");
-		audio_group.close().expect("finish group");
+		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
 		let sub_origin = produce_origin();
@@ -409,11 +408,11 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 			.unwrap();
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
-		let mut group = track.append_next().expect("append group");
+		let mut group = track.append_group(None).expect("append group");
 		group
 			.write_frame(group.at_start(), b"before".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()
@@ -448,11 +447,11 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		assert_eq!(&frame.payload[..], b"audio");
 
 		// The EXISTING subscription keeps flowing.
-		let mut group = track.append_next().expect("append group");
+		let mut group = track.append_group(None).expect("append group");
 		group
 			.write_frame(group.at_start(), b"after".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()

@@ -1258,14 +1258,12 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-			.unwrap();
+		let mut group = track.append_group(None).unwrap();
 		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut refused = Web::new(
 			auth::Auth::refuse("test"),
 			cluster.clone(),
@@ -1500,13 +1498,11 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-			.unwrap();
+		let mut group = track.append_group(None).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		for tier in ["first", "second"] {
 			for selector in [FetchGroup::Num(0), FetchGroup::Latest] {
@@ -1620,7 +1616,7 @@ mod tests {
 			group
 				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let status = serve_fetch(

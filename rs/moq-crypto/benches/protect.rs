@@ -44,7 +44,7 @@ fn bench_protect(c: &mut Criterion) {
 			group
 				.write_frame(Timestamp::from_millis(ms).unwrap(), black_box(&grouped))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		});
 	});
 	group.throughput(Throughput::Bytes(opus.len() as u64));

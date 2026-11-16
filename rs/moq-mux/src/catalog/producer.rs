@@ -339,7 +339,7 @@ impl<E: CatalogExt> Outputs<E> {
 		#[cfg(test)]
 		self.published[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		group.write_frame(at, msf)?;
-		group.close()?;
+		group.finish()?;
 
 		Ok(())
 	}

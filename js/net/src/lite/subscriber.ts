@@ -2773,6 +2773,11 @@ export class Subscriber {
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				// The wire fetches by group alone, so a lookup goes unanswered and its reader falls back.
+				if (fill.kind === "lookup") {
+					fill.close();
+					continue;
+				}
 				// One group is what FETCH carries; more go through the subscription.
 				if (fills && fill.end - fill.start > 1n) {
 					fills.push(fill);
@@ -2807,7 +2812,7 @@ export class Subscriber {
 		consumed: Consumed,
 		producer: track.Producer,
 		framing: Framing,
-		fill: track.Fill,
+		fill: track.FillGroups,
 	): Promise<void> {
 		try {
 			let last: bigint | undefined;
@@ -3070,7 +3075,7 @@ export class Subscriber {
 		consumed: Consumed,
 		name: string,
 		framing: Framing,
-		fill: track.Fill,
+		fill: track.FillGroups,
 		sequence: bigint,
 	): Promise<void> {
 		const cancel = new AbortController();
@@ -3124,7 +3129,7 @@ export class Subscriber {
 		consumed: Consumed,
 		name: string,
 		framing: Framing,
-		fill: track.Fill,
+		fill: track.FillGroups,
 		sequence: bigint,
 		cancel: AbortSignal,
 	): Promise<Stream | undefined> {

@@ -5,7 +5,6 @@
 //! never a version error that a caller would retry forever.
 
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -33,11 +32,11 @@ struct Relay {
 
 /// Append the next group of an untimed track, holding one frame.
 fn write(track: &moq_net::track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// A publisher on `version` with group 0 of an untimed track written, and the relay's view of it.
@@ -165,7 +164,7 @@ async fn an_unfed_fetch_is_a_miss() {
 		skipped
 			.write_frame(moq_net::Timestamp::unscaled(skipped.start), &b"3"[..])
 			.unwrap();
-		skipped.close().unwrap();
+		skipped.finish().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")

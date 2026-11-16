@@ -191,7 +191,7 @@ struct Writing(Option<moq_net::group::Producer>);
 
 impl Writing {
 	fn finish(mut self) -> moq_net::Result<()> {
-		self.0.take().expect("owned group").close().map(drop)
+		self.0.take().expect("owned group").finish().map(drop)
 	}
 
 	fn abort(mut self, err: moq_net::Error) -> moq_net::Result<()> {
@@ -630,7 +630,11 @@ async fn fetches(
 			},
 		};
 
-		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
+		// The rung can't place a time in its source without fetching it, so a lookup is dropped
+		// unanswered and its reader falls back to the groups held.
+		if let moq_net::track::Fill::Groups(fill) = fill {
+			spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
+		}
 	}
 
 	if retired {
@@ -650,7 +654,8 @@ async fn fetches(
 			tokio::select! {
 				biased;
 				fill = dynamic.requested_fill() => match fill {
-					Ok(fill) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone()),
+					Ok(moq_net::track::Fill::Groups(fill)) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone()),
+					Ok(moq_net::track::Fill::Lookup(_)) => {}
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
@@ -678,7 +683,12 @@ async fn fetches(
 
 /// Spawn one fill, taking a slot of `limit` for each group it transcodes, once the source
 /// group is in hand: waiting on the source holds no encoder session.
-fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_net::track::Fill, limit: Arc<Semaphore>) {
+fn spawn_fill(
+	tasks: &mut tokio::task::JoinSet<()>,
+	rung: Rung,
+	mut fill: moq_net::track::FillGroups,
+	limit: Arc<Semaphore>,
+) {
 	let mut retire = rung.retire.clone();
 	tasks.spawn(async move {
 		let mut last = None;
@@ -712,7 +722,7 @@ fn spawn_fill(tasks: &mut tokio::task::JoinSet<()>, rung: Rung, mut fill: moq_ne
 /// instead, releasing the slot for the groups the fill still owes: its last reader
 /// already left it, and accepting afterwards would cache the group a fresh fill is
 /// about to serve.
-async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64, limit: &Semaphore) -> Result<(), Error> {
+async fn fetch(rung: &Rung, fill: &moq_net::track::FillGroups, sequence: u64, limit: &Semaphore) -> Result<(), Error> {
 	let groups = sequence..sequence + 1;
 	let refuse = |err: moq_net::Error| fill.refuse_groups(groups.clone(), err);
 	let failed = || refuse(moq_net::Error::Stream(moq_net::StreamError::Internal));
@@ -836,7 +846,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64, limit: &
 async fn drop_gap(
 	rung: &Rung,
 	track: &moq_net::track::Consumer,
-	fill: &moq_net::track::Fill,
+	fill: &moq_net::track::FillGroups,
 	sequence: u64,
 	scale: Option<moq_net::Timescale>,
 ) -> Result<(), Error> {
@@ -1186,6 +1196,7 @@ fn scale_hint(size: moq_video::Size, output: moq_video::Output) -> Option<moq_vi
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::tests::groups;
 	use moq_video::Output;
 
 	/// A 160x120 software rung of an idle source, with the source and the
@@ -1263,16 +1274,18 @@ mod tests {
 		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
 		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
 			.unwrap();
-		live.close().unwrap();
+		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		// The reader first asks where 7 falls. A group starting at 6 covers it, so the reader
 		// starts there and asks for the groups after it.
-		let lookup = fills.requested_fill().await.unwrap();
-		assert_eq!(lookup.time(), Some(7));
-		lookup.accept(6, None).unwrap().close().unwrap();
+		let moq_net::track::Fill::Lookup(lookup) = fills.requested_fill().await.unwrap() else {
+			panic!("a time lookup");
+		};
+		assert_eq!(lookup.time(), 7);
+		lookup.accept(6, None).unwrap().finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.unwrap();
+		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		let mut tasks = tokio::task::JoinSet::new();
@@ -1281,6 +1294,7 @@ mod tests {
 		let first = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("group 7 is fetched from the source")
+			.map(groups)
 			.unwrap();
 		assert_eq!(first.start().group, 7);
 
@@ -1345,7 +1359,7 @@ mod tests {
 		let fills = track.requests();
 		let consumer = track.consume();
 		let fetching = tokio::spawn(async move { consumer.fetch_group(1, None).await.map(drop) });
-		let fill = fills.requested_fill().await.unwrap();
+		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (1, 2));
 
 		let mut tasks = tokio::task::JoinSet::new();
@@ -1374,8 +1388,8 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		if !empty {
-			video.append_group(0).unwrap().close().unwrap();
-			video.append_group(HOUR).unwrap().close().unwrap();
+			video.append_group(0).unwrap().finish().unwrap();
+			video.append_group(HOUR).unwrap().finish().unwrap();
 		}
 
 		let output = moq_net::broadcast::Info::default().produce();
@@ -1396,15 +1410,17 @@ mod tests {
 		track
 			.create_group(moq_net::group::Info { start: HOUR })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let lookup = fills.requested_fill().await.unwrap();
-		assert_eq!(lookup.time(), Some(1));
-		lookup.accept(0, None).unwrap().close().unwrap();
+		let moq_net::track::Fill::Lookup(lookup) = fills.requested_fill().await.unwrap() else {
+			panic!("a time lookup");
+		};
+		assert_eq!(lookup.time(), 1);
+		lookup.accept(0, None).unwrap().finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.unwrap();
+		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (1, HOUR));
 		assert_eq!(fill.order(), order);
 
@@ -1421,7 +1437,7 @@ mod tests {
 			);
 			// As a media producer's first group does, saying nothing came before it.
 			video.skip_groups(0..HOUR + 1);
-			video.append_group(HOUR + 1).unwrap().close().unwrap();
+			video.append_group(HOUR + 1).unwrap().finish().unwrap();
 		}
 		kio::clock::timeout(wait, tasks.join_next())
 			.await
@@ -1461,20 +1477,22 @@ mod tests {
 		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
 		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
 			.unwrap();
-		live.close().unwrap();
+		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		// The reader first asks where 7 falls. A group starting at 6 covers it, so the reader
 		// starts there and asks for the groups after it.
-		let lookup = fills.requested_fill().await.unwrap();
-		assert_eq!(lookup.time(), Some(7));
-		lookup.accept(6, None).unwrap().close().unwrap();
+		let moq_net::track::Fill::Lookup(lookup) = fills.requested_fill().await.unwrap() else {
+			panic!("a time lookup");
+		};
+		assert_eq!(lookup.time(), 7);
+		lookup.accept(6, None).unwrap().finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.unwrap();
+		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		// Group 7 is served, and the reader never reads again to pick it up.
-		fill.clone().accept(7, None).unwrap().close().unwrap();
+		fill.clone().accept(7, None).unwrap().finish().unwrap();
 		let mut tasks = tokio::task::JoinSet::new();
 		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
 		let wait = std::time::Duration::from_secs(5);
@@ -1487,6 +1505,7 @@ mod tests {
 		let requested = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("a retired rung serves what its fill still owes")
+			.map(groups)
 			.unwrap();
 		assert_eq!(requested.start().group, 8);
 		// The source no longer has it. It holds no group to place the gap after it by, and the

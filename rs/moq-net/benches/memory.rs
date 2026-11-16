@@ -211,7 +211,7 @@ impl Link {
 			for _ in 0..FRAMES {
 				group.write_frame(timestamp, self.payload.clone()).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let mut bytes = 0;

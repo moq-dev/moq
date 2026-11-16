@@ -454,7 +454,7 @@ impl Entry {
 		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}
-		group.close()?;
+		group.finish()?;
 		self.last_cut = Some(now);
 		Ok(())
 	}

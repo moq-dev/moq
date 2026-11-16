@@ -161,13 +161,11 @@ async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, 
 
 /// Write `payload` as one message of a session: one group.
 fn send(track: &moq_net::track::Producer, payload: &'static [u8]) {
-	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-		.expect("group");
+	let mut group = track.append_group(None).expect("group");
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.expect("frame");
-	group.close().expect("finish");
+	group.finish().expect("finish");
 }
 
 /// Read the next message of a session.

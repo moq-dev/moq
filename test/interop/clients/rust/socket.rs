@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 		for payload in PAYLOADS {
 			group.write_frame(moq_net::Timestamp::unscaled(start), payload)?;
 		}
-		group.close()?;
+		group.finish()?;
 	}
 	let _producer = producer.finish()?;
 	for start in 0..3 {

@@ -64,7 +64,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Each frame is dependent on the previous frame, so older frames are prioritized.
 	group.write_frame(hello, bytes::Bytes::from_static(b"Hello"))?;
 	group.write_frame(hello, bytes::Bytes::from_static(b"World"))?;
-	group.close()?;
+	group.finish()?;
 
 	tracing::info!("wrote hello + world");
 

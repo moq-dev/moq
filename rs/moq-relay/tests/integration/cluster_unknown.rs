@@ -96,13 +96,11 @@ async fn publish_version(relay: &cluster::Cluster, auth: &auth::Auth, version: &
 	let running = streaming.clone();
 	let streamer = kio::clock::sim::spawn(async move {
 		while running.load(std::sync::atomic::Ordering::Relaxed) {
-			let mut group = track
-				.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-				.expect("append group");
+			let mut group = track.append_group(None).expect("append group");
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 				.expect("write frame");
-			group.close().expect("finish group");
+			group.finish().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(100)).await;
 		}
 		let _track = track;

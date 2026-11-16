@@ -554,7 +554,7 @@ impl<T: Serialize> Snapshot<T> {
 				return Ok(None);
 			}
 			if let Some(group) = self.group.take() {
-				group.close()?;
+				group.finish()?;
 			}
 			if self.fresh && self.largest.is_none() {
 				self.track.skip_groups(0..start);
@@ -569,11 +569,11 @@ impl<T: Serialize> Snapshot<T> {
 		}
 		let group = self.group.as_mut().expect("a delta follows a snapshot");
 		if let Err(err) = group.write_frame(timestamp, frame.payload.clone()) {
-			let _ = self.group.take().unwrap().close();
+			let _ = self.group.take().unwrap().finish();
 			return Err(err.into());
 		}
 		if !self.deltas {
-			self.group.take().unwrap().close()?;
+			self.group.take().unwrap().finish()?;
 		}
 		frame.commit();
 		#[cfg(feature = "bench")]
@@ -585,7 +585,7 @@ impl<T: Serialize> Snapshot<T> {
 
 	fn finish(&mut self) -> moq_json::Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		// The output keeps its own clone, whose appends the end refuses.
 		Ok(self.track.clone().finish().map(drop)?)
@@ -1796,7 +1796,7 @@ mod tests {
 						.write_frame(Timestamp::ZERO, vec![0u8; frame_size])
 						.expect("write");
 				}
-				group.close().expect("close");
+				group.finish().expect("close");
 
 				let mut group = sub.recv_group().await.expect("recv").expect("group");
 				while group.read_frame().await.expect("read").is_some() {}
@@ -2248,12 +2248,11 @@ mod tests {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let start = video.largest().map_or(0, |largest| largest.group + 1);
-			let mut group = video.append_group(start).expect("group");
+			let mut group = video.append_group(None).expect("group");
 			group
-				.write_frame(Timestamp::from_millis(start).unwrap(), vec![0u8; size])
+				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; size])
 				.expect("write");
-			group.close().expect("close");
+			group.finish().expect("close");
 			let mut group = sub.recv_group().await.expect("recv").expect("group");
 			while group.read_frame().await.expect("read").is_some() {}
 		}
@@ -2711,7 +2710,7 @@ mod tests {
 		{
 			let mut group = video.append_group(0).expect("group");
 			group.write_frame(Timestamp::ZERO, vec![0u8; 10]).expect("write");
-			group.close().expect("close");
+			group.finish().expect("close");
 		}
 		drive_tick().await;
 		let (_, stats) = announced(&origin).await;

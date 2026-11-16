@@ -1816,38 +1816,32 @@ mod tests {
 		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
-			let mut group = pub_track
-				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
-				.unwrap();
+			let mut group = pub_track.append_group(None).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 12])
 				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 34])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		{
-			let mut group = pub_track
-				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
-				.unwrap();
+			let mut group = pub_track.append_group(None).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
 
 		// Write 56 ingress bytes into the regional-tier broadcast.
 		{
-			let mut group = sub_track
-				.append_group(sub_track.largest().map_or(0, |largest| largest.group + 1))
-				.unwrap();
+			let mut group = sub_track.append_group(None).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 56])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
@@ -1907,13 +1901,11 @@ mod tests {
 			let bc = egress.request("demo/x", None).await.unwrap();
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
 		}
-		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-			.unwrap();
+		let mut group = track.append_group(None).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		for reader in &mut readers {
 			let mut group = reader.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, payload.as_bytes());

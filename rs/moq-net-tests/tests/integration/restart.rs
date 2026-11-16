@@ -8,7 +8,6 @@
 //! instance's cached groups.
 
 use crate::support;
-use support::AppendNext;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -98,10 +97,10 @@ async fn quiet(version: Version, announced: &mut origin::Routes) {
 
 /// Write the next group of one frame tagged `tag`, starting at its key in milliseconds.
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	let start = Timestamp::from_millis(group.start).unwrap();
 	group.write_frame(start, tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.

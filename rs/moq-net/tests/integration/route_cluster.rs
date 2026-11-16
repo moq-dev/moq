@@ -240,7 +240,7 @@ impl Publisher {
 			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 			group.write_frame(timestamp, tagged(self.name, key, frame)).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 

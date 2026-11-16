@@ -319,7 +319,7 @@ mod test {
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		track
 	}
 
@@ -695,7 +695,7 @@ mod test {
 			checkpoint
 				.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), payload)
 				.unwrap();
-			checkpoint.close().unwrap();
+			checkpoint.finish().unwrap();
 			let _track = track.finish().unwrap();
 
 			assert_eq!(

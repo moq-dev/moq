@@ -9,7 +9,6 @@ use moq_net::broadcast::TracksEvent;
 use moq_net::socket::{Endpoint, TrackStream};
 use moq_net::{Error, StreamError, Version, group, origin, track};
 
-use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,11 +97,11 @@ async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, 
 
 /// Write `payload` as one message of a session: one group.
 fn send(track: &track::Producer, payload: &'static [u8]) {
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// Read the next message from a session, or `None` once the peer finished.
@@ -182,7 +181,7 @@ async fn track_messages_are_read_in_key() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	};
 	write(1, b"second");
 	// Let the later message arrive first.
@@ -212,7 +211,7 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	};
 	// Message 0 is never written: message 1 waits out the budget, then is read.
 	write(1, b"one");

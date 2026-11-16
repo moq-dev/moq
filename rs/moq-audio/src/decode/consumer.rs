@@ -2773,7 +2773,7 @@ mod tests {
 				keyframe: true,
 			};
 			container.write(&mut group, &[frame]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			if read(sequence) {
 				next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
 			}

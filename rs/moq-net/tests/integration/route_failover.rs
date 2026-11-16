@@ -152,7 +152,7 @@ impl Feed {
 			let index = self.written.len() as u64;
 			if index.is_multiple_of(FRAMES) {
 				if let Some(group) = self.group.take() {
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 				self.group = Some(self.track.append_group(index / FRAMES).unwrap());
 			}

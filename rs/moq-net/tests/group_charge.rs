@@ -75,7 +75,7 @@ fn measure(frames: usize, payload: usize) -> (usize, u64) {
 	// any lazy statics aren't billed to the groups.
 	let mut group = track.append_group(0).unwrap();
 	group.write_frame(Timestamp::ZERO, vec![0u8; payload]).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let before_heap = LIVE.with(Cell::get);
 	let before_charge = pool.used();
@@ -86,7 +86,7 @@ fn measure(frames: usize, payload: usize) -> (usize, u64) {
 		for _ in 0..frames {
 			group.write_frame(timestamp, vec![0u8; payload]).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	let heap = (LIVE.with(Cell::get) - before_heap) / GROUPS;

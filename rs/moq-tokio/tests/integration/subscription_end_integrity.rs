@@ -164,15 +164,13 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 
 /// Append one group of [`FRAMES`] padded frames.
 fn write_group(track: &moq_net::track::Producer) {
-	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-		.expect("append group");
+	let mut group = track.append_group(None).expect("append group");
 	for _ in 0..FRAMES {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0; PADDING])
 			.expect("write frame");
 	}
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 }
 
 /// The publisher disconnects with the final group in flight: the subscription ends

@@ -6,7 +6,6 @@
 use crate::support;
 use moq_net::{Version, origin, track};
 use std::time::Duration;
-use support::AppendNext;
 use support::harness::{MockConnectOptions, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
@@ -51,7 +50,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			viewers.push((viewer, pair, remote));
 		}
 		for round in 0..3 {
-			let mut group = track.append_next().unwrap();
+			let mut group = track.append_group(None).unwrap();
 			let key = group.start;
 			group
 				.write_frame(
@@ -59,7 +58,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					b"payload".as_ref(),
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			for (i, (_, _, remote)) in viewers.iter().enumerate() {
 				let mut group = remote.track("video").unwrap().fetch_group(key, None).await.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");

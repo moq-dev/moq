@@ -894,7 +894,7 @@ mod tests {
 				.map(|(index, ms)| frame(ms, index == 0))
 				.collect();
 			format.write(&mut group, &frames).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		write(10, vec![100, 80, 90, 110]);
 		write(11, vec![200, 180, 190, 210]);
@@ -1269,7 +1269,7 @@ mod tests {
 				.map(|(index, ms)| frame(ms, index == 0))
 				.collect();
 			wire().write(&mut group, &frames).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _published = published.finish().unwrap();
 		let begin = Instant::now();

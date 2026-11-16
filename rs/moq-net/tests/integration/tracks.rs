@@ -5,7 +5,6 @@
 //! after the sync is new at the source.
 
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -141,11 +140,11 @@ async fn a_listed_track_serves_its_cached_group() {
 	assert_eq!(next(&mut tracks).await, "synced");
 
 	let late = broadcast.broadcast().create_track("late", None).unwrap();
-	let mut group = late.append_next().unwrap();
+	let mut group = late.append_group(None).unwrap();
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), &b"first"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(next(&mut tracks).await, "+late");
 
 	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("late").unwrap().subscribe(None))

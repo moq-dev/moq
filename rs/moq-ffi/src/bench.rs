@@ -227,7 +227,7 @@ async fn net_round(
 			// Copy, as a binding's write does, so the baseline does not get zero-copy for free.
 			group.write_frame(timestamp, payload.to_vec()).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let mut consumers = Vec::with_capacity(readers.len());
 	for reader in readers {

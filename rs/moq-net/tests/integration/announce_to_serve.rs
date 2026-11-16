@@ -11,7 +11,6 @@
 //! is a virtual sleep.
 
 use crate::support;
-use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -114,9 +113,9 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
 }
 
 fn write_group(track: &moq_net::track::Producer, payload: &'static str) {
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group.write_frame(group.at_start(), payload.as_bytes()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// Walk one broadcast through its whole announce lifecycle and record what the

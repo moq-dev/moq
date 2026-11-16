@@ -25,13 +25,11 @@ fn sessions_without_a_runtime() {
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.expect("failed to create track");
-	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-		.expect("failed to append group");
+	let mut group = track.append_group(None).expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let dir = tempfile::tempdir().unwrap();
 	let socket = dir.path().join("moq.sock");

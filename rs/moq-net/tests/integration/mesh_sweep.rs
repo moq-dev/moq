@@ -25,7 +25,6 @@ use futures::channel::mpsc;
 use moq_net::{Instance, Timescale, Version, cache, origin, stats, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
-use crate::support::AppendNext;
 use crate::support::AtStart;
 use crate::support::{self, Rng};
 
@@ -363,11 +362,11 @@ impl Mesh {
 				.broadcast()
 				.create_track(TRACK, track::Info::default().with_timescale(Timescale::MILLI))
 				.unwrap();
-			let mut group = track.append_next().unwrap();
+			let mut group = track.append_group(None).unwrap();
 			group
 				.write_frame(group.at_start(), bytes::Bytes::from(path.clone()))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			route.announce().unwrap();
 			Held { route, _track: track }
 		};

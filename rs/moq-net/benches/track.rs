@@ -243,7 +243,7 @@ impl FetchReaders {
 		for key in 1..=history as u64 {
 			let mut group = track.append_group(key).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"f")).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let consumer = track.consume();
@@ -323,7 +323,7 @@ impl Fanout {
 	fn cycle(&mut self) {
 		let mut group = self.append();
 		group.write_frame(at(group.start), self.payload.clone()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		for (subscriber, waiter) in self.subscribers.iter_mut().zip(&self.waiters) {
 			let group = match subscriber.poll_recv_group(waiter) {
@@ -354,7 +354,7 @@ impl AbortedScan {
 		for key in 0..aborted as u64 {
 			stale.push(track.append_group(key).unwrap());
 		}
-		track.append_group(aborted as u64).unwrap().close().unwrap();
+		track.append_group(aborted as u64).unwrap().finish().unwrap();
 		for group in stale {
 			group.abort(Error::Cancel).unwrap();
 		}
@@ -400,7 +400,7 @@ impl Swept {
 				let track = broadcast.create_track(format!("bench{i}"), timed()).unwrap();
 				let mut group = track.append_group(0).unwrap();
 				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				track
 			})
 			.collect();
@@ -490,7 +490,7 @@ impl Aged {
 					group
 						.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
 						.unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 				let waiter = kio::Waiter::noop();
 				let Poll::Ready(Ok(Some(mut read))) = sub.poll_recv_group(&waiter) else {
@@ -641,7 +641,7 @@ fn bench_evict_fanout(c: &mut Criterion) {
 						for _ in 0..evicted {
 							let mut group = fanout.append();
 							group.write_frame(at(group.start), fanout.payload.clone()).unwrap();
-							group.close().unwrap();
+							group.finish().unwrap();
 						}
 						elapsed += start.elapsed();
 						for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&fanout.waiters) {
@@ -700,7 +700,7 @@ fn bench_fanout_frame(c: &mut Criterion) {
 					for _ in 0..iterations {
 						if written == FRAMES_PER_GROUP {
 							if let Some(open) = open.take() {
-								open.close().unwrap();
+								open.finish().unwrap();
 							}
 							open = Some(fanout.append());
 							written = 0;
@@ -749,7 +749,7 @@ impl FetchBudgets {
 		for key in (0..4u64).map(|second| second * 1000) {
 			let mut group = track.append_group(key).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"f")).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut open = track.append_group(4000).unwrap();
 		open.write_frame(at(4000), Bytes::from_static(b"f")).unwrap();
@@ -865,7 +865,7 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 					for key in 0..iterations {
 						let mut group = track.append_group(key).unwrap();
 						group.write_frame(at(key), payload.clone()).unwrap();
-						group.close().unwrap();
+						group.finish().unwrap();
 					}
 				})
 			})
@@ -1145,7 +1145,7 @@ fn bench_range_serving(c: &mut Criterion) {
 				group
 					.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			let subscription = track::Subscription::default()
 				.with_delay(track::Delay::default().with_max(AGED_BUDGET))
@@ -1261,7 +1261,7 @@ fn bench_parked_read(c: &mut Criterion) {
 					let mut next = track.append_group(millis(micros)).unwrap();
 					next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();
-					next.close().unwrap();
+					next.finish().unwrap();
 					micros += MICROS_PER_GROUP;
 					repoll(&mut reads);
 				}
@@ -1319,7 +1319,7 @@ impl Sparse {
 		};
 		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.write_frame(timestamp, Bytes::from_static(b"x")).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("the group is cached");
 		};
@@ -1548,7 +1548,7 @@ impl GapFlush {
 		};
 		// Every odd key is missing.
 		let handed: Vec<_> = (0..gaps).map(|gap| hand_out(gap * 2)).collect();
-		hand_out(gaps * 2).close().unwrap();
+		hand_out(gaps * 2).finish().unwrap();
 		for group in handed {
 			group.abort(Error::Cancel).unwrap();
 		}
@@ -1624,7 +1624,7 @@ impl EmptyRun {
 			if frame {
 				group.write_frame(at(key), Bytes::from_static(b"x")).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		append(0, true);
 		for key in 1..=run {
@@ -1711,7 +1711,7 @@ fn bench_range_widening(c: &mut Criterion) {
 						group
 							.write_frame(moq_net::Timestamp::unscaled(group.start), Bytes::from_static(b"x"))
 							.unwrap();
-						group.close().unwrap();
+						group.finish().unwrap();
 					}
 					let narrow = track::Subscription::default()
 						.with_delay(track::Delay::default().with_max(AGED_BUDGET))
@@ -1770,7 +1770,7 @@ impl BudgetWidening {
 			for key in keys {
 				let mut group = track.create_group(group::Info { start: 100 * key }).unwrap();
 				group.write_frame(at(100 * key), Bytes::from_static(b"x")).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
 				black_box(group);
@@ -1846,7 +1846,7 @@ impl TimeEnd {
 		let mut zero = track.create_group(group::Info { start: 0 }).unwrap();
 		zero.write_frame(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
-		zero.close().unwrap();
+		zero.finish().unwrap();
 		// Group 1 never arrives, and the budget outlasts the run, so the end never settles.
 		let subscription = track::Subscription::default()
 			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
@@ -1874,7 +1874,7 @@ impl TimeEnd {
 			group
 				.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			for reader in &mut self.readers {
 				let mut handed = 0;
 				while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
@@ -1926,7 +1926,7 @@ impl Fills {
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		// One range per run, with a key between each that no reader asks for.
 		let ranges = (0..runs).map(|run| span(run * 2, run * 2)).chain([from(start)]);
 		let subscription = track::Subscription::default()
@@ -1962,10 +1962,13 @@ impl Fills {
 		// The lookups go out first, and the misses they leave behind them.
 		for _ in 0..2 {
 			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-				assert_eq!(fill.priority(), 1, "the update reached the fill");
-				match fill.time() {
-					Some(_) => lookups += 1,
-					None => {
+				match fill {
+					track::Fill::Lookup(lookup) => {
+						assert_eq!(lookup.priority(), 1, "the update reached the lookup");
+						lookups += 1;
+					}
+					track::Fill::Groups(fill) => {
+						assert_eq!(fill.priority(), 1, "the update reached the fill");
 						fill.drop_groups(fill.start().group..fill.end());
 						fills += 1;
 					}
@@ -2031,7 +2034,7 @@ impl RangeFills {
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let subscription = track::Subscription::default()
 			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
 			.with_ranges((0..ranges).map(|i| {
@@ -2061,13 +2064,16 @@ impl RangeFills {
 		// The lookups go out first, and the misses they leave behind them.
 		for _ in 0..2 {
 			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-				// A lookup wants no group, so it is dropped unanswered.
+				// A lookup is dropped unanswered.
+				let track::Fill::Groups(fill) = fill else {
+					continue;
+				};
 				while let Some(key) = fill.wanted() {
 					let mut group = fill.accept(key, None).unwrap();
 					group
 						.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 			}
 			for (reader, filled) in self.readers.iter_mut().zip(&mut filled) {
@@ -2121,7 +2127,7 @@ struct RefusedFill {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
 	_dynamic: track::Requests,
-	fill: track::Fill,
+	fill: track::FillGroups,
 	readers: Vec<track::Subscriber>,
 }
 
@@ -2135,7 +2141,7 @@ impl RefusedFill {
 		track.start_at(Self::START).unwrap();
 		let mut group = track.create_group(group::Info { start: Self::START }).unwrap();
 		group.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		let readers = (0..readers)
 			.map(|_| {
@@ -2152,7 +2158,7 @@ impl RefusedFill {
 				reader
 			})
 			.collect();
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+		let Poll::Ready(Ok(track::Fill::Groups(fill))) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the miss below the start is asked");
 		};
 		assert!(

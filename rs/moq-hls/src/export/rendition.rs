@@ -3030,7 +3030,7 @@ mod tests {
 				group
 					.write_frame(moq_net::Timestamp::unscaled(0), Bytes::from_static(b"retained"))
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
 			}

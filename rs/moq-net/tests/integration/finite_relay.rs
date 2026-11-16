@@ -10,7 +10,6 @@
 
 use crate::support;
 use moq_net::track::Delay;
-use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -142,12 +141,12 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	// tells the relay where its feed starts; otherwise the outcome rests on whether the
 	// first group is written before SUBSCRIBE_OK.
 	kio::clock::sleep(Duration::from_millis(1)).await;
-	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
 			for key in 0..GROUPS {
-				let mut group = track.append_next().unwrap();
+				let mut group = track.append_group(None).unwrap();
 				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
@@ -162,16 +161,16 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			for mut group in groups {
 				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 		}
 		Arrival::NewestFirst => {
 			upstream.server_transport.hold_unis();
 			for _ in 0..GROUPS {
-				let mut group = track.append_next().unwrap();
+				let mut group = track.append_group(None).unwrap();
 				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				// IETF serves from the live edge, so let each group open its stream before
 				// the next one supersedes it.
 				kio::clock::sleep(Duration::from_millis(10)).await;

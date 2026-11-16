@@ -492,7 +492,7 @@ impl Track {
 	/// Close the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		Ok(())
 	}
@@ -536,14 +536,14 @@ impl Track {
 
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(previous) = self.group.take() {
-			previous.close()?;
+			previous.finish()?;
 		}
 
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
-			let _ = group.close();
+			let _ = group.finish();
 			return Err(err.into());
 		}
 
@@ -551,7 +551,7 @@ impl Track {
 			// Keep the group open so future deltas can be appended to it.
 			true => self.group = Some(group),
 			// One frame per group, identical to a plain JSON track.
-			false => drop(group.close()?),
+			false => drop(group.finish()?),
 		}
 
 		Ok(())
@@ -569,7 +569,7 @@ impl Track {
 
 	fn finish(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		// Another handle may have declared the end already, which stands. This shared state
 		// keeps its own clone, whose appends the end refuses.

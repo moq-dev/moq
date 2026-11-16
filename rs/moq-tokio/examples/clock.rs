@@ -198,7 +198,7 @@ impl Publisher {
 			now = actual;
 		}
 
-		segment.close()?;
+		segment.finish()?;
 
 		Ok(())
 	}

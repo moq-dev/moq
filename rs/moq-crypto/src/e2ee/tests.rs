@@ -466,7 +466,7 @@ fn grouped_roundtrip() {
 	group.write_frame(ms(1), b"frame-zero").unwrap();
 	group.write_frame(ms(2), b"frame-one").unwrap();
 	assert_eq!(group.next_frame(), 2);
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut group = recv_group(&mut pair.consumer);
 	assert_eq!(group.start(), 1);
@@ -606,7 +606,7 @@ fn one_name_keys_its_stream_and_datagram_tracks_apart() {
 	// The same plaintext at the same identity in each kind: group 0 frame 0, and datagram 0.
 	let mut group = track.append_group(0).unwrap();
 	group.write_frame(ms(1), b"same").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(datagrams.append(ms(1), b"same").unwrap(), 0);
 	assert_eq!(read_frame(&mut recv_group(&mut track_reader)).plaintext, &b"same"[..]);
 	match recv_datagram(&mut datagram_reader) {
@@ -630,7 +630,7 @@ fn one_name_keys_its_stream_and_datagram_tracks_apart() {
 	let mut reader = consuming.consume(forged.subscribe(subscribe_all()), "audio").unwrap();
 	let mut group = forged.create_group(moq_net::group::Info { start: 0 }).unwrap();
 	group.write_frame(ms(1), sealed).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(
 		recv_group(&mut reader)
 			.poll_read_frame(&kio::Waiter::noop())
@@ -751,7 +751,7 @@ fn broadcast_speaks_semantic_names() {
 	let mut reader = resolve(&protected.consumer.subscribe("video", subscribe_all()).unwrap()).unwrap();
 	let mut group = video.append_group(1).unwrap();
 	group.write_frame(ms(1), b"frame").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"frame"[..]);
 
 	// The relay's view holds only the physical name.
@@ -853,7 +853,7 @@ fn requests_serve_undeclared_names() {
 	let mut reader = resolve(&subscribing).unwrap();
 	let mut group = track.append_group(1).unwrap();
 	group.write_frame(ms(1), b"42").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"42"[..]);
 
 	// The handler's own consumer reads the broadcast under semantic names too.
@@ -1052,7 +1052,7 @@ fn new_epoch_authenticates_old_does_not() {
 	let mut producer = new.produce(net.clone(), "video").unwrap();
 	let mut group = producer.append_group(1).unwrap();
 	group.write_frame(ms(1), b"fresh").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut consumer = consume(&new).consume(net.subscribe(subscribe_all()), "video").unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut consumer)).plaintext, &b"fresh"[..]);
@@ -1130,7 +1130,7 @@ fn grouped_authentication_ends_track() {
 	let mut pair = pair("video");
 	let mut group = pair.producer.append_group(0).unwrap();
 	group.write_frame(ms(1), b"ok").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Tamper with a second group by writing ciphertext directly.
 	let semantic = pair.semantic.as_str();
@@ -1139,7 +1139,7 @@ fn grouped_authentication_ends_track() {
 	payload[0] ^= 1;
 	let mut bad = pair.net.create_group(moq_net::group::Info { start: 1 }).unwrap();
 	bad.write_frame(ms(2), payload).unwrap();
-	bad.close().unwrap();
+	bad.finish().unwrap();
 
 	let waiter = kio::Waiter::noop();
 	let mut first = recv_group(&mut pair.consumer);
@@ -1407,7 +1407,7 @@ fn cancellation_ends_consumer() {
 	let mut pair = pair("video");
 	let mut group = pair.producer.append_group(1).unwrap();
 	group.write_frame(ms(1), b"x").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	pair.producer.finish().unwrap();
 	let waiter = kio::Waiter::noop();
 	let mut group = recv_group(&mut pair.consumer);
@@ -1441,7 +1441,7 @@ fn failed_group_write_does_not_burn_nonce() {
 	group.write_frame(ms(1), b"ok").unwrap();
 	assert_eq!(group.invocations(), 1);
 	assert_eq!(group.next_frame(), 1);
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut group = recv_group(&mut pair.consumer);
 	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
@@ -1452,7 +1452,7 @@ fn failed_net_write_after_encryption_aborts_the_group() {
 	let mut pair = pair("video");
 	let mut first = pair.producer.append_group(0).unwrap();
 	first.write_frame(ms(10), b"start").unwrap();
-	first.close().unwrap();
+	first.finish().unwrap();
 
 	// The net track refuses a first frame that rewinds past the one before it, only after
 	// the frame was encrypted, so the group can no longer line its transport index up with
@@ -1465,7 +1465,7 @@ fn failed_net_write_after_encryption_aborts_the_group() {
 	let after = group.write_frame(ms(20), b"after").unwrap_err();
 	assert_eq!(after.to_string(), err.to_string());
 	assert_eq!(group.invocations(), 2);
-	assert_eq!(group.close().unwrap_err().to_string(), err.to_string());
+	assert_eq!(group.finish().unwrap_err().to_string(), err.to_string());
 
 	// Subscribers see the group end with the failure instead of waiting on it.
 	let mut start = recv_group(&mut pair.consumer);
@@ -1490,7 +1490,7 @@ fn resumed_group_opens_at_transport_index() {
 	let mut group = producer.append_group(1).unwrap();
 	group.write_frame(ms(1), b"zero").unwrap();
 	group.write_frame(ms(2), b"one").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Simulate a resume at object 1: skip frame 0 on the net cursor before wrapping.
 	let Poll::Ready(Ok(Some(mut net_group))) = subscriber.poll_recv_group(&kio::Waiter::noop()) else {

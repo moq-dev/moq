@@ -302,7 +302,7 @@ async fn produce(
 			stats.frame_sent(zeros.len());
 		}
 
-		group.close()?;
+		group.finish()?;
 		if sequence == 0 {
 			published.establish();
 		}
@@ -749,7 +749,7 @@ mod tests {
 			.unwrap();
 		wait_for(&stats.frames_recv, 2).await;
 		assert!(!stats.ready());
-		complete.close().unwrap();
+		complete.finish().unwrap();
 		wait_for(&stats.subscriptions_established, 1).await;
 		assert!(stats.ready());
 		let _track = track.finish().unwrap();
@@ -1054,7 +1054,7 @@ mod tests {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"{}"))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let announced = discover(&origin, "bench/current");
@@ -1094,7 +1094,7 @@ mod tests {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, serde_json::to_vec(&header).unwrap())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		task.await.unwrap().unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
 			group
 				.write_frame(moq_net::Timestamp::from_millis(n).unwrap(), header(n))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let stats = Arc::new(Stats::default());
@@ -1175,7 +1175,7 @@ mod tests {
 				let payload = if i == 0 { header(n) } else { Bytes::from_static(b"{}") };
 				group.write_frame(at, payload).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let stats = Arc::new(Stats::default());
@@ -1195,7 +1195,7 @@ mod tests {
 
 		write_group(&mut track, 1, &[1_100]);
 		write_group(&mut track, 2, &[1_500, 1_600]);
-		first.close().unwrap();
+		first.finish().unwrap();
 		wait_for(&stats.groups_recv, 2).await;
 
 		// A last group moves the live frontier past group 2, so 1 and 2 are accounted.

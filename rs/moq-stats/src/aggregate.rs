@@ -1303,7 +1303,7 @@ mod tests {
 
 		let mut group = track.append_group(0).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
 
@@ -1418,7 +1418,7 @@ mod tests {
 			let at = next_stamp(&self.track);
 			let mut group = self.track.append_group(at.value()).expect("append group");
 			group.write_frame(at, b"not json".to_vec()).expect("write frame");
-			group.close().expect("close group");
+			group.finish().expect("close group");
 		}
 	}
 

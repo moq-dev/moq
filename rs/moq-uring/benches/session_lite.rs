@@ -198,9 +198,7 @@ mod linux {
 						.block_on(async {
 							let start = Instant::now();
 							for _ in 0..iterations {
-								let mut writer = track
-									.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-									.expect("append group");
+								let mut writer = track.append_group(None).expect("append group");
 								for _ in 0..FRAMES {
 									writer
 										.write_frame(
@@ -209,7 +207,7 @@ mod linux {
 										)
 										.expect("write frame");
 								}
-								writer.close().expect("finish group");
+								writer.finish().expect("finish group");
 
 								let mut reader = sub
 									.recv_group()

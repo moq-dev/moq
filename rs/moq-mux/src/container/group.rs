@@ -215,7 +215,7 @@ mod tests {
 		assert_eq!(second.payload, b"delta".as_slice());
 		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
 
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(live.read().await.unwrap().is_none());
 	}
 

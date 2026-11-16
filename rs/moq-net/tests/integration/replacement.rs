@@ -11,7 +11,6 @@
 //! from then on, so its holder follows the `Restart` instead.
 
 use crate::support;
-use support::AppendNext;
 use support::AtStart;
 
 use std::time::Duration;
@@ -50,9 +49,9 @@ async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 
 /// Write one group of one frame tagged `tag`.
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group.write_frame(group.at_start(), tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.

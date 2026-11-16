@@ -162,7 +162,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = moq_net::Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
 		let _source = source.finish().unwrap();
@@ -279,7 +279,7 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 					.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; CHUNK])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let read = async {
 			let mut ordered = dialed.consumer.ordered();

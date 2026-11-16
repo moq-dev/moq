@@ -1104,9 +1104,9 @@ async fn busy_handshake() -> (Session, Session, Vec<Box<dyn std::any::Any>>) {
 		.await
 		.expect("the broadcast resolves")
 		.unwrap();
-	let mut group = track.append_next().unwrap();
+	let mut group = track.append_group(None).unwrap();
 	group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	sub.recv_group().await.unwrap().expect("the track ended");
 	(

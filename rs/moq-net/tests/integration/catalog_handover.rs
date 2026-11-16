@@ -12,7 +12,6 @@
 //! no catalog.
 
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -113,7 +112,7 @@ impl Topology {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("catalog.json", timed()).unwrap();
 		broadcast.announce().unwrap();
-		let group = track.append_next().unwrap();
+		let group = track.append_group(None).unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a, None).await;
 		let p_to_b = link(version, &publisher, &relay_b, None).await;

@@ -119,7 +119,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("catalog frame should write");
-		group.close().expect("catalog group should finish");
+		group.finish().expect("catalog group should finish");
 
 		match consumer.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(result) => result,
@@ -173,7 +173,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("catalog frame should write");
-		group.close().expect("catalog group should finish");
+		group.finish().expect("catalog group should finish");
 
 		consumer.next().await
 	}
@@ -356,7 +356,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("catalog frame should write");
-		group.close().expect("catalog group should finish");
+		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
 	}
@@ -369,7 +369,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
 			.expect("catalog frame should write");
-		group.close().expect("catalog group should finish");
+		group.finish().expect("catalog group should finish");
 
 		assert!(matches!(
 			consumer.poll_next(&kio::Waiter::noop()),
@@ -392,7 +392,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("catalog frame should write");
-		group.close().expect("catalog group should finish");
+		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
 	}
@@ -410,13 +410,13 @@ mod test {
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
-		old_group.close().expect("old catalog group should finish");
+		old_group.finish().expect("old catalog group should finish");
 
 		let mut latest_group = track.append_group(1).expect("latest catalog group should append");
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
-		latest_group.close().expect("latest catalog group should finish");
+		latest_group.finish().expect("latest catalog group should finish");
 		let _track = track.finish().expect("catalog track should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
@@ -436,7 +436,7 @@ mod test {
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
-		old_group.close().expect("old catalog group should finish");
+		old_group.finish().expect("old catalog group should finish");
 
 		let mut latest_group = track.append_group(1).expect("latest catalog group should append");
 
@@ -445,7 +445,7 @@ mod test {
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
-		latest_group.close().expect("latest catalog group should finish");
+		latest_group.finish().expect("latest catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 	}
@@ -467,7 +467,7 @@ mod test {
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
-		latest_group.close().expect("latest catalog group should finish");
+		latest_group.finish().expect("latest catalog group should finish");
 		let _track = track.finish().expect("catalog track should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
@@ -475,7 +475,7 @@ mod test {
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
-		old_group.close().expect("old catalog group should finish");
+		old_group.finish().expect("old catalog group should finish");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
 	}

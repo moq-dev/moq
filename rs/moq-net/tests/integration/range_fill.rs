@@ -67,7 +67,7 @@ impl Fixture {
 			group
 				.write_frame(Timestamp::from_millis(index * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let copy = origin(2, None);
@@ -154,7 +154,7 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered once");
 
@@ -197,7 +197,7 @@ async fn sparse_history_is_recovered_across_its_skips() {
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6000].into());
 	})
 	.await
@@ -235,7 +235,7 @@ async fn a_recovery_takes_a_skip_inside_it() {
 			group
 				.write_frame(Timestamp::from_millis(start * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut first = fixture.subscribe([Range::oldest()]).await;
 		assert_eq!(receive(&mut first, 5).await, [0, 1, 3, 4, 5].into());
@@ -251,7 +251,7 @@ async fn a_recovery_takes_a_skip_inside_it() {
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 	})
 	.await

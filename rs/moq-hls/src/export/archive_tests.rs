@@ -160,7 +160,7 @@ impl Recording {
 				let timestamp = Timestamp::from_micros(micros).unwrap();
 				group.write_frame(timestamp, legacy(track, micros, index == 0)).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 

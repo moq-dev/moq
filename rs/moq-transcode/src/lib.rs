@@ -223,6 +223,14 @@ mod tests {
 
 	use super::*;
 
+	/// A fill the test expects to name groups rather than look up a time.
+	pub(crate) fn groups(fill: moq_net::track::Fill) -> moq_net::track::FillGroups {
+		let moq_net::track::Fill::Groups(fill) = fill else {
+			panic!("a run of groups, not a time lookup");
+		};
+		fill
+	}
+
 	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
 	/// run future owns published state that must end deliberately when abandoned. The
 	/// output itself stays open while the caller holds it.
@@ -428,7 +436,7 @@ mod tests {
 					frame.write_to(&mut group).unwrap();
 				}
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		Source {
@@ -499,7 +507,7 @@ mod tests {
 					.unwrap();
 				}
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			for (name, subscriber) in &mut subscribers {
 				let mut group = subscriber.next_group().await.unwrap().unwrap();
@@ -859,10 +867,14 @@ mod tests {
 		// A past group, the only demand on the rung.
 		let rung = consumer.track("video/120p").unwrap();
 		let fetching = rung.fetch_group(7, None);
-		let request = source_fetches.requested_fill().await.expect("the source track closed");
+		let request = source_fetches
+			.requested_fill()
+			.await
+			.map(groups)
+			.expect("the source track closed");
 		let mut group = request.accept(7, None).unwrap();
 		write_keyframe(&mut group);
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		// A live encode holding the session would hang this.
 		let mut fetched = fetching.await.unwrap();
@@ -923,10 +935,10 @@ mod tests {
 		let _subscriber = rung.subscribe(past).await.unwrap();
 
 		tokio::spawn(async move {
-			while let Ok(request) = source_fetches.requested_fill().await {
+			while let Ok(request) = source_fetches.requested_fill().await.map(groups) {
 				let mut group = request.accept(request.start().group, None).unwrap();
 				write_keyframe(&mut group);
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 		});
 
@@ -1413,7 +1425,7 @@ mod tests {
 		)
 		.await
 		.expect("the ladder never retired the rung");
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let finished = kio::clock::timeout(std::time::Duration::from_secs(5), async {
 			while fetched.read_frame().await?.is_some() {}
@@ -1547,7 +1559,11 @@ mod tests {
 
 		// The rung's fetch task is now inside its source read, which is upstream of
 		// both its decoder and the `Fill::accept` that claims output group 7.
-		let request = source_fetches.requested_fill().await.expect("the source track closed");
+		let request = source_fetches
+			.requested_fill()
+			.await
+			.map(groups)
+			.expect("the source track closed");
 		assert_eq!(request.start().group, 7);
 
 		// Retire the rung with the fetch parked there, and let the retirement land
@@ -1566,7 +1582,7 @@ mod tests {
 		// 7, which retirement had to leave writable.
 		let mut group = request.accept(7, None).unwrap();
 		write_keyframe(&mut group);
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut fetched = fetching
 			.await
@@ -1624,6 +1640,7 @@ mod tests {
 		let mut abandoned = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the fetch never reached the source")
+			.map(groups)
 			.expect("the source track closed");
 		assert_eq!(abandoned.start().group, 7);
 
@@ -1642,6 +1659,7 @@ mod tests {
 		let fresh = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the retry never fetched the source")
+			.map(groups)
 			.expect("the source track closed");
 		assert_eq!(fresh.start().group, 7);
 		drop(abandoned);
@@ -1650,7 +1668,7 @@ mod tests {
 			.accept(7, None)
 			.expect("the fresh request lost to the abandoned encode");
 		write_keyframe(&mut group);
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut fetched = kio::clock::timeout(std::time::Duration::from_secs(5), retry)
 			.await
@@ -1745,7 +1763,7 @@ mod tests {
 		);
 
 		// Once the source group ends, the live path finishes its copy and leaves.
-		group.close().unwrap();
+		group.finish().unwrap();
 		while source_demand.wanted_changed().await.unwrap().is_some() {}
 
 		// Read from the cache after the live path left.
@@ -1830,7 +1848,7 @@ mod tests {
 			let mut edge = rung.clone();
 			while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
 			let mut fetched = rung.fetch_group(0, None).await.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			while fetched.read_frame().await.expect("group 0 was aborted").is_some() {}
 
 			// Queue the next source group first, so it is waiting for the live
@@ -1956,7 +1974,7 @@ mod tests {
 		// The next group arrives whole.
 		let mut next = source._track.create_group(1u64.into()).unwrap();
 		write(&mut next, &[66_666, 99_999]);
-		next.close().unwrap();
+		next.finish().unwrap();
 
 		loop {
 			match edge.largest().await {
@@ -2286,7 +2304,7 @@ mod tests {
 			let mut rung = subscribe(&consumer, "video/120p").await;
 			let mut group = source._track.create_group(0u64.into()).unwrap();
 			write_keyframe(&mut group);
-			group.close().unwrap();
+			group.finish().unwrap();
 			match finish {
 				true => drop(source._track.clone().finish().unwrap()),
 				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
