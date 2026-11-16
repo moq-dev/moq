@@ -574,7 +574,9 @@ async fn raw_audio_activity() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::audio::MoqAudioProducerOptions {
@@ -705,7 +707,9 @@ async fn audio_raw_publish_from_many_threads() {
 	use crate::audio::*;
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let output = MoqAudioEncoderOutput {
 		codec: MoqAudioCodec::opus(),
@@ -850,7 +854,9 @@ async fn raw_audio_decode_delay() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::audio::MoqAudioProducerOptions {
@@ -953,7 +959,9 @@ async fn raw_audio_decode_reports_encoder_ends() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		MoqAudioProducerOptions {
@@ -1396,7 +1404,7 @@ async fn json_snapshot_roundtrip() {
 		matches!(track.demand(), Err(MoqError::Closed)),
 		"the producer takes over the track"
 	);
-	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
+	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), None).unwrap();
 
 	for n in 1..=4 {
 		producer.update(format!(r#"{{"a":{n}}}"#), us(n * 1000)).unwrap();
@@ -1486,7 +1494,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	.await
 	.expect("timed out waiting for the refresh");
 	assert_eq!(refreshed.sequence(), 3000, "the restatement starts at the value's time");
-	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
+	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), None).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for the restated value")
@@ -1515,7 +1523,7 @@ async fn json_demand() {
 	assert_eq!(stream_demand.name(), "events");
 	assert!(!snapshot_demand.wanted().is_some());
 
-	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "status".into(), 0).unwrap();
+	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "status".into(), None).unwrap();
 	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
 
 	kio::clock::timeout(TIMEOUT, snapshot_demand.until_wanted())
@@ -2886,7 +2894,9 @@ async fn requested_track_dynamic_survives_accept() {
 async fn video_publish_named_track() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let init = || video_init(MoqVideoFormat::Avc3, h264_init());
 	let hd = MoqMediaTrackProducer::video(
@@ -2937,7 +2947,9 @@ async fn video_publish_named_track() {
 async fn video_rung_sits_below_its_lower_and_disables() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
@@ -2985,7 +2997,9 @@ async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
 	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
@@ -3214,7 +3228,9 @@ async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	// Importing onto the request accepts it (at the media timescale), which is what
 	// unblocks the media subscribe, so it runs on a concurrent task until then.
@@ -3301,7 +3317,9 @@ async fn media_track_activity_and_name() {
 	assert_eq!(track_name, "0.opus");
 
 	let broadcast_consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -3335,7 +3353,9 @@ async fn publish_media_aac_populates_description() {
 	.unwrap();
 
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -3974,7 +3994,9 @@ async fn local_publish_consume_audio() {
 	assert_eq!(announcement.prefix, "live");
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -4040,7 +4062,9 @@ async fn video_publish_consume() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -4160,7 +4184,9 @@ async fn video_raw_publish_consume() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4268,7 +4294,9 @@ async fn video_decode_frame_ownership() {
 
 	let consumer = origin.consume();
 	let broadcast_consumer = await_announced(&consumer, "video-decode-frame").await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4430,7 +4458,9 @@ async fn video_decode_start() {
 		.sequence()
 		== 0
 	{}
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4552,10 +4582,12 @@ async fn video_raw_publish_from_many_threads() {
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = next_announced(&announced).await;
-	let catalog_consumer =
-		MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
-			.await
-			.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(
+		await_announced(&consumer, &announcement.prefix).await.as_ref(),
+		Duration::ZERO,
+	)
+	.await
+	.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4687,7 +4719,9 @@ async fn multiple_frames_ordering() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
@@ -4748,7 +4782,9 @@ async fn catalog_update_on_new_track() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let catalog1 = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -5090,9 +5126,12 @@ async fn follow() {
 	let announcement = next_announced(&announced).await;
 
 	assert_eq!(announcement.prefix, "test/broadcast");
-	let _catalog = MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
-		.await
-		.unwrap();
+	let _catalog = MoqMediaCatalogConsumer::subscribe(
+		await_announced(&consumer, &announcement.prefix).await.as_ref(),
+		Duration::ZERO,
+	)
+	.await
+	.unwrap();
 	// Finish so consumers observe a deliberate end (the canonical end for a
 	// publisher; dropping without finish reads as a failure).
 	_broadcast.close().unwrap();
@@ -5914,7 +5953,7 @@ async fn server_client_run_end(version: &str) {
 			.payload,
 		b"still live"
 	);
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc, Duration::ZERO).await.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -6023,7 +6062,9 @@ async fn server_client_run_end(version: &str) {
 
 /// Subscribe to the first audio rendition in `broadcast`'s catalog.
 async fn subscribe_audio(broadcast: &MoqBroadcastConsumer) -> Arc<MoqMediaTrackConsumer> {
-	let catalogs = MoqMediaCatalogConsumer::subscribe(broadcast).await.unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(broadcast, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalogs.next())
 		.await
 		.expect("timed out waiting for the catalog")

@@ -74,7 +74,7 @@ moq
 // Wait for a publisher at one path. The first call never returns null; call available()
 // again for the next one, or null once the path goes offline.
 final broadcast = (await moq.follow('live/camera').available())!;
-final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
+final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast, delay: Duration.zero);
 print(await catalog.next());
 ```
 
@@ -110,7 +110,7 @@ encoder.finish();
 import 'package:moq/video.dart' as video;
 
 final remote = (await moq.follow('live/camera').available())!;
-final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
+final renditions = await media.CatalogConsumer.subscribe(broadcast: remote, delay: Duration.zero);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,
   id: 'camera',
@@ -162,6 +162,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`), listen to `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects.
 - **Tokens.** Pass `ConnectOptions(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set_(tokens: [...])` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `moq.credential(token)` returns a `Credential` that `route.setAuth(credential: credential)` or `claim.setAuth(credential: credential)` names (`null` for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `await credential.answered()` throws the peer's refusal, and `credential.cancel()` withdraws it unless a route or claim still names it.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
+- **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast: b, delay: Duration.zero)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `UnsupportedConfigMoqException` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `Subscription()`, passing no subscription, and `defaultSubscription()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. `Delay` defaults both bounds to zero: pass `max: null` for no subscriber limit, or `min: null` to leave the target latency unstated. Decoders take the same `Delay`.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call the producer's `abortUnwanted(errorCode:)` once `wantedChanged()` returns null rather than releasing it: it returns false and keeps the track for a subscriber that joined since.

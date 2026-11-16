@@ -41,6 +41,9 @@ typedef SnapshotConsumer = MoqJsonSnapshotConsumer;
 /// Configures a lossy latest-value JSON producer.
 typedef SnapshotConfig = MoqJsonSnapshotConfig;
 
+/// A snapshot consumer's subscription priority and playout delay.
+typedef SnapshotConsumerConfig = MoqJsonSnapshotConsumerConfig;
+
 /// Publishes a lossless stream of JSON records on a track it takes over.
 typedef StreamProducer = MoqJsonStreamProducer;
 

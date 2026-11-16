@@ -377,7 +377,7 @@ std::optional<moq::Catalog> relayCatalog(
 {
 	if (!broadcast)
 		return std::nullopt;
-	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(broadcast).get(), "catalog consumer");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(broadcast, {}).get(), "catalog consumer");
 	for (;;) {
 		auto next = catalogs->next();
 		if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)

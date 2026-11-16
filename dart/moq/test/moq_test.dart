@@ -96,6 +96,46 @@ void main() {
     expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
   });
 
+  // Updates published before the reader joins reach a holding reader in order, each with its
+  // timestamp; an arrival reader takes only the newest.
+  test('a holding catalog reader reads every update within its delay', () async {
+    final broadcast = BroadcastProducer();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+    for (final value in ['1', '2']) {
+      catalog.setSection(name: 'app', json: value);
+    }
+    final consumer = broadcast.consume();
+
+    for (final (delay, expected) in [
+      (Duration.zero, ['2']),
+      (const Duration(minutes: 1), ['1', '2']),
+    ]) {
+      final reader = await moq_media.CatalogConsumer.subscribe(
+        broadcast: consumer,
+        delay: delay,
+      ).timeout(timeout);
+      final read = <String>[];
+      var last = 0;
+      while (read.isEmpty || read.last != '2') {
+        final update = await reader.next().timeout(timeout);
+        expect(update, isNotNull, reason: '$delay delay');
+        expect(update!.timestamp.scale, isNotNull);
+        expect(
+          update.timestamp.value,
+          greaterThan(last),
+          reason: '$delay delay',
+        );
+        last = update.timestamp.value;
+        // The broadcast's first catalog, published before any section, is not one of ours.
+        final app = update.sections['app'];
+        if (app != null) read.add(app);
+      }
+      reader.cancel();
+      expect(read, expected, reason: '$delay delay');
+    }
+    broadcast.close();
+  });
+
   test('abortUnwanted keeps a reader that joined late', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'status', info: null);
@@ -1038,6 +1078,7 @@ void main() {
     final consumer = broadcast.consume();
     final catalogs = await moq_media.CatalogConsumer.subscribe(
       broadcast: consumer,
+      delay: Duration.zero,
     ).timeout(timeout);
     final catalog = await catalogs.next().timeout(timeout);
     final decoder = await moq_video.Consumer.subscribe(
@@ -1106,6 +1147,7 @@ void main() {
     final consumer = broadcast.consume();
     final catalogs = await moq_media.CatalogConsumer.subscribe(
       broadcast: consumer,
+      delay: Duration.zero,
     ).timeout(timeout);
     final rendition = (await catalogs.next().timeout(timeout))!.audio['mic']!;
 
