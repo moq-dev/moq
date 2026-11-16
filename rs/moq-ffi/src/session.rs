@@ -223,7 +223,7 @@ pub struct MoqBackoff {
 	pub max: Option<Duration>,
 	/// Lift the cap on the delay, which then grows without bound. Refused with `max` set.
 	#[uniffi(default = false)]
-	pub uncapped: bool,
+	pub max_unlimited: bool,
 	/// Time spent retrying before giving up. Null never gives up, and 0 gives up at the
 	/// first failure.
 	#[uniffi(default = None)]
@@ -239,10 +239,10 @@ impl MoqBackoff {
 		if let Some(multiplier) = self.multiplier {
 			backoff.multiplier = multiplier;
 		}
-		backoff.max = match (self.max, self.uncapped) {
+		backoff.max = match (self.max, self.max_unlimited) {
 			(Some(_), true) => {
 				return Err(MoqError::Config {
-					reason: "backoff max and uncapped are exclusive".into(),
+					reason: "backoff max and max_unlimited are exclusive".into(),
 				});
 			}
 			(Some(max), false) => Some(max.into()),
@@ -305,7 +305,7 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 			initial: Some(backoff.initial()),
 			multiplier: Some(backoff.multiplier),
 			max: backoff.max(),
-			uncapped: backoff.max().is_none(),
+			max_unlimited: backoff.max().is_none(),
 			timeout: backoff.timeout(),
 		},
 		..Default::default()
@@ -582,7 +582,7 @@ mod tests {
 			once: true,
 			backoff: MoqBackoff {
 				timeout: Some(Duration::ZERO),
-				uncapped: true,
+				max_unlimited: true,
 				..Default::default()
 			},
 			..Default::default()

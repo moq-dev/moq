@@ -7441,7 +7441,7 @@ fn defaults_report_what_a_zeroed_config_dials() {
 		config.has_backoff_max.then(|| std::time::Duration::from_micros(config.backoff_max_us)),
 		expected.connect.backoff.max()
 	);
-	assert!(!config.backoff_uncapped);
+	assert!(!config.backoff_max_unlimited);
 	// No give-up is both the default and the absent value.
 	assert!(!config.has_backoff_timeout);
 	assert_eq!(expected.connect.backoff.timeout(), None);
@@ -7511,7 +7511,7 @@ fn a_backoff_bound_is_unset_off_zero_or_a_value() {
 	assert_eq!(defaults.timeout(), None, "absent is already off");
 
 	let mut off = client_config();
-	off.backoff_uncapped = true;
+	off.backoff_max_unlimited = true;
 	assert_eq!(bounds(&off), (None, None));
 
 	for value in [std::time::Duration::ZERO, three] {
@@ -7525,7 +7525,7 @@ fn a_backoff_bound_is_unset_off_zero_or_a_value() {
 
 	let mut both = client_config();
 	both.has_backoff_max = true;
-	both.backoff_uncapped = true;
+	both.backoff_max_unlimited = true;
 	assert!(unsafe { crate::parse_client(Some(&both)) }.is_err());
 }
 

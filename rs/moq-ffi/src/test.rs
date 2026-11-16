@@ -131,7 +131,7 @@ fn fast_backoff() -> MoqBackoff {
 		initial: Some(Duration::from_millis(50)),
 		multiplier: Some(2),
 		max: Some(Duration::from_millis(200)),
-		uncapped: false,
+		max_unlimited: false,
 		timeout: None,
 	}
 }
@@ -6706,7 +6706,7 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	let backoff = moq_tokio::connection::Backoff::default();
 	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
 	assert_eq!(defaults.backoff.max, backoff.max());
-	assert!(!defaults.backoff.uncapped);
+	assert!(!defaults.backoff.max_unlimited);
 	assert_eq!(defaults.backoff.timeout, backoff.timeout());
 	let mut reapplied = moq_tokio::connection::Backoff::default();
 	defaults.backoff.clone().apply(&mut reapplied).unwrap();
@@ -6740,7 +6740,7 @@ fn a_backoff_bound_is_unset_off_zero_or_a_value() {
 		(MoqBackoff::default(), (defaults.max(), defaults.timeout())),
 		(
 			MoqBackoff {
-				uncapped: true,
+				max_unlimited: true,
 				..Default::default()
 			},
 			(None, None),
@@ -6768,7 +6768,7 @@ fn a_backoff_bound_is_unset_off_zero_or_a_value() {
 
 	let both = MoqBackoff {
 		max: Some(three),
-		uncapped: true,
+		max_unlimited: true,
 		..Default::default()
 	};
 	assert!(matches!(resolve(both), Err(MoqError::Config { .. })));

@@ -1590,7 +1590,7 @@ pub struct moq_client_config {
 	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
 	/// The maximum reconnect delay in microseconds; zero retries at once. Absent caps it
-	/// at 5s, and `backoff_uncapped` lifts the cap.
+	/// at 5s, and `backoff_max_unlimited` lifts the cap.
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
@@ -1658,7 +1658,7 @@ pub struct moq_client_config {
 
 	/// Lift the cap on the reconnect delay, which then grows without bound. Refused
 	/// with `has_backoff_max`.
-	pub backoff_uncapped: bool,
+	pub backoff_max_unlimited: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1709,7 +1709,7 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 				dst.backoff_max_us = micros(max);
 				dst.has_backoff_max = true;
 			}
-			None => dst.backoff_uncapped = true,
+			None => dst.backoff_max_unlimited = true,
 		}
 		if let Some(timeout) = config.connect.backoff.timeout() {
 			dst.backoff_timeout_us = micros(timeout);

@@ -89,9 +89,10 @@ public typealias Compression = MoqFFI.MoqCompression
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
 /// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
-/// field keeps its default. It applies only once a session has been established:
-/// a first dial that reaches no session ends the connection with its error rather
-/// than retrying.
+/// field keeps its default, zero means zero (retry at once, or give up at the
+/// first failure), and `maxUnlimited` lifts the ceiling. It applies only once a
+/// session has been established: a first dial that reaches no session ends the
+/// connection with its error rather than retrying.
 public typealias Backoff = MoqFFI.MoqBackoff
 
 /// Certificate trust and the mTLS identity for a `Client`.
