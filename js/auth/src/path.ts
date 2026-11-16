@@ -21,8 +21,8 @@ const MAX_BYTES = 4096;
 const utf8 = new TextEncoder();
 
 /**
- * Throw on a root `@moq/net`'s `Path.from` and `Path.decode` refuse: one longer than 4096
- * bytes, with a leading, trailing, or doubled `/`, or with a `\` before anything but `\` or `/`.
+ * Throw on a root that `@moq/net` refuses as a path: one longer than 4096 bytes, with a leading,
+ * trailing, or doubled `/`, or with a `\` before anything but `\` or `/`.
  */
 export function validate(root: string): void {
 	const invalid = (reason: string) => new Error(`invalid root ${JSON.stringify(root)} ${reason}`);
