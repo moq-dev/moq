@@ -16,7 +16,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Every moq-transport draft, each of which carries the SOLICIT option.
-const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
+const MOQT: [&str; 3] = ["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));

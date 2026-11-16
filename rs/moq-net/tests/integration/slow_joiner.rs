@@ -12,7 +12,7 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribe
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: [&str; 4] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Groups published one per second while the reader is stalled, which resumes a second
 /// after the last: group N ends `GROUPS - N - 1` seconds behind the clock then.

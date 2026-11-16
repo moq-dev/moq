@@ -1037,7 +1037,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 
 #[kio::test]
 async fn redundant_pair_follows_the_next_instance_when_unreachable() {
-	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(
 			TEST_TIMEOUT,
 			redundant_pair_follows_the_next_instance(version, Loss::Unreachable),
@@ -1049,7 +1049,7 @@ async fn redundant_pair_follows_the_next_instance_when_unreachable() {
 
 #[kio::test]
 async fn redundant_pair_follows_the_next_instance_when_the_incumbent_ends() {
-	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
+	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(
 			TEST_TIMEOUT,
 			redundant_pair_follows_the_next_instance(version, Loss::Ends),
