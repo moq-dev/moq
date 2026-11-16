@@ -56,7 +56,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
-  `mpegts`, one strict rule); [dead drafts](/quest/m2/drafts-retire.md);
+  `mpegts`, one strict rule);
   [the archive as version 2](/quest/m2/archive-v2.md);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
   [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),

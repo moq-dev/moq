@@ -52,20 +52,22 @@ subset drops. What a peer actually observes against this implementation:
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is synced, and
-[probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
+before a `SUBSCRIBE_NAMESPACE` is synced.
+Both libraries offer solicit unless a side's `extensions` setting declines it,
+which connects it as a peer that does not speak that extension. The pooled JavaScript `Connection` has no such setting yet.
+moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
+so the receiving session mints one per announcement.
+
+Bandwidth estimation is moq-lite only: moq-transport has no PROBE. On
+[moq-lite-07](/draft/moq-lite#probe), Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer or a `viewers()` viewer is held.
 The consumer reads the estimate, and a viewer reads its share of it; session
 statistics do not request PROBE. The viewers' ceilings, summed, are the PROBE target, sent only
 to a peer advertising `Increase`, which a native session over moq-quic with BBR3
 does and a browser session does not yet.
-Both libraries offer solicit unless a side's `extensions` setting declines it,
-which connects it as a peer that does not speak that extension. The pooled JavaScript `Connection` has no such setting yet.
-moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
-so the receiving session mints one per announcement; the
-[epoch draft](/draft/moq-epoch) remains an unimplemented proposal.
+
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this
 object state between relays. moq-lite-07 is still a work in progress
 (`moq-lite-07-wip`), negotiated only when both sides enable it, so a peer that
