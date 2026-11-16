@@ -5365,6 +5365,13 @@ impl kio::Task for FrontServe {
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					io.copy = None;
 					io.held = None;
+					// A copy that failed may have failed with its route, which the table can
+					// already have replaced: the front takes that change first, so it fails over
+					// to the replacement rather than giving up on the route that died.
+					if result.is_err() && self.watch.poll_changed(&kio::Waiter::noop(), self.seen).is_ready() {
+						let selected = self.select();
+						self.events.push_back(selected);
+					}
 					Event::TrackEnded {
 						track: name,
 						source,
