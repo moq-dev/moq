@@ -3,7 +3,7 @@
 ## Goal
 
 A relay with demand for an Instance advertises it on the announce stream to
-each peer or upstream that could take it, an edge asks its other upstreams
+each peer or upstream that could take it, an edge queries its other upstreams
 when it gains demand, and each relay pulls every demanded broadcast from the
 cheapest copy of its Instance, moving an existing pull only when the route it
 uses gets worse or ends, or another is strictly cheaper in summed cost. A peer
@@ -21,29 +21,40 @@ Plan, is replaced.
 Recommended 2026-11-16 on
 [moq-dev/moq#8903](https://github.com/moq-dev/moq/pull/8903), awaiting the
 maintainer's confirmation at merge: **adverts between peers and toward
-upstreams, only where the copy could be taken; never down a link the
-neighbour marked upstream, where the edge instead asks its other upstreams on
-subscribe; the data path in every offer, the relays a pull feeds in every
-subscription, and the race left standing**. Rejected:
+upstreams, only where the copy could be taken; none down a link the neighbour
+marked upstream, where an edge instead queries its other upstreams once when
+it gains demand; the data path in every offer; no warm signal taken from a
+relay on the taker's own path; and the race left standing**. Four parts:
+adverts, the path, the query, and one rule.
+
+The maintainer's decision is whether to keep the query, below. Rejected:
 
 - Advertising to every neighbour that could take the copy, down marked links
   too: it grows with a region's edges, since a warm core tells every edge it
   could feed. 1.7 to 118 warm messages per one-viewer reader change as edges
-  per core grow from 3 to 128, against the pick's flat 1.6 to 1.8.
+  per core grow from 3 to 128, against the pick's flat 1.05 to 1.3.
 - Advertising to every neighbour, which also grows with the neighbours of
   every relay on the warm chain: 9 to 66 per one-viewer reader change as a
   full core mesh grows from 4 to 32 cores.
-- Keeping adverts off the edges without the ask (never to a neighbour whose
-  route runs through the relay, never down a marked link, or asking only
-  between upstreams that tie): flat, but an edge whose cheaper uplink is to
-  the cold core never hears of the warm one, 29 against 24 on the unequal
-  region.
+- Asking only between upstreams that tie, or never advertising to a neighbour
+  whose route runs through the relay: as the pick without the query, at more
+  messages or none fewer.
+- A standing query, held open for updates while the demand lasts: the same
+  trees as the one-shot query, but the upstream holds an entry per edge per
+  demanded broadcast (41 against 9 per core) and it left 1 of 400 churned
+  regions unsettled.
+- Naming in every subscription the relays whose demand alone it carries, so
+  an offer leaves them out: a second fix for the loop the rule stops. It adds
+  a list and an update message on each change (6,913 to 8,469 per 400
+  churned meshes), loses a shared drone uplink (41 against 33 with two drones
+  a hop apart), and left 2 of 2,000 churned random meshes unsettled where the
+  rule left none.
 - Asking the k cheapest neighbours on each SUBSCRIBE. It stays bounded per
   subscribe only because it stops finding the copy: on a full drone mesh
   past 5 drones, `ask_1` shared no uplink at 64 drones and `ask_2` few. It
   doubled the time to a first frame and left about twice the readers unfed
   under churn. On CDN tiers `ask_1` sent 5.7 to 7 warm messages per
-  one-viewer reader change against the pick's 1.6 to 2.1.
+  one-viewer reader change against the pick's 1.05 to 1.55.
 - Advertising only once two others want the copy, which lost both cases;
   never advertising over a link the sender marked upstream, which saves
   nothing in a core mesh.
@@ -53,6 +64,50 @@ That PR's simulator, `rs/moq-net/src/route/tests/warm.rs`, runs every rule
 below, and its `warmth.rs` holds the shapes, the churn sweep, and the growth
 sweep this ports onto production code.
 
+### Decision: the query
+
+The query is the one part that only an edge with more than one upstream
+uses. Without it the pick is adverts between peers and toward upstreams, the
+path, and the rule. With equal uplinks the query buys nothing: every edge of
+a region ranks the two cores by the same rendezvous hash per broadcast, so
+every edge's path join lands on the same core, always; path joins already
+built the cheapest tree on every unpeered CDN shape swept. It pays only where an
+edge's cheaper uplink is to the core that is cold.
+
+| shape | tree, with / without the query (cheapest) | warm messages per reader change, with / without |
+|---|---|---|
+| CDN, 8 cores, 16 edges per core, one viewer | 2236 / 2236 (2236) | 1.21 / 0.21 |
+| CDN, 8 cores, 16 edges per core, crowd | 544 / 544 (544) | 3.00 / 2.00 |
+| CDN, 32 cores, 3 edges per core, crowd | 256 / 256 (256) | 3.00 / 2.00 |
+| tiers, crowd (edges peered) | 1095 / 1095 (1095) | 5.29 / 3.95 |
+| tiers, one viewer | 1096 / 1096 (1096) | 5.50 / 3.50 |
+| two edges, unequal uplinks, in turn | 12 / 13 (12) | 3.50 / 1.00 |
+| two edges, unequal uplinks, at once | 9 / 9 (7) | 3.00 / 1.00 |
+| one region, unequal uplinks | 24 / 29 (24) | 3.00 / 0.00 |
+| 400 churned regions: unfed reader-hops, warm messages | 17,181 / 12,586 | 24,446 / 8,602 in all |
+
+Recommended: keep the query. Where uplinks are unequal, it saves the second
+core's copy over the core mesh, the dearest link a region has. It costs one
+request and one answer per extra upstream per first viewer at an edge, holds
+nothing on the core, and carries no traffic. Without it an operator gets the
+same tree by pricing each edge's uplinks equally.
+
+### What each part costs
+
+| part | on the wire | relay state | bounded by | without it |
+|---|---|---|---|---|
+| advert | offer and path on the announce stream, and its withdrawal | one heard per neighbour per demanded Instance | neighbours; the path by the hop limit | path joins: pops 69 against 61, drones in turn 5 uplinks against 1, a ring 48 against 8 |
+| offer on the subscribe answer | a cost on the answer and its updates | one per pull | one per subscription | nothing can price a move |
+| path in the offer | a list on the advert, answer, and query answer | as the offer | the hop limit | cycle deliveries up 77%, 26%, and 110% on random meshes, drones, and regions; 3 of 1,200 churned meshes unsettled |
+| query | a request naming an Instance; one answer, offer and path or none | the edge keeps one answer per extra upstream per demanded Instance; the upstream none | upstreams beyond the first | an edge whose cheaper uplink is cold: 29 against 24 |
+| no warm signal from a relay on the taker's path | none | none, the path of its own pull | none | 1 of 400 churned regions never settles |
+
+The rule replaces a chain in every subscription naming the relays whose
+demand alone it carries. The offer's path cannot stand in for the chain on
+the sender's side: the demand that comes back is downstream of the sender,
+and its path names only relays upstream of it. On the taker's side the path
+of its own pull is enough.
+
 ### What a relay sends
 
 - **The offer.** What a relay R with a live upstream through parent P offers
@@ -60,9 +115,10 @@ sweep this ports onto production code.
   otherwise `O(P→R) + cold(P, R)`, the chain priced unshared. The publisher's
   relay offers 0. An offer is never below its sender's own cost.
 - **The path.** Every offer names the relays the data passes from the
-  publisher's relay to the sender. Without it, transient cycles under churn
-  rose by 73% on random meshes and 30% on drone meshes, and the merge below
-  cannot work.
+  publisher's relay to the sender. Without it, cycle deliveries under churn
+  rose by 77% on random meshes, 26% on drone meshes, and 110% on regions, 1
+  random mesh and 2 regions of 400 never settled, and the merge below cannot
+  work.
 - **Adverts.** While R has demand for an Instance besides N, and N has not
   marked R upstream, it tells N its offer and path on the announce stream
   when `O(R→N) + cold(R, N)` is below N's route cost for the Instance, or
@@ -73,22 +129,21 @@ sweep this ports onto production code.
   path join already. R knows N's route cost from what N announces it, and
   computes it when N's route runs through R. Skipping the parent and children
   by rule instead left 8 of 400 churned drone meshes unsettled.
-- **Asks.** A relay with more than one upstream asks each upstream besides
-  the one its path join takes, on a metadata-only subscription opened when
-  it gains demand and closed when the demand ends. It does not wait for the
-  answers: it joins along its route at once and moves if an answer is
-  strictly cheaper. The asked upstream answers its offer and path, and each
-  change. An upstream cannot tell which of its upstreams a dual-homed edge's
-  route uses, since the edge announces it nothing, so only the edge can find
-  a warm core beside its route.
-- **The pull's chain.** Every subscription names the relays whose demand
-  alone it carries: the subscriber, then, while the subscriber has no reader
-  and one neighbour pulling through it, that neighbour's chain. It updates
-  the chain on each change. A relay's demand besides N leaves out every pull
-  whose chain names N. Without it N's own pull, through another neighbour,
-  makes R's offer to N warm; N moves to R, the other pull ends, R's offer
-  turns cold, and N moves back for good. One of 400 churned regions never
-  settled for that reason, under the pick and most other warm arms.
+- **The query.** A relay with more than one upstream sends each upstream
+  besides the one its path join takes one query when it gains demand: one
+  request, one answer. The upstream answers its warm offer and path, or that
+  it has none, from what it holds, and keeps nothing: it forwards nothing,
+  holds no demand for it, and sends no update. The relay does not wait: it
+  joins along its route at once, moves if an answer is strictly cheaper, and
+  drops an answer once a pull from that upstream is answered, live or lost:
+  an answer kept longer went stale and held a move to a core that had lost
+  its upstream. It is not a
+  metadata-only subscription: one forwarded by a cold core would hold demand
+  of a kind across the core mesh for as long as the viewer stays, the
+  standby the epic keeps opt in and off inside the CDN. An upstream cannot
+  tell which of its upstreams a dual-homed edge's route uses, since the edge
+  announces it nothing, so only the edge can find a warm core beside its
+  route.
 - **Answers.** The subscribe answer carries the parent's offer and path to the
   subscriber, and an update on each change. A subscriber waits for that answer
   before it counts the pull as live.
@@ -101,6 +156,15 @@ sweep this ports onto production code.
 - It pulls from a neighbour only when that is strictly cheaper than `D(R)`.
   It never pulls from a neighbour that pulls through it, nor from one whose
   path names it.
+- It takes no advert or answer from a relay named on its own live pull's
+  path; its route still counts. That relay's warmth may be this relay's own
+  demand coming back: N pulls through X from R, so R has demand besides N
+  and offers N its warm cost; N moves to R, X's pull ends, R's offer turns
+  cold, N goes back through X, and so on for good. Without the rule, 1 of
+  400 churned regions never settled that way under most warm arms; with it, none of 2,000 each of random meshes, drone meshes,
+  and regions under the pick. A relay on N's path is upstream of N's parent,
+  so N gives up only a move up its own branch, which its route still offers
+  when that is the cheaper way.
 - A move is make before break: the old pull stays until the new one is
   answered live, and a move under way stays while it is no dearer than
   staying. Its own subscription shares the old parent, which lowers what
@@ -117,11 +181,12 @@ Why no cycle outlasts the messages in flight: a relay's cost is its parent's
 offer plus a warm price of at least 1, and no offer is below its sender's
 cost, so cost rises strictly along every pull chain. Two relays can never
 each prefer the other on current offers, and a cycle needs one stale offer.
-Gaining demand lowers offers only to neighbours outside the chain that
-brought it; losing it raises only the offer to the neighbour that still
-pulls, which then moves only to something strictly cheaper. The sweep agrees:
-every churned random mesh, drone mesh, and region settled, and cycles lasted
-at most 38 deliveries under the pick, each while some answer was in flight.
+Gaining demand lowers offers to others, and the one it lowers to the relay
+whose own demand it is, that relay ignores; losing it raises only the offer to
+the neighbour that still pulls, which then moves only to something strictly
+cheaper. The sweep agrees, though it is no proof: every churned random mesh,
+drone mesh, and region settled under the pick, and cycles lasted at most 61
+deliveries, each while some answer was in flight.
 
 ### Simultaneous starts
 
@@ -130,11 +195,11 @@ neither offers the other anything cheaper, and both uplinks stay until one
 drone's demand ends. The maintainer's rule, decided 2026-11-15: merge them
 on the rendezvous hash unless that adds a cycle, an unfed reader, or more
 messages than the second uplink costs. Under adverts it does add cycles:
-in 400 churned drone meshes, 20 deliveries had a pull the merge made inside
+in 400 churned drone meshes, 95 deliveries had a pull the merge made inside
 a cycle, all transient. The one traced was a pending cycle: a merged
 drone's new parent lost its uplink and rejoined through a drone that had
 trusted the merged drone's advert, before the lost parent's answer arrived.
-The merge also added about 1% unfed reader hops. Under asking on subscribe,
+The merge also added about 2% unfed reader hops. Under asking on subscribe,
 no merged pull was ever in a cycle.
 
 So the race stands. A drone that loses the one uplink leaves every drone
@@ -165,39 +230,42 @@ path in each offer.
   route layer's hop limit, and adverts for anything else dropped. Adverts are
   per broadcast like the claims the announce stream already carries over
   every link, so a relay hears at most one per neighbour per demanded
-  broadcast. An upstream holds at most one ask per downstream per demanded
-  broadcast, and a pull's chain is no longer than the hop limit.
+  broadcast. A query leaves nothing on the upstream; the edge keeps at most
+  one answer per upstream beyond the first per demanded broadcast.
 - Check the Goal's efficiency against plain path routing on the same shapes.
   On the simulator: pops 61 against 69 (cheapest tree 59), drones in turn one
   uplink against five, a ring of 48 relays 8 uplinks against 48, tiers 1095
   against 1191 (the cheapest), and an edge beside the warm core 24 against
-  29, at 5 to 16.5 messages per reader change against 2 to 5.4.
+  29, at 4.8 to 11 messages per reader change against 2 to 5.4.
 - Port the growth sweep, and hold its laws, per link kind. Per reader change,
   warm messages are flat in the number of demanded broadcasts for every arm.
   - Between cores, a full peer mesh: flat in cores. A core with demand is
     never cheaper for another core than that core's own route.
-  - Down a marked link: none. Up it: one ask per upstream beyond the first,
-    with its answer, flat in edges per core. Together 1.6 to 2.1 per
-    one-viewer reader change and 3.7 to 4.2 for a crowd, from 4 to 32 cores
-    and 3 to 128 edges per core, up to 2,080 relays.
+  - Down a marked link: none. Up it: one query per upstream beyond the
+    first, with its answer, when an edge gains demand, flat in edges per
+    core. Together 1.05 to 1.55 per one-viewer reader change and 3 for a
+    crowd, from 4 to 32 cores and 3 to 128 edges per core, up to 2,080
+    relays; the query is exactly 1 of it.
   - Between edges or drones that peer: n − 1 per first viewer (63 at 64
     drones), since every one could take the copy; that is what buys the
     cheapest tree there (432 against 1,328 to 1,456 for asking and path
     joins, a crowd of 9 on 16 broadcasts).
-  At rest the busiest relay of 80 holds 518 adverts and asks for 4,096
-  one-viewer broadcasts, against 4,355 metadata-only subscriptions for
-  `ask_1` and 139,264 adverts sent to every neighbour.
+  At rest the busiest relay of 80 holds 259 adverts for 4,096 one-viewer
+  broadcasts, against 4,355 metadata-only subscriptions for `ask_1` and
+  139,264 adverts sent to every neighbour.
 - A region's edges do not peer every pair as it grows: they reach each other
   through the region's cores. Peered, the region is a drone mesh and pays its
-  n − 1 per first viewer (65 at 64 edges per core); the tree it buys there,
+  n − 1 per first viewer (64 at 64 edges per core); the tree it buys there,
   288 against 544 unpeered for a crowd, comes from pricing an edge-to-edge
   link at a third of an uplink.
 - Port the cases as acceptance tests, two of them new: drones starting at
   once, whose uplinks the race keeps, and the same sweeps with each link
   delivering in order at its own pace, rather than one control message per
   delivery step across the mesh, which is what the simulator's unfed counts
-  and first frames assume. A first frame matches the path join's when readers
-  arrive in turn; when two edges start at once it took 262 ms against 150.
+  and first frames assume. A first frame matches the path join's everywhere
+  the sweeps measured, but two drones a hop apart (81 ms against 69). Two
+  edges starting at once each keep their path join (9 against 7), the race
+  again.
 - A far pop keeps pulling through a nearer pop after that pop's reader
   leaves, while the nearer pop's unshared offer plus the warm link stays
   below the far pop's own long link. That is the cheaper tree, and the
@@ -216,10 +284,10 @@ then-current wip version with this.
 
 Public API: report any relay configuration added, such as a warm cost per
 link. Wire, in the then-current wip version and all additive: an advert on
-the announce stream carrying an Instance's offer and path; the same offer and
-path on the subscribe answer and its updates, and on the answer to a
-metadata-only subscription; and the chain of relays a subscription feeds, on
-the subscribe and an update. Nothing lite-07 freezes changes.
+the announce stream carrying an Instance's offer and path, and its
+withdrawal; the same offer and path on the subscribe answer and its updates;
+and a query naming an Instance, answered once with an offer and path or
+none. Nothing lite-07 freezes changes.
 
 ## Required
 

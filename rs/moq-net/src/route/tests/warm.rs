@@ -80,6 +80,10 @@ pub(super) enum Audience {
 	/// As [`Audience::NotDown`], and a relay with demand asks every upstream besides the
 	/// one its path join takes, on subscribe, without waiting for their answers.
 	NotDownAskUp,
+	/// As [`Audience::NotDownAskUp`], but each ask is one request and one answer: the
+	/// upstream answers its warm offer once and keeps nothing, and the relay drops the
+	/// answer once a pull from that upstream is answered, live or lost.
+	NotDownQuery,
 }
 
 /// One way to find a warm copy, as measured.
@@ -92,6 +96,11 @@ pub(super) struct Arm {
 	/// Relays holding equal-cost copies merge: the lower rendezvous hash joins the
 	/// higher, when nothing else is cheaper once it has.
 	pub merge: bool,
+	/// A subscription names the relays whose demand alone it carries, and an offer
+	/// leaves out the demand that passes through its receiver. Without it, the rule
+	/// that stops the same loop: a relay never takes a warm signal from a relay named
+	/// on its own pull's path, whose warmth may be this relay's own demand.
+	pub chain: bool,
 }
 
 impl Arm {
@@ -108,10 +117,12 @@ impl Arm {
 			Mode::Advertise(Audience::NotDown) => "advertise_not_down".into(),
 			Mode::Advertise(Audience::NotDownAsk) => "advertise_not_down_ask".into(),
 			Mode::Advertise(Audience::NotDownAskUp) => "advertise_not_down_ask_up".into(),
+			Mode::Advertise(Audience::NotDownQuery) => "advertise_not_down_query".into(),
 		};
 		let hops = if self.hops { "+hops" } else { "" };
 		let merge = if self.merge { "+merge" } else { "" };
-		format!("{mode}{hops}{merge}")
+		let chain = if self.chain { "+chain" } else { "" };
+		format!("{mode}{hops}{merge}{chain}")
 	}
 }
 
@@ -674,9 +685,17 @@ impl WarmSim {
 				.chain((carry.asks.iter()).filter_map(|(&peer, signal)| Some((peer, signal.as_ref()?))))
 				.collect(),
 		};
+		// Without the chain, an ancestor's warmth may be this relay's own demand.
+		let ancestors: Vec<Node> = match self.arm.chain {
+			true => Vec::new(),
+			false => self
+				.live(node, cast)
+				.map_or_else(Vec::new, |signal| signal.path.clone()),
+		};
 		for (via, signal) in heard {
 			if !self.is_open(node, via)
 				|| carry.down.contains_key(&via)
+				|| ancestors.contains(&via)
 				|| (self.arm.hops && signal.path.contains(&node))
 			{
 				continue;
@@ -722,9 +741,24 @@ impl WarmSim {
 		let (count, patient) = match self.arm.mode {
 			Mode::Ask(count) => (count, true),
 			Mode::Advertise(Audience::NotDownAsk) => (0, false),
-			Mode::Advertise(Audience::NotDownAskUp) => (usize::MAX, false),
+			Mode::Advertise(Audience::NotDownAskUp | Audience::NotDownQuery) => (usize::MAX, false),
 			_ => return,
 		};
+		let once = self.arm.mode == Mode::Advertise(Audience::NotDownQuery);
+		// A one-shot answer is spent once a pull from that upstream is answered, live or
+		// lost: its subscribe answer says the rest.
+		if once {
+			let carry = self.entry(node, cast);
+			let answered: Vec<Node> = ([&carry.up, &carry.next].into_iter().flatten())
+				.filter(|pull| pull.state != State::Pending)
+				.map(|pull| pull.via)
+				.collect();
+			for via in answered {
+				if let Some(word) = carry.asks.get_mut(&via) {
+					*word = None;
+				}
+			}
+		}
 		let carry = self.entry(node, cast).clone();
 		let want: BTreeSet<Node> = match () {
 			// Its upstreams, when its route ties between more than one.
@@ -749,7 +783,10 @@ impl WarmSim {
 			let carry = self.entry(node, cast);
 			carry.asks.remove(&gone);
 			carry.unanswered.remove(&gone);
-			if let Some(stream) = carry.asking.remove(&gone) {
+			// The upstream keeps nothing for a one-shot query, so there is nothing to close.
+			if let Some(stream) = carry.asking.remove(&gone)
+				&& !once
+			{
 				self.send(node, gone, Lane::Ask, cast, Msg::Ask { stream, open: false });
 			}
 		}
@@ -794,9 +831,10 @@ impl WarmSim {
 	fn subscribe(&mut self, node: Node, cast: usize, via: Node) -> Pull {
 		self.streams += 1;
 		let stream = self.streams;
-		let chain = self
-			.carry(node, cast)
-			.map_or_else(|| vec![node], |carry| carry.chain(node));
+		let chain = match self.arm.chain {
+			true => (self.carry(node, cast)).map_or_else(|| vec![node], |carry| carry.chain(node)),
+			false => Vec::new(),
+		};
 		let open = Msg::Subscribe {
 			stream,
 			open: true,
@@ -815,7 +853,7 @@ impl WarmSim {
 	/// Tell each parent when the relays whose demand alone its pull carries change.
 	fn own(&mut self, node: Node, cast: usize) {
 		// A join along the route prices nothing, so it needs no chain.
-		if self.arm.mode == Mode::Path {
+		if self.arm.mode == Mode::Path || !self.arm.chain {
 			return;
 		}
 		let carry = self.entry(node, cast);
@@ -987,12 +1025,14 @@ impl WarmSim {
 	/// Tell each neighbour pulling through `node` what it offers now.
 	fn answer(&mut self, node: Node, cast: usize) {
 		let carry = self.entry(node, cast).clone();
+		// Neither pulling nor trying to: a new subscriber hears so at once.
+		let stuck = carry.next.is_none() && carry.up.as_ref().is_none_or(|pull| pull.state == State::Lost);
 		for (&child, streams) in &carry.down {
 			let offer = self.offer(node, cast, child);
 			for &stream in streams {
 				let was = carry.answered.get(&(child, stream));
-				// Unanswered until confirmed, then every change.
-				if (was.is_none() && offer.is_none()) || was == Some(&offer) {
+				// Unanswered until confirmed or lost, then every change.
+				if (was.is_none() && offer.is_none() && !stuck) || was == Some(&offer) {
 					continue;
 				}
 				self.entry(node, cast).answered.insert((child, stream), offer.clone());
@@ -1014,6 +1054,12 @@ impl WarmSim {
 				self.entry(node, cast).told.insert((asker, stream), word.clone());
 				let word = word.clone();
 				self.send(node, asker, Lane::Ask, cast, Msg::Told { stream, word });
+				// A one-shot query is answered once and forgotten.
+				if self.arm.mode == Mode::Advertise(Audience::NotDownQuery) {
+					let carry = self.entry(node, cast);
+					close(&mut carry.asked, asker, stream);
+					carry.told.remove(&(asker, stream));
+				}
 			}
 		}
 	}
@@ -1058,7 +1104,7 @@ impl WarmSim {
 			Audience::All => true,
 			Audience::Useful => useful(),
 			Audience::NotNext => matches!(heard, Some((cost, false)) if price <= cost),
-			Audience::NotDown | Audience::NotDownAsk | Audience::NotDownAskUp => {
+			Audience::NotDown | Audience::NotDownAsk | Audience::NotDownAskUp | Audience::NotDownQuery => {
 				!self.upstream.contains(&(peer, node)) && useful()
 			}
 			Audience::Shared => self.carry(node, cast).is_some_and(|carry| {
@@ -1456,24 +1502,14 @@ impl WarmSim {
 		self.watch.longest = self.watch.longest.max(self.watch.run);
 	}
 
-	/// The relays a path over open links joins to `cast`'s publisher.
+	/// The relays the route layer gives a route to `cast`'s publisher, which a pull
+	/// can follow. A path over open links is not enough: a relay announces only its
+	/// best route, and never one that came down a marked link back up one.
 	fn reach(&self, cast: usize) -> BTreeSet<Node> {
 		let start = self.endpoints[&self.casts[cast].0];
-		// A route that came down a link marked upstream never goes back up one.
-		let mut seen = BTreeSet::from([(start, false)]);
-		let mut queue = vec![(start, false)];
-		while let Some((at, marked)) = queue.pop() {
-			for peer in self.peers(at) {
-				if !self.relay(peer) || (marked && self.upstream.contains(&(at, peer))) {
-					continue;
-				}
-				let next = (peer, marked || self.upstream.contains(&(peer, at)));
-				if seen.insert(next) {
-					queue.push(next);
-				}
-			}
-		}
-		seen.into_iter().map(|(node, _)| node).collect()
+		(0..self.relays)
+			.filter(|&node| node == start || self.route(node, cast).is_some())
+			.collect()
 	}
 
 	/// Count unfed readers as a round ends, and the first frames that arrived.
@@ -1497,7 +1533,7 @@ impl WarmSim {
 		}
 	}
 
-	/// Every reader with a path to its publisher is fed, no pulls circle, and nothing is
+	/// Every reader with a route to its publisher is fed, no pulls circle, and nothing is
 	/// left to deliver.
 	pub fn check(&self) -> Result<(), String> {
 		if self.queues.values().any(|queue| !queue.is_empty()) || !self.net.ready().is_empty() {

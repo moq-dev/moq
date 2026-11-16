@@ -19,6 +19,7 @@ fn arms() -> Vec<Arm> {
 			mode: Mode::Path,
 			hops,
 			merge: false,
+			chain: false,
 		});
 	}
 	for mode in [
@@ -30,7 +31,12 @@ fn arms() -> Vec<Arm> {
 	] {
 		for hops in [true, false] {
 			for merge in [false, true] {
-				out.push(Arm { mode, hops, merge });
+				out.push(Arm {
+					mode,
+					hops,
+					merge,
+					chain: false,
+				});
 			}
 		}
 	}
@@ -42,6 +48,7 @@ const fn arm(mode: Mode, merge: bool) -> Arm {
 		mode,
 		hops: true,
 		merge,
+		chain: false,
 	}
 }
 
@@ -475,11 +482,18 @@ const NOT_NEXT: Arm = arm(Mode::Advertise(Audience::NotNext), false);
 const NOT_DOWN: Arm = arm(Mode::Advertise(Audience::NotDown), false);
 const NOT_DOWN_ASK: Arm = arm(Mode::Advertise(Audience::NotDownAsk), false);
 const NOT_DOWN_ASK_UP: Arm = arm(Mode::Advertise(Audience::NotDownAskUp), false);
+const NOT_DOWN_QUERY: Arm = arm(Mode::Advertise(Audience::NotDownQuery), false);
+/// The pick with the chain in place of the rule that a relay never takes a warm
+/// signal from one named on its own pull's path.
+const CHAIN: Arm = Arm {
+	chain: true,
+	..NOT_DOWN_QUERY
+};
 
-/// The narrower audiences for useful adverts, which keep them off a CDN's edges. The
-/// last, [`NOT_DOWN_ASK_UP`], is the pick.
+/// The narrower audiences for useful adverts, which keep them off a CDN's edges.
+/// [`NOT_DOWN_QUERY`] is the pick, and [`CHAIN`] the pick with the chain.
 fn narrower() -> Vec<Arm> {
-	vec![NOT_NEXT, NOT_DOWN, NOT_DOWN_ASK, NOT_DOWN_ASK_UP]
+	vec![NOT_NEXT, NOT_DOWN, NOT_DOWN_ASK, NOT_DOWN_ASK_UP, NOT_DOWN_QUERY, CHAIN]
 }
 
 /// The cheaper ways to advertise measured beside the rest: the narrower audiences,
@@ -663,12 +677,12 @@ fn useful_adverts_do_not_grow_with_the_core_mesh() {
 	assert!(warm(ADVERTISE, 4) < warm(ADVERTISE, 8));
 }
 
-/// Under the pick a warm core tells none of its region's edges, and each edge asks
-/// the upstreams beside its path join on subscribe, so a first viewer's warm messages
-/// stay flat as a region grows its edges and as the core mesh grows. Useful adverts
-/// grow with the edges, since a warm core tells every edge it could feed.
+/// Under the pick a warm core tells none of its region's edges, and each edge queries
+/// the upstreams beside its path join once on subscribe, so a first viewer's warm
+/// messages stay flat as a region grows its edges and as the core mesh grows. Useful
+/// adverts grow with the edges, since a warm core tells every edge it could feed.
 #[test]
-fn asks_toward_upstreams_do_not_grow_with_the_edges() {
+fn queries_toward_upstreams_do_not_grow_with_the_edges() {
 	let warm = |arm: Arm, regions: usize, edges: usize| {
 		let shape = cdn(regions, edges, false, 1);
 		// The first edge of region 1, which the publisher's core is not in.
@@ -676,13 +690,15 @@ fn asks_toward_upstreams_do_not_grow_with_the_edges() {
 		assert_eq!(grown.right, Ok(()), "{}", arm.name());
 		grown.sent.warm()
 	};
-	assert_eq!(warm(NOT_DOWN_ASK_UP, 4, 3), warm(NOT_DOWN_ASK_UP, 4, 16));
-	assert_eq!(warm(NOT_DOWN_ASK_UP, 4, 3), warm(NOT_DOWN_ASK_UP, 8, 3));
+	for arm in [NOT_DOWN_QUERY, NOT_DOWN_ASK_UP] {
+		assert_eq!(warm(arm, 4, 3), warm(arm, 4, 16), "{}", arm.name());
+		assert_eq!(warm(arm, 4, 3), warm(arm, 8, 3), "{}", arm.name());
+	}
 	assert!(warm(USEFUL, 4, 3) < warm(USEFUL, 4, 16));
 }
 
 /// An edge whose cheaper uplink is to the cold core reaches the warm core only on a
-/// warm signal over an upstream link: an advert down it, or the edge's own ask.
+/// warm signal over an upstream link: an advert down it, or the edge's own query.
 /// Skipping both leaves it on its path join.
 #[test]
 fn an_edge_finds_the_warm_core_beside_its_route() {
@@ -693,7 +709,7 @@ fn an_edge_finds_the_warm_core_beside_its_route() {
 		let cheapest: Metric = rows.iter().flat_map(|row| row.cheapest.iter()).sum();
 		(cost, cheapest)
 	};
-	for arm in [USEFUL, NOT_DOWN_ASK_UP] {
+	for arm in [USEFUL, NOT_DOWN_ASK_UP, NOT_DOWN_QUERY] {
 		let (cost, cheapest) = cost(arm);
 		assert_eq!(cost, cheapest, "{}", arm.name());
 	}
@@ -977,6 +993,8 @@ fn every_arm_settles_after_churn() {
 		ADVERTISE_MERGE,
 		USEFUL,
 		NOT_DOWN_ASK_UP,
+		NOT_DOWN_QUERY,
+		CHAIN,
 	] {
 		for shape in [random as fn(&mut XorShift) -> Shape, flying, regional] {
 			let out = churn(arm, 0..12, shape);
@@ -1151,7 +1169,7 @@ fn mean(values: &[usize]) -> f64 {
 #[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_warmth_cases() {
 	println!(
-		"case,arm,phases,tree_cost,path_cost,cheapest_cost,uplinks,max_copies,carriers,messages,warm_messages,messages_per_reader_change,warm_per_reader_change,first_frame_ms,cycle_steps,longest_cycle,unfed_reader_rounds,right"
+		"case,arm,phases,tree_cost,path_cost,cheapest_cost,uplinks,max_copies,carriers,messages,warm_messages,messages_per_reader_change,warm_per_reader_change,first_frame_ms,cycle_steps,longest_cycle,unfed_reader_rounds,advert_messages,query_messages,chain_messages,right"
 	);
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
 	for base in cases().into_iter().map(Some).chain([None]) {
@@ -1171,7 +1189,7 @@ fn benchmark_warmth_cases() {
 			let end = rows.last().expect("a phase");
 			let right = rows.iter().find_map(|row| row.right.clone().err());
 			println!(
-				"{},{},{},{cost},{},{cheapest},{},{},{},{},{},{:.2},{:.2},{:.0},{},{},{},{}",
+				"{},{},{},{cost},{},{cheapest},{},{},{},{},{},{:.2},{:.2},{:.0},{},{},{},{},{},{},{}",
 				case.name,
 				arm.name(),
 				rows.len(),
@@ -1187,30 +1205,39 @@ fn benchmark_warmth_cases() {
 				sum(|row| row.watch.cycles),
 				rows.iter().map(|row| row.watch.longest).max().unwrap_or(0),
 				sum(|row| row.watch.unfed),
+				sent.adverts,
+				sent.asks + sent.told,
+				sent.chains,
 				right.map_or("yes".into(), |err| err.replace(',', ";")),
 			);
 		}
 	}
 }
 
-/// Per arm, random meshes and drone meshes under churn: cycles, unfed readers, and
+/// Per arm, random meshes, drone meshes, and CDN regions under churn: cycles, unfed readers, and
 /// standing races while it churned, and whether each settled right once it stopped.
 #[test]
 #[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_warmth_churn() {
 	println!(
-		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,settle_rounds,failed"
+		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,advert_messages,query_messages,chain_messages,settle_rounds,failed"
 	);
 	let cases: usize = std::env::var("MOQ_WARMTH_CASES").map_or(400, |cases| cases.parse().expect("MOQ_WARMTH_CASES"));
+	// A comma-separated list of arm names to run, for a longer sweep of a few.
+	let only = std::env::var("MOQ_WARMTH_ARMS").ok();
+	let picked = |arm: &Arm| {
+		only.as_ref()
+			.is_none_or(|only| only.split(',').any(|name| name == arm.name()))
+	};
 	for (name, shape) in [
 		("random", random as fn(&mut XorShift) -> Shape),
 		("drones", flying),
 		("regional", regional),
 	] {
-		for arm in arms().into_iter().chain(audiences()) {
+		for arm in arms().into_iter().chain(audiences()).filter(picked) {
 			let out = churn(arm, 0..cases, shape);
 			println!(
-				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 				arm.name(),
 				out.cases,
 				out.watch.steps,
@@ -1223,6 +1250,9 @@ fn benchmark_warmth_churn() {
 				out.changes,
 				out.sent.total(),
 				out.sent.warm(),
+				out.sent.adverts,
+				out.sent.asks + out.sent.told,
+				out.sent.chains,
 				out.settle,
 				out.first.map_or("0".into(), |first| format!(
 					"{}: {}",
