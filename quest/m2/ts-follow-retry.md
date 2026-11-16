@@ -23,12 +23,9 @@ groups, each pinned by a test in `export_test.rs`:
   end with PUBLISH_DONE INTERNAL_ERROR (`Remote(0)`), which no reader can tell
   apart, so `retry` cannot answer for it.
 
-Recommended: adopt `retry`, treating a cancel or GOAWAY reset as the
-publisher leaving as `moqsrc` does, and keep `Remote(_)` as the one case
-`left` still matches, as moq-transport's lost route.
-
-## Waiting
-
-- Maintainer: whether a cancel, GOAWAY, or INTERNAL_ERROR reset counts as
-  the publisher leaving (follow it) or as the export's own failure (end at
-  once). Recommended: leaving, matching `moqsrc` and `Error::retry`.
+Settled (maintainer, 2026-11-16,
+[#8955](https://github.com/moq-dev/moq/pull/8955#issuecomment-6930707585)):
+adopt `retry`, so a cancel, GOAWAY, or INTERNAL_ERROR reset counts as the
+publisher leaving, as `moqsrc` does. Rejected: counting it as the export's
+own failure. `left` keeps `Remote(_)` as the one case it still matches, as
+moq-transport's lost route.
