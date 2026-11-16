@@ -70,7 +70,9 @@ pub use codec::Codec;
 pub use color::{Color, Matrix};
 pub use display::{Display, DrmDeviceIterator, OpenDrmDisplayError};
 pub use image::Image;
-pub use surface::{DrmPrimeSurfaceDescriptor, DrmPrimeSurfaceDescriptorLayer, DrmPrimeSurfaceDescriptorObject, Surface};
+pub use surface::{
+	DrmPrimeSurfaceDescriptor, DrmPrimeSurfaceDescriptorLayer, DrmPrimeSurfaceDescriptorObject, Surface,
+};
 pub use usage_hint::UsageHint;
 
 /// A frame resolution in pixels. (Vendored from discord/cros-codecs, BSD-3-Clause.)
