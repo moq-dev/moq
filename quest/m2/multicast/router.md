@@ -49,10 +49,11 @@ whose prototype is `rs/moq-net/src/route/tests/multi.rs`; its recommendations
 stand until the maintainer picks otherwise on that PR:
 
 - The rule as written hunts: 6.6 million route messages for a partition of a
-  32-relay CDN, against 579 today. Build these four with it, each an arm of
+  32-relay CDN, against 579 today. Build these five with it, each an arm of
   the bake-off: the highest session known closed per pair of nodes, kept for
   good and refusing any path at or below it (`floor`, a departure from the
-  epic's "no dead hop remembered"); advertising once per burst of input read
+  epic's "no dead hop remembered", and `epoch`, below, which bounds it);
+  advertising once per burst of input read
   rather than after every message (`batch`); and a node that sent GOAWAY named
   once per neighbour as a closed session is (`drain`); and a node offering a
   route to itself only once it has a claim to announce, its endpoints' or one
@@ -81,11 +82,13 @@ stand until the maintainer picks otherwise on that PR:
   on even when nothing in the copy differs, or a neighbour that heard a claim
   in between keeps it after its publisher ended it
   (`a_newer_floor_travels_with_nothing_changed`).
-- Bound the session floor before it ships: a restarted relay is a new node, so
-  each restart leaves every node that heard of it entries nothing removes
-  (`a_session_floor_keeps_an_entry_per_restart`: 4 more per restart of one
-  relay in three). A node identity that survives a restart, with sessions and
-  claim revisions that never repeat, bounds it by pairs of nodes.
+- Bound the session floor: alone it keeps an entry per restart, since a
+  restarted relay is a new node. Put the relay and a start that only grows in
+  the node identity, file the floor per pair of relays, and order a session
+  by its node's start and then its number (`epoch`): a restart then replaces
+  the entry, and no message or time changed on any row
+  (`a_session_floor_keeps_an_entry_per_restart_unless_filed_by_relay`). A
+  start that repeats or goes back gets the relay's new sessions refused.
 - Not picked, with their costs on the PR: holding adverts until neighbours
   agree (`quiet`, which can wait for good on a neighbour that learned a stale
   route late), ranking the far end of a closed session as draining

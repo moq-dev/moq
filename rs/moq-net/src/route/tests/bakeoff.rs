@@ -35,6 +35,7 @@ fn arms() -> Vec<Arm> {
 		}),
 		Arm::TUNED,
 		Arm::LEAN,
+		Arm::KEPT,
 		Arm::with(|tune| tune.claimed = true),
 		Arm::with(|tune| {
 			tune.suspect = Suspect::Flagged;
@@ -46,7 +47,7 @@ fn arms() -> Vec<Arm> {
 }
 
 /// The prototype's arms.
-const MULTI: [Arm; 3] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN];
+const MULTI: [Arm; 4] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT];
 
 /// How long a silent death takes its neighbours to notice, in hops of delay: an idle
 /// timeout of 3 s.
@@ -525,6 +526,7 @@ fn the_prototype_carries_every_failure_on_every_shape() {
 fn sweep_the_prototype_carries_every_failure_at_32_relays() {
 	carries(Arm::TUNED, 32);
 	carries(Arm::LEAN, 32);
+	carries(Arm::KEPT, 32);
 }
 
 /// A publisher is an endpoint of its relay, so one leaving, moving, or losing a home
@@ -722,26 +724,40 @@ fn a_newer_floor_travels_with_nothing_changed() {
 }
 
 /// The floor's cost: a relay that restarts is a new node, so each restart leaves
-/// its neighbours an entry nothing removes.
+/// its neighbours an entry nothing removes. Filed per pair of relays, with the
+/// restart in the session's order, a restart replaces the entry instead.
 #[test]
-fn a_session_floor_keeps_an_entry_per_restart() {
-	let mut net = MultiSim::new(tune(Arm::TUNED), 3);
-	for (a, b) in [(0, 1), (1, 2), (0, 2)] {
-		net.link(a, b, 1, Tie::Peer);
-	}
-	quiesce(&mut net);
-	let mut kept = Vec::new();
-	for _ in 0..8 {
-		net.reset(0);
-		quiesce(&mut net);
-		for peer in [1, 2] {
-			net.open(0, peer);
+fn a_session_floor_keeps_an_entry_per_restart_unless_filed_by_relay() {
+	let kept = |arm: Arm| {
+		let mut net = MultiSim::new(tune(arm), 3);
+		for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+			net.link(a, b, 1, Tie::Peer);
 		}
 		quiesce(&mut net);
-		kept.push(net.kept().closed);
-	}
-	assert!(kept.windows(2).all(|pair| pair[1] > pair[0]), "{kept:?}");
-	println!("pairs kept after each of 8 restarts of one relay in three: {kept:?}");
+		let mut kept = Vec::new();
+		for _ in 0..8 {
+			net.reset(0);
+			quiesce(&mut net);
+			for peer in [1, 2] {
+				net.open(0, peer);
+			}
+			quiesce(&mut net);
+			kept.push(net.kept().closed);
+		}
+		kept
+	};
+	let (grows, bounded) = (
+		kept(Arm::TUNED),
+		kept(Arm::with(|tune| {
+			tune.floor = true;
+			tune.epoch = true;
+		})),
+	);
+	println!("pairs kept after each of 8 restarts of one relay in three: {grows:?}, by relay {bounded:?}");
+	assert!(grows.windows(2).all(|pair| pair[1] > pair[0]), "{grows:?}");
+	// Two ways round each of the three links at most.
+	assert!(bounded.iter().all(|&pairs| pairs <= 6), "{bounded:?}");
+	assert_eq!(bounded[0], bounded[7], "{bounded:?}");
 }
 
 /// Every failure on every shape, per arm: what it cost and what readers saw.
@@ -830,7 +846,7 @@ fn benchmark_bakeoff_growth() {
 	cases.extend([1, 8, 64].map(|claims| ("broadcasts", tiers_of(32, 8, claims))));
 	cases.extend([8, 16, 32].map(|relays| ("links", clique(relays, 8))));
 	for (grows, mesh) in cases {
-		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN] {
+		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
 			let tree = mesh.tree();
 			let mut lab = Lab::new(arm, &mesh);
 			lab.coarse = true;
@@ -870,7 +886,7 @@ fn benchmark_bakeoff_growth() {
 fn benchmark_bakeoff_baseline() {
 	println!("case,rule,route_messages,claim_messages,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
-	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN] {
+	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
 		let mut rng = XorShift(0x6d6f_7100 + 24);
 		let sparse: Vec<Mesh> = (0..16).map(|_| Mesh::sparse(24, &mut rng)).collect();
 		let groups = [

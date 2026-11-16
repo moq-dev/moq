@@ -70,6 +70,17 @@ pub(super) struct Tune {
 	/// endpoints' or one it announces again across a scoped grant, and from then on:
 	/// nothing routes to a node that announces nothing.
 	pub claimed: bool,
+	/// With `floor`: a node's identity carries the relay and how many times it has
+	/// started, the floor is kept per pair of relays, and a session of a later start
+	/// is above every session of an earlier one. A restart then replaces a pair's
+	/// entry where it would add one, so the floor is bounded by pairs of relays.
+	pub epoch: bool,
+}
+
+/// The relay a simulated node identity names and how many times it had started,
+/// as [`hop`] numbers them. A real identity would carry a start that only grows.
+fn started(id: Id) -> (Id, u64) {
+	(id % 1_000, id / 1_000)
 }
 
 /// One node on a route's path, and the session it learned the route on. The
@@ -276,8 +287,9 @@ pub(super) struct Router<N> {
 	dead: BTreeMap<Hop, Id>,
 	/// Nodes at the far end of a closed session, by the near ends that said so.
 	suspects: BTreeMap<Id, BTreeSet<Hop>>,
-	/// The highest session known closed that the first node held to the second.
-	closed: BTreeMap<(Id, Id), u64>,
+	/// The highest session known closed that the first node held to the second, as
+	/// the start of the first and its session.
+	closed: BTreeMap<(Id, Id), (u64, u64)>,
 	/// Nodes named as draining that some heard route still crosses.
 	draining: BTreeSet<Id>,
 	/// Forwarding nodes whose route changed since the neighbours were last told.
@@ -751,6 +763,18 @@ impl<N: Key> Router<N> {
 		self.publish(me, vec![(broadcast, change)]);
 	}
 
+	/// The pair of nodes `hop`'s session joins, as the floor files it, and where the
+	/// session stands in that pair's order.
+	fn floor_of(&self, hop: Hop, far: Id) -> ((Id, Id), (u64, u64)) {
+		match self.tune.epoch {
+			true => {
+				let ((near, start), (far, _)) = (started(hop.node), started(far));
+				((near, far), (start, hop.session))
+			}
+			false => ((hop.node, far), (0, hop.session)),
+		}
+	}
+
 	/// A session closed: this node's own when `from` is `None`.
 	fn closed(&mut self, hop: Hop, far: Id, from: Option<N>) {
 		self.work += 1;
@@ -761,8 +785,9 @@ impl<N: Key> Router<N> {
 			}
 		}
 		if self.tune.floor {
-			let highest = self.closed.entry((hop.node, far)).or_default();
-			*highest = (*highest).max(hop.session);
+			let (pair, at) = self.floor_of(hop, far);
+			let highest = self.closed.entry(pair).or_default();
+			*highest = (*highest).max(at);
 		}
 		let named = (self.heard.values())
 			.flat_map(BTreeMap::values)
@@ -849,7 +874,8 @@ impl<N: Key> Router<N> {
 			};
 			let offer = &heard.offer;
 			let floored = offer.path.windows(2).any(|pair| {
-				(self.closed.get(&(pair[1].node, pair[0].node))).is_some_and(|highest| pair[1].session <= *highest)
+				let (key, at) = self.floor_of(pair[1], pair[0].node);
+				self.closed.get(&key).is_some_and(|highest| at <= *highest)
 			});
 			if heard.ended || floored {
 				continue;

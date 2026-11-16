@@ -33,6 +33,7 @@ impl Arm {
 		agree: false,
 		drain: false,
 		claimed: false,
+		epoch: false,
 	});
 	/// The epic's rule with what the bake-off found worth adding.
 	pub const TUNED: Self = Self::Multi(Tune {
@@ -43,6 +44,7 @@ impl Arm {
 		agree: false,
 		drain: true,
 		claimed: false,
+		epoch: false,
 	});
 	/// [`Self::TUNED`], and a node with nothing to announce offers no route to itself.
 	pub const LEAN: Self = Self::Multi(Tune {
@@ -53,6 +55,18 @@ impl Arm {
 		agree: false,
 		drain: true,
 		claimed: true,
+		epoch: false,
+	});
+	/// [`Self::LEAN`], with the floor kept per pair of relays: what the bake-off recommends.
+	pub const KEPT: Self = Self::Multi(Tune {
+		suspect: Suspect::Never,
+		quiet: false,
+		floor: true,
+		batch: true,
+		agree: false,
+		drain: true,
+		claimed: true,
+		epoch: true,
 	});
 
 	/// The epic's rule with `tune` changed from how it is written.
@@ -76,6 +90,7 @@ impl Arm {
 			(tune.agree, "+agree"),
 			(tune.drain, "+drain"),
 			(tune.claimed, "+claimed"),
+			(tune.epoch, "+epoch"),
 		];
 		(parts.into_iter().filter(|(on, _)| *on)).fold("multi".to_string(), |name, (_, part)| name + part)
 	}
