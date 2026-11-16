@@ -61,7 +61,8 @@ pub(super) enum Audience {
 	/// Only a neighbour for whom its offer plus the link beats that neighbour's route,
 	/// or ties it through another next hop, since a tie prefers a warm copy. Nothing
 	/// else could ever take it: a relay at rest costs no more than its own route, and
-	/// a tie through this relay is the path join already.
+	/// a tie through this relay is the path join already. The neighbour's route is
+	/// the one it last offered this relay, never its current one.
 	Useful,
 	/// Only once it has demand from two sources besides the neighbour.
 	Shared,
@@ -155,9 +156,15 @@ enum Msg {
 		offer: Option<Signal>,
 	},
 	/// The metadata-only subscription that asks, opening or closing.
-	Ask(bool),
+	Ask {
+		stream: u64,
+		open: bool,
+	},
 	/// The asked neighbour's word and each change to it.
-	Told(Option<Signal>),
+	Told {
+		stream: u64,
+		word: Option<Signal>,
+	},
 	Advert(Option<Signal>),
 }
 
@@ -170,7 +177,8 @@ enum Lane {
 	Announce,
 }
 
-/// A queue: sender, receiver, lane, and broadcast.
+/// A queue: sender, receiver, lane, and the stream: a subscription's or query's own,
+/// or `usize::MAX` for the session's announce stream.
 type Key = (Node, Node, Lane, usize);
 
 /// One relay's state for one broadcast.
@@ -179,19 +187,23 @@ struct Carry {
 	reader: bool,
 	/// The round its reader started, until its first frame.
 	since: Option<usize>,
-	/// Neighbours pulling through this relay, by stream.
-	down: BTreeMap<Node, u64>,
+	/// Neighbours pulling through this relay, and their subscriptions: a neighbour's
+	/// new one may arrive before its old one closes.
+	down: BTreeMap<Node, BTreeSet<u64>>,
 	up: Option<Pull>,
 	/// A move under way: it replaces `up` once answered.
 	next: Option<Pull>,
-	/// What each neighbour pulling through it was last answered.
-	answered: BTreeMap<Node, Option<Signal>>,
+	/// What each subscription through it was last answered.
+	answered: BTreeMap<(Node, u64), Option<Signal>>,
 	/// Neighbours it asks, with each one's latest word.
 	asks: BTreeMap<Node, Option<Signal>>,
+	/// The query it holds open to each.
+	asking: BTreeMap<Node, u64>,
 	/// Those yet to answer: a relay with no pull waits for them before it starts one.
 	unanswered: BTreeSet<Node>,
-	asked: BTreeSet<Node>,
-	told: BTreeMap<Node, Option<Signal>>,
+	/// Neighbours asking it, and their queries.
+	asked: BTreeMap<Node, BTreeSet<u64>>,
+	told: BTreeMap<(Node, u64), Option<Signal>>,
 	heard: BTreeMap<Node, Signal>,
 	advertised: BTreeMap<Node, Signal>,
 }
@@ -315,6 +327,16 @@ fn kept() -> Tune {
 	match Rule::KEPT {
 		Rule::Multi(tune) => tune,
 		Rule::Path(_) => unreachable!(),
+	}
+}
+
+/// Close `stream` from `peer`, forgetting `peer` once none is left.
+fn close(streams: &mut BTreeMap<Node, BTreeSet<u64>>, peer: Node, stream: u64) {
+	if let Some(open) = streams.get_mut(&peer) {
+		open.remove(&stream);
+		if open.is_empty() {
+			streams.remove(&peer);
+		}
 	}
 }
 
@@ -488,14 +510,17 @@ impl WarmSim {
 		match &msg {
 			Msg::Subscribe { .. } => self.sent.subscribes += 1,
 			Msg::Answer { .. } => self.sent.answers += 1,
-			Msg::Ask(_) => self.sent.asks += 1,
-			Msg::Told(_) => self.sent.told += 1,
+			Msg::Ask { .. } => self.sent.asks += 1,
+			Msg::Told { .. } => self.sent.told += 1,
 			Msg::Advert(_) => self.sent.adverts += 1,
 		}
 		// The announce stream is one per session, whatever the broadcast.
-		let stream = match lane {
-			Lane::Announce => usize::MAX,
-			Lane::Pull | Lane::Ask => cast,
+		let stream = match &msg {
+			Msg::Subscribe { stream, .. }
+			| Msg::Answer { stream, .. }
+			| Msg::Ask { stream, .. }
+			| Msg::Told { stream, .. } => *stream as usize,
+			Msg::Advert(_) => usize::MAX,
 		};
 		self.queues
 			.entry((from, to, lane, stream))
@@ -639,7 +664,7 @@ impl WarmSim {
 			// Asked with no demand of its own, it forwards the subscription along its route.
 			_ if !carry.asked.is_empty() => (self.route(node, cast).into_iter())
 				.map(|(next, _)| next)
-				.filter(|&next| self.relay(next) && !carry.asked.contains(&next))
+				.filter(|&next| self.relay(next) && !carry.asked.contains_key(&next))
 				.collect(),
 			_ => BTreeSet::new(),
 		};
@@ -647,13 +672,18 @@ impl WarmSim {
 			let carry = self.entry(node, cast);
 			carry.asks.remove(&gone);
 			carry.unanswered.remove(&gone);
-			self.send(node, gone, Lane::Ask, cast, Msg::Ask(false));
+			if let Some(stream) = carry.asking.remove(&gone) {
+				self.send(node, gone, Lane::Ask, cast, Msg::Ask { stream, open: false });
+			}
 		}
 		for &new in want.iter().filter(|peer| !carry.asks.contains_key(peer)) {
+			self.streams += 1;
+			let stream = self.streams;
 			let carry = self.entry(node, cast);
 			carry.asks.insert(new, None);
+			carry.asking.insert(new, stream);
 			carry.unanswered.insert(new);
-			self.send(node, new, Lane::Ask, cast, Msg::Ask(true));
+			self.send(node, new, Lane::Ask, cast, Msg::Ask { stream, open: true });
 		}
 	}
 
@@ -818,28 +848,34 @@ impl WarmSim {
 	/// Tell each neighbour pulling through `node` what it offers now.
 	fn answer(&mut self, node: Node, cast: usize) {
 		let carry = self.entry(node, cast).clone();
-		for (&child, &stream) in &carry.down {
+		for (&child, streams) in &carry.down {
 			let offer = self.offer(node, cast, child);
-			let was = carry.answered.get(&child);
-			// Unanswered until confirmed, then every change.
-			if (was.is_none() && offer.is_none()) || was == Some(&offer) {
-				continue;
+			for &stream in streams {
+				let was = carry.answered.get(&(child, stream));
+				// Unanswered until confirmed, then every change.
+				if (was.is_none() && offer.is_none()) || was == Some(&offer) {
+					continue;
+				}
+				self.entry(node, cast).answered.insert((child, stream), offer.clone());
+				let offer = offer.clone();
+				self.send(node, child, Lane::Pull, cast, Msg::Answer { stream, offer });
 			}
-			self.entry(node, cast).answered.insert(child, offer.clone());
-			self.send(node, child, Lane::Pull, cast, Msg::Answer { stream, offer });
 		}
 	}
 
 	/// Answer each neighbour asking `node`, and each change.
 	fn tell(&mut self, node: Node, cast: usize) {
 		let carry = self.entry(node, cast).clone();
-		for &asker in &carry.asked {
+		for (&asker, streams) in &carry.asked {
 			let word = self.warm(node, cast, asker);
-			if carry.told.get(&asker) == Some(&word) {
-				continue;
+			for &stream in streams {
+				if carry.told.get(&(asker, stream)) == Some(&word) {
+					continue;
+				}
+				self.entry(node, cast).told.insert((asker, stream), word.clone());
+				let word = word.clone();
+				self.send(node, asker, Lane::Ask, cast, Msg::Told { stream, word });
 			}
-			self.entry(node, cast).told.insert(asker, word.clone());
-			self.send(node, asker, Lane::Ask, cast, Msg::Told(word));
 		}
 	}
 
@@ -869,13 +905,17 @@ impl WarmSim {
 	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
 		match audience {
 			Audience::All => true,
-			Audience::Useful => match self.route(peer, cast) {
-				Some((via, cost)) => {
-					let price = signal.cost + self.price(node, peer).cold;
-					price < cost || (price == cost && via != node)
+			Audience::Useful => {
+				let price = signal.cost + self.price(node, peer).cold;
+				let router = self.net.router(node);
+				match router.and_then(|router| router.heard(&self.casts[cast], peer)) {
+					Some((cost, false)) => price <= cost,
+					// Its route runs through this relay, which a neighbour offers nobody
+					// back: it costs this relay's route and the link, so only an offer
+					// below that route can beat it.
+					_ => self.route(node, cast).is_none_or(|(_, cost)| signal.cost < cost),
 				}
-				None => true,
-			},
+			}
 			Audience::Shared => self.carry(node, cast).is_some_and(|carry| {
 				let children = carry.down.keys().filter(|&&child| child != peer).count();
 				usize::from(carry.reader) + children >= 2
@@ -914,14 +954,11 @@ impl WarmSim {
 		let carry = self.entry(to, cast);
 		match msg {
 			Msg::Subscribe { stream, open: true } => {
-				carry.down.insert(from, stream);
-				carry.answered.remove(&from);
+				carry.down.entry(from).or_default().insert(stream);
 			}
 			Msg::Subscribe { stream, open: false } => {
-				if carry.down.get(&from) == Some(&stream) {
-					carry.down.remove(&from);
-					carry.answered.remove(&from);
-				}
+				close(&mut carry.down, from, stream);
+				carry.answered.remove(&(from, stream));
 			}
 			Msg::Answer { stream, offer } => {
 				for pull in [&mut carry.up, &mut carry.next].into_iter().flatten() {
@@ -933,15 +970,17 @@ impl WarmSim {
 					}
 				}
 			}
-			Msg::Ask(true) => {
-				carry.asked.insert(from);
+			Msg::Ask { stream, open: true } => {
+				carry.asked.entry(from).or_default().insert(stream);
 			}
-			Msg::Ask(false) => {
-				carry.asked.remove(&from);
-				carry.told.remove(&from);
+			Msg::Ask { stream, open: false } => {
+				close(&mut carry.asked, from, stream);
+				carry.told.remove(&(from, stream));
 			}
-			Msg::Told(word) => {
-				if let Some(heard) = carry.asks.get_mut(&from) {
+			Msg::Told { stream, word } => {
+				if carry.asking.get(&from) == Some(&stream)
+					&& let Some(heard) = carry.asks.get_mut(&from)
+				{
 					*heard = word;
 					carry.unanswered.remove(&from);
 				}
@@ -986,11 +1025,12 @@ impl WarmSim {
 					carry.next = None;
 				}
 				carry.down.remove(&y);
-				carry.answered.remove(&y);
+				carry.answered.retain(|&(child, _), _| child != y);
 				carry.asks.remove(&y);
 				carry.unanswered.remove(&y);
+				carry.asking.remove(&y);
 				carry.asked.remove(&y);
-				carry.told.remove(&y);
+				carry.told.retain(|&(asker, _), _| asker != y);
 				carry.heard.remove(&y);
 				carry.advertised.remove(&y);
 			}
@@ -1161,9 +1201,12 @@ impl WarmSim {
 			let Some(pull) = self.carry(at, cast).and_then(|carry| carry.up.as_ref()) else {
 				return false;
 			};
-			let held = self
-				.carry(pull.via, cast)
-				.is_some_and(|carry| carry.down.get(&at) == Some(&pull.stream));
+			let held = self.carry(pull.via, cast).is_some_and(|carry| {
+				carry
+					.down
+					.get(&at)
+					.is_some_and(|streams| streams.contains(&pull.stream))
+			});
 			if !held || !self.is_open(at, pull.via) {
 				return false;
 			}

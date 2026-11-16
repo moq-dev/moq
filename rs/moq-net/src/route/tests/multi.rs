@@ -1087,6 +1087,15 @@ impl<N: Key> Router<N> {
 		}
 	}
 
+	/// What `via` last offered this node toward `broadcast`'s closest claim: its own
+	/// summed cost to the broadcast, and whether its route runs through this node.
+	/// `None` when it offered nothing.
+	pub fn heard(&self, broadcast: &Broadcast, via: N) -> Option<(Metric, bool)> {
+		let (origin, claim) = self.closest(broadcast)?;
+		let heard = self.heard.get(&origin)?.get(&via)?;
+		Some((heard.offer.cost + claim.cost, heard.offer.names(self.me)))
+	}
+
 	/// Every neighbour whose route to `origin` ranks with the one in use: the equal
 	/// next hops a request may take.
 	pub fn ties(&self, origin: Id) -> Vec<N> {

@@ -32,7 +32,7 @@ standing**. Rejected:
   doubled the time to a first frame and left about twice the readers unfed
   under churn. On CDN tiers `ask_1` sent 6.5 to 11 warm messages per
   one-viewer reader change against the pick's 3 to 7, about as many for a
-  crowd (3.9 to 8.1 against 5.4 to 7.9), and built dearer crowd trees.
+  crowd (3.9 to 8.1 against 5.8 to 8), and built dearer crowd trees.
 - Advertising only once two others want the copy, which lost both cases;
   never advertising over a link marked upstream, which saves nothing in a
   core mesh.
@@ -49,9 +49,9 @@ sweep this ports onto production code.
   otherwise `O(P→R) + cold(P, R)`, the chain priced unshared. The publisher's
   relay offers 0. An offer is never below its sender's own cost.
 - **The path.** Every offer names the relays the data passes from the
-  publisher's relay to the sender. Without it, 1 of 400 churned random meshes
-  never settled, and transient cycles rose by 74% on random meshes and 25% on
-  drone meshes. The merge below cannot work without it either.
+  publisher's relay to the sender. Without it, transient cycles under churn
+  rose by 73% on random meshes and 30% on drone meshes, and the merge below
+  cannot work.
 - **Adverts.** While R has demand for an Instance besides N, it tells N its
   offer and path on the announce stream when `O(R→N) + cold(R, N)` is below
   N's route cost for the Instance, or equals it through a next hop other than
@@ -93,7 +93,7 @@ each prefer the other on current offers, and a cycle needs one stale offer.
 Gaining demand only lowers offers to others; losing it raises only the offer
 to the neighbour that still pulls, which then moves only to something
 strictly cheaper. The sweep agrees: every churned mesh settled, and cycles
-lasted at most 42 deliveries, each while some answer was in flight.
+lasted at most 57 deliveries, each while some answer was in flight.
 
 ### Simultaneous starts
 
@@ -102,11 +102,11 @@ neither offers the other anything cheaper, and both uplinks stay until one
 drone's demand ends. The maintainer's rule, decided 2026-11-15: merge them
 on the rendezvous hash unless that adds a cycle, an unfed reader, or more
 messages than the second uplink costs. Under adverts it does add cycles:
-in 400 churned drone meshes, 41 deliveries had a pull the merge made inside
-a cycle (53 when advertising to every neighbour). Each was a pending cycle.
-A merged drone's new parent lost its uplink and rejoined through a drone
-that had trusted the merged drone's advert, before the lost parent's answer
-arrived. The merge also added about 2% unfed reader hops. Under asking on
+in 400 churned drone meshes, 145 deliveries had a pull the merge made inside
+a cycle (8 when advertising to every neighbour), all transient. The one
+traced was a pending cycle: a merged drone's new parent lost its uplink and
+rejoined through a drone that had trusted the merged drone's advert, before
+the lost parent's answer arrived. The merge also added about 2% unfed reader hops. Under asking on
 subscribe, no merged pull was ever in a cycle.
 
 So the race stands. A drone that loses the one uplink leaves every drone
@@ -145,7 +145,7 @@ path in each offer.
   2 to 3.
 - Port the growth sweep, and hold its laws. Per reader change, warm messages
   are flat in the number of demanded broadcasts for every arm. On CDN tiers
-  with a full core mesh they are also flat in cores: 3 to 7.9 from 12 to 128
+  with a full core mesh they are also flat in cores: 3 to 8 from 12 to 128
   relays and 1 to 4,096 broadcasts. A core with demand is never cheaper
   for another core than that core's own route, so only the edges beside it
   hear. On a full drone mesh they grow with the drones, n − 1 per first
