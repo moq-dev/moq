@@ -540,7 +540,7 @@ mod tests {
 	use super::*;
 	use crate::decode::Kind;
 	use crate::decode::backend::probe;
-	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
+	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Publisher as EncodePublisher};
 	use moq_mux::container::Container as _;
 
 	#[tokio::test]
@@ -559,7 +559,7 @@ mod tests {
 		let track = source_broadcast
 			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
+		let mut producer = EncodePublisher::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {

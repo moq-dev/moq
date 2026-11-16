@@ -89,11 +89,11 @@ enum Codecs {
 /// registered) before the camera opens; this is what lets a subscriber
 /// trigger capture on demand. The `moq_mux::codec` importer for the codec
 /// handles catalog registration and framing.
-pub struct Producer {
+pub struct Publisher {
 	codecs: Codecs,
 }
 
-impl Producer {
+impl Publisher {
 	/// Publish `rendition` on `track`, registering it under `reserved`, a
 	/// [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
 	/// that carries any per-track hint such as the encoder's GOP duration
@@ -512,7 +512,7 @@ enum Owned {
 	/// Registered, until the probe knows its rendition.
 	Track(moq_net::track::Producer),
 	/// Probed, and wrapped in the importer that publishes it.
-	Producer(Box<Producer>),
+	Publisher(Box<Publisher>),
 	/// Ended or cancelled, so nothing is left to end.
 	Done,
 }
@@ -524,7 +524,7 @@ impl Owned {
 		let ended = match self {
 			// The caller is done with the track, so the finished handle goes with it.
 			Self::Track(track) => track.finish().map(drop).map_err(Error::from),
-			Self::Producer(mut producer) => producer.finish(),
+			Self::Publisher(mut producer) => producer.finish(),
 			Self::Done => Ok(()),
 		};
 		if let Err(err) = ended {
@@ -538,7 +538,7 @@ impl Owned {
 			Self::Track(track) => {
 				let _ = track.abort(err);
 			}
-			Self::Producer(producer) => producer.abort(err),
+			Self::Publisher(producer) => producer.abort(err),
 			Self::Done => {}
 		}
 	}
@@ -629,9 +629,9 @@ impl<E: CatalogExt> Driver<E> {
 		let Owned::Track(track) = &self.owned else {
 			unreachable!("a driver runs once")
 		};
-		let producer = Producer::new(track.clone(), self.catalog.reserve().with_interval(join), rendition)?;
-		self.owned = Owned::Producer(Box::new(producer));
-		let Owned::Producer(producer) = &mut self.owned else {
+		let producer = Publisher::new(track.clone(), self.catalog.reserve().with_interval(join), rendition)?;
+		self.owned = Owned::Publisher(Box::new(producer));
+		let Owned::Publisher(producer) = &mut self.owned else {
 			unreachable!("just set")
 		};
 		// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
@@ -786,7 +786,7 @@ fn log_track_ended(err: moq_net::Error) {
 }
 
 #[cfg(any(feature = "capture", all(test, feature = "openh264")))]
-fn capture_stopped(producer: &mut Producer) -> Result<(), Error> {
+fn capture_stopped(producer: &mut Publisher) -> Result<(), Error> {
 	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
 	// for demand again so the next timestamp does not stretch the previous frame across the gap.
 	producer.discontinuity()
@@ -866,7 +866,7 @@ async fn rest(
 /// itself wedged.
 #[cfg(feature = "capture")]
 async fn capture_loop<S: CaptureSource>(
-	producer: &mut Producer,
+	producer: &mut Publisher,
 	source: &mut S,
 	options: &Capture,
 	clock: &moq_mux::Clock,
@@ -1084,7 +1084,7 @@ mod tests {
 	}
 
 	/// Encode a handful of synthetic frames for `codec` and publish them through a real
-	/// [`Producer`], returning the catalog rendition's track name and config.
+	/// [`Publisher`], returning the catalog rendition's track name and config.
 	///
 	/// Asserts the property the whole design rests on: the rendition published before anything is
 	/// encoded is the one the first keyframe resolves. A guessed codec string would be corrected
@@ -1100,7 +1100,7 @@ mod tests {
 		config.codec = codec;
 		config.kind = kind;
 
-		let mut producer = Producer::new(
+		let mut producer = Publisher::new(
 			broadcast
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap(),
@@ -1179,7 +1179,7 @@ mod tests {
 
 		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
-		let mut producer = Producer::new(
+		let mut producer = Publisher::new(
 			track,
 			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
@@ -1211,7 +1211,7 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut initial = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		initial.kind = encoder::Kind::Software;
-		let mut producer = Producer::new(
+		let mut producer = Publisher::new(
 			broadcast
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap(),
@@ -1266,7 +1266,7 @@ mod tests {
 		let track = broadcast
 			.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let _producer = Producer::new(track, catalog.reserve(), selected).unwrap();
+		let _producer = Publisher::new(track, catalog.reserve(), selected).unwrap();
 
 		let (_, published) = rendition(&catalog).expect("the rendition publishes before any frame");
 		assert_eq!(published.container, hang::catalog::Container::Loc);
@@ -1291,7 +1291,7 @@ mod tests {
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(6));
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
 		config.kind = encoder::Kind::Software;
-		let _producer = Producer::new(
+		let _producer = Publisher::new(
 			broadcast
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap(),
@@ -1338,7 +1338,7 @@ mod tests {
 			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::new(
+		let mut producer = Publisher::new(
 			track,
 			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
@@ -1451,7 +1451,7 @@ mod tests {
 
 				let mut probe = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 				probe.kind = encoder::Kind::Software;
-				let mut producer = Producer::new(
+				let mut producer = Publisher::new(
 					track,
 					catalog.reserve().with_interval(probe.effective_join()),
 					probe.probe().await.unwrap(),
@@ -2249,7 +2249,7 @@ mod tests {
 			let watched = track.clone();
 			let mut rendition = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 			rendition.kind = encoder::Kind::Software;
-			let mut producer = Producer::new(
+			let mut producer = Publisher::new(
 				track,
 				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
@@ -2306,7 +2306,7 @@ mod tests {
 			let _subscriber = track.subscribe(None);
 			let mut rendition = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 			rendition.kind = encoder::Kind::Software;
-			let mut producer = Producer::new(
+			let mut producer = Publisher::new(
 				track,
 				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
@@ -2391,7 +2391,7 @@ mod tests {
 	}
 }
 
-/// A finished [`Producer`] keeps its track and rendition published, but not its splitter.
+/// A finished [`Publisher`] keeps its track and rendition published, but not its splitter.
 ///
 /// Bindings keep finished video producers until their broadcast ends, so a long-lived broadcast
 /// that retires many encoders would otherwise hold each one's largest access unit. The counting
@@ -2481,7 +2481,7 @@ mod finished {
 					let track = broadcast
 						.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))
 						.unwrap();
-					let mut producer = Producer::new(track, catalog.reserve(), rendition.clone()).unwrap();
+					let mut producer = Publisher::new(track, catalog.reserve(), rendition.clone()).unwrap();
 					for pts in [0, 33_333] {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();
 						producer.publish(&Encoded::new(keyframe(), pts, true)).unwrap();

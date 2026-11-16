@@ -62,7 +62,7 @@ impl VideoEncoder {
 			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
 			.expect("failed to create the avc3 track");
 		let producer =
-			moq_video::encode::Producer::new(track, reserved, rendition).expect("failed to create avc3 producer");
+			moq_video::encode::Publisher::new(track, reserved, rendition).expect("failed to create avc3 producer");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
@@ -117,7 +117,7 @@ impl VideoEncoder {
 
 fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
-	mut producer: moq_video::encode::Producer,
+	mut producer: moq_video::encode::Publisher,
 	config: moq_video::encode::Config,
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,

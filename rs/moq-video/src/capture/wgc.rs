@@ -300,7 +300,7 @@ mod tests {
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
 	async fn unchanged_frames_reach_an_active_subscriber() {
-		use crate::encode::{Config, Encoder, Kind, Producer};
+		use crate::encode::{Config, Encoder, Kind, Publisher};
 
 		let now = Instant::now();
 		let interval = Duration::from_millis(20);
@@ -325,7 +325,7 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
 		let reserved = catalog.reserve().with_interval(config.effective_join());
-		let mut producer = Producer::new(track, reserved, rendition).unwrap();
+		let mut producer = Publisher::new(track, reserved, rendition).unwrap();
 		assert!(producer.demand().wanted().is_some());
 
 		// Only one captured picture arrives; more than three intervals of paced

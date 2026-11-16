@@ -285,7 +285,7 @@ impl MoqVideoEncoder {
 /// Publish every access unit `encoder` has ready.
 fn publish(
 	encoder: &mut moq_video::encode::Sink,
-	producer: &mut moq_video::encode::Producer,
+	producer: &mut moq_video::encode::Publisher,
 ) -> Result<(), moq_video::Error> {
 	while let Some(encoded) = encoder.receive()? {
 		producer.publish(&encoded)?;
@@ -296,7 +296,7 @@ fn publish(
 /// Flush `encoder` and publish its tail, closing it.
 fn drain(
 	mut encoder: moq_video::encode::Sink,
-	producer: &mut moq_video::encode::Producer,
+	producer: &mut moq_video::encode::Publisher,
 ) -> Result<(), moq_video::Error> {
 	block_on(encoder.flush())?;
 	publish(&mut encoder, producer)
@@ -309,7 +309,7 @@ fn drain(
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer,
+	mut producer: moq_video::encode::Publisher,
 	drained: Result<(), moq_video::Error>,
 	children: &crate::producer::Children,
 ) -> Result<(), MoqError> {
@@ -350,7 +350,7 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 struct VideoProducer {
 	/// `None` while the rendition is disabled for lack of bandwidth.
 	encoder: Option<moq_video::encode::Sink>,
-	producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Publisher,
 	/// The encoder settings, to reopen at [`ceiling`](Self::ceiling) when a disabled
 	/// rendition resumes.
 	config: moq_video::encode::Config,
@@ -870,7 +870,7 @@ impl MoqVideoProducer {
 				Some(name) => state.broadcast.create_track(name, info)?,
 				None => state.broadcast.unique_track(suffix, info)?,
 			};
-			Ok(moq_video::encode::Producer::new(
+			Ok(moq_video::encode::Publisher::new(
 				track,
 				state.catalog.reserve().with_interval(join),
 				rendition,
@@ -1695,7 +1695,7 @@ mod finish_tests {
 		let track = broadcast
 			.create_track("camera", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let producer = moq_video::encode::Producer::new(track.clone(), catalog.reserve(), rendition).unwrap();
+		let producer = moq_video::encode::Publisher::new(track.clone(), catalog.reserve(), rendition).unwrap();
 		let encoder = moq_video::encode::Sink::open(&encode).await.unwrap();
 		let mut video = VideoProducer {
 			encoder: Some(encoder),

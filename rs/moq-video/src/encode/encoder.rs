@@ -366,7 +366,7 @@ pub(crate) fn default_bitrate(size: Size, framerate: FrameRate) -> moq_net::band
 /// Video encoder. Build one with [`Encoder::new`], submit raw [`Frame`]s via
 /// [`encode`](Self::encode), [`receive`](Self::receive) the resulting
 /// [`Encoded`] access units until it returns `None`, and publish them through a
-/// [`Producer`](super::Producer) built for the same [`Codec`].
+/// [`Publisher`](super::Publisher) built for the same [`Codec`].
 ///
 /// An encoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
 /// when the owner can move between threads.
@@ -478,7 +478,7 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
+	/// The codec this encoder emits. A [`Publisher`](super::Publisher) must be
 	/// built for the same codec to publish its packets.
 	pub fn codec(&self) -> Codec {
 		self.codec

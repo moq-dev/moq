@@ -137,7 +137,7 @@ Public entry points:
   the track and catalog are advertised up front, and the camera stays open
   whether or not anyone is watching. With `Capture::on_demand`, the camera opens
   only while a subscriber is watching and is released when the last one leaves.
-- `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
+- `encode::Publisher` publishes frames you encoded yourself (`publish(&Encoded)`),
   handling the catalog and framing. Each is published at its own timestamp.
 
 The default features are `nvidia`, `v4l2`, `vaapi`, and `mediacodec`, so a default

@@ -403,7 +403,7 @@ fn retune(
 pub(crate) struct VideoEncoder {
 	/// `None` while the rendition is disabled for lack of bandwidth.
 	encoder: Option<moq_video::encode::Sink>,
-	producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Publisher,
 	/// The encoder settings, to reopen at [`ceiling`](Self::ceiling) when a disabled
 	/// rendition resumes.
 	config: moq_video::encode::Config,
@@ -539,7 +539,7 @@ fn surface(_frame: &moq_video::Frame) -> *const c_void {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer,
+	mut producer: moq_video::encode::Publisher,
 	drained: Result<(), moq_video::Error>,
 	children: &crate::publish::Children,
 	child: crate::publish::Child,
@@ -769,7 +769,7 @@ impl VideoEncoder {
 /// Publish every access unit `encoder` has ready.
 fn publish(
 	encoder: &mut moq_video::encode::Sink,
-	producer: &mut moq_video::encode::Producer,
+	producer: &mut moq_video::encode::Publisher,
 ) -> Result<(), moq_video::Error> {
 	while let Some(encoded) = encoder.receive()? {
 		producer.publish(&encoded)?;
@@ -780,7 +780,7 @@ fn publish(
 /// Flush `encoder` and publish its tail, closing it.
 fn drain(
 	mut encoder: moq_video::encode::Sink,
-	producer: &mut moq_video::encode::Producer,
+	producer: &mut moq_video::encode::Publisher,
 ) -> Result<(), moq_video::Error> {
 	block_on(encoder.flush())?;
 	publish(&mut encoder, producer)
@@ -834,7 +834,7 @@ impl Video {
 			}
 		};
 		let track = target.producer.unique_track(suffix, reserved.track_info(priority))?;
-		let producer = moq_video::encode::Producer::new(track, reserved, rendition)?;
+		let producer = moq_video::encode::Publisher::new(track, reserved, rendition)?;
 		let encoder = Shared::new(VideoEncoder {
 			encoder: Some(encoder),
 			producer,
@@ -1460,7 +1460,7 @@ mod tests {
 
 	/// A video track wired up without an encoder, plus a subscriber on it: enough
 	/// to pin what [`finalize`] shows the far end.
-	async fn track_under_test() -> (moq_video::encode::Producer, moq_net::track::Subscriber) {
+	async fn track_under_test() -> (moq_video::encode::Publisher, moq_net::track::Subscriber) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
@@ -1476,7 +1476,7 @@ mod tests {
 		let track = broadcast
 			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
+		let producer = moq_video::encode::Publisher::new(track, reserved, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
@@ -1571,7 +1571,7 @@ mod tests {
 		let track = broadcast
 			.create_track("camera", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let producer = moq_video::encode::Producer::new(track.clone(), catalog.reserve(), rendition).unwrap();
+		let producer = moq_video::encode::Publisher::new(track.clone(), catalog.reserve(), rendition).unwrap();
 		let shared = Shared::new(VideoEncoder {
 			encoder: Some(moq_video::encode::Sink::open(&encode).await.unwrap()),
 			producer,

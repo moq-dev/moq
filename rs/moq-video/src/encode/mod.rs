@@ -8,14 +8,14 @@
 //!   `Publication` that reports its state and the `Driver` that runs it.
 //!   Requires the `capture` feature.
 //! - [`Encoder`] encodes raw [`Frame`](crate::Frame)s you supply into
-//!   [`Encoded`] access units, and [`Producer`] publishes those (bring your own
+//!   [`Encoded`] access units, and [`Publisher`] publishes those (bring your own
 //!   frames). Build both for the same [`Codec`].
 //! - [`Sink`] is an [`Encoder`] that owns the thread it runs on, for an encoder
 //!   outliving a single thread's stack (a shared object, an FFI handle, a task
 //!   that migrates between workers).
-//! - [`Producer`] alone publishes frames you already encoded.
+//! - [`Publisher`] alone publishes frames you already encoded.
 //!
-//! A [`Producer`] advertises its catalog rendition as soon as the track exists,
+//! A [`Publisher`] advertises its catalog rendition as soon as the track exists,
 //! resolved from the encoder itself via [`Config::probe`], so a subscriber can
 //! discover a track nothing has encoded yet. That's what lets an on-demand
 //! capture wait for its first viewer at all.
@@ -40,15 +40,15 @@ pub(crate) mod backend;
 mod cuts;
 mod encoded;
 mod encoder;
-mod producer;
+mod publisher;
 mod sink;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;
 pub use encoder::{Applied, Codec, Config, Encoder, Kind, Preset};
-pub use producer::Producer;
+pub use publisher::Publisher;
 #[cfg(feature = "capture")]
-pub use producer::{Capture, Driver, Publication, State, Status, publish_capture};
+pub use publisher::{Capture, Driver, Publication, State, Status, publish_capture};
 pub use sink::Sink;
 
 #[cfg(test)]
