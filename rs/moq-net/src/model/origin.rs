@@ -8665,7 +8665,9 @@ impl Routes {
 	/// queued before then. A prefix not announced by then is not announced, rather
 	/// than not heard yet. A session joining the scope later, such as a reconnect,
 	/// takes this back until it syncs too; routes published on this origin
-	/// itself never wait.
+	/// itself never wait. On moq-lite-07 a session syncs only once this origin
+	/// shows every route its peer sent, so a redial waits out the doubt a closed
+	/// session left on that peer.
 	///
 	/// Synced is relative to the session's peer, never global: a relay answers with
 	/// what it holds without waiting on its own upstreams. Versions that cannot mark

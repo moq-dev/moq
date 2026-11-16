@@ -4,9 +4,10 @@
 
 Measure what a second decoder would buy a viewer of an intra-refresh rendition
 (catalog `warmup` set), and either add it to `@moq/watch`, `moq_video::decode`,
-and `moq play` or delete this quest. Today each player decodes through one
-decoder that joins one group earlier and hides the warmup after each join or
-skip, so a skip freezes the picture for one sweep.
+and `moq play` or delete this quest. Once
+[catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md) restores it, each
+player decodes through one decoder that joins one group earlier and hides the
+warmup after each join or skip, so a skip freezes the picture for one sweep.
 
 ## Plan
 
@@ -15,7 +16,10 @@ one decoder ships, and two are revisited here with measurements.
 [moq-dev/moq#8857](https://github.com/moq-dev/moq/pull/8857) removed the earlier
 pair: a min-delay decoder that showed stripes and drove the clock, and a
 max-delay decoder a sweep behind whose clean pictures replaced them once it
-caught up. That pair decoded twice for the whole session, since the max-delay
+caught up. The one-decoder path itself left before the cut with video
+`warmup` (2026-11-16, see the [epic](/quest/m4/intra-refresh/README.md)) and
+returns with [catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md).
+That pair decoded twice for the whole session, since the max-delay
 lane never stops in steady state, to improve only the moments after a join or
 skip. Its Rust and JS selection policies also differed (Rust held a sticky
 source, JS picked per picture).
@@ -42,6 +46,10 @@ than for the whole session, is the variant to measure first.
 
 - linux - Chromium and Firefox
 - macos - Safari and VideoToolbox
+
+## Required
+
+- [Catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md) - the one-decoder players this measures against
 
 ## Related
 
