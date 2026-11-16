@@ -50,7 +50,7 @@ For the PR, settle the home of native audio's live estimate first. Two ways:
    moq-audio's reorder tests) with the playhead in place.
 2. moq-audio writes its estimate into the subscription's `Delay::min` as it
    moves. `min` is Subscriber Min Age on the lite-07 wire, so each change is
-   a SUBSCRIBE_UPDATE, and since [a cold join reaches back by it](/quest/m2/min-age-join.md)
+   a SUBSCRIBE_UPDATE, and since a cold join reaches back by it
    it would also move where a join starts. Take this only with a coarse step
    and a measured update rate, and say why the playhead did not do.
 
@@ -69,5 +69,4 @@ loses `ConsumerProps.wait`. Wire: none.
 
 ## Related
 
-- [A cold join reaches back by Min Age](/quest/m2/min-age-join.md) - gives `Delay::min` a reader on the wire, which rules out using it as a fast-moving estimate
 - [Native audio playout is a library](/quest/m3/audio-playout-library.md) - moves the placement this wait feeds into moq-audio
