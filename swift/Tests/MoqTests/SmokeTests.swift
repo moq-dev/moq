@@ -734,6 +734,31 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
+    /// An idle track ends only once a reader that joined after it went unwanted has left.
+    func testAbortUnwantedKeepsALateReader() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "status")
+        let demand = try track.demand()
+        while try await demand.wantedChanged() != nil {}
+
+        let late = try track.consume()
+        XCTAssertFalse(try track.abortUnwanted(errorCode: 7))
+        try track.writeFrame(Data("still serving".utf8), timestamp: .unscaled(0))
+        let frame = try await late.readFrame()
+        XCTAssertEqual(frame?.payload, Data("still serving".utf8))
+
+        while try await demand.wantedChanged() == nil {}
+        late.cancel()
+        while try await demand.wantedChanged() != nil {}
+        XCTAssertTrue(try track.abortUnwanted(errorCode: 7))
+        XCTAssertThrowsError(try track.abortUnwanted(errorCode: 7)) { error in
+            guard case MoqError.Closed = error else {
+                return XCTFail("expected Closed, got \(error)")
+            }
+        }
+        try broadcast.close()
+    }
+
     func testScaleLessTrackCarriesGroupKey() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "untimed")

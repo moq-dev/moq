@@ -73,7 +73,7 @@ Settled:
    interoperate for a release; lite-07 without a route layer, a large strip
    that leaves lite-07 clusters with lite-06's hunting). The route stream and
    the acceptance fixtures still land: they are the baseline the
-   [bake-off](/quest/m2/multicast/bakeoff.md) measures against, and one
+   [bake-off](https://github.com/moq-dev/moq/pull/8880) measures against, and one
    announce stream per side is wanted by any design. The quests that only
    polish holds, doubt, or the path router's indexes wait on the bake-off.
 3. ✅ **A routing node is a node that forwards and is trusted to; claims,
@@ -95,8 +95,9 @@ Settled:
    the prototype).
 4. ✅ **Evidence, not timers.** The route layer is a plain path vector with
    the dead-hop withdrawal as an accelerator: no ROUTE_HOLD, no doubt, and no
-   dead hop remembered past the routes that name it. Routing state is a
-   hint. A request is confirmed only once its upstream is, data is identified
+   dead hop remembered past the routes that name it (that last clause
+   reversed 2026-11-16 by item 13: a session floor is kept for good).
+   Routing state is a hint. A request is confirmed only once its upstream is, data is identified
    by Instance, track, group, and frame, and a stale or stalled route is left
    on evidence ([requests](https://github.com/moq-dev/moq/pull/8881),
    [route health](/quest/m3/route-health/README.md)). What a hold protected,
@@ -168,20 +169,93 @@ flagged as costly, on
     standby wherever a second route exists, which about doubles a track's
     subscription state across the cluster).
 
-The shape those decisions give, for the children to confirm or improve; each
-departure is a decision to list in its PR:
+Decided 2026-11-16 (maintainer, "go for it" on all three, on
+[the bake-off](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514),
+whose tables hold every number here; 32 relays on CDN tiers with 2
+publishers, in route messages, unless noted):
+
+13. ✅ **The new rule replaces today's, with five additions, none a timer**
+    (rejected: the rule as written, which hunts through 6,625,456 for a
+    partition against today's 579 and 1,368,094 for a relay that drains and
+    closes; keeping today's rule, which leaves readers unfed about 1 s when
+    a link closes beside a detour, grows with publishers to 73,472 selected
+    routes at 256, and cannot cross two scoped grants). With all five a
+    partition costs 690, a link closing feeds every reader at once, and a
+    publisher leaving changes no route. No arm showed a false END or a
+    revival.
+    - `floor`: per pair of relays, a node keeps the highest session it knows
+      closed and refuses any path naming that pair at or below it, for good.
+      This reverses item 4's "no dead hop remembered past the routes that
+      name it": that clause is what the rule hunted through, a stale offer
+      arriving after the hop was forgotten (rejected: `quiet`, holding
+      adverts until neighbours agree, which can wait for good and cost 4,641
+      against 2,037 as written for a relay dying on a 12-relay chorded ring;
+      `agree`, refusing a route a neighbour's own offer contradicts, a small
+      gain `floor` covers).
+    - `epoch`: a relay's identity carries a start that only grows, and a
+      session orders by its relay's start and then its number, so a restart
+      replaces a pair's floor where it added one: 4 pairs after each of 8
+      restarts against 4 more per restart, with no row of any table changed.
+    - `batch`: a node advertises once it has read what was delivered, not
+      after every message. `floor` alone still spent 28.8 million on one
+      GOAWAY of a 32-relay chorded ring; with `batch`, 5,065.
+    - `drain`: a node that sent GOAWAY is named once per neighbour in a
+      message of its own, as a closed session is: 5,065 to 723.
+    - `claimed`: a node offers a route to itself only once it announces a
+      claim, and from then on until it restarts, so a route is per announcing
+      relay. Building the mesh for one publisher fell from 6,576 to 207,
+      under today's 221, and the partition from 7,549 to 690. A publisher's
+      first claim on a relay then costs a route at every node (201 for a
+      move). The route stands after the last claim leaves (rejected:
+      withdrawing it, which races the claim's own end and would show a
+      reader offline where the publisher ended cleanly).
+14. ✅ **A silent death is left to keep-alives and the opt-in metadata
+    standby** ([route health](/quest/m3/route-health/README.md)). No arm
+    fixed it: readers behind a relay that dies unnoticed for 3 s stay unfed
+    until the last session notices, as today (rejected: `suspect`, ranking
+    the far end of a closed session as draining until its own word arrives,
+    which shortened some silent deaths, nearly doubled a flap from 656 to
+    1,133, and left 20 to 42 suspicions that never lifted).
+
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which
+judged the route layer at this plan's end state):
+
+15. ✅ **The plan stands as item 2 has it** (rejected: freezing lite-07 with
+    claims only and moving the route exchange behind a negotiated SETUP
+    parameter with a version of its own, so the cut stops waiting on the
+    router and the switch and a third-party client implements no route
+    layer; keeping the plan with a fallback written down now). The audit's
+    case was the schedule, three XL quests in series before the freeze on a
+    rule re-decided on six days, and that an endpoint must parse a protocol
+    only relays speak. What it leaves is in
+    [the switch](/quest/m2/multicast/switch.md): the public route API and
+    config that would freeze by omission, the half `js/net` implements, what
+    a non-forwarding endpoint must parse, and the moq-cluster draft, which
+    still specifies the warm discount item 5 forbids.
+
+The shape those decisions give. The bake-off confirmed or changed each line;
+a further departure is a decision to list in its PR:
 
 - **Identity.** A path and an Instance name content, and a request names the
   Instance. A relay holds one upstream subscription per Instance and track,
   whichever origin node its downstream requests named, so a join stops at the
   first node already carrying it.
-- **Reachability.** One route per forwarding node: its path, drain, priority,
-  and cost. A node never uses a route whose path names it. Rank is not
-  draining, then the lowest priority on the path, then the summed cost, each
-  link adding at least 1, so extending a route never improves it.
-- **Claims.** A prefix, Instance, Epoch, and cost, announced by a forwarding
-  node for itself and its local endpoints, ordered by the node's revision and
-  certified by floors as today, which measured no revival and no false END.
+- **Reachability.** One route per announcing relay, offered once it has a
+  claim: its path, drain, priority, and cost. A node never uses a route
+  whose path names it, sends none to a neighbour already on the path, and
+  refuses one at or below a session floor. Rank is not draining, then the
+  lowest priority on the path, then the summed cost, each link adding at
+  least 1, so extending a route never improves it. A closed session and a
+  draining node are each named once per neighbour, and a closed session's
+  message ends every route its sender offered through it. A node advertises
+  once per burst of input.
+- **Claims.** A prefix, Instance, Epoch, cost, the lowest link priority to
+  its publisher, and whether the way there is draining, announced by a
+  forwarding node for itself and its local endpoints, ordered by the node's
+  revision and certified by floors as today, which measured no revival and
+  no false END. A claims message carries its floor even with nothing
+  changed, and a withdrawal says whether the publisher ended the claim or
+  its announcer lost it.
 - **Boundaries.** The chain of item 3.
 - **Requests.** A request names the origin node its first hop chose, so
   relays that rank differently never loop it, and fails closed.

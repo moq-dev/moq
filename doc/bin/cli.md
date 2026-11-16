@@ -69,7 +69,7 @@ none and are closed the same way. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward. Admission is part of
-the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+the handshake, so `--listen-timeout` (default `30s`) bounds it too; `0s` leaves admission without
 a deadline.
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific

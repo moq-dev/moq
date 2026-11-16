@@ -9,7 +9,7 @@ apart its neighbours notice the death within the keep-alive.
 
 Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
 multicast](/quest/m2/multicast/README.md)): this waits on the
-[bake-off](/quest/m2/multicast/bakeoff.md). The maintainer deferred how the
+[bake-off](https://github.com/moq-dev/moq/pull/8880). The maintainer deferred how the
 doubt covers a silent death on 2026-11-15, "not yet sure about the doubt
 design", and decided the same day that evidence replaces the doubt. If the new
 rule goes ahead, [the switch](/quest/m2/multicast/switch.md) deletes this
@@ -37,7 +37,8 @@ that window goes to a dead relay. A 1 s doubt does not cover a 3 s spread.
 
 ## Required
 
-- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the doubt this sizes remains
+- [The switch](/quest/m2/multicast/switch.md) - deletes this with the old rule, unless the maintainer keeps today's rule on [moq-dev/moq#8880](https://github.com/moq-dev/moq/pull/8880)
+
 
 ## Related
 

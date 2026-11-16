@@ -33,6 +33,12 @@ waits for [the switch](/quest/m2/multicast/switch.md), which rewrites these
 fixtures' assertions for the new rule and deletes the Required quests it
 makes moot.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
+switch makes `origin::Config::update_hold` crate-private, since nothing
+outside moq-net sets it, and puts whatever of the three mitigations survives
+here under one named lite-06 marker. So retiring them below changes no
+public API, and one that a lite-06 mesh keeps is already marked temporary.
+
 What remains:
 
 - Retire the quarantine, the dedup, and the hold once the Required quests

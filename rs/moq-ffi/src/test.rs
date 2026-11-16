@@ -1941,6 +1941,61 @@ async fn track_request_demand_survives_accept() {
 	assert!(matches!(err, MoqError::Closed), "{err:?}");
 }
 
+/// An on-demand track ends once unwanted, but a reader that joined first keeps it, and a later
+/// reader requests it afresh.
+#[tokio::test]
+async fn abort_unwanted_keeps_a_late_reader() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let first = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
+	};
+	let track = dynamic.requested_track().await.unwrap().accept(None).unwrap();
+	let demand = track.demand().unwrap();
+	first.await.unwrap().unwrap().cancel();
+	demand.until_unwanted().await.unwrap();
+
+	// A reader joins after the publisher saw nobody wanted the track.
+	let late = consumer.subscribe_track("events".into(), None).await.unwrap();
+	assert!(!track.abort_unwanted(7).unwrap());
+	track.append_group().unwrap().finish().unwrap();
+	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
+		.await
+		.expect("timed out waiting for the late reader's group")
+		.unwrap();
+	assert!(group.is_some());
+
+	// The publisher's demand loop sees the reader come and go; then the same teardown
+	// commits, and later calls find the handle closed.
+	demand.until_wanted().await.unwrap();
+	drop(group);
+	late.cancel();
+	demand.until_unwanted().await.unwrap();
+	assert!(track.abort_unwanted(7).unwrap());
+	assert!(matches!(track.abort_unwanted(7), Err(MoqError::Closed)));
+	assert!(matches!(track.append_group(), Err(MoqError::Closed)));
+
+	// The next reader asks the publisher again instead of finding the aborted track.
+	let next = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the track to be requested again")
+		.unwrap();
+	assert_eq!(request.name().unwrap(), "events");
+	request.reject(404).unwrap();
+	assert!(next.await.unwrap().is_err());
+
+	// A finished track is kept for its readers the same way.
+	let finished = broadcast.publish_track("status".into(), None).unwrap();
+	let reader = finished.consume(None).unwrap();
+	finished.finish().unwrap();
+	assert!(!finished.abort_unwanted(7).unwrap());
+	reader.cancel();
+	assert!(finished.abort_unwanted(7).unwrap());
+}
+
 /// A datagram handler keeps its broadcast alive independently of the stream handler.
 #[tokio::test]
 async fn requested_datagrams_outlive_the_broadcast_handle() {

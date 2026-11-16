@@ -96,6 +96,34 @@ void main() {
     expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
   });
 
+  test('abortUnwanted keeps a reader that joined late', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(name: 'status', info: null);
+    final demand = track.demand();
+    while (await demand.wantedChanged().timeout(timeout) != null) {}
+
+    final late = track.consume(subscription: null);
+    expect(track.abortUnwanted(errorCode: 7), isFalse);
+    track.writeFrame(
+      frame: Frame(
+        payload: utf8.encode('still serving'),
+        timestamp: Timestamp.unscaled(0),
+      ),
+    );
+    final frame = await late.readFrame().timeout(timeout);
+    expect(utf8.decode(frame!.payload), 'still serving');
+
+    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    late.cancel();
+    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    expect(track.abortUnwanted(errorCode: 7), isTrue);
+    expect(
+      () => track.abortUnwanted(errorCode: 7),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    broadcast.close();
+  });
+
   test('raw writes on a scale-less track carry their group key', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'untimed', info: null);

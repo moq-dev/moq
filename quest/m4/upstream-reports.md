@@ -50,8 +50,15 @@ maintainer a draft instead:
 Not to be filed:
 
 - **str0m/dimpl:** the DTLS retry budget runs out before ICE picks a
-  path, found in #7379. The [WebRTC epic](/quest/m3/webrtc/README.md)
-  vendors str0m instead of reporting upstream, and
-  [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) fixes it there.
+  path, found in #7379. Not filed while the
+  [WebRTC epic](/quest/m3/webrtc/README.md) vendored str0m. Since
+  2026-11-16 moq-webrtc [returns to upstream](/quest/m2/str0m-upstream.md),
+  so this and three more become candidates once their quests show the
+  public API cannot do it: [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md),
+  [the typed DTLS timeout](/quest/m3/webrtc/dtls-timeout.md),
+  [several bandwidth lines](/quest/m4/webrtc-sdp-bandwidth.md), and the
+  NACK hook of [WHEP pacing](/quest/m3/rtc-pacing.md). Each needs the
+  maintainer's approval and a read of the repository's AI policy before it
+  is filed.
 
 Public API: none. Wire: none.

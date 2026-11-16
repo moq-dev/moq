@@ -83,9 +83,10 @@ impl Drop for Admitted {
 	}
 }
 
-/// How long [`Server`] gives a connection to be accepted, from its arrival through the SETUP
-/// reply, unless [`Server::with_timeout`] says otherwise.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long [`Server`] gives a connection to be accepted, from its arrival through admission,
+/// unless [`Server::with_timeout`] says otherwise. Matches a client's connect timeout, so a
+/// client whose handshake probes back off under heavy loss is not shed first.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A MoQ server session builder.
 #[derive(Clone)]

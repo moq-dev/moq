@@ -1168,6 +1168,7 @@ impl Bbr3 {
 
     /// equivalent to BBRIsTimeToGoDown <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.3.9>
     fn maybe_go_down(&mut self, newly_acked: u64) -> bool {
+        // The ACK's bytes still count as in flight, as Linux's `prior_in_flight` does.
         let pre_ack_inflight = self.inflight.saturating_add(newly_acked);
         if self.prev_probe_too_high && pre_ack_inflight >= self.inflight_longterm {
             self.prev_probe_precautionary = true;

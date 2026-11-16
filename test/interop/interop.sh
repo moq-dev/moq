@@ -1780,13 +1780,13 @@ finish_marker() {
 
 run_finishes() {
     local pub sub name broadcast grant pid ack ack_fd reader_fd i started late
-    # moq-transport does not yet deliver a finished broadcast's late tail, withdrawal, and
+    # moq-transport does not deliver a finished broadcast's late tail, withdrawal, and
     # same-session health across clients, so a pinned moq-transport pass records the case as
     # skipped rather than red.
     if [[ "$VERSION" == moq-transport-* ]]; then
         for pub in "${PUB_LIST[@]}"; do
             for sub in "${SUB_LIST[@]}"; do
-                record skip case=finish publisher="$pub" subscriber="$sub" detail="moq-transport finish: quest/m3/ietf-finish.md"
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="moq-transport finish: not supported"
             done
         done
         return

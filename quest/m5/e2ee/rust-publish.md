@@ -20,26 +20,29 @@ timeline publishers already publish into an encrypted
 broadcast under semantic names with no change here. This quest keeps only
 what the traits do not cover. Every track these publishers serve is declared
 in advance, so it never needed the undeclared-name handler (maintainer,
-2026-10-19), which `moq_crypto::e2ee::broadcast::Producer::requests` now provides.
+2026-10-19), which `moq_e2ee::broadcast::Producer::requests` now provides.
 
 - Catalog naming: derive the protected catalog name from its well-known
   logical role, then put media roles, codecs, quality, timelines, and
   custom-track mappings only inside the encrypted catalog.
 - Encrypt the single Hang `catalog.json` left by the
   [m1 compression migration](https://github.com/moq-dev/moq/pull/7046), and encrypt or
-  suppress the MSF catalog. Set logical `compression` on protected catalog
-  tracks; the [e2ee wrapper](/quest/m5/net-wrap/e2ee.md) compresses before
-  encryption. Retain ordinary plaintext publication unchanged outside E2EE mode.
+  suppress the MSF catalog. The profile carries no compression (decided
+  2026-11-16, maintainer, replacing "the wrapper compresses before
+  encryption"), so a protected catalog ships uncompressed unless the
+  publisher compresses its own plaintext; follow what the
+  [e2ee wrapper](/quest/m5/net-wrap/e2ee.md) settles. Retain ordinary
+  plaintext publication unchanged outside E2EE mode.
 - Cover every current Rust importer and capture path so a convenience API
   cannot emit a plaintext semantic catalog.
 - A re-created track resumes (decided 2026-10-25, maintainer, replacing the
-  2026-10-17 refusal): moq-crypto never releases a name's claim, and a track
+  2026-10-17 refusal): moq-e2ee never releases a name's claim, and a track
   created again under a claimed name continues above its high-water marks,
-  so nonces never repeat. moq-crypto's `create_track` already does this.
+  so nonces never repeat. moq-e2ee's `create_track` already does this.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [moq-crypto's e2ee implements the traits](/quest/m5/net-wrap/e2ee.md) - the encrypted broadcast moq-mux publishes into
+- [moq-e2ee implements the traits](/quest/m5/net-wrap/e2ee.md) - the encrypted broadcast moq-mux publishes into
 - [moq-mux takes the traits](/quest/m5/net-wrap/mux.md) - the mux and capture publishers this relies on to stay unchanged

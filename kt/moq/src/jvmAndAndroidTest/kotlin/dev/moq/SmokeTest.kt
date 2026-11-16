@@ -378,6 +378,31 @@ class SmokeTest {
     }
 
     @Test
+    fun `abortUnwanted keeps a reader that joined late`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("status", null)
+            val demand = track.demand()
+            while (demand.wantedChanged() != null) {}
+
+            val late = track.consume(null)
+            assertFalse(track.abortUnwanted(7u))
+            track.writeFrame(
+                Frame(
+                    payload = "still serving".encodeToByteArray(),
+                    timestamp = Timestamp.unscaled(0uL),
+                )
+            )
+            assertEquals("still serving", late.readFrame()?.payload?.decodeToString())
+
+            while (demand.wantedChanged() == null) {}
+            late.cancel()
+            while (demand.wantedChanged() != null) {}
+            assertTrue(track.abortUnwanted(7u))
+            assertFailsWith<MoqException.Closed> { track.abortUnwanted(7u) }
+        }
+    }
+
+    @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))

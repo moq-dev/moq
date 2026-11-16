@@ -1533,6 +1533,63 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	}
 }
 
+// TestAbortUnwantedKeepsALateReader ends an idle track only once a reader that
+// joined after its demand went unwanted has left.
+func TestAbortUnwantedKeepsALateReader(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+
+	track, err := broadcast.PublishTrack("status", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	demand, err := track.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+
+	late, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aborted, err := track.AbortUnwanted(7); err != nil || aborted {
+		t.Fatalf("AbortUnwanted = %v, %v; want false with a reader", aborted, err)
+	}
+	payload := []byte("still serving")
+	if err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := late.ReadFrame(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || string(frame.Payload) != string(payload) {
+		t.Fatalf("frame = %+v, want payload=%q", frame, payload)
+	}
+
+	if err := untilWanted(ctx, demand, true); err != nil {
+		t.Fatal(err)
+	}
+	late.Cancel()
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	if aborted, err := track.AbortUnwanted(7); err != nil || !aborted {
+		t.Fatalf("AbortUnwanted = %v, %v; want true once unwanted", aborted, err)
+	}
+	if _, err := track.AbortUnwanted(7); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("AbortUnwanted after abort = %v, want ErrClosed", err)
+	}
+}
+
 // TestCancelDoesNotLeakGoroutines parks many subscribes on a dynamic producer
 // that never answers, cancels them all, and waits for the goroutine count to come
 // back. Each parked call holds a goroutine inside cgo, so a cancel that returned
