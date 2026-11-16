@@ -9,7 +9,7 @@ characters.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from importlib import metadata
 from typing import ClassVar, cast
@@ -359,7 +359,7 @@ class Backoff:
     initial: timedelta | None = None
     multiplier: int | None = None
     max: timedelta | None = None
-    max_unlimited: bool = False
+    max_unlimited: bool = field(default=False, kw_only=True)
     timeout: timedelta | None = None
 
     def _ffi(self) -> MoqBackoff:

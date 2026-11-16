@@ -205,16 +205,6 @@ impl Backoff {
 		if self.resolve().healthy.is_zero() {
 			return Err(Error::BackoffHealthy);
 		}
-		// TODO(next release): delete. A zero `max` or `timeout` turned the bound off until
-		// `none` took that job, so warn a config written for the old meaning.
-		let zero = |set: Option<crate::cli::Bound>| set.and_then(Into::into).is_some_and(|set: Duration| set.is_zero());
-		for (name, set) in [("max", self.max), ("timeout", self.timeout)] {
-			if zero(set) {
-				tracing::warn!(
-					"connect.backoff.{name} is zero, which no longer turns it off; set it to \"none\" for no bound"
-				);
-			}
-		}
 		Ok(())
 	}
 

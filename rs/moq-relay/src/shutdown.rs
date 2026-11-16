@@ -374,7 +374,7 @@ impl Observer {
 	///
 	/// With no time left (a zero [`drain_timeout`](Self::drain_timeout), or a
 	/// session accepted after the deadline) the GOAWAY's zero timeout closes the
-	/// session at once.
+	/// session at once with `GoawayTimeout`, likely before the GOAWAY is written.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
 		self.drain(session, true).await;
 	}

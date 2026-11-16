@@ -71,9 +71,11 @@ impl Goaway {
 	/// Force-close the session with [`Error::GoawayTimeout`] if the peer is still
 	/// around after `timeout`, or never with `None` (the default).
 	///
-	/// Zero closes the session as soon as the GOAWAY is sent. Other values round up
-	/// to the next millisecond and saturate at the wire's 62-bit millisecond limit,
-	/// so the local deadline agrees with what a moq-transport peer receives.
+	/// Zero closes the session at once, without waiting for the GOAWAY to be written, so
+	/// the peer may never receive it or its redirect URI; a redirect needs a nonzero
+	/// timeout to arrive. Other values round up to the next millisecond and saturate at
+	/// the wire's 62-bit millisecond limit, so the local deadline agrees with what a
+	/// moq-transport peer receives.
 	pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
 		self.timeout = timeout.map(|timeout| {
 			Duration::from_millis(timeout.as_nanos().div_ceil(1_000_000).min(u128::from(MAX_TIMEOUT_MS)) as u64)
@@ -421,7 +423,7 @@ mod tests {
 		);
 	}
 
-	/// A zero timeout closes the session as soon as the GOAWAY is sent, not never.
+	/// A zero timeout closes the session at once, not never.
 	#[test]
 	fn a_zero_timeout_closes_at_once() {
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::ZERO);

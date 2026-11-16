@@ -39,7 +39,17 @@ impl FromStr for Bound {
 	fn from_str(value: &str) -> Result<Self, Self::Err> {
 		match value {
 			"none" => Ok(Self::NONE),
-			value => humantime::parse_duration(value).map(Into::into),
+			value => {
+				let value = humantime::parse_duration(value)?;
+				// TODO(next release): delete. A zero backoff `max` or `timeout` turned the bound
+				// off until `none` took that job, so warn a flag or config written for the old
+				// meaning. Only a written spelling is parsed, so an API caller's deliberate zero
+				// stays quiet.
+				if value.is_zero() {
+					tracing::warn!("a zero connect.backoff bound no longer turns it off; write \"none\" for no bound");
+				}
+				Ok(value.into())
+			}
 		}
 	}
 }
