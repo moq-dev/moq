@@ -760,6 +760,90 @@ test("a pending request fails Unroutable once its discovery syncs without a rout
 	origin.close();
 });
 
+test("awaiting a request for a missing broadcast rejects Unroutable", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(true);
+	const initialSets: (() => void)[] = [];
+	const stop = wire.interests((prefix, wanted) => {
+		if (wanted) initialSets.push(wire.snapshot(prefix));
+	});
+	const request = origin.request(Path.from("room/missing"));
+	const answer = (async () => await request)();
+	await settle();
+	for (const synced of initialSets) synced();
+	await expect(answer).rejects.toMatchObject({ code: StreamCode.Unroutable });
+	expect(await request.closed).toBeInstanceOf(StreamError);
+
+	request.close();
+	stop();
+	detach();
+	origin.close();
+});
+
+test("awaiting a request resolves with its broadcast, now or once routed", async () => {
+	const origin = new Producer();
+	const routed = origin.route(Path.from("room/now"));
+	const now = origin.request(Path.from("room/now"));
+	expect((await now).instance).toBe(routed.instance);
+	expect(await now).toBe(now.active.peek() as NonNullable<ReturnType<typeof now.active.peek>>);
+
+	const later = origin.request(Path.from("room/later"));
+	let resolved = false;
+	const answer = later.then((broadcast) => {
+		resolved = true;
+		return broadcast;
+	});
+	await settle();
+	expect(resolved).toBe(false);
+	const route = origin.route(Path.from("room/later"));
+	expect((await answer).instance).toBe(route.instance);
+
+	for (const handle of [now, later, routed, route]) handle.close();
+	origin.close();
+});
+
+test("closing a pending request rejects its await with a cancellation", async () => {
+	const origin = new Producer();
+	const request = origin.request(Path.from("room/missing"));
+	const answer = (async () => await request)();
+	await settle();
+	request.close();
+	await expect(answer).rejects.toMatchObject({ code: StreamCode.Cancel });
+	expect(await request.closed).toBeNull();
+
+	// A closed origin answers a new request at once, the same way.
+	origin.close();
+	await expect((async () => await origin.request(Path.from("room/late")))()).rejects.toMatchObject({
+		code: StreamCode.Cancel,
+	});
+});
+
+test("the first await fixes a request's answer", async () => {
+	const origin = new Producer();
+	const route = origin.route(Path.from("room"));
+	const request = origin.request(Path.from("room"));
+	const broadcast = await request;
+	route.close();
+	await settle();
+	// The instance ended, so the request closed, yet a later await keeps the first answer.
+	expect(request.closed.peek()).not.toBeUndefined();
+	expect(await request).toBe(broadcast);
+
+	// Awaited only after it ended, the same request would have rejected.
+	const again = origin.route(Path.from("room"));
+	const late = origin.request(Path.from("room"));
+	await settle();
+	again.close();
+	await settle();
+	expect(late.closed.peek()).not.toBeUndefined();
+	await expect((async () => await late)()).rejects.toBeDefined();
+
+	request.close();
+	late.close();
+	origin.close();
+});
+
 // Unlike a Rust origin, which answers for its own table at once, a JS origin usually fronts a
 // reconnecting connection: no session yet means nothing has synced.
 test("a pending request waits for a session before concluding absence", async () => {

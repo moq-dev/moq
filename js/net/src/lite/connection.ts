@@ -163,6 +163,9 @@ export class Connection implements Session {
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
 
+	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
+	#closed = new Once<Error | null>();
+
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
 	 * peer's authorization grants the direction it intends to use.
@@ -229,6 +232,10 @@ export class Connection implements Session {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		void quic.closed.then(
+			(info) => this.#closed.set(fromClose(info)),
+			(err: unknown) => this.#closed.set(error(err)),
+		);
 		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
 		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
 		// client, whose origin holds that endpoint.
@@ -601,9 +608,9 @@ export class Connection implements Session {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
-	get closed(): Promise<Error | null> {
-		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
+	/** Settles when the session closes, decoding the peer's close code; see {@link Session.closed}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 }
 

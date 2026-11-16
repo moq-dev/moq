@@ -98,6 +98,9 @@ export class Connection implements Session {
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
 
+	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
+	#closed = new Once<Error | null>();
+
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
 
@@ -190,6 +193,10 @@ export class Connection implements Session {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		void quic.closed.then(
+			(info) => this.#closed.set(fromClose(info)),
+			(err: unknown) => this.#closed.set(error(err)),
+		);
 		this.#client = client;
 
 		this.#auth.violated.subscribe((err) => {
@@ -614,8 +621,8 @@ export class Connection implements Session {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
-	get closed(): Promise<Error | null> {
-		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
+	/** Settles when the session closes, decoding the peer's close code; see {@link Session.closed}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 }

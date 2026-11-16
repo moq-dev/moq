@@ -119,8 +119,7 @@ try {
 		}
 		announcements.close();
 		const request = origin.consume().request(Moq.Path.from("dg"));
-		let broadcast = request.active.peek();
-		while (!broadcast) broadcast = await request.active.changed();
+		const broadcast = await request;
 
 		const audio = broadcast.datagrams("audio");
 		audio.setPriority(PRIORITY);

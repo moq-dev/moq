@@ -35,10 +35,7 @@ try {
 	} else {
 		const session = await Moq.Connection.connect({ url, consume: origin });
 		const request = origin.request(path);
-		let broadcast = request.active.peek();
-		while (!broadcast) broadcast = await request.active.changed();
-		assert(broadcast);
-		const active = broadcast;
+		const active = await request;
 		// Each subscription is a stream to the publisher; each group, one from the relay.
 		const tracks = Array.from({ length: count }, (_, i) => active.track(String(i)).subscribe());
 		const groups = await Promise.all(
