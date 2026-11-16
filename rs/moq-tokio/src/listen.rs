@@ -133,7 +133,8 @@ pub struct Config {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
@@ -315,7 +316,8 @@ pub(crate) struct Legacy {
 			"moq-lite-07-wip",
 			"moq-transport-18",
 			"moq-transport-20",
-			"moq-transport-22"
+			"moq-transport-22",
+			"moq-transport-23"
 		),
 		hide = true
 	)]

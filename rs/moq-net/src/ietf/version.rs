@@ -7,6 +7,7 @@ pub enum Version {
 	Draft18,
 	Draft22,
 	Draft20,
+	Draft23,
 }
 
 impl fmt::Display for Version {
@@ -15,6 +16,7 @@ impl fmt::Display for Version {
 			Self::Draft18 => write!(f, "moq-transport-18"),
 			Self::Draft20 => write!(f, "moq-transport-20"),
 			Self::Draft22 => write!(f, "moq-transport-22"),
+			Self::Draft23 => write!(f, "moq-transport-23"),
 		}
 	}
 }
