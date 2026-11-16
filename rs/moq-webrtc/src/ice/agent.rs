@@ -409,6 +409,15 @@ mod tests {
 			None,
 		);
 		let (offer, _) = api.apply().unwrap();
+		// An offerer taking the DTLS client role, with no SSRCs declared, leaves the
+		// answerer no DTLS or media timer that would start ICE's clock instead.
+		let offer: String = offer
+			.to_sdp_string()
+			.replace("a=setup:actpass", "a=setup:active")
+			.split_inclusive("\r\n")
+			.filter(|line| !line.starts_with("a=ssrc"))
+			.collect();
+		let offer = str0m::change::SdpOffer::from_sdp_string(&offer).unwrap();
 
 		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let local = socket.local_addr().unwrap();
