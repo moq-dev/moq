@@ -115,7 +115,9 @@ pub struct Config {
 	///
 	/// Legacy: applies to moq-lite-03 through 06 and the negotiated MoQ Cluster extension
 	/// on moq-transport, and leaves with moq-lite-06. A moq-lite-07 route's own hops stop
-	/// at 32 whatever this is. A forwarded path counts this origin's own hop too, including
+	/// at 32 whatever this is, but a route that crossed into moq-lite-07 from moq-lite-06
+	/// still carries that chain: with its publisher's hop appended it must fit this
+	/// bound, or the route is dropped (logged at debug). A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
 	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
 	/// carries a path longer than 32, so a larger value acts as 32.

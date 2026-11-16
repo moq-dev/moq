@@ -105,7 +105,10 @@ moq-lite-03 through moq-lite-06 carry, and moq-transport drafts 18 through 22
 when the MoQ Cluster extension is negotiated, and it leaves with moq-lite-06.
 A moq-lite-07-wip route crosses at most 32 nodes whatever this is set to: it
 does not hunt for paths, so a lower cap would only hide a short path behind a
-cheaper long one.
+cheaper long one. In a mesh that mixes the two, a moq-lite-07-wip route that
+crossed in from moq-lite-06 still carries the moq-lite-06 chain: a relay drops
+the route when that chain plus the route's publisher is longer than
+`max_hops`.
 
 On those older versions it bounds the hop path this relay accepts or forwards,
 from 1 to 32, with 32 as the default. Set it near the mesh's diameter after any

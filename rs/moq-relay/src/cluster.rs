@@ -753,7 +753,9 @@ pub struct Config {
 	/// (default 32).
 	///
 	/// Also bounds moq-transport's MoQ Cluster extension. A moq-lite-07 route stops at
-	/// 32 nodes whatever this is, so the setting leaves with moq-lite-06.
+	/// 32 nodes whatever this is, so the setting leaves with moq-lite-06. Until then, a
+	/// moq-lite-07 route that crossed in from moq-lite-06 is dropped when the chain it
+	/// carries, plus its publisher, is longer than this.
 	#[usage(
 		name = "cluster-max-hops",
 		long = "cluster-max-hops",
