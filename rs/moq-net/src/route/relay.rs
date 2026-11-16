@@ -10,7 +10,8 @@
 //! session it learned it on or to a neighbour already on its path, and never sends one
 //! learned over a marked link to another marked link. It ranks routes by drain, then the
 //! lowest priority on the path, then the summed cost, each link adding at least 1, so
-//! extending a route never improves it; among equal ranks it stays on its next hop.
+//! extending a route never improves it. Among equal ranks it takes one with no marked link
+//! on its path, which it may send to more neighbours, and then stays on its next hop.
 //!
 //! A closed session is named once per neighbour in a fixed-size [`Msg::Dead`], which ends
 //! every route its sender offered through it until the sender offers it again or ends
@@ -309,9 +310,9 @@ struct Best<N> {
 	offer: Offer,
 }
 
-/// How candidate routes order, lower first: rank, then the next hop in use, the shorter
-/// path, and the neighbour.
-type Order<N> = (bool, Reverse<i8>, Metric, bool, usize, N);
+/// How candidate routes order, lower first: rank, then one with no marked link on its
+/// path, the next hop in use, the shorter path, and the neighbour.
+type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, N);
 
 /// What a router retains, for budgets and leak checks.
 #[cfg(test)]
@@ -1146,8 +1147,17 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				},
 			};
 			let (draining, priority, cost) = mine.offer.rank();
-			// Among equal ranks a node stays on its next hop.
-			let key = (draining, priority, cost, current != Some(via), offer.path.len(), via);
+			// Among equal ranks one with no marked link, which more neighbours may be sent,
+			// and then the next hop in use.
+			let key = (
+				draining,
+				priority,
+				cost,
+				mine.offer.marked,
+				current != Some(via),
+				offer.path.len(),
+				via,
+			);
 			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
 				pick = Some((mine, key));
 			}
@@ -1874,6 +1884,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	}
 
 	/// This node's revision of its own claims, and each of its claims as it stands.
+	/// Whether it offers a route to itself: it has announced a claim.
+	pub fn announced(&self) -> bool {
+		self.announced
+	}
+
 	pub fn own(&self) -> (Rev, Claims<I, A>) {
 		let items = self.known.get(&self.me).map(|known| known.items.clone());
 		(self.rev, items.unwrap_or_default())

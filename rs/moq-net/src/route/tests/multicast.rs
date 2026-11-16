@@ -471,6 +471,10 @@ impl RelaySim {
 		self.held.insert((from, to));
 	}
 
+	pub fn release(&mut self, from: Node, to: Node) {
+		self.held.remove(&(from, to));
+	}
+
 	pub fn ready(&self) -> Vec<((Node, Node), usize)> {
 		(self.queues.iter())
 			.filter(|(key, queue)| !queue.is_empty() && !self.held.contains(key))
@@ -986,6 +990,69 @@ fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
 	assert_eq!(kept[0], kept[7], "{kept:?}");
 }
 
+
+/// A route learned over an upstream link is marked, and a marked route is never sent over
+/// another upstream link. Relay 3 hears two routes of equal rank to relay 0: through 2,
+/// over a link it marked upstream, and through 1, over a peer link. Were the mark below the
+/// next hop in use, 3 would keep whichever came first, and with 2's first 4 would be
+/// offered nothing. Unmarked first, 3 moves to 1's route whichever came first, and offers
+/// it to 4, its own upstream.
+#[test]
+fn an_equal_route_in_use_never_leaves_a_neighbour_without_one() {
+	let settled = |first: Node, second: Node| {
+		let mut sim = RelaySim::new(6, relay::debounce(HOP));
+		sim.client(5);
+		sim.publish(5, 100);
+		sim.link(5, 0, 1, Tie::Peer);
+		sim.link(0, 1, 1, Tie::Peer);
+		sim.link(0, 2, 1, Tie::Peer);
+		sim.link(3, 2, 1, Tie::Up);
+		sim.link(3, 1, 1, Tie::Peer);
+		sim.link(3, 4, 1, Tie::Up);
+		let origin = sim.id(0);
+		let via = |sim: &RelaySim, relay: Node| sim.router(relay)?.best(origin).map(|(via, _)| via);
+		sim.hold(second, 3);
+		sim.claim(5, "live/0", true);
+		quiesce(&mut sim);
+		assert_eq!(via(&sim, 3), Some(first));
+		sim.release(second, 3);
+		quiesce(&mut sim);
+		(via(&sim, 3), via(&sim, 4).is_some(), sim.showing(4, 100, "live/0"))
+	};
+	assert_eq!(settled(1, 2), (Some(1), true, Some(true)), "the unmarked route first");
+	assert_eq!(settled(2, 1), (Some(1), true, Some(true)), "the marked route first");
+}
+
+/// Under `claimed` a relay offers a route to itself from its first claim on, for good.
+/// Relay 2 has no endpoint: it can only announce a claim relay 1 grants it. Relay 1 grants
+/// its closest claim, unless that is the one relay 2 granted it. 2's grant, over 2's cheap
+/// route to 0, beats 1's own dear route. If 2's grant reaches 1 first, 1 never grants 2
+/// anything and 2 never announces. If 1 hears 0's claim first, it grants it to 2, which
+/// announces; 1 then takes 2's cheaper grant and withdraws its own, and 2 keeps a route
+/// to itself with no claim behind it. A known limit, as in the prototype.
+#[test]
+fn whether_a_relay_announces_hangs_on_arrival_order() {
+	let settled = |late: (Node, Node)| {
+		let mut sim = RelaySim::new(4, relay::debounce(HOP));
+		sim.client(3);
+		sim.publish(3, 100);
+		sim.link(3, 0, 1, Tie::Peer);
+		sim.link(0, 2, 1, Tie::Peer);
+		sim.link(0, 1, 3, Tie::Peer);
+		sim.link(1, 2, 1, Tie::Scoped);
+		sim.hold(late.0, late.1);
+		sim.claim(3, "live/0", true);
+		quiesce(&mut sim);
+		sim.release(late.0, late.1);
+		quiesce(&mut sim);
+		let relay = sim.router(2).expect("a relay");
+		let claimed = relay.step(sim.id(2), &(p("live/0"), 100)).is_some();
+		let routed = sim.router(0).expect("a relay").best(sim.id(2)).is_some();
+		(relay.announced(), claimed, routed)
+	};
+	assert_eq!(settled((0, 1)), (false, false, false), "2's grant first");
+	assert_eq!(settled((2, 1)), (true, false, true), "0's claim first at 1");
+}
 
 /// The floor's growth with identities that never return: each round a relay under a new
 /// identity joins a ring as a chord with a publisher of its own, announces, and leaves for

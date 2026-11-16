@@ -234,9 +234,9 @@ impl<N> Default for Known<N> {
 	}
 }
 
-/// How candidate routes order, lower first: rank, then the next hop in use, the
-/// shorter path, and the neighbour.
-type Order<N> = (bool, Reverse<i8>, Metric, bool, usize, N);
+/// How candidate routes order, lower first: rank, then unmarked, the next hop in use,
+/// the shorter path, and the neighbour.
+type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, N);
 
 /// Where a request for a broadcast goes next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -929,11 +929,13 @@ impl<N: Key> Router<N> {
 				suspect,
 			};
 			let (draining, priority, cost) = mine.rank();
-			// Among equal ranks a node stays on its next hop.
+			// Among equal ranks one with no marked link, which more neighbours may be
+			// sent, and then the next hop in use.
 			let key = (
 				draining,
 				priority,
 				cost,
+				mine.offer.marked,
 				current != Some(via),
 				mine.offer.path.len(),
 				via,

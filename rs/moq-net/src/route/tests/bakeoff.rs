@@ -36,6 +36,7 @@ fn arms() -> Vec<Arm> {
 		Arm::TUNED,
 		Arm::LEAN,
 		Arm::KEPT,
+		Arm::RELAY,
 		Arm::with(|tune| tune.claimed = true),
 		Arm::with(|tune| {
 			tune.suspect = Suspect::Flagged;
@@ -917,7 +918,7 @@ fn benchmark_bakeoff_growth() {
 	cases.extend([1, 8, 64].map(|claims| ("broadcasts", tiers_of(32, 8, claims))));
 	cases.extend([8, 16, 32].map(|relays| ("links", clique(relays, 8))));
 	for (grows, mesh) in cases {
-		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
+		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
 			let tree = mesh.tree();
 			let mut lab = Lab::new(arm, &mesh);
 			lab.coarse = true;
@@ -957,7 +958,7 @@ fn benchmark_bakeoff_growth() {
 fn benchmark_bakeoff_baseline() {
 	println!("case,rule,route_messages,claim_items,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
-	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
+	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
 		let mut rng = XorShift(0x6d6f_7100 + 24);
 		let sparse: Vec<Mesh> = (0..16).map(|_| Mesh::sparse(24, &mut rng)).collect();
 		let groups = [
