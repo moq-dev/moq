@@ -81,20 +81,23 @@ impl<R: Incoming> Connection<R> {
 
 	/// Admits and serves this connection until it closes, then logs the close. A panic
 	/// ends only this connection, as an error.
-	pub async fn run(self) {
+	pub fn run(self) -> impl std::future::Future<Output = ()> {
 		let Self { request, lifecycle } = self;
-		match request.shared().cloned() {
-			Some(shared) => lifecycle.start(&shared, Self::start(request, &lifecycle)).await,
-			None => {
-				lifecycle
-					.run(async { Self::start(request, &lifecycle).await?.await })
-					.await
+		let shared = request.shared().cloned();
+		// Boxed before the task is built, so it is freed once the session starts: the task holds
+		// what it captures, and any future it awaits inline, for the connection's whole life,
+		// and starting takes several times the memory serving does.
+		let start = Box::pin(Self::start(request, lifecycle.clone()));
+		async move {
+			match lifecycle.isolate(start).await {
+				Ok(supervision) => lifecycle.serve(shared.as_ref(), supervision).await,
+				Err(err) => lifecycle.closed(Err(err)),
 			}
 		}
 	}
 
 	/// Admit the request and answer its SETUP, returning the session's supervision.
-	async fn start(mut request: R, lifecycle: &Lifecycle) -> anyhow::Result<Supervision> {
+	async fn start(mut request: R, lifecycle: Lifecycle) -> anyhow::Result<Supervision> {
 		// Only this relay's origin holds its identity, so a session declaring it is this
 		// relay dialing itself under a spelling its self filter missed. Every route
 		// from it would be dropped as reflected, so refuse it rather than serve it.
@@ -177,18 +180,19 @@ impl<R: Incoming> Connection<R> {
 			reply = request.ok() => reply?,
 		};
 
+		tracing::info!(version = %session.version(), %transport, "negotiated");
 		// Joined rather than awaited in turn, for a driver that runs only when polled. A
 		// spawned driver's panic still surfaces here, so it cannot look like cancellation.
-		let lifecycle = lifecycle.clone();
-		Ok(async move {
-			let (result, driven) = futures::join!(
-				lifecycle.supervise(serving, session, lease, registration, transport),
-				R::drive(driver),
-			);
-			driven?;
-			result
-		}
-		.boxed())
+		// Mapped, not awaited in an async block, which would hold a second copy of the
+		// session's state beside the one `supervise` holds.
+		Ok(
+			futures::future::join(supervise(session, lease, serving, registration), R::drive(driver))
+				.map(|(result, driven)| {
+					driven?;
+					result
+				})
+				.boxed(),
+		)
 	}
 }
 
@@ -228,33 +232,34 @@ impl Lifecycle {
 		self
 	}
 
-	/// Run `task` in this connection's span, then log its close; a panic closes it as an error.
-	async fn run(&self, task: impl std::future::Future<Output = anyhow::Result<()>>) {
-		let result = self.isolate(task).await;
-		self.closed(result);
-	}
-
-	/// Run the connection task's half, then supervise the started session on `runtime`, which logs
-	/// the close there: a worker stopped at shutdown drops its tasks, and the line with them.
-	async fn start<S>(
-		&self,
-		runtime: &tokio::runtime::Handle,
-		start: impl std::future::Future<Output = anyhow::Result<S>>,
-	) where
-		S: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
-	{
-		match self.isolate(start).await {
-			Ok(supervise) => {
+	/// Supervise a started session, on `runtime` when given, then log its close there: a
+	/// worker stopped at shutdown drops its tasks, and the close line with them.
+	async fn serve(&self, runtime: Option<&tokio::runtime::Handle>, supervision: Supervision) {
+		match runtime {
+			Some(runtime) => {
 				let lifecycle = self.clone();
-				runtime.spawn(async move { lifecycle.run(supervise).await }.with_current_subscriber());
+				runtime.spawn(async move { lifecycle.run(supervision).await }.with_current_subscriber());
 			}
-			Err(err) => self.closed(Err(err)),
+			None => self.run(supervision).await,
 		}
 	}
 
-	async fn isolate<T>(&self, task: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
-		// Boxing keeps large protocol futures off nested debug-build stack frames.
-		moq_tokio::panic::isolate(Box::pin(task))
+	/// Supervise a started session in this connection's span, then log its close; a panic
+	/// closes it as an error.
+	async fn run(&self, supervision: Supervision) {
+		let result = self.isolate(supervision).await;
+		self.closed(result);
+	}
+
+	/// Run `task` in this connection's span, returning a panic as an error.
+	///
+	/// The task comes boxed: an async fn keeps its arguments for its whole life, so a task
+	/// passed inline would stay in the caller's state after it finished.
+	async fn isolate<T, F>(&self, task: std::pin::Pin<Box<F>>) -> anyhow::Result<T>
+	where
+		F: std::future::Future<Output = anyhow::Result<T>> + ?Sized,
+	{
+		moq_tokio::panic::isolate(task)
 			.instrument(self.span.clone())
 			.await
 			.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")))
@@ -383,18 +388,6 @@ impl Lifecycle {
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}
-
-	async fn supervise(
-		&self,
-		serving: crate::shutdown::Serving,
-		session: moq_net::Session,
-		lease: auth::Lease,
-		registration: Option<crate::session::Registration>,
-		transport: impl std::fmt::Display,
-	) -> anyhow::Result<()> {
-		tracing::info!(version = %session.version(), %transport, "negotiated");
-		supervise(session, lease, serving, registration).await
-	}
 }
 
 /// Hold an accepted session open for as long as its lease allows.
@@ -504,17 +497,16 @@ mod tests {
 		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let (auth, _admissions) = auth::Auth::embedded("test");
 		let lifecycle = Lifecycle::new(cluster, auth, 42, None);
+		let supervision = async {
+			panic!("injected supervision panic");
+			#[expect(
+				unreachable_code,
+				reason = "the panic is the point; the `Ok` names the future's output type"
+			)]
+			Ok::<_, anyhow::Error>(())
+		};
 		lifecycle
-			.start(&tokio::runtime::Handle::current(), async {
-				Ok::<_, anyhow::Error>(async {
-					panic!("injected supervision panic");
-					#[expect(
-						unreachable_code,
-						reason = "the panic is the point; the `Ok` names the future's output type"
-					)]
-					Ok::<_, anyhow::Error>(())
-				})
-			})
+			.serve(Some(&tokio::runtime::Handle::current()), supervision.boxed())
 			.await;
 		logs.wait_for("connection closed").await;
 		let text = logs.text();

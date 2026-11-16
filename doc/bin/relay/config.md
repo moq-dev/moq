@@ -292,7 +292,10 @@ See [Clustering](/bin/relay/cluster).
 
 ## \[connect]
 
-Settings for outbound dials (cluster peers, auth API).
+Settings for outbound dials (cluster peers, auth API). Where and with what
+credential to dial come from `[cluster]`, so the relay refuses to start with
+`connect.url` (`--connect`): use `cluster.connect`; or `connect.tokens`
+(`--connect-token`): use `cluster.token` or a peer's `token`.
 
 ```toml
 [connect]

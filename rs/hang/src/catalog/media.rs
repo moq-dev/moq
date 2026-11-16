@@ -7,7 +7,6 @@ use super::millis::MillisCeil;
 /// What applies to every audio and video track of a broadcast: its clock and how a viewer joins.
 ///
 /// Serialized under the catalog root's `media` key, and omitted when it holds nothing.
-#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -18,14 +17,11 @@ pub struct Media {
 	/// `wall` is the wall-clock time of PTS zero in `timescale` units since the moq epoch
 	/// (2020-01-01); every media track refers to this mapping after timescale conversion. See
 	/// [`Clock`](crate::catalog::Clock).
-	#[serde(default)]
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
 	pub clock: Option<crate::catalog::Clock>,
 
 	/// How often a viewer can join every media track, if the publisher promises it.
-	///
-	/// An undecodable value is absent, so it can never reject the media.
-	#[serde(default)]
-	#[serde_as(as = "serde_with::DefaultOnError<_>")]
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
 	pub join: Option<Join>,
 }
 
@@ -55,8 +51,7 @@ pub struct Join {
 	/// It is also the grid an HLS or DASH export numbers its segments on, so every rendition shares
 	/// segment numbers, and it is fixed for the broadcast instance since that numbering depends on
 	/// it. A broadcast without one is not HLS-renderable. Serialized as whole milliseconds, rounded
-	/// up. Zero is no promise: [`Join::new`] refuses it, and a reader decodes it as absent, so set
-	/// the field only to a positive duration.
+	/// up. Zero is no promise: [`Join::new`] refuses it, and so does a reader.
 	#[serde_as(as = "MillisCeil")]
 	pub interval: Duration,
 }
@@ -79,8 +74,7 @@ impl TryFrom<JoinWire> for Join {
 }
 
 impl Join {
-	/// Promise a group at least every `interval`, or `None` for zero, which readers decode as no
-	/// promise at all.
+	/// Promise a group at least every `interval`, or `None` for zero, which readers refuse.
 	pub fn new(interval: Duration) -> Option<Self> {
 		(!interval.is_zero()).then_some(Self { interval })
 	}
@@ -121,7 +115,7 @@ mod test {
 	}
 
 	#[test]
-	fn an_undecodable_join_is_absent() {
+	fn an_undecodable_join_refuses() {
 		for join in [
 			r#"{"interval":0}"#,
 			r#"{"interval":-1}"#,
@@ -130,8 +124,7 @@ mod test {
 			r#""2000""#,
 			"null",
 		] {
-			let media: Media = serde_json::from_str(&format!(r#"{{"join":{join}}}"#)).unwrap();
-			assert_eq!(media.join, None, "{join}");
+			serde_json::from_str::<Media>(&format!(r#"{{"join":{join}}}"#)).expect_err(join);
 		}
 	}
 }
