@@ -125,10 +125,13 @@ Settled:
 8. Carried from the route-health epic deleted 2026-11-09
    ([moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)), whose
    decisions the maintainer made 2026-10-13 and 2026-11-02 and nothing
-   reversed: metadata-only delivery is a mode of SUBSCRIBE, never its own
-   message; a stall is found by comparing the two routes, never by silence;
-   and a demoted route never takes a track back while the working one
-   delivers.
+   reversed: a stall is found by comparing the two routes, never by
+   silence; and a demoted route never takes a track back while the working
+   one delivers. Reversed 2026-11-16 (maintainer, on
+   [moq-dev/moq#8882](https://github.com/moq-dev/moq/pull/8882)): a metadata
+   subscription was a mode of SUBSCRIBE switched in place, and is now a
+   subscription of its own with a fixed mode
+   ([metadata-only subscriptions](/quest/m3/route-health/meta.md)).
 
 Decided 2026-11-15 (maintainer, answering the requirements the plan's review
 flagged as costly, on
