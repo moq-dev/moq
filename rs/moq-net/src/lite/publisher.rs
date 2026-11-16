@@ -29,7 +29,7 @@ use crate::{
 
 use super::Version;
 
-mod routed;
+pub(super) mod routed;
 
 pub(super) struct PublisherConfig {
 	/// The runtime that arms the publisher's timers.
@@ -306,15 +306,16 @@ impl Publisher {
 	}
 }
 
-impl Drop for Publisher {
-	fn drop(&mut self) {
-		// Every announce stream closes with the session: disconnect them together.
-		let _closing = self.shared.origin.route_closing(self.shared.peer_setup.tag());
-		self.children = kio::Tasks::new();
-	}
-}
-
 impl Publisher {
+	/// What the session's route layer answers the peer from (lite-07).
+	pub fn route_publish(&self) -> super::subscriber::route_stream::Publish {
+		super::subscriber::route_stream::Publish {
+			origin: self.shared.origin.clone(),
+			auth: self.shared.auth.clone(),
+			withdrawal: self.shared.withdrawal.clone(),
+		}
+	}
+
 	/// The peer's latest PROBE target, or zero while it asks for none.
 	pub fn peer_target(&self) -> kio::Consumer<crate::bandwidth::Rate> {
 		self.shared.peer_target.consume()
@@ -447,6 +448,8 @@ impl Control {
 					// PROBE is lite-03+, GOAWAY lite-04+, the Track Stream and FETCH lite-05+, and the
 					// Auth and Tracks Streams lite-07+.
 					let kind = kind.filter(|kind| match kind {
+						// Lite-07 says everything about routing on a unidirectional stream.
+						lite::ControlType::Announce => !version.has_routes(),
 						lite::ControlType::Probe => !matches!(version, Version::Lite01 | Version::Lite02),
 						lite::ControlType::Goaway => version.has_goaway(),
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
@@ -993,19 +996,6 @@ impl AnnounceServe {
 			stream.reader.poll_decode::<lite::AnnounceRequest>(waiter)
 		})?;
 		let prefix: crate::Path = interest.prefix.clone();
-		let hidden: bool = interest.hidden;
-		// Lite-07 answers from the origin's route node instead of the route table.
-		let answer: Option<routed::Answer> = self.shared.version.has_routes().then(|| {
-			routed::Answer::new(
-				self.shared.origin.clone(),
-				prefix.clone(),
-				hidden,
-				self.shared.auth.clone(),
-			)
-			.with_peer_setup(self.shared.peer_setup.clone())
-			.with_session(self.shared.session.clone(), self.shared.runtime.clone())
-		});
-
 		// The identity whose routes we filter out. Lite-04/05 carry it per
 		// announce stream; lite-06+ reads the session-wide SETUP Hop
 		// parameter, the same identity the subscribe path excludes. A peer that
@@ -1025,33 +1015,16 @@ impl AnnounceServe {
 			Some(hop) => Poll::Ready(*hop),
 			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
 		});
-		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) = match answer.is_some() {
-			// The route table goes unread.
-			true => {
-				let origin = self.shared.origin.empty();
-				let announced = origin.routes();
-				(
-					origin,
-					announced,
-					AnnounceRun::new(prefix, exclude_hop, self.shared.version),
-				)
-			}
-			false => self.start(prefix, exclude_hop, hidden),
-		};
+		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) = self.start(prefix, exclude_hop);
 
 		// Streaming announce updates.
 		wait!(Run => {
 			let stream = self.stream.as_mut().expect("stream present");
 			let withdrawing = self.shared.withdrawal.poll(waiter).is_ready();
-			let res = match answer {
-				Some(answer) => ready!(answer.poll(stream, withdrawing, waiter)),
-				None => {
-					if withdrawing {
-						run.withdraw(stream, origin, announced)?;
-					}
-					ready!(run.poll(stream, origin, announced, waiter))
-				}
-			};
+			if withdrawing {
+				run.withdraw(stream, origin, announced)?;
+			}
+			let res = ready!(run.poll(stream, origin, announced, waiter));
 			if let Err(err) = res {
 				Self::abort(&mut self.stream, origin.root(), err);
 			}
@@ -1077,12 +1050,7 @@ impl AnnounceServe {
 		stream.take().expect("stream present").writer.abort(&err);
 	}
 
-	fn start(
-		&self,
-		prefix: crate::Path,
-		exclude_hop: Hop,
-		hidden: bool,
-	) -> (origin::Consumer, origin::Routes, AnnounceRun) {
+	fn start(&self, prefix: crate::Path, exclude_hop: Hop) -> (origin::Consumer, origin::Routes, AnnounceRun) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -1109,12 +1077,6 @@ impl AnnounceServe {
 		let origin = match self.shared.version {
 			Version::Lite01 | Version::Lite02 => origin,
 			_ => origin.forwardable(),
-		};
-		// Hidden routes are left out unless the peer opted in. A publish origin that
-		// already opted in (the caller's choice for this peer) keeps them either way.
-		let origin = match hidden {
-			true => origin.with_hidden(true),
-			false => origin,
 		};
 		let announced = origin.routes();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
@@ -1212,7 +1174,7 @@ impl AnnounceRun {
 		if let Some(remaining) = &mut self.initial {
 			*remaining = remaining.saturating_sub(1);
 			if *remaining == 0 {
-				stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+				stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 				self.initial = None;
 			}
 		}
@@ -1561,7 +1523,7 @@ impl AnnounceRun {
 			self.retract(stream, suffix.clone(), &origin.root().rejoin(&suffix))?;
 		}
 		if self.initial.take().is_some() {
-			stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+			stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 		}
 		self.phase = AnnouncePhase::Withdrawing;
 		Ok(())
@@ -1627,13 +1589,13 @@ impl AnnounceRun {
 				return Poll::Ready(res);
 			}
 			if self.initial == Some(0) {
-				stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+				stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 				self.initial = None;
 				continue;
 			}
 			let Poll::Ready(next) = announced.poll_next(waiter) else {
 				if self.initial.take().is_some() {
-					stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+					stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 					continue;
 				}
 				return Poll::Pending;
@@ -1654,7 +1616,7 @@ impl AnnounceRun {
 				}) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
-						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+						stream.writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 })?;
 						continue;
 					}
 					// The buffer is empty (flushed at the loop top), so FIN now and
@@ -3671,65 +3633,347 @@ mod announce_test {
 			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
 			.unwrap();
 		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
-		let mut answer = super::routed::Answer::new(consumer, prefix, true, crate::auth::Link::new(false));
+		let mut answer = super::routed::Answer::alone(consumer);
 		let log = Log::default();
 		let mut wire = Wire {
 			writes: log.writes.clone(),
 			cursor: 0,
 			version: Version::Lite07,
 		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
 		};
-		assert!(answer.poll(&mut stream, false, &kio::Waiter::noop()).is_pending());
-		wire.take_ok();
-		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced]);
+		answer.request(false, Vec::new(), vec![(prefix, true)]).unwrap();
+		assert_eq!(
+			sent(&mut answer),
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 0 }
+			]
+		);
 	}
 
-	/// A lite-07 peer sends nothing after its request: a byte more on the stream is a
-	/// protocol violation.
+	/// A lite-07 peer edits one request at a time, names only prefixes in effect, and
+	/// asks for no prefix at or below another: each is a protocol violation.
 	#[test]
-	fn a_lite07_peer_writing_after_its_request_violates_the_stream() {
-		/// A peer that keeps writing.
-		struct Chatty;
-		impl crate::transport::poll::Chunks for Chatty {
-			type Error = SinkError;
-			fn poll_read_chunk(
-				&mut self,
-				_: &kio::Waiter,
-				_: usize,
-			) -> std::task::Poll<Result<Option<bytes::Bytes>, SinkError>> {
-				std::task::Poll::Ready(Ok(Some(bytes::Bytes::from_static(&[0x01]))))
-			}
-			fn stop(&mut self, _: u32) {}
+	fn a_lite07_request_out_of_turn_or_nested_is_a_violation() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let answer = || super::routed::Answer::alone(origin.consume());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+
+		// A second edit before the first is answered.
+		let mut first = answer();
+		first.request(false, Vec::new(), vec![(path("a"), false)]).unwrap();
+		let again = first.request(false, Vec::new(), vec![(path("b"), false)]);
+		assert!(matches!(again, Err(Error::ProtocolViolation)), "{again:?}");
+
+		// Answered, the next edit goes.
+		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
+		first.request(false, vec![0], vec![(path("b"), false)]).unwrap();
+		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
+
+		// A prefix that is not in effect, one asked for twice, and one below another.
+		for (remove, add) in [
+			(vec![0], Vec::new()),
+			(Vec::new(), vec![path("b")]),
+			(Vec::new(), vec![path("b/c")]),
+			(Vec::new(), vec![path("")]),
+			(Vec::new(), vec![path("x"), path("x/y")]),
+		] {
+			let add: Vec<_> = add.into_iter().map(|path| (path, false)).collect();
+			let refused = first.request(false, remove.clone(), add.clone());
+			assert!(matches!(refused, Err(Error::ProtocolViolation)), "{remove:?} {add:?}");
 		}
 
+		// A set past one message.
+		let mut wide = answer();
+		let long = "p".repeat(crate::Path::MAX_BYTES - 8);
+		let add: Vec<_> = (0..80).map(|i| (path(&format!("{i:02}/{long}")), false)).collect();
+		let refused = wide.request(false, Vec::new(), add.clone());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+
+		// An edit in parts takes effect, and is answered, only at its last.
+		let mut parts = answer();
+		parts.request(true, Vec::new(), vec![(path("a"), false)]).unwrap();
+		assert!(parts.continuing());
+		assert!(sent(&mut parts).is_empty());
+		parts.request(false, Vec::new(), vec![(path("b"), false)]).unwrap();
+		assert!(!parts.continuing());
+		assert_eq!(sent(&mut parts)[0], lite::AnnounceBroadcast::Ok);
+		// Its parts remove only what the set held before it, so not a prefix one adds.
+		parts.request(true, vec![0], vec![(path("c"), false)]).unwrap();
+		let refused = parts.request(false, vec![2], Vec::new());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+
+		// Parts fail as soon as their Adds alone pass the limit, or they remove more
+		// prefixes than the set holds, before the last arrives.
+		let mut wide = answer();
+		wide.request(true, Vec::new(), add[..10].to_vec()).unwrap();
+		let refused = wide.request(true, Vec::new(), add[10..].to_vec());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+		let mut few = answer();
+		let refused = few.request(true, vec![0, 1], Vec::new());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+	}
+
+	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
+	/// Hidden opt-in does, keeps what a mount beneath it presents: the mount's route
+	/// and claim carry over to the new Prefix ID, and nothing ends.
+	#[kio::test]
+	async fn a_lite07_prefix_asked_again_keeps_its_mount() {
 		let origin = Hop::new(1).unwrap().produce();
-		let mut answer = super::routed::Answer::new(
-			origin.consume(),
-			crate::Path::empty(),
-			true,
-			crate::auth::Link::new(false),
-		);
+		let _cam = origin
+			.announce("tenant-a/public/cam", origin::RouteInfo::new())
+			.unwrap();
+		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
+			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let mut answer = super::routed::Answer::alone(consumer);
 		let log = Log::default();
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(
-				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(Chatty)),
-				Version::Lite07,
-			),
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
 		};
-		let polled = answer.poll(&mut stream, false, &kio::Waiter::noop());
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		let shared = crate::Path::from_static("shared");
+		answer
+			.request(false, Vec::new(), vec![(shared.clone(), false)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let first = sent(&mut answer);
 		assert!(
-			matches!(polled, std::task::Poll::Ready(Err(Error::ProtocolViolation))),
-			"{polled:?}"
+			first
+				.iter()
+				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { .. })),
+			"{first:?}"
+		);
+
+		let ends = |msgs: &[lite::AnnounceBroadcast]| {
+			msgs.iter().any(|msg| {
+				matches!(
+					msg,
+					lite::AnnounceBroadcast::RouteEnd { .. } | lite::AnnounceBroadcast::EndedId { .. }
+				)
+			})
+		};
+		answer.request(false, vec![0], vec![(shared, true)]).unwrap();
+		kio::clock::sim::yield_now().await;
+		let again = sent(&mut answer);
+		assert_eq!(again[0], lite::AnnounceBroadcast::Ok);
+		assert!(!ends(&again), "{again:?}");
+
+		// Widened past the mount point, the mount's stream stays, and so does its route,
+		// which its ROUTE_START marked as lying at its own prefix: nothing ends or starts.
+		answer
+			.request(false, vec![1], vec![(crate::Path::empty(), true)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let wider = sent(&mut answer);
+		assert_eq!(
+			wider,
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 2 }
+			]
+		);
+	}
+
+	/// A lite-07 mount's route at its mount point, asked for exactly there, starts
+	/// marked exact, and a route the session's own key presents there is not.
+	#[kio::test]
+	async fn a_lite07_mount_point_route_starts_exact() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin
+			.announce("tenant-a/public/cam", origin::RouteInfo::new())
+			.unwrap();
+		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
+			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let _own = origin.announce("tenant-b/own", origin::RouteInfo::new()).unwrap();
+		let mut answer = super::routed::Answer::alone(consumer);
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		let starts = |msgs: &[lite::AnnounceBroadcast]| -> Vec<(u64, bool)> {
+			(msgs.iter())
+				.filter_map(|msg| match msg {
+					lite::AnnounceBroadcast::RouteStart { prefix, exact, .. } => Some((*prefix, *exact)),
+					_ => None,
+				})
+				.collect()
+		};
+		answer
+			.request(
+				false,
+				Vec::new(),
+				vec![
+					(crate::Path::from_static("shared"), false),
+					(crate::Path::from_static("own"), false),
+				],
+			)
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut first = sent(&mut answer);
+		kio::clock::sim::yield_now().await;
+		first.extend(sent(&mut answer));
+		let mut starts = starts(&first);
+		starts.sort_unstable();
+		assert_eq!(starts, [(0, true), (1, false)], "{first:?}");
+	}
+
+	/// A lite-07 mount's route starts exact below the requested prefix too, so a
+	/// narrowing to its mount point and a widening back carry it over with nothing
+	/// ended or started again.
+	#[kio::test]
+	async fn a_lite07_mount_route_stays_through_a_narrowing_and_a_widening() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin
+			.announce("tenant-a/public/cam", origin::RouteInfo::new())
+			.unwrap();
+		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
+			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let mut answer = super::routed::Answer::alone(consumer);
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		answer
+			.request(false, Vec::new(), vec![(crate::Path::empty(), true)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut first = sent(&mut answer);
+		kio::clock::sim::yield_now().await;
+		first.extend(sent(&mut answer));
+		let shared = crate::Path::from_static("shared");
+		assert!(
+			first.iter().any(|msg| matches!(
+				msg,
+				lite::AnnounceBroadcast::RouteStart { suffix, exact: true, .. } if *suffix == shared
+			)),
+			"{first:?}"
+		);
+
+		// Narrowed to the mount point, then widened back to the root.
+		for (remove, add, prefix) in [(0, shared.clone(), 1), (1, crate::Path::empty(), 2)] {
+			answer.request(false, vec![remove], vec![(add, true)]).unwrap();
+			kio::clock::sim::yield_now().await;
+			assert_eq!(
+				sent(&mut answer),
+				[lite::AnnounceBroadcast::Ok, lite::AnnounceBroadcast::Synced { prefix }]
+			);
+		}
+	}
+
+	/// A lite-07 claim covering the requested prefix from above is presented there with
+	/// how far above it is, and a narrowing carries it to the narrower prefix with nothing
+	/// sent for it: the peer adds the distance to its Above as this side does.
+	#[kio::test]
+	async fn a_lite07_narrowing_carries_a_covering_claim_further_above() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let mut answer = super::routed::Answer::alone(origin.consume());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		answer
+			.request(false, Vec::new(), vec![(crate::Path::from_static("a/b"), false)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut first = sent(&mut answer);
+		kio::clock::sim::yield_now().await;
+		first.extend(sent(&mut answer));
+		assert!(
+			first
+				.iter()
+				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { above: 1, .. })),
+			"{first:?}"
+		);
+
+		answer
+			.request(false, vec![0], vec![(crate::Path::from_static("a/b/c"), false)])
+			.unwrap();
+		kio::clock::sim::yield_now().await;
+		assert_eq!(
+			sent(&mut answer),
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 1 }
+			]
 		);
 	}
 
@@ -3741,41 +3985,44 @@ mod announce_test {
 	async fn a_lite07_route_goes_only_with_a_shown_claim() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut answer =
-			super::routed::Answer::new(consumer, crate::Path::empty(), false, crate::auth::Link::new(false));
+		let mut answer = super::routed::Answer::alone(origin.consume());
 		let log = Log::default();
 		let mut wire = Wire {
 			writes: log.writes.clone(),
 			cursor: 0,
 			version: Version::Lite07,
 		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
 		let waiter = kio::Waiter::noop();
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		wire.take_ok();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		answer
+			.request(false, Vec::new(), vec![(crate::Path::empty(), false)])
+			.unwrap();
 		assert_eq!(
-			wire.take_announces(),
-			[lite::AnnounceBroadcast::Synced],
+			sent(&mut answer),
+			[
+				lite::AnnounceBroadcast::Ok,
+				lite::AnnounceBroadcast::Synced { prefix: 0 }
+			],
 			"nothing shown"
 		);
 
 		let shown = origin.announce("x", origin::RouteInfo::new()).unwrap();
 		// The origin feeds its node from a task.
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
+		let announces = sent(&mut answer);
 		assert!(
 			matches!(
 				announces.as_slice(),
 				[
-					lite::AnnounceBroadcast::RouteStart { .. },
+					lite::AnnounceBroadcast::RouteStart { prefix: 0, .. },
 					lite::AnnounceBroadcast::Active { route: 0, .. },
 					lite::AnnounceBroadcast::Floor { id: 0, .. },
 				]
@@ -3785,8 +4032,7 @@ mod announce_test {
 
 		drop(shown);
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
+		let announces = sent(&mut answer);
 		assert!(
 			matches!(
 				announces.as_slice(),
@@ -3801,329 +4047,18 @@ mod announce_test {
 
 		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
 		kio::clock::sim::yield_now().await;
-		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
-		let announces = wire.take_announces();
+		let announces = sent(&mut answer);
 		assert!(
 			matches!(
 				announces.as_slice(),
 				[
-					lite::AnnounceBroadcast::RouteStart { .. },
+					lite::AnnounceBroadcast::RouteStart { prefix: 0, .. },
 					lite::AnnounceBroadcast::Active { route: 1, .. },
 					lite::AnnounceBroadcast::Floor { id: 1, .. },
 				]
 			),
 			"{announces:?}"
 		);
-	}
-
-	/// A DEAD whose moved routes outgrow one message goes in consecutive parts, each
-	/// fitting one and all but the last with More set, which list its moved routes in
-	/// order, so failing over many routes at once never fails the stream; one that fits
-	/// goes whole.
-	#[test]
-	fn a_lite07_dead_past_one_message_goes_in_parts() {
-		use crate::route::path::{Hop, Offer};
-		let offer = Offer {
-			// The longest path, of the widest Hop IDs.
-			path: (0..crate::route::MAX_HOPS as u64)
-				.map(|session| Hop {
-					node: crate::route::GENERATED - session,
-					session,
-				})
-				.collect(),
-			draining: false,
-			priority: 0,
-			metric: 1,
-			down_only: false,
-		};
-		let dead = |moved: std::ops::Range<u64>, more| lite::Dead::Closed {
-			hop: Hop { node: 7, session: 1 },
-			far: 8,
-			gone: true,
-			more,
-			moved: moved.map(|id| (id, Ok(offer.clone()))).collect(),
-		};
-		let encodes = |msg: &lite::AnnounceBroadcast| {
-			crate::coding::Encode::encode(
-				msg,
-				&mut crate::coding::Encoder::new(&mut Vec::new(), Version::Lite07.into()),
-				Version::Lite07,
-			)
-			.is_ok()
-		};
-		// Past three times 65,535 bytes at about 300 a route.
-		let many = 700;
-		assert!(!encodes(&lite::AnnounceBroadcast::Dead(dead(0..many, false))));
-
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let waiter = kio::Waiter::noop();
-		super::routed::buffer_dead(&mut stream, dead(0..2, false)).unwrap();
-		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		assert_eq!(
-			wire.take_announces(),
-			[lite::AnnounceBroadcast::Dead(dead(0..2, false))]
-		);
-
-		super::routed::buffer_dead(&mut stream, dead(0..many, false)).unwrap();
-		assert!(stream.writer.poll_flush(&waiter).is_ready());
-		let sent = wire.take_announces();
-		assert!(sent.len() >= 3, "{} parts", sent.len());
-		let mut next = 0;
-		for (i, part) in sent.iter().enumerate() {
-			let lite::AnnounceBroadcast::Dead(lite::Dead::Closed { moved, .. }) = part else {
-				panic!("a DEAD part: {part:?}");
-			};
-			let end = next + moved.len() as u64;
-			assert!(end > next, "part {i} lists no route");
-			assert_eq!(
-				*part,
-				lite::AnnounceBroadcast::Dead(dead(next..end, i + 1 < sent.len()))
-			);
-			next = end;
-		}
-		assert_eq!(next, many);
-	}
-
-	#[test]
-	fn synced_survives_a_removed_initial_route_and_live_churn() {
-		let origin = Hop::new(1).unwrap().produce();
-		let removed = origin.announce("z/removed", origin::RouteInfo::new()).unwrap();
-		let _initial = origin.announce("z/retained", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(0usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		drop(removed);
-		let mut churn = Vec::new();
-		for limit in 1..=4 {
-			churn.push(origin.announce(format!("a/{limit}"), origin::RouteInfo::new()).unwrap());
-			*budget.write().ok().unwrap() = limit;
-			assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		}
-		assert_eq!(wire.take_ok().active, 0);
-		let messages = wire.take_announces();
-		assert!(
-			matches!(&messages[0], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/retained")
-		);
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
-		assert!(!messages.iter().any(
-			|msg| matches!(msg, lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/removed")
-		));
-	}
-
-	#[test]
-	fn a_partial_regrant_cannot_overtake_an_initial_route() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
-		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(1usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant {
-			subscribe: crate::Pattern::literal("b").unwrap().into(),
-			..Default::default()
-		});
-		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
-			panic!("the changed grant is ready");
-		};
-		run.regrant(&mut stream, &consumer, restricted).unwrap();
-		*budget.write().ok().unwrap() = 8;
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.take_ok();
-		let messages = wire.take_announces();
-		assert!(matches!(&messages[1], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "b"));
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
-		assert_eq!(messages[3], lite::AnnounceBroadcast::EndedId { id: 0 });
-	}
-
-	#[test]
-	fn synced_cuts_a_regrant_burst_at_the_initial_bound() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
-		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(0usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant::default());
-		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
-			panic!("the changed grant is ready");
-		};
-		run.regrant(&mut stream, &consumer, restricted).unwrap();
-		let _live = origin.announce("c", origin::RouteInfo::new()).unwrap();
-		run.regrant(&mut stream, &consumer, crate::auth::Permit::default())
-			.unwrap();
-		*budget.write().ok().unwrap() = 4;
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.take_ok();
-		let messages = wire.take_announces();
-		assert_eq!(messages.len(), 4);
-		let initial: std::collections::BTreeSet<_> = messages[..2]
-			.iter()
-			.map(|message| match message {
-				lite::AnnounceBroadcast::Active { suffix, .. } => suffix.rest.as_str(),
-				other => panic!("expected an initial start, got {other:?}"),
-			})
-			.collect();
-		assert_eq!(initial, std::collections::BTreeSet::from(["a", "b"]));
-		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
-		assert_eq!(
-			messages
-				.iter()
-				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Synced))
-				.count(),
-			1
-		);
-	}
-
-	#[test]
-	fn a_seen_retraction_can_precede_synced() {
-		let origin = Hop::new(1).unwrap().produce();
-		let first = origin.announce("a", origin::RouteInfo::new()).unwrap();
-		let unseen = origin.announce("b", origin::RouteInfo::new()).unwrap();
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		let budget = kio::Producer::new(1usize);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::stepped(log, budget.consume())),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		drop(unseen);
-		drop(first);
-		*budget.write().ok().unwrap() = 4;
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.take_ok();
-		assert!(matches!(
-			wire.take_announces().as_slice(),
-			[
-				lite::AnnounceBroadcast::Active { .. },
-				lite::AnnounceBroadcast::EndedId { id: 0 },
-				lite::AnnounceBroadcast::Synced
-			]
-		));
-		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		wire.assert_quiet();
-	}
-
-	#[test]
-	fn an_empty_cold_relay_syncs_without_its_upstream() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _upstream = origin.snapshot("");
-		let consumer = origin.consume();
-		let mut announced = consumer.routes();
-		assert!(!announced.is_synced());
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut stream = Stream::<Transport, Version> {
-			writer: Writer::new(
-				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-				Version::Lite07,
-			),
-			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
-		};
-		let mut run = AnnounceRun::new(
-			crate::Path::from_static(""),
-			crate::Hop::from(consumer.hop()),
-			Version::Lite07,
-		);
-		assert!(
-			run.poll(&mut stream, &consumer, &mut announced, &kio::Waiter::noop())
-				.is_pending()
-		);
-		wire.take_ok();
-		assert_eq!(wire.take_announces(), vec![lite::AnnounceBroadcast::Synced]);
 	}
 
 	/// The hops stamped on every harness route.
@@ -4279,7 +4214,7 @@ mod announce_test {
 		);
 		let mut initial = wire.take_announces();
 		if version.has_synced() {
-			assert_eq!(initial.pop(), Some(lite::AnnounceBroadcast::Synced));
+			assert_eq!(initial.pop(), Some(lite::AnnounceBroadcast::Synced { prefix: 0 }));
 		}
 		match initial.as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
@@ -4363,126 +4298,32 @@ mod announce_test {
 	}
 
 	/// A new best route the wire cannot tell apart (another session, same chain and
-	/// cost) under another instance is another source, in either direction: an
-	/// ANNOUNCE_RESTART on lite-07, carrying the instance, and an end and a fresh
-	/// start before it.
+	/// cost) under another instance is another source, in either direction: an end and
+	/// a fresh start.
 	#[kio::test]
 	async fn source_flip_restarts() {
-		for version in [Version::Lite06, Version::Lite07] {
-			let mut h = harness_on(version).await;
-			let route = crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(7);
-			let newer = h.origin.announce("cam", route.clone()).unwrap();
-			// A restart waits out the update hold like an update.
-			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
-			settle().await;
-			let restarted = |msgs: Vec<lite::AnnounceBroadcast>| match (version, msgs.as_slice()) {
-				(
-					Version::Lite07,
-					[
-						lite::AnnounceBroadcast::Restart {
-							id: 0,
-							instance: Some(_),
-							cost,
-							..
-						},
-					],
-				) => {
-					assert_eq!(*cost, crate::origin::Cost::new(7))
-				}
-				(
-					Version::Lite06,
-					[
-						lite::AnnounceBroadcast::EndedId { .. },
-						lite::AnnounceBroadcast::Active { suffix, .. },
-					],
-				) => {
-					assert_eq!(suffix.rest.as_str(), "cam")
-				}
-				(_, other) => panic!("expected a restart on {version}, got {other:?}"),
-			};
-			restarted(h.wire.take_announces());
-
-			drop(newer);
-			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
-			settle().await;
-			restarted(h.wire.take_announces());
-			h.assert_idle();
-		}
-	}
-
-	/// Another instance restarts the advertisement, and so does a newer epoch of the same
-	/// one, which the peer must rank: lite-07 carries both.
-	#[kio::test]
-	async fn a_new_instance_or_epoch_restarts_with_it() {
-		let mut h = harness_on(Version::Lite07).await;
-		let instance = crate::Instance::random();
-		let route = |epoch| {
-			crate::origin::RouteInfo::new()
-				.with_instance(instance.clone(), epoch)
-				.with_hops(pub_hops())
-				.with_cost(7)
-		};
-		let _first = h.origin.announce("cam", route(1)).unwrap();
-		let _newer = h.origin.announce("cam", route(2)).unwrap();
+		let mut h = harness_on(Version::Lite06).await;
+		let route = crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(7);
+		let newer = h.origin.announce("cam", route.clone()).unwrap();
+		// A restart waits out the update hold like an update.
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
-		match h.wire.take_announces().as_slice() {
+		let restarted = |msgs: Vec<lite::AnnounceBroadcast>| match msgs.as_slice() {
 			[
-				lite::AnnounceBroadcast::Restart {
-					id: 0,
-					instance: Some(sent),
-					epoch: 2,
-					..
-				},
-			] => assert_eq!(*sent, instance),
-			other => panic!("expected a restart, got {other:?}"),
-		}
-		h.assert_idle();
-	}
-
-	/// A grant that grows while another instance replaces an advertised one still restarts it,
-	/// whether the instance is named or minted: the regrant takes in what the old cursor had
-	/// pending rather than dropping it.
-	#[kio::test]
-	async fn a_restart_pending_when_the_grant_grows_still_restarts() {
-		// The peer's ceiling: what it may subscribe to is what we may announce to it.
-		let grant = |paths: &[&str]| crate::auth::Grant {
-			publish: Default::default(),
-			subscribe: paths
-				.iter()
-				.map(|path| crate::Pattern::subtree(path).unwrap())
-				.collect(),
-			expires: None,
-		};
-		for anonymous in [false, true] {
-			let auth = crate::auth::Link::new(false);
-			auth.handle().authorize(&grant(&["cam"]));
-			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
-
-			// Same chain and cost, so only the instance changed. Both land before the loop polls.
-			let route = crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(7);
-			let named = (!anonymous).then(crate::Instance::random);
-			let route = match &named {
-				Some(instance) => route.with_instance(instance.clone(), 0),
-				None => route,
-			};
-			let newer = h.origin.announce("cam", route).unwrap();
-			let instance = newer.route().and_then(|route| route.instance);
-			auth.handle().authorize(&grant(&["cam", "other"]));
-			kio::clock::sleep(crate::origin::Config::default().update_hold).await;
-			settle().await;
-			match h.wire.take_announces().as_slice() {
-				[
-					lite::AnnounceBroadcast::Restart {
-						id: 0, instance: sent, ..
-					},
-				] => {
-					assert_eq!(*sent, instance, "anonymous={anonymous}")
-				}
-				other => panic!("expected a restart (anonymous={anonymous}), got {other:?}"),
+				lite::AnnounceBroadcast::EndedId { .. },
+				lite::AnnounceBroadcast::Active { suffix, .. },
+			] => {
+				assert_eq!(suffix.rest.as_str(), "cam")
 			}
-			h.assert_idle();
-		}
+			other => panic!("expected a restart, got {other:?}"),
+		};
+		restarted(h.wire.take_announces());
+
+		drop(newer);
+		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
+		settle().await;
+		restarted(h.wire.take_announces());
+		h.assert_idle();
 	}
 
 	/// Costs past the wire ceiling clamp to the same value, so moving between them

@@ -364,7 +364,8 @@ test("the catalog version is needed only for misread fields", () => {
 	expect(encode(root(avc)).version).toBeUndefined();
 	expect(encode(root({ ...avc, track: "hd" })).version).toBeUndefined();
 	expect(encode(root({ ...avc, track: "video" })).version).toBe(4);
-	expect(encode(root({ ...avc, warmup: 500 })).version).toBe(4);
+	// moq-hang-04 defines no video `warmup`, so it is dropped as an unknown field.
+	expect(encode(root({ ...avc, warmup: 500 })).version).toBeUndefined();
 	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", track: "chat.json" } } } });
 	expect(encode(data).version).toBe(4);
 	// A carried version is recomputed, never trusted.
