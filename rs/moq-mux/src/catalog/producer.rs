@@ -472,8 +472,9 @@ impl<E: CatalogExt> Config<E> {
 	/// further behind live -- it caps what one may ask to wait for, and a subscriber's own
 	/// budget still defaults to zero.
 	///
-	/// Applies to the media tracks the catalog mints. The catalog tracks keep moq-net's zero
-	/// default: they are read at the live edge, which never goes stale.
+	/// Applies to the media tracks the catalog mints and to the catalog tracks themselves, so a
+	/// reader playing behind the live edge still receives each catalog update it holds until its
+	/// timestamp.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<std::time::Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self

@@ -253,8 +253,6 @@ impl Catalog<()> {
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
-	/// Keeps moq-net's default zero max age rather than the media one: the catalog is
-	/// snapshot mode, so a join reads the newest snapshot, which never goes stale.
 	/// Timed in milliseconds, so snapshots share the broadcast clock with media, fresh for the media's
 	/// [`MAX_AGE`](crate::container::MAX_AGE), so a reader playing behind the live edge still
 	/// receives each update it holds until its timestamp, and
