@@ -967,9 +967,9 @@ mod tests {
 	}
 
 	/// Encode `frames` of scrolling texture at 720p30 / 4 Mbit/s with a 30-frame
-	/// GOP and return the periodic IDR sizes with the mean P-frame size, so a
-	/// rate-control change can be judged by the burst it puts on the wire.
-	fn idr_burst(frames: u64) -> Option<(Vec<usize>, usize)> {
+	/// GOP and return the periodic IDR sizes, so a rate-control change can be
+	/// judged by the burst it puts on the wire.
+	fn idr_burst(frames: u64) -> Option<Vec<usize>> {
 		if !driver_available() {
 			return None;
 		}
@@ -981,7 +981,6 @@ mod tests {
 		let mut encoder = crate::encode::Encoder::new(&config).ok()?;
 
 		let mut idrs = Vec::new();
-		let (mut p_total, mut p_count) = (0usize, 0usize);
 		for i in 0..frames {
 			let rgba = textured_rgba(w, h, (i * 4) as usize);
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
@@ -993,32 +992,26 @@ mod tests {
 				}
 				if h264_nal_types(&encoded.payload).contains(&5) {
 					idrs.push(encoded.payload.len());
-				} else {
-					p_total += encoded.payload.len();
-					p_count += 1;
 				}
 			}
 		}
-		Some((idrs, p_total / p_count.max(1)))
+		Some(idrs)
 	}
 
-	/// The short VBV keeps a periodic IDR to a small multiple of a P-frame.
-	/// Without it the same stream produced 300+ KB keyframes against 5 KB
-	/// P-frames (a 60x burst); with it the ratio sits around 3-4x, so the
-	/// bounds here are loose enough not to flake on rate-control noise and still
-	/// an order of magnitude below the preset default. The absolute cap is what
-	/// a subscriber's one-frame jitter buffer has to absorb at the configured
-	/// 4 Mbit/s / 30 fps.
+	/// The short VBV keeps a periodic IDR to a few frames of bitrate. The
+	/// preset's second-long VBV produced 300+ KB keyframes on this stream; the
+	/// 3-frame one holds them near 46 KB, about 2.75 frames of the configured
+	/// 4 Mbit/s / 30 fps, which is what a subscriber's jitter buffer has to
+	/// absorb. Only that absolute bound is checked: in constant quality mode a
+	/// P-frame of this pure motion shrinks well below the frame budget while
+	/// the IDR does not (about 7.5x the mean P-frame on an RTX 3070 Ti), so a
+	/// ratio to it would measure the target quality, not the burst.
 	#[test]
 	fn nvenc_h264_idr_burst_is_bounded() {
-		let Some((idrs, p_mean)) = idr_burst(120) else { return };
+		let Some(idrs) = idr_burst(120) else { return };
 		assert_eq!(idrs.len(), 3, "expected one IDR per 30-frame GOP after the first");
 		let frame_budget = 4_000_000 / 8 / 30;
 		for idr in &idrs {
-			assert!(
-				*idr < 8 * p_mean,
-				"IDR {idr} bytes is more than 8x the mean P-frame ({p_mean})"
-			);
 			assert!(*idr < 5 * frame_budget, "IDR {idr} bytes exceeds 5 frames of bitrate");
 		}
 	}
