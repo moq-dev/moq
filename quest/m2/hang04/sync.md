@@ -87,6 +87,3 @@ Public API: breaking. Rust `hang::catalog::{Media, Join}` and
 `Catalog::media`; JS `root.media`, `MediaSchema`, `JoinSchema`. Wire: the
 hang-04 catalog JSON, unpublished; a main-built reader of `media.clock`
 finds no clock in a new catalog.
-
-## Related
-
