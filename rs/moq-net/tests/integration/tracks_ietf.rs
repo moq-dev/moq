@@ -41,8 +41,8 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		.expect("listing stalled")
 	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
-		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
-		Ok(Some(TracksEvent::Finished { name })) => format!("~{name}"),
+		Ok(Some(TracksEvent::Removed { name, .. })) => format!("-{name}"),
+		Ok(Some(TracksEvent::Finished { name, .. })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),

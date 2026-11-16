@@ -3039,9 +3039,9 @@ struct TracksRecv {
 	open: crate::transport::open::Open,
 	session: Transport,
 	stream: Option<Stream<Transport, Version>>,
-	/// What the peer lists, each holding an `announces` slot: discovery state the peer
-	/// makes us hold.
-	listed: HashMap<Arc<str>, crate::session::Slot>,
+	/// What the peer lists, by kind then name, each holding an `announces` slot: discovery
+	/// state the peer makes us hold.
+	listed: TracksListed,
 	synced: bool,
 	/// Each event fans out to every reader, so a peer streaming add/remove churn must not
 	/// hold the thread for as long as its bytes keep arriving.
@@ -3055,20 +3055,40 @@ struct TracksRecv {
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
+/// The tracks a peer lists, one map per kind since each kind is a namespace apart.
+#[derive(Default)]
+struct TracksListed {
+	tracks: HashMap<Arc<str>, crate::session::Slot>,
+	datagrams: HashMap<Arc<str>, crate::session::Slot>,
+}
+
+impl TracksListed {
+	fn of(&mut self, kind: crate::broadcast::Kind) -> &mut HashMap<Arc<str>, crate::session::Slot> {
+		match kind {
+			crate::broadcast::Kind::Track => &mut self.tracks,
+			crate::broadcast::Kind::Datagrams => &mut self.datagrams,
+		}
+	}
+
+	/// The key listed for `name` of `kind`, shared rather than copied.
+	fn known(&self, kind: crate::broadcast::Kind, name: &str) -> Option<Arc<str>> {
+		let listed = match kind {
+			crate::broadcast::Kind::Track => &self.tracks,
+			crate::broadcast::Kind::Datagrams => &self.datagrams,
+		};
+		listed.get_key_value(name).map(|(name, _)| name.clone())
+	}
+}
+
 /// A TRACKS event, with its name resolved against what the listing holds.
 #[derive(Debug)]
 enum Listing {
-	Added(Arc<str>, lite::TrackInfo),
-	/// The listed name, or `None` if nothing by that name is listed.
-	Removed(Option<Arc<str>>),
+	Added(Arc<str>, lite::Listed),
+	/// The listed name of that kind, or `None` if nothing of that kind and name is listed.
+	Removed(crate::broadcast::Kind, Option<Arc<str>>),
 	/// Like [`Self::Removed`].
-	Finished(Option<Arc<str>>),
+	Finished(crate::broadcast::Kind, Option<Arc<str>>),
 	Synced,
-}
-
-/// The key `listed` holds for `name`, shared rather than copied.
-fn known(listed: &HashMap<Arc<str>, crate::session::Slot>, name: &str) -> Option<Arc<str>> {
-	listed.get_key_value(name).map(|(name, _)| name.clone())
 }
 
 impl TracksRecv {
@@ -3108,8 +3128,8 @@ impl TracksRecv {
 			let event = ready!(stream.reader.poll_decode_maybe_with(waiter, |r| {
 				Ok(match lite::TracksEvent::decode(r, version)? {
 					lite::TracksEvent::Added { name, info } => Listing::Added(name.as_ref().into(), info),
-					lite::TracksEvent::Removed { name } => Listing::Removed(known(listed, &name)),
-					lite::TracksEvent::Finished { name } => Listing::Finished(known(listed, &name)),
+					lite::TracksEvent::Removed { kind, name } => Listing::Removed(kind, listed.known(kind, &name)),
+					lite::TracksEvent::Finished { kind, name } => Listing::Finished(kind, listed.known(kind, &name)),
 					lite::TracksEvent::Synced => Listing::Synced,
 				})
 			}))?;
@@ -3119,22 +3139,26 @@ impl TracksRecv {
 			};
 			match event {
 				Listing::Added(name, info) => {
-					if self.listed.contains_key(&name) {
+					let listed = self.listed.of(info.kind());
+					if listed.contains_key(&name) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					let slot = source.subscriber.announces.acquire()?;
-					source.lister.add(name.clone(), info.into())?;
-					self.listed.insert(name, slot);
+					match info {
+						lite::Listed::Track(info) => source.lister.add(name.clone(), crate::track::Info::from(info))?,
+						lite::Listed::Datagrams(info) => source.lister.add(name.clone(), datagram::Info::from(info))?,
+					}
+					listed.insert(name, slot);
 				}
-				Listing::Removed(name) => {
+				Listing::Removed(kind, name) => {
 					let name = name.ok_or(Error::ProtocolViolation)?;
-					self.listed.remove(&name);
-					source.lister.remove(&name)?;
+					self.listed.of(kind).remove(&name);
+					source.lister.remove(kind, name)?;
 				}
-				Listing::Finished(name) => {
+				Listing::Finished(kind, name) => {
 					let name = name.ok_or(Error::ProtocolViolation)?;
-					self.listed.remove(&name);
-					source.lister.finish(&name)?;
+					self.listed.of(kind).remove(&name);
+					source.lister.finish(kind, name)?;
 				}
 				Listing::Synced => {
 					if std::mem::replace(&mut self.synced, true) {
@@ -3192,7 +3216,7 @@ impl SourceServe {
 						open: Default::default(),
 						session: self.subscriber.session.clone(),
 						stream: None,
-						listed: HashMap::new(),
+						listed: TracksListed::default(),
 						synced: false,
 						budget: kio::coop::Budget::new(32),
 						gate: crate::auth::Gate::new(
@@ -12692,7 +12716,7 @@ impl SharedDatagrams {
 		let producer = serve
 			.source
 			.as_ref()?
-			.create_datagrams(serve.name.as_str(), info)
+			.create_unlisted_datagrams(serve.name.as_str(), info)
 			.ok()?;
 		let key = (serve.path.clone(), serve.name.clone());
 		serve.subscriber.legacy_datagrams.lock().insert(

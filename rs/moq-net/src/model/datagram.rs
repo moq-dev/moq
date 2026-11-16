@@ -9,7 +9,8 @@
 //! [`broadcast::Producer::create_datagrams`](crate::broadcast::Producer::create_datagrams),
 //! and a reader asks for a [`Consumer`] with
 //! [`broadcast::Consumer::datagrams`](crate::broadcast::Consumer::datagrams). A consumer
-//! is live from when it is created: it never receives a datagram written before it.
+//! is live from when it is created: it never receives a datagram written before it. A
+//! created track is in the broadcast's [listing](crate::broadcast::Tracks) until it ends.
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose
 //! encoded body exceeds the transport's datagram size, and sessions that can't carry
@@ -40,7 +41,7 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale, Timestamp, stats};
+use crate::{Error, Result, Timescale, Timestamp, broadcast, stats};
 
 /// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
@@ -142,6 +143,8 @@ struct State {
 	producers: usize,
 	// Each live consumer's priority, or None for passive forwarding over an existing stream.
 	priorities: slab::Slab<Option<i8>>,
+	// The broadcast's listing of a track its producer created, withdrawn once the track ends.
+	listed: Option<broadcast::Unlist>,
 }
 
 impl State {
@@ -167,10 +170,14 @@ impl State {
 		self.buffer.push_back(datagram);
 	}
 
-	fn end(&mut self, end: Result<()>) {
+	/// End the track, returning its listing to withdraw once this lock is released, since
+	/// the broadcast's lock is taken first.
+	#[must_use = "drop the listing after releasing the lock"]
+	fn end(&mut self, end: Result<()>) -> Option<broadcast::Unlist> {
 		if self.end.is_some() {
-			return;
+			return None;
 		}
+		let finished = end.is_ok();
 		// A finish leaves what is buffered for the consumers already reading; an error
 		// ends the track at once, so nobody reads what is left.
 		let unread = end.is_err() || self.priorities.is_empty();
@@ -178,6 +185,7 @@ impl State {
 		if unread {
 			self.release();
 		}
+		self.listed.take().map(|listed| listed.finished(finished))
 	}
 
 	/// Drop what is buffered: nobody can read it any more. A consumer joining later starts
@@ -264,6 +272,12 @@ impl Producer {
 		self
 	}
 
+	/// Keep the track in its broadcast's listing until it ends. Called under the broadcast's lock.
+	pub(super) fn listed(self, unlist: broadcast::Unlist) -> Self {
+		self.state.lock().listed = Some(unlist);
+		self
+	}
+
 	pub(super) fn weak(&self) -> Weak {
 		Weak {
 			name: self.name.clone(),
@@ -341,12 +355,14 @@ impl Producer {
 
 	/// End the track cleanly: consumers read `None` once they have read what is buffered.
 	pub fn finish(self) {
-		self.state.lock().end(Ok(()));
+		let unlist = self.state.lock().end(Ok(()));
+		drop(unlist);
 	}
 
 	/// End the track with an error.
 	pub fn abort(self, err: Error) {
-		self.state.lock().end(Err(err));
+		let unlist = self.state.lock().end(Err(err));
+		drop(unlist);
 	}
 
 	/// The highest subscriber priority among the track's consumers, or `None` when it has none.
@@ -397,7 +413,9 @@ impl Producer {
 		if !state.priorities.is_empty() {
 			return false;
 		}
-		state.end(Err(Error::Cancel));
+		let unlist = state.end(Err(Error::Cancel));
+		drop(state);
+		drop(unlist);
 		true
 	}
 
@@ -426,7 +444,9 @@ impl Drop for Producer {
 		let mut state = self.state.lock();
 		state.producers -= 1;
 		if state.producers == 0 {
-			state.end(Err(Error::Dropped));
+			let unlist = state.end(Err(Error::Dropped));
+			drop(state);
+			drop(unlist);
 		}
 	}
 }
@@ -673,7 +693,11 @@ impl Drop for Consumer {
 			// Nobody waits for a request no handler accepted yet: withdraw it, so a handler
 			// that stops polling never holds requests nobody reads.
 			if state.priorities.is_empty() && state.info.is_none() {
-				state.end(Err(Error::Cancel));
+				let unlisted = state.end(Err(Error::Cancel));
+				debug_assert!(
+					unlisted.is_none(),
+					"only a created track is listed, and it has its info"
+				);
 			}
 			// The last reader of a finished track leaves what it never read.
 			if state.priorities.is_empty() && state.end.is_some() {

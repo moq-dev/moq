@@ -1004,6 +1004,8 @@ fn datagram_requests_serve_issued_names() {
 
 #[test]
 fn lister_lists_physical_names() {
+	use moq_net::broadcast::Kind;
+
 	let protected = protected();
 	let requests = protected.producer.requests();
 	let lister = requests.lister().unwrap();
@@ -1028,14 +1030,27 @@ fn lister_lists_physical_names() {
 	);
 	assert!(matches!(next(&mut tracks), moq_net::broadcast::TracksEvent::Synced));
 
-	lister.finish("stats/viewers").unwrap();
+	lister.finish(Kind::Track, "stats/viewers").unwrap();
 	assert!(matches!(
 		next(&mut tracks),
-		moq_net::broadcast::TracksEvent::Finished { name: finished } if finished == name
+		moq_net::broadcast::TracksEvent::Finished { kind: Kind::Track, name: finished } if finished == name
 	));
 	assert!(matches!(
-		lister.remove("stats/viewers"),
+		lister.remove(Kind::Track, "stats/viewers"),
 		Err(Error::Net(moq_net::Error::NotFound))
+	));
+
+	// A datagram track of the same semantic name lists under the same physical name.
+	lister.add("stats/viewers", moq_net::datagram::Info::default()).unwrap();
+	assert!(matches!(
+		next(&mut tracks),
+		moq_net::broadcast::TracksEvent::Added { name: listed, info: moq_net::broadcast::Listed::Datagrams(_) }
+			if listed == name
+	));
+	lister.remove(Kind::Datagrams, "stats/viewers").unwrap();
+	assert!(matches!(
+		next(&mut tracks),
+		moq_net::broadcast::TracksEvent::Removed { kind: Kind::Datagrams, name: removed } if removed == name
 	));
 	// Listing claims nothing: only serving a name does.
 	assert_eq!(protected.producer.generation().claims(), 0);
