@@ -53,7 +53,7 @@ The three:
 2. **Ask on subscribe.** Each SUBSCRIBE answer, payload or metadata-only,
    says whether the neighbour has demand for the Instance and its summed
    cost from the source, and the relay takes the cheapest. A
-   [metadata-only subscription](/quest/m3/route-health/meta.md) doubles as
+   metadata-only subscription (`Subscription.meta`) doubles as
    the query, so nothing is sent for a broadcast nobody asks about. Sweep how
    many neighbours a relay asks.
 3. **Advertise.** A relay with demand announces it on the announce stream.
