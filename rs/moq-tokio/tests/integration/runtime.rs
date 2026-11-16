@@ -5,7 +5,7 @@
 //! runtime, so each poll that needs tokio has to find the fallback itself.
 //!
 //! Unix with the default transports, since it reads one broadcast over each of them.
-#![cfg(all(unix, feature = "quic", feature = "websocket", feature = "uds"))]
+#![cfg(unix)]
 
 use futures::executor::block_on;
 

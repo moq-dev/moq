@@ -24,7 +24,6 @@
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
 //! drill fails when its recovery behavior is removed, and the fuzz targets
 //! covering the wire underneath.
-#![cfg(all(feature = "quic", feature = "websocket"))]
 
 use std::time::Duration;
 

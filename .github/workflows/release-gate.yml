@@ -258,6 +258,7 @@ jobs:
               - "rs/moq-srt/**"
               - "rs/moq-stats/**"
               - "rs/moq-tokio/**"
+              - "rs/moq-uring/**"
               - "rs/moq-webrtc/**"
               - "rs/qmux/**"
               - "Cargo.toml"

@@ -5,10 +5,6 @@ use std::sync::Arc;
 /// Dependency errors are stored as messages so their crates stay out of this crate's public
 /// API. Several of them (reqwest above all) keep the useful detail in `source()`, which a
 /// plain `to_string()` would drop.
-#[allow(
-	dead_code,
-	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
-)]
 pub(crate) fn message(err: impl std::error::Error) -> String {
 	use std::fmt::Write;
 
@@ -23,10 +19,6 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 
 /// Generates `From` conversions into message-carrying variants of the enclosing module's `Error`,
 /// so `?` still works on a dependency's error without that dependency reaching our public API.
-#[allow(
-	unused_macros,
-	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
-)]
 macro_rules! from_message {
 	($($ty:ty => $variant:ident),* $(,)?) => {
 		$(
@@ -39,10 +31,6 @@ macro_rules! from_message {
 	};
 }
 
-#[allow(
-	unused_imports,
-	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
-)]
 pub(crate) use from_message;
 
 /// Whether an HTTP response status means "ask again later".
@@ -50,7 +38,6 @@ pub(crate) use from_message;
 /// A response that arrived is the server's answer, and only this narrow set invites another
 /// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
 /// `404` and `403` included, is settled.
-#[cfg(feature = "net")]
 pub(crate) fn status_retryable(status: u16) -> bool {
 	matches!(status, 408 | 429 | 502 | 503 | 504)
 }
@@ -77,7 +64,6 @@ pub enum Error {
 	Io(Arc<std::io::Error>),
 
 	/// The MoQ session itself failed, after the transport was established.
-	#[cfg(feature = "net")]
 	#[error(transparent)]
 	MoqNet(#[from] moq_net::Error),
 
@@ -93,7 +79,7 @@ pub enum Error {
 	#[error("failed to initialize Android logcat layer")]
 	Logcat(#[source] Arc<std::io::Error>),
 
-	/// No compiled-in backend or configured listener can serve this. The string names what is missing.
+	/// No configured backend or listener can serve this. The string names what is missing.
 	#[error("{0}")]
 	NoBackend(&'static str),
 
@@ -158,12 +144,10 @@ pub enum Error {
 	SimScheme(String),
 
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
-	#[cfg(feature = "net")]
 	#[error(transparent)]
 	Connect(#[from] crate::ConnectError),
 
 	/// Both halves of the QUIC/WebSocket race failed, so neither error alone tells the story.
-	#[cfg(feature = "websocket")]
 	#[error("failed to connect to server: QUIC failed: {quic}; WebSocket failed: {websocket}")]
 	TransportRace {
 		/// Why the QUIC attempt failed.
@@ -238,7 +222,6 @@ pub enum Error {
 
 	/// A listener's endpoint stopped, so [`Listener::accept`](crate::Listener::accept) can never
 	/// yield another session. The endpoint's own failure is logged where it happened.
-	#[cfg(feature = "_transport")]
 	#[error("the {0} listener stopped accepting")]
 	Accept(crate::Transport),
 
@@ -247,58 +230,48 @@ pub enum Error {
 	Tls(Arc<crate::tls::Error>),
 
 	/// The QUIC backend failed.
-	#[cfg(feature = "quic")]
 	#[error(transparent)]
 	Quic(Arc<crate::quic::Error>),
 
 	/// The WebSocket fallback transport failed.
-	#[cfg(feature = "websocket")]
 	#[error(transparent)]
 	WebSocket(Arc<crate::websocket::Error>),
 
 	/// The TCP (qmux) transport failed.
-	#[cfg(feature = "tcp")]
 	#[error(transparent)]
 	Tcp(Arc<crate::tcp::Error>),
 
 	/// The Unix socket transport failed.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
 	/// [`crate::watch::Files`] could not watch a file's directory. The string has the details.
-	#[cfg(feature = "watch")]
 	#[error("failed to watch files: {0}")]
 	Watch(String),
 
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.
-	#[cfg(feature = "qmux")]
 	#[error("qmux refused the session limits: {0}")]
 	QmuxLimits(String),
 }
 
 impl Error {
 	/// The auth rejection behind this error, digging through backend and race variants.
-	#[cfg(feature = "net")]
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::Connect(err) => Some(*err),
 			Self::MoqNet(
 				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
 			) => Some(crate::ConnectError::Unauthorized),
-			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.connect_error(),
-			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
-			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.connect_error(),
 			_ => None,
 		}
 	}
 
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
-	#[cfg(feature = "net")]
 	pub fn is_auth(&self) -> bool {
 		// Neither code has an HTTP status, so neither has a `ConnectError` to report.
 		matches!(
@@ -322,15 +295,12 @@ impl Error {
 			// A race is only settled when both halves were answered, and answered with something not
 			// worth repeating: one transport being refused says nothing about the other, so a `404`
 			// over QUIC alongside a dead WebSocket is still just a failed dial.
-			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => match (quic.status(), websocket.status()) {
 				(Some(quic), Some(websocket)) if !status_retryable(quic) && !status_retryable(websocket) => Some(quic),
 				_ => None,
 			},
 
-			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.status(),
-			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
 		}
@@ -338,7 +308,6 @@ impl Error {
 }
 
 /// What a connection reports when moq-net's reconnect policy fails an attempt or gives up.
-#[cfg(feature = "net")]
 impl From<moq_net::reconnect::Failure> for Error {
 	fn from(failure: moq_net::reconnect::Failure) -> Self {
 		use moq_net::reconnect::Failure;
@@ -372,7 +341,6 @@ impl From<crate::tls::Error> for Error {
 	}
 }
 
-#[cfg(feature = "quic")]
 impl From<crate::quic::Error> for Error {
 	fn from(err: crate::quic::Error) -> Self {
 		if let Some(err) = err.connect_error() {
@@ -383,7 +351,6 @@ impl From<crate::quic::Error> for Error {
 	}
 }
 
-#[cfg(feature = "websocket")]
 impl From<crate::websocket::Error> for Error {
 	fn from(err: crate::websocket::Error) -> Self {
 		if let Some(err) = err.connect_error() {
@@ -394,14 +361,13 @@ impl From<crate::websocket::Error> for Error {
 	}
 }
 
-#[cfg(feature = "tcp")]
 impl From<crate::tcp::Error> for Error {
 	fn from(err: crate::tcp::Error) -> Self {
 		Self::Tcp(Arc::new(err))
 	}
 }
 
-#[cfg(all(feature = "uds", unix))]
+#[cfg(unix)]
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
@@ -411,7 +377,7 @@ impl From<crate::unix::Error> for Error {
 /// Convenience alias for results produced by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(all(test, feature = "websocket"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 

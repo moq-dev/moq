@@ -10520,7 +10520,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
- "tungstenite",
  "typenum",
  "url",
  "usage-argv",

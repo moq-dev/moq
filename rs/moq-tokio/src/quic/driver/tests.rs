@@ -1,5 +1,3 @@
-#![cfg(feature = "_certs")]
-
 use rind_rustls::default_provider;
 
 use std::{

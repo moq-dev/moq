@@ -93,7 +93,7 @@ Building without default features leaves the `quic` module out entirely.
 just rs uring
 ```
 
-`moq-relay` enables it with `--features io-uring`.
+`moq-relay` always builds it on Linux and serves from it with `--runtime-io-uring`.
 
 The `qlog` feature turns on moq-quic's capture support. It writes one file per
 endpoint on the accept side and per dial on the connect side.

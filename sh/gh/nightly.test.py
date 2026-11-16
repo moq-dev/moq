@@ -40,7 +40,7 @@ class FeaturesTest(unittest.TestCase):
                         sys.exit(1)
                     if call[0] == 'just':
                         if os.environ['FEATURE_NESTED'] == '1' and args[1] in (
-                            'net-features', 'quic-features', 'crypto-key', 'tokio-features', 'media-features',
+                            'net-features', 'quic-features', 'crypto-key', 'media-features',
                             'coroutines',
                         ):
                             sys.exit(subprocess.call([os.environ['FEATURE_REAL_JUST'], *args]))
@@ -111,7 +111,7 @@ class FeaturesTest(unittest.TestCase):
         passed, expected = self.run_features(nested=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
         failures = []
-        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-tokio", "moq-video"):
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-video"):
             failures.append(
                 next(call for call in expected if call[0] == "cargo" and call[1] != "tree" and package in call)
             )
@@ -119,7 +119,7 @@ class FeaturesTest(unittest.TestCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(calls, expected)
         summary = "\n".join(line for line in failed.stderr.splitlines() if line.startswith("checks: failed: "))
-        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-tokio", "moq-video"):
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-video"):
             self.assertIn(package, summary)
         self.assertIn("checks: just rs coroutines", failed.stdout)
 

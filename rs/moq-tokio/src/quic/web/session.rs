@@ -1034,7 +1034,7 @@ fn webtransport_exporter_context(id: u64, label: &[u8], context: &[u8]) -> Optio
 	Some(exporter)
 }
 
-#[cfg(all(test, feature = "_certs"))]
+#[cfg(test)]
 mod tests {
 	use std::{
 		io::{self, IoSliceMut},

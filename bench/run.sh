@@ -924,9 +924,14 @@ generate_certificate() {
 
 # The runtime matrix and profiling use identical feature selection and support checks.
 build_workers() {
-    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring
+    local checkout=$1 target=$2 profile=$3
+    local -a features=()
+    # A revision from before the relay always compiled io_uring on Linux names it as a feature.
+    if grep -q '^io-uring = ' "$checkout/rs/moq-relay/Cargo.toml"; then
+        features+=(moq-relay/io-uring)
+    fi
     if [[ ${4:-} == heap ]]; then
-        features+=,moq-relay/jemalloc
+        features+=(moq-relay/jemalloc)
     fi
     printf 'Building worker runtimes: %s (%s)\n' "$checkout" "$profile"
     (
@@ -934,7 +939,7 @@ build_workers() {
         cd /
         CARGO_TARGET_DIR=$target cargo --config "$checkout/.cargo/config.toml" build \
             --manifest-path "$checkout/Cargo.toml" --locked --profile "$profile" \
-            -p moq-relay -p moq-bench --features "$features"
+            -p moq-relay -p moq-bench --features "${features[*]}"
     )
 }
 
