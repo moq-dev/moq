@@ -114,9 +114,7 @@ impl Recording {
 		let mut json = moq_json::snapshot::Config::default();
 		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
-		catalog
-			.update(&self::catalog(), Timestamp::ZERO)
-			.unwrap();
+		catalog.update(&self::catalog(), Timestamp::ZERO).unwrap();
 
 		let mut sources = HashMap::new();
 		for name in ["360p", "1080p", "audio"] {

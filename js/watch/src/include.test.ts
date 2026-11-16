@@ -437,8 +437,8 @@ it("offers every include's renditions to selection, subscribing only the selecte
 
 	const sized = (width: number, height: number, bitrate: number): Catalog.VideoConfig =>
 		Catalog.VideoConfigSchema.parse({ ...video("avc1.42001f"), codedWidth: width, codedHeight: height, bitrate });
-	ladderCatalog.update({
-		value: Catalog.RootSchema.parse({
+	ladderCatalog.update(
+		Catalog.RootSchema.parse({
 			video: {
 				renditions: {
 					"720p": sized(1280, 720, 2_000_000),
@@ -461,8 +461,8 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			// An include's own include needs a selection of its own, so it is never expanded.
 			include: { nested: { broadcast: "./nested.hang" } },
 		}),
-		at: key(),
-	});
+		key(),
+	);
 
 	const root = (own: Record<string, Catalog.VideoConfig>) =>
 		Catalog.RootSchema.parse({
@@ -586,7 +586,8 @@ it("takes a missing section's display settings from the include whose renditions
 	const serve = (path: string, value: Catalog.Root) => {
 		const broadcast = publish(origin, path);
 		new Json.Snapshot.Producer<Catalog.Root>({ track: broadcast.createTrack(Catalog.TRACK), deltas: false }).update(
-			value, key(),
+			value,
+			key(),
 		);
 		return broadcast;
 	};

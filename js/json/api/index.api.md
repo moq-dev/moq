@@ -72,7 +72,7 @@ export namespace Snapshot {
 		cut(): void;
 		finish(): Snapshot.Finished;
 		mutate(fn: (value: T) => void, at: Time.Timestamp): void;
-		update({ ... }: Timed<T>): void;
+		update(value: T, at: Time.Timestamp): void;
 	}
 }
 
@@ -110,7 +110,7 @@ export namespace Stream {
 	}
 	export class Producer<T> {
 		constructor(config: Stream.Producer.Config<T>);
-		append({ ... }: Timed<T>): void;
+		append(value: T, at: Time.Timestamp): void;
 		finish(): Stream.Finished;
 	}
 	export class Rolled extends Error {
@@ -180,7 +180,7 @@ export namespace Window {
 		finish(): Window.Finished<T>;
 		get offset(): number;
 		pop(count: number, at: Time.Timestamp): void;
-		push({ ... }: Timed<T>): void;
+		push(value: T, at: Time.Timestamp): void;
 		get window(): T[];
 	}
 	export type ProducerConfig = Window.Config & {

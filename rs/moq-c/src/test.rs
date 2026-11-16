@@ -2239,8 +2239,7 @@ fn timestamps_round_trip_exactly() {
 			.unwrap()
 			.clone();
 		let mut json = moq_json::stream::Producer::<serde_json::Value>::new(producer, Default::default());
-		json.append(&serde_json::json!(1), written.try_into().unwrap())
-		.unwrap();
+		json.append(&serde_json::json!(1), written.try_into().unwrap()).unwrap();
 		let value_id = id(values.recv());
 		let mut value = moq_json_value {
 			json: std::ptr::null(),

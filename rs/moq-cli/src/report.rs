@@ -642,7 +642,10 @@ mod tests {
 		let mut read = reader(track.consume());
 		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		report
-			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }), moq_net::Timestamp::unscaled(0))
+			.update(
+				&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }),
+				moq_net::Timestamp::unscaled(0),
+			)
 			.unwrap();
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
 	}

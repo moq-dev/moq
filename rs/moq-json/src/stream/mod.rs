@@ -328,7 +328,10 @@ mod test {
 		));
 
 		assert!(
-			matches!(producer.append(&json!({ "n": 2 }), rewound()), Err(crate::Error::Net(_))),
+			matches!(
+				producer.append(&json!({ "n": 2 }), rewound()),
+				Err(crate::Error::Net(_))
+			),
 			"a second append must fail on the ended track rather than open another group"
 		);
 

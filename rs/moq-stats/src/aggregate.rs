@@ -1407,9 +1407,7 @@ mod tests {
 				epoch: bucket_epoch(),
 				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
-			self.bucket
-				.update(&frame, next_stamp(&self.track))
-				.expect("publish");
+			self.bucket.update(&frame, next_stamp(&self.track)).expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't

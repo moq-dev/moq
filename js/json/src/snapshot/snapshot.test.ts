@@ -489,8 +489,7 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	// Deltas may carry timestamps older than their group's first frame.
-	for (const [n, ms] of [30, 10, 20, 15].entries())
-		producer.update({ n }, Time.Timestamp.fromMillis(ms));
+	for (const [n, ms] of [30, 10, 20, 15].entries()) producer.update({ n }, Time.Timestamp.fromMillis(ms));
 
 	const joiner = track.subscribe();
 	await settle();
@@ -749,7 +748,8 @@ test("a scale-less snapshot at a key not past the newest group is refused", asyn
 	const producer = new Producer<Value>({ track, deltas: false });
 	producer.update({ n: 0 }, Time.Timestamp.unscaled(5n));
 	// Two groups never share a key, and a new one must pass the newest.
-	for (const key of [5n, 4n]) expect(() => producer.update({ n: 1 }, Time.Timestamp.unscaled(key))).toThrow(NetError.TimestampMismatch);
+	for (const key of [5n, 4n])
+		expect(() => producer.update({ n: 1 }, Time.Timestamp.unscaled(key))).toThrow(NetError.TimestampMismatch);
 	producer.update({ n: 1 }, Time.Timestamp.unscaled(8n));
 	producer.finish();
 

@@ -228,7 +228,10 @@ mod test {
 		let (mut producer, track) = producer(cfg(true));
 		for n in [1, 2, 3] {
 			producer
-				.update(&json!({ "padding": "same-long-value-so-deltas-stay-in-one-group", "n": n }), key())
+				.update(
+					&json!({ "padding": "same-long-value-so-deltas-stay-in-one-group", "n": n }),
+					key(),
+				)
 				.unwrap();
 		}
 		let _finished = producer.finish().unwrap();
@@ -309,10 +312,16 @@ mod test {
 	#[test]
 	fn a_cut_makes_the_next_update_a_snapshot_group() {
 		let (mut producer, mut track) = producer(cfg(true));
-		producer.update(&json!({ "a": 1, "b": 1 }), moq_net::Timestamp::unscaled(0)).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 }), moq_net::Timestamp::unscaled(1)).unwrap();
+		producer
+			.update(&json!({ "a": 1, "b": 1 }), moq_net::Timestamp::unscaled(0))
+			.unwrap();
+		producer
+			.update(&json!({ "a": 1, "b": 2 }), moq_net::Timestamp::unscaled(1))
+			.unwrap();
 		producer.cut().unwrap();
-		producer.update(&json!({ "a": 1, "b": 3 }), moq_net::Timestamp::unscaled(2)).unwrap();
+		producer
+			.update(&json!({ "a": 1, "b": 3 }), moq_net::Timestamp::unscaled(2))
+			.unwrap();
 		let _finished = producer.finish().unwrap();
 
 		// The ratio would have kept every update in one group; the cut rolled it anyway. A consumer
@@ -540,13 +549,19 @@ mod test {
 		let (mut producer, _track) = producer_on(cfg(true), moq_net::track::Info::default().with_refresh(1));
 
 		// A 13 byte snapshot and a 7 byte delta: under the ratio.
-		producer.update(&json!({ "n": 0, "p": 0 }), moq_net::Timestamp::unscaled(0)).unwrap();
-		producer.update(&json!({ "n": 1, "p": 0 }), moq_net::Timestamp::unscaled(1)).unwrap();
+		producer
+			.update(&json!({ "n": 0, "p": 0 }), moq_net::Timestamp::unscaled(0))
+			.unwrap();
+		producer
+			.update(&json!({ "n": 1, "p": 0 }), moq_net::Timestamp::unscaled(1))
+			.unwrap();
 		let _early = producer.consume();
 		assert!(producer.poll_refresh(&waiter).is_pending(), "a join under the ratio");
 
 		// A second delta takes the group past it, and the next join asks for a fresh one.
-		producer.update(&json!({ "n": 2, "p": 0 }), moq_net::Timestamp::unscaled(2)).unwrap();
+		producer
+			.update(&json!({ "n": 2, "p": 0 }), moq_net::Timestamp::unscaled(2))
+			.unwrap();
 		assert!(producer.poll_refresh(&waiter).is_pending(), "no join, no refresh");
 		let mut late = producer.consume();
 		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
@@ -558,7 +573,9 @@ mod test {
 		assert_eq!(fresh.start, 2);
 		assert_eq!(frames(&mut fresh), vec![(restated, json!({ "n": 2, "p": 0 }))]);
 
-		producer.update(&json!({ "n": 3, "p": 0 }), moq_net::Timestamp::unscaled(3)).unwrap();
+		producer
+			.update(&json!({ "n": 3, "p": 0 }), moq_net::Timestamp::unscaled(3))
+			.unwrap();
 		assert_eq!(frames(&mut fresh), vec![(restated, json!({ "n": 3 }))]);
 	}
 
@@ -569,9 +586,7 @@ mod test {
 		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
 		producer.update(&json!({ "n": 0 }), ms(100)).unwrap();
 		for n in 1..=3 {
-			producer
-				.update(&json!({ "n": n }), ms(100 + n))
-				.unwrap();
+			producer.update(&json!({ "n": n }), ms(100 + n)).unwrap();
 		}
 
 		let mut late = producer.consume();
@@ -618,9 +633,7 @@ mod test {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
 		let (mut producer, track) = producer_on(cfg(true), timed().with_refresh(1));
 		for n in 0..=3 {
-			producer
-				.update(&json!({ "n": n }), ms(100 + n))
-				.unwrap();
+			producer.update(&json!({ "n": n }), ms(100 + n)).unwrap();
 		}
 
 		// Unscaled on a timed track, so the frame is rejected before it reaches a group.
@@ -692,7 +705,9 @@ mod test {
 		let (mut producer, mut track) = producer(cfg(true));
 		// First update is the snapshot (frame 0); then MAX_DELTA_FRAMES - 1 deltas fill the group.
 		for i in 0..=MAX_DELTA_FRAMES {
-			producer.update(&json!({ "n": i }), moq_net::Timestamp::unscaled(i as u64)).unwrap();
+			producer
+				.update(&json!({ "n": i }), moq_net::Timestamp::unscaled(i as u64))
+				.unwrap();
 		}
 		let _finished = producer.finish().unwrap();
 
@@ -961,7 +976,9 @@ mod test {
 	#[test]
 	fn a_panicking_edit_does_not_publish() {
 		let (mut producer, mut track) = producer(cfg(false));
-		producer.update(&json!({ "a": 1 }), moq_net::Timestamp::unscaled(0)).unwrap();
+		producer
+			.update(&json!({ "a": 1 }), moq_net::Timestamp::unscaled(0))
+			.unwrap();
 
 		let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 			let mut guard = producer.modify(moq_net::Timestamp::unscaled(1)).unwrap();
@@ -1108,16 +1125,24 @@ mod test {
 		let mut consumer = Consumer::<Value>::new(track, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
-		producer.update(&json!({ "a": 1 }), moq_net::Timestamp::unscaled(0)).unwrap(); // snapshot, group 0
+		producer
+			.update(&json!({ "a": 1 }), moq_net::Timestamp::unscaled(0))
+			.unwrap(); // snapshot, group 0
 		match consumer.poll_latest(&waiter) {
 			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": 1 })),
 			other => panic!("expected first value, got {other:?}"),
 		}
 
-		producer.update(&json!({ "a": 2 }), moq_net::Timestamp::unscaled(1)).unwrap(); // delta in group 0
-		producer.update(&json!({ "a": 3 }), moq_net::Timestamp::unscaled(2)).unwrap(); // delta in group 0
+		producer
+			.update(&json!({ "a": 2 }), moq_net::Timestamp::unscaled(1))
+			.unwrap(); // delta in group 0
+		producer
+			.update(&json!({ "a": 3 }), moq_net::Timestamp::unscaled(2))
+			.unwrap(); // delta in group 0
 		producer.cut().unwrap();
-		producer.update(&json!({ "a": 4 }), moq_net::Timestamp::unscaled(3)).unwrap(); // snapshot, group 3
+		producer
+			.update(&json!({ "a": 4 }), moq_net::Timestamp::unscaled(3))
+			.unwrap(); // snapshot, group 3
 		let _finished = producer.finish().unwrap();
 		assert_eq!(
 			observer
@@ -1232,14 +1257,18 @@ mod test {
 	fn a_compressed_refresh_opens_a_fresh_group() {
 		let (mut producer, mut track) = producer_on(cfg(true), compressed().with_refresh(1));
 		for n in 0..=40 {
-			producer.update(&json!({ "n": n }), moq_net::Timestamp::unscaled(n)).unwrap();
+			producer
+				.update(&json!({ "n": n }), moq_net::Timestamp::unscaled(n))
+				.unwrap();
 		}
 		let late = Consumer::<Value>::new(track.clone(), consumer::Config::default());
 		assert!(matches!(
 			producer.poll_refresh(&kio::Waiter::noop()),
 			Poll::Ready(Ok(()))
 		));
-		producer.update(&json!({ "n": 41 }), moq_net::Timestamp::unscaled(41)).unwrap();
+		producer
+			.update(&json!({ "n": 41 }), moq_net::Timestamp::unscaled(41))
+			.unwrap();
 		let _finished = producer.finish().unwrap();
 
 		assert_eq!(

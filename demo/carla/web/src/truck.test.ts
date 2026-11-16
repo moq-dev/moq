@@ -540,12 +540,15 @@ describe("Truck sessions", () => {
 				(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
 					broadcast.consume(),
 				);
-				producer.update({
+				producer.update(
+					{
 						accepted: { ...REST },
 						autonomy: "manual",
 						estopped: true,
 						estop_by: await handle(dial.session),
-					}, key());
+					},
+					key(),
+				);
 				expect(await read(stream, reader)).toBeUndefined();
 			} finally {
 				producer.finish();
