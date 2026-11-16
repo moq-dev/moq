@@ -229,13 +229,9 @@ const std::vector<Field> &Fields()
 		f.push_back(Choose(QUIC_MTU_DISCOVERY, "Path MTU discovery", AutoOnOff(), false,
 				   "Probe the path so packets use the largest size it allows. Turn it "
 				   "off if discovery itself causes drops."));
-		// Only when this build can capture: setting a directory without support fails
-		// the dial, so offering it would be a control that only breaks things.
-		if (moq::qlog_supported()) {
-			f.push_back(Directory(QUIC_QLOG, "qlog directory",
-					      "Write QUIC connection traces here for diagnosing stalls. Leave "
-					      "empty to disable; the files get large."));
-		}
+		f.push_back(Directory(QUIC_QLOG, "qlog directory",
+				      "Write QUIC connection traces here for diagnosing stalls. Leave "
+				      "empty to disable; the files get large."));
 		f.push_back(Toggle(QUIC_KEYLOG, "TLS key log", false,
 				   "Write TLS session secrets to the file the SSLKEYLOGFILE environment "
 				   "variable names, to decrypt a packet capture. Anyone holding that file "
@@ -361,15 +357,8 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 	config.quic.keep_alive = Milliseconds(settings, QUIC_KEEP_ALIVE, error);
 	config.quic.gso = TriState(settings, QUIC_GSO, error);
 	config.quic.mtu_discovery = TriState(settings, QUIC_MTU_DISCOVERY, error);
-	// A scene collection written by a qlog-capable build keeps the key even where the
-	// field is hidden. Refusing would block Go Live on a setting the user can no longer
-	// see, let alone clear, so the trace is skipped and the log says why.
-	if (const char *qlog = OptionalString(settings, QUIC_QLOG)) {
-		if (moq::qlog_supported())
-			config.quic.qlog = qlog;
-		else
-			LOG_WARNING("Skipping the qlog directory %s: this build cannot write qlog", qlog);
-	}
+	if (const char *qlog = OptionalString(settings, QUIC_QLOG))
+		config.quic.qlog = qlog;
 	config.quic.keylog = obs_data_get_bool(settings, QUIC_KEYLOG);
 
 	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);

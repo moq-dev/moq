@@ -125,7 +125,7 @@ mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
 stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
 send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
-qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
+qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 

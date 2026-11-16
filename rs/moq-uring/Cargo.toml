@@ -22,10 +22,6 @@ doc = false
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
 quic = ["dep:moq-congestion", "dep:moq-crypto", "dep:moq-quic", "dep:rustls"]
-# Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
-# qlog crate and its serde_json encoder into moq-quic, which a production build has
-# no use for.
-qlog = ["moq-quic?/qlog"]
 # Workers created inside a tokio runtime with a `kio::clock::Manual` clock installed
 # run on that clock, so a test decides when their time passes. For test builds.
 _manual = ["kio/manual"]

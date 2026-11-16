@@ -47,8 +47,7 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   `quic::Transport::qlog` turns capture on. The pinned worker never writes to
   the file: the QUIC stacks want a `Send + Sync` writer, which cannot hold the
   worker's `!Send` ring handle, so a trace is staged in memory and handed to
-  one background thread for every worker sharing the sink. Behind the `qlog`
-  feature, so a production build compiles none of it.
+  one background thread for every worker sharing the sink.
 - **Metrics**: a set of relaxed atomic counters per worker, read from any
   thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
   provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
@@ -95,8 +94,8 @@ just rs uring
 
 `moq-relay` always builds it on Linux and serves from it with `--runtime-io-uring`.
 
-The `qlog` feature turns on moq-quic's capture support. It writes one file per
-endpoint on the accept side and per dial on the connect side.
+qlog capture writes one file per endpoint on the accept side and per dial on
+the connect side.
 
 ## Validation
 

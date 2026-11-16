@@ -13,9 +13,6 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-# Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
-# builds do not pull in the qlog crate and its serde_json encoder.
-qlog = ["moq-quic/qlog"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 # Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
 # `quic::driver::sim` carries datagrams over seeded, impaired `moq_quic::sim::Link`s with

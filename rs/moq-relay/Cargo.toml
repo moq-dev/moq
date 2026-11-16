@@ -41,10 +41,6 @@ doc = false
 # them on a simulated QUIC host.
 test-support = ["kio/sim", "moq-tokio/sim"]
 jemalloc = ["moq-tokio/jemalloc"]
-# qlog trace capture (`--quic-qlog <DIR>`). Off by default: it compiles the
-# qlog machinery into both QUIC runtimes and is only wanted for debugging or
-# congestion-control testing.
-qlog = ["moq-tokio/qlog", "moq-uring/qlog"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }

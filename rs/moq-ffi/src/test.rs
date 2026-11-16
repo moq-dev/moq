@@ -18,7 +18,7 @@ use crate::json::{
 use crate::media::*;
 use crate::session::{
 	MoqBackoff, MoqCongestionControl, MoqConnectionPhase, MoqQuicConfig, MoqWebSocketConfig, moq_client_defaults,
-	moq_qlog_supported, moq_versions,
+	moq_versions,
 };
 
 use std::future::Future;
@@ -6610,20 +6610,6 @@ async fn server_new_validates_the_config() {
 		..Default::default()
 	});
 	assert!(matches!(version, Err(MoqError::Config { .. })));
-
-	// A build that cannot write qlog refuses the directory here, not later as a bind error.
-	let qlog = MoqServer::new(MoqServerConfig {
-		quic: MoqQuicConfig {
-			qlog: Some(std::env::temp_dir().display().to_string()),
-			..Default::default()
-		},
-		..Default::default()
-	});
-	if moq_qlog_supported() {
-		assert!(qlog.is_ok());
-	} else {
-		assert!(matches!(qlog, Err(MoqError::Config { .. })));
-	}
 }
 
 /// The defaults convert back to moq-net's own, so they mean the same as no subscription.
@@ -6699,12 +6685,11 @@ async fn client_new_validates_the_connection_knobs() {
 		Err(MoqError::Config { .. })
 	));
 
-	// A build that cannot write qlog refuses the directory rather than dropping it.
 	let qlog = MoqQuicConfig {
 		qlog: Some(std::env::temp_dir().display().to_string()),
 		..Default::default()
 	};
-	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
+	assert!(client(MoqClientTls::default(), qlog).is_ok());
 }
 
 /// A client with `quic.keylog` on, dialing `localhost` pinned to `fingerprints`.

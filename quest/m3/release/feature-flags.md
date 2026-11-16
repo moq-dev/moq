@@ -41,10 +41,10 @@ judged, so this pass reads only the difference:
   that look heavy on their crate add one or two crates to moq-relay or moq-cli.
   Diff this pass's inventory against the first pass's to find what m2 added.
 - Filed: network stack (landed in
-  [moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)),
-  [qlog](/quest/m2/features-qlog.md), and the media and gateway trims
-  ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)). Check each
-  landed or was dropped.
+  [moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)), qlog (landed
+  in [moq-dev/moq#8853](https://github.com/moq-dev/moq/pull/8853)), and the
+  media and gateway trims
+  ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)).
 - Kept, with the reason a new feature has to match:
   - `async` in kio, moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
     moq-crypto, and moq-auth: the poll-first design (decided 2026-11-05 in

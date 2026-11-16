@@ -40,34 +40,26 @@ fn transport(quic: &Resolved, role: &str) -> Result<driver::transport::Config> {
 /// A [`driver::transport::qlog::Stream`] is a shared handle: every connection on the endpoint
 /// writes into it, tagged with its own qlog `group_id`, so this is one file per endpoint.
 fn apply_qlog(transport: &mut driver::transport::Config, quic: &Resolved, role: &str) -> Result<()> {
-	// `Client::validate` already rejected a directory this build can't honor, so the
-	// block below is only reached where capture actually works.
 	let Some(dir) = quic.qlog_dir() else {
 		return Ok(());
 	};
 
-	#[cfg(feature = "qlog")]
-	{
-		// The pid and sequence keep endpoints sharing a directory from clobbering each other.
-		static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-		let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-		let path = dir.join(format!("moq-{role}-{}-{seq}.sqlog", std::process::id()));
-		let file = std::fs::File::create(&path).map_err(Error::CreateQlog)?;
+	// The pid and sequence keep endpoints sharing a directory from clobbering each other.
+	static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+	let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+	let path = dir.join(format!("moq-{role}-{}-{seq}.sqlog", std::process::id()));
+	let file = std::fs::File::create(&path).map_err(Error::CreateQlog)?;
 
-		// Deliberately unbuffered: qlog's streamer only flushes on `finish_log`, which is
-		// never called per event, so a BufWriter would hold every trace in memory until the
-		// endpoint drops and lose the lot if the process is killed. Killing a stuck process
-		// is exactly when these traces are worth having.
-		let mut config = driver::transport::qlog::Config::default();
-		config.writer = Some(Box::new(file));
-		config.title = Some(format!("moq-tokio {role}"));
+	// Deliberately unbuffered: qlog's streamer only flushes on `finish_log`, which is
+	// never called per event, so a BufWriter would hold every trace in memory until the
+	// endpoint drops and lose the lot if the process is killed. Killing a stuck process
+	// is exactly when these traces are worth having.
+	let mut config = driver::transport::qlog::Config::default();
+	config.writer = Some(Box::new(file));
+	config.title = Some(format!("moq-tokio {role}"));
 
-		transport.qlog = config.into_stream();
-		tracing::info!(path = %path.display(), "writing qlog");
-	}
-
-	#[cfg(not(feature = "qlog"))]
-	let _ = (transport, dir, role);
+	transport.qlog = config.into_stream();
+	tracing::info!(path = %path.display(), "writing qlog");
 
 	Ok(())
 }
@@ -108,7 +100,6 @@ pub enum Error {
 	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
 
 	/// The qlog trace file couldn't be created, usually a missing directory.
-	#[cfg(feature = "qlog")]
 	#[error("failed to create qlog file")]
 	CreateQlog(#[source] std::io::Error),
 

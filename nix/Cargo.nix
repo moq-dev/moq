@@ -18634,7 +18634,6 @@ rec {
             "dep:winit"
           ];
           "pulseaudio" = [ "moq-audio?/pulseaudio" ];
-          "qlog" = [ "moq-tokio/qlog" ];
           "s3" = [
             "object_store/aws-base"
             "object_store/reqwest"
@@ -18665,7 +18664,6 @@ rec {
           "pipewire"
           "play"
           "pulseaudio"
-          "qlog"
           "s3"
           "transcode"
           "v4l2"
@@ -19028,12 +19026,10 @@ rec {
         ];
         features = {
           "openh264" = [ "moq-video/openh264" ];
-          "qlog" = [ "moq-tokio/qlog" ];
           "testing" = [ "kio/manual" ];
         };
         resolvedDefaultFeatures = [
           "openh264"
-          "qlog"
           "testing"
         ];
       };
@@ -20205,7 +20201,6 @@ rec {
           {
             name = "qlog";
             packageId = "qlog";
-            optional = true;
           }
           {
             name = "rand";
@@ -20328,12 +20323,10 @@ rec {
             "dep:arbitrary"
             "sim"
           ];
-          "qlog" = [ "dep:qlog" ];
         };
         resolvedDefaultFeatures = [
           "default"
           "fuzz"
-          "qlog"
           "sim"
         ];
       };
@@ -20756,10 +20749,6 @@ rec {
         ];
         features = {
           "jemalloc" = [ "moq-tokio/jemalloc" ];
-          "qlog" = [
-            "moq-tokio/qlog"
-            "moq-uring/qlog"
-          ];
           "test-support" = [
             "kio/sim"
             "moq-tokio/sim"
@@ -20767,7 +20756,6 @@ rec {
         };
         resolvedDefaultFeatures = [
           "jemalloc"
-          "qlog"
           "test-support"
         ];
       };
@@ -21783,7 +21771,6 @@ rec {
             "dep:tikv-jemallocator"
             "dep:tikv-jemalloc-ctl"
           ];
-          "qlog" = [ "moq-quic/qlog" ];
           "sim" = [
             "kio/sim"
             "moq-quic/sim"
@@ -21791,7 +21778,6 @@ rec {
         };
         resolvedDefaultFeatures = [
           "jemalloc"
-          "qlog"
           "sim"
         ];
       };
@@ -22190,7 +22176,6 @@ rec {
           "_manual" = [ "kio/manual" ];
           "default" = [ "quic" ];
           "fuzz" = [ "moq-sock/fuzz" ];
-          "qlog" = [ "moq-quic?/qlog" ];
           "quic" = [
             "dep:moq-congestion"
             "dep:moq-crypto"
@@ -22203,7 +22188,6 @@ rec {
           "_probe"
           "default"
           "fuzz"
-          "qlog"
           "quic"
         ];
       };

@@ -1050,7 +1050,6 @@ async fn quic_cert_reload() {
 ///
 /// Both ends write into one directory, so this covers the client and server paths
 /// at once. Each endpoint writes one file.
-#[cfg(feature = "qlog")]
 async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
@@ -1103,7 +1102,6 @@ async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 	traces
 }
 
-#[cfg(feature = "qlog")]
 #[tokio::test]
 async fn quic_qlog() {
 	let traces = qlog_test("moqt").await;
