@@ -5182,16 +5182,15 @@ struct TrackRun {
 	/// mode each new Group Stream opens in.
 	meta: bool,
 	/// Lite-07: the groups served in metadata mode, which an update asking for the payload
-	/// serves again. At most [`MAX_META_RUNS`] runs, the lowest let go first.
+	/// serves again. Bounded by the track's cache: a group it no longer holds cannot be served
+	/// again, and is let go once the runs double.
 	meta_served: RangeSet<u64>,
+	/// How many runs `meta_served` held after the groups the cache let go were last swept.
+	meta_swept: usize,
 	/// Lite-07: where the payload resumes in the one group served again from partway through,
 	/// as the update asking for it said.
 	payload_from: Option<track::Position>,
 }
-
-/// The most runs of groups served as metadata a subscription remembers to serve again with
-/// the payload. Contiguous groups take one run, so only groups the cursor skipped add more.
-const MAX_META_RUNS: usize = 64;
 
 impl TrackRun {
 	fn new(
@@ -5247,6 +5246,7 @@ impl TrackRun {
 			datagrams: None,
 			meta: false,
 			meta_served: RangeSet::new(),
+			meta_swept: 0,
 			payload_from: None,
 		}
 	}
@@ -5330,10 +5330,14 @@ impl TrackRun {
 				runs.remove(0..payload.group);
 			}
 			self.payload_from = upd.payload.filter(|payload| payload.frame > 0);
+			self.meta_swept = 0;
 			for run in runs.iter() {
+				// A group the track no longer caches has no payload to serve: it is given up.
+				let gone = self.track.uncached(run.clone());
 				let groups = self.track.repay(run.clone());
 				self.track.record_mut().unserve(run.clone());
 				self.reoffered.extend(groups);
+				self.redrop.extend(gone.iter().cloned());
 			}
 		}
 		self.named = start;
@@ -6160,11 +6164,16 @@ impl TrackRun {
 		let meta = self.meta || group.is_meta();
 		if meta {
 			self.meta_served.insert(key..key.saturating_add(1));
-			while self.meta_served.len() > MAX_META_RUNS {
-				let Some(lowest) = self.meta_served.iter().next().cloned() else {
-					break;
-				};
-				self.meta_served.remove(lowest);
+			// Contiguous groups take one run, so only skipped groups add more: sweeping once the
+			// runs double keeps the cost per group constant.
+			if self.meta_served.len() >= self.meta_swept.max(8) * 2 {
+				let runs: Vec<_> = self.meta_served.iter().cloned().collect();
+				for run in runs {
+					for gone in self.track.uncached(run).iter() {
+						self.meta_served.remove(gone.clone());
+					}
+				}
+				self.meta_swept = self.meta_served.len();
 			}
 		}
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, meta, "serving group");

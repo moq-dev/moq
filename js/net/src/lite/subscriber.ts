@@ -214,8 +214,6 @@ interface SubscribeEntry {
 	tail: Tail;
 	// Whether the subscription last asked for metadata only (lite-07).
 	meta?: boolean;
-	// The groups received in metadata mode since, accounted for until an update clears `meta`.
-	metaReceived?: Run[];
 	// The first group the SUBSCRIBE asked for, if any.
 	requested?: bigint;
 	// The first group the publisher serves, once SUBSCRIBE_START says: null when it starts no
@@ -3540,12 +3538,11 @@ export class Subscriber {
 				payload: undefined,
 			});
 			// Clearing `meta` owes again the groups received as metadata, until the payload or a drop
-			// names them. Only those the copy still caches: nobody reads one it let go of.
+			// names them. Only the metadata copies the track still caches: nobody reads one it let go
+			// of, and the cache bounds what this remembers.
 			if (entry.meta && !meta) {
-				for (const run of entry.metaReceived ?? [])
-					for (const sequence of hooks.cachedMeta(track, run.start, run.end))
-						entry.tail.unaccount(sequence, sequence + 1n);
-				entry.metaReceived = undefined;
+				for (const sequence of hooks.cachedMeta(track, 0n, UNBOUNDED))
+					entry.tail.unaccount(sequence, sequence + 1n);
 			}
 			entry.meta = meta;
 			// A stale drop given up under the previous update may still be in flight, and this one
@@ -3688,10 +3685,6 @@ export class Subscriber {
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
 		const counted = tail.open(group.sequence);
-		if (group.meta) {
-			entry.metaReceived ??= [];
-			insertRun(entry.metaReceived, group.sequence, group.sequence + 1n);
-		}
 		// Until the stream is read, or a pause hands it to the paused group.
 		let read: (() => void) | undefined = counted.done;
 		this.#reoffered(track, group.sequence, group.sequence + 1n);

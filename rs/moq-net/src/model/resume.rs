@@ -946,6 +946,42 @@ impl Subscriber {
 		self.reader().reoffer_groups(run)
 	}
 
+	/// The parts of `run` no ready copy's track caches.
+	#[cfg(feature = "async")]
+	pub(super) fn uncached(&self, run: std::ops::Range<u64>) -> RangeSet<u64> {
+		let reader = self.reader();
+		let mut gaps = RangeSet::new();
+		gaps.insert(run);
+		for copy in &reader.copies {
+			if let Sub::Ready(sub) = &copy.sub {
+				let held: Vec<_> = gaps.iter().cloned().collect();
+				gaps = RangeSet::new();
+				for gap in held {
+					for still in sub.uncached(gap).iter() {
+						gaps.insert(still.clone());
+					}
+				}
+			}
+		}
+		gaps
+	}
+
+	/// The keys any copy's track caches as metadata copies, ascending and without repeats.
+	pub(super) fn meta_keys(&self) -> Vec<u64> {
+		let reader = self.reader();
+		let mut keys: Vec<u64> = reader
+			.copies
+			.iter()
+			.flat_map(|copy| match &copy.sub {
+				Sub::Ready(sub) => sub.meta_keys(),
+				Sub::Pending(_) => Vec::new(),
+			})
+			.collect();
+		keys.sort_unstable();
+		keys.dedup();
+		keys
+	}
+
 	/// Hand out again the groups in `run` the reader handed out as metadata; see
 	/// [`track::Subscriber::repay`].
 	#[cfg(feature = "async")]

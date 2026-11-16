@@ -10613,7 +10613,13 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
+		// Asking for the payload again: each group handed out as a metadata copy is handed out
+		// again once its payload arrives.
+		let promoted = channel.read().meta && !subscription.meta;
 		channel.update(subscription)?;
+		if promoted {
+			self.forget_meta();
+		}
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
@@ -10729,6 +10735,52 @@ impl Subscriber {
 			}
 		}
 		(groups, given_up)
+	}
+
+	/// The parts of `run` this subscriber's track caches no copy of, payload or metadata. A
+	/// front's reader asks its serving route's copy, and with none serving holds nothing.
+	#[cfg(feature = "async")]
+	pub(crate) fn uncached(&self, run: ops::Range<u64>) -> RangeSet<u64> {
+		let mut gaps = RangeSet::new();
+		gaps.insert(run.clone());
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				for &key in cursor.state.read().lookup.range(run).map(|(key, _)| key) {
+					gaps.remove(key..key.saturating_add(1));
+				}
+				gaps
+			}
+			Inner::Resume(resume, _) => resume.uncached(run),
+		}
+	}
+
+	/// The keys this subscriber's track caches as metadata copies, ascending: a front's reader
+	/// asks each of its copies.
+	pub(super) fn meta_keys(&self) -> Vec<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor
+				.state
+				.read()
+				.lookup
+				.iter()
+				.filter(|(_, slot)| slot.is_meta())
+				.map(|(&key, _)| key)
+				.collect(),
+			Inner::Resume(resume, _) => resume.meta_keys(),
+		}
+	}
+
+	/// Forget handing out each group the track caches as a metadata copy, so the payload copy
+	/// replacing it is handed out too. Bounded by what the cache holds.
+	fn forget_meta(&mut self) {
+		let keys = self.meta_keys();
+		let delivered = match &mut self.inner {
+			Inner::Plain(cursor) => &mut cursor.record.delivered,
+			Inner::Resume(_, logical) => &mut logical.record.delivered,
+		};
+		for key in keys {
+			delivered.remove_run(key..key.saturating_add(1));
+		}
 	}
 
 	/// Hand out the groups in `run` again, which this subscriber handed out as metadata before
@@ -17793,6 +17845,54 @@ mod test {
 		producer.received();
 		elapse(&producer, Duration::ZERO);
 		producer
+	}
+
+	/// A reader that read a group as metadata and then asks for the payload gets that group
+	/// again once its payload copy replaces the metadata one, while a payload reader never takes
+	/// the metadata copy at all.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn promotion_hands_out_the_payload_of_a_group_read_as_metadata() {
+		let producer = received_producer(Info::timed());
+		let at = Timestamp::from_millis(300).unwrap();
+		let from_start = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(5)))
+				.with_ranges([Range {
+					start: Anchor::Time(0),
+					end: None,
+				}])
+		};
+		let mut meta = producer.subscribe(from_start().with_meta(true));
+		let mut payload_reader = producer.subscribe(from_start());
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 3 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		copy.write_meta(at, 1000).unwrap();
+		copy.close().unwrap();
+
+		let mut group = meta.recv_group().await.unwrap().expect("the metadata copy");
+		assert!(group.is_meta());
+		assert_eq!(group.read_info().await.unwrap().map(|info| info.size), Some(1000));
+		let waiter = kio::Waiter::noop();
+		assert!(
+			payload_reader.poll_recv_group(&waiter).is_pending(),
+			"a payload reader took metadata"
+		);
+
+		meta.update(from_start()).unwrap();
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 3 }, 0, false) else {
+			panic!("the payload copy replaces the metadata one");
+		};
+		copy.write_frame(at, &b"payload"[..]).unwrap();
+		copy.close().unwrap();
+
+		for reader in [&mut meta, &mut payload_reader] {
+			let mut group = reader.recv_group().await.unwrap().expect("the payload copy");
+			assert!(!group.is_meta());
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
+		}
 	}
 
 	/// A reader on a received copy that fails waits out a re-offer still held for its group,
