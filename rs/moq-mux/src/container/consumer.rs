@@ -322,8 +322,9 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Er
 /// `warmup`. Subscribe with [`subscription`](Self::subscription), then build the consumer with
 /// [`consumer`](Self::consumer).
 ///
-/// The subscription carries the max delay plus the warmup, since the publisher and the transport
-/// skip what falls outside that budget, while the consumer skips at the max delay alone.
+/// The subscription carries the min and max delay plus the warmup: the publisher starts a live
+/// join that far back, and it and the transport skip what falls outside that budget, while the
+/// consumer skips at the max delay alone.
 ///
 /// Where delivery would start wherever the publisher does, it starts no later than the group
 /// covering the live edge less [`Delay::min`] and the warmup: one that starts at or before that
@@ -350,13 +351,22 @@ pub struct Playout {
 /// so a publisher cannot hold a reader's media without bound. Mirrored by `@moq/hang`'s `DELAY_MAX`.
 pub const DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The delay a subscription carries for a reader starting `warmup` further back than `delay`:
+/// both bounds widened, so a live join reaches back far enough and the budget keeps what it reaches.
+fn warmed(delay: Delay, warmup: std::time::Duration) -> Delay {
+	Delay {
+		min: delay.min.map(|min| min.saturating_add(warmup)),
+		max: delay.max.map(|max| max.saturating_add(warmup)),
+	}
+}
+
 impl Playout {
 	/// Play at `delay`, starting `warmup` further back.
 	pub fn new(delay: Delay, warmup: std::time::Duration) -> Self {
 		Self { delay, warmup }
 	}
 
-	/// `subscription` with this playout's delay, its max widened by the warmup.
+	/// `subscription` with this playout's delay, both bounds widened by the warmup.
 	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
 		subscription.with_delay(self.subscribed())
 	}
@@ -375,8 +385,7 @@ impl Playout {
 
 	/// The delay the subscription carries.
 	fn subscribed(&self) -> Delay {
-		self.delay
-			.with_max(self.delay.max.map(|max| max.saturating_add(self.reach())))
+		warmed(self.delay, self.reach())
 	}
 
 	/// The warmup, capped at [`DELAY_MAX`].
@@ -1377,7 +1386,7 @@ impl<F: Container> Consumer<F> {
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
 		// warmup too, as [`Playout::subscription`] does.
-		let delay = delay.with_max(delay.max.map(|max| max.saturating_add(self.warmup)));
+		let delay = warmed(delay, self.warmup);
 		if track.subscription().delay != delay {
 			let subscription = track.subscription().with_delay(delay);
 			let _ = track.update(subscription);
@@ -4321,9 +4330,10 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(5_000_000));
 	}
 
-	/// The subscription carries the min delay as is and the max delay plus the warmup.
+	/// The subscription carries the min and max delay, each plus the warmup, so a live join
+	/// reaches back far enough to warm the decoder before its first played frame.
 	#[tokio::test]
-	async fn the_subscription_carries_the_min_delay_and_the_warmed_max_delay() {
+	async fn the_subscription_carries_the_warmed_min_and_max_delay() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = reach_consumer(
 			&mut track,
@@ -4332,7 +4342,7 @@ mod tests {
 			Duration::from_millis(300),
 		);
 		let subscription = subscribed(&consumer).subscription();
-		assert_eq!(subscription.delay.min, Some(Duration::from_secs(2)));
+		assert_eq!(subscription.delay.min, Some(Duration::from_millis(2_300)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 	}
@@ -4350,7 +4360,7 @@ mod tests {
 		let consumer = Playout::new(delay, Duration::from_millis(300))
 			.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		let subscription = subscribed(&consumer).subscription();
-		assert_eq!(subscription.delay.min, Some(Duration::from_millis(100)));
+		assert_eq!(subscription.delay.min, Some(Duration::from_millis(400)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 		assert_eq!(consumer.warmup, Duration::from_millis(300));

@@ -313,15 +313,14 @@ export interface Delay {
 	 * means `0`; `null` means not stated, which only a peer whose wire cannot carry it (moq-lite
 	 * before 07, moq-transport) sends. A media consumer reads an unstated minimum as `0`.
 	 *
-	 * A join that follows the live edge from the latest or the oldest group starts this far behind
-	 * it: at the newest group that began at or before the live edge minus this, so a player's
-	 * buffer arrives full instead of filling in real time, and no fuller. The hop serving it
-	 * measures from what it holds: in media time from the newest frame on a timed track, and by
-	 * arrival on its own clock on a scale-less one. With no such group held it starts at the
-	 * oldest one, and never fetches upstream for more. {@link Delay.max} still skips what has gone
-	 * stale. A start naming a group or a count back, a range with an end, and a resumed
-	 * subscription ignore it, and changing it later moves nothing already started. Zero or
-	 * unstated asks for no reach back, so the range alone decides where to start.
+	 * A live join, `{ start: { relative: 0n } }` with no end, starts this far behind the live edge:
+	 * at the newest group that began at or before the live edge minus this, so a player's buffer
+	 * arrives full instead of filling in real time. The hop serving it measures from what it holds:
+	 * in media time from the newest frame on a timed track, and by arrival on its own clock on a
+	 * scale-less one. With no such group held it starts at the oldest one, and never fetches
+	 * upstream for more. {@link Delay.max} still skips what has gone stale. Any other range, the
+	 * default oldest start included, and a resumed subscription ignore it, and changing it later
+	 * moves nothing already started.
 	 *
 	 * The aggregate across subscribers is the largest stated one, which a relay forwards upstream,
 	 * so the copy it fills reaches back for the reader that buffers most; each reader's own
@@ -3369,7 +3368,8 @@ export class Subscriber {
 	#reachBack(min: Duration): { anchor?: Anchor } | undefined {
 		const timeline = this.#state.timeline;
 		// The newest group held for which `f` holds, failed ones aside.
-		const newest = (f: (group: GroupConsumer) => boolean) => timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
+		const newest = (f: (group: GroupConsumer) => boolean) =>
+			timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
 		const info = this.#state.info.peek();
 		if (info?.timescale == null) {
 			if (!newest(() => true)) return undefined;

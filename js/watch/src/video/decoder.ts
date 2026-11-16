@@ -602,8 +602,8 @@ class Rendition {
 	// The catalog `warmup`, capped like the delay so a publisher cannot hold the viewer without bound.
 	#warmup: Duration;
 	// The playout delay is where a cold join starts, and the shared max delay how late it may fall. The
-	// consumer's warmup reaches the start further back; the subscription widens its max by the same
-	// warmup, since the publisher skips what falls outside it.
+	// consumer's warmup reaches the start further back; the subscription widens both by the same
+	// warmup, since the publisher starts a live join at the min and skips what falls outside the max.
 	#delay: Getter<Moq.Track.Delay>;
 	#subscription: Getter<Moq.Track.Delay>;
 	// The running codec's join and gap state: which leading pictures to refuse, and which still warm up.
@@ -669,7 +669,7 @@ class Rendition {
 		this.#warmup = Duration.millis(this.config.warmup ?? 0).min(DELAY_MAX);
 		this.#delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max }));
 		this.#subscription = new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({
-			min,
+			min: min.add(this.#warmup),
 			max: max.add(this.#warmup),
 		}));
 		this.#predecessor = props.predecessor;

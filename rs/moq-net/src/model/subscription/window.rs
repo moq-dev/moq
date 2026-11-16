@@ -617,13 +617,11 @@ impl Window {
 	}
 }
 
-/// The Min Age a live join reaches back by: a nonzero `min`, for a range that follows the live
-/// edge from the latest or the oldest group, where this hop resolves its own ranges. A start
-/// naming a group or a count back wins, as does a range with an end. A zero or unstated
-/// minimum asks for no reach back, so the range alone decides.
+/// The Min Age a live join reaches back by: `min`, for [`Range::live`], where this hop resolves
+/// its own ranges. Any other start names where it starts, the oldest one included, which asks for
+/// everything the budget keeps. A zero minimum starts at the latest group anyway.
 fn joins(range: &Range, min: Option<Duration>, holdings: &impl Holdings) -> Option<Duration> {
-	let live = matches!(range.start, Anchor::Oldest | Anchor::Relative(0)) && range.end.is_none();
-	min.filter(|min| !min.is_zero() && live && holdings.resolves())
+	min.filter(|min| *range == Range::live() && !min.is_zero() && holdings.resolves())
 }
 
 /// Where a range starts.

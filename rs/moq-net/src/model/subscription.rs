@@ -58,15 +58,14 @@ pub struct Delay {
 	/// The target latency, the playout or jitter-buffer delay held behind the live edge, or
 	/// `None` when the subscriber did not state one.
 	///
-	/// A join that follows the live edge from [`Range::live`] or [`Range::oldest`] starts this
-	/// far behind it: at the newest group that began at or before the live edge minus this,
-	/// so a player's buffer arrives full instead of filling in real time, and no fuller. The
-	/// hop serving it measures from what it holds: in media time from the newest frame on a
-	/// timed track, and by arrival on its own clock on a scale-less one. With no such group
-	/// held it starts at the oldest one, and never fetches upstream for more. [`Self::max`]
-	/// still skips what has gone stale. A start naming a group or a count back, a range with
-	/// an end, and a resumed subscription ignore it, and changing it later moves nothing
-	/// already started. Zero or unstated asks for no reach back, so the range alone decides.
+	/// A [`Range::live`] join starts this far behind the live edge: at the newest group that
+	/// began at or before the live edge minus this, so a player's buffer arrives full instead
+	/// of filling in real time. The hop serving it measures from what it holds: in media time
+	/// from the newest frame on a timed track, and by arrival on its own clock on a scale-less
+	/// one. With no such group held it starts at the oldest one, and never fetches upstream for
+	/// more. [`Self::max`] still skips what has gone stale. Any other range, [`Range::oldest`]
+	/// included, and a resumed subscription ignore it, and changing it later moves nothing
+	/// already started.
 	///
 	/// A media consumer reads an unstated minimum as zero. The aggregate across subscribers is
 	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches

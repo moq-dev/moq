@@ -882,23 +882,23 @@ function appendHalfSecond(producer: TrackProducer, sequence: bigint): void {
 	group.finish();
 }
 
-test("a live join reaches back by its min age, from the latest or the oldest group", () => {
-	for (const ranges of [[LIVE], [{}]]) {
-		const producer = halfSecondGroups();
-		const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges });
-		// The newest frame presents at 5 s, so the join starts at the group containing 3 s.
-		expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
-		appendHalfSecond(producer, 11n);
-		expect(readable(reader)).toEqual([11n]);
-	}
+test("a live join reaches back by its min age", () => {
+	const producer = halfSecondGroups();
+	const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [LIVE] });
+	// The newest frame presents at 5 s, so the join starts at the group containing 3 s.
+	expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+	appendHalfSecond(producer, 11n);
+	expect(readable(reader)).toEqual([11n]);
 });
 
-test("a join without a min age, or with zero, starts where its range says", () => {
+test("a live join without a min age starts at the latest group, and the oldest start ignores it", () => {
 	const producer = halfSecondGroups();
 	const all = Array.from({ length: 11 }, (_, sequence) => BigInt(sequence));
 	for (const min of [null, Duration.ZERO]) {
 		const live = producer.subscribe({ delay: { min, max: Duration.secs(30) }, ranges: [LIVE] });
 		expect(readable(live)).toEqual([10n]);
+	}
+	for (const min of [null, Duration.ZERO, Duration.secs(2)]) {
 		const oldest = producer.subscribe({ delay: { min, max: Duration.secs(30) } });
 		expect(readable(oldest)).toEqual(all);
 	}

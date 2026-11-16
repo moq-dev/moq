@@ -1670,13 +1670,16 @@ mod tests {
 						max,
 					};
 					let consumer = MediaConsumer::new(video, warmup, delay).await;
+					let warmup = warmup.unwrap_or_default();
 					assert_eq!(
 						consumer.initial_delay,
 						// The request aggregate represents Duration::MAX as unlimited.
-						delay.with_max(
-							max.map(|max| max.saturating_add(warmup.unwrap_or_default()))
-								.filter(|max| *max != Duration::MAX)
-						)
+						Delay {
+							min: Some(Duration::from_millis(200) + warmup),
+							max: max
+								.map(|max| max.saturating_add(warmup))
+								.filter(|max| *max != Duration::MAX),
+						}
 					);
 					consumer.cancel().await;
 				}

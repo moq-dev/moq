@@ -874,13 +874,12 @@ function intersect(runs: readonly Run[], from: bigint, end: bigint): Run[] {
 }
 
 /**
- * The Min Age a live join reaches back by: a nonzero `min`, for a range that follows the live edge
- * from the latest or the oldest group, where the hop resolves its own ranges. A start naming a
- * group or a count back wins, as does a range with an end. A zero or unstated minimum asks for no
- * reach back, so the range alone decides. Mirrors the Rust `joins`.
+ * The Min Age a live join reaches back by: `min`, for {@link LIVE}, where the hop resolves its own
+ * ranges. Any other start names where it starts, the oldest one included, which asks for everything
+ * the budget keeps. A zero minimum starts at the latest group anyway. Mirrors the Rust `joins`.
  */
 function joins(range: Range, min: Duration | undefined, holdings: Holdings): Duration | undefined {
-	const live = (range.start === undefined || relative(range.start) === 0n) && range.end === undefined;
+	const live = relative(range.start) === 0n && range.end === undefined;
 	return live && min !== undefined && !min.isZero() && holdings.reachBack ? min : undefined;
 }
 

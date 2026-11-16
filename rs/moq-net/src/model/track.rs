@@ -12159,20 +12159,18 @@ mod test {
 	}
 
 	/// A live join stating a Min Age starts at the newest group that began that far behind the
-	/// newest frame, from the latest or the oldest group alike, and plays through to live.
+	/// newest frame, and plays through to live.
 	#[test]
 	fn a_live_join_reaches_back_by_its_min_age() {
-		for range in [Range::live(), Range::oldest()] {
-			let mut producer = half_second_groups();
-			let mut reader = producer.subscribe(joining(range, Duration::from_secs(2)));
-			assert_eq!(
-				ready_groups(&mut reader),
-				vec![3000, 3500, 4000, 4500, 5000],
-				"{range:?}: four groups back"
-			);
-			assert_eq!(append_half_second(&mut producer), 5500);
-			assert_eq!(ready_groups(&mut reader), vec![5500], "{range:?}: no gap to live");
-		}
+		let mut producer = half_second_groups();
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(
+			ready_groups(&mut reader),
+			vec![3000, 3500, 4000, 4500, 5000],
+			"four groups back"
+		);
+		assert_eq!(append_half_second(&mut producer), 5500);
+		assert_eq!(ready_groups(&mut reader), vec![5500], "no gap to live");
 
 		// Measured from the newest frame, not the latest group's start.
 		let producer = half_second_groups();
@@ -12184,8 +12182,8 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![3500, 4000, 4500, 5000, 5500]);
 	}
 
-	/// A join stating no Min Age, or zero, starts where its range says: the latest group, or as
-	/// far back as its budget keeps.
+	/// A live join stating no Min Age, or zero, starts at the latest group, and a join from the
+	/// oldest group reaches as far back as its budget keeps, whatever its Min Age.
 	#[test]
 	fn a_join_without_a_min_age_starts_where_its_range_says() {
 		let producer = half_second_groups();
@@ -12193,6 +12191,8 @@ mod test {
 		for min in [None, Some(Duration::ZERO)] {
 			let mut live = producer.subscribe(joining(Range::live(), min));
 			assert_eq!(ready_groups(&mut live), vec![5000], "{min:?}");
+		}
+		for min in [None, Some(Duration::ZERO), Some(Duration::from_secs(2))] {
 			let mut oldest = producer.subscribe(joining(Range::oldest(), min));
 			assert_eq!(ready_groups(&mut oldest), all, "{min:?}");
 		}
@@ -12242,6 +12242,13 @@ mod test {
 					end: Some(Anchor::Time(1000)),
 				},
 				vec![0, 500, 1000],
+			),
+			(
+				Range {
+					start: Anchor::Relative(0),
+					end: Some(Anchor::Relative(0)),
+				},
+				vec![5000],
 			),
 		];
 		for (range, expected) in cases {
