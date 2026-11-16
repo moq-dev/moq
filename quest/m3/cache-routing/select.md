@@ -102,7 +102,7 @@ operator gets the same tree by pricing each edge's uplinks equally.
 | part | on the wire | relay state | bounded by | without it |
 |---|---|---|---|---|
 | advert | offer and path on the announce stream, and its withdrawal | one heard per neighbour per demanded Instance | neighbours; the path by the hop limit | path joins: pops 69 against 61, drones in turn 5 uplinks against 1, a ring 48 against 8 |
-| the route layer's mark on adverts | none: each link's mark is configured already | none | none | an edge carries a copy between its cores, which no route would: 51 readers in 400 churned regions fed that way, and 1.05 to 1.55 warm messages per one-viewer reader change on an unpeered CDN against 1.0 |
+| the route layer's mark on adverts | one bit on the advert, the answer, and the query's answer, as a route's offer carries | the bit with each heard advert and live pull | one per offer | an edge carries a copy between its cores, which no route would: 51 readers in 400 churned regions fed that way, and 1.05 to 1.55 warm messages per one-viewer reader change on an unpeered CDN against 1.0 |
 | offer on the subscribe answer | a cost on the answer and its updates | one per pull | one per subscription | nothing can price a move |
 | path in the offer | a list on the advert, answer, and query answer | as the offer | the hop limit | cycle deliveries up 72%, 7%, and 156% on random meshes, drones, and regions; 3 of 1,200 churned meshes unsettled |
 | query | a request naming an Instance; one answer, offer and path or none | the edge keeps one answer per extra upstream per demanded Instance; the upstream none | upstreams beyond the first | an edge whose cheaper uplink is cold: 29 against 24 |
