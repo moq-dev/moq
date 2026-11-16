@@ -118,9 +118,14 @@ pub enum AnnounceBroadcast {
 	/// ANNOUNCE_REQUEST (lite-07+): the sender edits the prefixes it wants claims for,
 	/// removing those with the Prefix IDs in `remove` and then adding each of `add`,
 	/// with whether it also wants hidden claims there, which assigns it the next Prefix
-	/// ID.
-	Request { remove: Vec<u64>, add: Vec<(Path, bool)> },
-	/// ANNOUNCE_OK (lite-07+): the receiver's last ANNOUNCE_REQUEST takes effect here.
+	/// ID. With `more`, the edit continues in the next message, and takes effect whole
+	/// with its last (see [`request_parts`]).
+	Request {
+		more: bool,
+		remove: Vec<u64>,
+		add: Vec<(Path, bool)>,
+	},
+	/// ANNOUNCE_OK (lite-07+): the receiver's last edit takes effect here.
 	Ok,
 	/// ROUTE_START (lite-07+): the sender has a route to the publisher `node` covering
 	/// the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and
@@ -408,9 +413,11 @@ fn decode_floor(r: &mut Decoder<'_>) -> Result<AnnounceBroadcast, DecodeError> {
 fn encode_request(
 	w: &mut Encoder<'_>,
 	version: Version,
+	more: bool,
 	remove: &[u64],
 	add: &[(Path, bool)],
 ) -> Result<(), EncodeError> {
+	w.bool(more);
 	w.varint(remove.len() as u64)?;
 	for id in remove {
 		w.varint(*id)?;
@@ -423,25 +430,85 @@ fn encode_request(
 	Ok(())
 }
 
+/// The bytes `value` takes as a varint of `version`.
+fn varint_size(value: u64, version: Version) -> usize {
+	crate::coding::varint::size(value, version.into()).unwrap_or(usize::MAX)
+}
+
+/// The bytes one Add of `prefix` takes: its length, its bytes, and its flag.
+fn add_size(prefix: &Path, version: Version) -> usize {
+	let len = prefix.as_str().len();
+	varint_size(len as u64, version).saturating_add(len + 1)
+}
+
+/// The bytes an ANNOUNCE_REQUEST body takes with `removes` Prefix IDs totalling `ids`
+/// bytes and `adds` Adds totalling `added` bytes.
+fn request_size(removes: usize, ids: usize, adds: usize, added: usize, version: Version) -> usize {
+	(1 + varint_size(removes as u64, version) + varint_size(adds as u64, version))
+		.saturating_add(ids)
+		.saturating_add(added)
+}
+
 /// Whether the prefixes `set` fit the Adds of one ANNOUNCE_REQUEST, as a subscriber's
 /// whole set must.
 pub(crate) fn request_fits<'a>(set: impl Iterator<Item = &'a Path>, version: Version) -> bool {
-	let form: crate::coding::Form = version.into();
-	let size = |value: u64| crate::coding::varint::size(value, form).unwrap_or(usize::MAX);
 	let mut count = 0;
 	let mut bytes = 0usize;
 	for prefix in set {
-		let len = prefix.as_str().len();
 		count += 1;
-		bytes = bytes.saturating_add(size(len as u64)).saturating_add(len + 1);
+		bytes = bytes.saturating_add(add_size(prefix, version));
 	}
-	let bytes = bytes.saturating_add(size(0)).saturating_add(size(count));
-	bytes <= super::message::MAX_MESSAGE_SIZE
+	request_size(0, 0, count, bytes, version) <= super::message::MAX_MESSAGE_SIZE
+}
+
+/// The ANNOUNCE_REQUESTs of one edit removing the Prefix IDs `remove` and adding `add`:
+/// as many as it takes for each to fit one message, every one but the last with `more`.
+/// The receiver applies them together at the last, so how they split changes nothing.
+pub(crate) fn request_parts(remove: Vec<u64>, add: Vec<(Path, bool)>, version: Version) -> Vec<AnnounceBroadcast> {
+	let mut parts = Vec::new();
+	let mut part = (Vec::new(), Vec::new());
+	// The removes' count and bytes, then the adds'.
+	let mut size = (0, 0);
+	let fits = |part: &(Vec<u64>, Vec<(Path, bool)>), size: (usize, usize), more: (usize, usize)| {
+		let (removes, adds) = (
+			part.0.len() + usize::from(more.0 > 0),
+			part.1.len() + usize::from(more.1 > 0),
+		);
+		request_size(removes, size.0 + more.0, adds, size.1 + more.1, version) <= super::message::MAX_MESSAGE_SIZE
+	};
+	for id in remove {
+		let bytes = varint_size(id, version);
+		if !fits(&part, size, (bytes, 0)) {
+			parts.push(std::mem::take(&mut part));
+			size = (0, 0);
+		}
+		part.0.push(id);
+		size.0 += bytes;
+	}
+	for (prefix, hidden) in add {
+		let bytes = add_size(&prefix, version);
+		if !fits(&part, size, (0, bytes)) {
+			parts.push(std::mem::take(&mut part));
+			size = (0, 0);
+		}
+		part.1.push((prefix, hidden));
+		size.1 += bytes;
+	}
+	parts.push(part);
+	let last = parts.len() - 1;
+	(parts.into_iter().enumerate())
+		.map(|(i, (remove, add))| AnnounceBroadcast::Request {
+			more: i < last,
+			remove,
+			add,
+		})
+		.collect()
 }
 
 /// Decode an ANNOUNCE_REQUEST body. The prefixes are the sender's own, so one that is
 /// no path fails the message rather than being refused.
 fn decode_request(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroadcast, DecodeError> {
+	let more = r.bool()?;
 	let count = r.varint()?;
 	// Each id takes at least a byte, so the body bounds the count.
 	if count > r.remaining() as u64 {
@@ -456,7 +523,7 @@ fn decode_request(r: &mut Decoder<'_>, version: Version) -> Result<AnnounceBroad
 	let add = (0..count)
 		.map(|_| Ok((Path::decode(r, version)?, r.bool()?)))
 		.collect::<Result<_, DecodeError>>()?;
-	Ok(AnnounceBroadcast::Request { remove, add })
+	Ok(AnnounceBroadcast::Request { more, remove, add })
 }
 
 /// A path suffix as it travels: the first `keep` segments of a base announcement's
@@ -736,7 +803,7 @@ impl Encode<Version> for AnnounceBroadcast {
 					encode_lite06_chain(w, version, hops)?;
 				}
 				Self::Synced { prefix } => w.varint(*prefix)?,
-				Self::Request { remove, add } => encode_request(w, version, remove, add)?,
+				Self::Request { more, remove, add } => encode_request(w, version, *more, remove, add)?,
 				Self::Ok => {}
 				Self::RouteStart {
 					node,
@@ -1723,6 +1790,52 @@ mod tests {
 		assert_eq!(buf.len(), 3);
 	}
 
+	/// An edit too large for one message goes in as many as it takes, each fitting one,
+	/// every one but the last continuing it, and together holding the whole edit in order.
+	#[test]
+	fn an_edit_too_large_for_one_message_goes_in_parts() {
+		const VERSION: Version = Version::Lite07;
+		// Prefix IDs from 2^28 take five bytes.
+		let remove: Vec<u64> = (0..20_000).map(|i| (1 << 28) + i).collect();
+		let add: Vec<(Path, bool)> = (0..3_000)
+			.map(|i| (Path::new(&format!("{i:0>20}")).unwrap(), i % 2 == 0))
+			.collect();
+		let parts = request_parts(remove.clone(), add.clone(), VERSION);
+		assert!(parts.len() > 2, "{}", parts.len());
+		let (mut removed, mut added) = (Vec::new(), Vec::new());
+		for (i, part) in parts.iter().enumerate() {
+			let mut bytes = Vec::new();
+			part.encode(&mut Encoder::new(&mut bytes, VERSION.into()), VERSION)
+				.unwrap();
+			assert_eq!(broadcast_round_trip(part, VERSION), *part);
+			let AnnounceBroadcast::Request { more, remove, add } = part else {
+				panic!("{part:?}");
+			};
+			assert_eq!(*more, i + 1 < parts.len());
+			// The type and the length take at most 4 bytes.
+			assert!(
+				bytes.len() <= super::super::message::MAX_MESSAGE_SIZE + 4,
+				"{}",
+				bytes.len()
+			);
+			removed.extend(remove.iter().copied());
+			added.extend(add.iter().cloned());
+		}
+		assert_eq!((removed, added), (remove, add));
+
+		// An edit that fits goes whole, and one with nothing in it still goes.
+		let small = request_parts(vec![1], vec![(Path::from_static("a"), false)], VERSION);
+		assert!(matches!(
+			small.as_slice(),
+			[AnnounceBroadcast::Request { more: false, .. }]
+		));
+		let empty = request_parts(Vec::new(), Vec::new(), VERSION);
+		assert!(matches!(
+			empty.as_slice(),
+			[AnnounceBroadcast::Request { more: false, .. }]
+		));
+	}
+
 	fn request_round_trip(msg: &AnnounceRequest, version: Version) -> AnnounceRequest {
 		let mut buf = Vec::new();
 		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
@@ -1751,6 +1864,7 @@ mod tests {
 		assert!(matches!(res, Err(EncodeError::Version)));
 
 		let edit = AnnounceBroadcast::Request {
+			more: true,
 			remove: vec![0, 7],
 			add: vec![(Path::from_static("room"), true), (Path::empty(), false)],
 		};
@@ -1758,8 +1872,8 @@ mod tests {
 		let mut bytes = Vec::new();
 		edit.encode(&mut Encoder::new(&mut bytes, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		// Type, length, the removed Prefix IDs, then each added prefix with its Hidden.
-		assert_eq!(bytes, [&[16, 12, 2, 0, 7, 2, 4][..], b"room", &[1, 0, 0]].concat());
+		// Type, length, More, the removed Prefix IDs, then each added prefix with its Hidden.
+		assert_eq!(bytes, [&[16, 13, 1, 2, 0, 7, 2, 4][..], b"room", &[1, 0, 0]].concat());
 		assert_eq!(
 			broadcast_round_trip(&AnnounceBroadcast::Ok, Version::Lite07),
 			AnnounceBroadcast::Ok

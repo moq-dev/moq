@@ -182,17 +182,31 @@
 		"expect": "refused"
 	},
 	{
-		"name": "an ANNOUNCE_REQUEST removes Prefix IDs and adds prefixes, each with its Hidden",
+		"name": "an ANNOUNCE_REQUEST continues its edit, removes Prefix IDs, and adds prefixes, each with its Hidden",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "100c0200070204726f6f6d010000",
+		"hex": "100d010200070204726f6f6d010000",
 		"expect": "decoded"
+	},
+	{
+		"name": "an ANNOUNCE_REQUEST ending its edit may be empty",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "1003000000",
+		"expect": "decoded"
+	},
+	{
+		"name": "an ANNOUNCE_REQUEST whose More is neither 0 nor 1 is refused",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "1003020000",
+		"expect": "refused"
 	},
 	{
 		"name": "an ANNOUNCE_REQUEST whose Hidden is neither 0 nor 1 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "100300010002",
+		"hex": "10050000010002",
 		"expect": "refused"
 	},
 	{

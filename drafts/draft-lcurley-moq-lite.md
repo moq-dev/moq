@@ -383,13 +383,14 @@ An endpoint MUST close the session with a PROTOCOL_VIOLATION if its peer opens a
 An endpoint finishes its stream only when it is leaving the session, after a ROUTE_END for each route it sent.
 Its peer keeps answering the prefixes the endpoint asked for, which it can no longer edit.
 
-A subscriber sends ANNOUNCE_REQUEST messages, each an edit of the set of prefixes it wants claims for.
+A subscriber edits the set of prefixes it wants claims for with ANNOUNCE_REQUEST messages.
+An edit too large for one message continues over several: every ANNOUNCE_REQUEST of an edit but the last sets `More`, and nothing else comes between them on the stream.
 The set starts empty and MAY be empty, no prefix in it is at or below another, and encoded as the Adds of one ANNOUNCE_REQUEST it fits the [Message Length](#message-length) limit.
-A subscriber sends an ANNOUNCE_REQUEST only once the publisher has answered its last.
+A subscriber starts an edit only once the publisher has answered its last.
 
-A publisher answers each ANNOUNCE_REQUEST with one ANNOUNCE_OK, where the edit takes effect on its stream (see [Edits](#edits)), and sends the matching routes and claims and any future changes:
+A publisher answers each edit with one ANNOUNCE_OK, after the edit's last ANNOUNCE_REQUEST, where the edit takes effect on its stream (see [Edits](#edits)), and sends the matching routes and claims and any future changes:
 
-- ANNOUNCE_OK: the peer's last ANNOUNCE_REQUEST takes effect here.
+- ANNOUNCE_OK: the peer's last edit takes effect here.
 - ROUTE_START: the publisher reaches an origin node for a prefix.
 - ROUTE_UPDATE: a route's path, drain, priority, metric, or down-only bit changed.
 - ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
@@ -402,7 +403,7 @@ A publisher answers each ANNOUNCE_REQUEST with one ANNOUNCE_OK, where the edit t
 - ANNOUNCE_FLOOR: a batch of a route's claims is complete.
 - SYNCED: the initial set of one prefix is complete.
 
-The publisher MUST send [SYNCED](#synced) exactly once for each prefix an ANNOUNCE_REQUEST adds, after the ANNOUNCE_OK answering it and the prefix's initial set, unless a later ANNOUNCE_REQUEST removes the prefix first.
+The publisher MUST send [SYNCED](#synced) exactly once for each prefix an edit adds, after the ANNOUNCE_OK answering it and the prefix's initial set, unless a later edit removes the prefix first.
 The subscriber MAY batch a prefix's messages until its SYNCED; subsequent ones are live updates.
 The initial set is relative to this hop: a relay answers with what it holds without waiting for upstreams.
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
@@ -413,7 +414,7 @@ Each Add of an ANNOUNCE_REQUEST implicitly assigns the next Prefix ID on its sen
 No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the prefix, the origin node and the route's prefix, or the claim's prefix.
 A ROUTE_START and a SYNCED name a Prefix ID the peer assigned; every other id a message names is its sender's.
 Ids are never reused within a stream.
-A ROUTE_END retires its Route ID and the Announce ID of every claim under the route; an ANNOUNCE_END retires one Announce ID, and an ANNOUNCE_REQUEST the Prefix IDs it removes.
+A ROUTE_END retires its Route ID and the Announce ID of every claim under the route; an ANNOUNCE_END retires one Announce ID, and an edit the Prefix IDs it removes.
 
 A stream has at most one live route per origin node and prefix, and each route at most one live claim per prefix, at or below the route's prefix.
 Another origin claiming the same prefix is another claim, under its own route.
@@ -422,11 +423,11 @@ An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping
 An endpoint MUST close the session with a PROTOCOL_VIOLATION if it receives:
 
 - a message referencing a Prefix ID, Route ID, or Announce ID that was never assigned or already retired;
-- an ANNOUNCE_REQUEST before its last was answered, or one that leaves a prefix of the set at or below another or the set past the limit;
-- an ANNOUNCE_OK with no ANNOUNCE_REQUEST unanswered, or between a route's claim message and the ANNOUNCE_FLOOR closing its batch;
+- an edit before its last was answered, any other message between the ANNOUNCE_REQUESTs of one edit, or an edit that leaves a prefix of the set at or below another or the set past the limit;
+- an ANNOUNCE_OK with no edit unanswered, or between a route's claim message and the ANNOUNCE_FLOOR closing its batch;
 - a ROUTE_START for an origin node and prefix that already have a live route on the stream;
 - an ANNOUNCE_START for a prefix its route already claims or outside the route's prefix; or
-- a second SYNCED for a prefix, or one before the ANNOUNCE_OK answering the ANNOUNCE_REQUEST that added it.
+- a second SYNCED for a prefix, or one before the ANNOUNCE_OK answering the edit that added it.
 
 When the session closes, an endpoint MUST assume that every route and claim on the peer's stream is gone.
 
@@ -437,8 +438,8 @@ Every path on the stream is relative to the session, whichever requested prefix 
 When that most specific covering claim changes, such as when it is withdrawn and a broader one still covers the prefix, the publisher moves the presented claim to the new one with an ANNOUNCE_UPDATE or ANNOUNCE_RESTART, and ends it only when no claim of the route covers the prefix.
 
 ### Edits {#edits}
-An ANNOUNCE_REQUEST takes effect on the publisher's stream at the ANNOUNCE_OK answering it.
-Until then the publisher's messages answer the set before it, so they may still name a prefix the request removes, and never after.
+An edit takes effect on the publisher's stream at the ANNOUNCE_OK answering it.
+Until then the publisher's messages answer the set before it, so they may still name a prefix the edit removes, and never after.
 
 At the ANNOUNCE_OK both endpoints carry the stream's live routes over to the new set alike, so the publisher sends nothing again that both sets cover.
 Each route lies in one prefix of the old set, and in Route ID order:
@@ -470,7 +471,7 @@ A subscriber that may receive claims only beneath some prefixes, because its [sc
 
 The subscriber applies a batch whole, once its floor arrives.
 A receiver keeps one view of an origin's claims for each prefix it holds a route to the origin at: the claims of the floor with the highest Revision that a route it believes, at that prefix or one covering it, gave it.
-It believes a route while the route is usable, its Path does not name the receiver, and the receiver wants the prefix it lies in, with no ANNOUNCE_REQUEST unanswered that removes it; a held route, or one the receiver refused, certifies nothing.
+It believes a route while the route is usable, its Path does not name the receiver, and the receiver wants the prefix it lies in, with no edit unanswered that removes it; a held route, or one the receiver refused, certifies nothing.
 An older floor never revives a claim whose withdrawal a newer one delivered.
 While no route it believes has given a floor that certifies the prefix, the view holds the claims its selected route carries there, uncertified: a floor that certifies nothing proves no claim absent.
 The view stays whole while the receiver holds a route covering the prefix, usable or held, and the receiver shows each claim from the view at the narrowest prefix covering it, available while a usable route covers it.
@@ -1205,6 +1206,7 @@ A subscriber sends an ANNOUNCE_REQUEST message on its Announce Stream to edit th
 ANNOUNCE_REQUEST Message {
   Type (i) = 0x10
   Message Length (i)
+  More (8),
   Remove Count (i),
   Prefix ID (i) ...,
   Add Count (i),
@@ -1220,9 +1222,15 @@ Add {
 **Type**:
 Set to 0x10 to indicate an ANNOUNCE_REQUEST message.
 
+**More**:
+1 when the next message on the stream is an ANNOUNCE_REQUEST continuing this edit, 0 on an edit's last.
+Any other value is a PROTOCOL_VIOLATION.
+The publisher applies an edit's ANNOUNCE_REQUESTs together, at its last: each removes a prefix the set held before the edit, and each Add assigns the next Prefix ID in order across them.
+Parts whose Adds alone pass the set's limit, or that remove more prefixes than the set holds, are a PROTOCOL_VIOLATION as soon as they arrive.
+
 **Remove Count** and **Prefix ID**:
 The prefixes to remove from the set, each by its Prefix ID.
-One that was never assigned, was already removed, or is listed twice is a PROTOCOL_VIOLATION.
+One that was never assigned, was already removed, or is listed twice in an edit is a PROTOCOL_VIOLATION.
 
 **Add Count** and **Add**:
 The prefixes to add once those are removed.
@@ -1235,13 +1243,13 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 1 to also receive hidden claims (see [Hidden Paths](#hidden)), 0 otherwise.
 Any other value is a PROTOCOL_VIOLATION.
 
-One ANNOUNCE_REQUEST MAY swap prefixes for one above or below them, or re-add a prefix it removes to change its `Hidden`.
-The publisher MUST respond with an ANNOUNCE_OK on its own Announce Stream, followed by the routes and claims the added prefixes newly match and any future changes, subject to [Routing](#routing).
+One edit MAY swap prefixes for one above or below them, or re-add a prefix it removes to change its `Hidden`.
+The publisher MUST respond to the edit's last ANNOUNCE_REQUEST with an ANNOUNCE_OK on its own Announce Stream, followed by the routes and claims the added prefixes newly match and any future changes, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching claims and routes to prevent resource exhaustion.
 
 
 ## ANNOUNCE_OK {#announce-ok}
-A publisher sends one ANNOUNCE_OK message on its Announce Stream for each ANNOUNCE_REQUEST it receives, where the edit takes effect (see [Edits](#edits)).
+A publisher sends one ANNOUNCE_OK message on its Announce Stream for each edit it receives, after the edit's last ANNOUNCE_REQUEST, where the edit takes effect (see [Edits](#edits)).
 
 ~~~
 ANNOUNCE_OK Message {
@@ -2454,7 +2462,7 @@ An application-specific payload.
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session.
-- ANNOUNCE_REQUEST (0x10) edits a set of prefixes, none at or below another, one edit at a time, and ANNOUNCE_OK (0x11) marks where each edit takes effect. Both endpoints carry the routes and claims that both sets cover over to the new set, so none is sent again. ROUTE_START and SYNCED name the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix. A finished Announce Stream means its endpoint is leaving.
+- ANNOUNCE_REQUEST (0x10) edits a set of prefixes, none at or below another, one edit at a time, and ANNOUNCE_OK (0x11) marks where each edit takes effect. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints carry the routes and claims that both sets cover over to the new set, so none is sent again. ROUTE_START and SYNCED name the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix. A finished Announce Stream means its endpoint is leaving.
 - Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, for the paths under a prefix, with an additive metric and a down-only bit. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin and prefix rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
 - ROUTE_START and ROUTE_UPDATE carry a Route Offer that leads with the route's Path: one hop per node the route crossed, each a Hop ID and the Session Number that node learned the route on, at most 32. A node never uses a route whose Path names it. ROUTE_START also carries a Prefix ID and a Route Suffix naming the prefix the route covers, and the offer carries the route's drain (Flags 0x2) and priority, which rank before its metric.
 - Added ROUTE_HOLD (0xB), which holds a route while it may recover, for at most 10 seconds; ROUTE_END lets it go. Neither withdraws the origin's claims.

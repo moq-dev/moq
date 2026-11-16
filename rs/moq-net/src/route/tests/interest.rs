@@ -430,12 +430,12 @@ fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
 	assert_eq!(router.asks(4), beneath);
 }
 
-/// Swapping a set near the limit for another would name every removed prefix's Prefix
-/// ID beside every added prefix, past one request: the edit goes in parts that each fit,
-/// and a prefix narrowed into others is replaced by them in one part, so nothing still
-/// wanted goes unrequested in between.
+/// Swapping a set near the limit for another names every removed prefix's Prefix ID
+/// beside every added prefix, past one request: the router still asks it as one edit,
+/// which the session sends in as many messages as it takes, so nothing still wanted goes
+/// unrequested in between.
 #[test]
-fn a_swap_too_large_for_one_request_goes_in_parts() {
+fn a_swap_too_large_for_one_request_goes_as_one_edit() {
 	let fits = |set: &BTreeSet<Path>| path::ask_bytes(set, &Path::empty()) <= path::ASK_BYTES;
 	let set = |head: &str, n: usize| -> BTreeSet<Path> { (0..n).map(|i| p(&format!("{head}/{i:05}"))).collect() };
 	let mut old = set("x", 5000);
@@ -459,30 +459,21 @@ fn a_swap_too_large_for_one_request_goes_in_parts() {
 	asked(&mut router);
 
 	router.watch(new.clone()).unwrap();
-	let mut requested = old;
-	let mut parts = 0;
-	loop {
-		let edits = asked(&mut router);
-		let [edit] = edits.as_slice() else {
-			assert!(edits.is_empty(), "one edit at a time");
-			break;
-		};
-		parts += 1;
-		let add: BTreeSet<Path> = edit.add.iter().cloned().collect();
-		// Each Prefix ID removed takes at most 4 bytes.
-		assert!(path::ask_bytes(&add, &Path::empty()) + 4 * edit.remove.len() <= path::ASK_BYTES);
-		if edit.remove.contains(&p("a")) {
-			assert_eq!(add.intersection(&narrowed).count(), narrowed.len(), "replaced at once");
-		}
-		for prefix in &edit.remove {
-			requested.remove(prefix);
-		}
-		requested.extend(add);
-		assert!(fits(&requested));
-		router.edited(1);
-	}
-	assert_eq!(parts, 2);
-	assert_eq!(requested, new);
+	let edits = asked(&mut router);
+	let [edit] = edits.as_slice() else {
+		panic!("one edit: {}", edits.len());
+	};
+	let add: BTreeSet<Path> = edit.add.iter().cloned().collect();
+	let remove: BTreeSet<Path> = edit.remove.iter().cloned().collect();
+	// Past one ANNOUNCE_REQUEST, the session sends it in parts.
+	let ids = (0..edit.remove.len() as u64).map(|id| id << 30).collect();
+	let adds = edit.add.iter().map(|prefix| (prefix.clone(), false)).collect();
+	assert!(crate::lite::request_parts(ids, adds, crate::lite::Version::Lite07).len() > 1);
+	assert_eq!(add, new.difference(&old).cloned().collect());
+	assert_eq!(remove, old.difference(&new).cloned().collect());
+	assert!(narrowed.is_subset(&add) && remove.contains(&p("a")));
+	router.edited(1);
+	assert!(asked(&mut router).is_empty());
 	assert_eq!(router.asks(1), new);
 }
 

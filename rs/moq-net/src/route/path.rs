@@ -675,10 +675,6 @@ pub(super) fn meet(a: &Path, b: &Path) -> Option<Path> {
 /// whole set as the Adds of one ANNOUNCE_REQUEST.
 pub(crate) const ASK_BYTES: usize = 65_535;
 
-/// The bytes an ANNOUNCE_REQUEST spends removing one prefix: its Prefix ID, which takes
-/// at most 4 bytes until a session has asked for 2^30 prefixes.
-const REMOVE_BYTES: usize = 4;
-
 /// An upper bound on the bytes `set` takes as the Adds of one ANNOUNCE_REQUEST: each
 /// prefix as it follows the session's `root`, with its length and its flag, behind the
 /// two counts.
@@ -689,62 +685,6 @@ pub(crate) fn ask_bytes(set: &BTreeSet<Path>, root: &Path) -> usize {
 			.map_or(prefix.as_str().len(), |sent| sent.as_str().len())
 	};
 	set.iter().map(|prefix| sent(prefix) + 5).sum::<usize>() + 8
-}
-
-/// The next edit from the prefixes `requested` toward `want`, and the set it leaves
-/// requested. Both sets fit one request as Adds, but an edit also names each prefix it
-/// removes, so a large swap can pass one request: it then goes in parts, each changing
-/// whole groups of a prefix and those nested with it, which it replaces at once so
-/// nothing still wanted goes unrequested in between. The groups that shrink the set go
-/// first, so every set between the two fits too.
-fn next_edit(requested: &BTreeSet<Path>, want: &BTreeSet<Path>, root: &Path) -> (Edit, BTreeSet<Path>) {
-	let remove: BTreeSet<Path> = requested.difference(want).cloned().collect();
-	let add: BTreeSet<Path> = want.difference(requested).cloned().collect();
-	let bytes = |set: &BTreeSet<Path>| ask_bytes(set, root) - 8;
-	if bytes(&add) + REMOVE_BYTES * remove.len() + 8 <= ASK_BYTES {
-		let edit = Edit {
-			remove: remove.into_iter().collect(),
-			add: add.into_iter().collect(),
-		};
-		return (edit, want.clone());
-	}
-
-	// Each side's prefixes lie inside no other, so a group is a prefix of one side and
-	// those of the other inside it, keyed by that widest one.
-	let top = |prefix: &Path, other: &BTreeSet<Path>| ancestors(prefix).find(|above| other.contains(above));
-	let mut groups: BTreeMap<Path, (BTreeSet<Path>, BTreeSet<Path>)> = BTreeMap::new();
-	for prefix in &remove {
-		let key = top(prefix, &add).unwrap_or_else(|| prefix.clone());
-		groups.entry(key).or_default().0.insert(prefix.clone());
-	}
-	for prefix in &add {
-		let key = top(prefix, &remove).unwrap_or_else(|| prefix.clone());
-		groups.entry(key).or_default().1.insert(prefix.clone());
-	}
-	let mut groups: Vec<(BTreeSet<Path>, BTreeSet<Path>)> = groups.into_values().collect();
-	groups.sort_by_cached_key(|(remove, add)| bytes(add) as isize - bytes(remove) as isize);
-
-	let mut edit = (BTreeSet::new(), BTreeSet::new());
-	let mut spent = 8;
-	for (remove, add) in groups {
-		let cost = bytes(&add) + REMOVE_BYTES * remove.len();
-		// Any one group fits: it removes no more prefixes than one request held beside
-		// one add, or adds no more than one request holds beside one remove.
-		if spent + cost > ASK_BYTES && spent > 8 {
-			break;
-		}
-		spent += cost;
-		edit.0.extend(remove);
-		edit.1.extend(add);
-	}
-	let mut next = requested.clone();
-	next.retain(|prefix| !edit.0.contains(prefix));
-	next.extend(edit.1.iter().cloned());
-	let edit = Edit {
-		remove: edit.0.into_iter().collect(),
-		add: edit.1.into_iter().collect(),
-	};
-	(edit, next)
 }
 
 /// The prefixes of `set` that lie inside no other.
@@ -1323,8 +1263,13 @@ impl<N: Key, A: Clone + Eq + std::fmt::Debug> Router<N, A> {
 		if want == requested {
 			return;
 		}
-		let (edit, next) = next_edit(&requested, &want, &session.link.root);
-		session.edits.push_back(next);
+		// However large, the edit goes whole: the session splits it into as many
+		// ANNOUNCE_REQUESTs as it takes, which the peer applies together.
+		let edit = Edit {
+			remove: requested.difference(&want).cloned().collect(),
+			add: want.difference(&requested).cloned().collect(),
+		};
+		session.edits.push_back(want);
 		self.out.push(Out::Ask { to: neighbor, edit });
 	}
 

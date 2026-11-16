@@ -3755,7 +3755,7 @@ test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix c
 	};
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const readers = new Readers(pair.client, version);
-	publisher.request([], [{ prefix: Path.empty(), hidden: false }]);
+	publisher.request(false, [], [{ prefix: Path.empty(), hidden: false }]);
 	try {
 		await entered.promise;
 		removed.close();
@@ -3965,7 +3965,7 @@ function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>,
 		expect(await stream.u53()).toBe(DataType.Announce);
 		return stream;
 	})();
-	publisher.request([], [{ prefix, hidden: false }]);
+	publisher.request(false, [], [{ prefix, hidden: false }]);
 	const next = async () => decodeAnnounceBroadcast(await reader, version);
 	return {
 		node: wireOf(origin.consume()).own.node,
@@ -3975,6 +3975,7 @@ function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>,
 		// The next ANNOUNCE_REQUEST, as the session hands the publisher each one the peer sends.
 		request: (remove: bigint[], add: Path.Valid[]) =>
 			publisher.request(
+				false,
 				remove,
 				add.map((prefix) => ({ prefix, hidden: false })),
 			),

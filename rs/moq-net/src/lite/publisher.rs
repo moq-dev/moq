@@ -3644,7 +3644,7 @@ mod announce_test {
 			assert!(writer.poll_flush(&waiter).is_ready());
 			wire.take_announces()
 		};
-		answer.request(Vec::new(), vec![(prefix, true)]).unwrap();
+		answer.request(false, Vec::new(), vec![(prefix, true)]).unwrap();
 		assert_eq!(
 			sent(&mut answer),
 			[
@@ -3680,13 +3680,13 @@ mod announce_test {
 
 		// A second edit before the first is answered.
 		let mut first = answer();
-		first.request(Vec::new(), vec![(path("a"), false)]).unwrap();
-		let again = first.request(Vec::new(), vec![(path("b"), false)]);
+		first.request(false, Vec::new(), vec![(path("a"), false)]).unwrap();
+		let again = first.request(false, Vec::new(), vec![(path("b"), false)]);
 		assert!(matches!(again, Err(Error::ProtocolViolation)), "{again:?}");
 
 		// Answered, the next edit goes.
 		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
-		first.request(vec![0], vec![(path("b"), false)]).unwrap();
+		first.request(false, vec![0], vec![(path("b"), false)]).unwrap();
 		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
 
 		// A prefix that is not in effect, one asked for twice, and one below another.
@@ -3698,7 +3698,7 @@ mod announce_test {
 			(Vec::new(), vec![path("x"), path("x/y")]),
 		] {
 			let add: Vec<_> = add.into_iter().map(|path| (path, false)).collect();
-			let refused = first.request(remove.clone(), add.clone());
+			let refused = first.request(false, remove.clone(), add.clone());
 			assert!(matches!(refused, Err(Error::ProtocolViolation)), "{remove:?} {add:?}");
 		}
 
@@ -3706,7 +3706,30 @@ mod announce_test {
 		let mut wide = answer();
 		let long = "p".repeat(crate::Path::MAX_BYTES - 8);
 		let add: Vec<_> = (0..80).map(|i| (path(&format!("{i:02}/{long}")), false)).collect();
-		let refused = wide.request(Vec::new(), add);
+		let refused = wide.request(false, Vec::new(), add.clone());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+
+		// An edit in parts takes effect, and is answered, only at its last.
+		let mut parts = answer();
+		parts.request(true, Vec::new(), vec![(path("a"), false)]).unwrap();
+		assert!(parts.continuing());
+		assert!(sent(&mut parts).is_empty());
+		parts.request(false, Vec::new(), vec![(path("b"), false)]).unwrap();
+		assert!(!parts.continuing());
+		assert_eq!(sent(&mut parts)[0], lite::AnnounceBroadcast::Ok);
+		// Its parts remove only what the set held before it, so not a prefix one adds.
+		parts.request(true, vec![0], vec![(path("c"), false)]).unwrap();
+		let refused = parts.request(false, vec![2], Vec::new());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+
+		// Parts fail as soon as their Adds alone pass the limit, or they remove more
+		// prefixes than the set holds, before the last arrives.
+		let mut wide = answer();
+		wide.request(true, Vec::new(), add[..10].to_vec()).unwrap();
+		let refused = wide.request(true, Vec::new(), add[10..].to_vec());
+		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+		let mut few = answer();
+		let refused = few.request(true, vec![0, 1], Vec::new());
 		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
 	}
 
@@ -3735,7 +3758,9 @@ mod announce_test {
 			assert!(writer.poll_flush(&waiter).is_ready());
 			wire.take_announces()
 		};
-		answer.request(Vec::new(), vec![(crate::Path::empty(), false)]).unwrap();
+		answer
+			.request(false, Vec::new(), vec![(crate::Path::empty(), false)])
+			.unwrap();
 		assert_eq!(
 			sent(&mut answer),
 			[

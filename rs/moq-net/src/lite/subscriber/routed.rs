@@ -400,11 +400,12 @@ impl Routed {
 		self.silent = true;
 	}
 
-	/// The node asks the peer for other prefixes: the ANNOUNCE_REQUEST to send, if any.
-	fn ask(&mut self, edit: route::path::Edit) -> Option<lite::AnnounceBroadcast> {
+	/// The node asks the peer for other prefixes: the ANNOUNCE_REQUESTs of the edit to
+	/// send, if any.
+	fn ask(&mut self, edit: route::path::Edit) -> Vec<lite::AnnounceBroadcast> {
 		// The node sends one edit at a time.
 		if self.editing.is_some() || self.finished || self.silent {
-			return None;
+			return Vec::new();
 		}
 		let mut editing = Editing {
 			remove: Vec::new(),
@@ -436,12 +437,9 @@ impl Routed {
 			// local reader opts in on its own.
 			add.push((relative, true));
 		}
-		let request = lite::AnnounceBroadcast::Request {
-			remove: editing.remove.clone(),
-			add,
-		};
+		let requests = lite::request_parts(editing.remove.clone(), add, lite::Version::Lite07);
 		self.editing = Some(editing);
-		Some(request)
+		requests
 	}
 
 	/// ANNOUNCE_OK: the last edit takes effect on the peer's stream. Its live routes
@@ -1106,17 +1104,17 @@ impl Routed {
 	}
 
 	/// Act on what the node queued for this half of the session: serve the claims it
-	/// hands over, and return the ANNOUNCE_REQUEST asking the peer for what it now wants.
+	/// hands over, and return the ANNOUNCE_REQUESTs asking the peer for what it now wants.
 	pub(in crate::lite) fn output(
 		&mut self,
 		subscriber: &Subscriber,
 		output: node::Output,
-	) -> Option<lite::AnnounceBroadcast> {
+	) -> Vec<lite::AnnounceBroadcast> {
 		match output {
 			node::Output::Ask(edit) => self.ask(edit),
 			output => {
 				self.served(subscriber, output);
-				None
+				Vec::new()
 			}
 		}
 	}

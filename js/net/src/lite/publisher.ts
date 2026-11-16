@@ -630,10 +630,15 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	request(remove: bigint[], add: Add[]): void {
+	/** Whether the peer's edit continues in its next message, which must be its next ANNOUNCE_REQUEST. */
+	continuing(): boolean {
+		return this.#answer?.continuing() ?? false;
+	}
+
+	request(more: boolean, remove: bigint[], add: Add[]): void {
 		if (!this.#answer) throw new ProtocolViolation("ANNOUNCE_REQUEST before lite-07");
 		const started = this.#answering === undefined;
-		const answering = this.#answer.request(remove, add);
+		const answering = this.#answer.request(more, remove, add);
 		if (!started) return;
 		this.#answering = this.#withdrawal.track(answering);
 		// The session is ending under it: its close says why.

@@ -342,7 +342,7 @@ impl Running {
 			if let Some(output) = ready {
 				match output {
 					node::Output::Serve { .. } | node::Output::Unserve { .. } | node::Output::Ask(_) => {
-						if let Some(request) = self.routed.output(subscriber, output) {
+						for request in self.routed.output(subscriber, output) {
 							self.writer.buffer(&request)?;
 						}
 					}
@@ -388,7 +388,9 @@ impl Running {
 				Poll::Ready(Ok(Some(Msg::Request { .. }))) if self.routed.moving() => {
 					return Err(Error::ProtocolViolation);
 				}
-				Poll::Ready(Ok(Some(Msg::Request { remove, add }))) => self.answer.request(remove, add)?,
+				Poll::Ready(Ok(Some(Msg::Request { more, remove, add }))) => self.answer.request(more, remove, add)?,
+				// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
+				Poll::Ready(Ok(Some(_))) if self.answer.continuing() => return Err(Error::ProtocolViolation),
 				Poll::Ready(Ok(Some(announce))) => self.routed.receive(announce)?,
 				// The peer is leaving: its routes ended, and it asks for nothing more.
 				Poll::Ready(Ok(None)) => {

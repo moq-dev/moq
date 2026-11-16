@@ -157,6 +157,8 @@ pub(in crate::lite) struct Answer {
 	prefixes: BTreeMap<u64, Prefix>,
 	next_prefix: u64,
 	request: Option<Request>,
+	/// The ANNOUNCE_REQUESTs of an edit that continues: its removes and its adds so far.
+	parts: Option<(Vec<u64>, Vec<(Path, bool)>)>,
 	encoder: lite::AnnounceEncoder,
 	routes: HashMap<RouteKey, Sent>,
 	next_route: u64,
@@ -202,6 +204,7 @@ impl Answer {
 			prefixes: BTreeMap::new(),
 			next_prefix: 0,
 			request: None,
+			parts: None,
 			encoder: lite::AnnounceEncoder::new(Version::Lite07),
 			routes: HashMap::new(),
 			next_route: 0,
@@ -211,15 +214,42 @@ impl Answer {
 		}
 	}
 
-	/// ANNOUNCE_REQUEST: the peer edits the prefixes it asks for. It takes effect once
-	/// the node says where, in order with what the node already queued for the peer.
-	pub(in crate::lite) fn request(&mut self, remove: Vec<u64>, add: Vec<(Path, bool)>) -> Result<(), Error> {
+	/// Whether the peer's edit continues in its next message, which must be its next
+	/// ANNOUNCE_REQUEST.
+	pub(in crate::lite) fn continuing(&self) -> bool {
+		self.parts.is_some()
+	}
+
+	/// ANNOUNCE_REQUEST: the peer edits the prefixes it asks for, over as many messages as
+	/// `more` says. The edit takes effect once the node says where, in order with what
+	/// the node already queued for the peer.
+	pub(in crate::lite) fn request(
+		&mut self,
+		more: bool,
+		remove: Vec<u64>,
+		add: Vec<(Path, bool)>,
+	) -> Result<(), Error> {
 		if self.withdrawn {
 			return Ok(());
 		}
 		// The peer sends one edit at a time.
 		if self.request.is_some() {
 			return Err(Error::ProtocolViolation);
+		}
+		let (mut remove, mut add) = (remove, add);
+		if let Some((removed, added)) = self.parts.take() {
+			remove.splice(0..0, removed);
+			add.splice(0..0, added);
+		}
+		// Parts that could never make a valid edit fail before more of them pile up: their
+		// Adds alone already pass the set's limit, or they remove more than the set holds.
+		if remove.len() > self.prefixes.len() || !lite::request_fits(add.iter().map(|(path, _)| path), Version::Lite07)
+		{
+			return Err(Error::ProtocolViolation);
+		}
+		if more {
+			self.parts = Some((remove, add));
+			return Ok(());
 		}
 		let mut left: BTreeMap<u64, &Prefix> = self.prefixes.iter().map(|(id, prefix)| (*id, prefix)).collect();
 		let mut edit = route::path::Edit {

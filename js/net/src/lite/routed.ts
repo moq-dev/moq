@@ -24,12 +24,12 @@ import {
 	type Refusal as AnnounceRefusal,
 	type Base,
 	type Dead,
-	editPart,
 	type Offer,
 	type Refusable,
 	ROUTE_MAX_HOPS,
 	type RouteHop,
 	requestFits,
+	requestParts,
 	type Unusable,
 } from "./announce.ts";
 import type { Carrier, Claim, Floors } from "./floors.ts";
@@ -250,16 +250,10 @@ export class Routed {
 		return { remove, add: [...wanted].map(([prefix, hidden]) => ({ prefix, hidden })) };
 	}
 
-	// The next part of `edit`: see `editPart`.
-	#part(edit: { remove: bigint[]; add: Add[] }): { remove: bigint[]; add: Add[] } {
-		const removed = edit.remove.map((id) => ({ id, path: this.#asked.get(id)?.path ?? Path.empty() }));
-		return editPart(removed, edit.add, this.#session.version);
-	}
-
 	// Ask the peer for what the readers now want, one edit at a time.
 	#ask(): void {
 		if (this.#editing || this.#finished || this.#silent || this.#closing) return;
-		const { remove, add } = this.#part(this.#edit());
+		const { remove, add } = this.#edit();
 		if (remove.length === 0 && add.length === 0) return;
 		const added: bigint[] = [];
 		for (const { prefix, hidden } of add) {
@@ -269,7 +263,10 @@ export class Routed {
 		}
 		this.#editing = { remove, add: added };
 		console.debug(`announced: remove=${remove.join(",")} add=${add.map(({ prefix }) => prefix).join(",")}`);
-		this.#session.send({ status: "request", remove, add }).catch((err: unknown) => this.close(error(err)));
+		// However large, the edit goes whole, in as many messages as it takes.
+		for (const part of requestParts(remove, add, this.#session.version)) {
+			this.#session.send(part).catch((err: unknown) => this.close(error(err)));
+		}
 	}
 
 	// Let each reader see its prefix synced once its answer is in: the peer answered every

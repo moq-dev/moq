@@ -64,8 +64,10 @@ export class Answer {
 	/** The prefixes in effect, by Prefix ID. */
 	#prefixes = new Map<bigint, Prefix>();
 	#nextPrefix = 0n;
-	/** The peer's ANNOUNCE_REQUEST not put in effect yet. */
+	/** The peer's edit not put in effect yet. */
 	#request?: { remove: bigint[]; add: [bigint, Prefix][] };
+	/** The ANNOUNCE_REQUESTs of an edit that continues: its removes and its adds so far. */
+	#parts?: { remove: bigint[]; add: Add[] };
 	/** The route the peer holds for each requested prefix. */
 	#routes = new Map<Path.Valid, Sent>();
 	#nextRoute = 0n;
@@ -89,15 +91,40 @@ export class Answer {
 		this.#notify?.();
 	}
 
+	/** Whether the peer's edit continues in its next message, which must be its next ANNOUNCE_REQUEST. */
+	continuing(): boolean {
+		return this.#parts !== undefined;
+	}
+
 	/**
-	 * ANNOUNCE_REQUEST: the peer edits the prefixes it asks for. Returns the loop answering it,
-	 * started by the first request and running until the session leaves.
+	 * ANNOUNCE_REQUEST: the peer edits the prefixes it asks for, over as many messages as `more`
+	 * says. Returns the loop answering it, started by the first request and running until the
+	 * session leaves.
 	 */
-	request(remove: bigint[], add: Add[]): Promise<void> {
+	request(more: boolean, remove: bigint[], add: Add[]): Promise<void> {
 		this.#running ??= this.#run();
 		if (this.#withdrawn || this.#closed) return this.#running;
 		// The peer sends one edit at a time.
 		if (this.#request) throw new ProtocolViolation("ANNOUNCE_REQUEST before the last was answered");
+		if (this.#parts) {
+			remove = [...this.#parts.remove, ...remove];
+			add = [...this.#parts.add, ...add];
+			this.#parts = undefined;
+		}
+		// Parts that could never make a valid edit fail before more of them pile up: their Adds
+		// alone already pass the set's limit, or they remove more than the set holds.
+		if (
+			remove.length > this.#prefixes.size ||
+			!requestFits(
+				add.map(({ prefix }) => prefix),
+				this.#publish.version,
+			)
+		)
+			throw new ProtocolViolation("ANNOUNCE_REQUEST parts past the limit");
+		if (more) {
+			this.#parts = { remove, add };
+			return this.#running;
+		}
 		const left = new Map(this.#prefixes);
 		for (const id of remove) {
 			if (!left.delete(id)) throw new ProtocolViolation(`ANNOUNCE_REQUEST removes unknown Prefix ID ${id}`);

@@ -11,12 +11,13 @@ import {
 	AnnounceRequest,
 	decodeAnnounceBroadcast,
 	decodeAnnounceBroadcastMaybe,
-	editPart,
 	encodeAnnounceBroadcast,
 	type Offer,
 	ROUTE_MAX_HOPS,
 	requestFits,
+	requestParts,
 } from "./announce.ts";
+import { MAX_MESSAGE_SIZE } from "./message.ts";
 import { Version } from "./version.ts";
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -199,12 +200,13 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 	expect(with06.byteLength).toBeLessThan(with05.byteLength);
 });
 
-// Lite-07 asks on its Announce Stream: the Prefix IDs to remove, then each prefix to add with
-// its hidden opt-in. The stream-opening request is every earlier version's.
+// Lite-07 asks on its Announce Stream: whether the edit continues, the Prefix IDs to remove, then
+// each prefix to add with its hidden opt-in. The stream-opening request is every earlier version's.
 test("ANNOUNCE_REQUEST edits the requested prefixes on lite-07", async () => {
 	const v = Version.DRAFT_07;
 	const msg: AnnounceBroadcast = {
 		status: "request",
+		more: true,
 		remove: [1n, 2n],
 		add: [
 			{ prefix: Path.from("room"), hidden: true },
@@ -212,18 +214,19 @@ test("ANNOUNCE_REQUEST edits the requested prefixes on lite-07", async () => {
 		],
 	};
 	const wire = await bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
-	expect(wire).toEqual(new Uint8Array([16, 12, 2, 1, 2, 2, 4, 0x72, 0x6f, 0x6f, 0x6d, 1, 0, 0]));
+	expect(wire).toEqual(new Uint8Array([16, 13, 1, 2, 1, 2, 2, 4, 0x72, 0x6f, 0x6f, 0x6d, 1, 0, 0]));
 	expect(await roundTrip(msg, v)).toEqual(msg);
-	const empty: AnnounceBroadcast = { status: "request", remove: [], add: [] };
-	expect(await bytes((w) => encodeAnnounceBroadcast(w, empty, v), v)).toEqual(new Uint8Array([16, 2, 0, 0]));
+	const empty: AnnounceBroadcast = { status: "request", more: false, remove: [], add: [] };
+	expect(await bytes((w) => encodeAnnounceBroadcast(w, empty, v), v)).toEqual(new Uint8Array([16, 3, 0, 0, 0]));
 	await expect(roundTrip(msg, Version.DRAFT_06)).rejects.toThrow();
 	await expect(bytes((w) => new AnnounceRequest(Path.from("room"), UNKNOWN_HOP).encode(w, v), v)).rejects.toThrow();
 
-	// A count the body cannot hold, and a Hidden that is no boolean, are malformed.
+	// A count the body cannot hold, and a More or a Hidden that is no boolean, are malformed.
 	const decode = (body: number[]) =>
 		decodeAnnounceBroadcast(new Reader(undefined, new Uint8Array([16, body.length, ...body]), v), v);
-	await expect(decode([3, 1, 0])).rejects.toThrow();
-	await expect(decode([0, 1, 0, 2])).rejects.toThrow();
+	await expect(decode([0, 3, 1, 0])).rejects.toThrow();
+	await expect(decode([0, 0, 1, 0, 2])).rejects.toThrow();
+	await expect(decode([2, 0, 0])).rejects.toThrow();
 });
 
 // The requested set is its prefixes as an ANNOUNCE_REQUEST adding them all would carry them,
@@ -235,46 +238,37 @@ test("a requested set fits one message", () => {
 	expect(requestFits(fits, v)).toBe(true);
 	expect(requestFits([...fits, long(64), long(65)], v)).toBe(false);
 	expect(requestFits([], v)).toBe(true);
-	// An edit names the Prefix IDs it removes beside its Adds, which can pass the limit together.
-	const removes = Array.from({ length: 1000 }, (_, i) => BigInt(i));
-	expect(requestFits([], v, removes)).toBe(true);
-	expect(requestFits(fits, v, removes)).toBe(false);
 });
 
-// A swap too large for one request goes in parts that each fit, and a prefix narrowed into others
-// is replaced by them in one part, so nothing still wanted goes unrequested in between.
-test("a swap too large for one request goes in parts", () => {
+// An edit too large for one message goes in as many as it takes, each fitting one, every one but
+// the last continuing it, and together holding the whole edit in order, as `request_parts` does.
+test("an edit too large for one message goes in parts", async () => {
 	const v = Version.DRAFT_07;
-	const many = (head: string, n: number) =>
-		Array.from({ length: n }, (_, i) => Path.from(`${head}/${String(i).padStart(9, "0")}`));
-	const narrowed = many("a", 2000);
-	const want = new Set([...narrowed, ...many("y", 2800)]);
-	let asked = new Map<bigint, Path.Valid>([
-		[0n, Path.from("a")],
-		...many("x", 5000).map((path, i) => [BigInt(i + 1), path] as const),
-	]);
-	expect(requestFits(asked.values(), v)).toBe(true);
-	expect(requestFits(want, v)).toBe(true);
-
-	let next = BigInt(asked.size);
-	let parts = 0;
-	for (;;) {
-		const held = new Set(asked.values());
-		const removed = [...asked].filter(([, path]) => !want.has(path)).map(([id, path]) => ({ id, path }));
-		const add = [...want].filter((path) => !held.has(path)).map((prefix) => ({ prefix, hidden: false }));
-		if (removed.length === 0 && add.length === 0) break;
-		const part = editPart(removed, add, v);
-		parts += 1;
-		const added = part.add.map(({ prefix }) => prefix);
-		expect(requestFits(added, v, part.remove)).toBe(true);
-		if (part.remove.includes(0n)) expect(narrowed.every((prefix) => added.includes(prefix))).toBe(true);
-		const gone = new Set(part.remove);
-		asked = new Map([...asked].filter(([id]) => !gone.has(id)));
-		for (const prefix of added) asked.set(next++, prefix);
-		expect(requestFits(asked.values(), v)).toBe(true);
+	// Prefix IDs from 2^28 take five bytes.
+	const remove = Array.from({ length: 20_000 }, (_, i) => (1n << 28n) + BigInt(i));
+	const add = Array.from({ length: 3000 }, (_, i) => ({
+		prefix: Path.from(String(i).padStart(20, "0")),
+		hidden: i % 2 === 0,
+	}));
+	const parts = requestParts(remove, add, v);
+	expect(parts.length).toBeGreaterThan(2);
+	const removed: bigint[] = [];
+	const added: { prefix: Path.Valid; hidden: boolean }[] = [];
+	for (const [i, part] of parts.entries()) {
+		expect(part.more).toBe(i + 1 < parts.length);
+		const wire = await bytes((w) => encodeAnnounceBroadcast(w, part, v), v);
+		// The type and the length take at most 4 bytes.
+		expect(wire.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_SIZE + 4);
+		expect(await roundTrip(part, v)).toEqual(part);
+		removed.push(...part.remove);
+		added.push(...part.add);
 	}
-	expect(parts).toBe(2);
-	expect(new Set(asked.values())).toEqual(want);
+	expect(removed).toEqual(remove);
+	expect(added).toEqual(add);
+
+	// An edit that fits goes whole, and one with nothing in it still goes.
+	expect(requestParts([1n], [{ prefix: Path.from("a"), hidden: false }], v).map(({ more }) => more)).toEqual([false]);
+	expect(requestParts([], [], v)).toEqual([{ status: "request", more: false, remove: [], add: [] }]);
 });
 
 // The draft reserves Hop ID 0 for a responder that was never assigned an id, or that

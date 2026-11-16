@@ -10320,6 +10320,7 @@ mod tests {
 		};
 		let request = |w: &mut crate::coding::Encoder<'_>| {
 			lite::AnnounceBroadcast::Request {
+				more: false,
 				remove: Vec::new(),
 				add: Vec::new(),
 			}
@@ -10327,6 +10328,28 @@ mod tests {
 			.unwrap()
 		};
 		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &route_start(7), &dead, &request]);
+		let (mut routes, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let result = routes.poll(&kio::Waiter::noop());
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+			"{result:?}"
+		);
+	}
+
+	/// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
+	#[kio::test]
+	async fn a_message_inside_an_edit_closes_the_session() {
+		const VERSION: Version = Version::Lite07;
+		let part = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Request {
+				more: true,
+				remove: Vec::new(),
+				add: vec![(Path::from_static("a"), false)],
+			}
+			.encode(w, VERSION)
+			.unwrap()
+		};
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &part, &route_start(7)]);
 		let (mut routes, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let result = routes.poll(&kio::Waiter::noop());
 		assert!(

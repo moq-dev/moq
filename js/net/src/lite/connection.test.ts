@@ -1057,7 +1057,7 @@ for (const [name, violate] of [
 		"a reset Announce Stream",
 		async (pair) => {
 			const { writer, send } = await announceStream(pair);
-			await send({ status: "request", remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
 			writer.reset(new Error("gone"));
 		},
 	],
@@ -1076,6 +1076,7 @@ for (const [name, violate] of [
 			const { send } = await announceStream(pair);
 			await send({
 				status: "request",
+				more: false,
 				remove: [],
 				add: [
 					{ prefix: ROOM, hidden: false },
@@ -1088,15 +1089,41 @@ for (const [name, violate] of [
 		"an ANNOUNCE_REQUEST adding a prefix below one already asked for",
 		async (pair) => {
 			const { send } = await announceStream(pair);
-			await send({ status: "request", remove: [], add: [{ prefix: ROOM, hidden: false }] });
-			await send({ status: "request", remove: [], add: [{ prefix: Path.from("room/cam"), hidden: false }] });
+			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({
+				status: "request",
+				more: false,
+				remove: [],
+				add: [{ prefix: Path.from("room/cam"), hidden: false }],
+			});
 		},
 	],
 	[
 		"an ANNOUNCE_REQUEST removing an unknown Prefix ID",
 		async (pair) => {
 			const { send } = await announceStream(pair);
-			await send({ status: "request", remove: [3n], add: [] });
+			await send({ status: "request", more: false, remove: [3n], add: [] });
+		},
+	],
+	[
+		"a message inside an edit",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "request", more: true, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({ status: "ok" });
+		},
+	],
+	[
+		"the parts of an edit nesting one prefix below another",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "request", more: true, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({
+				status: "request",
+				more: false,
+				remove: [],
+				add: [{ prefix: Path.from("room/cam"), hidden: false }],
+			});
 		},
 	],
 	[

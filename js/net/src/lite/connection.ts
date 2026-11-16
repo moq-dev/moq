@@ -620,8 +620,11 @@ export class Connection implements Session {
 				throw new ProtocolViolation("Announce Stream broke", { cause: err });
 			}
 			if (!msg) break;
+			// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
+			if (msg.status !== "request" && this.#publisher.continuing())
+				throw new ProtocolViolation("a message inside an edit");
 			await this.#subscriber.announce(msg);
-			if (msg.status === "request") this.#publisher.request(msg.remove, msg.add);
+			if (msg.status === "request") this.#publisher.request(msg.more, msg.remove, msg.add);
 		}
 		// The peer is leaving: its routes end, and what it asked for is still answered.
 		this.#subscriber.announceFinished();

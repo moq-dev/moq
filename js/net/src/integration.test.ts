@@ -2222,9 +2222,9 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		});
 		// Lite-07 has one Announce Stream, and gives a prefix back with the edit removing it.
 		const request = LitePublisher.prototype.request;
-		spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, remove, add) {
+		spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, more, remove, add) {
 			ended += remove.length;
-			request.call(this, remove, add);
+			request.call(this, more, remove, add);
 		});
 		const pair = createMockTransportPair(alpn);
 		const serverOrigin = new OriginProducer();
@@ -2255,11 +2255,11 @@ test("moq-lite-07-wip: closing an announce consumer before ANNOUNCE_OK removes i
 	const request = LitePublisher.prototype.request;
 	const edits: { remove: bigint[]; add: string[] }[] = [];
 	const answer = Promise.withResolvers<void>();
-	spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, remove, add) {
+	spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, more, remove, add) {
 		edits.push({ remove, add: add.map(({ prefix }) => prefix) });
 		// The first edit reaches the publisher only once the test lets it.
-		if (edits.length === 1) void answer.promise.then(() => request.call(this, remove, add));
-		else request.call(this, remove, add);
+		if (edits.length === 1) void answer.promise.then(() => request.call(this, more, remove, add));
+		else request.call(this, more, remove, add);
 	});
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const [client, server] = await Promise.all([
@@ -2327,10 +2327,15 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			});
 			// Lite-07 asks and gives back each prefix with an edit on its one Announce Stream.
 			const edit = LitePublisher.prototype.request;
-			spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, remove, add) {
+			spyOn(LitePublisher.prototype, "request").mockImplementation(function (
+				this: LitePublisher,
+				more,
+				remove,
+				add,
+			) {
 				started += add.length;
 				ended += remove.length;
-				edit.call(this, remove, add);
+				edit.call(this, more, remove, add);
 			});
 			const pair = createMockTransportPair(alpn);
 			const serverOrigin = new OriginProducer();

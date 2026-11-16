@@ -110,7 +110,7 @@ async fn a_route_past_the_root_carries_over_as_the_peer_carries_it() {
 	routed.unwant(&prefix);
 	let requests = routed.outputs(&subscriber);
 	assert!(
-		matches!(requests.as_slice(), [Msg::Request { remove, add }] if remove.len() == 1 && add.len() == 1),
+		matches!(requests.as_slice(), [Msg::Request { remove, add, .. }] if remove.len() == 1 && add.len() == 1),
 		"{requests:?}"
 	);
 	routed.receive(Msg::Ok).unwrap();

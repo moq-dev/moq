@@ -1,7 +1,6 @@
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, MAX_HOPS, toHop, UNKNOWN_HOP, wireHop } from "../hop.ts";
 import type * as Instance from "../instance.ts";
-import { coveringPrefixes } from "../internal.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, type Reader, type Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -154,9 +153,10 @@ export type AnnounceBroadcast =
 	| { status: "synced"; prefix: bigint }
 	/** Lite07+ ANNOUNCE_REQUEST: the sender edits the prefixes it wants claims for, removing those
 	 * with the Prefix IDs in `remove` and then adding each of `add`, which assigns it the next
-	 * Prefix ID. */
-	| { status: "request"; remove: bigint[]; add: Add[] }
-	/** Lite07+ ANNOUNCE_OK: the receiver's last ANNOUNCE_REQUEST takes effect here. */
+	 * Prefix ID. With `more`, the edit continues in the next message, and takes effect whole with
+	 * its last (see `requestParts`). */
+	| { status: "request"; more: boolean; remove: bigint[]; add: Add[] }
+	/** Lite07+ ANNOUNCE_OK: the receiver's last edit takes effect here. */
 	| { status: "ok" }
 	/** Lite07+ ROUTE_START: the publisher reaches the publisher node `node` along `offer`, covering
 	 * the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and assigns the
@@ -396,9 +396,10 @@ async function decodeDead(r: Reader): Promise<Dead> {
 	return { kind: "closed", hop, far, gone: gone === 1, moved: await r.u62() };
 }
 
-/** Encode an ANNOUNCE_REQUEST body: the Prefix IDs to remove, then the prefixes to add, each with
- * its `Hidden`. */
-async function encodeRequest(w: Writer, remove: bigint[], add: Add[]) {
+/** Encode an ANNOUNCE_REQUEST body: `More`, the Prefix IDs to remove, then the prefixes to add,
+ * each with its `Hidden`. */
+async function encodeRequest(w: Writer, more: boolean, remove: bigint[], add: Add[]) {
+	await w.bool(more);
 	await w.u53(remove.length);
 	for (const id of remove) await w.u62(id);
 	await w.u53(add.length);
@@ -412,107 +413,85 @@ async function encodeRequest(w: Writer, remove: bigint[], add: Add[]) {
  * fails the message rather than being refused. Each entry takes bytes, so the body bounds both
  * counts before either loop runs out. */
 async function decodeRequest(r: Reader): Promise<AnnounceBroadcast> {
+	const more = await r.bool();
 	const remove: bigint[] = [];
 	for (let left = await r.u62(); left > 0n; left--) remove.push(await r.u62());
 	const add: Add[] = [];
 	for (let left = await r.u62(); left > 0n; left--) {
 		add.push({ prefix: Path.decode(await r.string()), hidden: await r.bool() });
 	}
-	return { status: "request", remove, add };
+	return { status: "request", more, remove, add };
 }
 
-/** The bytes the prefixes `add` and the Prefix IDs `remove` take in an ANNOUNCE_REQUEST, beside
- * its two counts. */
-function editBytes(add: Iterable<Path.Valid>, remove: Iterable<bigint>, version: Version): number {
-	const size = (value: number | bigint) => encodeVarint(value, version).byteLength;
-	const encoder = new TextEncoder();
-	let bytes = 0;
-	for (const id of remove) bytes += size(id);
-	for (const prefix of add) {
-		const length = encoder.encode(Path.encode(prefix)).byteLength;
-		bytes += size(length) + length + 1;
-	}
-	return bytes;
+/** The bytes one Add of `prefix` takes: its length, its bytes, and its flag. */
+function addSize(prefix: Path.Valid, version: Version): number {
+	const length = new TextEncoder().encode(Path.encode(prefix)).byteLength;
+	return encodeVarint(length, version).byteLength + length + 1;
+}
+
+/** The bytes an ANNOUNCE_REQUEST body takes with `removes` Prefix IDs totalling `ids` bytes and
+ * `adds` Adds totalling `added` bytes. */
+function requestSize(removes: number, ids: number, adds: number, added: number, version: Version): number {
+	return 1 + encodeVarint(removes, version).byteLength + encodeVarint(adds, version).byteLength + ids + added;
 }
 
 /** Whether the prefixes `set` fit the Adds of one ANNOUNCE_REQUEST, as a subscriber's whole set
- * must, beside the Prefix IDs `remove`. */
-export function requestFits(set: Iterable<Path.Valid>, version: Version, remove: readonly bigint[] = []): boolean {
-	const add = [...set];
-	const counts = encodeVarint(remove.length, version).byteLength + encodeVarint(add.length, version).byteLength;
-	return editBytes(add, remove, version) + counts <= MAX_MESSAGE_SIZE;
+ * must. */
+export function requestFits(set: Iterable<Path.Valid>, version: Version): boolean {
+	let adds = 0;
+	let added = 0;
+	for (const prefix of set) {
+		adds++;
+		added += addSize(prefix, version);
+	}
+	return requestSize(0, 0, adds, added, version) <= MAX_MESSAGE_SIZE;
 }
 
 /**
- * The next part of an edit of a subscriber's prefixes that removes `removed` and adds `add`.
- *
- * Both sets fit one ANNOUNCE_REQUEST as Adds, but an edit also names each prefix it removes, so a
- * large swap can pass one request: it then goes in parts, each changing whole groups of a prefix
- * and those at or inside it, which it replaces at once so nothing still wanted goes unrequested in
- * between. The groups that shrink the set go first, so every set between the two fits too.
- * Mirrors `next_edit` in rs/moq-net.
+ * The ANNOUNCE_REQUESTs of one edit removing the Prefix IDs `remove` and adding `add`: as many as
+ * it takes for each to fit one message, every one but the last with `more`. The receiver applies
+ * them together at the last, so how they split changes nothing. Mirrors `request_parts` in
+ * rs/moq-net.
  *
  * @internal
  */
-export function editPart(
-	removed: { id: bigint; path: Path.Valid }[],
+export function requestParts(
+	remove: bigint[],
 	add: Add[],
 	version: Version,
-): { remove: bigint[]; add: Add[] } {
-	const remove = removed.map(({ id }) => id);
-	if (
-		requestFits(
-			add.map(({ prefix }) => prefix),
+): { status: "request"; more: boolean; remove: bigint[]; add: Add[] }[] {
+	const parts: { remove: bigint[]; add: Add[] }[] = [];
+	let part: { remove: bigint[]; add: Add[] } = { remove: [], add: [] };
+	let ids = 0;
+	let added = 0;
+	const fits = (id: number, adding: number) =>
+		requestSize(
+			part.remove.length + (id > 0 ? 1 : 0),
+			ids + id,
+			part.add.length + (adding > 0 ? 1 : 0),
+			added + adding,
 			version,
-			remove,
-		)
-	)
-		return { remove, add };
-
-	// Each side's prefixes lie inside no other, so a group is a prefix of one side and those of
-	// the other at or inside it, keyed by that widest one.
-	const adds = new Set(add.map(({ prefix }) => prefix));
-	const gones = new Set(removed.map(({ path }) => path));
-	const widest = (path: Path.Valid, other: Set<Path.Valid>) => {
-		let top: Path.Valid | undefined;
-		for (const above of coveringPrefixes(path)) if (other.has(above)) top = above;
-		return top ?? path;
+		) <= MAX_MESSAGE_SIZE;
+	const next = () => {
+		parts.push(part);
+		part = { remove: [], add: [] };
+		ids = 0;
+		added = 0;
 	};
-	const groups = new Map<Path.Valid, { remove: bigint[]; add: Add[]; gone: Path.Valid[] }>();
-	const group = (key: Path.Valid) => {
-		let found = groups.get(key);
-		if (!found) {
-			found = { remove: [], add: [], gone: [] };
-			groups.set(key, found);
-		}
-		return found;
-	};
-	for (const { id, path } of removed) {
-		const found = group(widest(path, adds));
-		found.remove.push(id);
-		found.gone.push(path);
+	for (const id of remove) {
+		const bytes = encodeVarint(id, version).byteLength;
+		if (!fits(bytes, 0)) next();
+		part.remove.push(id);
+		ids += bytes;
 	}
-	for (const added of add) group(widest(added.prefix, gones)).add.push(added);
-	const sized = [...groups.values()].map((found) => {
-		const paths = found.add.map(({ prefix }) => prefix);
-		const cost = editBytes(paths, found.remove, version);
-		const delta = editBytes(paths, [], version) - editBytes(found.gone, [], version);
-		return { ...found, cost, delta };
-	});
-	sized.sort((a, b) => a.delta - b.delta);
-
-	// The two counts take at most 8 bytes each. Any one group fits: it removes no more prefixes
-	// than one request held beside one add, or adds no more than one request holds beside one
-	// remove.
-	const part: { remove: bigint[]; add: Add[] } = { remove: [], add: [] };
-	let spent = 16;
-	for (const found of sized) {
-		if (spent + found.cost > MAX_MESSAGE_SIZE && spent > 16) break;
-		spent += found.cost;
-		part.remove.push(...found.remove);
-		part.add.push(...found.add);
+	for (const one of add) {
+		const bytes = addSize(one.prefix, version);
+		if (!fits(0, bytes)) next();
+		part.add.push(one);
+		added += bytes;
 	}
-	return part;
+	parts.push(part);
+	return parts.map((part, i) => ({ status: "request", more: i + 1 < parts.length, ...part }));
 }
 
 /** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or
@@ -609,7 +588,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await w.u62(msg.prefix);
 			break;
 		case "request":
-			await encodeRequest(w, msg.remove, msg.add);
+			await encodeRequest(w, msg.more, msg.remove, msg.add);
 			break;
 		case "ok":
 			break;
