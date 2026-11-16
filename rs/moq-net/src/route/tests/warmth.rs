@@ -720,7 +720,7 @@ fn an_edge_finds_the_warm_core_beside_its_route() {
 }
 
 /// One CSV row of the growth sweeps.
-struct Sized {
+struct Size {
 	shape: Shape,
 	/// Cores and edges per core, or the CDN relay and its drones.
 	cores: usize,
@@ -749,7 +749,7 @@ fn benchmark_warmth_growth() {
 	let mut sizes = Vec::new();
 	let region = |regions: usize, edges: usize, peered: bool, arms: Vec<Arm>, wide: bool| {
 		let cores = 2 * regions;
-		Sized {
+		Size {
 			shape: cdn(regions, edges, peered, 1),
 			cores,
 			edges,
@@ -778,7 +778,7 @@ fn benchmark_warmth_growth() {
 		}
 	}
 	for count in [5, 16, 64] {
-		sizes.push(Sized {
+		sizes.push(Size {
 			shape: drones(count),
 			cores: 1,
 			edges: count,
