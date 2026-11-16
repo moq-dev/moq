@@ -228,7 +228,11 @@ export async function readFrames(
 			if (ingest?.partial) throw malformed("GROUP_END before completing the frame a continuation resumed");
 			if (frame.end <= producer.sequence)
 				throw malformed(`GROUP_END at ${frame.end}, not past the group's start`);
-			if (!(await stream.done())) throw malformed("bytes after GROUP_END");
+			// The FIN may never come, so the group's own close, such as an abort or eviction, still
+			// ends the wait.
+			const done = await race([stream.done(), producer.closed]);
+			if (done === false) throw malformed("bytes after GROUP_END");
+			if (done !== true) return undefined;
 			return frame.end;
 		}
 		if (ingest) {

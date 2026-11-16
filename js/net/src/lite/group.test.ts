@@ -167,6 +167,27 @@ test("a lite-07 GROUP_END says where the group ends", async () => {
 	expect(await readLite07(lite07(...frame))).toBeUndefined();
 });
 
+// A publisher that stalls between GROUP_END and its FIN can't hold the read open: the group's own
+// close, such as an abort or eviction, still ends it.
+test("a lite-07 GROUP_END still waiting for its FIN stops once the group closes", async () => {
+	const producer = new Producer(0n);
+	const stream = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(lite07(2, 0, 7, 0, 500));
+			},
+		}),
+		undefined,
+		Version.DRAFT_07,
+	);
+	const consumer = producer.consume();
+	const done = readFrames(stream, producer, { scale: SCALE, lengthFirst: true });
+	// The frame and GROUP_END arrive together, so once the frame is read the FIN is all that's left.
+	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([7]));
+	producer.abort(new Error("evicted"));
+	expect(await done).toBeUndefined();
+});
+
 // An End at or before the group's start, or anything after GROUP_END, is malformed. A malformed
 // FRAME ends only its stream, so it is a stream error rather than a session's protocol violation.
 test.each([

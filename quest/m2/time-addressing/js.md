@@ -18,6 +18,13 @@ so they are carried past 2^53 (decided 2026-11-03, maintainer).
 types PR, to keep frames allocation-free); revisit it here if a start must
 compare exactly with a timestamp past 2^53 ticks.
 
+Until this lands the lite-07 wire's one Time anchor reaches the JS model as
+a group key (`requestedRanges`, `js/net/src/lite/subscribe.ts`): a start
+`t` is a floor at key `t`, not the group containing `t`, so a JS publisher
+holding sparse keys skips the group a seek between two starts falls in.
+Resolve a Time start to the containing group here, as Rust's
+`track::Anchor::Time` does.
+
 The spike found no sparse-ID breakage in direct `@moq/net` sessions over
 lite-06 and lite-07; its relay fills follow Rust's once JavaScript received
 copies fill. JS ranges
