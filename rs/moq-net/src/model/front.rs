@@ -546,6 +546,7 @@ impl Front {
 		actions: &mut Vec<Action>,
 	) {
 		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
+		let strands = self.strands();
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
@@ -568,8 +569,9 @@ impl Front {
 					actions.push(Action::Splice { track: name, source });
 				}
 				Err(_) if closing => {}
-				// The route lost it: ask again once the table moves, as for an open track.
-				Err(err) if err.unroutable() => track.stranded = Some(source),
+				// The route lost it: ask again once the table moves, as for an open track. A
+				// local or minted route's word is the verdict, as it is there.
+				Err(err) if err.unroutable() && strands => track.stranded = Some(source),
 				Err(_) => {
 					track.ended = Some(Ended::Concluded);
 					actions.push(Action::Conclude { track: name });
@@ -2194,6 +2196,38 @@ mod tests {
 			assert_index_matches_scan(&front);
 			assert_eq!(front.next_deadline(), Some(t0.saturating_add(LINGER)));
 		}
+	}
+
+	/// A local route has no stale view to wait out: its unroutable answer for a finished
+	/// track's rerouted copy concludes the track, as any other refusal does.
+	#[test]
+	fn a_local_routes_unroutable_answer_concludes_a_finished_track() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Ok(()),
+			delivered: true,
+		});
+		front.step(Event::Selected {
+			best: Some(local(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(Error::Unroutable),
+				retry: None,
+			}),
+			&[Action::Conclude { track: name("video") }],
+		);
 	}
 
 	/// An aborted track lingers the same way rather than staying for the life of
