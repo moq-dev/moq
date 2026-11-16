@@ -1304,14 +1304,15 @@ mod tests {
 
 		for relay in [false, true] {
 			let (publisher, subscriber) = (origin(1), origin(3));
-			// SETUP takes the first uni stream; the second is the backlog's oldest group.
+			// SETUP and the Announce Stream take the first two uni streams; the third is
+			// the backlog's oldest group.
 			let (held, _downstream) = match relay {
 				true => {
 					let middle = origin(2);
-					let held = Link::held(&publisher, &middle, 2).await;
+					let held = Link::held(&publisher, &middle, 3).await;
 					(held, Some(Link::new(&middle, &subscriber).await))
 				}
-				false => (Link::held(&publisher, &subscriber, 2).await, None),
+				false => (Link::held(&publisher, &subscriber, 3).await, None),
 			};
 
 			let broadcast = publisher

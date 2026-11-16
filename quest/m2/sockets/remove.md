@@ -53,21 +53,41 @@ What exists only for sockets, to check before deleting:
 - `broadcast::Producer::reserve_unlisted_track`
   (`rs/moq-net/src/model/broadcast.rs:406`), `pub(super)`: a track a peer
   who knows its name finds, never announced or listed. Sockets are its one
-  caller. Kixel's copy is built on moq-net's public API and needs exactly
-  this. Recommended: make it public, with Kixel as its named consumer,
-  instead of deleting it; the alternative is that Kixel's session tracks
-  appear in track listings.
+  caller. Kixel's copy is built on moq-net's public API and needs it.
+  Decided 2026-11-16 (maintainer, kixel.ai's unblock triage): ✅ make
+  it public, with [Kixel's socket endpoint](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m0/mesh/sockets.md)
+  as its named consumer (rejected: deleting it, which puts Kixel's session
+  tracks in track listings). Its doc says unlisted controls discovery, not
+  authorization, and a moq-net test that outlives the socket tests shows an
+  accepted reservation is readable by name and absent from track listings.
+- `track::Producer::weak` and `TrackWeak` (`rs/moq-net/src/model/track.rs`),
+  `pub(super)`: the endpoint keeps a weak handle to each open session's
+  track (`socket.rs:236`) so closing the endpoint aborts its sessions
+  without holding them open, then aborts what is left before withdrawing
+  its broadcasts, so subscribers see a cancel rather than an unroutable
+  route. Kixel's port needs the same cleanup. Holding strong producers is no
+  substitute: a held producer never auto-closes, which is what the pruning
+  watches for. Recommended: publish a narrow non-owning handle that reports
+  whether its track closed and cancels it, rather than `TrackWeak` whole;
+  its cancel keeps the listing contract `Producer::abort` has (unlist first),
+  or works only on unlisted tracks. Tests pin that a held handle keeps no
+  dropped track alive.
 - `origin::Consumer::hidden_withheld` and the hold a pre-lite-07 client
   session takes on it (`rs/moq-net/src/lite/session.rs:311-315`), which make
   a dial fail `Unsupported` while a hop cannot carry hidden broadcasts.
-  Sockets are its one reader (`socket.rs:442`). Recommended: delete it,
-  unless Kixel's port names a need.
+  Sockets are its one reader (`socket.rs:442`). Delete it: Kixel's port
+  dials lite-07 only and needs none.
 - Hidden (`.`-named) broadcasts themselves are not socket-only: HLS, the CLI,
   and `RouteOptions::hidden()` use them
   (`rs/moq-hls/src/server/mod.rs:191`, `doc/concept/identity.md:196`). They
   stay.
 - `rs/moq-net/src/auth.rs` tests use `.socket` only as a pattern string;
   they stay.
+- JS keeps nothing for Kixel: it ports only the Rust endpoint, and its two
+  JS users exchange plain broadcasts instead (decided 2026-11-16, same
+  triage). The `@moq/net` internals `socket.ts` reads, such as
+  `hiddenWithheld` and `requestWanted`, go or stay as their other callers
+  need.
 
 For the PR:
 
@@ -78,12 +98,10 @@ For the PR:
   must already be off it.
 - Record the PR's parent commit in the PR body: it is the reference Kixel
   ports from.
-- If [the closed-endpoint flake](/quest/m0/test-flakes-3/py-socket-abort.md)
-  is still open, delete it here: its test leaves.
 - Run `just test interop --all` (moq-ffi changes) and `just api-diff`.
 
 Public API: breaking for `main`-only API in every language; nothing on
-`release` has sockets. Adds `reserve_unlisted_track` if kept. Wire: none
+`release` has sockets. Adds `reserve_unlisted_track` and a non-owning track cancellation handle. Wire: none
 (sockets were a path and track naming convention).
 
 ## Required

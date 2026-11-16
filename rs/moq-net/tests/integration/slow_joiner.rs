@@ -53,8 +53,8 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	// accepting streams, so the stream credit it grants runs out.
 	let gate = kio::Producer::new(true);
 	let mut downstream = MockConnectOptions::new(version);
-	// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-	downstream.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+	// One for groups, past the stream the session keeps open.
+	downstream.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	downstream.client_publish = Some(relay.consume());
 	downstream.server_subscribe = Some(viewer.clone());
 	downstream.server_gate = Some(gate.consume());

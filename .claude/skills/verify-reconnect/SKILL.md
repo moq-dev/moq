@@ -18,7 +18,7 @@ Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan`, `Re
 | `OfflineMeansNothingServes` | Disconnected is reported only when no predecessor still serves (`Action::Offline`: "nothing serves anymore"); one closing gracefully carries nothing and takes no new work. | An app waiting on `established` stalls, and the UI says disconnected, while a session still carries its media. |
 | `NoOrphan` | Until the policy is done, every open session is the live one or the predecessor. | A transport and the peer's state stay open with nothing able to reach them. |
 | `PresenceBalanced` | `sessions_started - sessions_ended` is 1 while connected and 0 otherwise. | Presence counts drift on every migration. |
-| `FirstWalkFailsFast` | Nothing backs off before a session has been established: a failed first walk ends the policy (a refusal of since-replaced tokens is the exception, and tokens are not modeled). | A setup mistake (an untrusted certificate, no version in common) retries forever instead of surfacing. |
+| `FirstWalkFailsFast` | Until a session has stayed up past the healthy bar or got a GOAWAY, which no refusal sends, no failed dial or closed session backs off: either ends the policy. | A setup mistake (an untrusted certificate, no version in common) or a refused credential retries forever instead of surfacing. |
 | `RedirectFollowed` | A dial never goes elsewhere than a redirect, named to a session the policy still holds, that the policy never acted on. | The replacement lands back on the node that is leaving. |
 
 ## Run
@@ -29,7 +29,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartHandoff.cfg
 ```
 
-The first checks every rule over four sessions: about 1.4M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 300k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule over four sessions: about 1.5M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 330k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -41,12 +41,12 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `c3682eae32c19362b99292d2a1c2ddb80679dd2f`. Run `git log c3682eae32.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `8f8eec388694cd74555b9a8adfbf63d0bc07da92`. Run `git log 8f8eec3886.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/reconnect.rs` `Reconnect::poll` (queue, predecessor, phases), `follow` | `Pop`, `Retire`, `IdleClose`, `FollowPred`, `Dial`, `Abandon`, `BackoffEnds`, `LiveEnds`, `ProbeAsk`, `ProbeAbandon` |
-| `rs/moq-net/src/reconnect.rs` `established`, and `walk_failed` ending the first walk | `Established`, `Failed`, `Abandon` |
+| `rs/moq-net/src/reconnect.rs` `established`, set by `end` and by a GOAWAY in `poll`, and `walk_failed` and `closed` failing fast until it is set | `established`, `EndGoaway`, `LiveEnds`, `Failed`, `Abandon`, `EndClosed` |
 | `rs/moq-net/src/reconnect.rs` `connected`, `fallback`, `failed`, `probed` | `Connected`, `Failed`, `ProbeFails`, `ProbeGetsThrough` |
 | `rs/moq-net/src/reconnect.rs` `end`, `closed`, `done`, `Predecessor` | `EndGoaway`, `EndClosed`, `Done`, `Retire`, `IdleClose` |
 | `rs/moq-net/src/reconnect.rs` `Restart::Wait`, `Restart::Handoff` | `LiveEnds` and `WaitOut` with `Restart = "wait"` (`RestartWait.cfg`) and `"handoff"` (`RestartHandoff.cfg`) |
