@@ -17,6 +17,14 @@ unproven.
 Trusted-publishing configuration and checks of already-published artifacts
 can proceed independently; cutting the tag cannot.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): Dart
+ships as experimental. The `moq` wrapper keeps its own 0.x version instead
+of the shared 0.22 minor, and `moq_ffi`'s generated sources are built at
+publish time rather than checked in
+([Dart is experimental](/quest/m2/dart-experimental.md)). So the tag this
+quest cuts is the wrapper's own next 0.x, and the clean-machine check below
+must also find `moq.dart` inside the published `moq_ffi` archive.
+
 - Trusted publishing for `moq` is fixed: its repository field read
   `moq/moq-dev` (owner and name swapped), so pub.dev refused the
   `moq-dart-v0.1.1` tag's token. On 2026-11-11 the maintainer set it to

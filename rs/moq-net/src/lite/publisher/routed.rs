@@ -708,13 +708,22 @@ impl Answer {
 		for (path, claim) in changes {
 			// Named as the handle names it: beneath the mount point for a mount, and never
 			// a claim the origin holds beneath a mount for the prefix's own.
-			let path = match mount {
+			let (path, claim) = match mount {
 				Some(mount) => match mount.name(&path) {
-					Some(named) => named,
+					// A claim above the target covers all of the mount, so as the handle
+					// names it, it is no more above the path than the mount point is.
+					Some(named) => {
+						let beneath = mount.beneath(&named);
+						let claim = claim.map(|claim| node::Claim {
+							above: claim.above.min(beneath),
+							..claim
+						});
+						(named, claim)
+					}
 					None => continue,
 				},
 				None if self.origin.shadows(&path) => continue,
-				None => path,
+				None => (path, claim),
 			};
 			sent.set(&self.link, path.clone(), claim);
 			paths.push(path);
@@ -758,6 +767,13 @@ impl Answer {
 		path.strip_prefix(self.prefix.as_ref()?)
 	}
 
+	/// How many segments the peer's path for the absolute `path` has: the most a claim shown
+	/// there can be above it, since a claim above the handle's root covers the whole of what
+	/// the peer sees.
+	fn depth(&self, path: &Path) -> u64 {
+		path.parts().count().saturating_sub(self.origin.root().parts().count()) as u64
+	}
+
 	/// Whether the peer is shown the claim at the absolute `path`.
 	fn shows(&self, path: &Path) -> bool {
 		let Some(suffix) = self.suffix(path) else {
@@ -781,6 +797,7 @@ impl Answer {
 			.map(|claim| claim.chain.clone())
 			.unwrap_or_default();
 		let claim_key = (key.clone(), path);
+		let depth = self.depth(&claim_key.1);
 		match (self.live.get_mut(&claim_key), wanted) {
 			(None, Some(claim)) => {
 				let wire = self.start(stream, key)?;
@@ -794,6 +811,7 @@ impl Answer {
 					epoch: claim.epoch,
 					hops: chain,
 					cost: origin::Cost::new(claim.cost),
+					above: claim.above.min(depth),
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(claim_key, (announce, claim));
@@ -802,7 +820,9 @@ impl Answer {
 			(Some((announce, held)), Some(claim)) => {
 				let announce = *announce;
 				let restart = held.instance != claim.instance || held.epoch != claim.epoch;
-				let update = held.cost != claim.cost || (self.chains && held.chain != claim.chain);
+				let update = held.cost != claim.cost
+					|| held.above.min(depth) != claim.above.min(depth)
+					|| (self.chains && held.chain != claim.chain);
 				if restart {
 					tracing::debug!(route = %claim_key.1, "restart");
 					stream.writer.buffer(&Msg::Restart {
@@ -811,12 +831,14 @@ impl Answer {
 						epoch: claim.epoch,
 						cost: origin::Cost::new(claim.cost),
 						hops: chain,
+						above: claim.above.min(depth),
 					})?;
 				} else if update {
 					stream.writer.buffer(&Msg::Update {
 						id: announce,
 						hops: chain,
 						cost: origin::Cost::new(claim.cost),
+						above: claim.above.min(depth),
 					})?;
 				}
 				self.live.insert(claim_key, (announce, claim));

@@ -266,9 +266,10 @@ its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
 The broadcast stays announced and keeps serving the finished tracks, so a
 subscriber still catching up can drain them, until `broadcast->close()` takes it
 offline. How long to keep it up is yours to decide. A track still open at the
-close, or released without a finish, ends with `Unroutable` (`Internal` over
-moq-transport, which has no such code). Readers follow a publisher's runs by
-announcement, not by that error: see [identity and recovery](/concept/identity).
+close ends with `Unroutable` (`Internal` over moq-transport, which has no such
+code), and one released without a finish ends `Dropped`, which readers see as
+`Internal`. Readers follow a publisher's runs by announcement, not by that error:
+see [identity and recovery](/concept/identity).
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

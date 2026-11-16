@@ -379,8 +379,7 @@ impl Config {
 		if self.handoff.socket.is_none() {
 			return Ok(());
 		}
-		#[cfg(not(target_os = "linux"))]
-		anyhow::bail!("handoff.socket is Linux-only");
+		anyhow::ensure!(cfg!(target_os = "linux"), "handoff.socket is Linux-only");
 		// Static and API peers share one dial socket on a fixed port, bound at startup and
 		// not handed on: a successor could not bind it beside the relay it replaces.
 		anyhow::ensure!(

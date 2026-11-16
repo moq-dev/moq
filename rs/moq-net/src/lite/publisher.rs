@@ -1315,9 +1315,12 @@ impl AnnounceRun {
 				advertised.cost = cost;
 				let hops = chain(self.version, hops);
 				match advertised.id {
-					Some(id) => stream
-						.writer
-						.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?,
+					Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::Update {
+						id,
+						hops,
+						cost,
+						above: 0,
+					})?,
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 						route: 0,
@@ -1326,6 +1329,7 @@ impl AnnounceRun {
 						suffix: lite::PathRef::literal(suffix),
 						hops,
 						cost,
+						above: 0,
 					})?,
 				}
 				self.sent(stream)?;
@@ -1403,6 +1407,7 @@ impl AnnounceRun {
 			suffix: wire,
 			hops: wire_hops,
 			cost,
+			above: 0,
 		})?;
 		self.sent(stream)?;
 		Ok(())
@@ -1439,6 +1444,7 @@ impl AnnounceRun {
 					epoch,
 					cost,
 					hops: crate::Hops::new(),
+					above: 0,
 				})?;
 				self.sent(stream)?;
 			}
@@ -4329,7 +4335,14 @@ mod announce_test {
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
+			[
+				lite::AnnounceBroadcast::Update {
+					id: 0,
+					hops,
+					cost,
+					above: 0,
+				},
+			] => {
 				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}

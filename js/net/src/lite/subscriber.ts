@@ -1072,7 +1072,13 @@ export class Subscriber {
 			owner: object;
 		};
 		const same = (a: Claim | undefined, b: Claim | undefined) =>
-			a === b || (!!a && !!b && a.instance === b.instance && a.epoch === b.epoch && a.cost === b.cost);
+			a === b ||
+			(!!a &&
+				!!b &&
+				a.instance === b.instance &&
+				a.epoch === b.epoch &&
+				a.cost === b.cost &&
+				a.above === b.above);
 
 		// Each live route and claim holds one of the session's announce slots.
 		const routes = new SlotMap<bigint, Route>(this.#announces);
@@ -1135,6 +1141,7 @@ export class Subscriber {
 					node: wire.node,
 					depth: Path.parts(wire.prefix).length,
 					priority: Math.min(0, wire.offer.priority),
+					above: claim.above,
 					draining: wire.offer.draining || wire.drain || undefined,
 					available: !wire.held,
 				}),
@@ -1295,6 +1302,16 @@ export class Subscriber {
 			for (const path of wire.view.claims.keys()) if (byPath.get(path)?.size === 0) byPath.delete(path);
 		};
 
+		// The peer's `above` for the claim at `path`, if it can be: a claim is no more than its
+		// path's segments broader than the path it is shown at. Mirrors rs/moq-net's `Routed::above`.
+		const aboveOf = (path: Path.Valid | undefined, above: bigint | undefined): bigint => {
+			const value = above ?? 0n;
+			if (path === undefined || value === 0n) return value;
+			if (value > BigInt(Path.parts(path).length))
+				throw new ProtocolViolation(`a claim at ${path} cannot be ${value} segments above it`);
+			return value;
+		};
+
 		// A claim the peer started under `routeId` with the next Announce ID, at `path` unless this
 		// node refused it, and `claim` unless it refuses what the peer forwarded.
 		const startClaim = (
@@ -1308,6 +1325,7 @@ export class Subscriber {
 			// The interest prefix can push a joined path past the limits: refused too.
 			const full = suffix === undefined ? undefined : Path.join(prefix, suffix);
 			const named = full !== undefined && Path.check(full) === undefined ? full : undefined;
+			if (claim) claim.above = aboveOf(named, claim.above);
 			if (named === undefined) {
 				if (claim) console.warn(`refusing a forwarded claim: route=${routeId} claim=${id} reason=path`);
 				claims.set(id, { route: routeId });
@@ -1518,15 +1536,21 @@ export class Subscriber {
 						if (msg.route === undefined) throw new ProtocolViolation("lite-07 claim without a route");
 						if (msg.instance === undefined)
 							throw new ProtocolViolation("lite-07 claim without an instance");
-						const claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+						const claim = {
+							instance: msg.instance,
+							epoch: msg.epoch ?? 0n,
+							cost: msg.cost ?? Cost.zero,
+							above: msg.above ?? 0n,
+						};
 						startClaim(msg.route, msg, claim);
 						break;
 					}
 					case "update": {
 						const live = claimOf(msg.id);
+						const above = aboveOf(live.path, msg.above);
 						// An update names none of what a refused claim lacks.
 						if (live.claim === undefined || live.path === undefined) break;
-						live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero };
+						live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero, above };
 						change(live.route, live.path, live.claim);
 						break;
 					}
@@ -1536,7 +1560,12 @@ export class Subscriber {
 							throw new ProtocolViolation("lite-07 restart without an instance");
 						// A claim without a path stays refused, whatever the peer sends for it.
 						if (live.path === undefined) break;
-						live.claim = { instance: msg.instance, epoch: msg.epoch ?? 0n, cost: msg.cost ?? Cost.zero };
+						live.claim = {
+							instance: msg.instance,
+							epoch: msg.epoch ?? 0n,
+							cost: msg.cost ?? Cost.zero,
+							above: aboveOf(live.path, msg.above),
+						};
 						route(live.route).withheld.delete(msg.id);
 						change(live.route, live.path, live.claim);
 						break;

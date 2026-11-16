@@ -115,7 +115,7 @@ Sync commit: `cbb742cecae437ee94fbf25848521ac11b145fbc`, where [moq-dev/moq#8734
 | --- | --- |
 | `rs/moq-net/src/route/path.rs` `Router::run`, `Router::select`, `Router::retain` | `Select` plans live routes and their reflected sources before `SelectKey` decides holds. |
 | `rs/moq-net/src/route/path.rs` `Offer::rank`, `Router::goaway`, `Router::drains`, `Router::report_draining`, `Router::dead` (`Dead::Draining`) | `Rank`, `Below`, `PathPrio`, `CostAt`, `GoAway`, `MarkDrain`, `Credited`, `ReportDrain`, `Recv` |
-| `rs/moq-net/src/route/path.rs` `Router::pending`, `Router::hopes`, `Router::doubts_path` | `Pending`, `Hopes`, `Doubted`, `RelayDoubted` (a path's first node does not count), `Returned` |
+| `rs/moq-net/src/route/path.rs` `Router::pending`, `Router::hopes`, `Router::kept_off`, `Router::doubts_path` | `Pending`, `Hopes`, `Doubted`, `RelayDoubted` (a path's first node does not count), `Returned` |
 | `rs/moq-net/src/route/path.rs` `Router::suspect`, `Router::doubt_until` | `Since`: a doubt on the publisher that begins notes the generation of the relay's own session to it. The router shares one generation across a session's streams (`Session::generation`), which the model's one stream per session leaves out. |
 | `rs/moq-net/src/route/path.rs` `Router::src` | `SrcKey` |
 | `rs/moq-net/src/route/path.rs` `Router::usable_offer`, `Offer` | `SelectKey`'s `Down`, `Want0`'s export check, and `DownOnly`: the down-only flag is set on a route learned over an upstream link or from a down-only one, and never sent over an upstream link. |

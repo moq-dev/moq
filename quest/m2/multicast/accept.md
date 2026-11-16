@@ -44,5 +44,4 @@ Public API: none. Wire: none expected.
 ## Required
 
 - [The switch](/quest/m2/multicast/switch.md) - the sessions these cases run on
-- [Requests](/quest/m2/multicast/requests.md) - a request fails closed and follows its Instance
 - [The proof](/quest/m2/multicast/proof.md) - what these cases need not show
