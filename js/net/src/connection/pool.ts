@@ -29,7 +29,7 @@ import {
 } from "./connect.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Drain as DrainType, GoawayProps, Redirect as RedirectType } from "./goaway.ts";
-import { pumpAnnounced, Reload, type Backoff as BackoffType, type ReloadStatus } from "./reload.ts";
+import { type Backoff as BackoffType, pumpAnnounced, Reload, type ReloadStatus } from "./reload.ts";
 import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";

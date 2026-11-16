@@ -27,7 +27,7 @@ export namespace Auth {
 	export interface Credential {
 		readonly answered: PromiseLike<void>;
 		close(): void;
-		readonly closed: PromiseLike<Error | null>;
+		readonly closed: Signals.GetPromise<Error | null>;
 		readonly grant: Signals.Getter<Auth.Grant | undefined>;
 	}
 	export class Duplicate extends Error {
@@ -179,8 +179,8 @@ export namespace Connection {
 		rtt?: Clock.Duration;
 	}
 	export interface Props {
+		backoff?: Connection.Backoff;
 		consume?: Origin.Producer;
-		delay?: Connection.Backoff;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Goaway;
 		publish?: Origin.Consumer;
@@ -200,7 +200,7 @@ export namespace Connection {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
-		closed: Promise<Error | null>;
+		readonly closed: Signals.GetPromise<Error | null>;
 		readonly draining: Signals.GetPromise<Connection.Drain>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
@@ -509,11 +509,12 @@ export namespace Origin {
 	export interface RequestOptions {
 		instance?: Instance.Valid;
 	}
-	export class Requesting {
+	export class Requesting implements PromiseLike<Broadcast.Consumer> {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
 		close(): void;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
+		get then(): Promise<Broadcast.Consumer>["then"];
 	}
 	export class Route {
 		[Symbol.dispose](): void;

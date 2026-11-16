@@ -517,7 +517,12 @@ test("a private handle with an explicitly undefined timeout outlasts the outage"
 
 	// What a caller building options from optional values produces: the undefined means "the
 	// default", which for a Connection is to retry for as long as the handle is held.
-	const handle = new Connection({ url, share: false, websocket: { enabled: false }, backoff: { timeout: undefined } });
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		backoff: { timeout: undefined },
+	});
 	try {
 		await relay.outage(handle);
 		const before = relay.attempts();

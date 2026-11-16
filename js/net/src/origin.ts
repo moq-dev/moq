@@ -2116,7 +2116,10 @@ export class Requesting implements PromiseLike<broadcast.Consumer> {
 }
 
 // The first of `active` holding a broadcast or `closed` settling, as a promise.
-function answer(active: Getter<broadcast.Consumer | undefined>, closed: GetPromise<Error | null>): Promise<broadcast.Consumer> {
+function answer(
+	active: Getter<broadcast.Consumer | undefined>,
+	closed: GetPromise<Error | null>,
+): Promise<broadcast.Consumer> {
 	return new Promise((resolve, reject) => {
 		let done = false;
 		const stops: Dispose[] = [];

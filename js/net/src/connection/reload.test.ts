@@ -21,7 +21,7 @@ import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
-import { pumpAnnounced, Redirects, Reload, type Backoff, type ReloadProps } from "./reload.ts";
+import { type Backoff, pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 import type { Session } from "./session.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
@@ -1561,9 +1561,10 @@ test("a backoff field with no meaning is refused when the loop is built", () => 
 		{ multiplier: Number.POSITIVE_INFINITY },
 	];
 	for (const backoff of invalid) {
-		expect(() => new Reload({ url: new URL("https://example.com/"), backoff }), String(Object.keys(backoff))).toThrow(
-			RangeError,
-		);
+		expect(
+			() => new Reload({ url: new URL("https://example.com/"), backoff }),
+			String(Object.keys(backoff)),
+		).toThrow(RangeError);
 	}
 });
 
