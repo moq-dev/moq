@@ -123,15 +123,17 @@ export namespace Window {
 		checkpointRecords?: number;
 		ops?: boolean;
 	}
+	export namespace Consumer {
+		export type Config = {
+			track: Track.Subscriber;
+		};
+	}
 	export class Consumer<T> {
-		constructor(config: Window.ConsumerConfig);
+		constructor(config: Window.Consumer.Config);
 		[Symbol.asyncIterator](): AsyncIterator<Timed<Window.Event<T>>>;
 		next(): Promise<Timed<Window.Event<T>> | undefined>;
 		get offset(): number;
 	}
-	export type ConsumerConfig = {
-		track: Track.Subscriber;
-	};
 	export class Decoder<T> {
 		constructor();
 		group(): Window.Group;
@@ -173,8 +175,13 @@ export namespace Window {
 	export interface Pending extends Window.Encoded {
 		commit(): void;
 	}
+	export namespace Producer {
+		export type Config = Window.Config & {
+			track: Track.Producer;
+		};
+	}
 	export class Producer<T> {
-		constructor(config: Window.ProducerConfig);
+		constructor(config: Window.Producer.Config);
 		abort(err: Error): void;
 		cut(): void;
 		finish(): Window.Finished<T>;
@@ -183,9 +190,6 @@ export namespace Window {
 		push(value: T, at: Time.Timestamp): void;
 		get window(): T[];
 	}
-	export type ProducerConfig = Window.Config & {
-		track: Track.Producer;
-	};
 	export interface Span {
 		end: number;
 		start: number;

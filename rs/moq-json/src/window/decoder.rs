@@ -5,9 +5,9 @@ use std::collections::VecDeque;
 
 use serde::de::DeserializeOwned;
 
+use super::consumer::Config;
 use super::encoder::MAX_INDEX;
 use super::op::{Header, Op};
-use super::consumer::Config;
 use crate::{Error, Result};
 
 /// One change to the window, as the consumer sees it.

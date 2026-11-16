@@ -1445,12 +1445,7 @@ impl Publish {
 	/// Not advertised in the catalog, which has no window mode. The track carries a refresh ratio
 	/// of 8: a join after more than eight headers' worth of edits asks for the window restated in a
 	/// fresh group, which a task answers until the track is finished.
-	pub fn json_window(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::window::Config,
-	) -> Result<Id, Error> {
+	pub fn json_window(&mut self, broadcast: Id, name: &str, config: moq_json::window::Config) -> Result<Id, Error> {
 		let data = self.data_track(broadcast, name, Some(8), |_, track| {
 			Ok(moq_json::window::Producer::new(track, config))
 		})?;

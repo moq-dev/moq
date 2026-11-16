@@ -266,10 +266,7 @@ mod test {
 		producer_on(config, moq_net::track::Info::default())
 	}
 
-	fn producer_on(
-		config: Config,
-		info: moq_net::track::Info,
-	) -> (Producer<Value>, moq_net::track::Subscriber) {
+	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", info)
@@ -703,10 +700,7 @@ mod test {
 	#[test]
 	fn a_joiner_over_the_ratio_gets_a_fresh_header() {
 		let waiter = kio::Waiter::noop();
-		let (mut producer, _track) = producer_on(
-			Config::default(),
-			moq_net::track::Info::default().with_refresh(1),
-		);
+		let (mut producer, _track) = producer_on(Config::default(), moq_net::track::Info::default().with_refresh(1));
 
 		// A 32 byte header and a 16 byte push: under the ratio.
 		producer.push(&rec(0), moq_net::Timestamp::unscaled(0)).unwrap();
