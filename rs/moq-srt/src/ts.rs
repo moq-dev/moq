@@ -18,7 +18,7 @@ use crate::Result;
 /// Which programs of a multi-program MPEG-TS an ingest publishes.
 ///
 /// Without one, an ingest whose PAT lists more than one program fails with
-/// [`ts::MultipleProgramsError`] rather than merging unrelated clocks onto one broadcast.
+/// [`ts::Error::MultiplePrograms`] rather than merging unrelated clocks onto one broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Program {
 	/// Only the program with this PAT program number, on the ingest's path.
@@ -603,11 +603,10 @@ mod tests {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 		let err = publisher.feed(two_programs()).unwrap_err();
-		let crate::Error::Mux(moq_mux::Error::Other(inner)) = &err else {
-			panic!("a demux error: {err}");
+		let crate::Error::Mux(moq_mux::Error::Ts(ts::Error::MultiplePrograms { programs })) = &err else {
+			panic!("a multiplex refusal: {err}");
 		};
-		let refused = inner.downcast_ref::<ts::MultipleProgramsError>();
-		assert_eq!(refused.map(|refused| refused.programs.as_slice()), Some(&[1, 2][..]));
+		assert_eq!(programs, &[1, 2]);
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is

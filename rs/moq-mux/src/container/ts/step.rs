@@ -25,6 +25,7 @@ use bytes::Bytes;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::demux::Demux;
+use super::error::Result;
 use super::health::{Continuation, Continuity, Delta, PTS_LIMIT};
 use super::import::{Framer, Payload, STAGING_BYTES_MAX, adaptation_valid, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
@@ -39,11 +40,10 @@ const PTS_WRAP: u64 = 1 << 33;
 /// The source's clock stepped onto another timeline, or its PAT named another program, so the
 /// [`Import`](super::Import) ended its instance there.
 ///
-/// What follows is another broadcast. [`Republish`](super::Republish) carries on into a new
-/// instance on the same path.
-#[derive(Clone, Debug, thiserror::Error)]
+/// What follows is another broadcast: read [`remainder`](Self::remainder) into a new import.
+/// [`Republish`](super::Republish) carries on that way into a new instance on the same path.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
-#[error("the source {step}; what follows is a new broadcast")]
 pub struct Restart {
 	/// How the source changed.
 	pub step: Step,

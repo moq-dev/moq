@@ -77,8 +77,12 @@ impl ImportArgs {
 
 /// Point a multi-program refusal at the flag that resolves it.
 fn suggest_program(err: moq_srt::Error) -> anyhow::Error {
-	let multiplex = matches!(&err, moq_srt::Error::Mux(moq_mux::Error::Other(inner))
-		if inner.is::<moq_mux::container::ts::MultipleProgramsError>());
+	let multiplex = matches!(
+		err,
+		moq_srt::Error::Mux(moq_mux::Error::Ts(
+			moq_mux::container::ts::Error::MultiplePrograms { .. }
+		))
+	);
 	let err = anyhow::Error::from(err);
 	if multiplex {
 		err.context("choose one with `--program <n>`, or publish each with `--program all`")

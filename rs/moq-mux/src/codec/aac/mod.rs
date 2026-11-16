@@ -77,6 +77,10 @@ pub enum Error {
 	/// Whole bytes follow the AudioSpecificConfig's last field.
 	#[error("{0} bytes after the AudioSpecificConfig")]
 	TrailingBytes(usize),
+
+	/// An ADTS header or frame is invalid, or cannot carry the frame.
+	#[error("adts: {0}")]
+	Adts(#[from] adts::Error),
 }
 
 /// A result using this module's error type.

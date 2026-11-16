@@ -179,9 +179,11 @@ struct Imported {
 
 /// Import `data`, onto a catalog clock already fixed when `captured` (so the timestamps shift),
 /// or one the first PTS places (so they stay verbatim).
-fn import(data: &[u8], captured: bool) -> anyhow::Result<Imported> {
+fn import(data: &[u8], captured: bool) -> Result<Imported, super::Error> {
 	let mut import = start(captured);
-	import.import.decode(data)?;
+	if let Some(restart) = import.import.decode(data)? {
+		panic!("the source restarted: {}", restart.step);
+	}
 	import.import.finish_in_place()?;
 	Ok(import)
 }
@@ -627,7 +629,10 @@ fn a_program_with_missing_media_timestamps_is_refused() {
 		feed.pcr(1_000 * MS + i * 40 * MS).data(klv(i as u8, 8));
 	}
 	let err = import(&feed.bytes(), false).err().expect("the import is refused");
-	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+	assert!(
+		matches!(&err, super::Error::Malformed(msg) if msg.contains("without a media timestamp")),
+		"{err:#}"
+	);
 }
 
 /// No media PTS is needed when the PMT declares only data: PCR carries the era too.
@@ -989,7 +994,10 @@ async fn a_private_stream_dropped_before_the_media_clock_refuses_the_import() {
 		.import
 		.decode(&feed.bytes()[head.len()..])
 		.expect_err("the held PES has no media timestamp to be placed by");
-	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+	assert!(
+		matches!(&err, super::Error::Malformed(msg) if msg.contains("without a media timestamp")),
+		"{err:#}"
+	);
 	imported.import.abort(moq_net::Error::Unsupported);
 	let (_, end) = held.await.unwrap();
 	assert!(end.as_ref().is_err_and(|err| err.contains("unsupported")), "{end:?}");

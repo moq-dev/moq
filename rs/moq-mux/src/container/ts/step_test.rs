@@ -116,10 +116,10 @@ fn replay(gap: i64, by: impl Fn(Clock) -> i64) -> (Vec<u8>, usize) {
 	(data, CLIP.len())
 }
 
-/// The importer, its catalog kept alive, fed `data` in `chunk`-byte pieces until it fails.
-/// Returns the failure, if any, and the input it did not take: a restart's remainder followed
-/// by the pieces never fed.
-fn feed(data: &[u8], chunk: usize) -> (Option<anyhow::Error>, Vec<u8>) {
+/// The importer, its catalog kept alive, fed `data` in `chunk`-byte pieces until it restarts or
+/// fails. A restart comes with the input the importer did not take: its remainder followed by
+/// the pieces never fed.
+fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::Error> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(
 		&mut broadcast,
@@ -128,18 +128,16 @@ fn feed(data: &[u8], chunk: usize) -> (Option<anyhow::Error>, Vec<u8>) {
 	.unwrap();
 	let mut import = Import::new(broadcast, catalog.reserve());
 	for (index, piece) in data.chunks(chunk).enumerate() {
-		if let Err(err) = import.decode(piece) {
-			let Some(restart) = err.downcast_ref::<Restart>() else {
-				return (Some(err), Vec::new());
-			};
+		if let Some(restart) = import.decode(piece)? {
 			let mut rest = restart.remainder.to_vec();
 			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
 			// The instance before the step ends cleanly.
 			let _finished = import.finish().unwrap();
-			return (Some(err), rest);
+			return Ok(Some((restart, rest)));
 		}
 	}
-	(import.finish().err(), Vec::new())
+	let _finished = import.finish()?;
+	Ok(None)
 }
 
 /// The input from the first packet of `pass` that carries a timestamp.
@@ -160,9 +158,7 @@ fn an_unflagged_switch_restarts_either_way() {
 	for (gap, expected) in [(-SWITCH, "rewind"), (SWITCH, "leap")] {
 		let (data, second) = replay(gap, |_| 0);
 		for chunk in [data.len(), 188 * 7, 1_000] {
-			let (err, rest) = feed(&data, chunk);
-			let err = err.expect("the switch ends the instance");
-			let restart = err.downcast_ref::<Restart>().expect("a restart");
+			let (restart, rest) = feed(&data, chunk).unwrap().expect("the switch ends the instance");
 			let by = match (restart.step, expected) {
 				(Step::Rewind { by, flagged: false }, "rewind") | (Step::Leap { by }, "leap") => by,
 				(step, _) => panic!("{expected}: {step:?}"),
@@ -176,8 +172,8 @@ fn an_unflagged_switch_restarts_either_way() {
 			assert!(rest.len() >= first_timed(&data[second..]).len(), "{expected} {chunk}");
 
 			// What follows imports as a broadcast of its own.
-			let (err, _) = feed(&rest, chunk);
-			assert!(err.is_none(), "{expected}: {err:?}");
+			let fed = feed(&rest, chunk);
+			assert!(matches!(fed, Ok(None)), "{expected}: {fed:?}");
 		}
 	}
 }
@@ -214,11 +210,9 @@ fn another_identity_restarts_at_its_pat() {
 	let mut data = CLIP.to_vec();
 	data.extend_from_slice(&second);
 	for chunk in [data.len(), 188 * 7, 1_000] {
-		let (err, rest) = feed(&data, chunk);
-		let err = err.expect("the switch ends the instance");
-		let restart = err
-			.downcast_ref::<Restart>()
-			.unwrap_or_else(|| panic!("{chunk}: {err:#}"));
+		let (restart, rest) = feed(&data, chunk)
+			.unwrap()
+			.unwrap_or_else(|| panic!("{chunk}: the switch ends the instance"));
 		assert_eq!(
 			restart.step,
 			Step::Identity {
@@ -228,8 +222,8 @@ fn another_identity_restarts_at_its_pat() {
 			"{chunk}"
 		);
 		assert_eq!(rest, second[pat..], "{chunk}: the new instance starts at its PAT");
-		let (err, _) = feed(&rest, chunk);
-		assert!(err.is_none(), "{chunk}: {err:?}");
+		let fed = feed(&rest, chunk);
+		assert!(matches!(fed, Ok(None)), "{chunk}: {fed:?}");
 	}
 }
 
@@ -238,15 +232,15 @@ fn another_identity_restarts_at_its_pat() {
 #[test]
 fn a_step_under_the_bound_carries_on() {
 	let (data, _) = replay(9 * HZ, |_| 0);
-	let (err, _) = feed(&data, 188 * 7);
-	assert!(err.is_none(), "{err:?}");
+	let fed = feed(&data, 188 * 7);
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 
 	// Two seconds of the clip lost in the middle.
 	let packets = CLIP.len() / 188;
 	let mut lossy = CLIP[..packets / 3 * 188].to_vec();
 	lossy.extend_from_slice(&CLIP[packets * 2 / 3 * 188..]);
-	let (err, _) = feed(&lossy, 188 * 7);
-	assert!(err.is_none(), "{err:?}");
+	let fed = feed(&lossy, 188 * 7);
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 }
 
 /// A stream the new source does not carry is waited for only as long as a cadenced stream may
@@ -266,9 +260,7 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 	data.truncate(second);
 	data.extend(&without);
 
-	let (err, rest) = feed(&data, 188 * 7);
-	let err = err.expect("the switch ends the instance");
-	let restart = err.downcast_ref::<Restart>().expect("a restart");
+	let (restart, rest) = feed(&data, 188 * 7).unwrap().expect("the switch ends the instance");
 	assert!(
 		matches!(restart.step, Step::Rewind { flagged: false, .. }),
 		"{restart:?}"
@@ -281,8 +273,8 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 #[test]
 fn a_clock_stepping_alone_is_no_switch() {
 	let (data, _) = replay(HZ, |clock| if clock == Clock::Pcr { -SWITCH } else { 0 });
-	let (err, _) = feed(&data, 188 * 7);
-	assert!(err.as_ref().is_none_or(|err| !err.is::<Restart>()), "{err:?}");
+	let fed = feed(&data, 188 * 7);
+	assert!(!matches!(fed, Ok(Some(_))), "{fed:?}");
 
 	// The audio carries on a second after the first pass while the rest rewinds.
 	let audio = audio_pid(CLIP);
@@ -290,8 +282,8 @@ fn a_clock_stepping_alone_is_no_switch() {
 		-SWITCH,
 		|clock| if clock == Clock::Pes(audio) { SWITCH + HZ } else { 0 },
 	);
-	let (err, _) = feed(&data, 188 * 7);
-	assert!(err.as_ref().is_none_or(|err| !err.is::<Restart>()), "{err:?}");
+	let fed = feed(&data, 188 * 7);
+	assert!(!matches!(fed, Ok(Some(_))), "{fed:?}");
 }
 
 /// The PID of the clip's audio: the PES that are not video.
