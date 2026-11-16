@@ -984,10 +984,12 @@ else
     METRICS_URL="http://127.0.0.1:${HARNESS_PORT}/metrics"
     printf '\n[internal]\nlisten = "127.0.0.1:%s"\n\n[stats]\nenabled = true\n' "$HARNESS_PORT" >>"$HARNESS_RUN/relay.toml"
 fi
-# Connection spans and clean closes must survive an inherited warn-only filter. The route key lane
-# reads the relay's debug line for each verified proof.
+# The relay's own level stays the base: a RUST_LOG naming only targets would silence every other
+# warning, such as why the relay refused a request. Connection spans and clean closes must survive an
+# inherited warn-only filter. The route key lane reads the relay's debug line for each verified proof,
+# and the idle-out check its upstream subscribe and fetch starts.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
-    "RUST_LOG=${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug" \
+    "RUST_LOG=${RUST_LOG:-info},moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug,moq_net::lite::subscriber=debug" \
     "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -2146,6 +2148,8 @@ run_fetch_round() {
         why="incorrect or missing FETCH payload"
         overall=1
         cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
+        # The run's last lines may be a later round's, so print the relay's side of this one.
+        relay_log_since "$from" | sed 's/^/  relay: /'
         harness_reap "$pid"
     fi
     exec 9>&-
@@ -2166,7 +2170,8 @@ run_fetch_subscriber() {
             grep -qx 'fetch clean group=1 frames=3 bytes=196608' "$LOGS/$name-sub.log"
         return
     fi
-    timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
+    # At debug, a failed fetch says whether it went on the wire and how the relay answered it.
+    RUST_LOG="${RUST_LOG:-info},moq_net=debug" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
         --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" 2>"$LOGS/$name-sub.log" &&
         python3 - "$LOGS/$name.json" <<'PYCODE'
 import base64, json, sys
