@@ -1361,6 +1361,14 @@ export class Subscriber {
 				message: `publish done: malformed track reason=${done.reasonPhrase}`,
 			});
 		}
+		// moq-transport has no code for a lost route, so a relay that loses its upstream ends the
+		// subscription with INTERNAL_ERROR, where a moq-lite relay resets with UNROUTABLE. Read the
+		// two alike, so a reader asks another route on either wire. Mirrors the Rust `PublishDone::end`.
+		if (done.statusCode === PublishDoneStatus.INTERNAL_ERROR) {
+			throw new StreamError(StreamCode.Unroutable, {
+				message: `publish done: internal error reason=${done.reasonPhrase}`,
+			});
+		}
 		if (!publishDoneClean(done.statusCode, version)) {
 			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
 		}

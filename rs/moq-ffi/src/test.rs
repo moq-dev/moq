@@ -5966,13 +5966,10 @@ async fn server_client_run_end(version: &str) {
 	else {
 		panic!("withdrawal falsely declared the unfinished track complete");
 	};
-	if version == "moq-lite-07-wip" {
-		assert_protocol(&error, crate::error::MoqErrorScope::Stream, MoqProtocolKind::Unroutable);
-	} else {
-		// The IETF PUBLISH_DONE registry has no Unroutable, so the publisher sends INTERNAL_ERROR
-		// and the reader keeps it. Neither TRACK_ENDED nor an EOF fits withdrawn content.
-		assert!(matches!(error, MoqError::Internal { .. }), "{version}: {error:?}");
-	}
+	// The IETF PUBLISH_DONE registry has no Unroutable, so the publisher sends INTERNAL_ERROR,
+	// which the reader takes for the lost route a moq-lite reset names. Neither TRACK_ENDED nor
+	// an EOF fits withdrawn content.
+	assert_protocol(&error, crate::error::MoqErrorScope::Stream, MoqProtocolKind::Unroutable);
 	while kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("catalog end timed out")
