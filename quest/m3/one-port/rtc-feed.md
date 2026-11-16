@@ -80,7 +80,10 @@ returns `None` once the listener is gone.
 
 Things to watch: the server config is `Clone` today and a receiver is not, so
 the fed socket may belong in the server's constructor rather than the
-config. The fed mux has nothing to bind lazily, and a dropped feed should
+config. Since 2026-11-16 (maintainer, /quest-plan of the pre-cut audit)
+[the bind at startup](/quest/m2/webrtc-bind.md) settles this before the cut:
+the server becomes `Server::bind(config)`, and that PR picks where the
+socket lives and writes it here, so the feed is an addition, not a break. The fed mux has nothing to bind lazily, and a dropped feed should
 fail the server loudly rather than idle.
 
 Noted 2026-10-31 from [moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095):

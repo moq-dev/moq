@@ -194,6 +194,11 @@ struct Track {
 	/// replaces it: a route being beaten keeps serving until then, and keeps serving if
 	/// the newcomer refuses the track.
 	draining: Option<u64>,
+	/// The source whose route lost the track, failing or refusing it as unroutable, which
+	/// judges the route, not the track. The track waits for another source, or for the
+	/// table to move, rather than ask that source again at once or end; a draining copy
+	/// keeps feeding it meanwhile.
+	stranded: Option<u64>,
 	/// The track finished or aborted: nothing is spliced again, and it stays only
 	/// until it goes unread for the linger.
 	ended: bool,
@@ -320,6 +325,7 @@ impl Front {
 						wanted: false,
 						ended: false,
 						draining: None,
+						stranded: None,
 					},
 				);
 			}
@@ -389,10 +395,13 @@ impl Front {
 		}
 		let serving_route = self.serving.map(|(_, serving)| serving.route);
 		match best {
-			// The serving route is still the best one. A track that waited on a switch
-			// given up on is asked of it again.
+			// The serving route is still the best one. The table moved, which is the
+			// evidence a track it lost waits for: ask it again, as for a track that waited
+			// on a switch given up on.
 			Some(candidate) if Some(candidate.route) == serving_route => {
-				if self.upstream.take().is_some() {
+				let gave_up = self.upstream.take().is_some();
+				self.unstrand(actions);
+				if gave_up {
 					self.redispatch_idle(actions);
 				}
 			}
@@ -537,6 +546,7 @@ impl Front {
 			Ok(()) => {
 				track.draining = None;
 				track.lost = None;
+				track.stranded = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
@@ -556,6 +566,7 @@ impl Front {
 		delivered: bool,
 		actions: &mut Vec<Action>,
 	) {
+		let strands = self.strands();
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
@@ -599,6 +610,18 @@ impl Front {
 				track.lost = Some(err);
 				self.fail_over(name, actions);
 			}
+			// The route lost the content, which another route of the instance continues:
+			// wait for one rather than ask this route again, which can only refuse. A copy
+			// drained from a replaced source leaves the track to the serving one.
+			Err(err) if delivered && err.unroutable() && strands => {
+				track.state = TrackState::Idle;
+				track.lost = Some(err);
+				if self.serving.is_some_and(|(serving, _)| serving == source) {
+					track.stranded = Some(source);
+				} else {
+					self.redispatch(name, actions);
+				}
+			}
 			// A content verdict survives every copy. Under a minted instance, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
@@ -625,11 +648,28 @@ impl Front {
 		refusal: (Error, Option<Duration>),
 		actions: &mut Vec<Action>,
 	) {
+		let strands = self.strands();
+		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
 		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.state = TrackState::Idle;
 		// A closing source's answer is not a verdict: it is on its way out and
 		// its replacement is asked afresh.
 		if closing {
+			return;
+		}
+		// A route that lost the content says nothing of the track: wait for another of its
+		// instance, keeping a draining copy meanwhile. A replaced source's loss leaves the
+		// track to the serving one, whose own answer stands.
+		if refusal.0.unroutable() && strands {
+			if let Some(draining) = track.draining {
+				track.state = TrackState::Spliced { source: draining };
+			} else if !serving {
+				self.redispatch(name, actions);
+				return;
+			}
+			if serving {
+				track.stranded = Some(source);
+			}
 			return;
 		}
 		track.refused.insert(source);
@@ -674,7 +714,7 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.wanted || track.ended || track.state != TrackState::Idle {
+		if !track.wanted || track.ended || track.state != TrackState::Idle || track.stranded == Some(source) {
 			return;
 		}
 		if track.refused.contains(&source) {
@@ -692,6 +732,45 @@ impl Front {
 		}
 		track.state = TrackState::Querying { source };
 		actions.push(Action::Query { track: name, source });
+	}
+
+	/// Whether an unroutable end from the serving source judges its route rather than the
+	/// track, so the track waits for the table to move. Only a received route can be stale:
+	/// a local publisher's word is the track's verdict, and no news about it is in flight. A
+	/// minted instance has no other route to wait for.
+	fn strands(&self) -> bool {
+		self.serving
+			.is_some_and(|(_, candidate)| candidate.carried && !candidate.local)
+	}
+
+	/// Ask the serving source again for every track it lost as unroutable. One still read from
+	/// a draining copy keeps reading it until the answer, as during any handover.
+	fn unstrand(&mut self, actions: &mut Vec<Action>) {
+		let Some((source, _)) = self.serving else {
+			return;
+		};
+		let mut idle = Vec::new();
+		for (name, track) in &mut self.tracks {
+			if track.stranded != Some(source) {
+				continue;
+			}
+			track.stranded = None;
+			match track.state {
+				TrackState::Spliced { source: draining }
+					if track.draining == Some(draining) && track.wanted && !track.ended && !self.serving_closing =>
+				{
+					track.state = TrackState::Querying { source };
+					actions.push(Action::Query {
+						track: name.clone(),
+						source,
+					});
+				}
+				_ => idle.push(name.clone()),
+			}
+		}
+		for name in idle {
+			self.redispatch(name, actions);
+		}
 	}
 
 	fn wanted(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
@@ -1251,8 +1330,6 @@ mod tests {
 				Error::from(crate::StreamError::MalformedTrack),
 				Error::App(7),
 				Error::NotFound,
-				Error::Unroutable,
-				Error::from(crate::StreamError::Unroutable),
 				Error::Unsupported,
 			] {
 				let mut front = serving(candidate, 100);
@@ -1273,6 +1350,330 @@ mod tests {
 				assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
 			}
 		}
+	}
+
+	/// A route losing the content judges the route, not the track: whether its copy fails
+	/// unroutable after delivering or it refuses the track so, the track waits for another
+	/// source rather than end, and asks the same one again only once the table moves.
+	#[test]
+	fn an_unroutable_route_strands_the_track_until_the_table_moves() {
+		for err in [Error::Unroutable, Error::from(crate::StreamError::Unroutable)] {
+			let mut front = serving(remote(1), 100);
+			let lost = Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(err.clone()),
+				delivered: true,
+			};
+			assert_actions(front.step(lost), &[]);
+			// The table moved while the same route still wins: ask it again.
+			let query = [Action::Query {
+				track: name("video"),
+				source: 100,
+			}];
+			let same = Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			};
+			assert_actions(front.step(same.clone()), &query);
+			// Refused the same way: still waiting, and a reader returning asks nothing.
+			let refused = Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(err.clone()),
+				retry: None,
+			};
+			assert_actions(front.step(refused), &[]);
+			assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
+			// Another route serves it.
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			assert_actions(
+				front.step(Event::Resolved {
+					route: 2,
+					result: Ok(200),
+				}),
+				&[
+					Action::Detach {
+						source: 100,
+						drain: false,
+					},
+					Action::Query {
+						track: name("video"),
+						source: 200,
+					},
+				],
+			);
+			assert!(!front.ended());
+			// With no route left the front ends, and the track with the route's loss.
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(err.clone()),
+				retry: None,
+			});
+			assert_actions(
+				front.step(Event::Selected {
+					best: None,
+					serving_closing: false,
+				}),
+				&[Action::End { err: Error::Unroutable }],
+			);
+			assert_eq!(front.lost("video").map(|err| err.to_string()), Some(err.to_string()));
+
+			// A minted instance has no other route, and a local publisher's word is the track's
+			// verdict with no news in flight to overtake it: either refusal ends the track, as
+			// does a local copy failing so.
+			for (local, carried) in [(false, false), (true, true)] {
+				let candidate = Candidate {
+					route: 1,
+					local,
+					carried,
+				};
+				let abort = [Action::Abort {
+					track: name("video"),
+					err: err.clone(),
+					retry: None,
+				}];
+				let mut front = querying(candidate, 100);
+				let refused = Event::TrackInfo {
+					track: name("video"),
+					source: 100,
+					closing: false,
+					result: Err(err.clone()),
+					retry: None,
+				};
+				assert_actions(front.step(refused), &abort);
+				if local {
+					let mut front = serving(candidate, 100);
+					let lost = Event::TrackEnded {
+						track: name("video"),
+						source: 100,
+						closing: false,
+						result: Err(err.clone()),
+						delivered: true,
+					};
+					assert_actions(front.step(lost), &abort);
+				}
+			}
+		}
+	}
+
+	/// The table moving toward a route that has yet to answer is no news for a stranded track:
+	/// it waits for that answer, or asks its own route again once that route wins back.
+	#[test]
+	fn a_pending_takeover_leaves_a_stranded_track_waiting() {
+		let stranded = || {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Unroutable),
+				delivered: true,
+			});
+			// A cheaper route wins: ask it, and nothing else.
+			let cheaper = Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			};
+			assert_actions(front.step(cheaper.clone()), &[Action::Request { route: 2 }]);
+			assert_actions(front.step(cheaper), &[]);
+			front
+		};
+
+		// It answers: the track asks it.
+		let mut front = stranded();
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
+				Action::Query {
+					track: name("video"),
+					source: 200,
+				},
+			],
+		);
+
+		// It leaves first: the serving route wins again, which is the news the track waited for.
+		let mut front = stranded();
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+	}
+
+	/// The serving source refuses a track unroutable while the copy it replaces still drains.
+	/// Once the table moves, the source is asked again with the draining copy still read, and
+	/// its answer replaces it. A request for the track after it aborted starts unstranded.
+	#[test]
+	fn a_stranded_track_still_draining_asks_again_when_the_table_moves() {
+		let replaced = || {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			let refused = Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(Error::from(crate::StreamError::Unroutable)),
+				retry: None,
+			};
+			assert_actions(front.step(refused), &[]);
+			front
+		};
+		let query = [Action::Query {
+			track: name("video"),
+			source: 200,
+		}];
+
+		let mut front = replaced();
+		let moved = Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		};
+		assert_actions(front.step(moved), &query);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+
+		// The draining copy fails for good; a fresh request asks the serving source.
+		let mut front = replaced();
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::App(7)),
+				delivered: true,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::App(7),
+				retry: None,
+			}],
+		);
+		front.step(Event::TrackAssigned {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		assert_actions(
+			front.step(Event::Wanted { track: name("video") }),
+			&[query[0].clone(), Action::Arm { at: None }],
+		);
+	}
+
+	/// A replaced copy that delivered nothing loses its route after its replacement refused
+	/// the track: the replacement's answer stands, so the track ends with it rather than wait
+	/// on a route nothing serves from.
+	#[test]
+	fn a_drained_copy_lost_as_unroutable_leaves_the_serving_refusal_standing() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		let refused = Event::TrackInfo {
+			track: name("video"),
+			source: 200,
+			closing: false,
+			result: Err(Error::NotFound),
+			retry: None,
+		};
+		assert_actions(front.step(refused), &[]);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::from(crate::StreamError::Unroutable)),
+				delivered: false,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::NotFound,
+				retry: None,
+			}],
+		);
+	}
+
+	/// A replaced copy still draining fails unroutable after its replacement refused the
+	/// track so: the track waits on the serving source, the one it asks once the table moves.
+	#[test]
+	fn a_drained_copy_lost_as_unroutable_waits_on_the_serving_source() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		let unroutable = || Error::from(crate::StreamError::Unroutable);
+		let refused = Event::TrackInfo {
+			track: name("video"),
+			source: 200,
+			closing: false,
+			result: Err(unroutable()),
+			retry: None,
+		};
+		assert_actions(front.step(refused), &[]);
+		let drained = Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(unroutable()),
+			delivered: true,
+		};
+		assert_actions(front.step(drained), &[]);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
 	}
 
 	/// Under a minted instance a re-request could reach another stream, so the track ends

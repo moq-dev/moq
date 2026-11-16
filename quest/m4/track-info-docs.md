@@ -17,8 +17,10 @@ The docs say "priority, ordering, latency budget, and timescale" (Kotlin,
 Dart) and "priority, group ordering, max age, and timescale" (Swift).
 `MoqTrackInfo` (`rs/moq-ffi/src/producer.rs`) has `priority`, `max_age`,
 `refresh`, `timescale` and `compression`. Ordering and delay are subscriber-side
-(`MoqSubscription`). #7729 adds `max_age_unlimited`, so describe the record
-as it stands when this lands.
+(`MoqSubscription`). #7729 added `max_age_unlimited`, which
+[the selector quest](/quest/m2/ffi-open-selectors.md) deletes in favor of a
+null `max_age` (decided 2026-11-16), so describe the record as it stands
+when this lands.
 
 - Name the fields, or describe the record's purpose without a list that can
   drift. Prefer the one-line purpose plus a pointer to the record, so a new

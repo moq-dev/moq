@@ -25,7 +25,21 @@ where upstream flattened it into `CryptoError::Other(String)`.
   recommended: an ICE timeout means no path, a DTLS timeout means a path that
   never finished the handshake.
 
+Changed 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
+moq-webrtc [returns to upstream str0m](/quest/m2/str0m-upstream.md), where
+the vendored copy's typed pass-through is gone and the timeout arrived as
+`CryptoError::Other(String)` at the vendored revision. That quest records
+what 0.25 returns. If it is typed, classify it as planned. If it is still a
+string, don't match on its text (AGENTS.md): the typed error is a change
+inside str0m, so write the report for
+[upstream reports](/quest/m4/upstream-reports.md) and reduce this quest to
+waiting on upstream.
+
 Public API: additive variants on non-exhaustive error enums. Wire: none.
+
+## Required
+
+- [moq-webrtc runs on upstream str0m](/quest/m2/str0m-upstream.md) - settles what type the timeout arrives as
 
 ## Related
 

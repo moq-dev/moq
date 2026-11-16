@@ -153,7 +153,7 @@ pub struct Config {
 	/// Maximum time for one accepted connection to finish its handshake: the
 	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, whatever the
 	/// server runs under (admission, say), until the session is accepted. Defaults to
-	/// 10 seconds; set to 0 to wait forever.
+	/// 30 seconds; set to 0 to wait forever.
 	///
 	/// A peer that connects and then never speaks would otherwise hold its
 	/// connection open indefinitely, since keep-alives count as activity. The

@@ -98,7 +98,7 @@ Settled:
    dead hop remembered past the routes that name it. Routing state is a
    hint. A request is confirmed only once its upstream is, data is identified
    by Instance, track, group, and frame, and a stale or stalled route is left
-   on evidence ([requests](/quest/m2/multicast/requests.md),
+   on evidence ([requests](https://github.com/moq-dev/moq/pull/8881),
    [route health](/quest/m3/route-health/README.md)). What a hold protected,
    a claim flickering while routes settle, becomes a reader's local debounce
    from unavailable to offline, never on the wire. This reverses items 19 and
@@ -150,7 +150,7 @@ flagged as costly, on
     has no path, chain, or Instance, so a moq-transport relay announcing
     back a name it learned from us cannot be told from a nearer publisher.
     That is unsupported: it must cost bounded work and touch no other
-    broadcast ([requests](/quest/m2/multicast/requests.md)), and nothing
+    broadcast ([requests](https://github.com/moq-dev/moq/pull/8881)), and nothing
     detects it (rejected: ignoring a claim for a name already announced to
     that session, which also hides a real second publisher behind it).
 11. ✅ **Redundant ingest is one Instance from synchronized encoders.** Two
@@ -167,6 +167,22 @@ flagged as costly, on
     stall wants it, and the CDN's own tiers run without one (rejected: a
     standby wherever a second route exists, which about doubles a track's
     subscription state across the cluster).
+
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which
+judged the route layer at this plan's end state):
+
+13. ✅ **The plan stands as item 2 has it** (rejected: freezing lite-07 with
+    claims only and moving the route exchange behind a negotiated SETUP
+    parameter with a version of its own, so the cut stops waiting on the
+    router and the switch and a third-party client implements no route
+    layer; keeping the plan with a fallback written down now). The audit's
+    case was the schedule, three XL quests in series before the freeze on a
+    rule re-decided on six days, and that an endpoint must parse a protocol
+    only relays speak. What it leaves is in
+    [the switch](/quest/m2/multicast/switch.md): the public route API and
+    config that would freeze by omission, the half `js/net` implements, what
+    a non-forwarding endpoint must parse, and the moq-cluster draft, which
+    still specifies the warm discount item 5 forbids.
 
 The shape those decisions give, for the children to confirm or improve; each
 departure is a decision to list in its PR:

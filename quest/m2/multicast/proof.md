@@ -41,7 +41,7 @@ What to show, each a lemma about one message handler:
 
 State plainly what the theorem does not give, and where each is covered:
 
-- No loop at every instant: [requests](/quest/m2/multicast/requests.md) fail
+- No loop at every instant: [requests](https://github.com/moq-dev/moq/pull/8881) fail
   closed instead.
 - A cost that depends on who subscribed:
   [warmth](/quest/m2/multicast/warmth.md) argues it separately.
