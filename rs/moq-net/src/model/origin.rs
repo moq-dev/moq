@@ -10786,7 +10786,12 @@ mod tests {
 
 		let table = producer.shared.read();
 		let best = table
-			.best_route(&Path::new("src/a").unwrap(), Horizon::default(), &HashSet::new(), |_| true)
+			.best_route(
+				&Path::new("src/a").unwrap(),
+				Horizon::default(),
+				&HashSet::new(),
+				|_| true,
+			)
 			.expect("the exact claim serves its own prefix");
 		assert_eq!((best.epoch, best.lane.above), (0, 0));
 		drop(table);
