@@ -653,9 +653,7 @@ async fn a_healthy_goaway_hands_over_to_the_redirect() {
 
 	// Past the healthy bar, the GOAWAY is a handover, not a failure.
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0]
-		.goaway(goaway::Goaway::redirect(b.to_string()))
-		.unwrap();
+	run.servers[0].goaway(goaway::Goaway::redirect(b.to_string())).unwrap();
 	let peers = [(a.clone(), Peer::Serve), (b.clone(), Peer::Serve)];
 	let migrated = kio::clock::now();
 	drive(&mut machine, &peers, &mut run, |run| run.events.contains(&"retired")).await;

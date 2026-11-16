@@ -374,13 +374,9 @@ mod tests {
 	fn only_the_first_send_wins() {
 		let (handle, protocol) = Handle::new(true);
 
-		handle
-			.send(Goaway::redirect("https://first.example/"))
-			.unwrap();
+		handle.send(Goaway::redirect("https://first.example/")).unwrap();
 
-		let err = handle
-			.send(Goaway::redirect("https://second.example/"))
-			.unwrap_err();
+		let err = handle.send(Goaway::redirect("https://second.example/")).unwrap_err();
 		assert!(matches!(err, Error::Duplicate));
 
 		assert_eq!(
@@ -441,9 +437,7 @@ mod tests {
 	#[test]
 	fn oversized_uri_is_refused() {
 		let (handle, _protocol) = Handle::new(true);
-		let err = handle
-			.send(Goaway::redirect("x".repeat(MAX_URI + 1)))
-			.unwrap_err();
+		let err = handle.send(Goaway::redirect("x".repeat(MAX_URI + 1))).unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
 
 		let (handle, _protocol) = Handle::new(true);

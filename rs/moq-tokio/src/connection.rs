@@ -1635,10 +1635,8 @@ mod tests {
 		}
 
 		let defaults = moq_net::reconnect::Backoff::default();
-		let fields: [(&str, fn(&moq_net::reconnect::Backoff) -> Option<Duration>); 2] = [
-			("max", |backoff| backoff.max),
-			("timeout", |backoff| backoff.timeout),
-		];
+		let fields: [(&str, fn(&moq_net::reconnect::Backoff) -> Option<Duration>); 2] =
+			[("max", |backoff| backoff.max), ("timeout", |backoff| backoff.timeout)];
 		for (field, read) in fields {
 			let flag = format!("--connect-backoff-{field}");
 			for (value, expected) in [

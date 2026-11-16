@@ -3804,11 +3804,7 @@ mod session_tests {
 	#[test]
 	fn the_source_retries_without_a_budget() {
 		let config = super::connect_config(&unreachable());
-		assert_eq!(
-			config.backoff.timeout,
-			Some(moq_tokio::cli::Bound::NONE),
-			"no give-up"
-		);
+		assert_eq!(config.backoff.timeout, Some(moq_tokio::cli::Bound::NONE), "no give-up");
 	}
 
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.

@@ -118,7 +118,11 @@ async fn connect(url: &str) -> moq_tokio::Connection {
 async fn stays(url: &str, quic: moq_tokio::quic::Config) -> moq_tokio::Connection {
 	let mut config = dial();
 	config.backoff.healthy = Some(Duration::from_secs(3600).into());
-	established(config.init(quic).unwrap().with_restart(moq_tokio::Restart::Handoff), url).await
+	established(
+		config.init(quic).unwrap().with_restart(moq_tokio::Restart::Handoff),
+		url,
+	)
+	.await
 }
 
 /// Wait for the GOAWAY a draining relay sends `connection`.

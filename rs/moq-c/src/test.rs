@@ -7438,7 +7438,9 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert_eq!(
-		config.has_backoff_max.then(|| std::time::Duration::from_micros(config.backoff_max_us)),
+		config
+			.has_backoff_max
+			.then(|| std::time::Duration::from_micros(config.backoff_max_us)),
 		expected.connect.backoff.max()
 	);
 	assert!(!config.backoff_max_unlimited);
@@ -7490,7 +7492,10 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
 	config.quic_keep_alive_us = 0;
 	config.has_quic_keep_alive = true;
-	assert_eq!(parsed(&config).quic.keep_alive, Some((std::time::Duration::ZERO).into()));
+	assert_eq!(
+		parsed(&config).quic.keep_alive,
+		Some((std::time::Duration::ZERO).into())
+	);
 
 	// Without the flag the same zero means nothing at all.
 	assert_eq!(parsed(&client_config()).quic.resolve().keep_alive, None);

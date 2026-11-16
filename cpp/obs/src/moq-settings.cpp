@@ -206,8 +206,7 @@ const std::vector<Field> &Fields()
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
 		// The library's default never gives up, which this field spells as 0.
 		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)",
-				   d.backoff.timeout ? Millis(d.backoff.timeout, BACKOFF_TIMEOUT) : 0, 0,
-				   3600000, 1000,
+				   d.backoff.timeout ? Millis(d.backoff.timeout, BACKOFF_TIMEOUT) : 0, 0, 3600000, 1000,
 				   "Total time to keep reconnecting after a drop before the stream fails. 0 retries "
 				   "forever. A first connect that reaches no server fails the stream at once."));
 
