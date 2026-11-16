@@ -1995,11 +1995,14 @@ export class Producer implements Table {
 			cached.front.close();
 		}
 		this.#state.materialized.clear();
+		// Every open request ends with the origin, pending or resolved, so an await never hangs.
+		const ended: RequestSlot[] = [];
 		this.#state.requests.update((requests) => {
 			for (const slot of requests.values()) {
 				slot.answer?.close();
 				slot.answer = undefined;
 				slot.route.set(undefined);
+				ended.push(slot);
 			}
 			return new Map();
 		});
@@ -2007,7 +2010,11 @@ export class Producer implements Table {
 			for (const slot of slots) {
 				this.#state.detach(path, slot);
 				slot.route.set(undefined);
+				ended.push(slot);
 			}
+		}
+		for (const slot of ended) {
+			for (const closed of slot.handles) if (closed.peek() === undefined) closed.set(abort ?? null);
 		}
 	}
 }

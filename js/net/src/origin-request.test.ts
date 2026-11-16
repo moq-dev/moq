@@ -812,8 +812,26 @@ test("closing a pending request rejects its await with a cancellation", async ()
 	await expect(answer).rejects.toMatchObject({ code: StreamCode.Cancel });
 	expect(await request.closed).toBeNull();
 
+	// Closing the origin ends a pending request, with its abort or cleanly, and a resolved one.
+	const pending = origin.request(Path.from("room/pending"));
+	const aborted = new Producer();
+	const blocked = aborted.request(Path.from("room/pending"));
+	const route = aborted.route(Path.from("room/served"));
+	const served = aborted.request(Path.from("room/served"));
+	await served;
+	const pendingAnswer = (async () => await pending)();
+	const blockedAnswer = (async () => await blocked)();
+	await settle();
+	const abort = new StreamError(StreamCode.Internal, { message: "shutdown" });
+	aborted.close(abort);
+	await expect(blockedAnswer).rejects.toBe(abort);
+	expect(served.closed.peek()).toBe(abort);
+	route.close();
+
 	// A closed origin answers a new request at once, the same way.
 	origin.close();
+	await expect(pendingAnswer).rejects.toMatchObject({ code: StreamCode.Cancel });
+	expect(await pending.closed).toBeNull();
 	await expect((async () => await origin.request(Path.from("room/late")))()).rejects.toMatchObject({
 		code: StreamCode.Cancel,
 	});
