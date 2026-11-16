@@ -21,15 +21,9 @@ already do, from
 - Add `moq_consume_catalog_timestamp(catalog, out)` filling a
   `moq_timestamp`, and a delay argument, in the ABI's existing duration shape,
   to `moq_consume_catalog`.
+- Settled by the maintainer (2026-11-16, [moq-dev/moq#8907](https://github.com/moq-dev/moq/pull/8907#issuecomment-6930706614)):
+  change `moq_consume_catalog`'s signature in the next moq-c release (rejected:
+  leaving moq-c on arrival timing).
 - Mirror the Rust test `a_holding_reader_reads_every_update_within_its_delay`
   in `rs/moq-c/src/test.rs`, and update `doc/lib/c/index.md` and the C interop
   client.
-
-## Waiting
-
-- Maintainer: whether to break `moq_consume_catalog`'s signature in the next
-  moq-c release to add the delay. Options: change the signature (recommended:
-  the ABI already breaks in this milestone, and a second entry point would be a
-  `foo_with_x`), or leave moq-c reading the newest catalog on arrival until a C
-  player needs to hold updates. An agent cannot take this step because it
-  decides the stable ABI's release contents.
