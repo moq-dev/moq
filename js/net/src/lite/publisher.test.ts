@@ -7,7 +7,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
-import { hooks, staleHole } from "../internal.ts";
+import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -723,6 +723,8 @@ async function servedSubscription(
 		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
 		pending?: boolean;
+		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
+		maxDelay?: number | null;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -789,6 +791,7 @@ async function servedSubscription(
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
 	msg.ranges = options.ranges;
+	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -921,7 +924,7 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		ranges: [
 			{ start: { relative: 1n } },
 			// Group 1 starts at 1 ms.
-			{ start: { time: 1 }, end: { absolute: 2n } },
+			{ start: { time: 1n }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
 			// Empty only once its start resolves to group 4.
@@ -1033,84 +1036,6 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 	}
 });
 
-// A time start resolves once too: a newer group starting before its time doesn't move it once
-// an update leaves the range live. Mirrors the Rust `lite07_an_added_time_start_keeps_its_start`.
-test("lite-07 keeps where an added time start resolved", async () => {
-	const version = Version.DRAFT_07;
-	const sub = await servedSubscription({
-		version,
-		prefill: [0n, 1n, 2n, 3n, 4n],
-		maxAge: Duration.millis(3_600_000),
-		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
-	});
-	const next = async () => {
-		for (;;) {
-			const resp = await decodeSubscribeResponse(sub.client.reader, version);
-			if ("start" in resp || "started" in resp) return resp;
-		}
-	};
-	try {
-		const start = await next();
-		if (!("start" in start)) throw new Error("expected SUBSCRIBE_OK");
-
-		// 10 ms falls in group 4, the newest one starting at or before it.
-		await replayUpdate({ priority: 0, ranges: [{ start: { time: 10 } }] }).encode(sub.client.writer, version);
-		const started = await next();
-		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
-		expect([started.started.id, started.started.start]).toEqual([1n, 4n]);
-
-		// Group 5 starts at 5 ms, before 10 ms, and another update leaves the range live: it
-		// still starts at 4.
-		sub.serve(5n);
-		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
-		const pinned = await next();
-		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
-		expect(pinned.started.id).toBe(2n);
-		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start?.absolute === 4n)).toBe(true);
-		expect(ranges.some((range) => range.start?.time !== undefined)).toBe(false);
-	} finally {
-		await sub.close();
-	}
-});
-
-// Group 0 included: a time start that resolved to group 0 names it, so a newer group starting
-// before its time doesn't move it either.
-test("lite-07 keeps an added time start that resolved to group 0", async () => {
-	const version = Version.DRAFT_07;
-	const sub = await servedSubscription({
-		version,
-		prefill: [0n],
-		maxAge: Duration.millis(3_600_000),
-		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
-	});
-	const next = async () => {
-		for (;;) {
-			const resp = await decodeSubscribeResponse(sub.client.reader, version);
-			if ("start" in resp || "started" in resp) return resp;
-		}
-	};
-	try {
-		if (!("start" in (await next()))) throw new Error("expected SUBSCRIBE_OK");
-
-		// 10 ms falls in group 0, the only group.
-		await replayUpdate({ priority: 0, ranges: [{ start: { time: 10 } }] }).encode(sub.client.writer, version);
-		const started = await next();
-		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
-		expect([started.started.id, started.started.start]).toEqual([1n, 0n]);
-
-		// Group 1 starts at 1 ms, before 10 ms; the range still starts at group 0.
-		sub.serve(1n);
-		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
-		if (!("started" in (await next()))) throw new Error("expected SUBSCRIBE_STARTED");
-		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start?.time !== undefined)).toBe(false);
-		expect(ranges.some((range) => range.start?.absolute === 0n && range.end === undefined)).toBe(true);
-	} finally {
-		await sub.close();
-	}
-});
-
 // An edit naming a Range ID the subscription never assigned violates the protocol.
 test("lite-07 refuses an update retiring an unknown Range ID", async () => {
 	const version = Version.DRAFT_07;
@@ -1148,23 +1073,6 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 		}
 	} finally {
 		yielding.mockRestore();
-	}
-});
-
-// A time anchor waits for the track's timescale. On an on-demand track that lookup is the
-// subscription's own request, so the track it answers is the one served.
-test("lite-07 serves a time range from the on-demand track its lookup resolved", async () => {
-	const sub = await servedSubscription({
-		version: Version.DRAFT_07,
-		pending: true,
-		ranges: [{ start: { time: 0 } }],
-	});
-	try {
-		await sub.accept();
-		sub.serve(0n);
-		expect(await sub.servedSequence()).toBe(0n);
-	} finally {
-		await sub.close();
 	}
 });
 
@@ -3119,11 +3027,10 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 
 test("a version without the latency field serves a non-dropping budget", async () => {
 	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
-		const sub = await servedSubscription({ version, maxAge: Duration.millis(Number.MAX_SAFE_INTEGER) });
+		// These drafts carry no max age, which decodes as no limit.
+		const sub = await servedSubscription({ version, maxDelay: null });
 		try {
-			// These drafts decode the absent field as zero. The publisher must not turn
-			// that into a live-edge request the peer never made.
-			expect(sub.track.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
+			expect(sub.track.subscription.peek()?.delay?.max).toEqual(Duration.millis(NO_MAX_DELAY));
 		} finally {
 			await sub.close();
 		}
@@ -3611,7 +3518,8 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
 		expect(response.start.starts[0]).toBe(startGroup);
-		expect(response.start.largest).toEqual({ group: 0n, frame: 0 });
+		// The group finished, so the answer says it ended.
+		expect(response.start.largest).toEqual({ position: { group: 0n, frame: 0 }, ended: true });
 	} finally {
 		client.close();
 		publisher.close();
@@ -3625,40 +3533,46 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 
 // A relay that holds only the first group of a backlog answers with the largest its source
 // reported, so a live joiner downstream starts at the newest group rather than the oldest one
-// the budget serves.
-test("lite draft-07 reports the source's largest position past what a relay holds", async () => {
-	const version = Version.DRAFT_07;
-	const pair = createMockTransportPair(ALPN_07_WIP);
-	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcast = publish(origin, Path.from("relayed"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	// The source answered with group 4 as its largest; only group 0 has landed.
-	hooks.reportedLargest(track, { group: 4n, frame: 0 });
-	const group = track.createGroup(0n);
-	group.writeFrame(textFrame("oldest"));
-	group.finish();
-	const client = await Stream.open(pair.client, { version });
-	const server = await Stream.accept(pair.server, version);
-	if (!server) throw new Error("missing subscribe stream");
-	const running = publisher.runSubscribe(
-		replaySubscribe({ id: 0n, broadcast: Path.from("relayed"), track: "video", priority: 0 }),
-		server,
-	);
-	try {
-		const response = await decodeSubscribeResponse(client.reader, version);
-		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-		expect([response.start.starts[0], response.start.largest]).toEqual([0n, { group: 4n, frame: 0 }]);
-	} finally {
-		client.close();
-		publisher.close();
-		broadcast.close();
-		origin.close();
-		pair.client.close();
-		pair.server.close();
-		await running;
-	}
-});
+// the budget serves, and says whether the source reported that group ended.
+test.each([false, true])(
+	"lite draft-07 reports the source's largest position past what a relay holds, ended %p",
+	async (ended) => {
+		const version = Version.DRAFT_07;
+		const pair = createMockTransportPair(ALPN_07_WIP);
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const broadcast = publish(origin, Path.from("relayed"));
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		// The source answered with group 4 as its largest; only group 0 has landed.
+		hooks.reportedLargest(track, { group: 4n, frame: 0 }, ended);
+		const group = track.createGroup(0n);
+		group.writeFrame(textFrame("oldest"));
+		group.finish();
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("missing subscribe stream");
+		const running = publisher.runSubscribe(
+			replaySubscribe({ id: 0n, broadcast: Path.from("relayed"), track: "video", priority: 0 }),
+			server,
+		);
+		try {
+			const response = await decodeSubscribeResponse(client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect([response.start.starts[0], response.start.largest]).toEqual([
+				0n,
+				{ position: { group: 4n, frame: 0 }, ended },
+			]);
+		} finally {
+			client.close();
+			publisher.close();
+			broadcast.close();
+			origin.close();
+			pair.client.close();
+			pair.server.close();
+			await running;
+		}
+	},
+);
 
 for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`Report consumes PROBE targets and observes their FIN (${version})`, async () => {

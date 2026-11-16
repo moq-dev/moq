@@ -779,6 +779,24 @@ impl Track {
 		self.largest.read().open
 	}
 
+	/// Whether `position` is the largest and its group ended there; see [`Self::finish_largest`].
+	pub(super) fn largest_finished(&self, position: Position) -> bool {
+		let largest = self.largest.read();
+		largest.position == Some(position) && !largest.open
+	}
+
+	/// The source reported `position` as its largest, its group ended there when `finished`.
+	pub(super) fn report_largest(&self, position: Position, finished: bool) {
+		let mut largest = self.largest.lock();
+		if largest.position.is_none_or(|current| position > current) {
+			largest.position = Some(position);
+			largest.open = true;
+		}
+		if finished && largest.position == Some(position) {
+			largest.open = false;
+		}
+	}
+
 	/// End the largest stream once the track ends: no newer frame can follow.
 	pub(super) fn end_largest(&self) {
 		let mut largest = self.largest.lock();

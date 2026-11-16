@@ -331,6 +331,11 @@ impl Consumer {
 		}
 	}
 
+	/// Whether `position` is the serving copy's largest and its group ended there.
+	pub(super) fn largest_finished(&self, position: Position) -> bool {
+		self.serving().is_some_and(|copy| copy.largest_finished(position))
+	}
+
 	/// Poll for a largest location within `bounds` newer than `seen` on the serving copy,
 	/// recording it there. A copy ending is its route failing, so the logical track ends
 	/// only with the route: at once when the front ends it, or with the last copy once the
@@ -997,6 +1002,11 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn latest(&self) -> Option<u64> {
 		self.reader().latest()
+	}
+
+	/// Whether `position` is the serving copy's largest and its group ended there.
+	pub(super) fn largest_finished(&self, position: Position) -> bool {
+		self.reader().route.largest_finished(position)
 	}
 
 	/// Poll for a largest location within `bounds` newer than `seen`; see [`Consumer::poll_largest`].

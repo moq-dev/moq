@@ -4879,10 +4879,11 @@ impl Producer {
 	}
 
 	/// The source reported its largest frame, which [`Self::largest`] follows before the
-	/// frame itself arrives. A hint about the edge: it never makes the frame readable.
+	/// frame itself arrives, and whether its group ended there, which a relay forwards. A
+	/// hint about the edge: it never makes the frame readable.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn report_largest(&self, largest: Position) {
-		self.state.read().cache.advance_largest(largest);
+	pub(crate) fn report_largest(&self, largest: Position, finished: bool) {
+		self.state.read().cache.report_largest(largest, finished);
 	}
 
 	/// Whether readers may take from the cache; see [`Self::set_idle`].
@@ -6568,6 +6569,24 @@ impl Consumer {
 		let next = self.poll_largest_after(&mut seen, Bounds::default(), waiter);
 		self.largest = seen;
 		next
+	}
+
+	/// Whether `position` is the largest and its group ended there, so no frame follows it. A
+	/// front's logical track asks the route serving it.
+	pub(super) fn largest_finished(&self, position: Position) -> bool {
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return false;
+			};
+			let (routes, cache) = {
+				let state = state.read();
+				(state.routes.clone(), state.cache.clone())
+			};
+			match routes {
+				Some(routes) => routes.largest_finished(position),
+				None => cache.largest_finished(position),
+			}
+		})
 	}
 
 	/// Poll for a largest frame within `bounds` newer than `seen`, recording it there. A
@@ -10589,6 +10608,16 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether `position`, the largest, ended there: its group finished or closed, or its
+	/// source said so. An aborted group stays open, since it can be recreated or fetched.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn largest_finished(&self, position: Position) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().cache.largest_finished(position),
+			Inner::Resume(resume, _) => resume.largest_finished(position),
+		}
+	}
+
 	/// The track's largest location known now, ignoring [`Self::with_range`], without waiting
 	/// or moving [`Self::poll_largest`] on: past what the cache holds once the source
 	/// reported a newer one.
@@ -11704,21 +11733,21 @@ mod test {
 	async fn largest_starts_with_the_sources_report() {
 		let producer = track_producer("test", Info::default());
 		let mut subscriber = producer.subscribe(replay());
-		producer.report_largest(Position { group: 7, frame: 3 });
+		producer.report_largest(Position { group: 7, frame: 3 }, false);
 		assert_eq!(subscriber.largest().await, Some(Position { group: 7, frame: 3 }));
 
 		// A report is a hint about the edge, not a cached group.
 		assert!(subscriber.recv_group().now_or_never().is_none());
 
 		// An older report or frame does not move it back.
-		producer.report_largest(Position { group: 7, frame: 1 });
+		producer.report_largest(Position { group: 7, frame: 1 }, false);
 		let mut _open = producer.create_group(group::Info { start: 2 }).unwrap();
 		_open
 			.write_frame(crate::Timestamp::unscaled(_open.start), &b"a"[..])
 			.unwrap();
 		assert!(subscriber.largest().now_or_never().is_none());
 
-		producer.report_largest(Position { group: 8, frame: 0 });
+		producer.report_largest(Position { group: 8, frame: 0 }, false);
 		assert_eq!(subscriber.largest().await, Some(Position { group: 8, frame: 0 }));
 	}
 
@@ -12046,7 +12075,7 @@ mod test {
 		assert!(reader.poll_largest(&waiter).is_pending(), "the copy is idle");
 
 		producer.set_live(Some(Position::group(5)), None).unwrap();
-		producer.report_largest(Position::group(5));
+		producer.report_largest(Position::group(5), false);
 		assert!(
 			reader.poll_largest(&waiter).is_pending(),
 			"the answer has not shown yet"

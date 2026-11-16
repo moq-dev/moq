@@ -16,6 +16,7 @@ import {
 	reason,
 	StreamCode,
 	StreamError,
+	TimestampMismatch,
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
@@ -40,7 +41,7 @@ import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, keyOf, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -65,7 +66,6 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
-	hasWireTime,
 	LiveRanges,
 	rangesOf,
 	requestedRanges,
@@ -161,6 +161,13 @@ function stamping(version: Version, info: { timescale?: Timescale | null }): Sta
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out scale-less. */
 function wireTime(timestamp: Timestamp, stamp: Stamp): number {
 	return stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale);
+}
+
+/** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
+function bareTime(timestamp: Timestamp): bigint {
+	const key = keyOf(timestamp);
+	if (key === undefined) throw new TimestampMismatch();
+	return key;
 }
 
 /**
@@ -491,21 +498,9 @@ function waitForControl(controls: SubscriptionControls): Promise<void> {
 	});
 }
 
-/**
- * The budget to serve a peer with, given what its wire could tell us.
- *
- * A version without the field decodes as `0`, which is indistinguishable from a peer
- * genuinely asking for the live edge. Serving that as real time would discard backlog
- * a legacy subscriber never declined, so fall back to the publisher's max age alone
- * and leave enforcement to the receiver, as the IETF path does for the same reason.
- */
-function servingMaxDelay(version: Version, requested: number): Duration | null {
-	return carriesMaxDelay(version) ? Duration.millis(requested) : null;
-}
-
-/** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
-function carriesMaxDelay(version: Version): boolean {
-	return version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
+/** The budget a SUBSCRIBE's `Subscriber Max Age` asks for: `null` for no limit, as lite-01/02 decode. */
+function servingMaxDelay(requested: number | null): Duration | null {
+	return requested === null ? null : Duration.millis(requested);
 }
 
 /**
@@ -517,7 +512,7 @@ function carriesMaxDelay(version: Version): boolean {
  * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
  * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
  * carry a `Subscriber Max Age`, but there it is a staleness tolerance only; lite-01/02 additionally get
- * an unbounded budget so nothing is dropped under them (see {@link servingMaxDelay}), which
+ * an unbounded budget so nothing is dropped under them (they carry no max age, which decodes as none), which
  * must not read as a request to replay the whole cache on join.
  */
 function cursorFloor(version: Version, startGroup: bigint | undefined, latest: bigint | undefined): bigint {
@@ -1091,18 +1086,14 @@ export class Publisher {
 			priority: msg.priority,
 			order: msg.order,
 			delay: {
-				max: servingMaxDelay(this.version, msg.maxDelay),
+				max: servingMaxDelay(msg.maxDelay),
 				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
 			},
 			ranges,
 		});
-		// A time anchor counts in the timescale this peer was told, so it waits for the info.
-		// Meanwhile the subscription asks for nothing but holds the track it resolves, so an
-		// on-demand track's request answers it, rather than one released once its info lands.
-		const timed = hasWireTime(msg.ranges);
-		let ranges: track.Range[] = [];
+		let ranges: track.Range[];
 		try {
-			if (!timed) ranges = requestedRanges(msg, undefined);
+			ranges = requestedRanges(msg);
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -1110,16 +1101,6 @@ export class Publisher {
 		// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 		const track = hooks.parked(consumer.subscribe(subscription(ranges)));
 		serving(track);
-		if (timed) {
-			try {
-				const info = await untilAborted(track.info(), left.signal);
-				track.update(subscription(requestedRanges(msg, info.timescale ?? undefined)));
-			} catch (err: unknown) {
-				track.close();
-				stream.writer.reset(error(err));
-				return;
-			}
-		}
 		if (watch.revoked()) {
 			track.close();
 			return;
@@ -1201,7 +1182,7 @@ export class Publisher {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
 					priority: msg.priority,
-					maxDelay: msg.maxDelay,
+					maxDelay: msg.maxDelay ?? 0,
 					startGroup: msg.startGroup,
 					endGroup: msg.endGroup,
 				});
@@ -1254,10 +1235,10 @@ export class Publisher {
 						priority: update.priority,
 						order: update.order,
 						delay: {
-							max: servingMaxDelay(this.version, update.maxDelay),
+							max: servingMaxDelay(update.maxDelay),
 							min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
 						},
-						ranges: requestedRanges(update, info.timescale ?? undefined),
+						ranges: requestedRanges(update),
 					});
 				},
 			});
@@ -1474,6 +1455,9 @@ export class Publisher {
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
+		// The largest as SUBSCRIBE_OK reports it, with whether its group ended.
+		const answered = (position: track.Position | undefined) =>
+			position && { position, ended: hooks.largestFinished(track, position) };
 		let endSent = false;
 		// The Range IDs of the last update taken, and those an update added whose start no
 		// SUBSCRIBE_STARTED reported yet. Lite-07 only.
@@ -1823,7 +1807,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(rangeStarts(bounds.startGroup), largest);
+								const start = new SubscribeStart(rangeStarts(bounds.startGroup), answered(largest));
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1838,7 +1822,7 @@ export class Publisher {
 							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
 								startSent = true;
 								startSequence = end;
-								const start = new SubscribeStart(rangeStarts(end), largest);
+								const start = new SubscribeStart(rangeStarts(end), answered(largest));
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1865,7 +1849,7 @@ export class Publisher {
 							) {
 								startSent = true;
 								startSequence = runs[0].start;
-								const start = new SubscribeStart(rangeStarts(startSequence), largest);
+								const start = new SubscribeStart(rangeStarts(startSequence), answered(largest));
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1898,7 +1882,7 @@ export class Publisher {
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
 							startSent = true;
 							startSequence = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
-							const start = new SubscribeStart(rangeStarts(startSequence), largest);
+							const start = new SubscribeStart(rangeStarts(startSequence), answered(largest));
 							if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version))))
 								return false;
 							continue;
@@ -1981,7 +1965,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(rangeStarts(startSequence), largest) },
+								{ start: new SubscribeStart(rangeStarts(startSequence), answered(largest)) },
 								this.version,
 							),
 						))
@@ -2394,13 +2378,16 @@ export class Publisher {
 				if (!datagram) return end;
 				end = max(end, datagram.sequence + 1n);
 				const stamp = options.stamp;
-				// An old subscription uses its stream track's timescale for both kinds.
+				// An old subscription uses its stream track's timescale for both kinds. Without a
+				// stamp the track is a scale-less lite-07 one, whose timestamp goes out bare.
 				const timestamp =
 					stamp === undefined
-						? undefined
-						: datagram.timestamp.scale === undefined
-							? floorAt(Timestamp.now(), stamp.timescale)
-							: floorAt(datagram.timestamp, stamp.timescale);
+						? bareTime(datagram.timestamp)
+						: BigInt(
+								datagram.timestamp.scale === undefined
+									? floorAt(Timestamp.now(), stamp.timescale)
+									: floorAt(datagram.timestamp, stamp.timescale),
+							);
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
 					this.version,
 				);
