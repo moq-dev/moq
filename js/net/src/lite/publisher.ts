@@ -832,7 +832,7 @@ export class Publisher {
 		// A hidden claim stays off the wire unless the request opted in.
 		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
 		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
-			const out = presented(msg.prefix, table, carries);
+			const out = presented(msg.prefix, table, carries, true);
 			const grant = this.#grant?.peek();
 			if (grant) {
 				for (const suffix of [...out.keys()]) {
@@ -894,18 +894,20 @@ export class Publisher {
 					await write({ status: "routeStart", node: identity.node, suffix: Path.empty(), offer: offer() });
 				}
 				const { instance, epoch, cost } = snap.route;
+				// How much broader the claim is than the prefix it is presented at.
+				const above = snap.route.above ?? 0n;
 				if (!prev) {
 					const id = nextAnnounce++;
 					live.set(suffix, { id, snap });
 					console.debug(`announce: broadcast=${suffix} active=true instance=${instance}`);
-					await write({ status: "active", suffix, route: route.id, instance, epoch, cost });
+					await write({ status: "active", suffix, route: route.id, instance, epoch, cost, above });
 				} else if (restarted(prev.snap, snap)) {
 					live.set(suffix, { id: prev.id, snap });
 					console.debug(`announce: broadcast=${suffix} restart=true instance=${instance} epoch=${epoch}`);
-					await write({ status: "restart", id: prev.id, instance, epoch, cost });
+					await write({ status: "restart", id: prev.id, instance, epoch, cost, above });
 				} else {
 					live.set(suffix, { id: prev.id, snap });
-					await write({ status: "update", id: prev.id, cost });
+					await write({ status: "update", id: prev.id, cost, above });
 				}
 			}
 			if (!route || (!changed && route.certified === certifies)) return;
@@ -923,7 +925,7 @@ export class Publisher {
 			metric: 0n,
 			downOnly: false,
 		});
-		// What the peer decodes for a claim: lite-07 carries its instance, epoch, and cost.
+		// What the peer decodes for a claim: lite-07 carries its instance, epoch, cost, and how far above its path it is.
 		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
 		const restarted = (prev: Advertised, next: Advertised): boolean =>
 			!sameInstance(prev, next) || (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n);

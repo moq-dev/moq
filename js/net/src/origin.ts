@@ -26,6 +26,7 @@ import {
 	firstEligible,
 	hiddenBelow,
 	hooks,
+	mostSpecific,
 	routeHops,
 	scopeCaptures,
 	scopeHead,
@@ -346,7 +347,13 @@ function preferredEntry(
 	skip?: (entry: RouteEntry) => boolean,
 	others: readonly WireRoute[] = [],
 ): RouteEntry | undefined {
-	const eligible = entries.filter((entry) => !skip?.(entry));
+	const admitted = entries.filter((entry) => !skip?.(entry));
+	// The most specific claims are the whole answer: a broader one shown here neither competes
+	// with them nor supersedes them, whatever its epoch.
+	const above = (entry: RouteEntry) => entry.route.peek().above ?? 0n;
+	// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
+	const narrowest = admitted.reduce((least, entry) => (above(entry) < least ? above(entry) : least), 2n ** 64n);
+	const eligible = admitted.filter((entry) => above(entry) === narrowest);
 	// `others` compete at the prefix too, such as a broadcast announced here at the path.
 	const epochs = new Epochs([...eligible.map((entry) => entry.route.peek()), ...others]);
 	let best: RouteEntry | undefined;
@@ -1142,19 +1149,21 @@ class OriginState {
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		const routes = this.routes.peek();
 		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
-		for (const prefix of coveringPrefixes(path)) {
-			const entries = routes.get(prefix);
-			if (!entries) continue;
-			const entry = preferredEntry(
-				path,
-				prefix,
-				entries,
-				(candidate) => !admits(candidate, prefix, path) || (skip?.(candidate) ?? false),
-				prefix === path && local ? [local] : [],
-			);
-			if (entry) return entry;
-		}
-		return undefined;
+		return mostSpecific(
+			path,
+			(prefix) => {
+				const entries = routes.get(prefix);
+				if (!entries) return undefined;
+				return preferredEntry(
+					path,
+					prefix,
+					entries,
+					(candidate) => !admits(candidate, prefix, path) || (skip?.(candidate) ?? false),
+					prefix === path && local ? [local] : [],
+				);
+			},
+			(entry) => entry.route.peek(),
+		);
 	}
 
 	/**
@@ -1171,12 +1180,17 @@ class OriginState {
 		if (!local || !this.local.peek().has(path)) return false;
 		if (!entry || !this.routes.peek().get(path)?.includes(entry)) return true;
 		const remote = entry.route.peek();
+		// A broadcast exactly here shadows every broader claim shown here, whatever its epoch or
+		// cost: the best claim is that broad only when each one is.
+		if ((remote.above ?? 0n) > 0n) return true;
 		// Within one instance only the higher epoch is eligible, however cheap the other is, so
 		// any route at the path the request could take supersedes the local broadcast, not only
 		// the best one.
 		const rivals = (this.routes.peek().get(path) ?? [])
 			.filter((candidate) => candidate.scope.matches(path) && !(skip?.(candidate) ?? false))
-			.map((candidate) => candidate.route.peek());
+			.map((candidate) => candidate.route.peek())
+			// A broader claim shown here competes with nothing the local broadcast competes with.
+			.filter((rival) => (rival.above ?? 0n) === 0n);
 		if (superseded(local, rivals)) return false;
 		if (superseded(remote, [local])) return true;
 		return compareRoutes(local, remote) <= 0;

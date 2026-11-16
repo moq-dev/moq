@@ -183,6 +183,12 @@ export interface WireRoute {
 	 * priority of a link no one set. Local, as `node` is.
 	 */
 	readonly priority?: number;
+	/**
+	 * How many segments broader the lite-07 claim is than the path it is presented at: a claim
+	 * exactly at a path outranks every broader one shown there, before anything else. Unset ranks
+	 * as 0. Local, as `node` is.
+	 */
+	readonly above?: bigint;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -207,6 +213,7 @@ export const WireRoute = {
 			node: route.node,
 			depth: route.depth,
 			priority: route.priority,
+			above: route.above,
 		};
 	},
 };
@@ -225,7 +232,7 @@ export function isAnonymous(route: WireRoute): boolean {
 
 /**
  * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node, and route depth and priority.
+ * availability, origin node, route depth, priority, and how far above its path a claim is.
  *
  * @internal
  */
@@ -242,6 +249,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.node === b.node &&
 		a.depth === b.depth &&
 		(a.priority ?? 0) === (b.priority ?? 0) &&
+		(a.above ?? 0n) === (b.above ?? 0n) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

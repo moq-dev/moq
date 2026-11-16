@@ -453,8 +453,7 @@ mod tests {
 
 	/// A compressed stream pinned byte for byte. `js/net/src/lite/announce.test.ts` decodes
 	/// this hex too.
-	const GOLDEN: &str =
-		"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
+	const GOLDEN: &str = "001400000a726f6f6d2f612f63616d00016100000000000d0102036d6963000161000000000203000000010101000b0201016200016100000000";
 
 	#[cfg(feature = "async")]
 	fn golden() -> Vec<crate::fuzz::Announced> {
@@ -480,7 +479,7 @@ mod tests {
 
 	/// The literal lite-07 stream `js/net` writes for the same announcements, never picking a
 	/// base; `js/net/src/lite/announce.test.ts` pins its encoder to it.
-	const JS_LITERAL: &str = "001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d696300016100000002020000010101000f000006726f6f6d2f62000161000000";
+	const JS_LITERAL: &str = "001400000a726f6f6d2f612f63616d00016100000000001400000a726f6f6d2f612f6d69630001610000000002030000000101010010000006726f6f6d2f6200016100000000";
 
 	#[test]
 	#[cfg(feature = "async")]
