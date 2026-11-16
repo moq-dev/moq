@@ -1077,15 +1077,13 @@ async fn a_name_announced_back_over_moq_transport_waits_without_retrying() {
 	drop((pairs, live, at_r, at_o));
 }
 
-/// Pins the gap in the wait a stale route's loss starts, a decision on moq-dev/moq#8881. `P`
-/// publishes `live` and `R` pulls it. `P` ends its track `Unroutable`, as moq-ffi does for a
-/// handle released without a finish, while `live` stays announced. A reader at `P` ends at
-/// once: a local publisher's word is the track's verdict. A reader at `R` cannot tell that
-/// from `P` losing its route, so it waits for the table to move, which nothing does until
-/// `live` goes; then it ends. A fix ends a released track with another code, or gives the
-/// wire one for a publisher leaving a track.
+/// `P` publishes `live` and `R` pulls it. `P` ends its track `Dropped` while `live` stays
+/// announced, as a binding releasing a handle before its finish does. That says nothing of a
+/// route, so readers at `P` and at `R` both end at once rather than wait for the table to
+/// move, which nothing does while `live` stands: only `Unroutable` reports a route losing
+/// the content.
 #[kio::test]
-async fn residual_a_track_left_unroutable_while_announced_waits_for_the_route() {
+async fn a_track_released_while_announced_ends_every_reader() {
 	let links = Links::new();
 	let [p, r] = [1, 2].map(produce_origin);
 	let broadcast = p.route("live", origin::RouteOptions::hidden()).unwrap();
@@ -1099,16 +1097,11 @@ async fn residual_a_track_left_unroutable_while_announced_waits_for_the_route() 
 	let mut at_p = reader(&p, "live", start).await;
 	let mut at_r = reader(&r, "live", start).await;
 	feed.run(2 * FRAMES).await;
-	track.abort(Error::Unroutable).unwrap();
+	track.abort(Error::Dropped).unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let ended =
 		|rx: &mut mpsc::UnboundedReceiver<Got>| std::iter::from_fn(|| rx.try_recv().ok()).find_map(|got| got.err());
 	assert!(ended(&mut at_p).is_some(), "the publisher's own reader ends");
-	assert!(ended(&mut at_r).is_none(), "the next relay's reader waits");
-	kio::clock::sleep(Duration::from_secs(60)).await;
-	assert!(ended(&mut at_r).is_none(), "and waits while the route stands");
-
+	assert!(ended(&mut at_r).is_some(), "the next relay's reader ends too");
 	drop(broadcast);
-	kio::clock::sleep(Duration::from_secs(1)).await;
-	assert!(ended(&mut at_r).is_some(), "the withdrawal ends the wait");
 }

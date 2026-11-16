@@ -935,8 +935,9 @@ struct MediaStreamProducer {
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its tracks with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its tracks with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends them with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
@@ -946,8 +947,9 @@ pub struct MoqMediaContainerProducer {
 
 /// Imports complete encoded frames onto one track.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
@@ -956,8 +958,9 @@ pub struct MoqMediaTrackProducer {
 
 /// Imports a video byte stream onto one track.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
 	inner: std::sync::Mutex<Option<MediaStreamProducer>>,
@@ -977,7 +980,7 @@ impl Child for MoqMediaContainerProducer {
 
 impl Drop for MoqMediaContainerProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Unroutable);
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 
@@ -992,7 +995,7 @@ impl Child for MoqMediaTrackProducer {
 
 impl Drop for MoqMediaTrackProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Unroutable);
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 
@@ -1007,7 +1010,7 @@ impl Child for MoqMediaTrackStreamProducer {
 
 impl Drop for MoqMediaTrackStreamProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Unroutable);
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 
