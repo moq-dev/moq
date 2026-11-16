@@ -2380,11 +2380,26 @@ impl<N: Key, A: Item> Router<N, A> {
 
 	/// Whether a neighbour offers a route for `key` that only doubt keeps this node off.
 	fn hopes(&self, key: &RouteId) -> bool {
-		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| {
-			heard.state == State::Live
-				&& !names(&heard.offer.path, self.hop)
-				&& heard.offer.metric.checked_add(self.sessions[peer].link.cost).is_some()
-				&& self.doubts_path(*peer, &heard.offer.path)
+		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| self.kept_off(*peer, heard))
+	}
+
+	/// Whether only doubt keeps this node off the route `heard` from `peer`.
+	fn kept_off(&self, peer: N, heard: &Heard<A>) -> bool {
+		heard.state == State::Live
+			&& !names(&heard.offer.path, self.hop)
+			&& heard.offer.metric.checked_add(self.sessions[&peer].link.cost).is_some()
+			&& self.doubts_path(peer, &heard.offer.path)
+	}
+
+	/// Whether `peer` offers a route that only doubt keeps this node off, where it has
+	/// no live one: it takes the route once the doubt lifts.
+	pub fn doubted(&self, peer: N) -> bool {
+		let Some(session) = self.sessions.get(&peer) else {
+			return false;
+		};
+		session.heard.iter().any(|key| {
+			!self.routes.get(key).is_some_and(Route::live)
+				&& (self.rx.get(key).and_then(|heard| heard.get(&peer))).is_some_and(|heard| self.kept_off(peer, heard))
 		})
 	}
 

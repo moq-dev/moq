@@ -1121,6 +1121,22 @@ impl Stream {
 		self.queue.lock().pop()
 	}
 
+	/// Ready once the peer offers no route on this stream that only doubt keeps the node
+	/// off ([`Router::doubted`]). Such a route waits on a doubt's timer, so this checks
+	/// again whenever the node's next deadline moves.
+	pub fn poll_undoubted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let armed = {
+				let state = self.node.lock();
+				if !state.router.doubted(self.key) {
+					return Poll::Ready(());
+				}
+				state.router.deadline()
+			};
+			ready!(self.node.poll_deadline(armed, waiter));
+		}
+	}
+
 	/// Date what the stream hands the node by its session's clock too.
 	pub fn with_clock(mut self, clock: Deadlines) -> Self {
 		self.clock = Some(clock);
