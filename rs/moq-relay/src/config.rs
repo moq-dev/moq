@@ -361,8 +361,11 @@ impl Config {
 			!io_uring || self.listen.bind.is_some(),
 			"runtime.io_uring requires listen.bind"
 		);
-		#[cfg(not(target_os = "linux"))]
-		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
+		#[cfg(not(uring))]
+		anyhow::ensure!(
+			!io_uring,
+			"runtime.io_uring needs Linux on x86_64, aarch64, riscv64, loongarch64, or powerpc64"
+		);
 		// Refused rather than ignored: a group is the whole point of the setting, and
 		// silently serving from the shared runtime instead would look like it worked.
 		Ok(())

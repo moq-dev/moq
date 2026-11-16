@@ -1263,7 +1263,7 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 }
 
 /// Build an auth request from the path, credential, role, and implementation carried in SETUP.
-#[cfg(any(feature = "test-support", target_os = "linux"))]
+#[cfg(any(feature = "test-support", uring))]
 pub(crate) fn request_for_setup(
 	auth: &Auth,
 	setup: &moq_net::server::Handshake,
