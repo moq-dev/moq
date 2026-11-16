@@ -343,7 +343,7 @@ impl Config {
 		let implementation = self
 			.listen
 			.implementation
-			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.get_or_insert_with(|| format!("{} {}", crate::auth::RELAY, moq_net::IMPLEMENTATION))
 			.clone();
 		self.connect.implementation = Some(implementation);
 		Ok(Resolved(self))

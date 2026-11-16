@@ -76,8 +76,10 @@ fn grant(path: &str) -> Grant {
 	let all: moq_net::Patterns = [Pattern::all()].into_iter().collect();
 	let mut grant = Grant::new(all.clone(), all);
 	grant.root = Some(String::new());
-	grant.peer = true;
-	grant.upstream = path == "/upstream";
+	grant.link = Some(match path {
+		"/upstream" => moq_auth::Link::Upstream,
+		_ => moq_auth::Link::Peer,
+	});
 	grant
 }
 

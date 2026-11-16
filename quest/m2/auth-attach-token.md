@@ -62,7 +62,3 @@ For the PR:
 
 Public API: none in Rust or JS beyond doc comments. HTTP contract: breaking
 for `attach` (the credential moves from `query` to `token`). Wire: none.
-
-## Related
-
-- [A relay refuses a grant it does not fully understand](/quest/m2/auth-grants.md) - the other change to the same request and its docs

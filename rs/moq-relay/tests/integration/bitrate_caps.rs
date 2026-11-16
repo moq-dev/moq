@@ -27,8 +27,8 @@ const LEAST: Duration = Duration::from_millis(700);
 fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
 	let all: moq_auth::Patterns = moq_auth::Pattern::all().into();
 	let mut grant = moq_auth::Grant::new(all.clone(), all);
-	grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
-	grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 	grant
 }
 

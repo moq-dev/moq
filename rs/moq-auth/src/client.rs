@@ -21,8 +21,8 @@ const MAX_REPLY: usize = 1 << 20;
 ///
 /// `connect` admits a session and hands back the [`lease::Consumer`] it holds; a task
 /// behind it re-POSTs `revalidate` on the grant's cadence, applies each reply, revokes
-/// when the server refuses, answers an invalid grant, or the grant expires, and POSTs
-/// `end` when the session closes.
+/// when the server refuses, answers a grant it cannot read or accept, or the grant
+/// expires, and POSTs `end` when the session closes.
 #[derive(Clone)]
 pub struct Client {
 	identity: Arc<()>,
@@ -293,8 +293,11 @@ impl Post for Client {
 			return Err(Error::Refused(refusal.unwrap_or_default()));
 		}
 		check(status)?;
-		serde_json::from_slice(&reply(response).await?)
-			.map_err(|err| Error::Unavailable(format!("auth server answered an invalid grant: {err}")))
+		serde_json::from_slice(&reply(response).await?).map_err(|err| {
+			// The server's fault, not the client's: say so here, since the client only sees a refusal.
+			tracing::warn!(id = %request.id, %err, "auth server answered a grant this relay cannot read; refusing");
+			Error::InvalidGrant(err.to_string())
+		})
 	}
 
 	async fn post_end(&self, request: &Request) -> crate::Result<()> {
@@ -470,7 +473,15 @@ impl<S: Post> Driver<S> {
 							};
 							break producer.finish(reason, Bytes::default());
 						},
-						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
+						// The server answered a grant that can never admit: asking again gets the same.
+						Err(
+							Error::GrantExpired
+							| Error::UnboundedRevalidate
+							| Error::ZeroRevalidate
+							| Error::InvalidGrant(_)
+							| Error::InvalidTier(_)
+							| Error::InvalidLabel(_),
+						) => {
 							break producer.finish(Reason::Invalid, Bytes::default());
 						},
 						Err(err) => {
@@ -651,7 +662,7 @@ mod tests {
 		.await;
 
 		let consumer = client(&server).connect(request()).await.unwrap();
-		assert_eq!(consumer.grant().publish, patterns(&["**"]));
+		assert_eq!(consumer.grant().publish.path, patterns(&["**"]));
 		assert_eq!(log.events(), [Event::Connect]);
 
 		consumer.close("disconnected", Bytes { sent: 7, received: 11 });
@@ -1052,9 +1063,15 @@ mod tests {
 			}
 		}
 
-		let garbage = server(Log::default(), |_| ResponseTemplate::new(200).set_body_string("nope")).await;
-		let err = client(&garbage).connect(request()).await.unwrap_err();
-		assert!(matches!(err, Error::Unavailable(_)), "{err}");
+		// A grant the relay cannot read is the server's fault and final, not an outage.
+		for body in ["nope", r#"{"publish":["**"],"publish_rate":8000}"#] {
+			let unreadable = server(Log::default(), move |_| {
+				ResponseTemplate::new(200).set_body_string(body)
+			})
+			.await;
+			let err = client(&unreadable).connect(request()).await.unwrap_err();
+			assert!(matches!(err, Error::InvalidGrant(_)), "{body}: {err}");
+		}
 
 		let nothing = server(Log::default(), |_| {
 			ResponseTemplate::new(200).set_body_json(Grant::default())
@@ -1346,7 +1363,7 @@ mod tests {
 		);
 		assert!(log.revalidates() >= 1, "the outage was answered before expires");
 		assert_eq!(
-			consumer.grant().publish,
+			consumer.grant().publish.path,
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);

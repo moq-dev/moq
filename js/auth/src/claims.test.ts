@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { authorize, type Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
-import { encodeGrant, GrantSchema } from "./contract.ts";
+import { GrantSchema } from "./contract.ts";
 import { encodeGrants } from "./wire.ts";
 
 // These cases mirror the Rust moq-auth crate's claims::tests one-for-one, so both
@@ -124,7 +124,8 @@ test("shared rate vectors parse and re-encode like Rust", async () => {
 	const vectors = await Bun.file(new URL("../../../rs/moq-auth/rate.json", import.meta.url)).json();
 	for (const row of vectors.valid) {
 		expect(encodeGrants(ClaimsSchema.parse(row.input))).toEqual(row.claims);
-		expect(encodeGrant(GrantSchema.parse(row.input))).toEqual(row.grant);
+		// A grant's type is its wire shape, so what parses is what a server answers with.
+		expect(GrantSchema.parse(row.input)).toEqual(row.grant);
 	}
 	for (const input of vectors.invalid) {
 		expect(ClaimsSchema.safeParse(input).success).toBe(false);
@@ -132,7 +133,7 @@ test("shared rate vectors parse and re-encode like Rust", async () => {
 	}
 });
 
-test("a capped role decodes beside its patterns and never encodes as a prefix", () => {
+test("a capped role keeps its cap in the role and never encodes as a prefix", () => {
 	for (const role of ["publish", "subscribe"] as const) {
 		// Subtrees alone would be written as legacy prefixes, which a cap must not be.
 		const claims = ClaimsSchema.parse({
@@ -140,8 +141,7 @@ test("a capped role decodes beside its patterns and never encodes as a prefix", 
 			subscribe: ["**"],
 			[role]: { path: ["alice/**"], rate: 8000 },
 		});
-		expect(claims[role]).toEqual(["alice/**"]);
-		expect(claims[`${role}_rate`]).toBe(8000);
+		expect(claims[role]).toEqual({ path: ["alice/**"], rate: 8000 });
 		const encoded = encodeGrants(claims);
 		expect(encoded).not.toHaveProperty("put");
 		expect(encoded).not.toHaveProperty("get");

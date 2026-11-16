@@ -5,7 +5,7 @@ import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
 import * as Json from "./json.ts";
 import * as Path from "./path.ts";
-import { encodeGrants, nestRates } from "./wire.ts";
+import { encodeGrants } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
@@ -168,9 +168,8 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  *
- * Takes each role as its patterns, capped by `publish_rate` or `subscribe_rate` beside
- * it, as the decoded {@link Claims} spell them; the `{path, rate}` wire form and the
- * legacy `put`/`get` spelling are refused.
+ * Takes each role as {@link Claims} spell it: its patterns, or `{path, rate}` when capped.
+ * The legacy `put`/`get` spelling is refused; it is written only when it says the same.
  *
  * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
  * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
@@ -179,11 +178,13 @@ function parse(jwk: string): Key {
 async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
-	// Scope-check and sign what the schema parsed, never the raw input. The caps nest
-	// back into their roles first, which the schema refuses a role already in.
+	// Scope-check and sign what the schema parsed, never the raw input.
 	let parsed: Claims;
 	try {
-		parsed = ClaimsSchema.parse(nestRates(claims));
+		if ("put" in claims || "get" in claims) {
+			throw new Error("legacy put/get grants are refused; sign publish and subscribe instead");
+		}
+		parsed = ClaimsSchema.parse(claims);
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}

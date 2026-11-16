@@ -142,8 +142,8 @@ connect = [
 
 The mark belongs to the link, whichever side dialed: a dialed peer is upstream
 when its `connect` entry says so, and a peer that dials in when its
-[grant](/bin/relay/auth#the-contract) sets `"upstream": true` beside
-`"peer": true`. `moq auth serve --mtls-link upstream` grants that to
+[grant](/bin/relay/auth#the-contract) sets `"link": "upstream"` (with
+`"peer": true` for relays before 0.22). `moq auth serve --mtls-link upstream` grants that to
 every certificate, so use it only where cores are the only relays dialing in
 with mTLS: on a hub that leaf relays dial into, it marks every leaf upstream
 and the hub stops forwarding between them. A relay that predates the mark treats every link as
@@ -325,7 +325,7 @@ listed peer, re-read on every dial so a rotated token applies at the next
 redial). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`. An
-accepted peer counts as a cluster peer only when its grant sets `peer: true`,
+accepted peer counts as a cluster peer only when its grant sets a `link`,
 as `--mtls-link peer` does; otherwise what it announces counts as ingest here, like
 a client's, and it lists [hidden](/concept/moq-lite#hidden-broadcasts) routes
 only by asking, which a relay below moq-lite-07-wip, or on moq-transport

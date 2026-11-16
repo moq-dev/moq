@@ -21,7 +21,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use kio::clock::Instant;
 
-use crate::{Event, Grant, Key, KeyId, KeySet, Patterns, Permissions, Rate, Request, Token};
+use crate::{Access, Event, Grant, Key, KeyId, KeySet, Link, Permissions, Request, Token};
 
 /// Where the signing keys a `jwt` is verified against come from. Each file is parsed
 /// once and re-read when its modification time or size changes, so a rotated file
@@ -53,48 +53,6 @@ pub struct Limits {
 	pub token: Option<usize>,
 	/// The most live sessions from one remote address; `None` is unlimited.
 	pub remote: Option<usize>,
-}
-
-/// A verified certificate's cluster-link role.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Link {
-	/// A cluster peer that may exchange routes in either direction.
-	Peer,
-	/// A peer that is never offered routes learned from another upstream.
-	Upstream,
-}
-
-impl std::str::FromStr for Link {
-	type Err = &'static str;
-	fn from_str(value: &str) -> Result<Self, Self::Err> {
-		match value {
-			"peer" => Ok(Self::Peer),
-			"upstream" => Ok(Self::Upstream),
-			_ => Err("expected peer or upstream"),
-		}
-	}
-}
-
-impl std::fmt::Display for Link {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(match self {
-			Self::Peer => "peer",
-			Self::Upstream => "upstream",
-		})
-	}
-}
-
-impl serde::Serialize for Link {
-	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		serializer.collect_str(self)
-	}
-}
-
-impl<'de> serde::Deserialize<'de> for Link {
-	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		let text = <Cow<'de, str>>::deserialize(deserializer)?;
-		text.parse().map_err(serde::de::Error::custom)
-	}
 }
 
 /// The SHA-256 of a DER certificate, written as 64 hex digits.
@@ -170,18 +128,14 @@ impl From<RuleLink> for Option<Link> {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Rule {
-	/// Patterns it may publish, rooted at `/`.
-	pub publish: Option<Patterns>,
-	/// Patterns it may subscribe to, rooted at `/`.
-	pub subscribe: Option<Patterns>,
+	/// What it may publish, rooted at `/`, with an optional bitrate cap.
+	pub publish: Option<Access>,
+	/// What it may subscribe to, rooted at `/`, with an optional bitrate cap.
+	pub subscribe: Option<Access>,
 	/// Its cluster-link role.
 	pub link: Option<RuleLink>,
 	/// The tier stamped on its grants.
 	pub tier: Option<String>,
-	/// The bitrate cap on what it publishes.
-	pub publish_rate: Option<Rate>,
-	/// The bitrate cap on what it subscribes to.
-	pub subscribe_rate: Option<Rate>,
 }
 
 /// The decisions the server answers with, evaluated in order and stopping at the
@@ -434,20 +388,21 @@ impl Policy {
 				},
 				other => Denial::InvalidToken(other.to_string()),
 			})?;
-			let rates = (claims.publish_rate, claims.subscribe_rate);
+			let rates = (claims.publish.rate, claims.subscribe.rate);
 			(permissions, rates, claims.expires, Some(claims.root))
 		} else if let Some(peer) = &request.tls {
 			let rule = self.rule(peer)?.cloned().unwrap_or_default();
-			let rules = Permissions::new(
-				rule.publish.unwrap_or_else(|| self.mtls.publish.clone()),
-				rule.subscribe.unwrap_or_else(|| self.mtls.subscribe.clone()),
-			);
+			let publish = rule.publish.unwrap_or_else(|| Access::new(self.mtls.publish.clone()));
+			let subscribe = rule
+				.subscribe
+				.unwrap_or_else(|| Access::new(self.mtls.subscribe.clone()));
+			let rules = Permissions::new(publish.path, subscribe.path);
 			if rules.is_empty() {
 				return Err(Denial::NoMtlsGrant);
 			}
 			tier = rule.tier.or(tier);
 			link = rule.link.map_or(self.mtls_link, Into::into);
-			let rates = (rule.publish_rate, rule.subscribe_rate);
+			let rates = (publish.rate, subscribe.rate);
 			(authorize(&rules, &request.path)?, rates, peer.expires, None)
 		} else {
 			if self.public.is_empty() {
@@ -457,7 +412,7 @@ impl Policy {
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		(grant.publish_rate, grant.subscribe_rate) = rates;
+		(grant.publish.rate, grant.subscribe.rate) = rates;
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
 			(None, Some(bound)) => Some(kio::clock::wall().checked_add(bound).ok_or(Denial::ExpiresOutOfRange)?),
@@ -465,8 +420,7 @@ impl Policy {
 		};
 		grant.revalidate = self.revalidate;
 		grant.tier = tier;
-		grant.peer = link.is_some();
-		grant.upstream = link == Some(Link::Upstream);
+		grant.link = link;
 		Ok((grant, root))
 	}
 
@@ -523,8 +477,8 @@ impl Policy {
 /// empty root would be.
 fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Denial> {
 	let claims = crate::Claims {
-		publish: rules.publish.clone(),
-		subscribe: rules.subscribe.clone(),
+		publish: Access::new(rules.publish.clone()),
+		subscribe: Access::new(rules.subscribe.clone()),
 		..Default::default()
 	};
 	// An empty root overlaps every path, so the only refusal is reaching nothing.
@@ -971,8 +925,8 @@ mod tests {
 
 	fn rule(publish: &[&str], subscribe: &[&str]) -> Rule {
 		Rule {
-			publish: Some(patterns(publish)),
-			subscribe: Some(patterns(subscribe)),
+			publish: Some(patterns(publish).into()),
+			subscribe: Some(patterns(subscribe).into()),
 			..Default::default()
 		}
 	}
@@ -1045,8 +999,8 @@ mod tests {
 		let jwt = sign(&key, "demo/room", &["alice/**"], &["**"], Some(exp));
 
 		let grant = policy.decide(&with_token(request("/demo/room/"), &jwt)).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["alice/**"]));
-		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert_eq!(grant.publish.path, patterns(&["alice/**"]));
+		assert_eq!(grant.subscribe.path, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(exp));
 		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
@@ -1133,8 +1087,8 @@ mod tests {
 		};
 		let jwt = sign(&key, "demo", &["alice/**"], &["**"], None);
 		let grant = policy.decide(&with_token(request("/demo/alice"), &jwt)).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["**"]));
-		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert_eq!(grant.publish.path, patterns(&["**"]));
+		assert_eq!(grant.subscribe.path, patterns(&["**"]));
 
 		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::RootMismatch { .. }), "{err}");
@@ -1346,7 +1300,7 @@ mod tests {
 			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish, patterns(&["alice/**"]));
+		assert_eq!(grant.publish.path, patterns(&["alice/**"]));
 
 		// And refused like one: a stranger's key never falls through to public.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
@@ -1398,7 +1352,7 @@ mod tests {
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 		let request = with_setup_token(with_token(request("/demo"), &jwt), Token::OUT_OF_BAND, &jwt);
 		let grant = policy.decide(&request).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["**"]));
+		assert_eq!(grant.publish.path, patterns(&["**"]));
 	}
 
 	/// Two different credentials would leave the server guessing which one the client meant.
@@ -1470,14 +1424,14 @@ mod tests {
 		};
 		let not_after = kio::clock::wall() + Duration::from_secs(86400 * 30);
 		let grant = policy.decide(&with_peer(request("/"), Some(not_after))).await.unwrap();
-		assert_eq!(grant.publish, patterns(&["**"]));
+		assert_eq!(grant.publish.path, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
 
 		// A certificate without a bound gets none by default, like 0.14.
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
 		assert_eq!(grant.expires, None);
 		// A certificate is a client unless the policy says it is a relay.
-		assert!(!grant.peer);
+		assert_eq!(grant.link, None);
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Denial::NoPublicGrant);
@@ -1497,14 +1451,17 @@ mod tests {
 					Rule {
 						tier: Some("affiliate".into()),
 						link: Some(RuleLink::None),
-						publish_rate: Some(Rate::from_bps(1_000_000).unwrap()),
-						..rule(&["affiliate/**"], &["affiliate/**"])
+						publish: Some(
+							Access::new(patterns(&["affiliate/**"]))
+								.with_rate(crate::Rate::from_bps(1_000_000).unwrap()),
+						),
+						..rule(&[], &["affiliate/**"])
 					},
 				),
 				(
 					"vip",
 					Rule {
-						subscribe: Some(patterns(&["**"])),
+						subscribe: Some(patterns(&["**"]).into()),
 						..Default::default()
 					},
 				),
@@ -1517,11 +1474,11 @@ mod tests {
 			.decide(&with_chain(request("/"), "alice", &["affiliate-ca", "root"]))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish, patterns(&["affiliate/**"]));
-		assert_eq!(grant.subscribe, patterns(&["affiliate/**"]));
+		assert_eq!(grant.publish.path, patterns(&["affiliate/**"]));
+		assert_eq!(grant.subscribe.path, patterns(&["affiliate/**"]));
 		assert_eq!(grant.tier.as_deref(), Some("affiliate"));
-		assert_eq!(grant.publish_rate, Rate::from_bps(1_000_000).ok());
-		assert!(!grant.peer, "the rule drops the shared link role");
+		assert_eq!(grant.publish.rate, crate::Rate::from_bps(1_000_000).ok());
+		assert_eq!(grant.link, None, "the rule drops the shared link role");
 
 		// A leaf rule beats its intermediate's, and what it omits inherits the server-wide
 		// values, not the intermediate rule's.
@@ -1529,25 +1486,25 @@ mod tests {
 			.decide(&with_chain(request("/"), "vip", &["affiliate-ca", "root"]))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish, patterns(&["shared/**"]));
-		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert_eq!(grant.publish.path, patterns(&["shared/**"]));
+		assert_eq!(grant.subscribe.path, patterns(&["**"]));
 		assert_eq!(grant.tier.as_deref(), Some("base"));
-		assert_eq!(grant.publish_rate, None);
-		assert!(grant.peer);
+		assert_eq!(grant.publish.rate, None);
+		assert_eq!(grant.link, Some(Link::Peer));
 
 		// No rule names the chain: the shared grant.
 		let grant = policy
 			.decide(&with_chain(request("/"), "bob", &["other-ca"]))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish, patterns(&["shared/**"]));
-		assert!(grant.subscribe.is_empty());
+		assert_eq!(grant.publish.path, patterns(&["shared/**"]));
+		assert!(grant.subscribe.path.is_empty());
 
 		// A relay that predates the chain reports only the leaf, which a leaf rule matches.
 		let mut legacy = with_chain(request("/"), "vip", &[]);
 		legacy.tls.as_mut().unwrap().chain.clear();
 		let grant = policy.decide(&legacy).await.unwrap();
-		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert_eq!(grant.subscribe.path, patterns(&["**"]));
 
 		// A rule that grants nothing refuses, even where the shared grant would admit.
 		let revoked = Policy {
@@ -1578,7 +1535,7 @@ mod tests {
 		let server = Server::new(provisioned.clone()).unwrap();
 		let mut session = with_chain(request("/"), "alice", &["ca"]);
 		assert_eq!(
-			server.answer(&session).await.unwrap().unwrap().publish,
+			server.answer(&session).await.unwrap().unwrap().publish.path,
 			patterns(&["**"])
 		);
 
@@ -1590,7 +1547,7 @@ mod tests {
 			})
 			.unwrap();
 		assert_eq!(
-			server.answer(&session).await.unwrap().unwrap().publish,
+			server.answer(&session).await.unwrap().unwrap().publish.path,
 			patterns(&["alice/**"])
 		);
 
@@ -1606,7 +1563,7 @@ mod tests {
 		};
 		assert!(server.update(invalid).is_err());
 		assert_eq!(
-			server.answer(&session).await.unwrap().unwrap().publish,
+			server.answer(&session).await.unwrap().unwrap().publish.path,
 			patterns(&["alice/**"])
 		);
 
@@ -1642,29 +1599,30 @@ mod tests {
 			..Default::default()
 		};
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
-		assert!(grant.peer && !grant.upstream);
+		assert_eq!(grant.link, Some(Link::Peer));
 
 		let policy = Policy {
 			mtls_link: Some(Link::Upstream),
 			..policy
 		};
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
-		assert!(grant.peer && grant.upstream);
+		assert_eq!(grant.link, Some(Link::Upstream));
 		grant.validate().unwrap();
 		let grant = policy.decide(&request("/")).await.unwrap();
-		assert!(!grant.peer && !grant.upstream);
+		assert_eq!(grant.link, None);
 		let jwt = sign(&key, "", &["**"], &[], None);
 		let grant = policy.decide(&with_token(request("/"), &jwt)).await.unwrap();
-		assert!(!grant.peer && !grant.upstream);
+		assert_eq!(grant.link, None);
 	}
 
-	/// Every representable mTLS link role produces a valid wire grant.
+	/// Every representable mTLS link role produces a valid grant that the strict
+	/// reader reads back, with the `peer` a relay before 0.22 reads in its place.
 	#[tokio::test]
 	async fn mtls_link_roles_preserve_the_grant_contract() {
-		for (link, peer, upstream) in [
-			(None, false, false),
-			(Some(Link::Peer), true, false),
-			(Some(Link::Upstream), true, true),
+		for (link, peer) in [
+			(None, None),
+			(Some(Link::Peer), Some(true)),
+			(Some(Link::Upstream), Some(true)),
 		] {
 			let policy = Policy {
 				mtls: rules(&["**"], &["**"]),
@@ -1672,8 +1630,11 @@ mod tests {
 				..Default::default()
 			};
 			let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
-			assert_eq!((grant.peer, grant.upstream), (peer, upstream));
+			assert_eq!(grant.link, link);
 			grant.validate().unwrap();
+			let json = serde_json::to_value(&grant).unwrap();
+			assert_eq!(json.get("peer").and_then(|peer| peer.as_bool()), peer);
+			assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 		}
 	}
 
@@ -1706,8 +1667,8 @@ mod tests {
 			..Default::default()
 		};
 		let grant = policy.decide(&request("/")).await.unwrap();
-		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
-		assert!(grant.publish.is_empty());
+		assert_eq!(grant.subscribe.path, patterns(&["anon/**"]));
+		assert!(grant.publish.path.is_empty());
 		// Never re-checked or closed by default, like 0.14.
 		assert_eq!(grant.expires, None);
 		assert_eq!(grant.revalidate, None);
@@ -1731,8 +1692,8 @@ mod tests {
 			("/rooms", &[], &["chat"]),
 		] {
 			let grant = policy.decide(&request(path)).await.unwrap();
-			assert_eq!(grant.publish, patterns(publish), "{path}");
-			assert_eq!(grant.subscribe, patterns(subscribe), "{path}");
+			assert_eq!(grant.publish.path, patterns(publish), "{path}");
+			assert_eq!(grant.subscribe.path, patterns(subscribe), "{path}");
 			assert_eq!(grant.root, None, "{path}");
 		}
 
@@ -1748,7 +1709,7 @@ mod tests {
 		}
 
 		let grant = policy.decide(&with_peer(request("/origin/edge0"), None)).await.unwrap();
-		assert_eq!(grant.publish, patterns(&[""]));
+		assert_eq!(grant.publish.path, patterns(&[""]));
 		let err = policy.decide(&with_peer(request("/anon"), None)).await.unwrap_err();
 		assert!(matches!(err, Denial::NoAccess { .. }), "{err}");
 	}
@@ -2070,7 +2031,7 @@ mod tests {
 		.await;
 
 		let consumer = client.connect(request("/demo")).await.unwrap();
-		assert_eq!(consumer.grant().publish, patterns(&["**"]));
+		assert_eq!(consumer.grant().publish.path, patterns(&["**"]));
 
 		let err = client.connect(request("/demo")).await.unwrap_err();
 		assert!(matches!(err, Error::Refused(_)), "{err}");
@@ -2185,6 +2146,6 @@ mod tests {
 		let url = format!("unix://{}", url.path()).parse().unwrap();
 		let client = Client::new(url, None).unwrap();
 		let consumer = client.connect(request("/")).await.unwrap();
-		assert_eq!(consumer.grant().subscribe, patterns(&["**"]));
+		assert_eq!(consumer.grant().subscribe.path, patterns(&["**"]));
 	}
 }

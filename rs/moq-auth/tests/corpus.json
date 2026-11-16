@@ -164,7 +164,7 @@
 			"name": "capped_role",
 			"key": "hs256",
 			"payload": { "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] },
-			"claims": { "root": "", "publish": ["alice/**"], "publish_rate": 1000, "subscribe": ["**"] }
+			"claims": { "root": "", "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] }
 		},
 		{
 			"name": "misspelled_cap",
@@ -542,7 +542,31 @@
 		{ "name": "expires_past_the_clock", "grant": { "publish": ["**"], "expires": 18446744074 }, "valid": false },
 		{ "name": "revalidate_without_expires", "grant": { "publish": ["**"], "revalidate": 60 }, "valid": false },
 		{ "name": "grants_nothing", "grant": { "expires": 4102444800 }, "valid": false },
-		{ "name": "upstream_without_peer", "grant": { "publish": ["**"], "upstream": true }, "valid": false },
-		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false }
+		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false },
+		{ "name": "unknown_field", "grant": { "publish": ["**"], "future": true }, "valid": false },
+		{ "name": "flat_rate", "grant": { "publish": ["**"], "publish_rate": 8000 }, "valid": false },
+		{
+			"name": "legacy_upstream_flag",
+			"grant": { "publish": ["**"], "peer": true, "upstream": true },
+			"valid": false
+		},
+		{
+			"name": "capped_role",
+			"grant": { "publish": { "path": ["alice/**"], "rate": 8000 }, "subscribe": ["**"] },
+			"valid": true
+		},
+		{ "name": "cap_on_nothing", "grant": { "publish": { "path": [], "rate": 8000 } }, "valid": false },
+		{ "name": "misspelled_cap", "grant": { "publish": { "path": ["**"], "rat": 8000 } }, "valid": false },
+		{ "name": "link_peer", "grant": { "publish": ["**"], "link": "peer" }, "valid": true },
+		{ "name": "link_upstream", "grant": { "publish": ["**"], "link": "upstream", "peer": true }, "valid": true },
+		{ "name": "peer_alias", "grant": { "publish": ["**"], "peer": true }, "valid": true },
+		{ "name": "not_a_peer", "grant": { "publish": ["**"], "peer": false }, "valid": true },
+		{
+			"name": "link_disagrees_with_peer",
+			"grant": { "publish": ["**"], "link": "upstream", "peer": false },
+			"valid": false
+		},
+		{ "name": "unknown_link", "grant": { "publish": ["**"], "link": "downstream" }, "valid": false },
+		{ "name": "null_link", "grant": { "publish": ["**"], "link": null }, "valid": false }
 	]
 }

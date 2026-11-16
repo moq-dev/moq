@@ -120,10 +120,6 @@ pub enum Error {
 	#[error("grant names nothing; the session is refused")]
 	UselessGrant,
 
-	/// The grant marks an upstream but not a peer.
-	#[error("grant marks an upstream that is not a peer")]
-	UpstreamWithoutPeer,
-
 	/// The grant asks to be revalidated but never expires.
 	#[error("grant asks to be revalidated but never expires")]
 	UnboundedRevalidate,
@@ -155,6 +151,11 @@ pub enum Error {
 	/// The auth server refused the session.
 	#[error(transparent)]
 	Refused(#[from] crate::Refusal),
+
+	/// The auth server answered a grant this reader cannot read, such as one with a field
+	/// it does not know. The server's fault, and final: asking again gets the same answer.
+	#[error("auth server answered a grant this relay cannot read: {0}")]
+	InvalidGrant(String),
 
 	/// The auth server could not be reached or answered with an error.
 	#[error("auth server unavailable: {0}")]
