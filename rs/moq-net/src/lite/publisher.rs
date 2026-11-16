@@ -2891,7 +2891,8 @@ struct DatagramSend {
 	session: Transport,
 	id: u64,
 	version: Version,
-	/// How datagrams are stamped, or `None` when they carry no timestamp.
+	/// How datagrams are stamped, or `None` on a scale-less lite-07 track, whose datagrams
+	/// carry their producer's bare value.
 	stamp: Option<Stamp>,
 	/// The publisher's priority for the track, which breaks subscriber priority ties.
 	publisher: i8,
@@ -2931,8 +2932,12 @@ impl DatagramSend {
 	/// every datagram its source produces later is at least as far, so the subscription can
 	/// deliver no more. One the network reordered below it is lost, as any datagram may be.
 	fn send(&self, datagram: crate::datagram::Datagram) -> Result<(), Error> {
-		let Ok(timestamp) = self.stamp.map(|stamp| stamp.wire(datagram.timestamp)).transpose() else {
-			return Ok(());
+		let timestamp = match self.stamp {
+			Some(stamp) => match stamp.wire(datagram.timestamp) {
+				Ok(timestamp) => timestamp,
+				Err(_) => return Ok(()),
+			},
+			None => datagram.timestamp.value(),
 		};
 		let sequence = datagram.sequence;
 		let size = datagram.payload.len();
@@ -2942,8 +2947,6 @@ impl DatagramSend {
 			timestamp,
 			payload: datagram.payload,
 		};
-		// The stamp is set wherever the version needs a timestamp, so this never hits a
-		// version guard.
 		let body = body.encode_bytes(self.version)?;
 		let max = self.session.max_datagram_size().min(lite::Datagram::MAX_SIZE);
 		if body.len() > max {

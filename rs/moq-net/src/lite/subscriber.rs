@@ -1177,20 +1177,15 @@ impl Subscriber {
 		if payload.len() > lite::Datagram::MAX_SIZE {
 			return Ok(None);
 		}
-		let mut target = None;
-		let dg = lite::Datagram::decode(payload, self.version, |id| {
-			target = self.datagram_target(id);
-			target.as_ref().is_some_and(|(_, timescale)| timescale.is_some())
-		})?;
-		let Some((mut producer, timescale)) = target else {
+		let dg = lite::Datagram::decode(payload, self.version)?;
+		let Some((mut producer, timescale)) = self.datagram_target(dg.subscribe) else {
 			return Ok(Some(dg.subscribe));
 		};
-		// A scale-less datagram's time is its sequence.
-		let timestamp = match (dg.timestamp, timescale) {
-			(Some(value), Some(scale)) => {
-				Timestamp::new(value, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
-			}
-			_ => Timestamp::unscaled(dg.sequence),
+		// A scale-less datagram's timestamp is bare, which the track checks is its sequence.
+		let timestamp = match timescale {
+			Some(scale) => Timestamp::new(dg.timestamp, scale)
+				.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
+			None => Timestamp::unscaled(dg.timestamp),
 		};
 		producer.insert(crate::datagram::Datagram {
 			sequence: dg.sequence,
@@ -4746,7 +4741,7 @@ mod tests {
 			let body = lite::Datagram {
 				subscribe,
 				sequence: 0,
-				timestamp: None,
+				timestamp: 0,
 				payload: bytes::Bytes::from_static(b"x"),
 			};
 			peer.send_datagram(body.encode_bytes(Version::Lite07).unwrap(), Default::default())
@@ -4817,7 +4812,7 @@ mod tests {
 			let body = lite::Datagram {
 				subscribe: 1,
 				sequence: key,
-				timestamp: None,
+				timestamp: key,
 				payload: bytes::Bytes::from_static(b"x"),
 			};
 			peer.send_datagram(body.encode_bytes(Version::Lite07).unwrap(), Default::default())
@@ -7365,7 +7360,7 @@ mod tests {
 				lite::Datagram {
 					subscribe: 1,
 					sequence: key,
-					timestamp: Some(key),
+					timestamp: key,
 					payload: bytes::Bytes::from(vec![0; size]),
 				}
 				.encode_bytes(version)

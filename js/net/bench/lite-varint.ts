@@ -78,8 +78,8 @@ const subscribe: Sample = {
 
 const datagram: Sample = {
 	name: "Datagram",
-	encode: (w, version) => w.write(new Datagram(3n, 1_234n, 1_234_567_890, new Uint8Array()).encode(version)),
-	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version, () => ({ timed: true }))),
+	encode: (w, version) => w.write(new Datagram(3n, 1_234n, 1_234_567_890n, new Uint8Array()).encode(version)),
+	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version)),
 };
 
 const hop = randomHop();

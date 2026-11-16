@@ -13,7 +13,6 @@ const input: {
 	varints: number[];
 	setup: number[];
 	datagram: number[];
-	untimedDatagram: number[];
 	trackInfo: number[];
 	group: number[];
 	untimedGroup: number[];
@@ -64,20 +63,11 @@ if (version === Version.DRAFT_07) {
 const setup = await Setup.decode(reader(input.setup), version);
 const setupBytes = await write((w) => setup.encode(w, version));
 
-const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => ({ timed: true }));
+const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version);
 const datagramBytes = [...datagram.encode(version)];
 
 // Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
 const untimed = version === Version.DRAFT_07;
-
-let untimedDatagramBytes: number[] = [];
-if (untimed) {
-	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => ({ timed: false }));
-	assert.equal(datagram.timestamp, undefined);
-	untimedDatagramBytes = [...datagram.encode(version)];
-} else {
-	assert.throws(() => new Datagram(9n, 1n, undefined, new Uint8Array()).encode(version));
-}
 
 const trackInfo = await TrackInfo.decode(reader(input.trackInfo), version);
 assert.equal(trackInfo.timescale, version === Version.DRAFT_07 ? undefined : 1_000);
@@ -136,7 +126,6 @@ console.log(
 		varints,
 		setup: setupBytes,
 		datagram: datagramBytes,
-		untimedDatagram: untimedDatagramBytes,
 		trackInfo: trackInfoBytes,
 		group: groupBytes,
 		untimedGroup: untimedGroupBytes,

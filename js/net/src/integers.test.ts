@@ -9,7 +9,6 @@ import { Parameters } from "./ietf/parameters.ts";
 import { PublishDone } from "./ietf/publish.ts";
 import { RequestError } from "./ietf/request.ts";
 import { Version } from "./ietf/version.ts";
-import { Datagram } from "./lite/datagram.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { frameDecoder, Group as LiteGroup } from "./lite/group.ts";
 import * as LiteMessage from "./lite/message.ts";
@@ -182,8 +181,6 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 		);
 		const decode = frameDecoder({ scale: Timescale.NANO });
 		expect(() => decode(new Cursor(fields(version, UNSAFE << 1n, 0), version))).toThrow(RangeError);
-		const datagram = fields(version, ...(version === Lite.DRAFT_07 ? [0] : []), 0, 0, UNSAFE);
-		await expect(Datagram.decode(datagram, version, () => ({ timed: true }))).rejects.toThrow(RangeError);
 	});
 }
 

@@ -11,12 +11,11 @@ import { Timescale } from "../time.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { hasDatagrams, hasDatagramTracks, type Version, wireTimescale } from "./version.ts";
+import { hasDatagrams, hasDatagramTracks, type Version } from "./version.ts";
 
 /**
- * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
- * timestamp present only when the subscription's track carries one (see `wireTimescale`).
- * Lite-07 prefixes datagram-track bodies with type 0x0, its only datagram type.
+ * A QUIC datagram body: `subscribe (i) | sequence (i) | timestamp (i) | payload (b)`. Lite-07
+ * prefixes datagram-track bodies with type 0x0, its only datagram type.
  *
  * The payload runs to the datagram boundary, so unlike a size-prefixed lite message there is no
  * inner length prefix. Mirrors the Rust `lite::Datagram`; the model counterpart is
@@ -30,12 +29,15 @@ export class Datagram {
 	subscribe: bigint;
 	/** The datagram track's sequence, mapped to a group sequence on lite-05/06. */
 	sequence: bigint;
-	/** Absolute presentation timestamp in the track's wire timescale, or undefined on a track that carries none. */
-	timestamp: number | undefined;
+	/**
+	 * Absolute presentation timestamp in the track's wire timescale. A scale-less track's is the
+	 * bare value its producer gave, which is the datagram's sequence.
+	 */
+	timestamp: bigint;
 	/** The frame payload, delimited by the datagram boundary. */
 	payload: Uint8Array;
 
-	constructor(subscribe: bigint, sequence: bigint, timestamp: number | undefined, payload: Uint8Array) {
+	constructor(subscribe: bigint, sequence: bigint, timestamp: bigint, payload: Uint8Array) {
 		this.subscribe = subscribe;
 		this.sequence = sequence;
 		this.timestamp = timestamp;
@@ -45,14 +47,9 @@ export class Datagram {
 	/** Encode the body to a single `Uint8Array` (no length prefix; the datagram boundary delimits it). */
 	encode(version: Version): Uint8Array {
 		if (!hasDatagrams(version)) throw new Error("datagrams require lite-05 or newer");
-		// A version that always carries a timescale has no untimed body.
-		if (this.timestamp === undefined && wireTimescale(version, undefined) !== undefined) {
-			throw new Error(`version ${version} has no untimed datagram`);
-		}
-
 		const subscribe = encodeVarint(this.subscribe, version);
 		const sequence = encodeVarint(this.sequence, version);
-		const timestamp = this.timestamp === undefined ? new Uint8Array() : encodeVarint(this.timestamp, version);
+		const timestamp = encodeVarint(this.timestamp, version);
 		const type = hasDatagramTracks(version) ? encodeVarint(0x0, version) : new Uint8Array();
 
 		const out = new Uint8Array(
@@ -75,16 +72,8 @@ export class Datagram {
 		return out;
 	}
 
-	/**
-	 * Decode a datagram body. `timed` reports whether the track of the given subscribe ID carries
-	 * a timestamp, which the body itself does not say. An unknown lite-07 type throws, so the
-	 * caller discards it.
-	 */
-	static async decode(
-		data: Uint8Array,
-		version: Version,
-		framing: (subscribe: bigint) => { timed: boolean },
-	): Promise<Datagram> {
+	/** Decode a datagram body. An unknown lite-07 type throws, so the caller discards it. */
+	static async decode(data: Uint8Array, version: Version): Promise<Datagram> {
 		if (!hasDatagrams(version)) throw new Error("datagrams require lite-05 or newer");
 		const r = new Reader(undefined, data, version);
 		if (hasDatagramTracks(version)) {
@@ -93,11 +82,9 @@ export class Datagram {
 		}
 		const subscribe = await r.u62();
 		const sequence = await r.u62();
-		const { timed } = framing(subscribe);
-		const timestamp = timed ? await r.u53() : undefined;
+		const timestamp = await r.u62();
 		const payload = await r.readAll();
-		const result = new Datagram(subscribe, sequence, timestamp, payload);
-		return result;
+		return new Datagram(subscribe, sequence, timestamp, payload);
 	}
 }
 

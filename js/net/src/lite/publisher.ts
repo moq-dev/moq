@@ -16,6 +16,7 @@ import {
 	reason,
 	StreamCode,
 	StreamError,
+	TimestampMismatch,
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
@@ -40,7 +41,7 @@ import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, keyOf, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -160,6 +161,13 @@ function stamping(version: Version, info: { timescale?: Timescale | null }): Sta
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out scale-less. */
 function wireTime(timestamp: Timestamp, stamp: Stamp): number {
 	return stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale);
+}
+
+/** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
+function bareTime(timestamp: Timestamp): bigint {
+	const key = keyOf(timestamp);
+	if (key === undefined) throw new TimestampMismatch();
+	return key;
 }
 
 /**
@@ -2366,13 +2374,16 @@ export class Publisher {
 				if (!datagram) return end;
 				end = max(end, datagram.sequence + 1n);
 				const stamp = options.stamp;
-				// An old subscription uses its stream track's timescale for both kinds.
+				// An old subscription uses its stream track's timescale for both kinds. Without a
+				// stamp the track is a scale-less lite-07 one, whose timestamp goes out bare.
 				const timestamp =
 					stamp === undefined
-						? undefined
-						: datagram.timestamp.scale === undefined
-							? floorAt(Timestamp.now(), stamp.timescale)
-							: floorAt(datagram.timestamp, stamp.timescale);
+						? bareTime(datagram.timestamp)
+						: BigInt(
+								datagram.timestamp.scale === undefined
+									? floorAt(Timestamp.now(), stamp.timescale)
+									: floorAt(datagram.timestamp, stamp.timescale),
+							);
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
 					this.version,
 				);

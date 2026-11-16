@@ -57,6 +57,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
+import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
 import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -4030,20 +4031,15 @@ export class Subscriber {
 	// Deliver one datagram body, returning its Subscribe ID if that subscription has no datagram
 	// track, or, `behindHeld`, has a datagram held.
 	async #deliverDatagram(payload: Uint8Array, behindHeld: boolean): Promise<bigint | undefined> {
-		// Read with the entry it was decoded with: one registered while the decode awaited would
-		// read a datagram parsed with the defaults.
-		let entry: DatagramEntry | undefined;
-		const dg = await DatagramMessage.decode(payload, this.version, (id) => {
-			entry = this.#datagrams.get(id);
-			return { timed: entry?.timescale !== undefined };
-		});
-		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
+		const dg = await DatagramMessage.decode(payload, this.version);
+		const entry = this.#datagrams.get(dg.subscribe);
+		if (!entry) return dg.subscribe;
 		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
-		// A scale-less datagram's timestamp is its sequence.
+		// A scale-less datagram's timestamp is bare, which the track checks is its sequence.
 		const timestamp =
-			dg.timestamp === undefined || entry.timescale === undefined
-				? Time.Timestamp.unscaled(dg.sequence)
-				: new Time.Timestamp(dg.timestamp, entry.timescale);
+			entry.timescale === undefined
+				? Time.Timestamp.unscaled(dg.timestamp)
+				: new Time.Timestamp(toNumber(dg.timestamp), entry.timescale);
 		entry.producer.insert({ sequence: dg.sequence, timestamp, payload: dg.payload });
 		return undefined;
 	}

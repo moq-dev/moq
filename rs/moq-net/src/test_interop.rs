@@ -291,7 +291,6 @@ struct Echo {
 	varints: Vec<u8>,
 	setup: Vec<u8>,
 	datagram: Vec<u8>,
-	untimed_datagram: Vec<u8>,
 	track_info: Vec<u8>,
 	group: Vec<u8>,
 	untimed_group: Vec<u8>,
@@ -324,7 +323,7 @@ fn lite_varint_interop() {
 		let datagram = lite::Datagram {
 			subscribe: (1 << 40) + 1,
 			sequence: 300,
-			timestamp: Some((1 << 50) + 5),
+			timestamp: (1 << 50) + 5,
 			payload: bytes::Bytes::from_static(b"x"),
 		}
 		.encode_bytes(version)
@@ -332,21 +331,6 @@ fn lite_varint_interop() {
 
 		// Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
 		let untimed = version.wire_timescale(None).is_none();
-		// The body doesn't say it is untimed; the subscription's track does.
-		let untimed_datagram = lite::Datagram {
-			subscribe: 9,
-			sequence: 1 << 30,
-			timestamp: None,
-			payload: bytes::Bytes::from_static(b"untimed"),
-		}
-		.encode_bytes(version);
-		let untimed_datagram = match untimed {
-			true => untimed_datagram.unwrap().to_vec(),
-			false => {
-				assert!(untimed_datagram.is_err(), "{version}: encoded an untimed datagram");
-				Vec::new()
-			}
-		};
 
 		// An untimed track: zero on lite-07, milliseconds before it. Compressed where the
 		// version can say so.
@@ -384,7 +368,6 @@ fn lite_varint_interop() {
 			"varints": varints,
 			"setup": setup.to_vec(),
 			"datagram": datagram.to_vec(),
-			"untimedDatagram": untimed_datagram,
 			"trackInfo": track_info.to_vec(),
 			"group": group,
 			"untimedGroup": untimed_group,
@@ -396,7 +379,6 @@ fn lite_varint_interop() {
 		assert_eq!(echo.varints, varints, "{version}: JS encoded the values differently");
 		assert_eq!(echo.setup, setup, "{version}: SETUP");
 		assert_eq!(echo.datagram, datagram, "{version}: datagram");
-		assert_eq!(echo.untimed_datagram, untimed_datagram, "{version}: untimed datagram");
 		assert_eq!(echo.track_info, track_info, "{version}: TRACK_INFO");
 		assert_eq!(echo.group, group, "{version}: group");
 		assert_eq!(echo.untimed_group, untimed_group, "{version}: untimed group");
