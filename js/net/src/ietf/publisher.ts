@@ -1357,9 +1357,12 @@ export class Publisher {
 				const end = hooks.subscriberEnd(track);
 				const marked = end?.group === group.sequence && end.frame === next;
 				// A finished group ends with END_OF_GROUP one past its last object, unless the
-				// END_OF_TRACK below marks that place or the range stops short of it.
-				if (ended && !marked && (slice.until === undefined || next < slice.until)) {
-					await send(() => new Frame().encode(stream, header.flags, this.#session.version, first ? next : 0));
+				// END_OF_TRACK below marks that place or the range misses it: a filter starting
+				// past the group's end, or one stopping short of it.
+				const last = group.frameCount;
+				if (ended && !marked && last >= slice.skip && (slice.until === undefined || last < slice.until)) {
+					// Every object below `last` was written, so only an empty stream names it.
+					await send(() => new Frame().encode(stream, header.flags, this.#session.version, first ? last : 0));
 					first = false;
 				} else if (marked) {
 					await new Frame({ endOfTrack: true }).encode(

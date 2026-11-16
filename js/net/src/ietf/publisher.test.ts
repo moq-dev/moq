@@ -2531,6 +2531,37 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 	}
 });
 
+/**
+ * A filter starting past a finished group's end serves none of it and names no end either:
+ * END_OF_GROUP goes one past the group's real last object, which the filter skipped, as in
+ * Rust's `end_object`.
+ */
+test("draft-22: a filter starting past a group's end claims no END_OF_GROUP", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	writeGroup(track, 2);
+	writeGroup(track, 2);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 5n, endGroup: 1n, endObject: 0n },
+		}),
+	);
+
+	try {
+		const served = await readGroup(await nextUni(fx.uni));
+		expect(served).toEqual({ sequence: 0n, firstObject: false, endOfGroup: false, objects: [] });
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
 test("draft-22: an absolute subscribe is no join", async () => {
 	const fx = fixture();
