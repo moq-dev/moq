@@ -8805,8 +8805,8 @@ mod serve_group_test {
 	/// A stale group already named in SUBSCRIBE_DROP stays dropped before lite-07 after any
 	/// SUBSCRIBE_UPDATE, since those subscribers settle a drop for good. Lite-07 reopens it on
 	/// every update: one that widens the max age past it serves it, and one that keeps the
-	/// budget drops it again under the new update's number. The groups served around it are
-	/// never resent.
+	/// budget, changing no term at all, drops it again under the new update's number. The
+	/// groups served around it are never resent.
 	#[kio::test]
 	async fn any_update_reoffers_a_reported_stale_drop_on_lite07_alone() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -8835,7 +8835,7 @@ mod serve_group_test {
 					wanted_group: None,
 					priority: 0,
 					max_delay: if widen { Duration::from_secs(10) } else { budget },
-					min_delay: None,
+					min_delay: Some(Duration::ZERO),
 					ranges: vec![(0, lite::Range::span(None, 0, None, None))],
 					order: Order::Descending,
 					update: 1,

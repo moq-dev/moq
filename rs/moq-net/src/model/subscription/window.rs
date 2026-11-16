@@ -4,7 +4,7 @@
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
 //! side: resolved at the hop serving the subscriber, it filters that subscriber's reads.
 
-use std::{ops, sync::Arc};
+use std::{ops, sync::Arc, time::Duration};
 
 use super::{Anchor, Layered, Range, Runs};
 use crate::{Error, Result};
@@ -75,6 +75,15 @@ pub(in crate::model) trait Holdings {
 	/// to the oldest group rather than wait.
 	fn complete(&self) -> bool;
 
+	/// Where a live join holding `min` behind the live edge starts, `latest` being the latest
+	/// group: the time that far behind the newest frame held, a group that starts at or
+	/// before it, or [`Anchor::Oldest`] when none held does. `None` while nothing held can
+	/// measure it, so the join waits for a group as a relative start does.
+	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
+		let _ = (latest, min);
+		None
+	}
+
 	/// Whether the producer declared every key in `keys` skipped, so no group starts there
 	/// even in the history a handler serves.
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
@@ -124,6 +133,8 @@ impl Holdings for Unheld {
 pub(in crate::model) struct Window {
 	/// What these were resolved from, so only replacing the ranges resolves again.
 	ranges: Vec<Range>,
+	/// The subscriber's Min Age, which reaches a live join back from the live edge.
+	min: Option<Duration>,
 	spans: Vec<Span>,
 	/// The spans still looking up their time start (see [`Self::found`]), which read nothing
 	/// meanwhile: kept apart so a probe finds them without visiting every span.
@@ -154,6 +165,8 @@ pub(in crate::model) struct Window {
 struct Span {
 	/// Which of the ranges it came from.
 	index: usize,
+	/// Where it starts: its range's start, or where a live join's Min Age reached it back to.
+	anchor: Anchor,
 	start: u64,
 	/// The exclusive end, `None` past every group.
 	end: Option<u64>,
@@ -176,14 +189,16 @@ struct Looking {
 }
 
 impl Window {
-	/// Resolve `ranges`, counting relative anchors back from `latest`.
+	/// Resolve `ranges`, counting relative anchors back from `latest`, and reaching a live
+	/// join back by `min` (see [`joins`]).
 	///
 	/// Refuses an [`Anchor::Oldest`] end with [`Error::InvalidRange`] where the hop
 	/// [resolves](Holdings::resolves) ranges itself, and an anchor a received copy's wire
 	/// drops with [`Error::Unsupported`].
-	pub fn new(ranges: &[Range], latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
+	pub fn new(ranges: &[Range], min: Option<Duration>, latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
 		let mut window = Self {
 			ranges: ranges.to_vec(),
+			min,
 			spans: Vec::new(),
 			looking: Vec::new(),
 			waiting: Vec::new(),
@@ -237,7 +252,7 @@ impl Window {
 	fn start_waiting(&mut self, holdings: &impl Holdings) -> bool {
 		let mut started = false;
 		for position in std::mem::take(&mut self.waiting) {
-			let Anchor::Time(time) = self.ranges[self.spans[position].index].start else {
+			let Anchor::Time(time) = self.spans[position].anchor else {
 				unreachable!("only a time start waits on a group");
 			};
 			let (start, floored) = match holdings.containing(time) {
@@ -263,9 +278,10 @@ impl Window {
 	/// where the groups held can't place it, as when first resolved, and otherwise reading
 	/// its groups.
 	fn start_span(&mut self, position: usize, time: u64, start: u64, floored: bool, holdings: &impl Holdings) {
+		let asked = matches!(self.ranges[self.spans[position].index].start, Anchor::Time(_));
 		let span = &mut self.spans[position];
 		(span.start, span.floored, span.waiting) = (start, floored, false);
-		if let Some(below) = unresolved(time, start, floored, holdings) {
+		if let Some(below) = unresolved(time, start, floored, holdings).filter(|_| asked) {
 			span.looking = Some(Looking { time, below });
 			self.looking.push(position);
 		}
@@ -485,7 +501,18 @@ impl Window {
 				self.pending = true;
 				continue;
 			};
-			let (start, floored) = match start(range.start, latest, holdings) {
+			let anchor = match joins(range, self.min, holdings) {
+				None => range.start,
+				Some(min) => match latest.map(|latest| holdings.reach_back(latest, min)) {
+					Some(Some(anchor)) => anchor,
+					// Nothing to measure the live edge by yet.
+					_ => {
+						self.pending = true;
+						continue;
+					}
+				},
+			};
+			let (start, floored) = match start(anchor, latest, holdings) {
 				Start::At(start, floored) => (start, floored),
 				Start::Pending => {
 					self.pending = true;
@@ -497,6 +524,7 @@ impl Window {
 					self.waiting.push(self.spans.len());
 					self.spans.push(Span {
 						index,
+						anchor,
 						start: 0,
 						end,
 						floored: false,
@@ -506,9 +534,12 @@ impl Window {
 					continue;
 				}
 			};
-			// A time start the groups held can't place reads nothing until its lookup answers.
-			let looking = match range.start {
-				Anchor::Time(time) => unresolved(time, start, floored, holdings).map(|below| Looking { time, below }),
+			// A time start the groups held can't place reads nothing until its lookup answers. A
+			// join's reach back never looks one up: it starts from what this hop holds.
+			let looking = match (range.start, anchor) {
+				(Anchor::Time(_), Anchor::Time(time)) => {
+					unresolved(time, start, floored, holdings).map(|below| Looking { time, below })
+				}
 				_ => None,
 			};
 			if looking.is_some() {
@@ -516,6 +547,7 @@ impl Window {
 			}
 			self.spans.push(Span {
 				index,
+				anchor,
 				start,
 				end,
 				floored,
@@ -554,7 +586,7 @@ impl Window {
 			// there, as one reaching back past every group held does: whichever group contains
 			// it starts at or before it, so every group from there on is in range.
 			if span.waiting {
-				if let Anchor::Time(time) = self.ranges[span.index].start
+				if let Anchor::Time(time) = span.anchor
 					&& time <= last
 				{
 					groups.push(time..=last);
@@ -571,7 +603,7 @@ impl Window {
 			// on is in range, the key at the time itself being the containing group if it
 			// exists. A relative one counting back past every group held asks none below the
 			// oldest, since which of them it reaches is unknown.
-			let reach = match (self.ranges[span.index].start, span.floored) {
+			let reach = match (span.anchor, span.floored) {
 				(Anchor::Time(time), false) => time,
 				(Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(span.start),
 				_ => span.start,
@@ -583,6 +615,15 @@ impl Window {
 		self.groups = Layered::new(Arc::new(Runs::new(groups)), Runs::default());
 		self.missable = Layered::new(Arc::new(Runs::new(missable)), Runs::default());
 	}
+}
+
+/// The Min Age a live join reaches back by: a nonzero `min`, for a range that follows the live
+/// edge from the latest or the oldest group, where this hop resolves its own ranges. A start
+/// naming a group or a count back wins, as does a range with an end. A zero or unstated
+/// minimum asks for no reach back, so the range alone decides.
+fn joins(range: &Range, min: Option<Duration>, holdings: &impl Holdings) -> Option<Duration> {
+	let live = matches!(range.start, Anchor::Oldest | Anchor::Relative(0)) && range.end.is_none();
+	min.filter(|min| !min.is_zero() && live && holdings.resolves())
 }
 
 /// Where a range starts.
@@ -742,7 +783,7 @@ mod tests {
 	fn ranges_cover_only_their_groups() {
 		let keys = Keys::new(0..10);
 		let ranges = [range(time(2), time(3)), range(time(7), None)];
-		let window = Window::new(&ranges, Some(9), &keys).unwrap();
+		let window = Window::new(&ranges, None, Some(9), &keys).unwrap();
 		assert_eq!(covered(&window, 0..10), vec![2, 3, 7, 8, 9]);
 		assert_eq!(window.floor(), Some(2));
 		assert_eq!(window.end(), None);
@@ -770,7 +811,7 @@ mod tests {
 		assert_eq!(window.starts(5), [None, Some(7)]);
 
 		// Nothing asked for is nothing in range, floored nowhere.
-		let window = Window::new(&[], None, &keys).unwrap();
+		let window = Window::new(&[], None, None, &keys).unwrap();
 		assert_eq!(covered(&window, 0..4), Vec::<u64>::new());
 		assert_eq!((window.floor(), window.end()), (Some(0), Some(0)));
 	}
@@ -780,7 +821,7 @@ mod tests {
 	#[test]
 	fn time_anchors_name_groups_by_their_starts() {
 		let keys = Keys::new([0, 33, 66, 99]);
-		let window = Window::new(&[range(time(50), time(70))], Some(99), &keys).unwrap();
+		let window = Window::new(&[range(time(50), time(70))], None, Some(99), &keys).unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66]);
 		assert!(window.is_settled());
 		assert_eq!(
@@ -793,16 +834,16 @@ mod tests {
 		);
 
 		// A start exactly on a group names that group, and an end on one includes it.
-		let window = Window::new(&[range(time(33), time(66))], Some(99), &keys).unwrap();
+		let window = Window::new(&[range(time(33), time(66))], None, Some(99), &keys).unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66]);
 
 		// An end before its start is empty, and so is one ending before every group.
-		let window = Window::new(&[range(time(66), time(33))], Some(99), &keys).unwrap();
+		let window = Window::new(&[range(time(66), time(33))], None, Some(99), &keys).unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), Vec::<u64>::new());
 
 		// Before every start held: reach back to the group containing it, naming no floor.
 		let keys = Keys::new([10, 20]);
-		let window = Window::new(&[range(time(5), None)], Some(20), &keys).unwrap();
+		let window = Window::new(&[range(time(5), None)], None, Some(20), &keys).unwrap();
 		assert_eq!(covered(&window, [10, 20]), vec![10, 20]);
 		assert_eq!((window.floor(), window.start(), window.named()), (Some(0), None, None));
 		assert_eq!(window.missable(0).next(), Some(5..=u64::MAX), "nothing below its time");
@@ -813,19 +854,25 @@ mod tests {
 	#[test]
 	fn relative_anchors_count_groups_back_from_the_latest() {
 		let keys = Keys::new([0, 33, 66, 99]);
-		let window = Window::new(&[range(Anchor::Relative(2), Anchor::Relative(1))], Some(99), &keys).unwrap();
+		let window = Window::new(
+			&[range(Anchor::Relative(2), Anchor::Relative(1))],
+			None,
+			Some(99),
+			&keys,
+		)
+		.unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![33, 66]);
 		assert_eq!(window.start(), Some(33));
 
 		// Counting back past every group held reaches back to the oldest as a start, and ends
 		// before them all as an end.
-		let window = Window::new(&[range(Anchor::Relative(10), None)], Some(99), &keys).unwrap();
+		let window = Window::new(&[range(Anchor::Relative(10), None)], None, Some(99), &keys).unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), vec![0, 33, 66, 99]);
 		assert_eq!(window.start(), None);
-		let window = Window::new(&[range(Anchor::Oldest, Anchor::Relative(10))], Some(99), &keys).unwrap();
+		let window = Window::new(&[range(Anchor::Oldest, Anchor::Relative(10))], None, Some(99), &keys).unwrap();
 		assert_eq!(covered(&window, [0, 33, 66, 99]), Vec::<u64>::new());
 
-		let mut window = Window::new(&[Range::live()], None, &Keys::default()).unwrap();
+		let mut window = Window::new(&[Range::live()], None, None, &Keys::default()).unwrap();
 		assert!(window.is_pending() && window.contains(3) && window.floor().is_none());
 		assert!(!window.settle(None, &Keys::default()));
 		let keys = Keys::new([5]);
@@ -834,15 +881,15 @@ mod tests {
 		assert!(window.is_settled());
 
 		// The oldest start needs no latest group, and names no floor.
-		let window = Window::new(&[Range::oldest()], None, &keys).unwrap();
+		let window = Window::new(&[Range::oldest()], None, None, &keys).unwrap();
 		assert_eq!((window.floor(), window.start()), (Some(0), None));
 
 		// Any count back, however far, waits on a latest group.
 		for back in [u64::MAX, u64::MAX - 1] {
 			let open = range(Anchor::Relative(back), None);
 			assert!(!open.is_wire());
-			assert!(Window::new(&[open], None, &keys).unwrap().is_pending());
-			assert_eq!(Window::new(&[open], Some(5), &keys).unwrap().start(), None);
+			assert!(Window::new(&[open], None, None, &keys).unwrap().is_pending());
+			assert_eq!(Window::new(&[open], None, Some(5), &keys).unwrap().start(), None);
 		}
 	}
 
@@ -851,11 +898,11 @@ mod tests {
 	fn an_oldest_end_is_refused() {
 		let ranges = [range(time(0), Anchor::Oldest)];
 		assert!(matches!(
-			Window::new(&ranges, Some(3), &Keys::new(0..4)),
+			Window::new(&ranges, None, Some(3), &Keys::new(0..4)),
 			Err(Error::InvalidRange)
 		));
 		// A hop holding no groups leaves the refusal to the copies that do.
-		assert!(Window::new(&ranges, Some(3), &Unheld).is_ok());
+		assert!(Window::new(&ranges, None, Some(3), &Unheld).is_ok());
 	}
 
 	/// The named floor is the lowest start, unless a range reaches back to the oldest
@@ -863,7 +910,7 @@ mod tests {
 	#[test]
 	fn the_named_start_is_the_lowest_unless_one_reaches_back() {
 		let keys = Keys::new(0..10);
-		let start = |ranges: &[Range], latest| Window::new(ranges, latest, &keys).unwrap().start();
+		let start = |ranges: &[Range], latest| Window::new(ranges, None, latest, &keys).unwrap().start();
 		assert_eq!(start(&[range(time(4), None), Range::live()], Some(9)), Some(4));
 		assert_eq!(start(&[range(time(4), None), Range::live()], Some(2)), Some(2));
 		assert_eq!(start(&[range(time(0), None)], None), Some(0));
@@ -878,7 +925,7 @@ mod tests {
 	fn a_time_start_waits_for_a_group() {
 		let mut keys = Keys::default();
 		let ranges = [range(time(2500), None), range(Anchor::Relative(0), Anchor::Relative(0))];
-		let mut window = Window::new(&ranges, Some(9), &keys).unwrap();
+		let mut window = Window::new(&ranges, None, Some(9), &keys).unwrap();
 		assert!(!window.is_pending() && !window.is_settled());
 		assert_eq!(covered(&window, 0..22), vec![9], "only the other range reads below it");
 		assert_eq!(
@@ -912,7 +959,7 @@ mod tests {
 			"3000 starts past it"
 		);
 		keys.held.insert(2000);
-		let window = Window::new(&ranges, Some(3000), &keys).unwrap();
+		let window = Window::new(&ranges, None, Some(3000), &keys).unwrap();
 		assert_eq!(
 			window.resolved()[0],
 			Some(Resolved {
@@ -927,7 +974,7 @@ mod tests {
 			complete: true,
 			..Keys::default()
 		};
-		let window = Window::new(&ranges, Some(9), &keys).unwrap();
+		let window = Window::new(&ranges, None, Some(9), &keys).unwrap();
 		assert_eq!(
 			window.resolved()[0],
 			Some(Resolved {
@@ -945,7 +992,7 @@ mod tests {
 		for latest in [None, Some(9)] {
 			let mut keys = Keys::default();
 			let ranges = [range(time(2500), Anchor::Relative(0))];
-			let mut window = Window::new(&ranges, latest, &keys).unwrap();
+			let mut window = Window::new(&ranges, None, latest, &keys).unwrap();
 			assert_eq!(window.is_pending(), latest.is_none());
 			keys.held.extend([2000, 3000]);
 			assert!(window.settle(Some(3000), &keys));
@@ -965,7 +1012,7 @@ mod tests {
 	fn coverage_resumes_within_what_was_checked() {
 		let keys = Keys::new(0..6);
 		let ranges = [range(time(0), time(1)), range(time(4), time(5))];
-		let mut window = Window::new(&ranges, None, &keys).unwrap();
+		let mut window = Window::new(&ranges, None, None, &keys).unwrap();
 		let accounted = rangemap::RangeSet::from_iter([0..1, 4..6]);
 		assert!(window.covered_by(4, None, &accounted));
 		assert!(
@@ -986,7 +1033,7 @@ mod tests {
 	/// behind where it stopped.
 	#[test]
 	fn coverage_resumes_within_a_range() {
-		let mut window = Window::new(&[range(time(0), time(7))], None, &Keys::new(0..8)).unwrap();
+		let mut window = Window::new(&[range(time(0), time(7))], None, None, &Keys::new(0..8)).unwrap();
 		let mut accounted = rangemap::RangeSet::from_iter(std::iter::once(0..3));
 		assert!(!window.covered_by(0, None, &accounted));
 		assert_eq!(window.covered, Some((0, 3)), "stops at the first missing group");
@@ -1002,7 +1049,7 @@ mod tests {
 	#[test]
 	fn coverage_reads_a_map_of_the_groups_accounted_for() {
 		let ranges = [range(time(0), time(1)), range(time(4), time(5))];
-		let mut window = Window::new(&ranges, None, &Keys::new(0..6)).unwrap();
+		let mut window = Window::new(&ranges, None, None, &Keys::new(0..6)).unwrap();
 		let mut accounted = rangemap::RangeMap::new();
 		accounted.insert(0..2, 'a');
 		accounted.insert(4..5, 'b');
@@ -1019,7 +1066,7 @@ mod tests {
 	fn a_time_start_the_groups_cant_place_is_looked_up() {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
-		let mut window = Window::new(&[range(time(8500), None)], Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 9000)]);
 		assert!(!window.is_settled() && !window.contains(9000) && window.resolved() == [None]);
 		keys.held.insert(8000);
@@ -1034,12 +1081,12 @@ mod tests {
 		);
 		assert!(window.is_settled());
 
-		let window = Window::new(&[range(time(8500), None)], Some(9000), &keys).unwrap();
+		let window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().count(), 1, "something may start between 8000 and 8500");
-		let window = Window::new(&[range(time(8000), None)], Some(9000), &keys).unwrap();
+		let window = Window::new(&[range(time(8000), None)], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().count(), 0, "8000 starts exactly there");
 
-		let mut window = Window::new(&[range(time(500), None)], Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(500), None)], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 4000)]);
 		assert!(window.found(500, None, &keys));
 		assert_eq!(
@@ -1060,7 +1107,7 @@ mod tests {
 		let mut keys = Keys::new([0, 33, 66]);
 		keys.looks_up = true;
 		keys.skipped = vec![1..33, 34..66];
-		let window = Window::new(&[range(time(50), None)], Some(66), &keys).unwrap();
+		let window = Window::new(&[range(time(50), None)], None, Some(66), &keys).unwrap();
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(33));
 	}
@@ -1071,7 +1118,7 @@ mod tests {
 	fn an_unanswered_lookup_settles_with_its_time_end() {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
-		let mut window = Window::new(&[range(time(500), time(3000))], Some(9000), &keys).unwrap();
+		let mut window = Window::new(&[range(time(500), time(3000))], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 4000)]);
 		assert!(window.found(500, None, &keys));
 		assert!(window.is_settled());
@@ -1089,7 +1136,13 @@ mod tests {
 	#[test]
 	fn a_time_start_is_not_looked_up_without_a_history() {
 		let keys = Keys::new([4000, 9000]);
-		let window = Window::new(&[range(time(8500), None), range(time(500), None)], Some(9000), &keys).unwrap();
+		let window = Window::new(
+			&[range(time(8500), None), range(time(500), None)],
+			None,
+			Some(9000),
+			&keys,
+		)
+		.unwrap();
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(
 			window.resolved(),

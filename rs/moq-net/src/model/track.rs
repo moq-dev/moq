@@ -1061,6 +1061,45 @@ impl Holdings for TrackState {
 		self.outcome.is_final()
 	}
 
+	/// In media time, from the newest frame held, or the latest group's start when it is
+	/// newer; on a scale-less track, by arrival on this hop's clock, as expiry measures it.
+	///
+	/// Where groups are keyed by their start, the time itself, so a received copy resolves it
+	/// as any time start. On a copy whose wire keys groups otherwise, the newest group held
+	/// whose first frame presented at or before it.
+	fn reach_back(&self, latest: u64, min: Duration) -> Option<Anchor> {
+		let Some(scale) = self.info.as_ref()?.timescale else {
+			let key = self.live(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
+			return match key {
+				Some((&key, _)) => Some(Anchor::Time(key)),
+				None if self.lookup.is_empty() => None,
+				None => Some(Anchor::Oldest),
+			};
+		};
+		let newest = self
+			.live_edge(&Servable::ALL)
+			.and_then(|edge| edge.timestamp.convert(scale).ok())
+			.map(Timestamp::value);
+		// A Min Age past every timestamp reaches back to the oldest group.
+		let back = Timestamp::try_from(min)
+			.and_then(|min| min.convert(scale))
+			.map_or(u64::MAX, Timestamp::value);
+		if self.anchors != Anchors::Refused && !self.starts_at_keys {
+			let edge = newest.map_or(latest, |newest| newest.max(latest));
+			return Some(Anchor::Time(edge.saturating_sub(back)));
+		}
+		let target = newest?.saturating_sub(back);
+		let started = |slot: &Slot| {
+			self.started_at(slot)
+				.and_then(|start| start.convert(scale).ok())
+				.is_some_and(|start| start.value() <= target)
+		};
+		Some(match self.live(..).rev().find(|(_, slot)| started(slot)) {
+			Some((&key, _)) => Anchor::Time(key),
+			None => Anchor::Oldest,
+		})
+	}
+
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
 		// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 		// evicted a group inside it.
@@ -4853,7 +4892,7 @@ impl Producer {
 		}
 		let ranges: Vec<Range> = relative.iter().map(|index| subscription.ranges[*index]).collect();
 		let state = self.state.read();
-		let window = Window::new(&ranges, state.latest_live(), &*state)?;
+		let window = Window::new(&ranges, None, state.latest_live(), &*state)?;
 		if !window.is_settled() {
 			return Err(Error::Unsupported);
 		}
@@ -8257,9 +8296,9 @@ struct Filter {
 
 impl Cursor {
 	fn new(state: kio::Consumer<TrackState>, subscription: Preferences) -> Self {
-		// The ranges floor the cursor, and the budget picks where above it to start, timed
-		// or not: delivery skips the cached groups it already judges stale, on whichever
-		// clock convicts them.
+		// The ranges floor the cursor, raised for a live join by its Min Age, and the budget
+		// picks where above it to start, timed or not: delivery skips the cached groups it
+		// already judges stale, on whichever clock convicts them.
 		if subscription.read().joins_live() {
 			TrackState::join(state.read());
 		}
@@ -8267,10 +8306,14 @@ impl Cursor {
 			let preferences = subscription.read();
 			let ranges_revision = subscription.ranges_revision();
 			let state = state.read();
-			let (window, refused) = match Window::new(&preferences.ranges, state.latest_live(), &*state) {
-				Ok(window) => (window, None),
-				Err(err) => (Window::new(&[], None, &*state).expect("nothing to refuse"), Some(err)),
-			};
+			let (window, refused) =
+				match Window::new(&preferences.ranges, preferences.delay.min, state.latest_live(), &*state) {
+					Ok(window) => (window, None),
+					Err(err) => (
+						Window::new(&[], None, None, &*state).expect("nothing to refuse"),
+						Some(err),
+					),
+				};
 			let filter = Filter {
 				window,
 				resolved: ranges_revision,
@@ -8394,7 +8437,7 @@ impl Cursor {
 		let replaced = {
 			let preferences = self.subscription.read();
 			let revision = self.subscription.ranges_revision();
-			(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone()))
+			(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone(), preferences.delay.min))
 		};
 		// A settled window has nothing to read from the track, whose lock every subscriber
 		// of it takes.
@@ -8404,9 +8447,9 @@ impl Cursor {
 		let state = self.state.read();
 		let holdings = &*state;
 		let moved = match replaced {
-			Some((revision, ranges)) => {
+			Some((revision, ranges, min)) => {
 				self.filter.resolved = revision;
-				match Window::new(&ranges, state.latest_live(), holdings) {
+				match Window::new(&ranges, min, state.latest_live(), holdings) {
 					Ok(window) => {
 						self.filter.window = window;
 						self.filter.refused = None;
@@ -8690,6 +8733,11 @@ impl Cursor {
 			return Vec::new();
 		};
 		let (runs, received) = drops.take_stale(&mut self.record);
+		// What it owes again notifies nothing a parked read waits on, as when an update that
+		// changes no term leaves the window and budget alone.
+		if !runs.is_empty() {
+			idle::Idle::disarm(&mut self.idle);
+		}
 		// What neither a skip nor a miss offers again: a group written off at the track's max
 		// age bound, which no budget reverses. It is still stale under the new terms. What an
 		// upstream's stale run decided is the upstream's to judge again: the next scan folds
@@ -9607,16 +9655,16 @@ impl Republish {
 		let Some(published) = self.published.produce() else {
 			return;
 		};
-		let (ranges, revision) = {
+		let (ranges, min, revision) = {
 			let current = preferences.read();
-			(current.ranges.clone(), preferences.ranges_revision())
+			(current.ranges.clone(), current.delay.min, preferences.ranges_revision())
 		};
 		if published.read().revision >= revision {
 			return;
 		}
 		let state = self.state.read();
 		// The update was refused before it got here if the track can't resolve it.
-		let Ok(window) = Window::new(&ranges, state.latest_live(), &*state) else {
+		let Ok(window) = Window::new(&ranges, min, state.latest_live(), &*state) else {
 			return;
 		};
 		drop(state);
@@ -10325,14 +10373,19 @@ impl Subscriber {
 		}
 	}
 
-	/// `ranges` resolved against this track's cache now, by index.
-	pub(super) fn resolve_ranges(&self, ranges: &[Range]) -> Vec<Option<Resolved>> {
+	/// The ranges of `subscription` resolved against this track's cache now, by index.
+	pub(super) fn resolve_ranges(&self, subscription: &Subscription) -> Vec<Option<Resolved>> {
 		match &self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				Window::new(ranges, state.latest_live(), &*state)
-					.map(|window| window.resolved())
-					.unwrap_or_default()
+				Window::new(
+					&subscription.ranges,
+					subscription.delay.min,
+					state.latest_live(),
+					&*state,
+				)
+				.map(|window| window.resolved())
+				.unwrap_or_default()
 			}
 			Inner::Resume(..) => Vec::new(),
 		}
@@ -12076,6 +12129,175 @@ mod test {
 			keys.push(group.start);
 		}
 		keys
+	}
+
+	/// A timed track of 500 ms groups starting at 0 through 5 s, each presenting at its start.
+	fn half_second_groups() -> Producer {
+		let mut producer = track_producer("test", Info::timed());
+		for _ in (0..=5000).step_by(500) {
+			append_half_second(&mut producer);
+		}
+		producer
+	}
+
+	/// Append the next 500 ms group, presenting at its start.
+	fn append_half_second(producer: &mut Producer) -> u64 {
+		let start = producer.state.read().latest_group.map_or(0, |latest| latest + 500);
+		let mut group = producer.create_group(group::Info { start }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+			.unwrap();
+		group.close().unwrap();
+		start
+	}
+
+	/// A join over `range` holding `min` behind the live edge, with a budget that keeps the cache.
+	fn joining(range: Range, min: impl Into<Option<Duration>>) -> Subscription {
+		Subscription::default()
+			.with_ranges([range])
+			.with_delay(Delay::default().with_min(min).with_max(Duration::from_secs(30)))
+	}
+
+	/// A live join stating a Min Age starts at the newest group that began that far behind the
+	/// newest frame, from the latest or the oldest group alike, and plays through to live.
+	#[test]
+	fn a_live_join_reaches_back_by_its_min_age() {
+		for range in [Range::live(), Range::oldest()] {
+			let mut producer = half_second_groups();
+			let mut reader = producer.subscribe(joining(range, Duration::from_secs(2)));
+			assert_eq!(
+				ready_groups(&mut reader),
+				vec![3000, 3500, 4000, 4500, 5000],
+				"{range:?}: four groups back"
+			);
+			assert_eq!(append_half_second(&mut producer), 5500);
+			assert_eq!(ready_groups(&mut reader), vec![5500], "{range:?}: no gap to live");
+		}
+
+		// Measured from the newest frame, not the latest group's start.
+		let producer = half_second_groups();
+		let mut group = producer.create_group(group::Info { start: 5500 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(5900).unwrap(), &b"x"[..])
+			.unwrap();
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(ready_groups(&mut reader), vec![3500, 4000, 4500, 5000, 5500]);
+	}
+
+	/// A join stating no Min Age, or zero, starts where its range says: the latest group, or as
+	/// far back as its budget keeps.
+	#[test]
+	fn a_join_without_a_min_age_starts_where_its_range_says() {
+		let producer = half_second_groups();
+		let all: Vec<u64> = (0..=5000).step_by(500).collect();
+		for min in [None, Some(Duration::ZERO)] {
+			let mut live = producer.subscribe(joining(Range::live(), min));
+			assert_eq!(ready_groups(&mut live), vec![5000], "{min:?}");
+			let mut oldest = producer.subscribe(joining(Range::oldest(), min));
+			assert_eq!(ready_groups(&mut oldest), all, "{min:?}");
+		}
+	}
+
+	/// A Min Age past everything held starts at the oldest group held, and never past what the
+	/// budget keeps: a shorter budget starts at the oldest group still fresh.
+	#[test]
+	fn a_min_age_reaches_back_no_further_than_the_cache_or_the_budget() {
+		let producer = half_second_groups();
+		let all: Vec<u64> = (0..=5000).step_by(500).collect();
+		let mut far = producer.subscribe(joining(Range::live(), Duration::from_secs(60)));
+		assert_eq!(ready_groups(&mut far), all);
+
+		let budget = Subscription::default().with_ranges([Range::live()]).with_delay(
+			Delay::default()
+				.with_min(Duration::from_secs(2))
+				.with_max(Duration::from_secs(1)),
+		);
+		let mut budget = producer.subscribe(budget);
+		assert_eq!(ready_groups(&mut budget), vec![4000, 4500, 5000]);
+	}
+
+	/// A start naming a time or a count back, or a range with an end, ignores the Min Age.
+	#[test]
+	fn a_named_start_or_an_end_ignores_the_min_age() {
+		let producer = half_second_groups();
+		let min = Duration::from_secs(2);
+		let cases = [
+			(
+				Range {
+					start: Anchor::Time(1000),
+					end: Some(Anchor::Time(2000)),
+				},
+				vec![1000, 1500, 2000],
+			),
+			(
+				Range {
+					start: Anchor::Relative(1),
+					end: None,
+				},
+				vec![4500, 5000],
+			),
+			(
+				Range {
+					start: Anchor::Oldest,
+					end: Some(Anchor::Time(1000)),
+				},
+				vec![0, 500, 1000],
+			),
+		];
+		for (range, expected) in cases {
+			let mut reader = producer.subscribe(joining(range, min));
+			assert_eq!(ready_groups(&mut reader), expected, "{range:?}");
+		}
+	}
+
+	/// Changing the Min Age later moves nothing already started.
+	#[test]
+	fn an_update_to_the_min_age_moves_no_started_join() {
+		let mut producer = half_second_groups();
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(1)));
+		assert_eq!(ready_groups(&mut reader), vec![4000, 4500, 5000]);
+		reader.update(joining(Range::live(), Duration::from_secs(3))).unwrap();
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new());
+		append_half_second(&mut producer);
+		assert_eq!(ready_groups(&mut reader), vec![5500]);
+	}
+
+	/// A scale-less track has no media time, so a join reaches back by arrival on this hop's
+	/// clock, as expiry measures it.
+	#[test]
+	fn a_scale_less_join_reaches_back_by_arrival() {
+		let producer = track_producer("test", None);
+		// Group N arrives N seconds in, and the join comes at 5 s.
+		for key in 0..5 {
+			framed(&producer, key, 1).close().unwrap();
+			elapse(&producer, Duration::from_secs(1));
+		}
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_millis(2500)));
+		assert_eq!(ready_groups(&mut reader), vec![2, 3, 4]);
+		let mut far = producer.subscribe(joining(Range::live(), Duration::from_secs(10)));
+		assert_eq!(ready_groups(&mut far), vec![0, 1, 2, 3, 4]);
+		framed(&producer, 5, 1).close().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![5]);
+	}
+
+	/// A copy whose wire keys groups by sequence measures the reach back by where each group's
+	/// first frame presented, not by its key.
+	#[test]
+	fn a_sequence_keyed_copy_reaches_back_by_first_frames() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.starts_at_keys();
+		for key in 0..10 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(key * 500).unwrap(), &b"x"[..])
+				.unwrap();
+			group.close().unwrap();
+		}
+		let mut reader = producer.subscribe(joining(Range::live(), Duration::from_secs(2)));
+		assert_eq!(ready_groups(&mut reader), vec![5, 6, 7, 8, 9]);
+		let mut far = producer.subscribe(joining(Range::live(), Duration::from_secs(60)));
+		assert_eq!(ready_groups(&mut far), (0..10).collect::<Vec<_>>());
 	}
 
 	/// A relative start taken while the copy is idle counts back from the live feed's
@@ -21656,7 +21878,7 @@ mod test {
 		let mut index = 0;
 		let window = {
 			let state = producer.state.read();
-			Window::new(&replay().ranges, None, &*state).unwrap()
+			Window::new(&replay().ranges, None, None, &*state).unwrap()
 		};
 		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0, &window) {
 			walked.push(group.start);
