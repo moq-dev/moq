@@ -238,8 +238,8 @@ pub(crate) const HOP: Duration = Duration::from_millis(25);
 
 /// How long a reader shows a claim unavailable before offline: the longest path a route
 /// may take, times a hop's delay, since a reroute settles within that.
-pub(crate) fn debounce(hop: Duration) -> Duration {
-	hop * MAX_HOPS as u32
+pub(crate) const fn debounce(hop: Duration) -> Duration {
+	hop.saturating_mul(MAX_HOPS as u32)
 }
 
 #[derive(Clone, Debug)]
@@ -550,12 +550,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.fresh.remove(&peer);
 		// Nothing still unsent goes to a session that closed.
 		self.out.retain(|(to, _)| *to != peer);
-		let mut touched = BTreeSet::new();
-		for &origin in &gone.offers {
-			self.unhear(origin, peer);
-			self.unheard(origin);
-			touched.insert(origin);
-		}
 		for (origin, offer) in &gone.sent {
 			self.unsend(peer, *origin, offer.as_ref());
 			if let Some(peers) = self.sent_to.get_mut(origin) {
@@ -564,6 +558,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					self.sent_to.remove(origin);
 				}
 			}
+		}
+		let mut touched = BTreeSet::new();
+		for &origin in &gone.offers {
+			self.unhear(origin, peer);
+			touched.insert(origin);
 		}
 		if gone.routing().is_none() {
 			for prefix in &gone.asks {
@@ -574,12 +573,17 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.ungive(&broadcast, peer);
 			self.restate(broadcast, Change::Lost);
 		}
+		// The session is named before any route it carried is withdrawn: a neighbour that
+		// hears only the withdrawal still takes the routes others offer through it.
 		if let Role::Routing(far) = gone.port.role {
 			let hop = Hop {
 				node: self.me,
 				session: gone.session,
 			};
 			self.closed(hop, far, None, &mut touched);
+		}
+		for &origin in &gone.offers {
+			self.unheard(origin);
 		}
 		for origin in touched {
 			self.reselect(origin);
@@ -736,9 +740,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 			}
 			Msg::Drain { node } if routing => {
-				// It names a node only on a route it offered.
+				// It names a node only on a live route it offered.
 				let named = (self.rx_hops.range(hops_of(node)))
-					.any(|(hop, by)| by.contains_key(&from) && self.live.contains_key(hop));
+					.filter_map(|(_, by)| by.get(&from))
+					.flatten()
+					.any(|origin| !self.heard[origin][&from].ended);
 				if !named {
 					return Err(Error::Unrouted);
 				}
@@ -873,7 +879,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
-	/// No neighbour offers `origin` any more: its claims go.
+	/// No neighbour offers `origin` any more: its claims go, and so does every route this
+	/// node sent to it, at once. A copy of its claims learned later may be older than the
+	/// one this node passed on, so it travels only on a route that starts afresh.
 	fn unheard(&mut self, origin: NodeId) {
 		if !self.heard.get(&origin).is_some_and(BTreeMap::is_empty) {
 			return;
@@ -885,6 +893,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				self.unclaim(&broadcast, origin);
 				self.dirty.insert(broadcast);
 			}
+		}
+		for peer in self.sent_to.remove(&origin).into_iter().flatten() {
+			self.visit();
+			let sent = (self.peers.get_mut(&peer)).and_then(|state| state.sent.remove(&origin));
+			self.unsend(peer, origin, sent.flatten().as_ref());
+			self.out.push((peer, Msg::Route { origin, offer: None }));
 		}
 	}
 
@@ -1732,6 +1746,18 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			closed: self.closed.len(),
 			waiting: self.waiting.len(),
 		}
+	}
+
+	/// The route this node uses to `origin`: the neighbour, and the offer as it stands here.
+	pub fn best(&self, origin: NodeId) -> Option<(N, &Offer)> {
+		self.best.get(&origin).map(|best| (best.via, &best.offer))
+	}
+
+	/// What each neighbour offers for `origin`, and whether a closed session ended it.
+	pub fn heard(&self, origin: NodeId) -> Vec<(N, &Offer, bool)> {
+		(self.heard.get(&origin).into_iter().flatten())
+			.map(|(peer, heard)| (*peer, &heard.offer, heard.ended))
+			.collect()
 	}
 
 	/// The pairs of relays with a session known closed, and where each floor stands.

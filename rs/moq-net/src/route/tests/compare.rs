@@ -12,13 +12,18 @@
 use std::collections::BTreeSet;
 
 use super::multi::{Broadcast, MultiSim, Suspect, Tie, Tune};
+use super::multicast::RelaySim;
 use super::*;
 
-/// A router under comparison: today's rule, or the multicast epic's prototype.
+/// A router under comparison: today's rule, the multicast epic's prototype, or its
+/// production router.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Arm {
 	Path(Rule),
 	Multi(Tune),
+	/// [`relay::Router`]: the rule [`Self::KEPT`] measures, as it ships, its readers
+	/// showing a lost claim unavailable for this long before offline.
+	Relay(Duration),
 }
 
 impl Arm {
@@ -69,6 +74,9 @@ impl Arm {
 		epoch: true,
 	});
 
+	/// The production router as it ships.
+	pub const RELAY: Self = Self::Relay(relay::debounce(HOP));
+
 	/// The epic's rule with `tune` changed from how it is written.
 	pub fn with(tune: impl FnOnce(&mut Tune)) -> Self {
 		let mut out = Tune::default();
@@ -80,6 +88,8 @@ impl Arm {
 		let tune = match self {
 			Self::Path(rule) => return rule.as_str().into(),
 			Self::Multi(tune) => tune,
+			Self::Relay(debounce) if debounce.is_zero() => return "relay-undebounced".into(),
+			Self::Relay(_) => return "relay".into(),
 		};
 		let parts = [
 			(tune.suspect == Suspect::Flagged, "+suspect"),
@@ -99,6 +109,7 @@ impl Arm {
 		match self {
 			Self::Path(rule) => Box::new(Sim::with(rule, nodes)),
 			Self::Multi(tune) => Box::new(MultiSim::new(tune, nodes)),
+			Self::Relay(debounce) => Box::new(RelaySim::new(nodes, debounce)),
 		}
 	}
 }
@@ -221,7 +232,7 @@ pub(super) trait Net {
 	fn work(&self) -> usize;
 }
 
-fn tally(kinds: impl Iterator<Item = Kind>) -> (usize, usize, usize) {
+pub(super) fn tally(kinds: impl Iterator<Item = Kind>) -> (usize, usize, usize) {
 	let (mut offline, mut unavailable, mut starts) = (0, 0, 0);
 	for kind in kinds {
 		match kind {

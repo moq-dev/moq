@@ -47,19 +47,19 @@ fn arms() -> Vec<Arm> {
 }
 
 /// The prototype's arms.
-const MULTI: [Arm; 4] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT];
+pub(super) const MULTI: [Arm; 4] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT];
 
 /// How long a silent death takes its neighbours to notice, in hops of delay: an idle
 /// timeout of 3 s.
-const IDLE: usize = 120;
+pub(super) const IDLE: usize = 120;
 
 /// A mesh to measure, and whether today's rule can run it.
-struct Shape {
-	name: &'static str,
-	mesh: Mesh,
+pub(super) struct Shape {
+	pub name: &'static str,
+	pub mesh: Mesh,
 	/// Today's rule qualifies an identity across one scoped link and refuses to
 	/// again, so a publisher two grants away is never seen.
-	today: bool,
+	pub today: bool,
 }
 
 fn pair(a: Node, b: Node) -> (Node, Node) {
@@ -75,7 +75,7 @@ fn spread(relays: &[Node], publishers: usize) -> Vec<Node> {
 /// to both cores of the regions beside it, and every edge on both of its region's
 /// cores, which it marks as upstream. Edges of one region peer when `peered`.
 /// Publishers join edges.
-fn tiers(regions: usize, edges: usize, peered: bool, publishers: usize) -> Mesh {
+pub(super) fn tiers(regions: usize, edges: usize, peered: bool, publishers: usize) -> Mesh {
 	let core = |region: usize, side: usize| 2 * (region % regions) + side;
 	let edge = |region: usize, index: usize| 2 * regions + region * edges + index;
 	let mut links = BTreeSet::new();
@@ -111,7 +111,7 @@ fn tiers(regions: usize, edges: usize, peered: bool, publishers: usize) -> Mesh 
 }
 
 /// A ring with a chord from every relay at each power of two: log N of them.
-fn chords(relays: usize, publishers: usize) -> Mesh {
+pub(super) fn chords(relays: usize, publishers: usize) -> Mesh {
 	let mut links = BTreeSet::new();
 	let mut step = 1;
 	while step <= relays / 2 {
@@ -141,7 +141,7 @@ fn sparse(relays: usize, publishers: usize, rng: &mut XorShift) -> Mesh {
 	}
 }
 
-fn clique(relays: usize, publishers: usize) -> Mesh {
+pub(super) fn clique(relays: usize, publishers: usize) -> Mesh {
 	Mesh {
 		homes: spread(&(0..relays).collect::<Vec<_>>(), publishers),
 		claims: 1,
@@ -206,7 +206,7 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 }
 
 /// Every shape, at about `relays` relays each.
-fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
+pub(super) fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 	let mut rng = XorShift(0x6d6f_7100 + relays as u64);
 	let open = |name, mesh| Shape {
 		name,
@@ -253,7 +253,7 @@ fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 
 /// The failures measured, each from a settled mesh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Failure {
+pub(super) enum Failure {
 	/// A link relays route over closes cleanly, and every relay still has a path.
 	Close,
 	/// It returns.
@@ -291,7 +291,7 @@ enum Failure {
 }
 
 impl Failure {
-	fn as_str(self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Close => "link_closes",
 			Self::Reopen => "link_reopens",
@@ -316,18 +316,24 @@ impl Failure {
 
 /// What one failure cost and showed.
 #[derive(Clone, Debug)]
-struct Row {
-	cost: Cost,
-	faults: Faults,
+pub(super) struct Row {
+	pub cost: Cost,
+	pub faults: Faults,
 	/// Dead hops, doubts, and suspected nodes left once it settled.
-	pending: usize,
+	pub pending: usize,
 	/// Pairs of nodes with a session known closed, kept for good.
-	lasting: usize,
+	pub lasting: usize,
 	/// The hops every relay's request crosses once it settled, summed.
-	hops: usize,
+	pub hops: usize,
 	/// Whether every relay with a path routed to its publisher once it settled.
-	right: Result<(), String>,
+	pub right: Result<(), String>,
+	/// Per publisher and relay, the nodes its request visits once it settled, and
+	/// whether it reached the publisher.
+	pub answers: Vec<Vec<Option<Chased>>>,
 }
+
+/// The nodes a request visits, and whether it reached its publisher.
+pub(super) type Chased = (Vec<Node>, bool);
 
 fn observe(lab: &mut Lab, change: &dyn Fn(&mut Lab)) -> Row {
 	let before = lab.net.faults();
@@ -346,11 +352,17 @@ fn observe(lab: &mut Lab, change: &dyn Fn(&mut Lab)) -> Row {
 			true => lab.check(),
 			false => Err("never settled".into()),
 		},
+		answers: (0..lab.mesh.homes.len())
+			.map(|index| {
+				let (_, id) = lab.mesh.publisher(index);
+				(0..lab.mesh.relays).map(|relay| lab.net.chase(relay, id)).collect()
+			})
+			.collect(),
 	}
 }
 
 /// The relay the most others route through toward the first publisher, its own aside.
-fn transit(mesh: &Mesh, tree: &[Option<Node>]) -> Option<Node> {
+pub(super) fn transit(mesh: &Mesh, tree: &[Option<Node>]) -> Option<Node> {
 	let mut through = vec![0; mesh.relays];
 	for relay in 0..mesh.relays {
 		let mut at = relay;
@@ -372,7 +384,7 @@ fn depths(tree: &[Option<Node>]) -> Vec<usize> {
 }
 
 /// Run every failure on `mesh` under `arm`, each from a settled mesh.
-fn fail(arm: Arm, mesh: &Mesh, coarse: bool) -> Vec<(Failure, Row)> {
+pub(super) fn fail(arm: Arm, mesh: &Mesh, coarse: bool) -> Vec<(Failure, Row)> {
 	let tree = mesh.tree();
 	let depth = depths(&tree);
 	let fresh = || {
@@ -519,7 +531,7 @@ fn the_prototype_settles_after_churn() {
 /// routes to its publisher, and no reader sees an end the publisher never made or a
 /// life it had seen end. On three meshes in a ring that includes the chain stopping
 /// a claim circling: once the publisher leaves, every relay lets go.
-fn carries(arm: Arm, relays: usize) {
+pub(super) fn carries(arm: Arm, relays: usize) {
 	for shape in shapes(relays, 2) {
 		for (failure, row) in fail(arm, &shape.mesh, relays > 16) {
 			let case = format!("{}: {} on {}", arm.name(), failure.as_str(), shape.name);
@@ -668,7 +680,7 @@ fn quiesce(net: &mut MultiSim) {
 fn tune(arm: Arm) -> multi::Tune {
 	match arm {
 		Arm::Multi(tune) => tune,
-		Arm::Path(_) => panic!("today's rule"),
+		Arm::Path(_) | Arm::Relay(_) => panic!("not the prototype"),
 	}
 }
 

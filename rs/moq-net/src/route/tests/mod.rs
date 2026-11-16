@@ -17,6 +17,7 @@ mod forward;
 mod handoff;
 mod interest;
 mod multi;
+mod multicast;
 mod residual;
 mod routing;
 mod scope;
