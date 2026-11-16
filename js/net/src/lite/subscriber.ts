@@ -37,6 +37,7 @@ import {
 	insertRun,
 	maxDelayOf,
 	minDelayOf,
+	NO_MAX_DELAY,
 	type Run,
 	removeRun,
 	runGaps,
@@ -44,6 +45,7 @@ import {
 	scopeHead,
 	scopeOverlaps,
 	staleHole,
+	wireMaxDelay,
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Mint from "../mint.ts";
@@ -230,9 +232,9 @@ interface SubscribeEntry {
 	// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given up under
 	// an earlier one is no verdict on the current terms.
 	update: bigint;
-	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds: the budget
-	// a stale drop under it was judged by.
-	maxDelay?: number;
+	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds, null for
+	// no limit: the budget a stale drop under it was judged by.
+	maxDelay?: number | null;
 	// The runs `tail` accounts for by a stale drop under `update`: the next update reopens them,
 	// since the publisher re-offers or drops them again under it.
 	// Coalesced, so a peer repeating a drop holds one run, not one per message.
@@ -2134,7 +2136,7 @@ export class Subscriber {
 			track: name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
-			maxDelay: maxDelayOf(subscription),
+			maxDelay: wireMaxDelay(subscription),
 			minDelay: minDelayOf(subscription),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
@@ -3244,7 +3246,8 @@ export class Subscriber {
 				// whatever an update changed since.
 				if (hasRanges(this.version)) this.#declare(entry);
 				else hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
-				hooks.reportedLargest(entry.track, resp.start.largest);
+				// Recorded whole, so a relay answers its own readers that the group ended.
+				hooks.reportedLargest(entry.track, resp.start.largest?.position, resp.start.largest?.ended ?? false);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
 				if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
@@ -3317,7 +3320,9 @@ export class Subscriber {
 				// A paused group the drop names ends there: no continuation follows.
 				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
-				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
+				const hole = stale
+					? staleHole(entry.maxDelay === null ? NO_MAX_DELAY : (entry.maxDelay ?? 0))
+					: { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
 				// won, even once the cache evicted it.
 				const named = stale ? entry.tail.unfinished(start, end) : [{ start, end }];
@@ -3402,7 +3407,7 @@ export class Subscriber {
 				if (!entry.starts.has(id)) return false;
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
-				const [model] = requestedRanges({ startFrame: 0, ranges: [range] }, entry.scale);
+				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
 				owed.push({ ...model, start: { absolute: at } });
 			}
 			const window = new Window(owed, entry.track.largest()?.group);
@@ -3445,7 +3450,7 @@ export class Subscriber {
 			priority: msg.priority,
 			order: msg.order,
 			delay: {
-				max: Duration.millis(msg.maxDelay),
+				max: msg.maxDelay === null ? null : Duration.millis(msg.maxDelay),
 				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
 			},
 			ranges: entry.asked,
@@ -3539,7 +3544,7 @@ export class Subscriber {
 				wantedGroup: refresh ?? sentWanted,
 				priority,
 				order: current.order,
-				maxDelay: maxDelayOf(current),
+				maxDelay: wireMaxDelay(current),
 				minDelay: minDelayOf(current),
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),

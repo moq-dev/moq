@@ -1469,6 +1469,12 @@ class Reader implements ResumeSource {
 		return serving ? hooks.objectLargest(serving.sub) : this.#ended?.object;
 	}
 
+	largestFinished(position: track.Position): boolean {
+		this.sync();
+		const serving = this.#serving();
+		return serving !== undefined && hooks.largestFinished(serving.sub, position);
+	}
+
 	peekLargest(): { largest?: track.Position; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();

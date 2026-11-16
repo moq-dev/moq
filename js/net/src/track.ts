@@ -773,6 +773,9 @@ class TrackState {
 	first?: bigint;
 	// Set once {@link largest} can no longer advance while the track stays open.
 	largestEnded = new Signal(false);
+	// Whether {@link largest}'s group ended there: it closed cleanly, or its source said so. An
+	// aborted one stays open, since it can be recreated or fetched.
+	largestFinished = false;
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -1131,8 +1134,6 @@ export class Producer {
 	// has landed yet.
 	#refresh = false;
 	#demand: Demand;
-	// The largest group may still grow until it closes cleanly; an aborted one can be recreated.
-	#largestOpen = false;
 	// Only real objects or upstream metadata advance this, never the head of an empty group.
 	#objectLargest?: Position;
 
@@ -1348,7 +1349,12 @@ export class Producer {
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
-		hooks.reportedLargest = (producer, largest) => producer.#advanceObject(largest);
+		hooks.reportedLargest = (producer, largest, finished) => {
+			producer.#advanceObject(largest);
+			const current = producer.#state.largest.peek();
+			if (finished && current && current.group === largest?.group && current.frame === largest.frame)
+				producer.#finishLargest(largest.group);
+		};
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
@@ -1621,6 +1627,7 @@ export class Producer {
 		sink.largest.set(this.#state.largest.peek());
 		sink.first = this.#state.largest.peek()?.group;
 		sink.largestEnded.set(this.#state.largestEnded.peek());
+		sink.largestFinished = this.#state.largestFinished;
 		sink.dropsAnchors.set(this.#state.dropsAnchors.peek());
 
 		const closed = this.#state.closed.peek();
@@ -1853,10 +1860,10 @@ export class Producer {
 		if (!largest) return;
 		const current = this.#state.largest.peek();
 		if (current && !after(largest, current)) return;
-		this.#largestOpen = true;
 		for (const state of [this.#state, ...this.#sinks]) {
 			state.first ??= largest.group;
 			state.largest.set(largest);
+			state.largestFinished = false;
 		}
 	}
 
@@ -2344,8 +2351,14 @@ export class Producer {
 	// Group `sequence` holds every frame it will have: it closed cleanly, its stream finished.
 	// A group name fixes its content, so no legal write raises the largest past it.
 	#finishLargest(sequence: bigint): void {
-		if (this.#state.largest.peek()?.group === sequence) this.#largestOpen = false;
+		if (this.#state.largest.peek()?.group === sequence)
+			for (const state of [this.#state, ...this.#sinks]) state.largestFinished = true;
 		this.#endLargest();
+	}
+
+	// The largest group may still grow until it closes cleanly; an aborted one can be recreated.
+	get #largestOpen(): boolean {
+		return this.#state.largest.peek() !== undefined && !this.#state.largestFinished;
 	}
 
 	// End the largest stream while the track stays open, once it can no longer advance: the
@@ -4017,6 +4030,12 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();
 			const producer = subscriber.#state.producer;
 			return producer && objectLargest(producer);
+		};
+		hooks.largestFinished = (subscriber, position) => {
+			if (subscriber.#resume) return subscriber.#resume.largestFinished(position);
+			const state = subscriber.#state;
+			const largest = state.largest.peek();
+			return state.largestFinished && largest?.group === position.group && largest.frame === position.frame;
 		};
 		hooks.peekLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.peekLargest();

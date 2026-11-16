@@ -37,7 +37,7 @@ import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** What a null {@link Delay.max} goes out as, in milliseconds: the largest value every peer can read, as Rust sends for `None`. */
+/** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
@@ -50,6 +50,12 @@ export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
 	const max = subscription.delay?.max;
 	if (max === null) return NO_MAX_DELAY;
 	return max?.asMillis() ?? 0;
+}
+
+/** A subscription's {@link Delay.max} in milliseconds as SUBSCRIBE carries it: null for no limit. */
+export function wireMaxDelay(subscription: Pick<Subscription, "delay">): number | null {
+	const max = maxDelayOf(subscription);
+	return max < NO_MAX_DELAY ? max : null;
 }
 
 /** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated, omitted for zero. */
@@ -517,6 +523,8 @@ export interface ResumeSource {
 	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Position; ended: boolean };
+	/** Whether `position` is the serving copy's largest and its group ended there. */
+	largestFinished(position: Position): boolean;
 	/**
 	 * The serving copy's largest location once within the reader's cursor and newer than `seen`,
 	 * or undefined once the logical track ends.
@@ -705,8 +713,11 @@ export const hooks: {
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
-	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
-	reportedLargest: (producer: Producer, largest: Position | undefined) => void;
+	/**
+	 * Seed a received track from the publisher's reported edge, and whether its group ended there;
+	 * assigned by `track.ts`.
+	 */
+	reportedLargest: (producer: Producer, largest: Position | undefined, finished: boolean) => void;
 	/**
 	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
 	 * so it names no object; assigned by `track.ts`.
@@ -836,6 +847,8 @@ export const hooks: {
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };
+	/** Whether `position` is a subscriber's largest and its group ended there, so no frame follows it. */
+	largestFinished: (subscriber: Subscriber, position: Position) => boolean;
 	/** Wake once a subscriber's largest location or its end may have changed; fires at most once. */
 	largestChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** A subscriber that reads its routes' copies through `source` instead of a buffer of its own. */
@@ -1171,6 +1184,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	peekLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	largestFinished: () => {
 		throw new Error("track.ts not loaded");
 	},
 	largestChanged: () => {

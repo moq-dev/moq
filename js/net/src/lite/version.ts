@@ -272,6 +272,23 @@ export function hasOrder(version: Version): boolean {
 	}
 }
 
+/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one, so 0
+ * says no limit. Added in lite-07; earlier wires carry bare milliseconds. */
+export function hasUnlimitedMaxDelay(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the optional `Subscriber Min Age`. Added in
  * lite-07; an earlier subscription decodes it as not stated. */
 export function hasMinDelay(version: Version): boolean {

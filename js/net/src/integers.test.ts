@@ -196,5 +196,5 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 test("time anchors convert at the declared scale without losing an aligned unit", () => {
 	expect(
 		toWireRanges([{ start: { time: new Timestamp(4611686021000000, Timescale.NANO) } }], Timescale.MILLI),
-	).toEqual([{ start: { time: 4611686021 } }]);
+	).toEqual([{ start: { time: 4611686021n } }]);
 });
