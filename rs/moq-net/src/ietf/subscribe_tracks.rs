@@ -218,7 +218,7 @@ mod tests {
 			group_order: Some(GroupOrder::Ascending),
 			..paused()
 		};
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert_ne!(encode(&ordered, version), encode(&paused(), version), "{version}");
 			let decoded: SubscribeTracks = decode(&encode(&ordered, version), version).unwrap();
 			assert_eq!(decoded.group_order, Some(GroupOrder::Ascending), "{version}");
@@ -230,7 +230,7 @@ mod tests {
 
 	#[test]
 	fn publish_skipped_round_trips() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let msg = PublishSkipped {
 				suffix: Path::from_static("cam"),
 				track_name: "video".into(),

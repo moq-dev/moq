@@ -321,7 +321,7 @@ mod tests {
 
 	#[test]
 	fn subscriber_max_age_round_trips() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for max_age in [None, Some(0), Some(250), Some(super::super::max_age::MAX_MILLIS)] {
 				let msg = Subscribe {
 					max_age,
@@ -390,7 +390,7 @@ mod tests {
 	}
 
 	/// Build a SUBSCRIBE body carrying a single RENDEZVOUS_TIMEOUT parameter.
-	const VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const VERSIONS: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	/// NEW_GROUP_REQUEST survives SUBSCRIBE and REQUEST_UPDATE.
 	#[test]
@@ -456,7 +456,7 @@ mod tests {
 	/// SUBSCRIBE.
 	#[test]
 	fn rendezvous_timeout_retains_whether_a_wait_was_requested() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for millis in [0, 5000] {
 				let encoded = subscribe_with_rendezvous(millis, version);
 				let msg: Subscribe = decode_message(&encoded, version)
@@ -505,7 +505,7 @@ mod tests {
 			authorization_token: None,
 		};
 
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// The reader has to be able to see a 0x04, or its absence below proves nothing.
 			assert_eq!(
 				first_param_key(&subscribe_with_rendezvous(5000, version), version),
@@ -513,11 +513,21 @@ mod tests {
 				"{version}: reader missed a planted RENDEZVOUS_TIMEOUT"
 			);
 
-			assert_eq!(
-				first_param_key(&encode_message(&msg, version), version),
-				Some(0x10),
-				"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
-			);
+			// Drafts 18 to 22 lead with FORWARD (0x10). Draft-23 has PAUSED (0x11) in its
+			// place and omits it at its default, so an unpaused SUBSCRIBE leads with a
+			// later key or carries none.
+			let first = first_param_key(&encode_message(&msg, version), version);
+			match version {
+				Version::Draft18 | Version::Draft20 | Version::Draft22 => assert_eq!(
+					first,
+					Some(0x10),
+					"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
+				),
+				Version::Draft23 => assert!(
+					first.is_none_or(|key| key > 0x04),
+					"{version}: RENDEZVOUS_TIMEOUT must not be advertised, got {first:?}"
+				),
+			}
 		}
 	}
 
@@ -565,7 +575,7 @@ mod tests {
 	#[test]
 	fn test_subscribe_ok_accepts_largest_object() {
 		let payload = [0x04, 0x01, 0x09, 0x05, 0x00];
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let decoded: SubscribeOk = decode_message(&payload, version).unwrap();
 
 			assert_eq!(decoded.track_alias, 4, "{version}");
@@ -619,7 +629,7 @@ mod tests {
 	/// instead of letting the request reach its answer.
 	#[test]
 	fn subscribe_accepts_the_delivery_timeouts() -> Result<(), EncodeError> {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut body = Vec::new();
 			let w = &mut Encoder::new(&mut body, version.into());
 			RequestId(1).encode(w, version)?;
@@ -707,7 +717,7 @@ mod tests {
 	/// stack's unset 127, so a relay forwards it unchanged.
 	#[test]
 	fn test_subscribe_omitted_priority_is_128() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut bytes = vec![0x00]; // request_id
 			bytes.extend_from_slice(b"\x01\x0bnonexistent\x0dno-such-track"); // namespace, name
 			bytes.push(0x00); // no parameters
@@ -762,7 +772,7 @@ mod tests {
 	/// decoder returns the same wire value.
 	#[test]
 	fn subscribe_ok_priority_property_bytes_on_every_draft() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut msg = SubscribeOk {
 				track_alias: 42,
 				largest: None,
@@ -1080,7 +1090,7 @@ mod tests {
 			0x01, // Number of Parameters
 			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
 		]);
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let wire = body.clone();
 			let mut buf = Decoder::new(&wire, version.into());
 			Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
@@ -1147,7 +1157,7 @@ mod cache_duration_tests {
 
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for age in [0u64, 30_000] {
 				let mut payload = vec![0, 0, 4];
 				Encoder::new(&mut payload, version.into()).varint(age).unwrap();
@@ -1165,7 +1175,7 @@ mod cache_duration_tests {
 
 	#[test]
 	fn cache_duration_preserves_optional_value() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 				let ok = SubscribeOk {
 					track_alias: 0,

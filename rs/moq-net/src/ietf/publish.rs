@@ -545,7 +545,7 @@ mod tests {
 
 	#[test]
 	fn test_publish_done_registered_statuses_all_versions() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22, Version::Draft23] {
 			for (status, expected) in [
 				(PublishDoneStatus::InternalError, 0x0),
 				(PublishDoneStatus::TrackEnded, 0x2),
@@ -578,7 +578,7 @@ mod tests {
 			reason_phrase: "".into(),
 		};
 
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert!(done(0x2).end(version).is_ok(), "{version:?}");
 			assert!(
 				matches!(done(0x1).end(version), Err(crate::Error::Unauthorized)),
@@ -664,7 +664,7 @@ mod tests {
 
 	#[test]
 	fn publish_priority_property_bytes_on_every_draft() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut msg = Publish {
 				authorization_token: None,
 				request_id: RequestId(1),

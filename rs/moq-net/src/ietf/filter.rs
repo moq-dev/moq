@@ -780,7 +780,7 @@ mod fill_tests {
 
 	#[test]
 	fn fill_rejects_invalid_group_order() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let fill = Fill {
 				group_order: Some(super::super::GroupOrder::Any),
 				filter: None,

@@ -54,6 +54,39 @@ pub(crate) fn decode_length(r: &mut Decoder<'_>, version: Version) -> Result<usi
 	}
 }
 
+/// The Message Length at the head of `bytes` and the width of its field, in `version`'s
+/// encoding. For tests that walk frames collected off a test transport.
+#[cfg(test)]
+pub(crate) fn peek_length(bytes: &[u8], version: Version) -> (usize, usize) {
+	let mut r = Decoder::new(bytes, version.into());
+	let len = decode_length(&mut r, version).expect("a whole Message Length");
+	(len, r.position())
+}
+
+/// The Message Length of a `len` byte body in `version`'s encoding. For hand-built frames.
+#[cfg(test)]
+pub(crate) fn length_bytes(len: usize, version: Version) -> Vec<u8> {
+	let mut buf = Vec::new();
+	let mut w = Encoder::new(&mut buf, version.into());
+	match version.varint_length() {
+		true => w.varint(len as u64).expect("a length that fits a varint"),
+		false => w.u16(u16::try_from(len).expect("a length that fits 16 bits")),
+	}
+	buf
+}
+
+/// A whole control message: its type, its Message Length in `version`'s encoding, its body.
+#[cfg(test)]
+pub(crate) fn framed(id: u64, body: &[u8], version: Version) -> Vec<u8> {
+	let mut buf = Vec::new();
+	Encoder::new(&mut buf, version.into())
+		.varint(id)
+		.expect("a type that fits a varint");
+	buf.extend(length_bytes(body.len(), version));
+	buf.extend_from_slice(body);
+	buf
+}
+
 /// A trait for IETF messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// IETF messages carry a Message Length (see [`prefix_length`]) and have a message type ID

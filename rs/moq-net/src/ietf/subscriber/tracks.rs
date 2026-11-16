@@ -2019,7 +2019,7 @@ mod tests {
 	/// and a reader leaving meanwhile stops waiting for it.
 	#[kio::test]
 	async fn churn_under_withheld_credit_buffers_one_resume_and_pause() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// One message in flight per stream, so a peer that stops reading withholds credit.
 			let config = memory::Config {
 				stream_buffer: 0,
@@ -2122,7 +2122,7 @@ mod tests {
 	/// the peer unlists a track, so it invites a retry (draft-18 section 10.6.2).
 	#[kio::test]
 	async fn an_over_limit_publish_invites_a_retry() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut h = harness(version);
 			h.subscriber.announces = crate::session::Slots::new(0);
 			let _listing = h.establish().await;
@@ -2212,7 +2212,7 @@ mod tests {
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.
 	#[kio::test]
 	async fn a_skipped_track_lists_once_its_paused_subscribe_answers() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut h = harness(version);
 			let mut listing = h.establish().await;
 			let skipped = ietf::PublishSkipped {
@@ -2311,7 +2311,7 @@ mod tests {
 	/// objects refused unseen. On draft-18 our PUBLISH_OK pauses it.
 	#[kio::test]
 	async fn a_forwarding_publish_fails_the_listing_on_draft_22() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let forwarding = ietf::Publish {
