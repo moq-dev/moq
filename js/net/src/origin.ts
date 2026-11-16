@@ -921,6 +921,10 @@ class OriginState {
 		instance: Instance.Valid | undefined,
 		source: object | undefined,
 	): void {
+		// A slot it follows records a pending takeover in `failover`, so one the slot was taken
+		// out of the table with is stale.
+		const current = slot.route.peek();
+		if (current?.pending) slot.route.set({ ...current, pending: false });
 		if (instance === undefined) {
 			if (source && this.serves(path, source, instance, true)) return;
 			this.drop(path, slot, unroutable());

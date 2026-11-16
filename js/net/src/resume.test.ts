@@ -22,6 +22,7 @@ import { overrideBroadcastWire, wireOf } from "./wire.ts";
 const INFO: track.Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
 
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
+const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
 const path = Path.from("live");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -1372,6 +1373,74 @@ for (const answers of [true, false]) {
 		close();
 	});
 }
+
+// The same, after another instance won the path: the request leaves the table, and its own
+// instance's takeover leaving is still the news the stranded read waits for.
+test("a read stranded on a route asks it again once a pending takeover leaves, after another instance won", async () => {
+	const { origin, a, active, close } = await setup();
+	const first = copy(a);
+	const sub = active.track("seq").subscribe();
+	first.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	first.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	const second = copy(a);
+	second.write(1n);
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	await settle();
+	const newer = wireOf(origin).receive(path, WireRoute.normalize({ instance: NEWER, cost: 1n }));
+	await settle();
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+
+	// The takeover leaves: the stranded route wins its instance again.
+	next.close();
+	await settle();
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	newer.close();
+	close();
+});
+
+// Mirrors the refusal half of `a_stranded_track_still_draining_asks_again_when_the_table_moves` in
+// rs/moq-net/src/model/front.rs: a replacement refusing the track as unroutable judged its route.
+test("a replacement that refuses a track as unroutable is asked again once the table moves, the replaced copy feeding meanwhile", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	const requested = wireOf(b).requested();
+	front.serve(b.consume());
+	const request = await requested;
+	if (!request) throw new Error("expected on-demand track request");
+	request.reject(new StreamError(StreamCode.Unroutable));
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	const tb = copy(b);
+	tb.write(2n);
+	front.moved();
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
 
 // Mirrors `a_stranded_track_still_draining_asks_again_when_the_table_moves` in rs/moq-net/src/model/front.rs.
 test("a replacement that loses its route is asked again once the table moves, the replaced copy feeding meanwhile", async () => {

@@ -2075,8 +2075,11 @@ export class Front {
 				(err: unknown) => {
 					if (this.#source !== source) return;
 					const error = err instanceof Error ? err : new Error(String(err));
-					// A route on its way out is no verdict: the next one is asked.
-					if (!routeFailed(error)) route.refuse(error);
+					// A route that lost the content leaves the replaced copy feeding the read, which asks
+					// again once the table moves, as the Rust front's refusal does. A route on its way
+					// out is no verdict: the next one is asked.
+					if (strands(error, source)) route.strand(source);
+					else if (!routeFailed(error)) route.refuse(error);
 				},
 			)
 			.finally(() => {
