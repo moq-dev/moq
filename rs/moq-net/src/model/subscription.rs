@@ -45,7 +45,7 @@ pub struct Subscription {
 	pub order: Order,
 	/// Whether this subscriber wants each group's frame progress without its payload:
 	/// every frame's timestamp and declared size, read with
-	/// [`group::Consumer::read_info`](crate::group::Consumer::read_info), and no bytes.
+	/// [`group::Consumer::poll_read_info`](crate::group::Consumer::poll_read_info), and no bytes.
 	///
 	/// Defaults to `false`, the payload. Aggregated across subscribers as headers only
 	/// while none wants the payload, so a relay pulls payload upstream only for payload

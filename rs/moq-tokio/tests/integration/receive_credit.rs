@@ -625,6 +625,8 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	varint(&mut header, sequence);
 	// The first frame.
 	varint(&mut header, 0);
+	// Payload mode, not metadata.
+	header.push(0);
 
 	// GROUP, then its size-prefixed header.
 	let mut bytes = vec![0x00];

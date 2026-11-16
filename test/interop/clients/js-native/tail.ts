@@ -43,9 +43,19 @@ if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch", "meta"].includes(
-		mode,
-	)
+	![
+		undefined,
+		"drop",
+		"join",
+		"compress",
+		"datagram",
+		"status",
+		"cached",
+		"history",
+		"late",
+		"fetch",
+		"meta",
+	].includes(mode)
 ) {
 	throw new Error(
 		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch]]",
