@@ -253,6 +253,20 @@ impl RangeFills {
 		read: bool,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
+		// What the copy records skipped is never produced, such as the starts a lite-07 GROUP's
+		// Previous Start passes over, which no SUBSCRIBE_SKIP names: a fill owing one is
+		// answered as a SUBSCRIBE_SKIP answers it, rather than asked or recovered again.
+		let mut skipped = Vec::new();
+		for fill in &self.held {
+			if let Some(run) = fill.next_run() {
+				skipped.extend(serving.skipped(run).iter().cloned());
+			}
+		}
+		for groups in skipped {
+			for gap in self.refused.gaps(&groups).collect::<Vec<_>>() {
+				self.refused.insert(gap, Refusal::dropped(StreamError::NotFound));
+			}
+		}
 		// The groups the subscription already accounted for, which it never sends again, are
 		// recovered on their own, once.
 		if let Some(accounted) = accounted {

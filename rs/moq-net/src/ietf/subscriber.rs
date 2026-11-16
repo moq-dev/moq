@@ -635,7 +635,7 @@ impl RangeWriter {
 	/// Finish the current group, with the slot already settled.
 	fn close_group(current: &mut Option<(u64, Option<crate::recv::Group>)>) -> Result<(), Error> {
 		match current.take() {
-			Some((_, Some(producer))) => producer.finish(),
+			Some((_, Some(producer))) => producer.close(),
 			_ => Ok(()),
 		}
 	}
@@ -6443,12 +6443,12 @@ impl RecvGroup {
 				Ok(())
 			}
 			Ok(Ended::Group) => {
-				let _ = producer.finish();
+				let _ = producer.close();
 				Ok(())
 			}
 			// No object past this group's last one exists, so the track ends after it.
 			Ok(Ended::Track { object, properties }) => {
-				let _ = producer.finish();
+				let _ = producer.close();
 				end_track(
 					&mut track,
 					track::Position {
@@ -7119,7 +7119,7 @@ impl RunFill {
 		}
 		if current.is_none() || group.is_some_and(|group| Some(group) != current) {
 			if let Some((_, _, producer)) = self.head.take() {
-				producer.finish()?;
+				producer.close()?;
 			}
 			self.skipped = None;
 			let key = group.ok_or(Error::ProtocolViolation)?;

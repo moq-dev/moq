@@ -298,6 +298,17 @@ impl Version {
 		)
 	}
 
+	/// Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream
+	/// ends a finished group with GROUP_END and a closed one with a bare FIN. A publisher then
+	/// closes an expired group's stream rather than resetting it. Added in lite-07; earlier
+	/// versions end every group with a bare FIN.
+	pub(crate) fn has_group_end(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether a Group Stream reset with YIELDED pauses its group, which a later stream
 	/// continues. Added in lite-07; an earlier publisher out of stream credit gives the reset
 	/// group up.

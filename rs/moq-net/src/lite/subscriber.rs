@@ -471,6 +471,24 @@ impl TrackEntry {
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
 		let received = producer.create_group_at(group_info, hdr.frame_start);
+		// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
+		// would say. Recorded once the group is, so a relay serving the copy sees the group
+		// the skip runs up to, whose own GROUP passes over it again.
+		let passed = hdr.passed_over();
+		if !passed.is_empty() {
+			if let Ok(mut tail) = self.tail.write() {
+				tail.account(passed.clone(), now);
+			}
+			let cached = producer.skip_received(passed.clone());
+			if let Some(first) = cached.iter().next() {
+				tracing::warn!(
+					group = hdr.key,
+					passed = ?passed,
+					cached = first.start,
+					"protocol error: GROUP passes over a group that arrived; keeping the group"
+				);
+			}
+		}
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !self.tail.read().accounts(hdr.key);
 		// The subscription's end waits until this stream is read. Counted
@@ -1649,6 +1667,10 @@ impl GroupRecv {
 			}
 			self.reader.poll_decode::<lite::Group>(waiter).map_ok(|hdr| (ietf, hdr))
 		})?;
+		// A previous group at or past this one's own start is no group before it.
+		if header.1.previous.is_some_and(|previous| previous >= header.1.key) {
+			return Poll::Ready(Err(Error::MalformedTrack));
+		}
 
 		// A SUBSCRIBE sent alongside its TRACK may be served before the TRACK_INFO that says
 		// how to read it: the stream parks, unread, until the accept opens its group.
@@ -1815,10 +1837,8 @@ impl GroupRecv {
 				.and_then(|entry| entry.end_yielding(hdr.key, stream))
 		});
 		let res = match res {
-			Ok(()) => {
-				let _ = group.finish();
-				Ok(())
-			}
+			// Whole at a GROUP_END's end, else closed: every frame sent arrived.
+			Ok(end) => group.end(end),
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = group.abort(err);
 				Ok(())
@@ -1866,8 +1886,8 @@ impl GroupRecv {
 /// Pumps bare FRAME messages from a reader into a group producer: the wire
 /// format shared by GROUP streams and FETCH responses.
 pub(crate) struct FrameIngest {
-	/// A timescale decodes the lite-05 zigzag-delta timestamp prefix; none leaves frames
-	/// untimed (pre-lite-05).
+	/// Whether frames carry the zigzag-delta timestamp prefix (lite-05+), in the track's
+	/// timescale, or bare on a scale-less lite-07 track, where each must be its group's start.
 	framing: lite::Framing,
 	/// Previous frame's raw timestamp value (in `timescale` units), for the
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
@@ -1914,9 +1934,13 @@ enum IngestPhase {
 	/// The END_OF_GROUP record arrived, so only the stream end may follow.
 	Ended,
 	/// Lite-07: reading the `Payload Length`, the payload size plus one, which leads the
-	/// frame. Stream end here means the group has no more frames.
+	/// frame, or 0 for GROUP_END. Stream end here means the group closed incomplete.
 	Length,
-	/// Reading the timestamp delta (skipped without a timescale), after the size on lite-07.
+	/// Lite-07: reading GROUP_END's `End`, the group's exclusive end.
+	GroupEnd,
+	/// Lite-07: GROUP_END said where the group ends, so only the stream end may follow.
+	Finished { end: u64 },
+	/// Reading the timestamp delta (skipped when frames carry none), after the size on lite-07.
 	/// Stream end here before lite-07 means the group has no more frames.
 	Timing { size: Option<u64> },
 	/// Reading a compressed Track's inflated size (lite-07), or skipped. Stream end here
@@ -1974,12 +1998,13 @@ impl FrameIngest {
 		self.partial.take()
 	}
 
-	/// The stream ended on a frame boundary: the group ends, unless a continuation ended
-	/// before completing the frame its group held cut short.
-	fn end(&self) -> Result<(), Error> {
+	/// The stream ended on a frame boundary: the group ends, whole at `end` after a GROUP_END
+	/// or closed without one, unless a continuation ended before completing the frame its
+	/// group held cut short.
+	fn end(&self, end: Option<u64>) -> Result<Option<u64>, Error> {
 		match self.partial {
 			Some(_) => Err(Error::ProtocolViolation),
-			None => Ok(()),
+			None => Ok(end),
 		}
 	}
 
@@ -2073,15 +2098,15 @@ impl FrameIngest {
 		}
 	}
 
-	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
-	/// finishes or aborts the group; a frame cut short mid-payload was already
-	/// aborted here with the reason.
+	/// `Ready(Ok(end))` once the stream FINs on a frame boundary, with the group's end when a
+	/// GROUP_END preceded the FIN. The caller finishes, closes, or aborts the group; a frame
+	/// cut short mid-payload was already aborted here with the reason.
 	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<Option<u64>, Error>> {
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
@@ -2107,7 +2132,7 @@ impl FrameIngest {
 				}
 				IngestPhase::Object => {
 					let Some(code) = ready!(reader.poll_varint_maybe(waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
 					let records = self.records.as_mut().expect("the Group State came first");
 					let (id, end) = lite::ietf::decode_object(records.prior, code)?;
@@ -2154,34 +2179,54 @@ impl FrameIngest {
 					if ready!(reader.poll_has_more(waiter))? {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
-					return Poll::Ready(self.end());
+					return Poll::Ready(self.end(None));
 				}
 				IngestPhase::Length => {
 					let Some(length) = ready!(self.poll_header_varint(reader, true, waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
-					// 0 is reserved for GROUP_END, which no version defines yet.
+					// 0 is GROUP_END, where a frame would start. Under object records a record
+					// precedes every FRAME, and the group's end is the stream's.
 					let Some(size) = length.checked_sub(1) else {
-						return Poll::Ready(Err(Error::ProtocolViolation));
+						if self.records.is_some() {
+							return Poll::Ready(Err(Error::ProtocolViolation));
+						}
+						self.phase = IngestPhase::GroupEnd;
+						continue;
 					};
 					self.phase = IngestPhase::Timing { size: Some(size) };
 				}
+				IngestPhase::GroupEnd => {
+					let end = ready!(reader.poll_varint(waiter))?;
+					self.phase = IngestPhase::Finished { end };
+				}
+				IngestPhase::Finished { end } => {
+					let end = *end;
+					if ready!(reader.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
+					return Poll::Ready(self.end(Some(end)));
+				}
 				IngestPhase::Timing { size } => {
 					let size = *size;
-					let Some(scale) = self.framing.timescale else {
+					if !self.framing.stamped() {
 						self.phase = IngestPhase::Inflated { size, timestamp: None };
 						continue;
-					};
+					}
 					// Before lite-07 the timestamp delta doubles as the per-frame sentinel.
 					let Some(zz) = ready!(self.poll_header_varint(reader, size.is_none(), waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
 						.try_into()
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 					self.prev_ts = next;
-					let timestamp = Timestamp::new(next, scale)
-						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+					// A scale-less track's is a bare number, which the group checks against its start.
+					let timestamp = match self.framing.timescale {
+						Some(scale) => Timestamp::new(next, scale)
+							.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
+						None => Timestamp::unscaled(next),
+					};
 					self.phase = IngestPhase::Inflated {
 						size,
 						timestamp: Some(timestamp),
@@ -2192,9 +2237,9 @@ impl FrameIngest {
 					// Only a compressed Track carries it, and only lite-07 can mark one.
 					let inflated = match group.compressed() {
 						true => {
-							let boundary = size.is_none() && self.framing.timescale.is_none();
+							let boundary = size.is_none() && !self.framing.stamped();
 							let Some(inflated) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
-								return Poll::Ready(self.end());
+								return Poll::Ready(self.end(None));
 							};
 							Some(inflated)
 						}
@@ -2210,9 +2255,9 @@ impl FrameIngest {
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
-					let boundary = self.framing.timescale.is_none() && !group.compressed();
+					let boundary = !self.framing.stamped() && !group.compressed();
 					let Some(size) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
 					let header = self.header(group, timestamp, inflated, size)?;
 					self.phase = self.dispatch(group, header)?;
@@ -4877,6 +4922,7 @@ mod tests {
 				lite::Group {
 					subscribe: 7,
 					key: 3,
+					previous: None,
 					frame_start: 0,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
@@ -4963,6 +5009,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5065,26 +5112,38 @@ mod tests {
 		framing: lite::Framing,
 		body: &[u64],
 	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
+		let header = lite::Group {
+			subscribe: 7,
+			key: 0,
+			previous: None,
+			frame_start: 0,
+		};
+		receive_lite07(framing, true, header, body).await
+	}
+
+	/// Receive the group `header` opens on a track `framing` describes over a lite-07
+	/// session, which negotiated the `ietf` extension when `ietf`, its stream holding `body`
+	/// after the header. Also returns the cache pool the track charges.
+	async fn receive_lite07(
+		framing: lite::Framing,
+		ietf: bool,
+		header: lite::Group,
+		body: &[u64],
+	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
 		use crate::transport::poll::Session as _;
 
 		let version = Version::Lite07;
 		let mut script = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-		lite::Group {
-			subscribe: 7,
-			key: 0,
-			frame_start: 0,
-		}
-		.encode(&mut encoder, version)
-		.unwrap();
+		header.encode(&mut encoder, version).unwrap();
 		for value in body {
 			encoder.varint(*value).unwrap();
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
-		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(true);
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(ietf);
 		peer_setup
 			.set(lite::Setup {
-				ietf: true,
+				ietf,
 				..Default::default()
 			})
 			.unwrap();
@@ -5128,6 +5187,108 @@ mod tests {
 		);
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 		(res, track, pool)
+	}
+
+	/// A lite-07 track with no extension, in `timescale`.
+	fn lite07(timescale: Option<Timescale>) -> lite::Framing {
+		lite::Framing {
+			timescale,
+			ietf: None,
+			compressed: false,
+			length_first: true,
+		}
+	}
+
+	/// Group `key`'s header on subscription 7, naming `previous` as the group before it.
+	fn lite07_header(key: u64, previous: Option<u64>) -> lite::Group {
+		lite::Group {
+			subscribe: 7,
+			key,
+			previous,
+			frame_start: 0,
+		}
+	}
+
+	/// GROUP_END finishes the group whole at its End, and a bare FIN closes it with every frame
+	/// sent but no end: each frame is its `Payload Length`, a timestamp delta, and the payload.
+	#[kio::test]
+	async fn group_end_finishes_and_a_bare_fin_closes() {
+		let x = u64::from(b'x');
+		for (body, end) in [(&[2, 0, x, 0, 5][..], Some(5)), (&[2, 0, x][..], None)] {
+			let (res, track, _) =
+				receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(0, None), body).await;
+			res.unwrap();
+			let mut group = track.consume().peek_group(0).unwrap();
+			assert_eq!(
+				group.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+				b"x"[..]
+			);
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert_eq!(group.end(), end, "{body:?}");
+		}
+	}
+
+	/// Anything after GROUP_END, an End the group refuses (at or before its start), or a
+	/// zero length under object records, where a record would come first, is refused.
+	#[kio::test]
+	async fn group_end_refuses_what_cannot_end_a_group() {
+		let x = u64::from(b'x');
+		for (key, body, reason) in [
+			(0, &[2, 0, x, 0, 5, 0][..], "a byte after GROUP_END"),
+			(0, &[2, 0, x, 0, 5, 2, 0, x], "a frame after GROUP_END"),
+			(5, &[2, 5, x, 0, 5], "an End at the group's start"),
+			(5, &[2, 5, x, 0, 4], "an End before the group's start"),
+			(0, &[0], "a stream ending inside GROUP_END"),
+		] {
+			let (res, track, _) =
+				receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(key, None), body).await;
+			assert!(res.is_err(), "accepted {reason}");
+			if let Some(mut group) = track.consume().peek_group(key) {
+				while let Some(Ok(Some(_))) = group.read_frame().now_or_never() {}
+				assert!(group.end().is_none(), "{reason}: the group finished");
+			}
+		}
+		let (res, ..) = receive_ietf(draft18(None), &[0, 0]).await;
+		assert!(res.is_err(), "accepted GROUP_END under object records");
+	}
+
+	/// A lite-07 FRAME on a scale-less track carries its timestamp, its group's start as a
+	/// bare number; any other value is a TIMESTAMP_MISMATCH.
+	#[kio::test]
+	async fn a_scale_less_frame_carries_its_groups_start() {
+		let x = u64::from(b'x');
+		let (res, track, _) = receive_lite07(lite07(None), false, lite07_header(9, None), &[2, 18, x, 2, 0, x]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(9).unwrap();
+		for _ in 0..2 {
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.timestamp, Timestamp::unscaled(9));
+		}
+
+		// 10, then 9 and 10 again.
+		for body in [&[2, 20, x][..], &[2, 18, x, 2, 2, x]] {
+			let (res, ..) = receive_lite07(lite07(None), false, lite07_header(9, None), body).await;
+			assert!(matches!(res, Err(Error::TimestampMismatch)), "{body:?}: {res:?}");
+		}
+	}
+
+	/// GROUP's Previous Start passes over the starts between, which the copy records skipped
+	/// as a SUBSCRIBE_SKIP would; one at or above the group's own start is malformed.
+	#[kio::test]
+	async fn a_groups_previous_start_skips_the_starts_between() {
+		let x = u64::from(b'x');
+		let body = [2, 18, x];
+		let (res, track, _) = receive_lite07(lite07(None), false, lite07_header(9, Some(4)), &body).await;
+		res.unwrap();
+		let consumer = track.subscribe(None);
+		assert!(consumer.is_skipped(5..9));
+		assert!(!consumer.is_skipped(4..5), "the previous group is not skipped");
+
+		for previous in [9, 10] {
+			let (res, track, _) = receive_lite07(lite07(None), false, lite07_header(9, Some(previous)), &body).await;
+			assert!(matches!(res, Err(Error::MalformedTrack)), "{previous}: {res:?}");
+			assert!(track.consume().peek_group(9).is_none(), "{previous}: opened the group");
+		}
 	}
 
 	/// Object records: `(Skip << 1) | END`, the properties block's length, then the frame.
@@ -5260,6 +5421,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 5,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut encoder, version)
@@ -5422,6 +5584,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 3,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5492,6 +5655,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 3,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut encoder, version)
@@ -5608,6 +5772,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 3,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5759,6 +5924,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 3,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5848,6 +6014,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 3,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut encoder, version)
@@ -5928,6 +6095,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 3,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut encoder, version)
@@ -7546,6 +7714,7 @@ mod tests {
 			lite::Group {
 				subscribe: 0,
 				key,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut w, version)
@@ -7617,6 +7786,7 @@ mod tests {
 		let header = |key| lite::Group {
 			subscribe: 0,
 			key,
+			previous: None,
 			frame_start: 0,
 		};
 		let mut entry = TrackEntry::new(None, Default::default());
@@ -7660,7 +7830,7 @@ mod tests {
 		let Ok(Open::Group(opened)) = entry.unpark(kept) else {
 			panic!("the kept group");
 		};
-		opened.group.finish().unwrap();
+		opened.group.close().unwrap();
 		let _track = track.finish().unwrap();
 		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing
 		// waits on it.
@@ -10840,6 +11010,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 0,
+			previous: None,
 			frame_start: u64::MAX - 1,
 		}
 		.encode(&mut encoder, version)
@@ -10902,6 +11073,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 0,
+				previous: None,
 				frame_start: start,
 			}
 			.encode(&mut encoder, version)
@@ -14428,9 +14600,9 @@ impl kio::Task for FetchServeRun {
 						unreachable!()
 					};
 					match res {
-						Ok(()) => {
-							let producer = producer;
-							let _ = producer.finish();
+						// Whole at a GROUP_END's end, else closed; an end the group refuses aborts it.
+						Ok(end) => {
+							let _ = producer.end(end);
 						}
 						Err(err) => {
 							let _ = producer.abort(err);

@@ -271,6 +271,7 @@ fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i
 	let header = lite::Group {
 		subscribe: 5,
 		key: 1 << 20,
+		previous: None,
 		frame_start: 200,
 	};
 	header.encode(w, version).unwrap();

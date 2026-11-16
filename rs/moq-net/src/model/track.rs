@@ -1314,6 +1314,25 @@ impl TrackState {
 		gone.then_some(run.end)
 	}
 
+	/// The start of the group before `start`, as a lite-07 GROUP's Previous Start names it:
+	/// just below the run of starts the publisher declared skipped directly under `start`, or
+	/// the group just below it, and `None` when neither says. A run skipped down to 0 has no
+	/// group below it. See [`Subscriber::previous_start`].
+	fn previous_start(&self, start: u64) -> Option<u64> {
+		let below = start.checked_sub(1)?;
+		match self.drops.get_key_value(&below) {
+			Some((run, hole)) if *hole == Hole::Skip => run.start.checked_sub(1),
+			_ => self.lookup.contains_key(&below).then_some(below),
+		}
+	}
+
+	/// Whether the live feed's copy of the group at `key` is cached and still serves it.
+	fn holds_group(&self, key: u64) -> bool {
+		self.lookup
+			.get(&key)
+			.is_some_and(|slot| slot.visible && slot.serves_end())
+	}
+
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
 	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
@@ -4582,6 +4601,22 @@ impl Producer {
 		cached
 	}
 
+	/// The parts of `groups` recorded skipped, never to be produced: a cost in the skipped
+	/// runs it overlaps, not its length.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn skipped(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		if groups.is_empty() {
+			return RangeSet::new();
+		}
+		let state = self.state.read();
+		state
+			.drops
+			.overlapping(&groups)
+			.filter(|(_, hole)| matches!(hole, Hole::Skip))
+			.map(|(run, _)| run.start.max(groups.start)..run.end.min(groups.end))
+			.collect()
+	}
+
 	/// Forget every run held as stale: a new upstream subscription judges them afresh, and
 	/// may deliver them, so they are unknown again, and a reader that wants one fills it.
 	/// Returns the runs forgotten; a group that arrived since its stale drop replaced it, so
@@ -6470,6 +6505,23 @@ impl Consumer {
 			return serving.hole_end(key, dropped);
 		}
 		self.with_state(|state| state?.read().hole_end(key, dropped))
+	}
+
+	/// The start of the group before `start`; see [`Subscriber::previous_start`].
+	pub(super) fn previous_start(&self, start: u64) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.previous_start(start);
+		}
+		self.with_state(|state| state?.read().previous_start(start))
+	}
+
+	/// Whether the cache holds the group at `key`; see [`Subscriber::holds`].
+	pub(super) fn holds(&self, key: u64) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.holds(key);
+		}
+		self.with_state(|state| state.map(|state| state.read().holds_group(key)))
+			.unwrap_or(false)
 	}
 
 	/// The keys of `span` the cache holds, lowest first.
@@ -10128,6 +10180,27 @@ impl Subscriber {
 				first_open(run, |key| state.hole_end(key, false)).is_none()
 			}
 			Inner::Resume(resume, _) => resume.is_skipped(run),
+		}
+	}
+
+	/// The start of the group before `start` on the track, as a lite-07 GROUP's Previous Start
+	/// names it: just below the run of starts the publisher declared skipped directly under
+	/// `start`, else the group just below it, else `None`. No group starts between the two.
+	/// A copy knows only the skips its wire forwarded.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn previous_start(&self, start: u64) -> Option<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().previous_start(start),
+			Inner::Resume(resume, _) => resume.previous_start(start),
+		}
+	}
+
+	/// Whether the track's cache holds the live feed's group at `key`, still serving it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn holds(&self, key: u64) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().holds_group(key),
+			Inner::Resume(resume, _) => resume.holds(key),
 		}
 	}
 

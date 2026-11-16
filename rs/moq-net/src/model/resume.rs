@@ -941,6 +941,19 @@ impl Subscriber {
 		track::first_open(run, |key| serving.hole_end(key, false)).is_none()
 	}
 
+	/// The start of the group before `start` the serving copy knows; see
+	/// [`track::Subscriber::previous_start`].
+	pub(super) fn previous_start(&self, start: u64) -> Option<u64> {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone())?;
+		serving.previous_start(start)
+	}
+
+	/// Whether the serving copy holds the group at `key`; see [`track::Subscriber::holds`].
+	pub(super) fn holds(&self, key: u64) -> bool {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		serving.is_some_and(|serving| serving.holds(key))
+	}
+
 	/// The groups the reader's ranges name from `from` on; see
 	/// [`track::Subscriber::runs_in_range`].
 	pub(super) fn runs(&self, from: u64) -> Vec<std::ops::RangeInclusive<u64>> {

@@ -37,6 +37,7 @@ mod finished_broadcast_mock;
 mod finite_relay;
 mod flights;
 mod goaway;
+mod group_end;
 mod group_order;
 mod half_read_frame;
 mod history_groups;
