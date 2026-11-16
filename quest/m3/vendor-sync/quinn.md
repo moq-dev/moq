@@ -29,9 +29,9 @@ a rebase onto `c7b46a96` whose BBR3 commits match `01b8848d`, so it has
 nothing to port; recorded in the ledger. Of the nine `main` commits since `aea1e538`, check
 [`aa61ce99`](https://github.com/quinn-rs/quinn/commit/aa61ce996b97b21c63731a84fac1346c2d70852b) (late
 ACK-only packets are not spurious losses) against BBR3's spurious-loss undo
-first. The [BBR3 references epic](/quest/m1/bbr3-references/README.md) adds
-Google Linux BBRv3, draft-ietf-ccwg-bbr, and QUICHE BBR3 heads to the ledger;
-recheck them with quinn#2481 each run.
+first. The ledger's `BBR3 references` entry holds the Google Linux BBRv3,
+draft-ietf-ccwg-bbr, and QUICHE BBR3 heads; recheck them with quinn#2481 each
+run, and record any divergence a change to them adds there.
 
 Learned: a fix missing from the ledger is often already held, since the fork
 reworked the same code (`stop` under `RESET_STREAM_AT`, the stale-accept
