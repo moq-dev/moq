@@ -645,6 +645,7 @@ mod tests {
 		for (version, expected) in [
 			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 			(Version::Draft22, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft23, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x09 => location.clone());

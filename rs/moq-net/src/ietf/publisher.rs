@@ -11077,7 +11077,7 @@ mod serve_tests {
 	/// a single token is answered as usual.
 	#[kio::test]
 	async fn a_request_with_repeated_or_several_tokens_is_refused_alone() {
-		for (version, malformed) in [(Version::Draft22, 0x4)] {
+		for (version, malformed) in [(Version::Draft22, 0x4), (Version::Draft23, 0x4)] {
 			let request = |tokens: &[&[u8]]| {
 				let mut body = track_status("room", true, version);
 				assert_eq!(body.pop(), Some(0), "{version}");
@@ -11123,6 +11123,8 @@ mod serve_tests {
 		for (version, tokens, code) in [
 			(Version::Draft22, [TOKEN, TOKEN], 0x4),
 			(Version::Draft22, [TOKEN, other], 0x3),
+			(Version::Draft23, [TOKEN, TOKEN], 0x4),
+			(Version::Draft23, [TOKEN, other], 0x3),
 		] {
 			let h = serve(version);
 			let session = ScriptedSession::per_stream(vec![update_with_tokens(version, &tokens)]);

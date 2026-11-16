@@ -610,6 +610,7 @@ mod tests {
 		for (version, expected) in [
 			(Version::Draft18, &[42, 1, 0x09, 0x09, 0x03][..]),
 			(Version::Draft22, &[42, 1, 0x09, 0x09, 0x03][..]),
+			(Version::Draft23, &[42, 1, 0x09, 0x09, 0x03][..]),
 		] {
 			let msg = SubscribeOk {
 				track_alias: 42,
@@ -652,6 +653,8 @@ mod tests {
 		for (wanted, version) in [
 			(false, Version::Draft22),
 			(true, Version::Draft22),
+			(false, Version::Draft23),
+			(true, Version::Draft23),
 			// Older drafts have no such parameter, so the opt-out is dropped rather than
 			// sent as one they would treat as a protocol violation.
 			(true, Version::Draft18),

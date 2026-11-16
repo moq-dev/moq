@@ -498,7 +498,7 @@ mod tests {
 			start: Location { group: 9, object: 0 },
 			end: Some(EndLocation { group: 4, object: None }),
 		};
-		for version in [OLD, FIELDS, TYPED] {
+		for version in [OLD, FIELDS, TYPED, Version::Draft23] {
 			let mut buf = Vec::new();
 			assert!(
 				backwards

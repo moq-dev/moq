@@ -2107,7 +2107,11 @@ mod tests {
 	/// track, and UNINTERESTED after.
 	#[kio::test]
 	async fn an_unasked_or_redundant_publish_is_refused() {
-		for (version, duplicate) in [(Version::Draft18, 0x19), (Version::Draft22, 0x20)] {
+		for (version, duplicate) in [
+			(Version::Draft18, 0x19),
+			(Version::Draft22, 0x20),
+			(Version::Draft23, 0x20),
+		] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let (_, id, body) = h.offer(offered("other", "video", 1)).await;
