@@ -49,9 +49,9 @@ pub struct Subscription {
 	///
 	/// Defaults to `false`, the payload. Aggregated across subscribers as headers only
 	/// while none wants the payload, so a relay pulls payload upstream only for payload
-	/// readers, and for history any reader finds missing from its cache, which it fetches
-	/// once for every kind of reader. It serves metadata from a payload copy while it holds
-	/// one. A metadata group
+	/// readers, and while it fills history any reader finds missing from its cache: a held
+	/// fill asks the upstream subscription for the payload, live groups included, until it is
+	/// answered. It serves metadata from a payload copy while it holds one. A metadata group
 	/// is never handed to a payload subscriber, and clearing this with
 	/// [`crate::track::Subscriber::update`] asks again for the payload of the groups seen as
 	/// metadata. Carried by moq-lite-07; any other wire refuses a metadata-only request with

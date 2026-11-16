@@ -371,7 +371,7 @@ export interface Subscription {
 	 * `false`. Needs moq-lite 07; an older session refuses it as unsupported.
 	 *
 	 * Aggregated across every live subscriber: the publisher sends payload if any of them wants it,
-	 * and for history missing from a relay's cache, which it fetches once for every kind of reader.
+	 * and while a relay fills history missing from its cache, live groups included.
 	 * Clearing it with {@link Subscriber.update} asks for the payload of the groups read as metadata.
 	 */
 	meta?: boolean;

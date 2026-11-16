@@ -1164,6 +1164,33 @@ impl GroupState {
 	/// A compressed group hands a plain reader each frame whole once it completes, as the
 	/// slices to inflate, and a `raw` one the stored slice, streaming one still arriving.
 	/// A frame handed out counts as taken, pacing the writer (see [`Pace`]).
+	/// The header of the frame at `index` alone: from its stored slice, the inflated copy when
+	/// the copy kept only that, or the frame still being written, whose header is declared up
+	/// front even when a local writer compresses it only once it commits.
+	fn poll_frame_header(&self, index: usize) -> Poll<Result<Option<frame::Header>>> {
+		if index == self.committed()
+			&& let Some(p) = self.partial.as_ref().filter(|p| p.scratch)
+		{
+			self.check_read(index, true)?;
+			self.charge.refresh();
+			self.pace.took_committed();
+			let info = frame::Info {
+				size: p.buf.size() as u64,
+				timestamp: p.timestamp,
+			};
+			return Poll::Ready(Ok(Some(frame::Header {
+				info,
+				fields: p.fields.clone(),
+				inflated: None,
+			})));
+		}
+		Poll::Ready(Ok(match ready!(self.poll_frame_source(index, index >= self.held()))? {
+			None => None,
+			Some(Source::Ready(header, _)) => Some(header),
+			Some(Source::Inflate { .. }) => unreachable!("a stored or held read inflates nothing"),
+		}))
+	}
+
 	fn poll_frame_source(&self, index: usize, raw: bool) -> Poll<Result<Option<Source>>> {
 		self.check_read(index, raw)?;
 		if index < self.held()
@@ -5059,11 +5086,9 @@ impl Cursor {
 				self.refresh_if_stale();
 				header
 			}
-			// The stored slice, unless the copy kept only the inflated frame.
-			None => match ready!(self.poll(waiter, |state| state.poll_frame_source(index, index >= state.held()))?) {
+			None => match ready!(self.poll(waiter, |state| state.poll_frame_header(index))?) {
 				None => return Poll::Ready(Ok(None)),
-				Some(Source::Ready(header, _)) => header,
-				Some(Source::Inflate { .. }) => unreachable!("a stored or held read inflates nothing"),
+				Some(header) => header,
 			},
 		};
 		self.index += 1;
@@ -7773,6 +7798,28 @@ mod test {
 			Poll::Ready(Ok(None))
 		));
 		assert_eq!(pool.used(), used, "nothing inflated");
+		drop(group);
+	}
+
+	/// A plain reader's header read of a local compressed group returns a frame's header while
+	/// its writer still streams it, before the frame is compressed at its commit.
+	#[test]
+	fn a_streamed_compressed_header_reads_before_its_commit() {
+		let pool = cache::Pool::unbounded();
+		let group = compressed_group(&pool);
+		let mut reader = group.consume();
+		let mut frame = group.create_frame(untimed(verbose(0).len())).unwrap();
+		frame.write(Bytes::copy_from_slice(&verbose(0)[..10])).unwrap();
+		let Poll::Ready(Ok(Some(info))) = reader.poll_read_info(&kio::Waiter::noop()) else {
+			panic!("the header is readable while the frame streams");
+		};
+		assert_eq!(info.size, verbose(0).len() as u64);
+		frame.write(Bytes::copy_from_slice(&verbose(0)[10..])).unwrap();
+		let group = frame.finish().unwrap().close().unwrap();
+		assert!(matches!(
+			reader.poll_read_info(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
 		drop(group);
 	}
 
