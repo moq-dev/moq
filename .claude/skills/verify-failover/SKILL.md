@@ -24,10 +24,10 @@ Each rule is an INVARIANT, except `Settles`, which is TLC's deadlock check: ever
 ```sh
 quest gate just rs tla moq-net/verify/failover/FailoverChain.tla
 quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Leave.cfg
-quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Mesh.cfg
+quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Mesh.cfg -simulate num=200000 -depth 100
 ```
 
-The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.3M states. Each takes under a minute and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop, after `B`'s track ended too (`Action::Reroute`): MESH_STATES, so it stays out of the first config.
+The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.2M states. Each takes under a minute and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop, after `B`'s track ended too (`Action::Reroute`). It is too large to exhaust (past 139M distinct states at depth 38 after an hour, its queue still growing), so its `Simulate:` line samples 800k random behaviors in about 7 minutes, and Nightly samples new ones each run. An exhaustive run passed every state through depth 37. Before the reroute, a sample that size missed the depth-31 hang that BFS found after about 48M states, so a passing sample is weak evidence: check a change at the middle hop by running it without the `-simulate` arguments for as long as it takes.
 
 ## Reading a failure
 
