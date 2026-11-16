@@ -40,6 +40,9 @@ pub(crate) struct Tail {
 	folded: Option<Range<u64>>,
 	// How many updates were sent, so a stale drop can tell whether a later one superseded it.
 	updates: u64,
+	// The subscription asks for metadata only, as of the last update sent. A metadata stream
+	// that finishes once it asks for the payload again is not the group it is owed.
+	meta: bool,
 	// What `finished` bills to the track's account, [`FINISHED_OVERHEAD`] per run, once the
 	// subscription has a copy to bill.
 	bill: Option<crate::model::track::Bill>,
@@ -67,6 +70,7 @@ impl Tail {
 			finished: RangeSet::new(),
 			folded: None,
 			updates: 0,
+			meta: false,
 			bill: None,
 		}
 	}
@@ -122,6 +126,16 @@ impl Tail {
 	/// Whether the publisher's FIN ended the track.
 	pub fn is_ended(&self) -> bool {
 		self.ended
+	}
+
+	/// Whether the subscription asks for metadata only, as of the update being sent.
+	pub fn set_meta(&mut self, meta: bool) {
+		self.meta = meta;
+	}
+
+	/// Whether the subscription asks for metadata only, as of the last update sent.
+	pub fn is_meta(&self) -> bool {
+		self.meta
 	}
 
 	/// Change the grace, for a subscription whose max delay changed.
@@ -246,10 +260,12 @@ impl Reading {
 		}
 	}
 
-	/// Record that the stream's group arrived whole, once it finished.
-	pub fn finish(&self) {
+	/// Record that the stream's group arrived whole, once it finished: its metadata only when
+	/// `meta`, which the subscription asking for the payload no longer counts.
+	pub fn finish(&self, meta: bool) {
 		if let (Some(tail), Some(group)) = (&self.tail, self.group)
 			&& let Ok(mut state) = tail.write()
+			&& (state.meta || !meta)
 		{
 			state.finished.insert(group..group.saturating_add(1));
 			state.rebill();
@@ -324,6 +340,34 @@ impl Settle {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A metadata stream finishes its group only while the subscription asks for metadata: one
+	/// that finishes once it asks for the payload again leaves a stale drop of the group a
+	/// verdict. A payload stream finishes its group in either mode.
+	#[kio::test]
+	async fn a_metadata_stream_finishes_its_group_only_in_metadata_mode() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::default());
+		let set_meta = |meta| {
+			let Ok(mut state) = tail.write() else {
+				unreachable!("the tail is open");
+			};
+			state.set_meta(meta);
+		};
+		set_meta(true);
+		let meta = Reading::open(&tail, Some(0), runtime.now());
+		let payload = Reading::open(&tail, Some(1), runtime.now());
+		set_meta(false);
+		meta.finish(true);
+		payload.finish(false);
+		let finished: Vec<_> = tail.read().finished(0..2).collect();
+		assert_eq!(finished.len(), 1);
+		assert_eq!(finished[0], 1..2);
+
+		set_meta(true);
+		Reading::open(&tail, Some(2), runtime.now()).finish(true);
+		assert_eq!(tail.read().finished(2..3).count(), 1);
+	}
 
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.

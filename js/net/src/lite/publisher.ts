@@ -1087,7 +1087,7 @@ export class Publisher {
 		// The subscription's mode, which an update changes: a promotion to the payload asks for it from
 		// the first frame the subscriber misses, which the stream for that group starts at.
 		let meta = msg.meta;
-		const promotion: { at?: track.Position } = {};
+		const promotion: { at?: track.Position; payload: boolean } = { payload: !meta };
 		const subscription = (ranges: track.Range[]): track.Subscription => ({
 			priority: msg.priority,
 			order: msg.order,
@@ -1256,6 +1256,7 @@ export class Publisher {
 					const promoted = meta && !update.meta;
 					if (promoted) promotion.at = update.payload;
 					meta = update.meta;
+					promotion.payload = !meta;
 					hooks.updateSubscriber(
 						track,
 						{
@@ -1460,7 +1461,8 @@ export class Publisher {
 			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
 			initial: bigint;
 			// Where the last promotion to the payload resumes: its group's stream starts at its frame.
-			promotion: { at?: track.Position };
+			// And whether the subscription asks for the payload now.
+			promotion: { at?: track.Position; payload: boolean };
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial, promotion } = serving;
@@ -2042,6 +2044,10 @@ export class Publisher {
 							serving.givenUp.close();
 						}
 						if (!failed) return;
+						// The update asking for the payload again owes a group served as metadata its
+						// payload or a drop of its own: it neither continues nor is named here. Mirrors the
+						// Rust `TrackRun::update`.
+						const promoted = serving.meta && promotion.payload;
 						// Lite-07: the session reset the stream to make room, which only pauses the group.
 						// The subscriber keeps what arrived, and a new stream continues the group from
 						// the reset one's Frame Start, owing no drop. Mirrors the Rust `GroupServe::settle_failed`.
@@ -2051,7 +2057,7 @@ export class Publisher {
 							// before the release replaces it with the reset's.
 							const fate = serving.group.closed.peek();
 							hooks.releaseGroupReader(serving.group, failed);
-							const resumed = fate instanceof Error ? undefined : continuation(serving);
+							const resumed = fate instanceof Error || promoted ? undefined : continuation(serving);
 							if (resumed) {
 								console.debug(
 									`continuing paused group: track=${track.name} sequence=${group.sequence} frame_start=${serving.start}`,
@@ -2062,7 +2068,7 @@ export class Publisher {
 							// Given up meanwhile, such as by the subscription's budget: the usual stale drop.
 							failed = fate instanceof Error ? fate : new StreamError(StreamCode.Old);
 						}
-						if (emitRange) {
+						if (emitRange && !promoted) {
 							pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
 							drops.update((revision) => revision + 1);
 						}

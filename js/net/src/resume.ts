@@ -714,14 +714,34 @@ class Reader implements ResumeSource {
 		return this.#copies.findLast((copy) => copy.generation === generation);
 	}
 
-	/** The copies other than `except` whose track still holds group `sequence` unfailed, newest first. */
-	holding(sequence: bigint, except: Copy): Copy[] {
+	/**
+	 * The copies other than `except` whose track still holds group `sequence` unfailed, newest
+	 * first: in `meta` mode when given, as a recovering group reads it.
+	 */
+	holding(sequence: bigint, except: Copy, meta?: boolean): Copy[] {
 		const holding: Copy[] = [];
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
-			if (copy !== except && hooks.holdsGroup(copy.sub, sequence)) holding.push(copy);
+			if (copy !== except && hooks.holdsGroup(copy.sub, sequence, meta)) holding.push(copy);
 		}
 		return holding;
+	}
+
+	/**
+	 * Read from `sequence` again in sequence order: a promotion reopened what lies below the
+	 * newest group handed out. The Rust reader's ordered floor is its delivered set, which the
+	 * promotion lowers itself.
+	 */
+	cachedSequences(start: bigint, end: bigint): bigint[] {
+		const found = new Set<bigint>();
+		for (const copy of this.#copies)
+			for (const sequence of hooks.cachedSequences(copy.sub, start, end)) found.add(sequence);
+		return [...found].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+	}
+
+	rewind(sequence: bigint): void {
+		if (this.#newest === undefined || sequence > this.#newest) return;
+		this.#newest = sequence === 0n ? undefined : sequence - 1n;
 	}
 
 	/**
@@ -755,10 +775,10 @@ class Reader implements ResumeSource {
 		return taken;
 	}
 
-	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
+	cachedGroup(sequence: bigint, from = 0, meta?: boolean): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
-			const group = hooks.cachedGroup(copy.sub, sequence, from);
+			const group = hooks.cachedGroup(copy.sub, sequence, from, meta);
 			if (group) return this.#handOut(copy, group);
 		}
 		return undefined;
@@ -1588,6 +1608,8 @@ function dropped(): Error {
 class Recover implements GroupRecover {
 	#reader: Reader;
 	readonly sequence: bigint;
+	/** Whether the group was handed out as metadata: what continues it is read the same way. */
+	readonly #meta: boolean;
 	/** The copy being read, whose subscription this group keeps alive while it is read. */
 	#copy?: Copy;
 
@@ -1598,6 +1620,7 @@ class Recover implements GroupRecover {
 	constructor(reader: Reader, group: GroupConsumer, copy: Copy) {
 		this.#reader = reader;
 		this.sequence = group.sequence;
+		this.#meta = group.meta;
 		this.#copy = copy;
 		copy.lease++;
 		reader.out.add(this);
@@ -1687,8 +1710,8 @@ class Recover implements GroupRecover {
 			// its content. A stall only moves to the serving copy, so two stalled copies never trade
 			// the group back and forth.
 			if (failed) {
-				const held = reader.holding(this.sequence, current)[0];
-				const cached = held && hooks.cachedGroup(held.sub, this.sequence, index);
+				const held = reader.holding(this.sequence, current, this.#meta)[0];
+				const cached = held && hooks.cachedGroup(held.sub, this.sequence, index, this.#meta);
 				if (cached) return this.#replacement(cached, held);
 				// Once the track ended, no route continues it: only a copy holding it could.
 				if (reader.ended) throw failed;
@@ -1711,7 +1734,7 @@ class Recover implements GroupRecover {
 				waits.push(...given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
-					const cached = hooks.cachedGroup(serving.sub, this.sequence, index);
+					const cached = hooks.cachedGroup(serving.sub, this.sequence, index, this.#meta);
 					if (cached) return this.#replacement(cached, serving);
 				}
 				// Finished history may still continue the group above, and so may a fetch already

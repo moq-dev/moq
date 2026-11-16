@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { DEFAULT_EXPIRY } from "./cache.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -734,6 +735,33 @@ test("a stalled group continues from the replacement at the next frame", async (
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
 	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a stalled metadata group continues from the replacement's metadata copy", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ meta: true, delay: { max: null } });
+	const headers = (producer: track.Producer, sizes: number[], finish: boolean) => {
+		const group = hooks.receiveGroup(producer, { sequence: 0n, start: 0, meta: true });
+		for (const size of sizes) hooks.writeGroupHeader(group, { size, timestamp: Timestamp.unscaled(0n) });
+		if (finish) group.finish();
+		return group;
+	};
+	headers(ta.producer, [1], false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect([group.meta, (await group.readInfo())?.size]).toEqual([true, 1]);
+
+	// The new route has the rest of its headers, and no payload: nothing is fetched for them.
+	headers(tb.producer, [1, 2, 3], true);
+	await swap();
+	expect((await group.readInfo())?.size).toBe(2);
+	expect((await group.readInfo())?.size).toBe(3);
+	expect(await group.readInfo()).toBeUndefined();
 
 	sub.close();
 	close();
@@ -3582,6 +3610,78 @@ test("a resumed reader re-offers a group its serving copy still caches", () => {
 	sub.close();
 	front.consumer.close();
 	a.close();
+});
+
+// A front's ordered reader that asks for the payload of groups it read as metadata reads each again
+// in sequence order, as a direct one does: the front's own watermark goes back with it.
+test("a resumed ordered reader reads the groups it passed as metadata again once promoted", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ meta: true, delay: { max: null } })
+		.ordered();
+	const land = (sequence: bigint, meta: boolean) => {
+		const group = hooks.receiveGroup(ta.producer, { sequence, start: 0, meta });
+		const timestamp = Timestamp.unscaled(sequence);
+		if (meta) hooks.writeGroupHeader(group, { size: 3, timestamp });
+		else group.writeFrame({ payload: enc.encode("abc"), timestamp });
+		group.finish();
+	};
+	const read = () => {
+		const out: [bigint, boolean][] = [];
+		for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) {
+			out.push([group.sequence, group.meta]);
+			group.close();
+		}
+		return out;
+	};
+	land(0n, true);
+	land(1n, true);
+	expect(read()).toEqual([
+		[0n, true],
+		[1n, true],
+	]);
+	ordered.update({ meta: false, delay: { max: null } });
+	land(0n, false);
+	land(1n, false);
+	expect(read()).toEqual([
+		[0n, false],
+		[1n, false],
+	]);
+	ordered.close();
+	front.consumer.close();
+	a.close();
+});
+
+// A front's reader remembers the groups it read as metadata only while a copy caches them, as the
+// Rust reader sweeps against its copies, so its record stays bounded as the caches evict.
+test("a resumed reader forgets metadata groups no copy caches any longer", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const producer = a.createTrack("seq");
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ meta: true, delay: { max: null } });
+	try {
+		// Every other sequence, so each group read is a run of its own.
+		for (let sequence = 0n; sequence < 64n; sequence += 2n) {
+			const group = hooks.receiveGroup(producer, { sequence, start: 0, meta: true });
+			hooks.writeGroupHeader(group, { size: 3, timestamp: Timestamp.unscaled(sequence) });
+			group.finish();
+			expect(drain(sub)).toEqual([sequence]);
+			await clock.advance(Duration.millis(3 * DEFAULT_EXPIRY.asMillis()));
+		}
+		expect(hooks.metaRuns(sub)).toBeLessThan(8);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		installed.close();
+	}
 });
 
 // A continuation keeps its stream's mode: a front's reader now asking for metadata still re-offers

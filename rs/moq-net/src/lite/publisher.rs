@@ -4978,8 +4978,9 @@ struct GroupOutcomes {
 	#[cfg(test)]
 	opened: std::sync::atomic::AtomicU64,
 	unencodable: Mutex<Option<Error>>,
-	/// Groups whose stream failed, with why, for the control stream to name.
-	dropped: Mutex<Vec<(u64, StreamError)>>,
+	/// Groups whose stream failed, with why and whether it carried metadata only, for the
+	/// control stream to name.
+	dropped: Mutex<Vec<(u64, StreamError, bool)>>,
 	/// Lite-07: groups whose stream the session reset to make room, for the run loop to
 	/// continue on a new stream.
 	paused: Mutex<Vec<Paused>>,
@@ -5320,6 +5321,20 @@ impl TrackRun {
 				return;
 			}
 		};
+		// A metadata group paused before is the promotion's to serve or drop, not its
+		// continuation's.
+		if self.meta && !upd.meta {
+			let paused: Vec<u64> = self
+				.paused_tasks
+				.iter()
+				.filter(|paused| paused.meta)
+				.map(|paused| paused.group.start)
+				.collect();
+			self.paused_tasks.retain(|paused| !paused.meta);
+			for start in paused {
+				self.paused.remove(&start);
+			}
+		}
 		self.meta = upd.meta;
 		// Open streams keep their mode either way.
 		if let Some(promoted) = promoted {
@@ -5555,16 +5570,24 @@ impl TrackRun {
 
 		let paused = std::mem::take(&mut *self.ctx.outcomes.paused.lock().unwrap());
 		if !paused.is_empty() {
-			// The track side continues them.
+			// The track side continues them. A metadata stream yielded once the payload is asked
+			// for again continues no longer: the promotion serves its group or drops it.
 			Idle::disarm(&mut self.idle);
 			for paused in paused {
-				self.pause(paused);
+				if !paused.meta || self.meta {
+					self.pause(paused);
+				}
 			}
 		}
 		self.drop_given_up_paused(waiter);
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
-			for (key, err) in dropped {
+			for (key, err, meta) in dropped {
+				// The update asking for the payload again owes a group served as metadata its
+				// payload or a drop of its own, whatever became of that stream.
+				if meta && !self.meta {
+					continue;
+				}
 				// A stream expired under this subscription's budget is a stale verdict.
 				let hole = match err {
 					// The pool folded the group while its stream was open, which is final for this
@@ -5687,15 +5710,7 @@ impl TrackRun {
 			if self.start.emits_range() && self.track.record_mut().told(key) {
 				return Poll::Ready(Ok(ControlFlow::Continue(())));
 			}
-			let positioned = position_group(group, &self.frames).and_then(|group| match self.payload_from {
-				Some(from) if from.group == key => {
-					self.payload_from = None;
-					let group = group.with_range((Bound::Included(from.frame), Bound::Unbounded));
-					(group.index() == from.frame).then_some(group)
-				}
-				_ => Some(group),
-			});
-			match positioned {
+			match self.position(group) {
 				Some(group) => self.serve(group),
 				None => {
 					self.drop_range(key..key + 1, &Hole::drop(StreamError::NotFound), writer)?;
@@ -5737,7 +5752,7 @@ impl TrackRun {
 					} else if self.start.emits_range() && record.told(key) {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					let Some(group) = position_group(group, &self.frames) else {
+					let Some(group) = self.position(group) else {
 						// Its head is gone, and this subscriber didn't ask for a
 						// partial group. Skip it rather than open a stream that can
 						// only be reset; the next servable group resolves the start.
@@ -6145,6 +6160,21 @@ impl TrackRun {
 		Ok(())
 	}
 
+	/// Position `group` at the first frame this subscription asks of it: the frame bounds of its
+	/// range, and after a promotion, the payload position the update named, whichever path
+	/// serves that group's payload. `None` when the cache no longer holds that frame.
+	fn position(&mut self, group: group::Consumer) -> Option<group::Consumer> {
+		let group = position_group(group, &self.frames)?;
+		match self.payload_from {
+			Some(from) if from.group == group.start && !group.is_meta() => {
+				self.payload_from = None;
+				let group = group.with_range((Bound::Included(from.frame), Bound::Unbounded));
+				(group.index() == from.frame).then_some(group)
+			}
+			_ => Some(group),
+		}
+	}
+
 	/// Open a group machine for `group`, which waits for stream credit. The cursor hands it
 	/// out past a group already waiting only if it outranks that one, which gives way.
 	fn serve(&mut self, group: group::Consumer) {
@@ -6205,7 +6235,12 @@ impl TrackRun {
 	/// subscription's budget is.
 	fn shed(&self, key: u64) {
 		if self.ctx.version.has_track_stream() {
-			self.ctx.outcomes.dropped.lock().unwrap().push((key, StreamError::Old));
+			self.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((key, StreamError::Old, self.meta));
 		}
 	}
 
@@ -6237,12 +6272,12 @@ impl TrackRun {
 		}
 		let mut dropped = Vec::new();
 		let _ = self.paused_tasks.poll_each(waiter, |paused, err| {
-			dropped.push((paused.group.start, StreamError::from(&err)));
+			dropped.push((paused.group.start, StreamError::from(&err), paused.meta));
 		});
 		if dropped.is_empty() {
 			return;
 		}
-		for (start, _) in &dropped {
+		for (start, ..) in &dropped {
 			self.paused.remove(start);
 		}
 		if self.ctx.version.has_track_stream() {
@@ -7022,7 +7057,7 @@ impl GroupServe {
 			.dropped
 			.lock()
 			.unwrap()
-			.push((self.key, StreamError::from(err)));
+			.push((self.key, StreamError::from(err), self.meta));
 	}
 }
 
@@ -8106,6 +8141,45 @@ mod serve_group_test {
 		assert_eq!(track.demand().wanted(), Some(1), "new hop judges its own ratio");
 	}
 
+	/// The payload position a promotion names applies once, to that group's payload copy,
+	/// whichever path serves it: the update's re-serve, or the payload landing after it. A
+	/// metadata copy of it, or a cache that lost the frame, leaves the position for later or
+	/// gives the group up.
+	#[kio::test]
+	async fn the_payload_position_applies_to_the_payload_whenever_it_lands() {
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "position", track::Info::timed());
+		track.received();
+		let (mut run, _, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), track.subscribe(None));
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		run.payload_from = Some(track::Position { group: 0, frame: 1 });
+
+		let Ok(track::Received::Group(mut meta)) = track.create_group_at(group::Info { start: 0 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		meta.write_meta(at(0), 1).unwrap();
+		let meta_copy = meta.consume();
+		meta.close().unwrap();
+		let served = run.position(meta_copy).expect("a metadata copy is served whole");
+		assert_eq!(served.index(), 0);
+		assert!(run.payload_from.is_some(), "the position waits for the payload");
+
+		let Ok(track::Received::Group(mut payload)) = track.create_group_at(group::Info { start: 0 }, 0, false) else {
+			panic!("the payload copy replaces it");
+		};
+		payload.write_frame(at(0), &b"a"[..]).unwrap();
+		payload.write_frame(at(1), &b"b"[..]).unwrap();
+		let copy = payload.consume();
+		payload.close().unwrap();
+		let served = run.position(copy.clone()).expect("the payload from frame 1");
+		assert_eq!(served.index(), 1);
+		assert!(run.payload_from.is_none(), "applied once");
+		assert_eq!(run.position(copy.clone()).map(|group| group.index()), Some(0));
+
+		// A cache holding only frames past the position cannot serve it.
+		run.payload_from = Some(track::Position { group: 0, frame: 1 });
+		assert!(run.position(copy.with_range(2..)).is_none());
+	}
+
 	fn write_group(track: &mut track::Producer, key: u64, millis: u64) {
 		let mut group = track.create_group(group::Info { start: key }).unwrap();
 		group
@@ -8888,6 +8962,70 @@ mod serve_group_test {
 		);
 	}
 
+	/// A metadata stream that fails once the subscription asks for the payload again is named
+	/// in no drop: the promotion owes its group the payload or a drop of its own, and naming it
+	/// would end the payload copy the subscriber may already be reading. A payload stream that
+	/// fails is named as before.
+	#[kio::test]
+	async fn a_metadata_stream_failing_after_promotion_is_named_in_no_drop() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(!run.meta, "the subscription asks for the payload");
+		// Group 1's metadata stream, which the subscriber stopped as redundant, and group 2's
+		// payload stream.
+		run.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.extend([(1, StreamError::Cancel, true), (2, StreamError::Cancel, false)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(2, 2, 0)]);
+	}
+
+	/// Asking for the payload again lets go of a metadata group paused before: the promotion
+	/// serves it or drops it, so no continuation follows, and giving it up later names nothing.
+	/// A paused payload group still continues.
+	#[kio::test]
+	async fn promotion_lets_go_of_a_paused_metadata_group() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(Some(track::Subscription::default().with_meta(true)));
+		let (mut run, _writer, _log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		run.meta = true;
+		for (start, meta) in [(1, true), (2, false)] {
+			let group = track.create_group(group::Info { start }).unwrap();
+			run.pause(Paused {
+				group: group.consume(),
+				frame_start: 0,
+				meta,
+			});
+		}
+		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: Duration::from_secs(3600),
+			min_delay: None,
+			ranges: vec![(0, lite::Range::span(None, 0, None, None))],
+			order: Order::Descending,
+			update: 1,
+			meta: false,
+			payload: None,
+		});
+		assert_eq!(run.paused.keys().copied().collect::<Vec<_>>(), [2]);
+		assert_eq!(run.paused_tasks.len(), 1);
+	}
+
 	/// A lite-07 stream that expired as stale is a stale drop like any other: a final drop
 	/// the reader reaches for it later replaces it, and no update drops it again then.
 	#[kio::test]
@@ -8902,7 +9040,12 @@ mod serve_group_test {
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		// Group 1's stream expired, as a blocked transport would leave it.
-		run.ctx.outcomes.dropped.lock().unwrap().push((1, StreamError::Old));
+		run.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.push((1, StreamError::Old, false));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		forward(&mut run, 1..2, &Hole::drop(StreamError::Cancel), &mut writer);
 		run.update(lite::SubscribeUpdate {
@@ -9046,7 +9189,7 @@ mod serve_group_test {
 				.dropped
 				.lock()
 				.unwrap()
-				.extend([(1, StreamError::Old), (2, StreamError::Old)]);
+				.extend([(1, StreamError::Old, false), (2, StreamError::Old, false)]);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			run.update(lite::SubscribeUpdate {
 				wanted_group: None,
@@ -9154,7 +9297,12 @@ mod serve_group_test {
 			// Group 2 lands at 3s, so group 0's successor is 2s behind the edge, past the 500ms
 			// budget, and its stream expired.
 			write_group(&mut track, 2, 3000);
-			run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+			run.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((0, StreamError::Old, false));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(0, 0, 0)]);
 
@@ -9207,7 +9355,12 @@ mod serve_group_test {
 			write_group(&mut track, 1, 1000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			write_group(&mut track, 2, 3000);
-			run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+			run.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((0, StreamError::Old, false));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
 			let update = |id, start, update| lite::SubscribeUpdate {
@@ -9266,7 +9419,12 @@ mod serve_group_test {
 		write_group(&mut track, 1, 1000);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		write_group(&mut track, 2, 3000);
-		run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+		run.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.push((0, StreamError::Old, false));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		// Update 1 widens the budget, so group 0 waits its turn; update 2 restores it first.
 		for (update, max_delay) in [(1, Duration::from_secs(10)), (2, budget)] {
@@ -9345,7 +9503,12 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
 		write_group(&mut track, 2, 3000);
-		run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+		run.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.push((0, StreamError::Old, false));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(0, 0, 0)]);
 
@@ -13055,7 +13218,7 @@ mod tests {
 		run.drop_given_up_paused(&kio::Waiter::noop());
 		assert!(run.paused.is_empty() && run.paused_tasks.is_empty());
 		let dropped = run.ctx.outcomes.dropped.lock().unwrap();
-		assert_eq!(dropped.iter().map(|(start, _)| *start).collect::<Vec<_>>(), [100]);
+		assert_eq!(dropped.iter().map(|(start, ..)| *start).collect::<Vec<_>>(), [100]);
 	}
 
 	/// The next paused group to continue is the newest when descending, the oldest when
@@ -13094,6 +13257,6 @@ mod tests {
 		assert!(!run.paused.contains_key(&200));
 		assert_eq!(run.paused_tasks.len(), 1, "only the released group leaves");
 		let dropped = run.ctx.outcomes.dropped.lock().unwrap();
-		assert_eq!(dropped.iter().map(|(start, _)| *start).collect::<Vec<_>>(), [200]);
+		assert_eq!(dropped.iter().map(|(start, ..)| *start).collect::<Vec<_>>(), [200]);
 	}
 }

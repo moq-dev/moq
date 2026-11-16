@@ -3495,6 +3495,192 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 	}
 });
 
+// A metadata copy is no group a payload reader holds: once the subscription asks for the payload
+// again, a stale drop under that update names a group received as metadata, whether its stream
+// finished before the update or arrived after it, which accounts for nothing. Mirrors Rust.
+test("a stale drop names a group received as metadata once the payload is asked for on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = {
+		track: Producer;
+		stale?: { start: bigint; end: bigint }[];
+		tail: { covers(start: bigint, end: bigint): boolean };
+	};
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const delay = { max: Duration.millis(500) };
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ meta: true, delay });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		const send = async (...resps: SubscribeResponse[]) => {
+			const chunks: Uint8Array[] = [];
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+				version,
+			);
+			for (const resp of resps) await encodeSubscribeResponse(writer, resp, version);
+			for (const chunk of chunks) stream.inbound.enqueue(chunk);
+			await drainReactions();
+		};
+		// A metadata group stream of no frames that arrives whole.
+		const arrive = (sequence: bigint) =>
+			subscriber.runGroup(
+				new Group({ subscribe: 0n, sequence, meta: true }),
+				new Reader(new ReadableStream({ start: (controller) => controller.close() }), undefined, version),
+			);
+
+		await send({ start: new SubscribeStart([0n]) });
+		await arrive(1n);
+		track.update({ delay });
+		await drainReactions();
+		// Opened before the publisher read the update: it accounts for nothing.
+		await arrive(2n);
+		if (!entry) throw new Error("no subscription");
+		expect(entry.tail.covers(1n, 3n)).toBe(false);
+		await send({ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.Old, update: 1n }) });
+		expect(entry.stale?.map(({ start, end }) => [start, end])).toEqual([[1n, 3n]]);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A final drop sent before the update asking for the payload again named a metadata stream: the
+// payload stream that the publisher paused since is still owed a continuation, so the drop does not
+// end its paused group. Mirrors the Rust
+// `a_final_drop_before_the_payload_was_asked_for_leaves_a_paused_payload_group`.
+test("a final drop before the payload was asked for leaves a paused payload group on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const delay = { max: Duration.millis(60_000) };
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe({ meta: true, delay });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		// Asking for the payload again, sent as update 1.
+		track.update({ delay });
+		await drainReactions();
+
+		const first = handStream(version);
+		first.write(await liteFrame(1, new Uint8Array([1])));
+		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 1n }), first.reader);
+		const group = await track.recvGroup();
+		expect(group?.sequence).toBe(1n);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		first.reset(StreamCode.Yielded);
+		await yielded;
+		await drainReactions();
+
+		// The metadata stream the publisher evicted under update 0, named only now.
+		await respond(request, version, [
+			{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: StreamCode.Cancel, update: 0n }) },
+		]);
+		await drainReactions();
+		expect(group?.closed.peek()).toBeUndefined();
+
+		// The continuation picks the group up where the reset left it.
+		const second = handStream(version);
+		second.write(await liteFrame(10, new Uint8Array([2])));
+		second.finish();
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 1n, frameStart: 1 }), second.reader);
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
+		expect(await group?.readFrame()).toBeUndefined();
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
+// Asking for the payload again lets go of a paused metadata group, and a metadata stream still
+// arriving that the publisher yields after that does not pause: no continuation follows either, since
+// the publisher serves those groups again with the payload, or drops them. Their copies stay cached,
+// owed to a payload reader. A metadata stream that arrives after it fills no copy the cache holds.
+// Mirrors the Rust `promotion_lets_go_of_paused_metadata_groups`.
+test("promotion lets go of paused metadata groups on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { track: Producer; paused?: { groups: Map<bigint, unknown> } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const delay = { max: Duration.millis(60_000) };
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ meta: true, delay });
+	// A metadata stream of one frame for `sequence`, read up to the end of its frames.
+	const openMeta = async (sequence: bigint) => {
+		const stream = handStream(version);
+		stream.write(await liteFrame(Number(sequence), new Uint8Array([1]), 0));
+		const run = subscriber.runGroup(new Group({ subscribe: 0n, sequence, meta: true }), stream.reader);
+		await drainReactions();
+		return { stream, run };
+	};
+	const yielded = async ({ stream, run }: Awaited<ReturnType<typeof openMeta>>) => {
+		stream.reset(StreamCode.Yielded);
+		await run;
+		await drainReactions();
+	};
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		if (!entry) throw new Error("no subscription");
+		const paused = () => [...(entry?.paused?.groups.keys() ?? [])];
+
+		await yielded(await openMeta(1n));
+		expect(paused()).toEqual([1n]);
+		// Still arriving across the update.
+		const two = await openMeta(2n);
+
+		track.update({ delay });
+		await drainReactions();
+		expect(paused()).toEqual([]);
+
+		// Yielded before the publisher read the update.
+		await yielded(two);
+		expect(paused()).toEqual([]);
+		// Still cached, and owed to a payload reader until its payload or a drop.
+		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([1n, 2n]);
+
+		// Opened before the publisher read the update, and read whole.
+		const three = await openMeta(3n);
+		three.stream.finish();
+		await three.run;
+		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([1n, 2n]);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an update
 // reopens only stale verdicts, so the groups stay accounted for, and the skip stays final rather
 // than being superseded with the OLD drop. An empty range names nothing. Mirrors Rust.

@@ -214,6 +214,9 @@ interface SubscribeEntry {
 	tail: Tail;
 	// Whether the subscription last asked for metadata only (lite-07).
 	meta?: boolean;
+	// The update that last asked for the payload again: a final drop under an earlier one named
+	// metadata streams only.
+	promoted?: bigint;
 	// The first group the SUBSCRIBE asked for, if any.
 	requested?: bigint;
 	// The first group the publisher serves, once SUBSCRIBE_START says: null when it starts no
@@ -298,6 +301,8 @@ interface Yielding {
 	// End the stream as reset with YIELDED: a later stream for its group proves the publisher
 	// reset it, even where the browser lost that reset.
 	supersede: () => void;
+	// Whether the stream carries metadata only.
+	meta: boolean;
 }
 
 // Stale drops expire on the next update. An already accounted header stays accounted, and
@@ -3293,17 +3298,27 @@ export class Subscriber {
 				// and a reader that wants it fills it meanwhile.
 				if (stale && update < entry.update) continue;
 				this.#reoffered(entry.track, start, end);
+				// A final drop sent before the update asking for the payload again named metadata
+				// streams only: a payload stream since wins over it, as over a stale drop, so it accounts
+				// only for the groups it records.
+				const beforePayload = !stale && entry.promoted !== undefined && update < entry.promoted;
 				// Lite-07 tells a stream a final drop overtook from one whose gap the grace gave up on.
-				if (!stale && hasYield(this.version)) entry.tail.drop(start, end);
+				if (beforePayload) {
+					// Accounted below, for what it records.
+				} else if (!stale && hasYield(this.version)) entry.tail.drop(start, end);
 				else entry.tail.account(start, end);
 				// A paused group the drop names ends there: no continuation follows.
-				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
+				this.#dropPaused(entry, start, end, error, stale ? update : undefined, beforePayload);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
 				// won, even once the cache evicted it.
 				const named = stale ? entry.tail.unfinished(start, end) : [{ start, end }];
-				const recorded = named.flatMap((run) => hooks.dropTrackGroups(entry.track, run.start, run.end, hole));
+				const payload = entry.meta !== true;
+				const recorded = named.flatMap((run) =>
+					hooks.dropTrackGroups(entry.track, run.start, run.end, hole, payload, beforePayload),
+				);
+				if (beforePayload) for (const run of recorded) entry.tail.drop(run.start, run.end);
 				// A final drop is never reopened, even where it replaces a stale one. A sequence
 				// already skipped stays skipped, and one whose group arrived keeps it, so no update
 				// reopens either.
@@ -3541,8 +3556,10 @@ export class Subscriber {
 			// names them. Only the metadata copies the track still caches: nobody reads one it let go
 			// of, and the cache bounds what this remembers.
 			if (entry.meta && !meta) {
+				entry.promoted = update.update;
 				for (const sequence of hooks.cachedMeta(track, 0n, UNBOUNDED))
 					entry.tail.unaccount(sequence, sequence + 1n);
+				this.#letGoMeta(entry);
 			}
 			entry.meta = meta;
 			// A stale drop given up under the previous update may still be in flight, and this one
@@ -3668,6 +3685,10 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
+		// A metadata stream the publisher opened before it read the update asking for the payload
+		// again accounts for nothing: that update owes the group's payload or a drop. Mirrors the Rust
+		// `TrackEntry::open`.
+		const late = group.meta && entry.meta !== true;
 		// Lite-07: a YIELDED reset pauses the group, for a later stream to continue.
 		const yields = hasYield(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
@@ -3684,7 +3705,7 @@ export class Subscriber {
 		let arriving: Arriving | undefined;
 		let ingest: Ingest | undefined;
 		let yielding: Yielding | undefined;
-		const counted = tail.open(group.sequence);
+		const counted = tail.open(late ? undefined : group.sequence);
 		// Until the stream is read, or a pause hands it to the paused group.
 		let read: (() => void) | undefined = counted.done;
 		this.#reoffered(track, group.sequence, group.sequence + 1n);
@@ -3721,7 +3742,8 @@ export class Subscriber {
 				// Kept held past a failure until this copy takes the group, below.
 				// A copy in the other mode is no duplicate: payload replaces metadata, and metadata over
 				// payload is discarded.
-				const next = hooks.arrivingGroup(track, group.sequence, group.meta);
+				// A late metadata stream fills no copy, so it waits on none.
+				const next = late ? undefined : hooks.arrivingGroup(track, group.sequence, group.meta);
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
@@ -3741,6 +3763,7 @@ export class Subscriber {
 				start: group.frameStart,
 				fill: entry.filling,
 				meta: group.meta,
+				discard: late,
 			});
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
@@ -3752,9 +3775,10 @@ export class Subscriber {
 					supersede = resolve;
 				});
 				yielding = {
-					verdict: headerVerdict(owed, dropped, unowedUnder),
+					verdict: late ? headerVerdict(false, false, undefined) : headerVerdict(owed, dropped, unowedUnder),
 					counted,
 					supersede,
+					meta: group.meta,
 				};
 				entry.yielding ??= new Map();
 				entry.yielding.set(group.sequence, yielding);
@@ -3782,7 +3806,9 @@ export class Subscriber {
 			producer.finish();
 			// Only a group that arrived whole, not one a drop or the track ended meanwhile, and only
 			// where a lite-07 stale drop asks for it.
-			if (hasSkip(this.version) && producer.closed.peek() === null) tail.finish(group.sequence);
+			// A metadata stream finishes its group only while the subscription asks for metadata.
+			if (hasSkip(this.version) && producer.closed.peek() === null && (!group.meta || entry.meta === true))
+				tail.finish(group.sequence);
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
@@ -3854,6 +3880,13 @@ export class Subscriber {
 	// to continue. Groups the cache gave up on meanwhile are swept out as the held ones double, so
 	// sweeping costs constant time per pause. Mirrors the Rust `TrackEntry::pause`.
 	#pause(entry: SubscribeEntry, sequence: bigint, paused: PausedGroup): void {
+		// Once the payload is asked for again, no continuation follows a metadata stream: the
+		// publisher serves its group again with the payload, or drops it. The copy stays, owed to a
+		// payload reader until then, and the stream holds the end no longer.
+		if (hooks.groupMeta(paused.group) && entry.meta !== true) {
+			paused.read();
+			return;
+		}
 		const registry = pausesOf(entry);
 		if (registry.groups.size >= Math.max(registry.swept, 1) * 2) {
 			for (const [held, group] of registry.groups) {
@@ -3877,10 +3910,19 @@ export class Subscriber {
 	// A SUBSCRIBE_DROP named `[start, end)` with `error`, under update `staleUnder` when it is a
 	// lite-07 stale verdict: a paused group ends there, and one a stream is reading ends with it if
 	// a YIELDED reset would otherwise pause it, since no continuation follows, unless an update
-	// supersedes a stale drop first. Mirrors the Rust `TrackEntry::dropped`.
-	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
+	// supersedes a stale drop first. A drop that names only metadata streams, `metaOnly`, leaves a
+	// payload stream and its paused group alone. Mirrors the Rust `TrackEntry::dropped`.
+	#dropPaused(
+		entry: SubscribeEntry,
+		start: bigint,
+		end: bigint,
+		error: Error,
+		staleUnder?: bigint,
+		metaOnly = false,
+	): void {
 		for (const [sequence, yielding] of entry.yielding ?? []) {
 			if (sequence < start || sequence >= end) continue;
+			if (metaOnly && !yielding.meta) continue;
 			const verdict = yielding.verdict;
 			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
 			else if (verdict.kind !== "dropped")
@@ -3896,8 +3938,23 @@ export class Subscriber {
 		if (!paused) return;
 		for (const [sequence, group] of paused.groups) {
 			if (sequence < start || sequence >= end) continue;
+			if (metaOnly && !hooks.groupMeta(group.group)) continue;
 			paused.groups.delete(sequence);
 			group.group.abort(error);
+			group.read();
+		}
+	}
+
+	// The payload is asked for again: no continuation follows a paused metadata stream, since the
+	// publisher serves its group again with the payload, or drops it. Its copy stays, owed to a
+	// payload reader until then, and the stream holds the end no longer. Mirrors the Rust
+	// `TrackEntry::let_go_meta`, whose copy the cache already let go of.
+	#letGoMeta(entry: SubscribeEntry): void {
+		const paused = entry.paused;
+		if (!paused) return;
+		for (const [sequence, group] of paused.groups) {
+			if (!hooks.groupMeta(group.group)) continue;
+			paused.groups.delete(sequence);
 			group.read();
 		}
 	}

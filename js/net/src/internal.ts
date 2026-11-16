@@ -521,8 +521,15 @@ export interface ResumeSource {
 	largest(seen: Position | undefined): Promise<Position | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
-	/** A fresh reader for a group still cached by one of this reader's copies. */
-	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
+	/** A fresh reader for a group still cached by one of this reader's copies, read in `meta` mode. */
+	cachedGroup(sequence: bigint, from?: number, meta?: boolean): GroupConsumer | undefined;
+	/**
+	 * Read from `sequence` again in sequence order, which a promotion reopened below the groups
+	 * already handed out: the copies' own cursors go back with their subscribers.
+	 */
+	rewind(sequence: bigint): void;
+	/** See {@link hooks.cachedSequences}: what any of this reader's copies caches. */
+	cachedSequences(start: bigint, end: bigint): bigint[];
 	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
 	reofferGroups(
 		start: bigint,
@@ -634,7 +641,14 @@ export const hooks: {
 	 * the drop. A skip ends no reader, and replaces any drop; a drop leaves a skip in place.
 	 * Returns the runs recorded. Mirrors the Rust `give_up`; assigned by `track.ts`.
 	 */
-	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, hole: Hole) => Run[];
+	dropTrackGroups: (
+		producer: Producer,
+		start: bigint,
+		end: bigint,
+		hole: Hole,
+		payload?: boolean,
+		beforePayload?: boolean,
+	) => Run[];
 	/**
 	 * `Producer.skipGroups`, returning the cached sequences it left alone, which a skip naming a
 	 * group that arrived contradicts. Mirrors the Rust `skip_received`; assigned by `track.ts`.
@@ -660,7 +674,7 @@ export const hooks: {
 	 */
 	receiveGroup: (
 		producer: Producer,
-		group: { sequence: bigint; start: number; fill?: boolean; meta?: boolean },
+		group: { sequence: bigint; start: number; fill?: boolean; meta?: boolean; discard?: boolean },
 	) => GroupProducer;
 	/**
 	 * Hold the copy of `sequence` still arriving, if one is, for a duplicate to wait on: until
@@ -837,10 +851,23 @@ export const hooks: {
 	updateSubscriber: (subscriber: Subscriber, options: Subscription, payload: Position | undefined) => void;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
-	/** A group the subscriber's track still caches, as a fresh read handle. */
-	cachedGroup: (subscriber: Subscriber, sequence: bigint, from?: number) => GroupConsumer | undefined;
-	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
-	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
+	/**
+	 * A group the subscriber's track still caches, as a fresh read handle read in `meta` mode,
+	 * the subscriber's own by default: a metadata copy serves only a metadata read.
+	 */
+	cachedGroup: (subscriber: Subscriber, sequence: bigint, from?: number, meta?: boolean) => GroupConsumer | undefined;
+	/**
+	 * The sequences in `[start, end)` the subscriber's track caches any copy of, payload or metadata,
+	 * ascending: a front's reader asks each of its copies. Mirrors the Rust `track::Subscriber::uncached`.
+	 */
+	cachedSequences: (subscriber: Subscriber, start: bigint, end: bigint) => bigint[];
+	/** How many runs of groups handed out as metadata the subscriber remembers, for a promotion. */
+	metaRuns: (subscriber: Subscriber) => number;
+	/**
+	 * Whether {@link cachedGroup} would find the group, without making a read handle: in `meta`
+	 * mode when given, which a metadata copy serves only for a metadata read, else in any mode.
+	 */
+	holdsGroup: (subscriber: Subscriber, sequence: bigint, meta?: boolean) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
@@ -1181,6 +1208,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	cachedSequences: () => {
+		throw new Error("track.ts not loaded");
+	},
+	metaRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {

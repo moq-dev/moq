@@ -892,7 +892,8 @@ let cachedMirror: (producer: Producer, sequence: bigint, from: number, meta?: bo
 // Read a sink's unread groups again in its current mode, after its subscription changed it.
 let remode: (producer: Producer, sink: TrackState) => void;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
-let cachedHolds: (producer: Producer, sequence: bigint) => boolean;
+// In `meta` mode when given, which a metadata copy serves only for a metadata read, else in any mode.
+let cachedHolds: (producer: Producer, sequence: bigint, meta?: boolean) => boolean;
 // Whether group `sequence` is cached as a copy from frame 0 that has not written it yet, so its
 // start may still land, as the Rust `Slot::may_start` says.
 let cachedMayStart: (producer: Producer, sequence: bigint) => boolean;
@@ -1335,8 +1336,8 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { sequence, start, fill, meta }) =>
-			producer.#createGroup(sequence, start, fill, meta);
+		hooks.receiveGroup = (producer, { sequence, start, fill, meta, discard }) =>
+			producer.#createGroup(sequence, start, fill, meta, discard);
 		hooks.arrivingGroup = (producer, sequence, meta = false) => {
 			const group = producer.#cached.get(sequence)?.group;
 			if (!group || group.closed.peek() !== undefined || hooks.groupMeta(group) !== meta) return undefined;
@@ -1367,7 +1368,8 @@ export class Producer {
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
-		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
+		hooks.dropTrackGroups = (producer, start, end, hole, payload = false, beforePayload = false) =>
+			producer.#drop(start, end, hole, true, payload, beforePayload);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
 		hooks.supersedeStale = (producer, judged) => {
 			const held = producer.#state.drops.all
@@ -1392,9 +1394,10 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
-		cachedHolds = (producer, sequence) => {
+		cachedHolds = (producer, sequence, meta) => {
 			const entry = producer.#cached.get(sequence);
-			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
+			if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
+			return meta !== false || !hooks.groupMeta(entry.group);
 		};
 		cachedMayStart = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
@@ -1512,7 +1515,11 @@ export class Producer {
 	// and the most authoritative verdict, so a drop never replaces one. An upstream drop (`open`)
 	// also ends the groups still arriving in it with its error, so their readers settle now
 	// rather than once the stream's reset lands. A skip names nothing produced.
-	#drop(start: bigint, end: bigint, hole: Hole, open = false): Run[] {
+	// With `payload`, the subscription asks for the payload, so a metadata copy is no group it holds.
+	// A final drop sent `beforePayload`, before the update asking for the payload again, named a
+	// metadata stream: a payload copy arriving since wins over it, as one wins a stale drop. Mirrors
+	// the Rust `give_up_as`.
+	#drop(start: bigint, end: bigint, hole: Hole, open = false, payload = false, beforePayload = false): Run[] {
 		if (start >= end) return [];
 		const skipped = hole.skip ? [] : this.#state.drops.overlapping(start, end).filter((run) => run.skip);
 		let runs = runGaps(skipped, start, end);
@@ -1521,11 +1528,13 @@ export class Producer {
 			for (const [sequence, entry] of this.#cached) {
 				const closed = entry.group.closed.peek();
 				if (sequence < start || sequence >= end || closed instanceof Error) continue;
+				if (payload && hooks.groupMeta(entry.group)) continue;
+				const ends = hole.stale === undefined && !(beforePayload && !hooks.groupMeta(entry.group));
 				// A lite-07 publisher may serve a group after its stale drop, and the group's stream
 				// may land first. A final drop ends a group still arriving, but one that finished here
 				// stays whole, as a re-sent copy the subscriber refused leaves it: naming it given up
 				// would hide it from every reader.
-				if (hole.stale === undefined && closed === undefined) arriving.push(entry.group);
+				if (ends && closed === undefined) arriving.push(entry.group);
 				else runs = removeRun(runs, sequence, sequence + 1n);
 			}
 		}
@@ -2234,7 +2243,11 @@ export class Producer {
 		return this.#createGroup(sequence, 0);
 	}
 
-	#createGroup(sequence: bigint, start: number, fetched = false, meta = false): GroupProducer {
+	// With `discard`, a metadata stream arrived once the payload was asked for again: that request
+	// owes the group's payload or a drop, so the stream is read to its end into a copy the cache
+	// never holds, and its reset ends nothing a payload reader waits for. Mirrors the Rust
+	// `discarded_meta_group`.
+	#createGroup(sequence: bigint, start: number, fetched = false, meta = false, discard = false): GroupProducer {
 		this.#writable(sequence);
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
@@ -2243,7 +2256,7 @@ export class Producer {
 		let kept: Map<TrackState, GroupConsumer> | undefined;
 		const failed = existing?.group.closed.peek() instanceof Error ? existing.group : undefined;
 		const existingMeta = existing !== undefined && hooks.groupMeta(existing.group);
-		if (existing && !failed && meta && !existingMeta) {
+		if ((meta && discard) || (existing && !failed && meta && !existingMeta)) {
 			// A metadata copy adds nothing to a payload one: it is read to its end and discarded.
 			const discarded = new GroupProducer(sequence);
 			hooks.startGroup(discarded, start);
@@ -3077,19 +3090,25 @@ export class Subscriber {
 		if (sequence >= forgot) this.#stoppedReading(sequence, sequence + 1n);
 	}
 
+	// The sequences in `[start, end)` this subscriber's track caches any copy of; see
+	// {@link hooks.cachedSequences}. A front's reader asks its copies.
+	#cachedSequences(start: bigint, end: bigint): bigint[] {
+		if (this.#resume) return this.#resume.cachedSequences(start, end);
+		const producer = this.#state.producer;
+		return producer ? cachedIn(producer, start, end) : [];
+	}
+
 	// Forget the groups handed out as metadata that a promotion could no longer serve: stale under the
-	// budget, or no longer cached on a direct reader. Pruned again only once the record doubled, so
+	// budget, or cached by no copy any longer. Pruned again only once the record doubled, so
 	// it costs O(1) per hand-out amortized.
 	#pruneMeta(): void {
 		const drift = this.#drift();
-		const producer = this.#state.producer;
 		const kept: Run[] = [];
 		for (const run of this.#metaHanded) {
 			for (let sequence = run.start; sequence < run.end; sequence++) {
 				// A run is cut only where it is stale, which sequences never undo going up.
 				if (this.#staleAt(sequence, drift)) continue;
-				const cached = producer ? cachedIn(producer, sequence, run.end) : undefined;
-				if (cached?.length === 0) break;
+				if (this.#cachedSequences(sequence, run.end).length === 0) break;
 				insertRun(kept, sequence, run.end);
 				break;
 			}
@@ -3110,6 +3129,7 @@ export class Subscriber {
 		// sequence order, skipping what it handed out in between.
 		const lowest = reopened.reduce((low, run) => min(low, run.start), reopened[0].start);
 		if (lowest < this.#nextSequence) this.#nextSequence = lowest;
+		this.#resume?.rewind(lowest);
 		const reported = this.#reported;
 		const sequences: bigint[] = [];
 		const producer = this.#state.producer;
@@ -4111,14 +4131,16 @@ export class Subscriber {
 				changed: subscriber.#expiryChanged(),
 			};
 		};
-		hooks.cachedGroup = (subscriber, sequence, from = 0) => {
-			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence, from);
+		hooks.cachedSequences = (subscriber, start, end) => subscriber.#cachedSequences(start, end);
+		hooks.metaRuns = (subscriber) => subscriber.#metaHanded.length;
+		hooks.cachedGroup = (subscriber, sequence, from = 0, meta = !subscriber.#readsPayload()) => {
+			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence, from, meta);
 			const producer = subscriber.#state.producer;
-			return producer && cachedMirror(producer, sequence, from);
+			return producer && cachedMirror(producer, sequence, from, meta);
 		};
-		hooks.holdsGroup = (subscriber, sequence) => {
+		hooks.holdsGroup = (subscriber, sequence, meta) => {
 			const producer = subscriber.#state.producer;
-			return producer !== undefined && cachedHolds(producer, sequence);
+			return producer !== undefined && cachedHolds(producer, sequence, meta);
 		};
 		hooks.staleHeld = (subscriber, start, end) => {
 			const held: Run[] = [];

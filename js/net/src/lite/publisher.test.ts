@@ -723,6 +723,8 @@ async function servedSubscription(
 		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
 		pending?: boolean;
+		// Ask for each frame's header without its payload (lite-07).
+		meta?: boolean;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -789,6 +791,7 @@ async function servedSubscription(
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
 	msg.ranges = options.ranges;
+	msg.meta = options.meta ?? false;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -886,6 +889,12 @@ async function servedSubscription(
 				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
+		},
+		// The next group stream the publisher opened, unread.
+		async openedStream(): Promise<ReadableStream<Uint8Array>> {
+			const next = await opened.read();
+			if (next.done) throw new Error("the publisher opened no group stream");
+			return next.value;
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
 		// as a subscriber that discards a stream unread does.
@@ -1577,6 +1586,39 @@ test("lite draft-07: a group served over a stale drop retires it", async () => {
 		sub.track.close();
 		// No second OLD, and no NOT_FOUND at the end.
 		expect(await holesToEnd(sub.client.reader)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A metadata stream that fails once the subscription asks for the payload again is named in no
+// drop: the promotion owes its group the payload or a drop of its own, and naming it would end
+// the payload copy the subscriber may already be reading. Mirrors the Rust
+// `a_metadata_stream_failing_after_promotion_is_named_in_no_drop`.
+test("lite draft-07: a metadata stream stopped after promotion is named in no drop", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, meta: true });
+	try {
+		// Left open, so only the stop ends its metadata stream.
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
+		const meta = await sub.openedStream();
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		await replayUpdate({ priority: 0, startGroup: 0n, update: 1n, meta: false, ...restate(version) }).encode(
+			sub.client.writer,
+			version,
+		);
+		await flush();
+		// The subscriber holds the payload copy now, and stops the redundant metadata stream.
+		const payload = await sub.openedStream();
+		await meta.cancel({ source: "stream", streamErrorCode: StreamCode.Cancel });
+		await flush();
+		group.finish();
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToEnd(sub.client.reader)).toEqual([]);
+		await payload.cancel();
 	} finally {
 		await sub.close();
 	}

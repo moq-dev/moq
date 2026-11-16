@@ -395,6 +395,28 @@ test("an ordered payload read stops waiting for a metadata group the upstream dr
 	ordered.close();
 });
 
+test("a promoted read skips a payload copy past its budget, as any read does", async () => {
+	const track = receivedTrack();
+	const delay = { max: Duration.millis(100) };
+	const reader = track.subscribe({ meta: true, delay });
+	receive(track, 0n, true, [5]).finish();
+	expect((await reader.recvGroup())?.meta).toBe(true);
+	receive(track, 0n, false, [5]).finish();
+	// Group 1 runs 200 ms past where group 0 could still present.
+	const next = hooks.receiveGroup(track, { sequence: 1n, start: 0, meta: false });
+	next.writeFrame({ payload: new Uint8Array(5), timestamp: Timestamp.fromMillis(1000) });
+	next.writeFrame({ payload: new Uint8Array(5), timestamp: Timestamp.fromMillis(1200) });
+	next.finish();
+
+	const fresh = track.subscribe({ delay });
+	expect((await fresh.recvGroup())?.sequence).toBe(1n);
+	reader.update({ meta: false, delay });
+	const group = await reader.recvGroup();
+	expect([group?.sequence, group?.meta]).toEqual([1n, false]);
+	fresh.close();
+	reader.close();
+});
+
 test("an update re-reads the unread groups in the new mode, and leaves handed-out ones alone", async () => {
 	const track = new TrackProducer("video");
 	track.accept({ timescale: Timescale.MILLI, maxAge: null });

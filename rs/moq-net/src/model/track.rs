@@ -3004,9 +3004,11 @@ impl TrackState {
 
 	/// Group `key` once cached, `None` once the feed starts past it or ends before it,
 	/// and pending while it still may land.
-	fn landing(&self, key: u64) -> Poll<Option<group::Consumer>> {
+	fn landing(&self, key: u64, meta: bool) -> Poll<Option<group::Consumer>> {
+		// To a payload reader a metadata copy landed nothing it can read.
 		if let Some(slot) = self.lookup.get(&key)
 			&& slot.serves_end()
+			&& (meta || !slot.is_meta())
 		{
 			return Poll::Ready(Some(slot.serving().consume()));
 		}
@@ -3023,17 +3025,26 @@ impl TrackState {
 		key: u64,
 		now: crate::time::Instant,
 		grace: Duration,
+		meta: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		if let Poll::Ready(Some(group)) = self.landing(key) {
+		if let Poll::Ready(Some(group)) = self.landing(key, meta) {
 			return Poll::Ready(Ok(Some(group)));
 		}
 		if let Some(err) = self.given_up(key) {
 			return Poll::Ready(Err(err));
 		}
-		if self.landing(key).is_ready()
-			|| key.checked_add(1).is_some_and(|end| self.arrivals.covers(key..end))
-			|| self.arrivals.folds_at(key, grace).is_some_and(|at| at <= now)
+		// To a payload reader a metadata copy's group is still owed, as on the key walk: until the
+		// payload replaces it, a drop gives it up, or the copy aborts.
+		let owed = !meta
+			&& self
+				.lookup
+				.get(&key)
+				.is_some_and(|slot| slot.is_meta() && !slot.is_aborted());
+		if !owed
+			&& (self.landing(key, meta).is_ready()
+				|| key.checked_add(1).is_some_and(|end| self.arrivals.covers(key..end))
+				|| self.arrivals.folds_at(key, grace).is_some_and(|at| at <= now))
 		{
 			return Poll::Ready(Ok(None));
 		}
@@ -4365,6 +4376,22 @@ impl Producer {
 		Ok(Received::Group(group))
 	}
 
+	/// A metadata copy of `info` from frame `start` that the cache never holds, for a metadata
+	/// stream that arrives once the payload is asked for again: it is read to its end into this,
+	/// and nobody reads it, since that request owes the group's payload or a drop.
+	#[cfg(feature = "async")]
+	pub(crate) fn discarded_meta_group(&self, info: group::Info, start: u64) -> Result<Received> {
+		let mut state = self.modify()?;
+		let track = state.info.clone().ok_or(Error::Closed)?;
+		let mut group = group::Producer::new_meta(info, track, state.cache.clone());
+		if start != 0 {
+			group.bound(group::Bounds { start, end: None })?;
+		}
+		// Kept for a teardown to end.
+		state.detach(&group.handle());
+		Ok(Received::Group(group))
+	}
+
 	/// The payload is asked for again: let go of every metadata copy this track caches, so
 	/// a payload reader waits for each of those groups as for one the live feed still owes,
 	/// until the payload replaces it or the publisher gives it up. Readers already holding
@@ -4374,10 +4401,11 @@ impl Producer {
 		let Ok(mut state) = self.modify() else {
 			return Vec::new();
 		};
+		// An aborted one keeps its verdict: the drop that ended it accounted for it.
 		let keys: Vec<u64> = state
 			.lookup
 			.iter()
-			.filter(|(_, slot)| slot.is_meta())
+			.filter(|(_, slot)| slot.is_meta() && !slot.serving().is_aborted())
 			.map(|(&key, _)| key)
 			.collect();
 		if keys.is_empty() {
@@ -4772,6 +4800,21 @@ impl Producer {
 	/// wins, or dies, which leaves the drop as the slot's cut.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn give_up(&self, groups: ops::Range<u64>, hole: Hole) -> RangeSet<u64> {
+		self.give_up_as(groups, hole, false, false)
+	}
+
+	/// [`Self::give_up`] for a subscription that asks for the payload when `payload`, which a
+	/// metadata copy holds none of: the drop names its group as though nothing arrived. A final
+	/// drop sent `before_payload`, before the update asking for the payload again, named a
+	/// metadata stream: a payload copy arriving since wins over it, as one wins a stale drop.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn give_up_as(
+		&self,
+		groups: ops::Range<u64>,
+		hole: Hole,
+		payload: bool,
+		before_payload: bool,
+	) -> RangeSet<u64> {
 		let error = match &hole {
 			Hole::Drop { error, .. } => error.clone(),
 			Hole::Skip => {
@@ -4794,20 +4837,21 @@ impl Producer {
 				let mut open = Vec::new();
 				let mut carried = Vec::new();
 				for (&key, slot) in state.lookup.range_mut(groups) {
-					if !slot.visible {
+					if !slot.visible || (payload && slot.is_meta()) {
 						continue;
 					}
 					// A final drop ends only the live feed's copy still arriving: a drop judges
 					// the subscription, so a fetched head or fetch-only backfill may still complete.
+					let ends = !stale && !(before_payload && !slot.is_meta());
 					let arriving = !slot.group.is_aborted() && !slot.group.is_settled();
-					if !stale && arriving {
+					if ends && arriving {
 						open.push(slot.group.clone());
 					}
 					// A lite-07 publisher may serve a group after its stale drop, and the group's
 					// stream may land first. A group a copy still serves whole stays, whichever
 					// copy serves it, as a re-sent copy the subscriber refused leaves it: naming
 					// it given up would hide it from every reader.
-					let ended = !stale && arriving && std::ptr::eq(slot.serving(), &slot.group);
+					let ended = ends && arriving && std::ptr::eq(slot.serving(), &slot.group);
 					if !ended
 						&& slot.serves_end()
 						&& let Some(end) = key.checked_add(1)
@@ -4817,7 +4861,7 @@ impl Producer {
 						// drop ended: the slot keeps the drop to surface as its cut then, and
 						// the head announces its death to cut watchers. A copy that finished
 						// already won.
-						if !stale
+						if ends
 							&& !slot.copies().any(group::Handle::is_settled)
 							&& let Some(head) = slot.head.as_deref()
 						{
@@ -6041,7 +6085,7 @@ impl ArrivalRead<'_> {
 		now: crate::time::Instant,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		match self.state.poll_arrival(key, now, self.grace, waiter) {
+		match self.state.poll_arrival(key, now, self.grace, false, waiter) {
 			Poll::Pending if self.state.is_closed() => Poll::Ready(Ok(None)),
 			res => res,
 		}
@@ -6303,7 +6347,8 @@ impl Consumer {
 				.lookup
 				.range(..key)
 				.rev()
-				.find(|(_, slot)| slot.serves_end())
+				// A metadata copy is no copy of the group to the payload readers this serves.
+				.find(|(_, slot)| slot.serves_end() && !slot.is_meta())
 				.map(|(_, slot)| slot.serving().consume())
 		})
 	}
@@ -6314,12 +6359,21 @@ impl Consumer {
 	/// copy cut short at the back, is a miss.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn peek_group(&self, key: u64) -> Option<group::Consumer> {
+		self.peek_group_as(key, false)
+	}
+
+	/// [`Self::peek_group`] for a reader reading in `meta` mode: a metadata reader takes a
+	/// metadata copy too, which to a payload reader is no copy of the group.
+	pub(crate) fn peek_group_as(&self, key: u64, meta: bool) -> Option<group::Consumer> {
 		if let Some(serving) = self.serving() {
-			return serving.peek_group(key);
+			return serving.peek_group_as(key, meta);
 		}
 		self.with_state(|state| {
 			let state = state?.read();
-			let slot = state.lookup.get(&key).filter(|slot| slot.serves_end())?;
+			let slot = state
+				.lookup
+				.get(&key)
+				.filter(|slot| slot.serves_end() && (meta || !slot.is_meta()))?;
 			Some(slot.serving().consume())
 		})
 	}
@@ -6333,7 +6387,16 @@ impl Consumer {
 
 	/// Poll for a cached group, a terminal disposition, or a gap outliving its grace: the
 	/// group, the error a dropped or cut group was given up with, or `None` once it is gone.
-	pub(crate) fn poll_group(&self, key: u64, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	///
+	/// Read in `meta` mode, a metadata copy is the group too; to a payload reader one is a group
+	/// still owed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_group_as(
+		&self,
+		key: u64,
+		meta: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Ok(None));
@@ -6342,7 +6405,7 @@ impl Consumer {
 				let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
 				let grace = ledger::grace(max_delay);
 				let now = state.cache.pool().now_wall();
-				let res = state.poll_arrival(key, now, grace, waiter);
+				let res = state.poll_arrival(key, now, grace, meta, waiter);
 				if res.is_pending() {
 					let Some(at) = state.arrivals.folds_at(key, grace) else {
 						// No later arrival yet: only this wait uses the track's change channel.
@@ -6361,13 +6424,19 @@ impl Consumer {
 			if res.is_pending() && state.poll_closed(waiter).is_ready() {
 				// A cached arrival may have raced closure after the first lookup.
 				let state = state.read();
-				return Poll::Ready(match state.landing(key) {
+				return Poll::Ready(match state.landing(key, meta) {
 					Poll::Ready(Some(group)) => Ok(Some(group)),
 					_ => state.given_up(key).map_or(Ok(None), Err),
 				});
 			}
 			res
 		})
+	}
+
+	/// [`Self::poll_group_as`] for a payload reader.
+	#[cfg(test)]
+	pub(crate) fn poll_group(&self, key: u64, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		self.poll_group_as(key, false, waiter)
 	}
 
 	/// Lend `head` to the cached copies of group `key`; see
@@ -10941,20 +11010,29 @@ impl Subscriber {
 	}
 
 	/// Hand out the groups in `run` again, which this subscriber handed out as metadata before
-	/// it asked for the payload: the payload copies its track caches and its range admits now,
-	/// and each other key once its payload arrives. With `hand`, the copies returned count as
+	/// it asked for the payload: the payload copies its track caches, its range admits and its
+	/// budget does not judge stale now, and each other key once its payload arrives. A stale
+	/// one is left to the walk, as any group is. With `hand`, the copies returned count as
 	/// handed out now; without, the reader hands each out when it reads it, and a key-order
 	/// read reads all of `run` again in its turn. A front's reader asks its serving route's
 	/// copy.
 	pub(crate) fn repay(&mut self, run: ops::Range<u64>, hand: bool) -> Vec<group::Consumer> {
 		let (groups, delivered) = match &mut self.inner {
 			Inner::Plain(cursor) => {
+				let budget = cursor.subscription.read().budget();
 				let held: Vec<_> = {
 					let state = cursor.state.read();
+					// Judged as the walk judges a group: one past the budget now is left to it.
+					let budget = clamp_max_delay(budget, state.max_age_bound());
+					let edge = state.drift_edge(&cursor.servable);
 					state
 						.lookup
 						.range(run.clone())
-						.filter(|&(&key, slot)| slot.serves_end() && !slot.is_meta() && cursor.admits(key))
+						.filter(|&(&key, slot)| {
+							slot.serves_end()
+								&& !slot.is_meta() && cursor.admits(key)
+								&& !state.is_stale(key, &edge, budget)
+						})
 						.map(|(_, slot)| slot.serving().consume())
 						.collect()
 				};
@@ -18192,6 +18270,71 @@ mod test {
 			reader.poll_recv_group(&waiter).is_pending(),
 			"the payload copy was handed out twice"
 		);
+	}
+
+	/// A final drop sent before the update asking for the payload again named a metadata
+	/// stream: a payload copy arriving since wins over it, and the drop records nothing. One
+	/// sent since ends that copy, as any final drop does.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_final_drop_before_the_payload_was_asked_for_leaves_the_payload_arriving() {
+		for before_payload in [true, false] {
+			let producer = received_producer(Info::timed());
+			let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 1 }, 0, false) else {
+				panic!("the payload copy opens");
+			};
+			copy.write_frame(Timestamp::from_millis(1).unwrap(), &b"payload"[..])
+				.unwrap();
+			let error = crate::StreamError::Evicted;
+			let recorded = producer.give_up_as(1..2, Hole::drop(error), true, before_payload);
+			assert_eq!(recorded.is_empty(), before_payload, "{before_payload}");
+			assert_eq!(copy.is_aborted(), !before_payload, "{before_payload}");
+		}
+	}
+
+	/// A payload copy queued for a promoted arrival-order read is judged as the walk judges any
+	/// group: one past the reader's budget by the time it asks for the payload is not handed out.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn promotion_skips_a_payload_copy_past_the_budget() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let from_start = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_millis(100)))
+				.with_ranges([Range {
+					start: Anchor::Time(0),
+					end: None,
+				}])
+		};
+		let mut reader = producer.subscribe(from_start().with_meta(true));
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 0 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		copy.write_meta(at(0), 7).unwrap();
+		copy.close().unwrap();
+		assert!(reader.recv_group().await.unwrap().expect("the metadata copy").is_meta());
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 0 }, 0, false) else {
+			panic!("the payload copy replaces the metadata one");
+		};
+		copy.write_frame(at(0), &b"stale"[..]).unwrap();
+		copy.close().unwrap();
+		let Ok(Received::Group(mut next)) = producer.create_group_at(group::Info { start: 1 }, 0, false) else {
+			panic!("the next group opens");
+		};
+		next.write_frame(at(1000), &b"fresh"[..]).unwrap();
+		next.write_frame(at(1200), &b"fresh"[..]).unwrap();
+		next.close().unwrap();
+
+		reader.update(from_start()).unwrap();
+		let mut fresh = producer.subscribe(from_start());
+		let first = fresh.recv_group().await.unwrap().expect("the next group");
+		assert_eq!(first.start, 1, "a payload reader skips group 0 as stale");
+		let group = reader.recv_group().await.unwrap().expect("the next group");
+		assert_eq!(group.start, 1, "group 0 is past the budget behind the edge");
+		assert!(!group.is_meta());
 	}
 
 	/// The upstream lets go of the metadata copy for its payload before the reader that asked
@@ -26313,7 +26456,7 @@ mod test {
 			state.bill(producer.bill());
 		}
 		let now = crate::time::sim().now();
-		let finish = |key: u64| crate::tail::Reading::open(&tail, Some(key), now).finish();
+		let finish = |key: u64| crate::tail::Reading::open(&tail, Some(key), now).finish(false);
 		for run in 0..RUNS {
 			finish(2 * run);
 		}

@@ -69,11 +69,14 @@ export class Tail {
 		return this.#streams;
 	}
 
-	/** Record a group stream whose header arrived, held until it is read to its end. */
-	open(sequence: bigint): Counted {
+	/**
+	 * Record a group stream whose header arrived, held until it is read to its end, accounting for
+	 * `sequence` unless it is omitted.
+	 */
+	open(sequence?: bigint): Counted {
 		this.#streams += 1;
 		this.#active += 1;
-		this.#account(sequence, sequence + 1n);
+		if (sequence !== undefined) this.#account(sequence, sequence + 1n);
 
 		let state: "held" | "excused" | "done" = "held";
 		const token = {};

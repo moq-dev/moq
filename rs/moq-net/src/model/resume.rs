@@ -698,7 +698,8 @@ impl Copy {
 			// A group at or past where it was asked to start may land even before its first
 			// arrival; without a floor, only what follows its first arrival can.
 			let asked = self.floor.is_some_and(|floor| floor <= key);
-			self.track.peek_group(key).is_some()
+			// Any copy backs it: a group read as metadata continues on a metadata copy too.
+			self.track.peek_group_as(key, true).is_some()
 				|| (lands
 					&& self
 						.track
@@ -1526,8 +1527,10 @@ impl Reader {
 		self.out.push((key, Arc::downgrade(&out)));
 		let copy = &self.copies[index];
 		let handoff = group.handoff();
+		let meta = group.is_meta();
 		group.with_recover(Recover {
 			key,
+			meta,
 			reader: Some(self.this.clone()),
 			max_delay: None,
 			route: self.route.watch(),
@@ -2137,6 +2140,9 @@ impl Reader {
 /// group's copy fails or stalls, so a passthrough read never touches it.
 pub(super) struct Recover {
 	key: u64,
+	/// Whether the group was handed out as metadata: what continues it is read the same way, so
+	/// a metadata copy can, and to a payload read one is no copy of the group.
+	meta: bool,
 	/// The reader it was handed out to, followed onto each new route; `None` for a fetch.
 	reader: Option<Weak<Mutex<Reader>>>,
 	/// A fetch's own age budget, asked of each route and judged while waiting on one.
@@ -2177,6 +2183,7 @@ impl Clone for Recover {
 	fn clone(&self) -> Self {
 		Self {
 			key: self.key,
+			meta: self.meta,
 			reader: self.reader.clone(),
 			max_delay: self.max_delay,
 			route: self.route.clone(),
@@ -2375,7 +2382,7 @@ impl Recover {
 			if copy.generation == self.generation {
 				return None;
 			}
-			let group = copy.track.peek_group(self.key)?;
+			let group = copy.track.peek_group_as(self.key, self.meta)?;
 			lend_head(&self.handoff, self.key, &copy.track, &group);
 			let group = group.with_range(index..);
 			(group.index() == index).then(|| Replacement {
@@ -2400,7 +2407,7 @@ impl Recover {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
-		match serving.poll_group(self.key, waiter) {
+		match serving.poll_group_as(self.key, self.meta, waiter) {
 			Poll::Ready(Ok(Some(group))) if !same => {
 				lend_head(&self.handoff, self.key, serving, &group);
 				let group = group.with_range(index..);
@@ -2501,7 +2508,7 @@ impl Recover {
 		// A refusal is a verdict only for a copy that failed, and once the serving
 		// subscription will not deliver the group either.
 		let same = generation == self.generation;
-		if failed.is_some() && (same || serving.poll_group(self.key, waiter).is_ready()) {
+		if failed.is_some() && (same || serving.poll_group_as(self.key, self.meta, waiter).is_ready()) {
 			return Poll::Ready(Err(err));
 		}
 
@@ -2719,6 +2726,7 @@ impl kio::Task for Fetching {
 					let handoff = group.handoff();
 					Poll::Ready(Ok(group.with_recover(Recover {
 						key: self.key,
+						meta: false,
 						reader: None,
 						max_delay: self.options.options.max_delay,
 						route: self.route.watch(),
@@ -3639,6 +3647,55 @@ mod test {
 			assert_eq!(sub.take_stale().groups, 2, "routed={routed}");
 			assert_eq!(sub.take_stale().groups, 0, "routed={routed}: counted once");
 		}
+	}
+
+	/// A stalled group read as metadata continues on the replacement route's metadata copy,
+	/// as a payload one continues on a payload copy: its mode is what continues it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stalled_metadata_group_continues_from_the_replacements_metadata_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+			.with_meta(true);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let size = |group: &mut group::Consumer| {
+			let Poll::Ready(info) = group.poll_read_info(&kio::Waiter::noop()) else {
+				panic!("a header or the end");
+			};
+			info.unwrap().map(|info| info.size)
+		};
+
+		let Ok(track::Received::Group(mut open)) = a.create_group_at(group::Info { start: 0 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		open.write_meta(ts(0), 1).unwrap();
+		let mut reading = recv(&mut sub);
+		assert!(reading.is_meta());
+		assert_eq!(size(&mut reading), Some(1));
+
+		// The replacement holds the rest of the headers, and no payload.
+		let b = received_copy();
+		let Ok(track::Received::Group(mut whole)) = b.create_group_at(group::Info { start: 0 }, 0, true) else {
+			panic!("the replacement's metadata copy opens");
+		};
+		for (ms, bytes) in [(0, 1), (1, 2), (2, 3)] {
+			whole.write_meta(ts(ms), bytes).unwrap();
+		}
+		whole.close().unwrap();
+		routes.serve(b.consume());
+
+		assert_eq!(size(&mut reading), Some(2));
+		assert_eq!(size(&mut reading), Some(3));
+		assert_eq!(size(&mut reading), None);
 	}
 
 	#[test]
@@ -4592,6 +4649,49 @@ mod test {
 		let (groups, given_up) = sub.reoffer_groups(0..3);
 		assert_eq!(groups.iter().map(|group| group.start).collect::<Vec<_>>(), [0]);
 		assert_eq!(given_up, std::iter::once(1..3).collect::<RangeSet<u64>>());
+	}
+
+	/// A front's ordered reader that asks for the payload of groups it read as metadata reads
+	/// each again in key order, as a direct one does: its ordered floor is its delivered set,
+	/// which the promotion lowers.
+	#[cfg(feature = "async")]
+	#[test]
+	fn a_resumed_ordered_reader_reads_the_groups_it_passed_as_metadata_again() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(HOUR));
+		let mut reader = logical
+			.consume()
+			.subscribe(subscription.clone().with_meta(true))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let land = |key: u64, meta: bool| {
+			let Ok(track::Received::Group(mut group)) = a.create_group_at(group::Info { start: key }, 0, meta) else {
+				panic!("the copy opens");
+			};
+			match meta {
+				true => group.write_meta(ts(key), 3).unwrap(),
+				false => group.write_frame(ts(key), b"abc".as_ref()).unwrap(),
+			}
+			group.close().unwrap();
+		};
+		let read = |reader: &mut track::Subscriber| {
+			let mut out = Vec::new();
+			while let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&kio::Waiter::noop()) {
+				out.push((group.start, group.is_meta()));
+			}
+			out
+		};
+		land(0, true);
+		land(1, true);
+		assert_eq!(read(&mut reader), [(0, true), (1, true)]);
+		reader.update(subscription).unwrap();
+		land(0, false);
+		land(1, false);
+		assert_eq!(read(&mut reader), [(0, false), (1, false)]);
 	}
 
 	/// A front's reader takes back the stale runs its serving route's copy reported, so a

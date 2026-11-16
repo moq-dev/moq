@@ -269,6 +269,8 @@ struct Yielding {
 	/// The stream reading the group, as [`TrackEntry::read_yielding`] numbered it.
 	stream: u64,
 	verdict: YieldVerdict,
+	/// Whether the stream carries metadata only.
+	meta: bool,
 }
 
 /// A stale verdict expires on the next update; a final drop never does. A group already
@@ -492,8 +494,11 @@ impl TrackEntry {
 
 	/// Open the group of a stream whose header is `hdr` in the copy.
 	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
+		// A metadata stream the publisher opened before it read the update asking for the
+		// payload again accounts for nothing: that update owes the group's payload or a drop.
+		let accounts = (!hdr.meta || self.tail.read().is_meta()).then_some(hdr.key);
 		if self.is_paused(hdr.key, hdr.meta) {
-			let reading = Reading::open(&self.tail, Some(hdr.key), now);
+			let reading = Reading::open(&self.tail, accounts, now);
 			return self.resume(hdr, reading).expect("checked paused above");
 		}
 		let Some(Accepted { producer, .. }) = &mut self.copy else {
@@ -506,7 +511,12 @@ impl TrackEntry {
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
-		let received = producer.create_group_at(group_info, hdr.frame_start, hdr.meta);
+		let received = match accounts {
+			// Read to its end into a copy the cache never holds, so its reset ends nothing a
+			// payload reader waits for.
+			None => producer.discarded_meta_group(group_info, hdr.frame_start),
+			Some(_) => producer.create_group_at(group_info, hdr.frame_start, hdr.meta),
+		};
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !self.tail.read().accounts(hdr.key);
 		// The subscription's end waits until this stream is read. Counted
@@ -514,7 +524,7 @@ impl TrackEntry {
 		// opens (a resubscribe resends a cached group), and only after the
 		// cache holds the group, so a fetch held for the feed that sees it
 		// accounted also finds it.
-		let reading = Reading::open(&self.tail, Some(hdr.key), now);
+		let reading = Reading::open(&self.tail, accounts, now);
 		// A route's first group says where its live feed is, when its answer does
 		// not: even one the cache already holds, as an idle copy asked from its
 		// head gets back. The copy goes live once the cache shows that group.
@@ -534,7 +544,9 @@ impl TrackEntry {
 				}
 			}
 		}
-		let verdict = if owed {
+		let verdict = if accounts.is_none() {
+			YieldVerdict::Accounted
+		} else if owed {
 			YieldVerdict::Owed
 		} else if stale {
 			YieldVerdict::Stale {
@@ -611,6 +623,12 @@ impl TrackEntry {
 	/// Pause `group`, whose stream the publisher reset with YIELDED, for a later stream to
 	/// continue. Groups the cache gave up on meanwhile are swept out as the held ones double.
 	fn pause(&mut self, key: u64, paused: PausedGroup) {
+		// Once the payload is asked for again, no continuation follows a metadata stream: the
+		// publisher serves its group again with the payload, or drops it.
+		if paused.group.handle().is_meta() && !self.tail.read().is_meta() {
+			let _ = paused.group.abort(Error::Cancel);
+			return;
+		}
 		let registry = self.paused.get_or_insert_with(Default::default);
 		let Ok(mut state) = registry.write() else {
 			return;
@@ -623,10 +641,10 @@ impl TrackEntry {
 	}
 
 	/// Track a stream reading `key`, returning its token for [`Self::end_yielding`].
-	fn read_yielding(&mut self, key: u64, verdict: YieldVerdict) -> u64 {
+	fn read_yielding(&mut self, key: u64, verdict: YieldVerdict, meta: bool) -> u64 {
 		self.yield_streams += 1;
 		let stream = self.yield_streams;
-		self.yielding.insert(key, Yielding { stream, verdict });
+		self.yielding.insert(key, Yielding { stream, verdict, meta });
 		stream
 	}
 
@@ -646,24 +664,55 @@ impl TrackEntry {
 	/// A SUBSCRIBE_DROP named `groups` with `err`, `stale` when it is a lite-07 stale verdict: a
 	/// paused group ends there, and one a stream is reading ends with it if a YIELDED reset
 	/// would otherwise pause it, since no continuation follows, unless an update supersedes a
-	/// stale drop first.
-	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error, stale: bool) {
+	/// stale drop first. A drop that names only metadata streams, `meta_only`, leaves a
+	/// payload stream and its paused group alone.
+	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error, stale: bool, meta_only: bool) {
 		let updates = stale.then(|| self.tail.read().updates());
 		for (_, yielding) in self.yielding.range_mut(groups.clone()) {
-			yielding.verdict.drop_with(err.clone(), updates);
+			if !meta_only || yielding.meta {
+				yielding.verdict.drop_with(err.clone(), updates);
+			}
 		}
 		let Some(registry) = &self.paused else {
 			return;
 		};
 		let ended: Vec<_> = match registry.write() {
 			Ok(mut state) => {
-				let keys: Vec<u64> = state.groups.range(groups).map(|(key, _)| *key).collect();
+				let keys: Vec<u64> = state
+					.groups
+					.range(groups)
+					.filter(|(_, paused)| !meta_only || paused.group.handle().is_meta())
+					.map(|(key, _)| *key)
+					.collect();
 				keys.into_iter().filter_map(|key| state.groups.remove(&key)).collect()
 			}
 			Err(_) => return,
 		};
 		for paused in ended {
 			let _ = paused.group.abort(err.clone());
+		}
+	}
+
+	/// The payload is asked for again: no continuation follows a paused metadata stream, since
+	/// the publisher serves its group again with the payload, or drops it.
+	fn let_go_meta(&mut self) {
+		let Some(registry) = &self.paused else {
+			return;
+		};
+		let ended: Vec<_> = match registry.write() {
+			Ok(mut state) => {
+				let keys: Vec<u64> = state
+					.groups
+					.iter()
+					.filter(|(_, paused)| paused.group.handle().is_meta())
+					.map(|(key, _)| *key)
+					.collect();
+				keys.into_iter().filter_map(|key| state.groups.remove(&key)).collect()
+			}
+			Err(_) => return,
+		};
+		for paused in ended {
+			let _ = paused.group.abort(Error::Cancel);
 		}
 	}
 
@@ -1836,7 +1885,7 @@ impl GroupRecv {
 				.subscribes
 				.lock()
 				.get_mut(&hdr.subscribe)
-				.map(|entry| entry.read_yielding(hdr.key, verdict)),
+				.map(|entry| entry.read_yielding(hdr.key, verdict, hdr.meta)),
 			false => None,
 		};
 		let (priority, order) = track
@@ -1882,8 +1931,9 @@ impl GroupRecv {
 		let res = match res {
 			Ok(()) => {
 				// Only a lite-07 stale drop asks which groups arrived whole.
+				let meta = group.handle().is_meta();
 				if group.finish().is_ok() && self.subscriber.version.has_skip() {
-					reading.finish();
+					reading.finish(meta);
 				}
 				Ok(())
 			}
@@ -3833,6 +3883,7 @@ mod tests {
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 			update: 0,
+			promoted: 0,
 			stale: RangeSet::new(),
 			meta: false,
 		})
@@ -3996,6 +4047,7 @@ mod tests {
 				unanswered: None,
 				_working: crate::session::Work::default().start(),
 				update: 0,
+				promoted: 0,
 				stale: RangeSet::new(),
 				meta: false,
 			});
@@ -4472,6 +4524,7 @@ mod tests {
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 			update: 0,
+			promoted: 0,
 			stale: RangeSet::new(),
 			meta: false,
 		};
@@ -4590,6 +4643,7 @@ mod tests {
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 			update: 0,
+			promoted: 0,
 			stale: RangeSet::new(),
 			meta: false,
 		};
@@ -4660,6 +4714,7 @@ mod tests {
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 			update: 0,
+			promoted: 0,
 			stale: RangeSet::new(),
 			meta: false,
 		};
@@ -5862,8 +5917,8 @@ mod tests {
 			length_first: true,
 		};
 		let mut entry = TrackEntry::accepted(track, framing, kio::Producer::new(Tail::default()));
-		let replaced = entry.read_yielding(3, YieldVerdict::Owed);
-		let replacement = entry.read_yielding(3, YieldVerdict::Owed);
+		let replaced = entry.read_yielding(3, YieldVerdict::Owed, false);
+		let replacement = entry.read_yielding(3, YieldVerdict::Owed, false);
 		assert!(
 			entry.end_yielding(3, replaced).is_none(),
 			"the replaced stream's record is gone"
@@ -6027,12 +6082,12 @@ mod tests {
 		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
 		let mut group = reader.assert_group();
 		// The publisher gave the group up after pausing it, and its drop lands first.
-		subscriber
-			.subscribes
-			.lock()
-			.get_mut(&7)
-			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
+		subscriber.subscribes.lock().get_mut(&7).unwrap().dropped(
+			3..4,
+			&Error::Stream(crate::StreamError::Old),
+			true,
+			false,
+		);
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
 		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 		assert!(res.is_ok(), "{res:?}");
@@ -6110,12 +6165,12 @@ mod tests {
 		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
 		let mut group = reader.assert_group();
 		// The publisher gave the group up after pausing it, and its drop lands first.
-		subscriber
-			.subscribes
-			.lock()
-			.get_mut(&7)
-			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
+		subscriber.subscribes.lock().get_mut(&7).unwrap().dropped(
+			3..4,
+			&Error::Stream(crate::StreamError::Old),
+			true,
+			false,
+		);
 		// An update supersedes it, as `buffer_update` does.
 		tail.write().ok().expect("the tail is open").updated();
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
@@ -6526,6 +6581,7 @@ mod tests {
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
 			update: 0,
+			promoted: 0,
 			stale: RangeSet::new(),
 			meta: false,
 		});
@@ -6738,6 +6794,263 @@ mod tests {
 		assert!(!covers(4..5), "the group that never arrived is owed again");
 		frame(two).expect("the drop leaves a group still arriving");
 		frame(three).expect("the update leaves a group still arriving");
+	}
+
+	/// A metadata copy is no group a payload reader holds: once the subscription asks for the
+	/// payload again, a stale drop under that update names a group received as metadata, whether
+	/// its stream finished before the update or arrived after it, which accounts for nothing. The
+	/// copy gives the group up, so a payload reader stops waiting for it.
+	#[kio::test]
+	async fn a_stale_drop_names_a_group_received_as_metadata_once_the_payload_is_asked_for() {
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		serve.subscriber.subscribes.lock().insert(
+			0,
+			TrackEntry::accepted(
+				serving.serving.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+					length_first: true,
+				},
+				tail.clone(),
+			),
+		);
+		// A metadata group stream of one frame of one byte that arrives whole.
+		let arrive = async |key: u64| {
+			let mut script = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			lite::Group {
+				subscribe: 0,
+				key,
+				frame_start: 0,
+				meta: true,
+			}
+			.encode(&mut encoder, version)
+			.unwrap();
+			// Its size plus one, then its timestamp.
+			encoder.varint(2).unwrap();
+			encoder.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut group = GroupRecv::new(
+				serve.subscriber.clone(),
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			kio::wait(|waiter| group.poll_serve(waiter)).await
+		};
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			set_meta(active, &serving.serving, true, now());
+		}
+		arrive(1).await.unwrap();
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			// Asking for the payload again, sent as update 1.
+			set_meta(active, &serving.serving, false, now());
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+		}
+		// Opened before the publisher read the update: it accounts for nothing.
+		arrive(2).await.unwrap();
+		assert!(!tail.read().covers(1..3), "the payload of either is still owed");
+
+		// The publisher let go of both payloads: stale under update 1.
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+			groups: 1..3,
+			error: code,
+			update: 1,
+		});
+		serving.apply_response(&serve, drop).unwrap();
+		for key in [1, 2] {
+			assert!(serving.serving.holds_stale(key), "group {key} is held as metadata");
+		}
+	}
+
+	/// A final drop sent before the update asking for the payload again named a metadata
+	/// stream: the payload stream that the publisher paused since is still owed a continuation,
+	/// so the drop does not end its paused group.
+	#[kio::test]
+	async fn a_final_drop_before_the_payload_was_asked_for_leaves_a_paused_payload_group() {
+		use crate::lite::test_transport::{Close, ScriptedSession};
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		serve.subscriber.subscribes.lock().insert(
+			0,
+			TrackEntry::accepted(
+				serving.serving.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+					length_first: true,
+				},
+				tail.clone(),
+			),
+		);
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			set_meta(active, &serving.serving, true, now());
+			// Asking for the payload again, sent as update 1.
+			set_meta(active, &serving.serving, false, now());
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+		}
+		// Group 1's payload stream: one frame, then a YIELDED reset.
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 0,
+			key: 1,
+			frame_start: 0,
+			meta: false,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		encoder.varint(2).unwrap();
+		encoder.varint(crate::coding::varint::zigzag(1)).unwrap();
+		script.push(b'x');
+		let yielded = ScriptedSession::new(script);
+		let (_, recv) = yielded.open_bi(Default::default()).await.unwrap();
+		let mut stream = GroupRecv::new(
+			serve.subscriber.clone(),
+			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		);
+		assert!(stream.poll_serve(&kio::Waiter::noop()).is_pending());
+		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
+		let res = kio::wait(|waiter| stream.poll_serve(waiter)).await;
+		assert!(res.is_ok(), "{res:?}");
+
+		// The metadata stream the publisher evicted under update 0, named only now.
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Cancel,
+		));
+		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+			groups: 1..2,
+			error: code,
+			update: 0,
+		});
+		serving.apply_response(&serve, drop).unwrap();
+
+		let subs = serve.subscriber.subscribes.lock();
+		let paused = subs.get(&0).unwrap().paused.as_ref().unwrap().read();
+		let group = paused.groups.get(&1).expect("the payload group stays paused");
+		assert!(!group.group.handle().is_aborted(), "the drop did not end it");
+	}
+
+	/// Asking for the payload again lets go of a paused metadata group, and a metadata stream
+	/// still arriving that the publisher yields after that does not pause: no continuation
+	/// follows either, since the publisher serves those groups again with the payload, or drops
+	/// them. A metadata stream that arrives after it fills no copy the cache holds.
+	#[kio::test]
+	async fn promotion_lets_go_of_paused_metadata_groups() {
+		use crate::lite::test_transport::{Close, ScriptedSession};
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		serve.subscriber.subscribes.lock().insert(
+			0,
+			TrackEntry::accepted(
+				serving.serving.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+					length_first: true,
+				},
+				tail.clone(),
+			),
+		);
+		// A metadata stream of one frame for `key`, read up to the end of its frames.
+		let open_meta = async |key: u64| {
+			let mut script = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			lite::Group {
+				subscribe: 0,
+				key,
+				frame_start: 0,
+				meta: true,
+			}
+			.encode(&mut encoder, version)
+			.unwrap();
+			encoder.varint(2).unwrap();
+			encoder.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
+			let session = ScriptedSession::new(script);
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut stream = GroupRecv::new(
+				serve.subscriber.clone(),
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			assert!(stream.poll_serve(&kio::Waiter::noop()).is_pending());
+			(session, stream)
+		};
+		let close = async |(session, mut stream): (ScriptedSession, GroupRecv), close: Close| {
+			session.close(close);
+			let res = kio::wait(|waiter| stream.poll_serve(waiter)).await;
+			assert!(res.is_ok(), "{res:?}");
+		};
+		let yielded = || Close::ResetStream(crate::StreamError::Yielded.to_code());
+		let paused = || {
+			let subs = serve.subscriber.subscribes.lock();
+			let entry = subs.get(&0).unwrap();
+			entry
+				.paused
+				.as_ref()
+				.map(|registry| registry.read().groups.keys().copied().collect::<Vec<_>>())
+				.unwrap_or_default()
+		};
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			set_meta(active, &serving.serving, true, now());
+		}
+		close(open_meta(1).await, yielded()).await;
+		assert_eq!(paused(), [1], "a metadata group pauses while metadata is asked for");
+		// Still arriving across the update.
+		let two = open_meta(2).await;
+
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			// As the update handler does.
+			assert!(set_meta(active, &serving.serving, false, now()));
+			serve.subscriber.subscribes.lock().get_mut(&0).unwrap().let_go_meta();
+		}
+		assert!(paused().is_empty(), "promotion lets go of it");
+
+		// Yielded before the publisher read the update.
+		close(two, yielded()).await;
+		assert!(paused().is_empty(), "a metadata group no longer pauses");
+		assert!(!tail.read().is_reading(), "nor does its stream hold the end");
+
+		// Opened before the publisher read the update, and read whole.
+		close(open_meta(3).await, Close::Fin).await;
+		assert!(
+			serving.serving.consume().cached_groups(0..4).is_empty(),
+			"the cache holds no metadata copy"
+		);
 	}
 
 	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
@@ -11353,6 +11666,9 @@ struct SubStream {
 	/// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given
 	/// up under an earlier one is no verdict on the current terms.
 	update: u64,
+	/// The number of the latest update that asked for the payload again, or 0: a final drop
+	/// under an earlier one named a metadata stream, which a payload copy wins over.
+	promoted: u64,
 	/// The runs `tail` accounts for by a stale drop under `update`: the next update reopens
 	/// them, since the publisher re-offers or drops them again under it.
 	stale: RangeSet<u64>,
@@ -11994,20 +12310,10 @@ impl TrackServe {
 						active.order = subscription.order;
 						active.max_delay = wire_max_delay(subscription.delay.max);
 						active.min_delay = subscription.delay.min;
-						// The payload is asked for again: every group received as metadata is
-						// owed again, until its payload arrives or the publisher drops it.
-						let promoted = match active.meta && !subscription.meta {
-							true => producer.promote(),
-							false => Vec::new(),
-						};
-						active.meta = subscription.meta;
-						if !promoted.is_empty()
-							&& let Ok(mut tail) = active.tail.write()
+						if set_meta(active, producer, subscription.meta, self.subscriber.runtime.now())
+							&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&active.id)
 						{
-							let now = self.subscriber.runtime.now();
-							for key in promoted {
-								tail.unaccount(key..key.saturating_add(1), now);
-							}
+							entry.let_go_meta();
 						}
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
@@ -12366,6 +12672,31 @@ fn judged<'a>(ranges: impl IntoIterator<Item = &'a lite::Range>) -> Option<Range
 /// again under the new number what is still stale, so the tail owes every stale run again,
 /// from `now`. A group that arrived since its stale drop won over it: the publisher served
 /// it, so it is neither re-offered nor owed again.
+/// Ask for metadata only, or for the payload, from the update about to be sent. Asking for the
+/// payload again owes every group received as metadata again, in the copy and in the tail,
+/// until its payload arrives or the publisher drops it, and a metadata stream still arriving
+/// no longer finishes its group.
+///
+/// Returns whether it asked for the payload again.
+fn set_meta(active: &mut SubStream, producer: &track::Producer, meta: bool, now: crate::time::Instant) -> bool {
+	let asked = active.meta && !meta;
+	let promoted = match active.meta && !meta {
+		true => {
+			active.promoted = active.update + 1;
+			producer.promote()
+		}
+		false => Vec::new(),
+	};
+	active.meta = meta;
+	if let Ok(mut tail) = active.tail.write() {
+		tail.set_meta(meta);
+		for key in promoted {
+			tail.unaccount(key..key.saturating_add(1), now);
+		}
+	}
+	asked
+}
+
 fn buffer_update(
 	active: &mut SubStream,
 	ranges: lite::RangeEdit,
@@ -12500,6 +12831,9 @@ impl Establish {
 
 	/// The live subscription, `answered` once the publisher's first response arrived.
 	fn activate(&self, stream: Stream<Transport, Version>, answered: bool) -> SubStream {
+		if let Ok(mut tail) = self.tail.write() {
+			tail.set_meta(self.subscription.meta);
+		}
 		SubStream {
 			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
@@ -12515,6 +12849,7 @@ impl Establish {
 			priority: self.subscription.priority,
 			order: self.subscription.order,
 			meta: self.subscription.meta,
+			promoted: 0,
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			started: None,
@@ -13894,18 +14229,22 @@ impl ServeLoop {
 				// the publisher re-offers it or drops it again under the new number, so it is
 				// still owed, and a reader that wants it fills it by range meanwhile.
 				if !(stale && dropped.update < active.update) {
+					// A final drop sent before the update asking for the payload again named
+					// metadata streams only: a payload stream since wins over it, as over a
+					// stale drop, so it accounts only for the groups it records.
+					let before_payload = !stale && dropped.update < active.promoted;
 					// Asked before this drop is accounted: what a fold forgot finishing that the
 					// ledger already accounted may be a stream this drop overtook.
 					let overtaken: Vec<_> = match stale {
 						true => active.tail.read().overtaken(groups.clone()).collect(),
 						false => Vec::new(),
 					};
-					if let Ok(mut tail) = active.tail.write() {
+					if !before_payload && let Ok(mut tail) = active.tail.write() {
 						tail.account(groups.clone(), serve.subscriber.runtime.now());
 					}
 					// A paused group the drop names ends there: no continuation follows.
 					if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
-						entry.dropped(groups.clone(), &Error::Stream(error.clone()), stale);
+						entry.dropped(groups.clone(), &Error::Stream(error.clone()), stale, before_payload);
 					}
 					match stale {
 						// Judged under the budget this subscriber sent with that update. A
@@ -13925,10 +14264,8 @@ impl ServeLoop {
 							}
 							let mut owed = rangemap::RangeSet::new();
 							for given in given.iter() {
-								owed.extend(
-									self.serving
-										.give_up(given.clone(), track::Hole::stale(active.max_delay)),
-								);
+								let hole = track::Hole::stale(active.max_delay);
+								owed.extend(self.serving.give_up_as(given.clone(), hole, !active.meta, false));
 							}
 							// Owed again by the next update, save what a stream may have won.
 							for overtaken in overtaken {
@@ -13939,7 +14276,16 @@ impl ServeLoop {
 						// Final, so no update reopens it, even where it replaces a stale drop.
 						false => {
 							active.stale.remove(groups.clone());
-							self.serving.give_up(groups.clone(), track::Hole::drop(error.clone()));
+							let hole = track::Hole::drop(error.clone());
+							let recorded = self
+								.serving
+								.give_up_as(groups.clone(), hole, !active.meta, before_payload);
+							if before_payload && let Ok(mut tail) = active.tail.write() {
+								let now = serve.subscriber.runtime.now();
+								for run in recorded.iter() {
+									tail.account(run.clone(), now);
+								}
+							}
 						}
 					}
 					self.range_fills.refuse(groups, error);
