@@ -563,8 +563,13 @@ impl Front {
 				Err((err, _)) => Err(err),
 			};
 			match verdict {
-				Ok(()) => actions.push(Action::Splice { track: name, source }),
-				Err(err) if closing || err.unroutable() => {}
+				Ok(()) => {
+					track.stranded = None;
+					actions.push(Action::Splice { track: name, source });
+				}
+				Err(_) if closing => {}
+				// The route lost it: ask again once the table moves, as for an open track.
+				Err(err) if err.unroutable() => track.stranded = Some(source),
 				Err(_) => {
 					track.ended = Some(Ended::Concluded);
 					actions.push(Action::Conclude { track: name });
@@ -799,6 +804,15 @@ impl Front {
 						track: name.clone(),
 						source,
 					});
+				}
+				// A finished track asks for a rerouted copy anew; its state stays as it lingers.
+				_ if track.ended == Some(Ended::Finished) => {
+					if !self.serving_closing {
+						actions.push(Action::Reroute {
+							track: name.clone(),
+							source,
+						});
+					}
 				}
 				_ => idle.push(name.clone()),
 			}
@@ -2093,9 +2107,9 @@ mod tests {
 	}
 
 	/// A rerouted copy of a finished track joins its reads only from the serving source and
-	/// with the track's metadata. That source refusing it, other than closing or losing the
-	/// route, concludes the track: nothing is rerouted again. A parked one keeps its linger
-	/// either way.
+	/// with the track's metadata. A lost route is asked again once the table moves. That
+	/// source refusing it, other than closing or losing the route, concludes the track:
+	/// nothing is rerouted again. A parked one keeps its linger either way.
 	#[test]
 	fn a_finished_track_splices_only_a_matching_copy_from_the_serving_source() {
 		for refusal in [None, Some(Ok(track::Info::default())), Some(Err(Error::NotFound))] {
@@ -2133,6 +2147,19 @@ mod tests {
 			assert_actions(front.step(answer(100, false, Ok(info()))), &[]);
 			assert_actions(front.step(answer(200, true, Err(Error::NotFound))), &[]);
 			assert_actions(front.step(answer(200, false, Err(Error::Unroutable))), &[]);
+			// The lost route is asked again once the table moves, and only then.
+			let moved = || Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			};
+			assert_actions(
+				front.step(moved()),
+				&[Action::Reroute {
+					track: name("video"),
+					source: 200,
+				}],
+			);
+			assert_actions(front.step(moved()), &[]);
 			match refusal {
 				// Other metadata, or a refusal.
 				Some(result) => {

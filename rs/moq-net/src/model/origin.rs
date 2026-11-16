@@ -5136,10 +5136,24 @@ impl kio::Task for FrontServe {
 							if !io.weak.is_held() {
 								continue;
 							}
-							let Some(Ok(lookup)) = self.sources.get(&source).map(|s| s.track(&name)) else {
-								continue;
-							};
 							io.ready.wake_by_ref();
+							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
+							let lookup = match self.sources.get(&source).map(|s| s.track(&name)) {
+								Some(Ok(lookup)) => lookup,
+								// Refused before any lookup, as a query would be: the front judges
+								// it the same way, so a held fetch is not left waiting on it.
+								Some(Err(err)) => {
+									self.events.push_back(Event::TrackInfo {
+										track: name,
+										source,
+										closing,
+										result: Err(err),
+										retry: None,
+									});
+									continue;
+								}
+								None => continue,
+							};
 							// No subscription: the track is over, and a read that continues on the
 							// copy asks it for what it needs.
 							let query = lookup.info().into_inner();
@@ -15691,6 +15705,63 @@ mod tests {
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
+	}
+
+	/// A fetch holds a finished track whose group its route lost, and the replacement neither
+	/// has the track nor takes requests: refused at the lookup itself, that concludes the
+	/// track as a refused query would, so the fetch fails rather than wait out its budget.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_tracks_fetch_fails_when_the_replacement_lacks_the_track() {
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		let fills = old.requests();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let video = resolved.track("video").unwrap();
+		let mut open = old.append_next().unwrap();
+		open.write_frame(open.key_time(), b"a".as_ref()).unwrap();
+		let finished = old.finish().unwrap();
+		let mut fetched = video.fetch_group(0, None).await.unwrap();
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+		// The route loses the rest of the group and refuses to fill it.
+		open.abort(Error::Cancel).unwrap();
+		assert!(fetched.read_frame().now_or_never().is_none());
+		let request = kio::clock::timeout(Duration::from_secs(1), fills.requested_fill_group())
+			.await
+			.expect("the fetch asked the route to fill the group")
+			.expect("request");
+		request.reject(Error::Cancel);
+		drop((fills, finished));
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(
+			fetched.read_frame().now_or_never().is_none(),
+			"the fetch waits for another route"
+		);
+
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let _other = newcomer
+			.broadcast()
+			.create_track("audio", crate::track::Info::timed())
+			.unwrap();
+		newcomer.announce().unwrap();
+		let res = kio::clock::timeout(Duration::from_secs(1), fetched.read_frame())
+			.await
+			.expect("the fetch fails once the replacement refused the track");
+		assert!(res.is_err(), "{res:?}");
 	}
 
 	/// The newcomer answers "video" with matching metadata but aborts before delivering a
