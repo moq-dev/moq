@@ -85,6 +85,15 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 
 /// Stand up the assembled relay path with `--server-version` restricted.
 async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
+	spawn_public_relay(versions, vec![moq_auth::Pattern::all()]).await
+}
+
+/// Stand up the assembled relay path with `--server-version` restricted, granting anonymous
+/// sessions only `public`.
+async fn spawn_public_relay(
+	versions: Vec<moq_net::Version>,
+	public: Vec<moq_auth::Pattern>,
+) -> (u16, tokio::task::JoinHandle<()>) {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
@@ -92,7 +101,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.web.ws = true;
 	config.web.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
 
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = public;
 
 	// `load` binds the web listener, so the port is ours before anyone dials it.
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
@@ -373,6 +382,80 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 
 	drop((track, hidden, visible));
 	drop((pub_connection, opted_connection));
+	web_handle.abort();
+}
+
+/// A moq-transport namespace field holding a `/` is one path segment all the way through a
+/// relay: a public grant of `room/*` covers `room/a\/b`, which it could not if the escaped `/`
+/// split the field, and each wire reads back the same broadcast the other published.
+#[tokio::test]
+async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
+	let lite: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let ietf: moq_net::Version = "moq-transport-22".parse().unwrap();
+	let (port, web_handle) = spawn_public_relay(vec![lite, ietf], vec!["room/*".parse().unwrap()]).await;
+	let url: url::Url = format!("ws://127.0.0.1:{port}/").parse().expect("parse url");
+
+	for (publisher, subscriber) in [(ietf, lite), (lite, ietf)] {
+		// The field `<publisher>/<subscriber>`, escaped into one segment.
+		let path = moq_net::Path::new(&format!(r"room/{publisher}\/{subscriber}")).unwrap();
+		assert_eq!(path.parts().count(), 2);
+
+		let pub_origin = moq_tokio::origin::spawn();
+		let route = pub_origin
+			.route(&path, moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = route.broadcast().create_track("video", timed()).expect("create track");
+		let mut group = track.append_group(0).expect("append group");
+		group
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"escaped".as_ref())
+			.expect("write frame");
+		group.close().expect("finish group");
+		let (_pub_client, pub_connection) = kio::clock::timeout(
+			TIMEOUT,
+			connect_once(client_version(Some(publisher)).with_publisher(&pub_origin), url.clone()),
+		)
+		.await
+		.expect("publisher connect timeout")
+		.expect("publisher connect failed");
+
+		let sub_origin = moq_tokio::origin::spawn();
+		let sub_consumer = sub_origin.consume();
+		let mut announcements = sub_consumer.routes();
+		let (_sub_client, sub_connection) = kio::clock::timeout(
+			TIMEOUT,
+			connect_once(client_version(Some(subscriber)).with_subscriber(sub_origin), url.clone()),
+		)
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed");
+
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
+			.await
+			.expect("announcement timeout")
+			.expect("origin closed");
+		assert!(active, "{publisher} -> {subscriber}: expected an announcement");
+		assert_eq!(update.prefix, path, "{publisher} -> {subscriber}");
+
+		let broadcast = sub_consumer.request(&path, None).await.expect("announced broadcast resolves");
+		let mut track_sub = broadcast.track("video").unwrap().subscribe(None).await.expect("subscribe");
+		let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
+			.await
+			.expect("recv_group timeout")
+			.expect("recv_group failed")
+			.expect("track closed prematurely");
+		let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
+			.await
+			.expect("read_frame timeout")
+			.expect("read_frame failed")
+			.expect("group closed prematurely");
+		assert_eq!(&frame.payload[..], b"escaped", "{publisher} -> {subscriber}");
+
+		drop(track);
+		drop(route);
+		drop(pub_connection);
+		drop(sub_connection);
+	}
+
 	web_handle.abort();
 }
 
