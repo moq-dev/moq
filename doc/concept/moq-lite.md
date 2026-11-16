@@ -33,7 +33,8 @@ A broadcast is named by a path: non-empty segments joined by `/`, such as
 `room/alice`. A path never starts or ends with `/` or doubles one, and a `\`
 only escapes a `\` or `/` (how a moq-transport namespace field holding one is
 spelled), so each name has one spelling, and every API and peer refuses any
-other. The empty path is the root, which prefixes every path.
+other. An escaped `/` stays inside its segment: `room/a\/b` has two segments,
+one per namespace field. The empty path is the root, which prefixes every path.
 
 ## Discovery
 
@@ -205,8 +206,9 @@ matches `room` and every descendant. Segments are separated by `/`:
 | `pre*suf` | One segment with that prefix and suffix, without overlapping them. |
 | `**` | Zero or more segments. |
 
-A pattern may contain at most 32 segments and one `**`. There is no escape for
-a literal `*`. The empty pattern matches the empty path.
+A pattern may contain at most 32 segments and one `**`. A literal escapes a `/`
+the way a path does, so `room/a\/b/*` names a namespace field holding a `/`;
+there is no escape for a literal `*`. The empty pattern matches the empty path.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
