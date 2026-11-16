@@ -551,7 +551,7 @@ async fn the_section_goes_with_the_importer() {
 			);
 			drop(passthrough);
 		}
-		assert!(catalog.snapshot().ext.mpegts.is_empty(), "abort {abort}");
+		assert!(catalog.snapshot().ext.mpegts.passthrough.is_none(), "abort {abort}");
 	}
 }
 

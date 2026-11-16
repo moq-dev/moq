@@ -206,15 +206,12 @@ impl<E: super::Catalog> Finished<E> {
 
 impl<E: super::Catalog> Drop for Section<E> {
 	fn drop(&mut self) {
-		let written = &self.written;
-		// A closed catalog has nothing left to remove it from.
+		// A closed catalog has nothing left to remove it from. The rate stays: it is the
+		// multiplex's, which a demultiplexing importer of the same source may also write, and
+		// that importer leaves it in place when it ends too.
 		let _ = self.catalog.mutate(|catalog| {
 			if let Some(mpegts) = catalog.ext.mpegts_mut() {
 				mpegts.passthrough = None;
-				// The rate is the multiplex's, so leave one something else wrote since.
-				if mpegts.mux_rate == written.mux_rate {
-					mpegts.mux_rate = None;
-				}
 			}
 		});
 	}
