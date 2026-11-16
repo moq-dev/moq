@@ -222,9 +222,12 @@ interface SubscribeEntry {
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
 	declared?: { start?: bigint | null; requested?: bigint };
-	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds: the budget
-	// a stale drop is recorded under.
-	maxDelay?: number;
+	// The narrowest max delay the SUBSCRIBE and every SUBSCRIBE_UPDATE asked for, in milliseconds,
+	// which a lite-07 stale drop is recorded under: the wire does not say which update a drop
+	// crossed, so it may have been judged under any budget asked before it arrived. Too narrow
+	// costs a wider reader a request of its own; too wide would settle it on a group it could
+	// still get.
+	staleBudget: number;
 	// The subscribe stream, from the setup that registered this entry to its end.
 	stream: SubscribeStream;
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
@@ -2320,7 +2323,7 @@ export class Subscriber {
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 		const entry: SubscribeEntry = {
 			track: producer,
-			maxDelay: msg.maxDelay,
+			staleBudget: msg.maxDelay,
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -2787,6 +2790,7 @@ export class Subscriber {
 		);
 		const entry: SubscribeEntry = {
 			track: producer,
+			staleBudget: msg.maxDelay,
 			compress: copy.compress,
 			timescale: copy.timescale,
 			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
@@ -3222,10 +3226,11 @@ export class Subscriber {
 				else entry.tail.account(start, end);
 				// A paused group the drop names ends there: no continuation follows.
 				this.#dropPaused(entry, start, end, error);
-				// On lite-07 an OLD drop is stale, judged under this subscription's budget: a reader
-				// wider than that does not settle on it, and asks for the group with a request of its own.
+				// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
+				// judged under: a reader wider than that does not settle on it, and asks for the group
+				// with a request of its own.
 				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
+				const hole = stale ? staleHole(entry.staleBudget) : { error };
 				hooks.dropTrackGroups(entry.track, start, end, hole);
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
@@ -3441,7 +3446,7 @@ export class Subscriber {
 				ranges: edit?.add,
 				remove: edit?.remove,
 			});
-			entry.maxDelay = update.maxDelay;
+			entry.staleBudget = Math.min(entry.staleBudget, update.maxDelay);
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the

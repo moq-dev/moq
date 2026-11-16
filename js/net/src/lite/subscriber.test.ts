@@ -1685,7 +1685,8 @@ test.each(["continued", "dropped"] as const)("a reset without its code pauses th
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
 // leaves the stream open forever. A drop accounts for its group, so the subscription's end waits
 // for that stream at most the grace: a stale drop before or after its header, or a final one before
-// it, even once a later stale drop of the group expires, whether it came before or after the header. A final drop after it ends the read at once.
+// it, even with a stale drop of the group after the final one and an update after both. A final
+// drop after it ends the read at once.
 test.each([
 	["stale", "before"],
 	["stale", "after"],
@@ -1722,7 +1723,7 @@ test.each([
 		if (kind === "final then stale" && order === "before") await respond(request, version, [stale]);
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
-		// The update expires the stale drop, but not the final one beneath it.
+		// An update reopens neither drop.
 		if (kind === "final then stale") {
 			track.update({ priority: 1 });
 			await drainReactions();
@@ -3345,6 +3346,48 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		expect(three.group.closed.peek()).toBeUndefined();
 		two.read.done();
 		three.read.done();
+	} finally {
+		responses.mockRestore();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A lite-07 stale (OLD) drop is recorded under the narrowest budget the subscription asked: the wire
+// does not say which update a drop crossed, so one arriving after a widening update may have been
+// judged under the budget before it. Mirrors the Rust `an_update_reopens_no_stale_drop`.
+test("a stale drop is recorded under the narrowest budget asked on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { staleBudget: number };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		await drainReactions();
+		if (!entry) throw new Error("no subscription");
+		expect(entry.staleBudget).toBe(500);
+
+		track.update({ delay: { max: Duration.millis(5000) } });
+		await drainReactions();
+		expect(entry.staleBudget).toBe(500);
+		track.update({ delay: { max: Duration.millis(200) } });
+		await drainReactions();
+		expect(entry.staleBudget).toBe(200);
 	} finally {
 		responses.mockRestore();
 		track.close();
