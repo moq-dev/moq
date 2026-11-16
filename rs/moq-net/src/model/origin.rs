@@ -519,7 +519,7 @@ pub struct RouteInfo {
 	/// every other eligible route, whatever its priority or cost, yet still serves when
 	/// nothing else does.
 	///
-	/// A priority state, never a saturated metric. Local, like [`Self::via`]: never
+	/// A ranking state, never a saturated metric. Local, like [`Self::via`]: never
 	/// forwarded, so a relay advertises a draining route at its real cost and its
 	/// readers never see the flag.
 	pub(crate) draining: bool,
@@ -1920,7 +1920,7 @@ struct OriginScope {
 
 /// A subtree a handle reads from elsewhere on the origin: `at/rest` resolves at
 /// `target/rest`. Both absolute.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Mount {
 	at: Path,
 	target: Path,
@@ -1928,7 +1928,7 @@ struct Mount {
 
 /// A mount as a reader of a prefix sees it through a handle: where the origin holds
 /// what it presents, and how the handle names that.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Mounted {
 	mount: Mount,
@@ -1948,6 +1948,11 @@ impl Mounted {
 	/// Whether the absolute, handle-side `path` lies at or beneath the mount point.
 	pub fn holds(&self, path: &Path) -> bool {
 		path.has_prefix(&self.mount.at)
+	}
+
+	/// The absolute, handle-side mount point.
+	pub fn at(&self) -> &Path {
+		&self.mount.at
 	}
 
 	/// How many segments the handle-side `path` lies beneath the mount point: the most a
@@ -2430,13 +2435,6 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_node(&self) -> crate::route::Node {
 		self.consume().route_node()
-	}
-
-	/// See [`Consumer::route_closing`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
@@ -5415,6 +5413,13 @@ impl kio::Task for FrontServe {
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					io.copy = None;
 					io.held = None;
+					// A copy that failed may have failed with its route, which the table can
+					// already have replaced: the front takes that change first, so it fails over
+					// to the replacement rather than giving up on the route that died.
+					if result.is_err() && self.watch.poll_changed(&kio::Waiter::noop(), self.seen).is_ready() {
+						let selected = self.select();
+						self.events.push_back(selected);
+					}
 					Event::TrackEnded {
 						track: name,
 						source,
@@ -7520,16 +7525,6 @@ impl Consumer {
 			None => crate::route::node::declared_for(self.node),
 		};
 		id.and_then(NonZeroU64::new)
-	}
-
-	/// Hold back the disconnect of every route stream of the session `tag` dropped until
-	/// the guard is released, so the session closing costs the route layer one recompute
-	/// and reports its hops dead; `None` while no session created the route node, which
-	/// then has no streams.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on
@@ -11382,7 +11377,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			matches!(
-				stream.try_output(),
+				stream.try_wire(),
 				Some(crate::route::node::Output::Route { reach: Some(_), .. })
 			),
 			"the new stream is sent the route to the announced claim"
@@ -16418,7 +16413,7 @@ mod tests {
 		drop(alice);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
-		let output = stream.try_output();
+		let output = stream.try_wire();
 		assert!(
 			matches!(
 				&output,

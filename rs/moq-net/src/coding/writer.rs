@@ -908,7 +908,7 @@ mod tests {
 				starts: vec![Some(3)],
 			})
 			.unwrap();
-		writer.buffer(&lite::AnnounceBroadcast::Synced).unwrap();
+		writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 }).unwrap();
 		assert_eq!(
 			stats.snapshot().control().len(),
 			4,

@@ -95,7 +95,7 @@ pub trait Sealed: Sized {
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)>;
 
 	/// Run the session's protocol until it ends, alongside its supervision.
-	fn drive(driver: Self::Driver) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+	fn drive(driver: Self::Driver) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static;
 }
 
 impl Sealed for moq_tokio::server::Request {

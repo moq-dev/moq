@@ -600,7 +600,7 @@ pub struct RouteNode {
 }
 
 impl RouteNode {
-	/// A node holding `claims` claims of its own under `live/`, answering one stream
+	/// A node holding `claims` claims of its own under `live/`, answering one session
 	/// per prefix in `streams`, each already sent its snapshot.
 	pub fn new(claims: usize, streams: &[&str]) -> Self {
 		let node = crate::route::Node::new(1, 1, route_clock());
@@ -612,7 +612,9 @@ impl RouteNode {
 			.map(|(i, prefix)| {
 				let link = crate::route::Link::default();
 				let peer = route_peer(i as u64 + 1, i as u64 + 2);
-				node.answer(peer, link, Path::new(prefix).unwrap()).unwrap()
+				let stream = node.connect(peer, link).unwrap();
+				stream.edit(route_ask(Path::new(prefix).unwrap())).unwrap();
+				stream
 			})
 			.collect();
 		let node = Self {
@@ -678,7 +680,9 @@ impl RouteRelay {
 		let answer = (0..answers as u64)
 			.map(|i| {
 				let peer = route_peer(i + 1, i + 3);
-				node.answer(peer, crate::route::Link::default(), Path::empty()).unwrap()
+				let stream = node.connect(peer, crate::route::Link::default()).unwrap();
+				stream.edit(route_ask(Path::empty())).unwrap();
+				stream
 			})
 			.collect();
 		let instance = crate::Instance::random();
@@ -686,7 +690,9 @@ impl RouteRelay {
 		let receive = (0..streams as u64)
 			.map(|i| {
 				let peer = route_peer(answers as u64 + i + 1, Self::ORIGIN);
-				let receive = node.receive(peer, crate::route::Link::default()).unwrap();
+				let receive = node.connect(peer, crate::route::Link::default()).unwrap();
+				// The peer answered what the node asks it for.
+				receive.edited(Default::default());
 				let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
 				receive.route(Self::ORIGIN, Path::empty(), Some(reach));
 				let snapshot = (0..claims)
@@ -848,11 +854,17 @@ impl RouteFollower {
 		follower
 	}
 
-	/// Open the stream for prefix `k`, which hears the origin's route and snapshot.
+	/// Open the session for prefix `k`, which hears the origin's route and snapshot.
 	fn follow(&self, k: usize) -> crate::route::node::Stream {
 		let prefix = Path::new(&format!("live/{k}")).unwrap();
-		let peer = route_peer(Self::TAG, Self::ORIGIN);
-		let stream = self.node.receive(peer, crate::route::Link::default()).unwrap();
+		let peer = route_peer(Self::TAG + k as u64, Self::ORIGIN);
+		let link = crate::route::Link {
+			interest: [prefix.clone()].into(),
+			..Default::default()
+		};
+		let stream = self.node.connect(peer, link).unwrap();
+		// The peer answered what the node asks it for.
+		stream.edited(Default::default());
 		let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
 		stream.route(Self::ORIGIN, prefix.clone(), Some(reach));
 		let claim = crate::route::node::Claim {
@@ -871,7 +883,7 @@ impl RouteFollower {
 		stream
 	}
 
-	/// Close one prefix's stream and open it again, returning how many outputs the
+	/// Close one prefix's session and open it again, returning how many outputs the
 	/// node queued.
 	pub fn refollow(&mut self) -> usize {
 		let k = self.next % self.streams.len();
@@ -882,9 +894,8 @@ impl RouteFollower {
 		self.drain()
 	}
 
-	/// Close every stream at once, as a session ending does.
+	/// Close every session.
 	pub fn teardown(self) {
-		let _closing = self.node.closing(Self::TAG);
 		drop(self.streams);
 	}
 
@@ -892,6 +903,14 @@ impl RouteFollower {
 		(self.streams.iter().flatten())
 			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
 			.sum()
+	}
+}
+
+/// A peer's request for `prefix` alone.
+fn route_ask(prefix: Path) -> crate::route::path::Edit {
+	crate::route::path::Edit {
+		remove: Vec::new(),
+		add: vec![prefix],
 	}
 }
 
@@ -2087,23 +2106,25 @@ pub fn pattern(data: &[u8]) -> bool {
 }
 
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
-/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message and
-/// both kinds of DEAD (the sweep sets ROUTE_START's type byte but fills its size byte
-/// with the body pattern, so none decodes whole), and a DATAGRAMS request, whose eight
-/// fields outgrow the sweep's longest body.
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message,
+/// both kinds of DEAD, and an ANNOUNCE_REQUEST and its ANNOUNCE_OK (the sweep sets
+/// ROUTE_START's type byte but fills its size byte with the body pattern, so none
+/// decodes whole), and a DATAGRAMS request, whose eight fields outgrow the sweep's
+/// longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[8, 0, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 8, 1, 0, 1, 1, 0, 0, 0x80, 1]),
+	(5, &[6, 9, 1, 0, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[7, 7, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
-	(5, &[15, 7, 0, 1, 1, 2, 0, 0, 0]),
-	(5, &[15, 7, 0, 1, 1, 2, 0, 1, 0]),
-	(5, &[15, 15, 0, 1, 1, 2, 1, 0, 1, 0, 6, 1, 1, 1, 0, 0x80, 1]),
+	(5, &[15, 6, 0, 1, 1, 2, 0, 0]),
+	(5, &[15, 6, 0, 1, 1, 2, 1, 2]),
 	(5, &[15, 2, 1, 1]),
+	(5, &[16, 4, 0, 1, 0, 0]),
+	(5, &[17, 0]),
 ];
 
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,

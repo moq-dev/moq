@@ -1647,6 +1647,9 @@ impl Cluster {
 	/// A fixed bind port is kept instead: static and API peers share one socket
 	/// on it, while LAN dials still take ephemeral ports.
 	///
+	/// The template's [`tokens`](moq_tokio::connect::Config::tokens) are ignored: a
+	/// peer is handed only `cluster.token` or its own `token`.
+	///
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
@@ -2319,6 +2322,9 @@ impl Cluster {
 			.as_deref()
 			.cloned()
 			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
+		// A peer gets only the credential the cluster settings chose for it, so the
+		// template's would reach every peer, LAN ones included.
+		connect.tokens.clear();
 		if ephemeral {
 			let mut bind = connect.resolve().bind;
 			bind.set_port(0);
@@ -4395,6 +4401,83 @@ mod tests {
 			driver::connection::Error::ApplicationClosed(close) => assert_eq!(close.reason, "client shutdown"),
 			other => panic!("the link ended with {other:?}, not the shutdown close"),
 		}
+	}
+
+	/// Cluster dials carry only the credentials the cluster settings name: a dial
+	/// template's own tokens reach neither a static peer nor a LAN peer, in SETUP
+	/// or the URL. lite-07 puts the template's first token in SETUP and the rest on
+	/// AUTH streams, so an empty SETUP token means the template sent none. The
+	/// template's other settings (version, TLS) still dial both.
+	#[tokio::test]
+	async fn cluster_dials_present_no_template_tokens() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		moq_tokio::crypto::install_default().unwrap();
+
+		let mut server = moq_tokio::server::Config::default();
+		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		server.listen.tls.generate = vec!["localhost".into()];
+		server.listen.version = vec!["moq-lite-07-wip".parse().unwrap()];
+		let server = server.init().expect("server");
+		let fingerprint = server
+			.certificates()
+			.fingerprints()
+			.into_iter()
+			.next()
+			.expect("generated fingerprint");
+		let mut listener = server.listen().await.expect("listen");
+		let port = listener.local_addr().expect("quic addr").port();
+		let (sender, mut seen) = tokio::sync::mpsc::unbounded_channel();
+		tokio::spawn(async move {
+			while let Ok(request) = listener.accept().await {
+				let token = request.token().map(|token| token.value.clone());
+				sender
+					.send((request.path().to_string(), request.query().map(str::to_string), token))
+					.ok();
+				tokio::spawn(async move {
+					let Ok(_session) = request.ok().await else { return };
+					std::future::pending::<()>().await;
+				});
+			}
+		});
+		let mut next = async || {
+			kio::clock::timeout(TIMEOUT, seen.recv())
+				.await
+				.expect("no dial arrived")
+				.expect("server stopped")
+		};
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		connect.version = vec!["moq-lite-07-wip".parse().unwrap()];
+		connect.tokens = vec!["template-setup".parse().unwrap(), "template-auth".parse().unwrap()];
+
+		let config = Config {
+			connect: vec![Peer::new(format!("moqt://localhost:{port}/static"))],
+			..Default::default()
+		};
+		let cluster = new_cluster(config)
+			.expect("cluster")
+			.with_connect(connect, Default::default());
+		let started = cluster.clone().start().await.expect("start");
+		let _running = tokio::spawn(started.run());
+		assert_eq!(next().await, ("/static".to_string(), None, None), "static peer");
+
+		cluster.set_lan_credential("lan-proof");
+		let url: Url = format!("moqt://127.0.0.1:{port}{CLUSTER_PATH}/lan-proof")
+			.parse()
+			.expect("url");
+		let target = DialTarget {
+			key: PeerKey::canonicalize(&format!("moqt://127.0.0.1:{port}/")),
+			url: url.clone(),
+			urls: vec![url],
+			cost: None,
+			fingerprint: Some(fingerprint),
+			lan: true,
+			upstream: false,
+		};
+		let _lan = cluster.dial_lan_target(&target).expect("dial");
+		let (path, query, token) = next().await;
+		assert_eq!((query, token), (None, None), "LAN peer at {path}");
 	}
 
 	/// A second close awaits the shutdown the first started, and still finishes it

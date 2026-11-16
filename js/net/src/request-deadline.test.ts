@@ -176,9 +176,10 @@ for (const protocol of ["lite", "ietf"] as const) {
 			const clock = new Manual();
 			const installed = clock.install();
 			const transport = limited(mode);
+			// Lite-06 asks on a bidirectional stream of its own; lite-07 asks on its Announce Stream.
 			const subscriber =
 				protocol === "lite"
-					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, toHop(1n))
+					? new LiteSubscriber(transport.quic, Lite.DRAFT_06, toHop(1n))
 					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 			const announced = subscriber.routes();
 			try {

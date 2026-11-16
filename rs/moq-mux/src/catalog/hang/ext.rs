@@ -40,7 +40,7 @@ impl CatalogExt for () {}
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
 /// `version`, `video`, `audio`, `media`, `text`, `archive`, `clock`, `json`, `binary`, `stats`,
-/// `echo`, and the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject
+/// `echo`, `include`, `m2ts`, and the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject
 /// them to keep the wire JSON free of duplicate or retired keys. The exception is a root `clock`,
 /// which moved under `media`: an older publisher's is dropped on decode, so its media still plays.
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -70,7 +70,8 @@ fn reserved(name: &str) -> bool {
 			| "clock" | "json"
 			| "binary"
 			| "stats" | "echo"
-			| "timeline"
+			| "include"
+			| "m2ts" | "timeline"
 	) || moq_msf::reserved_root(name)
 }
 
@@ -97,7 +98,7 @@ impl Extra {
 
 	/// Set (or replace) a section. Errors if `name` collides with a reserved member of either
 	/// catalog: hang's root `version` and base sections
-	/// (`video`/`audio`/`media`/`text`/`archive`/`clock`/`json`/`binary`/`stats`/`echo`),
+	/// (`video`/`audio`/`media`/`text`/`archive`/`clock`/`json`/`binary`/`stats`/`echo`/`include`/`m2ts`),
 	/// the retired `timeline` key that the wire format forbids beside `archive`, or a root member
 	/// MSF defines ([`moq_msf::reserved_root`]).
 	///
@@ -141,23 +142,17 @@ mod test {
 
 	impl CatalogExt for Scte35Ext {}
 
+	/// A section hang defines is hang's, whatever an application puts there: one with the wrong
+	/// shape refuses the catalog rather than passing to `Extra` or reading as empty.
 	#[test]
-	fn legacy_text_section_keeps_the_catalog() {
-		// `Extra` is exactly the mechanism an application would have used to carry its own `text`
-		// section before captions reserved the name, so an unreadable one must cost its captions
-		// and nothing else rather than failing the whole decode.
-		let json =
-			r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"text":{"overlay":"hi"},"scte35":{"spliceId":7}}"#;
+	fn a_mis_shaped_text_section_refuses_the_catalog() {
+		let json = r#"{"text":{"overlay":"hi"},"scte35":{"spliceId":7}}"#;
+		serde_json::from_str::<Catalog<Extra>>(json).expect_err("a mis-shaped text section");
 
-		let catalog: Catalog<Extra> = serde_json::from_str(json).expect("legacy text section broke the catalog");
-		assert!(catalog.text.is_empty());
-		assert!(catalog.video.is_empty());
-		assert!(catalog.audio.is_empty());
-		assert!(catalog.ext.get("scte35").is_some(), "unrelated sections still decode");
-
-		// Republishing drops the empty media sections the old payload carried.
-		let output = serde_json::to_string(&catalog).expect("failed to encode");
-		assert_eq!(output, r#"{"scte35":{"spliceId":7}}"#);
+		// Republishing drops the empty media sections an older payload carried.
+		let json = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"scte35":{"spliceId":7}}"#;
+		let catalog: Catalog<Extra> = serde_json::from_str(json).unwrap();
+		assert_eq!(serde_json::to_string(&catalog).unwrap(), r#"{"scte35":{"spliceId":7}}"#);
 	}
 
 	/// A publisher from before `media` writes its clock at the root: that key is dropped rather than
@@ -235,7 +230,7 @@ mod test {
 				.set_section("timeline", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
-		for name in ["media", "clock", "stats", "echo"] {
+		for name in ["media", "clock", "stats", "echo", "include", "m2ts"] {
 			assert!(
 				matches!(
 					producer.modify().unwrap().set_section(name, serde_json::json!({})),
