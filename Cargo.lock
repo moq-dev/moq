@@ -5331,9 +5331,9 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "8.2.1"
+version = "8.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f812702fbc75d35416d3f884e04925be7e9498f4eceea2e24ba34559284674"
+checksum = "c41a04a5f59df9322cc657286dd2d79f90816119b22c5f847607c850110205ab"
 dependencies = [
  "bitflags 2.13.2",
  "inotify",
@@ -7125,9 +7125,9 @@ dependencies = [
 
 [[package]]
 name = "rind"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b1b559e7ba7aa39bc4aa9b581dd2254919b3434d50669898bb8c8e7b154cfb8"
+checksum = "4e056ace5683dfa2e78b0c3b73cbb80ceb08496a3d537a4bfeeb6e16504270d5"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -7144,9 +7144,9 @@ dependencies = [
 
 [[package]]
 name = "rind-jsonwebtoken"
-version = "11.0.2"
+version = "11.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd34e9d4695a1a34a4d8fc31d3db5acda9a24cfd2ca90ffbd36f7c62dc4bb7eb"
+checksum = "09e4e08d1d342927a63a51c45bb2e44ebbc11da61cc67d7cb89c2c7a50c31cf8"
 dependencies = [
  "jsonwebtoken",
  "pkcs1 0.7.5",
@@ -7155,9 +7155,9 @@ dependencies = [
 
 [[package]]
 name = "rind-object-store"
-version = "0.14.2"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9150c3274a6f8789e0cb6a971cd22bae40698df54f596b9b663c18088ad144d5"
+checksum = "aa37097eda02526b73c09c63b4e57e725eba8d6d65d90335ea7ad89847255dba"
 dependencies = [
  "object_store",
  "rind",
@@ -7166,9 +7166,9 @@ dependencies = [
 
 [[package]]
 name = "rind-rcgen"
-version = "0.14.2"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c29833453b6f7def587d905c234d65e9172045504b77300084614d5df23dfdf"
+checksum = "39643eda229e1b63a8150a0687bcb946f1d252ffda8fdc7959e5b4bb936af45b"
 dependencies = [
  "rcgen",
  "rind",
@@ -7178,9 +7178,9 @@ dependencies = [
 
 [[package]]
 name = "rind-rustls"
-version = "0.23.2"
+version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f91c7ed15f653d52782f482dbea8d2ec350b49ee88a911660acf539e7cf6752"
+checksum = "91231b092d302751759d46e21a2a710371b6dddf9e9ec333ee795a2ce52dbddd"
 dependencies = [
  "rind",
  "rustls",
@@ -9524,9 +9524,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.29.1"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a06f08a856b009bc7bbaf7d3e79808595d032dd19074c0c2ef26e49e03e6bdc"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

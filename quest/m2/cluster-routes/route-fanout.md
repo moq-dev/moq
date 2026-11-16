@@ -10,7 +10,7 @@ remembered for sessions nothing was learned on.
 
 Reordered 2026-11-15 (maintainer, /quest-plan on [cache-aware
 multicast](/quest/m2/multicast/README.md)): this waits on the
-[bake-off](/quest/m2/multicast/bakeoff.md). Its first and third findings are
+[bake-off](https://github.com/moq-dev/moq/pull/8880). Its first and third findings are
 in `path::Router`'s indexes and its doubts and dead hops, which the new router
 replaces; the second, per-broadcast rewrites in `route/node.rs`, the
 [router](/quest/m2/multicast/router.md) takes as a requirement. If the new
@@ -54,7 +54,8 @@ which also edits `path.rs`.
 
 ## Required
 
-- [The bake-off](/quest/m2/multicast/bakeoff.md) - decides whether the path router these findings are in remains
+- [The switch](/quest/m2/multicast/switch.md) - deletes this with the old rule, unless the maintainer keeps today's rule on [moq-dev/moq#8880](https://github.com/moq-dev/moq/pull/8880)
+
 
 ## Related
 

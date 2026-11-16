@@ -915,6 +915,31 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing or [`abort`](Self::abort)ing it instead fails a reader that
+	/// joined in between. Returns true once the track is closed, including when it already
+	/// was, and this handle's later calls fail with `Closed`. Returns false, leaving the track
+	/// unchanged, when a reader wants it again, so keep serving and wait for the next null.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut phase = self.phase.lock().unwrap();
+		let err = moq_net::Error::App(error_code);
+		*phase = match std::mem::take(&mut *phase) {
+			TrackPhase::Open { raw, family } => match raw.abort_unwanted(err) {
+				Ok(()) => return Ok(true),
+				Err(raw) => TrackPhase::Open { raw, family },
+			},
+			TrackPhase::Finished(raw) => match raw.abort_unwanted(err) {
+				Ok(()) => return Ok(true),
+				Err(raw) => TrackPhase::Finished(raw),
+			},
+			TrackPhase::Closed => return Err(MoqError::Closed),
+		};
+		Ok(false)
+	}
+
 	/// End the track at the live edge.
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
