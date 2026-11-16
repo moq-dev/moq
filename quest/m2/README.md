@@ -322,7 +322,7 @@ what would need a breaking release had it landed right after the cut:
   in m2.
 - ✅ Stayed in m2 though not breaking itself:
   [the interest set](https://github.com/moq-dev/moq/pull/8728), because
-  [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
+  [the route stream](https://github.com/moq-dev/moq/pull/8835) needs it.
   The route stream stays because lite-07 would otherwise freeze with one
   router key per announce stream, which the route model doesn't check, and
   keep the reopen-and-hand-over machinery for its lifetime (rejected: moving

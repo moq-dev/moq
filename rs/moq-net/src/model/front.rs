@@ -397,10 +397,13 @@ impl Front {
 		let serving_route = self.serving.map(|(_, serving)| serving.route);
 		match best {
 			// The serving route is still the best one. The table moved, which is the
-			// evidence a track it lost waits for: ask it again.
+			// evidence a track it lost waits for: ask it again, as for a track that waited
+			// on a switch given up on, however that switch ended (a refused request clears
+			// `upstream` before it reselects).
 			Some(candidate) if Some(candidate.route) == serving_route => {
 				self.upstream = None;
 				self.unstrand(actions);
+				self.redispatch_idle(actions);
 			}
 			// Already asking through it.
 			Some(candidate) if self.upstream.is_some_and(|upstream| upstream.route == candidate.route) => {}
@@ -594,14 +597,18 @@ impl Front {
 				track.ended = true;
 				actions.push(Action::Finish { track: name });
 			}
-			// Died mid-serve after delivering from the same instance: normal
-			// failover, re-splice from the serving source at the first missing group.
+			// Died mid-serve after delivering from the same instance: normal failover,
+			// re-splice at the first missing group from the serving source, or from the
+			// route a switch already under way moves to, whatever the error, since the
+			// route it leaves may be what failed.
 			Err(err)
-				if delivered && err.transient() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
+				if delivered
+					&& (err.transient() || self.upstream.is_some())
+					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
-				self.redispatch(name, actions);
+				self.fail_over(name, actions);
 			}
 			// The route lost the content, which another route of the instance continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
@@ -678,7 +685,27 @@ impl Front {
 			track.state = TrackState::Spliced { source: draining };
 			return;
 		}
-		self.redispatch(name, actions);
+		self.fail_over(name, actions);
+	}
+
+	/// A copy of `name` failed: while a switch to another route is under way, the
+	/// track waits for it, and [`Self::attach`] asks the new source, since the failure
+	/// may be the route the switch leaves; otherwise the serving source is asked again.
+	fn fail_over(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
+		if self.upstream.is_none() {
+			self.redispatch(name, actions);
+		}
+	}
+
+	/// [`Self::redispatch`] every idle track.
+	fn redispatch_idle(&mut self, actions: &mut Vec<Action>) {
+		let idle: Vec<Arc<str>> = (self.tracks.iter())
+			.filter(|(_, track)| track.state == TrackState::Idle)
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in idle {
+			self.redispatch(name, actions);
+		}
 	}
 
 	/// Splice `name` from the serving source if it can serve it, or abort the
@@ -1754,6 +1781,120 @@ mod tests {
 			// A returning reader is not re-spliced either.
 			assert_actions(front.step(Event::Wanted { track: name("video") }), &[]);
 		}
+	}
+
+	/// A copy that fails while a switch to another route is under way waits for it,
+	/// whatever its error: the route the switch leaves may be what failed, so the new
+	/// source continues the track rather than the old one refusing it.
+	#[test]
+	fn a_copy_failing_during_a_switch_waits_for_it() {
+		for err in [
+			Error::Unroutable,
+			Error::from(crate::StreamError::Unroutable),
+			Error::Dropped,
+		] {
+			let mut front = serving(remote(1), 100);
+			assert_actions(
+				front.step(Event::Selected {
+					best: Some(remote(2)),
+					serving_closing: false,
+				}),
+				&[Action::Request { route: 2 }],
+			);
+			assert_actions(
+				front.step(Event::TrackEnded {
+					track: name("video"),
+					source: 100,
+					closing: false,
+					result: Err(err.clone()),
+					delivered: true,
+				}),
+				&[],
+			);
+			let actions = front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			assert!(
+				actions
+					.iter()
+					.any(|action| matches!(action, Action::Query { track, source: 200 } if track.as_ref() == "video")),
+				"{err}: {actions:?}"
+			);
+			assert!(
+				!actions.iter().any(|action| matches!(action, Action::Abort { .. })),
+				"{err}: {actions:?}"
+			);
+		}
+	}
+
+	/// A switch given up on, with the serving route the best again, leaves a track that
+	/// waited on it to the serving source, which a lost copy re-asks.
+	#[test]
+	fn a_switch_given_up_on_asks_the_serving_source_again() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(Error::Dropped),
+			delivered: true,
+		});
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+	}
+
+	/// A switch the target retracted ends with a refusal that is not standing: the serving
+	/// route winning the reselect still asks the track that waited on it.
+	#[test]
+	fn a_switch_refused_without_standing_asks_the_serving_source_again() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Dropped),
+				delivered: true,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Err(Refusal {
+					err: Error::NotFound,
+					standing: false,
+				}),
+			}),
+			&[Action::Reselect],
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
 	}
 
 	#[test]
