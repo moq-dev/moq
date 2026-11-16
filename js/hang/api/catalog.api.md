@@ -9,7 +9,6 @@ import { $strip } from "zod/v4/core";
 import { Net } from "@moq/hang";
 import { ZodMiniBase64 } from "zod/mini";
 import { ZodMiniBoolean } from "zod/mini";
-import { ZodMiniCatch } from "zod/mini";
 import { ZodMiniCustom } from "zod/mini";
 import { ZodMiniDefault } from "zod/mini";
 import { ZodMiniDiscriminatedUnion } from "zod/mini";
@@ -280,9 +279,9 @@ export const MediaSchema: ZodMiniObject<{
 		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 	}, $strip>>;
-	join: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
+	join: ZodMiniOptional<ZodMiniObject<{
 		interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-	}, $strip>>>;
+	}, $strip>>;
 }, $strip>;
 
 export type Mode = infer<typeof ModeSchema>;
@@ -361,7 +360,7 @@ export const RootSchema: ZodMiniObject<{
 			warmup?: number & $brand<"u53"> | undefined;
 		}>, Record<string, unknown>>>;
 	}, $strip>>;
-	binary: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	binary: ZodMiniOptional<ZodMiniObject<{
 		tracks: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			[x: string]: unknown;
 			bitrate?: number & $brand<"u53"> | undefined;
@@ -373,15 +372,15 @@ export const RootSchema: ZodMiniObject<{
 			mode: string;
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	echo: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	}, $strip>>;
+	echo: ZodMiniOptional<ZodMiniObject<{
 		path: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
+	}, $strip>>;
 	include: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 		broadcast: RelativeBroadcast;
 		instance?: ReferenceInstance | undefined;
 	}>, Record<string, unknown>>>>;
-	json: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	json: ZodMiniOptional<ZodMiniObject<{
 		tracks: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			[x: string]: unknown;
 			bitrate?: number & $brand<"u53"> | undefined;
@@ -393,20 +392,20 @@ export const RootSchema: ZodMiniObject<{
 			schema?: string | undefined;
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	media: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	}, $strip>>;
+	media: ZodMiniOptional<ZodMiniObject<{
 		clock: ZodMiniOptional<ZodMiniObject<{
 			timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 			wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 		}, $strip>>;
-		join: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
+		join: ZodMiniOptional<ZodMiniObject<{
 			interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-		}, $strip>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	stats: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+		}, $strip>>;
+	}, $strip>>;
+	stats: ZodMiniOptional<ZodMiniObject<{
 		track: ZodMiniString<string>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	text: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
+	}, $strip>>;
+	text: ZodMiniOptional<ZodMiniObject<{
 		renditions: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			broadcast?: RelativeBroadcast | undefined;
 			container: {
@@ -432,7 +431,7 @@ export const RootSchema: ZodMiniObject<{
 			role: string;
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
-	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
+	}, $strip>>;
 	version: ZodMiniOptional<ZodMiniNumber<number>>;
 	video: ZodMiniOptional<ZodMiniObject<{
 		display: ZodMiniOptional<ZodMiniObject<{
