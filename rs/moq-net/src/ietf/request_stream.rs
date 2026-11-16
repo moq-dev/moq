@@ -417,7 +417,7 @@ impl<'a> Decode<'a, Version> for Update {
 			return Err(DecodeError::InvalidValue);
 		}
 		let start = r.position();
-		let size = r.u16()? as usize;
+		let size = super::message::decode_length(r, version)?;
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
 		let update = Self::decode_body(&mut data, version).map_err(DecodeError::complete)?;
@@ -454,7 +454,7 @@ impl<'a> Decode<'a, Version> for NamespaceUpdate {
 			return Err(DecodeError::InvalidValue);
 		}
 		let start = r.position();
-		let size = r.u16()? as usize;
+		let size = super::message::decode_length(r, version)?;
 		let mut data = r.sub(size)?;
 		let mut decode = || {
 			let request_id = super::RequestId::decode(&mut data, version)?;

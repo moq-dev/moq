@@ -21,6 +21,14 @@ impl fmt::Display for Version {
 	}
 }
 
+impl Version {
+	/// Whether a control message's Message Length is a varint (draft-23 section 9) rather
+	/// than the 16-bit length of every earlier draft.
+	pub(crate) fn varint_length(self) -> bool {
+		!matches!(self, Self::Draft18 | Self::Draft20 | Self::Draft22)
+	}
+}
+
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
 		crate::Version::Ietf(v)
