@@ -37,7 +37,7 @@ fn timed_datagrams() -> moq_net::datagram::Info {
 const KEY_LEN: usize = 16;
 const NAME_MAC_LEN: usize = 32;
 
-const VECTORS: &str = include_str!("../../../drafts/moq-e2ee-00.json");
+const VECTORS: &str = include_str!("../../../drafts/moq-e2ee-01-wip.json");
 
 fn vectors() -> Value {
 	serde_json::from_str(VECTORS).unwrap()
@@ -321,7 +321,7 @@ fn negative_vectors() {
 }
 
 fn test_secret() -> [u8; SECRET_LEN] {
-	*b"moq-e2ee-00 test secret!!!!!!!!!"
+	*b"moq-e2ee-01-wip test secret!!!!!"
 }
 
 fn test_credential() -> Credential {

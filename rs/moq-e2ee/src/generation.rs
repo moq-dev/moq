@@ -153,14 +153,14 @@ impl Consumer {
 	}
 }
 
-/// `"moq-e2ee-00 name-mac" || scope`.
+/// `"moq-e2ee-01-wip name-mac" || scope`.
 pub(crate) fn name_mac_info(credential: &Credential, epoch: &Epoch) -> Vec<u8> {
 	let mut info = NAME_MAC_LABEL.to_vec();
 	scope(&mut info, credential, epoch);
 	info
 }
 
-/// `"moq-e2ee-00 name-key" || scope`.
+/// `"moq-e2ee-01-wip name-key" || scope`.
 pub(crate) fn name_key_info(credential: &Credential, epoch: &Epoch) -> Vec<u8> {
 	let mut info = NAME_KEY_LABEL.to_vec();
 	scope(&mut info, credential, epoch);

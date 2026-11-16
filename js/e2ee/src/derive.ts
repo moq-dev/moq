@@ -110,22 +110,22 @@ class Info {
 	}
 }
 
-/** `"moq-e2ee-00 path" || bytes(context) || u64(kid) || bytes(semantic)`. */
+/** `"moq-e2ee-01-wip path" || bytes(context) || u64(kid) || bytes(semantic)`. */
 export function pathInfo(context: Uint8Array, kid: number, semantic: string): Uint8Array<ArrayBuffer> {
 	return new Info().label(PATH_LABEL).bytes(context).u64(kid).text(semantic).finish();
 }
 
-/** `"moq-e2ee-00 name-mac" || bytes(context) || bytes(epoch) || u64(kid)`. */
+/** `"moq-e2ee-01-wip name-mac" || bytes(context) || bytes(epoch) || u64(kid)`. */
 export function nameMacInfo(context: Uint8Array, epoch: string, kid: number): Uint8Array<ArrayBuffer> {
 	return new Info().label(NAME_MAC_LABEL).bytes(context).text(epoch).u64(kid).finish();
 }
 
-/** `"moq-e2ee-00 name-key" || bytes(context) || bytes(epoch) || u64(kid)`. */
+/** `"moq-e2ee-01-wip name-key" || bytes(context) || bytes(epoch) || u64(kid)`. */
 export function nameKeyInfo(context: Uint8Array, epoch: string, kid: number): Uint8Array<ArrayBuffer> {
 	return new Info().label(NAME_KEY_LABEL).bytes(context).text(epoch).u64(kid).finish();
 }
 
-/** `"moq-e2ee-00 key" || bytes(context) || bytes(epoch) || u64(kid) || bytes(semantic) || domain`. */
+/** `"moq-e2ee-01-wip key" || bytes(context) || bytes(epoch) || u64(kid) || bytes(semantic) || domain`. */
 export function keyInfo(
 	context: Uint8Array,
 	epoch: string,

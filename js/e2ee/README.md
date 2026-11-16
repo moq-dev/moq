@@ -5,7 +5,7 @@
 # @moq/e2ee
 
 End-to-end encryption for [Media over QUIC](https://moq.dev) groups, datagrams,
-and track names, mirroring the Rust `moq-e2ee` crate. Profile `moq-e2ee-00` from
+and track names, mirroring the Rust `moq-e2ee` crate. Profile `moq-e2ee-01-wip` from
 [draft-lcurley-moq-e2ee](https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/),
 interoperable with Rust's `moq_e2ee`. It wraps `@moq/net` and checks each timestamp with
 `@moq/net`'s `Datagram.rescale(info, timestamp)` before encrypting, so a frame it accepts is one

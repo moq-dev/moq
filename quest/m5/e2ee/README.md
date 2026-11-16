@@ -8,9 +8,9 @@ Every application payload and semantic track name is confidential and authentica
 
 ## Plan
 
-Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): E2EE is "not ready yet". It lives in its own unpublished `moq-e2ee` crate again ([the crate move](/quest/m2/e2ee-crate.md)), and [the finished format](/quest/m3/e2ee-format.md) ships as profile `moq-e2ee-01` before any quest in this epic builds on it. That quest changes decisions recorded below, each marked where it stands: keys bind the semantic broadcast name, each group has its own key (no per-key limits), the per-track wrap is public, `Epoch` is `moq_net::Instance`, and the profile carries no compression. Encryption stays in the payload, invisible to relays, with nothing on the moq-net layer.
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): E2EE is "not ready yet". It lives in its own unpublished `moq-e2ee` crate again ([the crate move](https://github.com/moq-dev/moq/pull/8947)), and [the finished format](/quest/m3/e2ee-format.md) ships as profile `moq-e2ee-01` before any quest in this epic builds on it. That quest changes decisions recorded below, each marked where it stands: keys bind the semantic broadcast name, each group has its own key (no per-key limits), the per-track wrap is public, `Epoch` is `moq_net::Instance`, and the profile carries no compression. Encryption stays in the payload, invisible to relays, with nothing on the moq-net layer.
 
-The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), profile `moq-e2ee-00`, with `drafts/moq-e2ee-00.json` as the shared primitive vectors. It starts from IETF Secure Objects where the object model maps exactly, specifies the moq-lite and datagram bindings that draft does not cover, and records intentional differences from SFrame and the experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/moq/issues/3023).
+The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), profile `moq-e2ee-01-wip` (`moq-e2ee-00` is the published draft's), with `drafts/moq-e2ee-01-wip.json` as the shared primitive vectors. It starts from IETF Secure Objects where the object model maps exactly, specifies the moq-lite and datagram bindings that draft does not cover, and records intentional differences from SFrame and the experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/moq/issues/3023).
 
 ### Security boundary
 
@@ -71,7 +71,7 @@ Noted 2026-10-31 from [moq-dev/moq#7307](https://github.com/moq-dev/moq/pull/730
   neither the e2ee wrapper nor the trait mirror has them. Add them to the
   wrapper once moq-net does.
 
-Before `@moq/crypto` is first published, add its entrypoints to the API
+Before `@moq/e2ee` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since
 [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
 

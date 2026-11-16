@@ -17,7 +17,7 @@ function credential(): Credential {
 	return new Credential({
 		context: encoder.encode("example.com/meeting-123"),
 		kid: 7,
-		secret: encoder.encode("moq-e2ee-00 test secret!!!!!!!!!"),
+		secret: encoder.encode("moq-e2ee-01-wip test secret!!!!!"),
 	});
 }
 

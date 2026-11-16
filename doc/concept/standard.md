@@ -74,8 +74,8 @@ object state between relays. moq-lite-07 is still a work in progress
 does not offer it does not carry this state. Only Rust offers the extension, when
 `extensions.ietf` is set, and `moq-relay` always does on moq-lite-07.
 [moq-e2ee](/draft/moq-e2ee), published and experimental, is not a transport extension. It encrypts
-application payloads, so relays still forward named tracks they cannot read.
-See [Encryption](/concept/hang#encryption).
+application payloads, so relays still forward named tracks they cannot read. Its
+implementation is unpublished while the format changes.
 
 ### Deliberate deviations
 

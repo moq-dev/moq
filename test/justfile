@@ -68,7 +68,7 @@ harness:
 [positional-arguments]
 interop *args:
     uv run --no-project python ../sh/js/install.py frozen
-    just rs test -p moq-net -p moq-crypto --lib \
+    just rs test -p moq-net --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \

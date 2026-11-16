@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
- * moq-e2ee-00 primitives and known-answer vectors.
+ * moq-e2ee-01-wip primitives and known-answer vectors.
  *
- * `bun drafts/moq-e2ee-00.ts` verifies drafts/moq-e2ee-00.json against this
- * file. `bun drafts/moq-e2ee-00.ts --write` regenerates the JSON.
+ * `bun drafts/moq-e2ee-01-wip.ts` verifies drafts/moq-e2ee-01-wip.json against this
+ * file. `bun drafts/moq-e2ee-01-wip.ts --write` regenerates the JSON.
  *
  * This is the language-neutral contract, not the TypeScript E2EE core: it does
  * not wrap tracks, groups, or datagrams.
@@ -13,12 +13,12 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PROFILE = "moq-e2ee-00";
-export const SALT = utf8("moq-e2ee-00");
-export const PATH_LABEL = utf8("moq-e2ee-00 path");
-export const NAME_MAC_LABEL = utf8("moq-e2ee-00 name-mac");
-export const NAME_KEY_LABEL = utf8("moq-e2ee-00 name-key");
-export const KEY_LABEL = utf8("moq-e2ee-00 key");
+export const PROFILE = "moq-e2ee-01-wip";
+export const SALT = utf8("moq-e2ee-01-wip");
+export const PATH_LABEL = utf8("moq-e2ee-01-wip path");
+export const NAME_MAC_LABEL = utf8("moq-e2ee-01-wip name-mac");
+export const NAME_KEY_LABEL = utf8("moq-e2ee-01-wip name-key");
+export const KEY_LABEL = utf8("moq-e2ee-01-wip key");
 export const DOMAIN_GROUP = 0x00;
 export const DOMAIN_DATAGRAM = 0x01;
 export const TAG_LEN = 16;
@@ -418,7 +418,7 @@ export async function unprotect(
 const EPOCH = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f";
 const OTHER_EPOCH = "0199b7f4-9e10-7f42-8a3c-5d7e2b1c0f9a";
 
-function gen(epoch = EPOCH, secret = utf8("moq-e2ee-00 test secret!!!!!!!!!")): Generation {
+function gen(epoch = EPOCH, secret = utf8("moq-e2ee-01-wip test secret!!!!!")): Generation {
 	return {
 		context: utf8("example.com/meeting-123"),
 		epoch: utf8(epoch),
@@ -918,7 +918,7 @@ async function expectError(code: string, fn: () => unknown | Promise<unknown>): 
 async function main(): Promise<void> {
 	const write = process.argv.includes("--write");
 	const generated = await generate();
-	const jsonPath = pathFor("moq-e2ee-00.json");
+	const jsonPath = pathFor("moq-e2ee-01-wip.json");
 	if (write) {
 		mkdirSync(dirname(jsonPath), { recursive: true });
 		// Escape the BOM vector so it stays visible in the file.
@@ -928,10 +928,10 @@ async function main(): Promise<void> {
 	const onDisk = JSON.parse(readFileSync(jsonPath, "utf8")) as Awaited<ReturnType<typeof generate>>;
 	await verify(onDisk);
 	if (JSON.stringify(onDisk) !== JSON.stringify(generated)) {
-		throw new Error("drafts/moq-e2ee-00.json is stale; run bun drafts/moq-e2ee-00.ts --write");
+		throw new Error("drafts/moq-e2ee-01-wip.json is stale; run bun drafts/moq-e2ee-01-wip.ts --write");
 	}
 	console.log(
-		`moq-e2ee-00: ${onDisk.paths.length} path, ${onDisk.derivation.length} derivation, ${onDisk.groups.length} group, ${onDisk.datagrams.length} datagram, ${onDisk.negative.length} negative vectors`,
+		`moq-e2ee-01-wip: ${onDisk.paths.length} path, ${onDisk.derivation.length} derivation, ${onDisk.groups.length} group, ${onDisk.datagrams.length} datagram, ${onDisk.negative.length} negative vectors`,
 	);
 }
 

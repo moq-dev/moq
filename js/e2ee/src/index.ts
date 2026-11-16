@@ -1,7 +1,7 @@
 /**
  * End-to-end encryption for MoQ groups, datagrams, and track names.
  *
- * Implements profile `moq-e2ee-00` from
+ * Implements profile `moq-e2ee-01-wip` from
  * [draft-lcurley-moq-e2ee](https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/). Relays
  * forward ciphertext; content keys never enter `@moq/net`. Mirrors the Rust `moq-e2ee` crate.
  *

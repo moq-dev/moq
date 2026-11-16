@@ -1,17 +1,17 @@
 /** Profile string, also the HKDF salt. */
-export const PROFILE = "moq-e2ee-00";
+export const PROFILE = "moq-e2ee-01-wip";
 
 /** HKDF info prefix for opaque broadcast paths. */
-export const PATH_LABEL = "moq-e2ee-00 path";
+export const PATH_LABEL = "moq-e2ee-01-wip path";
 
 /** HKDF info prefix for the HMAC-SHA-256 key that derives physical name nonces. */
-export const NAME_MAC_LABEL = "moq-e2ee-00 name-mac";
+export const NAME_MAC_LABEL = "moq-e2ee-01-wip name-mac";
 
 /** HKDF info prefix for the AES-128-GCM key that seals physical names. */
-export const NAME_KEY_LABEL = "moq-e2ee-00 name-key";
+export const NAME_KEY_LABEL = "moq-e2ee-01-wip name-key";
 
 /** HKDF info prefix for AEAD keys. */
-export const KEY_LABEL = "moq-e2ee-00 key";
+export const KEY_LABEL = "moq-e2ee-01-wip key";
 
 /** AES-GCM tag length in bytes. */
 export const TAG_LEN = 16;

@@ -43,7 +43,7 @@ Facts found by the audit, re-checked at `80ca9787e3`:
   `js/publish/src/preview.ts:99`.
 - Nothing is published under the name: `@moq/ui` returned 404 on
   2026-11-12 ([first publish](/quest/m3/release/npm-first-publish.md)).
-  `js/crypto` is already `private: true`.
+  `js/e2ee` is already `private: true`.
 - The package is 783 lines of source and CSS, so a page loading both
   overlays carries that much twice.
 

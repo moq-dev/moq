@@ -34,7 +34,7 @@ import type * as Track from "./track.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const SECRET = encoder.encode("moq-e2ee-00 test secret!!!!!!!!!");
+const SECRET = encoder.encode("moq-e2ee-01-wip test secret!!!!!");
 
 function credential(): Credential {
 	return new Credential({ context: encoder.encode("example.com/meeting-123"), kid: 7, secret: SECRET });
@@ -1004,7 +1004,7 @@ test("secrets stay out of serialization", async () => {
 	const generation = cred.produce();
 	const net = netTrack(await generation.name("video"));
 	const producer = await generation.produce(net, "video");
-	const marker = "moq-e2ee-00 test secret";
+	const marker = "moq-e2ee-01-wip test secret";
 	for (const value of [cred, generation, producer]) {
 		expect(JSON.stringify(value) ?? "").not.toContain(marker);
 		expect(Bun.inspect(value)).not.toContain(marker);

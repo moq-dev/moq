@@ -1,17 +1,17 @@
 /// Profile string, also the HKDF salt.
-pub(crate) const PROFILE: &str = "moq-e2ee-00";
+pub(crate) const PROFILE: &str = "moq-e2ee-01-wip";
 
 /// HKDF info prefix for opaque broadcast paths.
-pub(crate) const PATH_LABEL: &[u8] = b"moq-e2ee-00 path";
+pub(crate) const PATH_LABEL: &[u8] = b"moq-e2ee-01-wip path";
 
 /// HKDF info prefix for the HMAC-SHA-256 key that derives physical name nonces.
-pub(crate) const NAME_MAC_LABEL: &[u8] = b"moq-e2ee-00 name-mac";
+pub(crate) const NAME_MAC_LABEL: &[u8] = b"moq-e2ee-01-wip name-mac";
 
 /// HKDF info prefix for the AES-128-GCM key that seals physical names.
-pub(crate) const NAME_KEY_LABEL: &[u8] = b"moq-e2ee-00 name-key";
+pub(crate) const NAME_KEY_LABEL: &[u8] = b"moq-e2ee-01-wip name-key";
 
 /// HKDF info prefix for AEAD keys.
-pub(crate) const KEY_LABEL: &[u8] = b"moq-e2ee-00 key";
+pub(crate) const KEY_LABEL: &[u8] = b"moq-e2ee-01-wip key";
 
 /// AES-GCM tag length in bytes.
 pub(crate) const TAG_LEN: usize = 16;

@@ -52,7 +52,8 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
   [claims](/quest/m2/auth-claims.md), and
   [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
-  [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
+  is its own unpublished crate again
+  ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under

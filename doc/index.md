@@ -53,7 +53,7 @@ features:
   - icon:
       src: /emoji/lock.svg
     title: Secure
-    details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN or end-to-end encrypt your content.
+    details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN.
 
   - icon:
       src: /emoji/back.svg

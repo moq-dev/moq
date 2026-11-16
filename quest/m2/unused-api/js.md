@@ -53,8 +53,8 @@ over `js` (outside `js/net/src` and `js/net/api`), `demo`, `test`, and
   with `Broadcast.Producer.requests()` after the cut, which is additive.
 - **`Datagram.rescale` and `Datagram.rescaleIn`**
   (`js/net/src/datagram.ts:13`, from `rescale.ts`) take any
-  `{timescale}`, and `@moq/crypto` calls `rescaleIn` for a stream track's
-  frame (`js/crypto/src/e2ee/group.ts:67`, `datagram.ts:92`). Rust has
+  `{timescale}`, and `@moq/e2ee` calls `rescaleIn` for a stream track's
+  frame (`js/e2ee/src/group.ts:67`, `datagram.ts:92`). Rust has
   `track::Info::rescale` and `rescale_in`
   (`rs/moq-net/src/model/track.rs:289`, `:300`). Export them under `Track`
   and drop the `Datagram` export.
@@ -68,7 +68,7 @@ Recommended in the same PR, from the audit, not individually decided:
 - `Group.Producer.isClosed` and `Group.Consumer.isClosed`
   (`js/net/src/group.ts:698`, `:1330`) duplicate
   `closed.peek() !== undefined`, which `js/AGENTS.md` names as the way to
-  ask. Two callers outside the package (`js/crypto/src/e2ee/group.ts:91`,
+  ask. Two callers outside the package (`js/e2ee/src/group.ts:91`,
   `js/hang/bench/buffered.ts:179`). Remove them and move the callers.
 - `Connection.Transport` includes `"webrtc"`
   (`js/net/src/connection/transport.ts:2`). Nothing produces that label

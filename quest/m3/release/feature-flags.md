@@ -47,7 +47,7 @@ judged, so this pass reads only the difference:
   ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)).
 - Kept, with the reason a new feature has to match:
   - `async` in kio, moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
-    moq-crypto, and moq-auth: the poll-first design (decided 2026-11-05 in
+    moq-e2ee, and moq-auth: the poll-first design (decided 2026-11-05 in
     [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607)), checked
     by `just rs coroutines`. kio's `runtime`, `macros`, `sim`, and `manual`
     follow it.
@@ -62,7 +62,8 @@ judged, so this pass reads only the difference:
     of moq-quic's graph, a layering need rather than a trim. Corrected
     2026-11-16: `sign` left in
     [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855), and `e2ee`
-    leaves with [the crate move](/quest/m2/e2ee-crate.md).
+    left with the crate move
+    ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)).
   - `serde` in kio, moq-pattern, and moq-crypto: an optional dependency, by
     ecosystem convention.
   - moq-video's `capture`: device I/O the bindings deliberately leave to the

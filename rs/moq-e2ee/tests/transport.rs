@@ -40,7 +40,7 @@ async fn connect_protected(version: Version, label: &str) -> Fixture {
 	let cred = Credential::new(Config {
 		context: format!("transport-{version}-{label}").into(),
 		kid: 7,
-		secret: *b"moq-e2ee-00 test secret!!!!!!!!!",
+		secret: *b"moq-e2ee-01-wip test secret!!!!!",
 	})
 	.unwrap();
 	let generation = cred.produce();

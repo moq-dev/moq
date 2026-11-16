@@ -111,7 +111,7 @@ rind 0.4 itself changes three things, of which MoQ uses two:
   `rg 'cpu::check|MissingFeature|UnsupportedCpu' rs` finds every site; at
   `985e8897` they are:
   - `moq_crypto::cpu::check()` callers: `rs/moq-crypto/src/provider.rs:22`
-    and `:48`, `rs/moq-crypto/src/e2ee/credential.rs:60`,
+    and `:48`, `rs/moq-e2ee/src/credential.rs:60`,
     `rs/moq-auth/src/crypto.rs:6`, `rs/moq-hls/src/server/mod.rs:188`,
     `rs/moq-hls/src/export/mod.rs:147`,
     `rs/moq-quic/src/config/endpoint.rs:122`, `rs/moq-rtmp/src/dial.rs:84`
@@ -119,7 +119,7 @@ rind 0.4 itself changes three things, of which MoQ uses two:
     `rs/moq-uring/src/quic/driver/mod.rs:126`,
     `rs/moq-webrtc/src/session.rs:674`, and `rs/qmux/src/tls.rs:76`.
   - The `UnsupportedCpu` error variants and re-export that wrap it, in
-    moq-auth, moq-crypto's e2ee, moq-hls, moq-quic, moq-rtmp, moq-tokio
+    moq-auth, moq-e2ee, moq-hls, moq-quic, moq-rtmp, moq-tokio
     (`rs/moq-tokio/src/crypto.rs:7`), moq-uring, moq-webrtc, and qmux, with
     the doc comments that name it.
   - The vendored providers, which call rind directly:

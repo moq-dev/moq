@@ -1,4 +1,4 @@
-// Every vector in drafts/moq-e2ee-00.json, run against the internal primitives.
+// Every vector in drafts/moq-e2ee-01-wip.json, run against the internal primitives.
 import { expect, test } from "bun:test";
 import { Credential } from "./credential.ts";
 import { type Domain, decode, encode, nameKeyInfo, nameMacInfo, nonce, pad, pathInfo } from "./derive.ts";
@@ -11,7 +11,7 @@ import { expand } from "./secret.ts";
 
 type Row = Record<string, unknown>;
 
-const vectors = (await Bun.file(new URL("../../../drafts/moq-e2ee-00.json", import.meta.url)).json()) as {
+const vectors = (await Bun.file(new URL("../../../drafts/moq-e2ee-01-wip.json", import.meta.url)).json()) as {
 	profile: string;
 	constants: Row;
 	generation: Row;
