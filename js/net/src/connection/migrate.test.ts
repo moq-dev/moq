@@ -720,3 +720,31 @@ test("a peer restarting through immediate GOAWAYs escalates the backoff but neve
 		installed.close();
 	}
 });
+
+test("a first session drained before it is healthy keeps retrying once its relay exits", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		delay: { initial: Duration.millis(10), max: Duration.millis(10) },
+	});
+
+	try {
+		await waitUntil(() => dials.length === 1 && reload.status.peek() === "connected");
+		const started = clock.now();
+		// A page opened while its relay drains: the GOAWAY comes at once, which no refusal sends.
+		await goaway(dials[0]?.server as WebTransport, "");
+		await elapse(clock, () => dials.length === 2 && reload.status.peek() === "connected");
+		// The relay exits before any session it served was healthy.
+		for (const dial of dials) dial.server.close();
+		await elapse(clock, () => dials.length === 3 || reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+		expect(clock.now().since(started).asMillis()).toBeLessThan(1000);
+	} finally {
+		reload.close();
+		installed.close();
+	}
+});

@@ -18,7 +18,7 @@ Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan`, `Re
 | `OfflineMeansNothingServes` | Disconnected is reported only when no predecessor still serves (`Action::Offline`: "nothing serves anymore"); one closing gracefully carries nothing and takes no new work. | An app waiting on `established` stalls, and the UI says disconnected, while a session still carries its media. |
 | `NoOrphan` | Until the policy is done, every open session is the live one or the predecessor. | A transport and the peer's state stay open with nothing able to reach them. |
 | `PresenceBalanced` | `sessions_started - sessions_ended` is 1 while connected and 0 otherwise. | Presence counts drift on every migration. |
-| `FirstWalkFailsFast` | Until a session has stayed up past the healthy bar, no failed dial or closed session backs off: either ends the policy. Only a GOAWAY's backoff, a move the peer asked for, comes sooner. | A setup mistake (an untrusted certificate, no version in common) or a refused credential retries forever instead of surfacing. |
+| `FirstWalkFailsFast` | Until a session has stayed up past the healthy bar or got a GOAWAY, which no refusal sends, no failed dial or closed session backs off: either ends the policy. | A setup mistake (an untrusted certificate, no version in common) or a refused credential retries forever instead of surfacing. |
 | `RedirectFollowed` | A dial never goes elsewhere than a redirect, named to a session the policy still holds, that the policy never acted on. | The replacement lands back on the node that is leaving. |
 
 ## Run
@@ -29,7 +29,7 @@ quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartHandoff.cfg
 ```
 
-The first checks every rule over four sessions: about 1.8M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 400k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule over four sessions: about 1.7M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 370k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -46,7 +46,7 @@ Sync commit: `fabfe5ed356591a95e8d87a2f3105fcf51460a24`. Run `git log fabfe5ed35
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/reconnect.rs` `Reconnect::poll` (queue, predecessor, phases), `follow` | `Pop`, `Retire`, `IdleClose`, `FollowPred`, `Dial`, `Abandon`, `BackoffEnds`, `LiveEnds`, `ProbeAsk`, `ProbeAbandon` |
-| `rs/moq-net/src/reconnect.rs` `established`, and `walk_failed` and `closed` failing fast until it is set | `established`, `drained`, `Failed`, `Abandon`, `EndClosed` |
+| `rs/moq-net/src/reconnect.rs` `established`, set by `end` and by a GOAWAY in `poll`, and `walk_failed` and `closed` failing fast until it is set | `established`, `EndGoaway`, `LiveEnds`, `Failed`, `Abandon`, `EndClosed` |
 | `rs/moq-net/src/reconnect.rs` `connected`, `fallback`, `failed`, `probed` | `Connected`, `Failed`, `ProbeFails`, `ProbeGetsThrough` |
 | `rs/moq-net/src/reconnect.rs` `end`, `closed`, `done`, `Predecessor` | `EndGoaway`, `EndClosed`, `Done`, `Retire`, `IdleClose` |
 | `rs/moq-net/src/reconnect.rs` `Restart::Wait`, `Restart::Handoff` | `LiveEnds` and `WaitOut` with `Restart = "wait"` (`RestartWait.cfg`) and `"handoff"` (`RestartHandoff.cfg`) |

@@ -41,8 +41,8 @@ const PROBE_MAX = Duration.secs(300);
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Nothing retries until a session to the current URL has been established, which
- * takes staying up past {@link ReloadDelay.healthy}: an attempt failing, or a session closing
- * sooner, stops that URL with its error. That covers a relay refusing a session right after
+ * takes staying up past {@link ReloadDelay.healthy} or being drained by a GOAWAY, which no
+ * refusal sends: an attempt failing, or a session closing sooner, stops that URL with its error. That covers a relay refusing a session right after
  * accepting it, as it does a rejected token on moq-lite 03 or later. After that, every failure is retried,
  * including an attempt that outlives {@link ConnectProps.timeout}, until
  * {@link ReloadDelay.timeout} runs out, whatever the error, an auth rejection included; only a
@@ -192,7 +192,7 @@ export type ReloadStatus = "connecting" | "connected" | "disconnected";
  * redials with exponential backoff.
  *
  * The first attempt for a URL fails fast instead: until a session to it has stayed up past
- * {@link ReloadDelay.healthy}, a failed attempt or a closed session sets {@link Reload.error}
+ * {@link ReloadDelay.healthy} or been drained by a GOAWAY, a failed attempt or a closed session sets {@link Reload.error}
  * rather than retrying, so a setup mistake such as an
  * untrusted certificate or no version in common surfaces at once. A page opened before its
  * relay is reachable therefore stays disconnected until a new URL or a disable/re-enable.
@@ -370,7 +370,8 @@ export class Reload {
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
-	// The configured href a session stayed up past the healthy bar for. Until it matches, a failed
+	// The configured href a session stayed up past the healthy bar for, or the peer drained with a
+	// GOAWAY. Until it matches, a failed
 	// attempt or a closed session gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
 	// resume a URL that worked.
 	#establishedHref: string | undefined;
@@ -669,6 +670,10 @@ export class Reload {
 					}
 
 					current = undefined;
+					// A peer's GOAWAY establishes the URL however soon it came: the peer accepted the
+					// session and asked us to move, which a refusal never does, so a page opened while
+					// its relay drains rides out the restart. Leaving the fallback is our own.
+					if (!reached) this.#establishedHref = href;
 					// A pinned WebSocket URL can win the race against the primary. Judge the
 					// redirect against that endpoint, not the primary we never reached.
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;

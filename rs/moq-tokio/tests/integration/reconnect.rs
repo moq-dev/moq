@@ -85,6 +85,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 /// count, however fast the redial.
 #[tokio::test]
 async fn the_connect_count_advances_on_reconnect() {
+	kio::clock::host_time(); // real TCP sockets
 	let (port, mut sessions, _task) = spawn_server().await;
 	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
 	let mut connection = quick_client(Default::default()).connect(url);
@@ -177,6 +178,7 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 /// After a healthy first session, a protocol violation reconnects like any other close.
 #[tokio::test]
 async fn a_protocol_violation_reconnects() {
+	kio::clock::host_time(); // real TCP sockets
 	let (port, mut sessions, task) = spawn_server().await;
 	let mut connection =
 		quick_client(Default::default()).connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap());

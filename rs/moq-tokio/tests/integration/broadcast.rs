@@ -3508,6 +3508,7 @@ async fn reconnect_ends_on_a_first_session_rejection() {
 /// like any other close: the loop does not judge the error's kind.
 #[tokio::test]
 async fn reconnect_retries_a_rejection_after_a_healthy_session() {
+	kio::clock::host_time(); // real QUIC sockets
 	const HEALTHY: Duration = Duration::from_millis(50);
 	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();

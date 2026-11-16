@@ -44,8 +44,8 @@ fn verdict(client: &Client, url: &url::Url, err: &Error) -> Verdict {
 /// Three knobs, each with one job: `initial` and `multiplier` set the wait before
 /// each retry, `max` caps it, and `healthy` decides which sessions count as failed
 /// attempts. See [`moq_net::reconnect::Backoff`], which this resolves to, for how
-/// the policy applies them. It applies only once a session has stayed up past `healthy`:
-/// until then, a failed dial or a closed session ends the connection instead of retrying.
+/// the policy applies them. Until a session has stayed up past `healthy` or been drained by
+/// a GOAWAY, a failed dial or a closed session ends the connection instead of retrying.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -889,8 +889,8 @@ pub struct Snapshot {
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
-/// redials with exponential backoff. Until a session has stayed up past the healthy bar,
-/// nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
+/// redials with exponential backoff. Until a session has stayed up past the healthy bar or
+/// been drained by a GOAWAY, nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
 /// credential does, stops the loop with its error, so a setup mistake surfaces at once. The read surface
 /// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),

@@ -391,6 +391,47 @@ async fn a_healthy_session_establishes_the_policy() {
 	assert_eq!(run.events, ["offline", "retrying"]);
 }
 
+/// A GOAWAY establishes the policy however soon it comes, since a refusal never drains a
+/// session. A client started while its relay drains follows the GOAWAY, and when the relay
+/// then exits, the replacement's close and the failed walks after it retry rather than end.
+#[kio::test]
+async fn a_goaway_before_healthy_establishes_the_policy() {
+	for restart in [Restart::Redial, Restart::Wait] {
+		let peer = url("tcp://peer:1/");
+		let mut config = config(INITIAL, None);
+		config.restart = restart;
+		let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
+		let mut run = Run::default();
+		drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+			!run.accepts.is_empty()
+		})
+		.await;
+
+		run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+		// `Redial` follows it to a replacement on the draining relay; `Wait` serves on.
+		if restart == Restart::Redial {
+			drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+				run.accepts.len() == 2
+			})
+			.await;
+		} else {
+			// Delivered before the relay exits, as at a drain's deadline.
+			kio::clock::sleep(Config::default().backoff.healthy / 10).await;
+		}
+
+		// The relay exits before any session it served was healthy, and stays down.
+		for server in run.servers.drain(..) {
+			server.abort(Error::Cancel);
+		}
+		let dials = run.dials.len();
+		let ended = drive(&mut machine, &[(peer, Peer::Fail(Verdict::Retry))], &mut run, |run| {
+			run.dials.len() == dials + 2
+		})
+		.await;
+		assert!(ended.is_none(), "{restart:?}: a drained first session gave up: {ended:?}");
+	}
+}
+
 /// A zero window is a real bound, not "unlimited": a retry's failure gives up at once. A
 /// peer that keeps serving is unaffected.
 #[kio::test]

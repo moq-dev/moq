@@ -204,9 +204,9 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 
 // Backoff is the retry pacing for automatic reconnects: the delay starts at
 // Initial, multiplies by Multiplier after each failed attempt, and caps at Max.
-// After Timeout of consecutive failures the connection gives up for good. It
-// applies only once a session has stayed up past 1s: until then, a failed dial or
-// a closed session, such as a refused credential, ends the connection with its
+// After Timeout of consecutive failures the connection gives up for good. Until a
+// session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a
+// closed session, such as a refused credential, ends the connection with its
 // error rather than retrying.
 //
 // Every field is optional: the zero value means the native default (1s, x2, 5s,
@@ -272,8 +272,9 @@ type Client struct {
 }
 
 // Dial starts a MoQ connection and returns without waiting for its first native dial to succeed. Cancel ctx
-// to abort an in-flight connect. Until a session has stayed up past 1s, a failed dial or a closed session, such
-// as a refused credential, closes the session with its error (see Session.Closed) rather than retrying.
+// to abort an in-flight connect. Until a session has stayed up past 1s or been drained by a GOAWAY, a failed
+// dial or a closed session, such as a refused credential, closes the session with its error (see Session.Closed)
+// rather than retrying.
 func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error) {
 	native, err := config.ffi()
 	if err != nil {

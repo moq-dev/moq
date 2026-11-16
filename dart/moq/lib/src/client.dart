@@ -61,9 +61,9 @@ final class ConnectOptions {
   final WebSocketConfig? websocket;
 
   /// Set true for a one-shot dial. By default a session that stayed up past 1s
-  /// redials with backoff whenever the transport drops; before then, a failed
-  /// dial or a closed session, such as a refused credential, ends it with that
-  /// error instead.
+  /// or was drained by a GOAWAY redials with backoff whenever the transport
+  /// drops; before then, a failed dial or a closed session, such as a refused
+  /// credential, ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.

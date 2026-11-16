@@ -20,8 +20,8 @@
 (* one it refuses, no retry window, no tokens, not connecting once, and no *)
 (* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
 (* past `Backoff::healthy`. Until a session has been established, which   *)
-(* takes one past that bar, a failed dial or a closed session ends the     *)
-(* policy (`Reconnect::established`).                                      *)
+(* takes one past that bar or a GOAWAY, a failed dial or a closed session *)
+(* ends the policy (`Reconnect::established`).                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -59,13 +59,12 @@ VARIABLES
     started,   \* `Presence::sessions_started`
     ended,     \* `Presence::sessions_ended`
     misdials,  \* 1 once a dial went elsewhere than an unheeded redirect named
-    established, \* `Reconnect::established`: a session stayed up past the healthy bar
-    drained    \* whether the backoff under way follows a GOAWAY rather than a failure
+    established \* `Reconnect::established`: a session stayed up past the healthy bar or got a GOAWAY
 
 policyVars == <<phase, live, watch, probe, pred, target, queue, sess, used, timer,
                 dial, dialTo, misdials>>
 callerVars == <<lc, lcSess, migrating, spred, started, ended, probing>>
-lifeVars == <<established, drained>>
+lifeVars == <<established>>
 vars == <<policyVars, callerVars, lifeVars>>
 
 \* A session: where it reached, whether it is open and who closed it ("peer",
@@ -103,7 +102,6 @@ Init ==
     /\ ended = 0
     /\ misdials = 0
     /\ established = FALSE
-    /\ drained = FALSE
 
 Open(s) == s # None /\ sess[s].open
 Abort(sx, s) == IF s # None /\ sx[s].open
@@ -287,12 +285,11 @@ Abandon ==
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
             \* `walk_failed` drops a redirect target, as in Failed.
             /\ target' = Start
-            /\ drained' = FALSE
             /\ UNCHANGED <<live, pred, queue>>
        \* A walk fails fast until then: `Action::Abandon`, then the `Done` it queued.
        ELSE /\ Done
             /\ queue' = <<"Done">>
-            /\ UNCHANGED <<timer, target, drained>>
+            /\ UNCHANGED <<timer, target>>
     /\ UNCHANGED <<watch, probe, sess, used, dialTo,
                    misdials, lc, lcSess, migrating, spred, started, ended, established>>
 
@@ -308,16 +305,17 @@ BackoffEnds ==
     /\ CallerSame
     /\ UNCHANGED lifeVars
 
-\* `Reconnect::end` for a GOAWAY naming `uri` off the live session `s`. A
-\* session past the healthy bar establishes the policy, whatever follows.
+\* `Reconnect::end` for a GOAWAY naming `uri` off the live session `s`. The
+\* GOAWAY establishes the policy however soon it came, as `Reconnect::poll` does
+\* on its receipt: the peer accepted the session, which a refusal never does.
 EndGoaway(s, uri) ==
     IF uri = Refused
     THEN \* A refused redirect is terminal.
          /\ Done
          /\ Emit(<<"Done">>, None)
-         /\ established' = (established \/ sess[s].age >= 1)
-         /\ UNCHANGED <<sess, watch, probe, target, timer, drained>>
-    ELSE /\ established' = (established \/ sess[s].age >= 1)
+         /\ established' = TRUE
+         /\ UNCHANGED <<sess, watch, probe, target, timer>>
+    ELSE /\ established' = TRUE
          /\ target' = IF uri = "" THEN target ELSE uri
          \* An older predecessor is retired outright, with no `Retired`.
          /\ sess' = [Abort(sess, pred) EXCEPT ![s].heeded = TRUE]
@@ -325,7 +323,6 @@ EndGoaway(s, uri) ==
          /\ live' = None
          \* A healthy session hands over at once; one that drained too soon backs off.
          /\ phase' = IF sess[s].age >= 1 THEN "start" ELSE "backoff"
-         /\ drained' = TRUE
          /\ timer' = [timer EXCEPT !["handover"] = FALSE, !["backoff"] = FALSE]
          /\ probe' = "none"
          /\ Emit(<<"Migrating">>, s)
@@ -342,13 +339,12 @@ EndClosed ==
     /\ IF established'
        THEN /\ live' = None
             /\ phase' = "backoff"
-            /\ drained' = FALSE
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
             /\ Emit(IF pred # None /\ ~sess[pred].closing THEN <<"Migrating">> ELSE <<"Offline">>, pred)
             /\ UNCHANGED <<pred, sess, target, watch>>
        ELSE /\ Done
             /\ Emit(<<"Done">>, None)
-            /\ UNCHANGED <<sess, target, watch, timer, drained>>
+            /\ UNCHANGED <<sess, target, watch, timer>>
 
 \* `Phase::Live`: a GOAWAY is checked before the close.
 Goaway(s) == watch /\ sess[s].goaway # NoGoaway
@@ -367,11 +363,12 @@ LiveEnds ==
     /\ phase = "live"
     /\ \/ /\ Goaway(live)
           /\ WaitOut(live)
-          \* Drop the latch and serve until the peer closes.
+          \* Drop the latch and serve until the peer closes. The GOAWAY establishes
+          \* the policy here too, so that close retries.
           /\ watch' = FALSE
           /\ UNCHANGED <<phase, live, probe, pred, target, queue, sess, timer>>
           /\ CallerSame
-          /\ UNCHANGED lifeVars
+          /\ established' = TRUE
        \/ /\ Goaway(live)
           /\ ~WaitOut(live)
           /\ EndGoaway(live, sess[live].goaway)
@@ -454,18 +451,17 @@ Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
-       THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars, drained>>
+       THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars>>
        ELSE IF established
             THEN /\ phase' = "backoff"
                  /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
                  \* A redirect target that failed its walk is dropped: the next walk
                  \* dials the configured target (`Reconnect::configured`).
                  /\ target' = Start
-                 /\ drained' = FALSE
                  /\ UNCHANGED <<live, pred, queue, callerVars>>
             ELSE /\ Done
                  /\ Emit(Append(queue, "Done"), None)
-                 /\ UNCHANGED <<timer, target, drained>>
+                 /\ UNCHANGED <<timer, target>>
     /\ UNCHANGED <<watch, probe, sess, used, dialTo, misdials, established>>
 
 \* `Reconnect::probed`, and the dial `run` makes of a probe that got through.
@@ -504,7 +500,7 @@ ProbeGetsThrough ==
           /\ Emit(Append(queue, "Migrating"), live)
           \* The fallback served all along, so a long one establishes the policy.
           /\ established' = (established \/ sess[live].age >= 1)
-    /\ UNCHANGED <<watch, target, used, misdials, drained>>
+    /\ UNCHANGED <<watch, target, used, misdials>>
 
 Caller == Connected \/ Failed \/ ProbeFails \/ ProbeGetsThrough
 
@@ -591,7 +587,7 @@ Due(t) ==
 View ==
     <<phase, live, watch, probe, pred, target, queue, [s \in Sessions |-> Seen(s)],
       used, [t \in Timers |-> Due(t)], dial, IF dial = "none" THEN Start ELSE dialTo,
-      misdials, callerVars, established, phase = "backoff" /\ drained>>
+      misdials, callerVars, established>>
 
 (***************************************************************************)
 (* Rules. Each is checked where `run` waits, its queue drained, since that *)
@@ -635,8 +631,8 @@ PresenceBalanced ==
 
 \* The policy fails fast: no failed dial or closed session backs off before a
 \* session has been established, so a setup mistake or a refusal ends the
-\* policy instead of looping. A GOAWAY's backoff is a move the peer asked for.
-FirstWalkFailsFast == phase = "backoff" => established \/ drained
+\* policy instead of looping. A GOAWAY establishes it: no refusal sends one.
+FirstWalkFailsFast == phase = "backoff" => established
 
 \* A dial never goes elsewhere than where a session the policy still holds
 \* was redirected and the policy never acted on it: the peer is leaving, and
