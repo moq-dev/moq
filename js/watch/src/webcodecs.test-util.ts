@@ -21,25 +21,15 @@ export function stubSupport(answers: Answers): Disposable {
 
 	const { video, audio } = answers;
 	if (video) {
-		install(
-			"VideoDecoder",
-			class {
-				static async isConfigSupported(config: VideoDecoderConfig) {
-					return { supported: await video(config), config };
-				}
-			},
-		);
+		install("VideoDecoder", {
+			isConfigSupported: async (config: VideoDecoderConfig) => ({ supported: await video(config), config }),
+		});
 	}
 	if (audio) {
-		install(
-			"AudioDecoder",
-			class {
-				static async isConfigSupported(config: AudioDecoderConfig) {
-					return { supported: await audio(config), config };
-				}
-			},
-		);
-		if (!globalThis.AudioEncoder) install("AudioEncoder", class {});
+		install("AudioDecoder", {
+			isConfigSupported: async (config: AudioDecoderConfig) => ({ supported: await audio(config), config }),
+		});
+		if (!globalThis.AudioEncoder) install("AudioEncoder", {});
 	}
 
 	return {

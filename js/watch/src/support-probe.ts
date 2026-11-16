@@ -35,7 +35,11 @@ export class SupportProbe<Config extends { codec: string }> {
 	 * Probe `renditions` within `effect`, then `publish` the supported ones.
 	 * Nothing is published when the effect is torn down first, since its rerun redoes this.
 	 */
-	run(effect: Effect, renditions: Record<string, Config>, publish: (available: Record<string, Config>) => void): void {
+	run(
+		effect: Effect,
+		renditions: Record<string, Config>,
+		publish: (available: Record<string, Config>) => void,
+	): void {
 		this.error.set(undefined);
 
 		const cache = this.#cache;

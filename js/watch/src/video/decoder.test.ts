@@ -10,8 +10,8 @@ import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
 import { DELAY_MAX, type Delay, Sync, Track } from "../sync";
-import { Decoder, insertRecoveryPoint } from "./decoder";
 import { stubSupport } from "../webcodecs.test-util";
+import { Decoder, insertRecoveryPoint } from "./decoder";
 import { Source } from "./source";
 import { supported } from "./supported";
 
