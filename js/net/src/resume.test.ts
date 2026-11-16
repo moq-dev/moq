@@ -3584,6 +3584,28 @@ test("a resumed reader re-offers a group its serving copy still caches", () => {
 	a.close();
 });
 
+// A continuation keeps its stream's mode: a front's reader now asking for metadata still re-offers
+// a payload read when the continued stream carried the payload. Mirrors the Rust publisher, which
+// continues on a clone of the stream's own cursor.
+test("a resumed reader re-offers a continuation in the mode it is asked for", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	sub.update({ meta: true, delay: { max: Duration.millis(60_000) } });
+	for (const meta of [false, true]) {
+		const { groups } = hooks.reofferGroups(sub, 0n, 1n, 0, meta);
+		expect(groups.map((group) => [group.sequence, group.meta])).toEqual([[0n, meta]]);
+		for (const group of groups) group.close();
+	}
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 // A front's reader takes back the stale runs its serving route's copy reported, so a relay's
 // publisher re-offers them under a new update rather than keep them reported. Mirrors Rust.
 test("a resumed reader takes back its stale reports", () => {

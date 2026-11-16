@@ -313,6 +313,29 @@ test("promoting a reader hands out again the groups it read as metadata, from th
 	reader.close();
 });
 
+test("an ordered reader reads the groups it passed as metadata again, in order, once promoted", async () => {
+	for (const landed of [false, true]) {
+		const track = new TrackProducer("video");
+		track.accept({ timescale: Timescale.MILLI, maxAge: null });
+		const ordered = track.subscribe({ meta: true, delay: { max: null } }).ordered();
+		for (const sequence of [0n, 1n]) {
+			receive(track, sequence, true, [5]).finish();
+			const group = await ordered.nextGroup();
+			expect([group?.sequence, group?.meta]).toEqual([sequence, true]);
+		}
+		if (landed) for (const sequence of [0n, 1n]) receive(track, sequence, false, [5]).finish();
+
+		ordered.update({ meta: false, delay: { max: null } });
+		for (const sequence of [0n, 1n]) {
+			if (!landed) receive(track, sequence, false, [5]).finish();
+			const group = await ordered.nextGroup();
+			expect([group?.sequence, group?.meta, landed]).toEqual([sequence, false, landed]);
+			expect((await group?.readFrame())?.payload.byteLength).toBe(5);
+		}
+		ordered.close();
+	}
+});
+
 test("an update re-reads the unread groups in the new mode, and leaves handed-out ones alone", async () => {
 	const track = new TrackProducer("video");
 	track.accept({ timescale: Timescale.MILLI, maxAge: null });

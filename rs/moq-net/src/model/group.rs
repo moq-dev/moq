@@ -4422,8 +4422,14 @@ impl Consumer {
 		let Some(frame) = ready!(self.poll_read_as(waiter, Prefetch::pop))? else {
 			return Poll::Ready(Ok(None));
 		};
+		// The read may have continued on the payload copy that replaced this one, whose frames
+		// carry their payload rather than its size.
+		let size = match self.is_meta() {
+			true => meta_size(&frame.payload)?,
+			false => frame.payload.len() as u64,
+		};
 		Poll::Ready(Ok(Some(frame::Info {
-			size: meta_size(&frame.payload)?,
+			size,
 			timestamp: frame.timestamp,
 		})))
 	}
@@ -4635,6 +4641,10 @@ impl Consumer {
 	/// Whether this copy can continue `reader` from frame `index`.
 	pub(super) fn continues(&self, reader: &Consumer, index: usize) -> bool {
 		let raw = reader.cursor.raw;
+		// A payload read never continues on a copy holding no payload.
+		if self.is_meta() && !reader.is_meta() {
+			return false;
+		}
 		let state = self.cursor.state.read();
 		// A plain read inflates from frame 0, and a copy that shed the frame can't serve it.
 		!state.sparse()

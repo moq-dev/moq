@@ -967,8 +967,8 @@ impl Subscriber {
 
 	/// Hand out again the groups in `run` the reader handed out as metadata; see
 	/// [`track::Subscriber::repay`].
-	pub(super) fn repay(&mut self, run: std::ops::Range<u64>) -> Vec<group::Consumer> {
-		self.reader().repay(run)
+	pub(super) fn repay(&mut self, run: std::ops::Range<u64>, hand: bool) -> Vec<group::Consumer> {
+		self.reader().repay(run, hand)
 	}
 
 	/// Take back every stale run this reader queued or the serving route's copy reported;
@@ -1850,11 +1850,11 @@ impl Reader {
 
 	/// The serving copy's groups in `run` handed out again, as any group of that copy is;
 	/// nothing while no copy serves.
-	fn repay(&mut self, run: std::ops::Range<u64>) -> Vec<group::Consumer> {
+	fn repay(&mut self, run: std::ops::Range<u64>, hand: bool) -> Vec<group::Consumer> {
 		let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) else {
 			return Vec::new();
 		};
-		let groups = sub.repay(run);
+		let groups = sub.repay(run, hand);
 		// The serving copy is the newest one.
 		let index = self.copies.len() - 1;
 		groups.into_iter().map(|group| self.hand_out(index, group)).collect()

@@ -3081,6 +3081,10 @@ export class Subscriber {
 		this.#metaHanded = [];
 		this.#metaBound = 1;
 		if (reopened.length === 0) return;
+		// An ordered read already passed them: it goes back to the lowest and reads them again in
+		// sequence order, skipping what it handed out in between.
+		const lowest = reopened.reduce((low, run) => min(low, run.start), reopened[0].start);
+		if (lowest < this.#nextSequence) this.#nextSequence = lowest;
 		const reported = this.#reported;
 		const sequences: bigint[] = [];
 		const producer = this.#state.producer;
@@ -3383,7 +3387,7 @@ export class Subscriber {
 		from = 0,
 		meta = this.#state.update.peek()?.meta === true,
 	): { groups: GroupConsumer[]; givenUp: Run[] } {
-		if (this.#resume) return this.#resume.reofferGroups(start, end, from);
+		if (this.#resume) return this.#resume.reofferGroups(start, end, from, meta);
 		const groups: GroupConsumer[] = [];
 		let givenUp: Run[] = [{ start, end }];
 		const producer = this.#state.producer;
@@ -4922,6 +4926,12 @@ export class Subscriber {
 		for (let index = 0; ; ) {
 			const group = groups[index];
 			if (!group || (cursor.end !== undefined && group.sequence >= cursor.end)) break;
+			// Handed out already, below where a promotion moved the cursor back.
+			if (this.#delivered.has(group.sequence)) {
+				groups.splice(index, 1);
+				group.close();
+				continue;
+			}
 			// Out of range for now, but kept until the cursor passes it: an anchor still
 			// resolving, or an update widening the ranges, may take it in.
 			if (!this.#window.contains(group.sequence)) {
@@ -5183,7 +5193,9 @@ export class Ordered {
 	}
 
 	/**
-	 * Return the next group with a strictly-greater sequence number than the last returned.
+	 * Return the next group with a strictly-greater sequence number than the last returned, except once
+	 * `meta` is cleared: the groups returned as metadata are returned again with their payload, in
+	 * sequence order, from the lowest.
 	 *
 	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
 	 * group whose every frame is further behind the live edge than `delay.max` (the default

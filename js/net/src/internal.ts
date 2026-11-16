@@ -519,7 +519,12 @@ export interface ResumeSource {
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
 	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
-	reofferGroups(start: bigint, end: bigint, from?: number): { groups: GroupConsumer[]; givenUp: Run[] };
+	reofferGroups(
+		start: bigint,
+		end: bigint,
+		from?: number,
+		meta?: boolean,
+	): { groups: GroupConsumer[]; givenUp: Run[] };
 	/**
 	 * See {@link hooks.reofferStale}: the stale runs queued here, those this reader reported, which a
 	 * route change keeps, and those the serving copy reported.
