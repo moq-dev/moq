@@ -54,7 +54,7 @@ const VersionSchema = z.number().check(
  * broadcasts without opening them; each shares this catalog's PTS timeline and root settings.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
- * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
+ * application can add its own sections (e.g. `com.example.scte35`) without modifying hang. A base consumer
  * ignores the extra sections; an extended consumer validates them with its own schema, typically
  * built via `z.extend(RootSchema, { ... })`. An application names its own sections with a
  * namespaced key (`com.example.telemetry`): every section defined here must have its shape when

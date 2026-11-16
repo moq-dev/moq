@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
 /// `echo` soliciting viewer feedback under a relative broadcast prefix, and `include` naming
 /// whole broadcasts for explicit selection.
-/// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
+/// Applications extend it with their own root sections (e.g. `com.example.scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
 ///

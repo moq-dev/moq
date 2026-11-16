@@ -176,8 +176,9 @@ pub struct AudioConfig {
 
 	/// The largest media span the publisher hands to the transport behind a frame's presentation
 	/// timestamp: the reorder delay of a frame presented after frames decoded behind it, or the span
-	/// of a batch written together, such as a run of audio packets between video packets in TS. A consumer's jitter buffer should be at
-	/// least this large. Absent when the publisher measured none.
+	/// of a batch written together, such as a run of audio packets between video packets in TS. A
+	/// consumer's jitter buffer should be at least this large. Absent when the publisher measured
+	/// none.
 	///
 	/// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
 	/// whatever the frame rate; encoder latency and the network don't count. It only ever grows
