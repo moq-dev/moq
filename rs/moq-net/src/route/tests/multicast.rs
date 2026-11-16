@@ -1218,7 +1218,11 @@ fn a_gateway_takes_no_claim_it_first_hears_unavailable() {
 		let mut sim = mesh(false);
 		let (told, events, left) = (sim.told.len(), sim.events.len(), sim.now());
 		sim.close(PUBLISHER, HOME);
-		while read(&sim, RELAY, events).is_empty() {
+		// Bounded as `quiesce` is, so a relay that never reads the claim unavailable fails.
+		for _ in 0..200 {
+			if !read(&sim, RELAY, events).is_empty() {
+				break;
+			}
 			deliver(&mut sim);
 			sim.tick();
 		}
