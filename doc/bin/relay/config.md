@@ -86,7 +86,6 @@ A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
 use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
-The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
 
 `[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
@@ -107,8 +106,7 @@ so one file serves the whole cluster:
 A packet for an unlisted server ID is dropped. A forward is accepted only from a listed address
 and under the shared `key` (`openssl rand -hex 32 > forward.key`). A changed file replaces the
 map; an invalid one is logged and the last valid map kept, or stops startup. Forwarding needs
-`lb.id` and all three settings, which the `--listen-quic-lb-forward-bind`, `-key`, and `-peers`
-flags update.
+`lb.id` and all three settings.
 
 ## \[quic]
 
@@ -278,11 +276,11 @@ connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost pric
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
-max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
+max_hops = 32                                         # Legacy: longest hop path on moq-lite-03 to 06 (1 to 32).
 
 [cluster.api]
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
-# tls.root = ["api-ca.pem"]                           # API server trust, independent from connect.tls.
+# root = ["api-ca.pem"]                               # API server trust, independent from connect.tls.
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true

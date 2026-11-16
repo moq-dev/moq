@@ -66,7 +66,3 @@ keys still dials its peers.
 Public API: none (`Cluster::with_connect` keeps its type; its tokens are
 ignored). Config and CLI: breaking for moq-relay only, `connect.url` and
 `connect.tokens` refused. Wire: none.
-
-## Related
-
-- [The relay's config names](/quest/m2/relay-config-names.md) - the renames at this freeze

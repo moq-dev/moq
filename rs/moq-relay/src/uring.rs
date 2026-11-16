@@ -1002,7 +1002,7 @@ mod tests {
 			&mut crate::handoff::Sockets::disabled(),
 		)
 		.expect_err("a QUIC-LB nonce without an id is refused");
-		assert!(err.to_string().contains("--listen-quic-lb-nonce"), "{err:#}");
+		assert!(err.to_string().contains("--listen-lb-nonce"), "{err:#}");
 	}
 
 	/// A window the operator set has to reach the worker. Refusing it, or
