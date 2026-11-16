@@ -138,16 +138,16 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// Offer the `ietf` extension on moq-lite-07: moq-relay's door for its own links, not a
-	/// setting.
-	#[doc(hidden)]
+	/// Offer the `ietf` extension on moq-lite-07. Behind the `relay` feature: moq-relay's
+	/// door for its own links, not a setting.
+	#[cfg(feature = "relay")]
 	#[usage(skip)]
 	#[serde(skip)]
 	pub ietf: bool,
 
-	/// Decline MoQ Solicit, acting as a moq-transport peer without it: a test's door, not a
-	/// setting.
-	#[doc(hidden)]
+	/// Decline MoQ Solicit, acting as a moq-transport peer without it. Behind the
+	/// `test-support` feature: a test's door, not a setting.
+	#[cfg(feature = "test-support")]
 	#[usage(skip)]
 	#[serde(skip)]
 	pub decline_solicit: bool,
@@ -546,8 +546,10 @@ impl Config {
 			version: _,
 			// Offered by the moq-net server every listener accepts with, which no QUIC
 			// listener reads.
-			ietf: _,
-			decline_solicit: _,
+			#[cfg(feature = "relay")]
+				ietf: _,
+			#[cfg(feature = "test-support")]
+				decline_solicit: _,
 			implementation,
 			timeout: _,
 			tls,

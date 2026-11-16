@@ -3233,8 +3233,7 @@ impl Request for FetchServe {
 					let capped = msg.end_frame.is_some();
 					let timescale = stamp.map(|stamp| stamp.timescale);
 					// Only a track a moq-transport publisher made carries records.
-					let records =
-						(ietf && group.ietf().is_some()).then(|| lite::ietf::Records::new(capped, timescale));
+					let records = (ietf && group.ietf().is_some()).then(|| lite::ietf::Records::new(capped, timescale));
 
 					*self = Self::Serve {
 						group,
@@ -12779,7 +12778,10 @@ mod tests {
 	#[kio::test]
 	async fn a_moq_lite_group_is_the_same_bytes_with_the_ietf_extension() {
 		let plain = crate::track::Info::timed();
-		assert_eq!(served_group(plain.clone(), true).await, served_group(plain, false).await);
+		assert_eq!(
+			served_group(plain.clone(), true).await,
+			served_group(plain, false).await
+		);
 
 		let mut relayed = crate::track::Info::timed();
 		relayed.properties = Some(Arc::new(crate::model::object::TrackProperties {

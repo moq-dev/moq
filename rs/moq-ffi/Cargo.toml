@@ -62,6 +62,8 @@ jni = { workspace = true }
 
 [dev-dependencies]
 moq-shaper = { path = "../moq-shaper" }
+# A peer without MoQ Solicit.
+moq-tokio = { workspace = true, features = ["test-support"] }
 # The video tests encode with OpenH264, the one encoder a GPU-less host has, so
 # they turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }

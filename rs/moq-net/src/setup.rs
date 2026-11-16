@@ -73,7 +73,7 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 /// The SETUP extensions this side offers.
 ///
 /// Not public: every session offers Solicit, and only moq-relay offers `ietf`, through
-/// `Client::with_ietf` and `Server::with_ietf`.
+/// `Client::with_ietf` and `Server::with_ietf` behind the `relay` feature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Extensions {
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than

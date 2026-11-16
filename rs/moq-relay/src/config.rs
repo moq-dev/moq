@@ -504,7 +504,10 @@ mod tests {
 	#[test]
 	fn extension_tables_are_refused() {
 		let dir = tempfile::tempdir().unwrap();
-		for table in ["[listen.extensions]\nietf = true\n", "[connect.extensions]\nsolicit = false\n"] {
+		for table in [
+			"[listen.extensions]\nietf = true\n",
+			"[connect.extensions]\nsolicit = false\n",
+		] {
 			let path = dir.path().join("relay.toml");
 			std::fs::write(&path, table).unwrap();
 			let parsed = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]);

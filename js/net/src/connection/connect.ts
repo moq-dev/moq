@@ -250,7 +250,6 @@ export interface ConnectProps {
 	 */
 	consume?: OriginProducer;
 
-
 	/**
 	 * Credentials to present, kept apart from the URL.
 	 *

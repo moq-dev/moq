@@ -1150,7 +1150,10 @@ mod hop_tests {
 			.unwrap();
 		for (millis, payload) in [(5, &b"key"[..]), (6, b"delta")] {
 			let frame = next(&mut fetched).await.unwrap();
-			assert_eq!((frame.timestamp, &frame.payload.contiguous(0)[..]), (ts(millis), payload));
+			assert_eq!(
+				(frame.timestamp, &frame.payload.contiguous(0)[..]),
+				(ts(millis), payload)
+			);
 			assert!(frame.fields.is_none());
 		}
 		assert!(next(&mut fetched).await.is_none());

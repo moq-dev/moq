@@ -39,7 +39,6 @@ export interface AcceptProps {
 	 */
 	consume?: OriginProducer;
 
-
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
 	implementation?: string;
 }

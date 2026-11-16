@@ -51,6 +51,8 @@ cbindgen = "0.29"
 [dev-dependencies]
 kio = { path = "../kio", features = ["runtime"] }
 moq-loc = { path = "../moq-loc" }
+# A peer without MoQ Solicit.
+moq-tokio = { workspace = true, features = ["test-support"] }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
 # turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }

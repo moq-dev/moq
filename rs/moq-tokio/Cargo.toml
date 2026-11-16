@@ -21,6 +21,12 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 # instead. Hidden from the docs. Meant for dev-dependencies, so production builds never
 # compile it.
 sim = ["kio/sim", "moq-quic/sim"]
+# The `ietf` field of `connect::Config` and `listen::Config`, which offers the lite-07 `ietf`
+# extension: moq-relay's door for its own links, not a setting. Hidden from the docs.
+relay = ["moq-net/relay"]
+# The `decline_solicit` field of `connect::Config` and `listen::Config`, which acts as a
+# moq-transport peer without MoQ Solicit. Hidden from the docs. Meant for dev-dependencies.
+test-support = ["moq-net/test-support"]
 
 [dependencies]
 bytes = "1"
