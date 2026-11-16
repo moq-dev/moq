@@ -719,6 +719,41 @@ fn an_edge_finds_the_warm_core_beside_its_route() {
 	}
 }
 
+/// The price of taking no warm signal from a relay on the taker's own path. Relay 1
+/// is warm for a reader of its own, and 3 pulls through 1 and 2 at 4. Once the
+/// direct link 1 to 3 opens, 1's warm copy is 3 away, but 1 is 3's ancestor, so the
+/// pick stays: its tree costs 14 where 13 is cheapest, the publisher's link included. The chain, which tells 1 that
+/// 2's pull is 3's demand, takes it.
+#[test]
+fn an_ancestor_warm_on_its_own_is_passed_over() {
+	let shape = Shape {
+		name: "ancestor",
+		relays: 4,
+		links: vec![
+			(0, 1, Price::new(11, 2), Tie::Peer),
+			(1, 2, Price::new(1, 1), Tie::Peer),
+			(2, 3, Price::new(1, 1), Tie::Peer),
+			(1, 3, Price::new(1, 1), Tie::Peer),
+		],
+		home: 0,
+		claims: 1,
+	};
+	let tree = |arm: Arm| {
+		let mut sim = shape.build(arm, 7);
+		sim.close(1, 3);
+		sim.read(1, 0, true);
+		sim.read(3, 0, true);
+		assert!(sim.settle(), "{}", arm.name());
+		assert_eq!(sim.tree(0).cost, 14, "{}", arm.name());
+		sim.reopen(1, 3);
+		assert!(sim.settle(), "{}", arm.name());
+		assert_eq!(sim.check(), Ok(()), "{}", arm.name());
+		(sim.tree(0).cost, sim.cheapest(0))
+	};
+	assert_eq!(tree(NOT_DOWN_QUERY), (14, 13));
+	assert_eq!(tree(CHAIN), (13, 13));
+}
+
 /// One CSV row of the growth sweeps.
 struct Size {
 	shape: Shape,
@@ -850,6 +885,10 @@ struct Churned {
 	first: Option<String>,
 	/// Rounds each case took to settle once churn stopped, summed.
 	settle: usize,
+	/// The cost of the trees each case settled on, and of the cheapest trees for the
+	/// same readers, summed over the cases that settled right.
+	tree: Metric,
+	cheapest: Metric,
 }
 
 /// A random mesh of four to seven relays, a chain and about two in five of the
@@ -923,6 +962,10 @@ fn churn(arm: Arm, cases: std::ops::Range<usize>, shape: fn(&mut XorShift) -> Sh
 			true => sim.check(),
 			false => Err("never settled".into()),
 		};
+		if right.is_ok() {
+			out.tree += (0..shape.claims).map(|cast| sim.tree(cast).cost).sum::<Metric>();
+			out.cheapest += (0..shape.claims).map(|cast| sim.cheapest(cast)).sum::<Metric>();
+		}
 		if let Err(err) = right {
 			out.failed += 1;
 			out.first
@@ -1220,7 +1263,7 @@ fn benchmark_warmth_cases() {
 #[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_warmth_churn() {
 	println!(
-		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,advert_messages,query_messages,chain_messages,settle_rounds,failed"
+		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,advert_messages,query_messages,chain_messages,settle_rounds,settled_tree_cost,settled_cheapest_cost,failed"
 	);
 	let cases: usize = std::env::var("MOQ_WARMTH_CASES").map_or(400, |cases| cases.parse().expect("MOQ_WARMTH_CASES"));
 	// A comma-separated list of arm names to run, for a longer sweep of a few.
@@ -1237,7 +1280,7 @@ fn benchmark_warmth_churn() {
 		for arm in arms().into_iter().chain(audiences()).filter(picked) {
 			let out = churn(arm, 0..cases, shape);
 			println!(
-				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 				arm.name(),
 				out.cases,
 				out.watch.steps,
@@ -1254,6 +1297,8 @@ fn benchmark_warmth_churn() {
 				out.sent.asks + out.sent.told,
 				out.sent.chains,
 				out.settle,
+				out.tree,
+				out.cheapest,
 				out.first.map_or("0".into(), |first| format!(
 					"{}: {}",
 					out.failed,

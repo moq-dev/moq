@@ -72,7 +72,9 @@ pub(super) enum Audience {
 	/// against another warm neighbour.
 	NotNext,
 	/// As [`Audience::Useful`], but never over a link the neighbour marked upstream: an
-	/// edge relies on its path join and the rendezvous hash among equal upstreams.
+	/// edge relies on its path join and the rendezvous hash among equal upstreams. Nor
+	/// up a marked link with a copy that came over one, as the route layer never passes
+	/// a route from one marked link to another: an edge carries nothing between cores.
 	NotDown,
 	/// As [`Audience::NotDown`], and a relay with demand whose route ties between
 	/// upstreams asks them on subscribe, without waiting for their answers.
@@ -1086,6 +1088,17 @@ impl WarmSim {
 		}
 	}
 
+	/// Whether `node`'s copy, which `signal` offers, came over a link its receiver marked
+	/// upstream: the route layer passes no such route on to another marked neighbour.
+	fn crossed(&self, node: Node, cast: usize, signal: &Signal) -> bool {
+		let up = self.carry(node, cast).and_then(|carry| carry.up.as_ref());
+		up.is_some_and(|pull| self.upstream.contains(&(node, pull.via)))
+			|| signal
+				.path
+				.windows(2)
+				.any(|hop| self.upstream.contains(&(hop[1], hop[0])))
+	}
+
 	/// Whether `audience` lets `node` advertise `signal` to `peer`.
 	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
 		let price = signal.cost + self.price(node, peer).cold;
@@ -1105,7 +1118,9 @@ impl WarmSim {
 			Audience::Useful => useful(),
 			Audience::NotNext => matches!(heard, Some((cost, false)) if price <= cost),
 			Audience::NotDown | Audience::NotDownAsk | Audience::NotDownAskUp | Audience::NotDownQuery => {
-				!self.upstream.contains(&(peer, node)) && useful()
+				!self.upstream.contains(&(peer, node))
+					&& !(self.upstream.contains(&(node, peer)) && self.crossed(node, cast, signal))
+					&& useful()
 			}
 			Audience::Shared => self.carry(node, cast).is_some_and(|carry| {
 				let children = carry.down.keys().filter(|&&child| child != peer).count();
@@ -1502,9 +1517,25 @@ impl WarmSim {
 		self.watch.longest = self.watch.longest.max(self.watch.run);
 	}
 
+	/// The relays joined to `cast`'s publisher over open links through relays, whether
+	/// or not their route has arrived yet.
+	fn connected(&self, cast: usize) -> BTreeSet<Node> {
+		let start = self.endpoints[&self.casts[cast].0];
+		let mut seen = BTreeSet::from([start]);
+		let mut queue = vec![start];
+		while let Some(at) = queue.pop() {
+			for peer in self.peers(at) {
+				if self.relay(peer) && seen.insert(peer) {
+					queue.push(peer);
+				}
+			}
+		}
+		seen
+	}
+
 	/// The relays the route layer gives a route to `cast`'s publisher, which a pull
-	/// can follow. A path over open links is not enough: a relay announces only its
-	/// best route, and never one that came down a marked link back up one.
+	/// can follow once settled. A path over open links is not enough: a relay announces
+	/// only its best route, and never one that came down a marked link back up one.
 	fn reach(&self, cast: usize) -> BTreeSet<Node> {
 		let start = self.endpoints[&self.casts[cast].0];
 		(0..self.relays)
@@ -1512,14 +1543,19 @@ impl WarmSim {
 			.collect()
 	}
 
-	/// Count unfed readers as a round ends, and the first frames that arrived.
+	/// Count unfed readers as a round ends, and the first frames that arrived. A reader
+	/// counts while joined over open links, so a late route is an outage as much as a
+	/// late copy; one the route layer never routes counts alike for every arm.
 	fn tally(&mut self) {
 		let round = self.round;
 		let mut reach: BTreeMap<Node, BTreeSet<Node>> = BTreeMap::new();
 		for (node, cast) in self.readers() {
 			let fed = self.fed(node, cast) && self.live(node, cast).is_some();
 			let start = self.endpoints[&self.casts[cast].0];
-			let path = reach.entry(start).or_insert_with(|| self.reach(cast)).contains(&node);
+			let path = reach
+				.entry(start)
+				.or_insert_with(|| self.connected(cast))
+				.contains(&node);
 			self.watch.unfed += usize::from(path && !fed);
 			let carry = self.entry(node, cast);
 			if fed && let Some(since) = carry.since.take() {
@@ -1635,12 +1671,17 @@ impl WarmSim {
 		}
 	}
 
-	/// The cheapest tree joining `cast`'s publisher to every relay reading it, over open
-	/// links at their cold prices: Dreyfus and Wagner's exact dynamic program.
+	/// The cheapest tree joining `cast`'s publisher to every relay reading it that has a
+	/// route or a copy, over open links at their cold prices: Dreyfus and Wagner's exact
+	/// dynamic program.
 	pub fn cheapest(&self, cast: usize) -> Metric {
 		let endpoint = self.endpoints[&self.casts[cast].0];
+		let reach = self.reach(cast);
 		let mut terminals = vec![endpoint];
-		terminals.extend((0..self.relays).filter(|&node| self.reading(node, cast)));
+		terminals.extend(
+			(0..self.relays)
+				.filter(|&node| self.reading(node, cast) && (reach.contains(&node) || self.fed(node, cast))),
+		);
 		let n = self.nodes;
 		let count = terminals.len();
 		let full = (1usize << count) - 1;
