@@ -36,6 +36,7 @@ impl Client {
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU
 	/// rind can't run on.
 	pub fn new(config: Config) -> crate::Result<Self> {
+		// Destructured so a new option cannot compile without being used.
 		let Config {} = config;
 		// reqwest reads rustls's process default and panics without one, so install rind's
 		// unless the host already chose a provider.
