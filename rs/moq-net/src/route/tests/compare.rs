@@ -227,6 +227,10 @@ pub(super) trait Net {
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool>;
 	fn sent(&self) -> Sent;
 	fn held(&self) -> Held;
+	/// The session floors `nodes` keep, where the rule keeps any.
+	fn floors(&self, _nodes: &[Node]) -> usize {
+		0
+	}
 	fn faults(&self) -> Faults;
 	/// Routes, claims, and streams visited.
 	fn work(&self) -> usize;
@@ -642,9 +646,13 @@ fn pair(a: Node, b: Node) -> (Node, Node) {
 impl Lab {
 	/// Build `mesh` on `rule`'s router, with every publisher announcing, and let it settle.
 	pub fn new(arm: impl Into<Arm>, mesh: &Mesh) -> Self {
-		let nodes = mesh.relays + mesh.homes.len();
+		Self::with(arm.into().net(mesh.relays + mesh.homes.len()), mesh)
+	}
+
+	/// Build `mesh` on `net`, with a node for every relay and publisher.
+	pub fn with(net: Box<dyn Net>, mesh: &Mesh) -> Self {
 		let mut lab = Self {
-			net: arm.into().net(nodes),
+			net,
 			mesh: mesh.clone(),
 			up: BTreeSet::new(),
 			linked: BTreeSet::new(),
