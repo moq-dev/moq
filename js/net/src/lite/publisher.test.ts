@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -1621,6 +1622,45 @@ test("lite draft-07: a metadata stream stopped after promotion is named in no dr
 		await payload.cancel();
 	} finally {
 		await sub.close();
+	}
+});
+
+// A promotion gives up every group served as metadata that the cache no longer holds, even one
+// the record of those groups already let go: none is left neither served again nor named in a
+// drop. Mirrors the Rust `promotion_gives_up_a_metadata_group_the_sweep_let_go`.
+test("lite draft-07: a promotion drops a metadata group the record let go once evicted", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, meta: true });
+	try {
+		const serve = async (sequence: bigint) => {
+			const group = sub.track.createGroup(sequence);
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(sequence))));
+			group.finish();
+			await sub.openedStream();
+		};
+		await serve(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+		await serve(2n);
+		// Past the cache window: the next group written evicts both.
+		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(1000)));
+		// Served with gaps, so the record of metadata groups is pruned, letting go of 0 and 2.
+		for (const sequence of [4n, 6n, 8n]) await serve(sequence);
+
+		await replayUpdate({ priority: 0, startGroup: 0n, update: 1n, meta: false, ...restate(version) }).encode(
+			sub.client.writer,
+			version,
+		);
+		await flush();
+		sub.track.finish();
+		sub.track.close();
+		const named = (await holesToEnd(sub.client.reader)) as [string, bigint, bigint][];
+		for (const sequence of [0n, 2n])
+			expect(named.some(([, start, end]) => start <= sequence && sequence < end)).toBe(true);
+	} finally {
+		await sub.close();
+		installed.close();
 	}
 });
 

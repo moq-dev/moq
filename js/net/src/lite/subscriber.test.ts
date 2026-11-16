@@ -3611,9 +3611,9 @@ test("a final drop before the payload was asked for leaves a paused payload grou
 
 // Asking for the payload again lets go of a paused metadata group, and a metadata stream still
 // arriving that the publisher yields after that does not pause: no continuation follows either, since
-// the publisher serves those groups again with the payload, or drops them. Their copies stay cached,
-// owed to a payload reader, and a reader holding one gets an end once the payload replaces it. A
-// metadata stream that arrives after it fills no copy the cache holds. Mirrors the Rust
+// the publisher serves those groups again with the payload, or drops them. The cache lets go of their
+// copies, which a payload reader owes until the payload or a drop, and a reader holding one gets an
+// end. A metadata stream that arrives after it fills no copy the cache holds. Mirrors the Rust
 // `promotion_lets_go_of_paused_metadata_groups`.
 test("promotion lets go of paused metadata groups on lite-07", async () => {
 	const version = Version.DRAFT_07;
@@ -3664,30 +3664,34 @@ test("promotion lets go of paused metadata groups on lite-07", async () => {
 		track.update({ delay });
 		await drainReactions();
 		expect(paused()).toEqual([]);
+		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([]);
+		// Nothing writes the paused one any longer; the other's stream still does.
+		expect(held[0]?.closed.peek()).toBeInstanceOf(Error);
+		expect(held[1]?.closed.peek()).toBeUndefined();
 
 		// Yielded before the publisher read the update.
 		await yielded(two);
 		expect(paused()).toEqual([]);
-		// Still cached, and owed to a payload reader until its payload or a drop.
-		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([1n, 2n]);
+		expect(held[1]?.closed.peek()).toBeInstanceOf(Error);
 
 		// Opened before the publisher read the update, and read whole.
 		const three = await openMeta(3n);
 		three.stream.finish();
 		await three.run;
-		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([1n, 2n]);
-		expect(held.map((group) => group?.closed.peek())).toEqual([undefined, undefined]);
+		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([]);
 
-		// The payload replaces both: nothing writes the metadata copies a reader holds any longer.
+		// Each payload lands as any group still owed.
 		for (const sequence of [1n, 2n]) {
 			const payload = handStream(version);
 			payload.write(await liteFrame(Number(sequence), new Uint8Array([1])));
 			payload.finish();
 			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), payload.reader);
 		}
-		await drainReactions();
-		expect(hooks.cachedMeta(entry.track, 0n, 10n)).toEqual([]);
-		for (const group of held) expect(group?.closed.peek()).toBeInstanceOf(Error);
+		const again = [await track.recvGroup(), await track.recvGroup()];
+		expect(again.map((group) => [group?.sequence, group?.meta])).toEqual([
+			[1n, false],
+			[2n, false],
+		]);
 	} finally {
 		responses.mockRestore();
 		track.close();

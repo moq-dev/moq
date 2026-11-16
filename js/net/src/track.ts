@@ -1131,8 +1131,6 @@ export class Producer {
 	#cache = new Set<CachedGroup>();
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<bigint, CachedGroup>();
-	// Cached copies nothing writes any longer, aborted once the cache lets go of them.
-	#abandoned = new WeakSet<GroupProducer>();
 	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
@@ -1340,10 +1338,7 @@ export class Producer {
 		};
 		hooks.receiveGroup = (producer, { sequence, start, fill, meta, discard }) =>
 			producer.#createGroup(sequence, start, fill, meta, discard);
-		hooks.abandonGroup = (producer, group) => {
-			if (producer.#cached.get(group.sequence)?.group === group) producer.#abandoned.add(group);
-			else if (group.closed.peek() === undefined) group.abort(new StreamError(StreamCode.Cancel));
-		};
+		hooks.promoteTrack = (producer) => producer.#promote();
 		hooks.arrivingGroup = (producer, sequence, meta = false) => {
 			const group = producer.#cached.get(sequence)?.group;
 			if (!group || group.closed.peek() !== undefined || hooks.groupMeta(group) !== meta) return undefined;
@@ -1865,8 +1860,27 @@ export class Producer {
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
 		hooks.chargeGroup(entry.group, undefined);
-		if (this.#abandoned.has(entry.group) && entry.group.closed.peek() === undefined)
-			entry.group.abort(new StreamError(StreamCode.Cancel));
+	}
+
+	// See {@link hooks.promoteTrack}. An aborted copy keeps its verdict: the drop that ended it
+	// accounted for it.
+	#promote(): bigint[] {
+		const sequences: bigint[] = [];
+		for (const [sequence, entry] of this.#cached) {
+			if (hooks.groupMeta(entry.group) && !(entry.group.closed.peek() instanceof Error)) sequences.push(sequence);
+		}
+		if (sequences.length === 0) return sequences;
+		sequences.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+		const at = now();
+		for (const sequence of sequences) {
+			const entry = this.#cached.get(sequence);
+			if (!entry) continue;
+			this.#unlink(entry);
+			this.#uncache(entry);
+			this.#arrivals.unaccount(sequence, sequence + 1n, at);
+		}
+		this.#owe();
+		return sequences;
 	}
 
 	// The starts a first frame of group `sequence` must fall between: the nearest checked
@@ -2743,6 +2757,10 @@ export class Subscriber {
 	#metaHanded: Run[] = [];
 	// At most how many runs #metaHanded holds before it is pruned again.
 	#metaBound = 1;
+	// The lowest and past the highest sequence handed out as metadata since the last promotion,
+	// which pruning #metaHanded never narrows: a promotion gives up every group in it handed out
+	// that no copy caches any longer, remembered or not. Mirrors the Rust `meta_span`.
+	#metaSpan?: Run;
 	// Cached groups the arrival cursor skipped as stale, each with the budget it was judged
 	// under, so a wider budget offers them again. Only a widening reverses a stale verdict, and
 	// an entry is kept only while its group is cached, since nothing could offer it again.
@@ -3075,6 +3093,10 @@ export class Subscriber {
 	// expecting what is past its budget, so only the gaps within it cost memory.
 	#handOut(sequence: bigint, ordered: boolean, meta = false): void {
 		if (meta) {
+			const span = this.#metaSpan;
+			this.#metaSpan = span
+				? { start: min(span.start, sequence), end: max(span.end, sequence + 1n) }
+				: { start: sequence, end: sequence + 1n };
 			insertRun(this.#metaHanded, sequence, sequence + 1n);
 			if (this.#metaHanded.length > this.#metaBound) this.#pruneMeta();
 		}
@@ -3129,9 +3151,26 @@ export class Subscriber {
 	// hand those groups out again, as never delivered, judged as any newly covered group is. A group
 	// below `payload` stays delivered. Mirrors the publisher side of the draft's metadata promotion.
 	#promote(payload: Position | undefined): void {
-		const reopened = removeRun(this.#metaHanded, 0n, payload?.group ?? 0n);
+		const from = payload?.group ?? 0n;
+		const reopened = removeRun(this.#metaHanded, 0n, from);
 		this.#metaHanded = [];
 		this.#metaBound = 1;
+		// What pruning let go is no longer in the record: each group in the span handed out that
+		// no copy caches any longer is reopened too, which gives it up as any newly covered group
+		// no copy holds, so none is left neither served nor dropped. A payload copy the peer holds
+		// whole wins over that drop.
+		const span = this.#metaSpan;
+		this.#metaSpan = undefined;
+		if (span && max(span.start, from) < span.end) {
+			const start = max(span.start, from);
+			for (const handed of runGaps(this.#delivered.gaps(start, span.end), start, span.end)) {
+				const cached = this.#cachedSequences(handed.start, handed.end).map((sequence) => ({
+					start: sequence,
+					end: sequence + 1n,
+				}));
+				for (const gone of runGaps(cached, handed.start, handed.end)) insertRun(reopened, gone.start, gone.end);
+			}
+		}
 		if (reopened.length === 0) return;
 		// An ordered read already passed them: it goes back to the lowest and reads them again in
 		// sequence order, skipping what it handed out in between.

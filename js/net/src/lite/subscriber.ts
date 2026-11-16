@@ -3557,8 +3557,7 @@ export class Subscriber {
 			// of, and the cache bounds what this remembers.
 			if (entry.meta && !meta) {
 				entry.promoted = update.update;
-				for (const sequence of hooks.cachedMeta(track, 0n, UNBOUNDED))
-					entry.tail.unaccount(sequence, sequence + 1n);
+				for (const sequence of hooks.promoteTrack(track)) entry.tail.unaccount(sequence, sequence + 1n);
 				this.#letGoMeta(entry);
 			}
 			entry.meta = meta;
@@ -3881,10 +3880,10 @@ export class Subscriber {
 	// sweeping costs constant time per pause. Mirrors the Rust `TrackEntry::pause`.
 	#pause(entry: SubscribeEntry, sequence: bigint, paused: PausedGroup): void {
 		// Once the payload is asked for again, no continuation follows a metadata stream: the
-		// publisher serves its group again with the payload, or drops it. The copy stays, owed to a
-		// payload reader until then, and the stream holds the end no longer.
+		// publisher serves its group again with the payload, or drops it. The cache already let go
+		// of the copy.
 		if (hooks.groupMeta(paused.group) && entry.meta !== true) {
-			hooks.abandonGroup(entry.track, paused.group);
+			paused.group.abort(new StreamError(StreamCode.Cancel));
 			paused.read();
 			return;
 		}
@@ -3947,16 +3946,15 @@ export class Subscriber {
 	}
 
 	// The payload is asked for again: no continuation follows a paused metadata stream, since the
-	// publisher serves its group again with the payload, or drops it. Its copy stays, owed to a
-	// payload reader until then, and the stream holds the end no longer. Mirrors the Rust
-	// `TrackEntry::let_go_meta`, whose copy the cache already let go of.
+	// publisher serves its group again with the payload, or drops it, and the cache already let go
+	// of its copy. Mirrors the Rust `TrackEntry::let_go_meta`.
 	#letGoMeta(entry: SubscribeEntry): void {
 		const paused = entry.paused;
 		if (!paused) return;
 		for (const [sequence, group] of paused.groups) {
 			if (!hooks.groupMeta(group.group)) continue;
 			paused.groups.delete(sequence);
-			hooks.abandonGroup(entry.track, group.group);
+			group.group.abort(new StreamError(StreamCode.Cancel));
 			group.read();
 		}
 	}

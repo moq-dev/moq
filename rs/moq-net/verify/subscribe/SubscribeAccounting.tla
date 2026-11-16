@@ -87,6 +87,7 @@ VARIABLES
     pauses,     \* YIELDED resets sent for the group
     pmeta,      \* `meta`: the subscription asks for metadata only, as of the update applied
     metaRead,   \* the cursor's record of the groups it handed out as metadata (`note_meta`)
+    pswept,     \* the groups that record let go once the cache no longer held them (`meta_span`)
     \* The wire.
     streams,    \* every Group Stream opened, in order
     resp,       \* the Subscribe Stream, publisher to subscriber
@@ -111,7 +112,7 @@ VARIABLES
     paid        \* history: the subscriber read the group's payload to its FIN
 
 pubVars == <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq, folded,
-             paused, pauses, pmeta, metaRead>>
+             paused, pauses, pmeta, metaRead, pswept>>
 subVars == <<sup, acct, reading, finished, forgot, sstale, sdrop, rec, cached, have, got, malformed,
              violation, smeta, spromoted, metaCopy, paid>>
 vars == <<pubVars, streams, resp, ctrl, subVars>>
@@ -124,7 +125,7 @@ Init ==
     /\ redrop = {} /\ reoffered = {} /\ outq = <<>> /\ folded = {}
     /\ paused = [g \in Groups |-> 0]
     /\ pauses = [g \in Groups |-> 0]
-    /\ pmeta = Promote /\ metaRead = {}
+    /\ pmeta = Promote /\ metaRead = {} /\ pswept = {}
     /\ streams = <<>> /\ resp = <<>> /\ ctrl = <<>>
     /\ sup = 0
     /\ acct = {} /\ reading = {} /\ finished = {} /\ forgot = {} /\ sstale = {} /\ sdrop = {}
@@ -157,6 +158,7 @@ Serve(g) ==
     /\ streams' = Append(streams, NewStream(g, 0, 0, pmeta))
     /\ served' = served \cup {g}
     /\ metaRead' = IF pmeta THEN metaRead \cup {g} ELSE metaRead
+    /\ pswept' = pswept
 
 \* `poll_track` takes `Recv::Group`: the cursor hands g out. Once more, it may hand out a
 \* group it gave up: one a route the front switched to delivers after a stale verdict, or
@@ -174,7 +176,7 @@ CursorHand(g) ==
        THEN /\ ReplaceStale(g)
             /\ Serve(g)
        ELSE IF g \in served
-            THEN UNCHANGED <<served, dropped, dstale, expired, redrop, streams, metaRead>>
+            THEN UNCHANGED <<served, dropped, dstale, expired, redrop, streams, metaRead, pswept>>
             ELSE /\ Serve(g)
                  /\ UNCHANGED <<dropped, dstale, expired, redrop>>
     /\ UNCHANGED <<pup, reoffered, outq, folded, paused, pauses, pmeta, resp, ctrl, subVars>>
@@ -207,7 +209,7 @@ CursorGiveUp(g, kind) ==
           /\ resp' = IF ~named THEN resp
                      ELSE IF kind = "skip" THEN Append(resp, SkipMsg(g))
                      ELSE Append(resp, DropMsg(g, kind, pup))
-    /\ UNCHANGED <<late, pup, reoffered, outq, folded, paused, pauses, pmeta, metaRead, streams, ctrl,
+    /\ UNCHANGED <<late, pup, reoffered, outq, folded, paused, pauses, pmeta, metaRead, pswept, streams, ctrl,
                    subVars>>
 
 \* A serving stream writes its next frame.
@@ -233,7 +235,7 @@ StreamFailAt(i, err) ==
                                   ![i].wasFin = (streams[i].pub = "fin")]
     /\ outq' = Append(outq, <<streams[i].g, err, streams[i].meta>>)
     /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered,
-                   folded, paused, pauses, pmeta, metaRead, resp, ctrl, subVars>>
+                   folded, paused, pauses, pmeta, metaRead, pswept, resp, ctrl, subVars>>
 
 \* Out of stream credit, the publisher resets a serving stream with YIELDED. The group is
 \* paused, not given up: nothing names it, and the publisher owes a continuation or a drop.
@@ -246,7 +248,7 @@ StreamYieldAt(i) ==
     /\ paused' = IF streams[i].meta /\ ~pmeta THEN paused ELSE [paused EXCEPT ![streams[i].g] = i]
     /\ pauses' = [pauses EXCEPT ![streams[i].g] = @ + 1]
     /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered,
-                   outq, folded, pmeta, metaRead, resp, ctrl, subVars>>
+                   outq, folded, pmeta, metaRead, pswept, resp, ctrl, subVars>>
 
 \* The publisher continues a paused group on a new Group Stream, from the YIELDED
 \* stream's own Frame Start: a reset can discard frames the transport acknowledged.
@@ -257,7 +259,7 @@ PubContinue(g) ==
        IN streams' = Append(streams, NewStream(g, k, streams[k].start, streams[k].meta))
     /\ paused' = [paused EXCEPT ![g] = 0]
     /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered,
-                   outq, folded, pauses, pmeta, metaRead, resp, ctrl, subVars>>
+                   outq, folded, pauses, pmeta, metaRead, pswept, resp, ctrl, subVars>>
 
 \* The publisher gives a paused group up instead, as it would the stream it yielded:
 \* it expires stale under the delivery budget, or is evicted.
@@ -266,7 +268,7 @@ PausedGiveUp(g, err) ==
     /\ paused' = [paused EXCEPT ![g] = 0]
     /\ outq' = Append(outq, <<g, err, streams[paused[g]].meta>>)
     /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered,
-                   folded, pauses, pmeta, metaRead, streams, resp, ctrl, subVars>>
+                   folded, pauses, pmeta, metaRead, pswept, streams, resp, ctrl, subVars>>
 
 \* The peer acknowledged everything up to the FIN.
 StreamAckAt(i) ==
@@ -292,7 +294,7 @@ PubOutcomes ==
                   /\ dropped' = dropped \cup {g}
                   /\ dstale' = dstale \cup {g}
              ELSE UNCHANGED <<expired, dropped, dstale>>
-    /\ UNCHANGED <<cur, late, pup, served, redrop, reoffered, folded, paused, pauses, pmeta, metaRead,
+    /\ UNCHANGED <<cur, late, pup, served, redrop, reoffered, folded, paused, pauses, pmeta, metaRead, pswept,
                    streams, ctrl, subVars>>
 
 \* `poll_step` drops again, under the new number, what an update could not re-offer.
@@ -306,7 +308,7 @@ PubRedrop ==
           /\ dropped' = dropped \cup {g}
           /\ dstale' = dstale \cup {g}
           /\ served' = served \cup {g}
-    /\ UNCHANGED <<cur, late, pup, reoffered, outq, folded, paused, pauses, pmeta, metaRead, streams,
+    /\ UNCHANGED <<cur, late, pup, reoffered, outq, folded, paused, pauses, pmeta, metaRead, pswept, streams,
                    ctrl, subVars>>
 
 \* `poll_track` serves a re-offered group, unless a verdict since accounted for it. One
@@ -318,8 +320,8 @@ PubReoffer ==
        IN /\ reoffered' = reoffered \ {g}
           /\ CASE g \in folded ->
                     /\ resp' = Append(resp, DropMsg(g, "evicted", pup))
-                    /\ UNCHANGED <<served, streams, metaRead>>
-               [] g \in served -> UNCHANGED <<served, streams, resp, metaRead>>
+                    /\ UNCHANGED <<served, streams, metaRead, pswept>>
+               [] g \in served -> UNCHANGED <<served, streams, resp, metaRead, pswept>>
                [] OTHER -> Serve(g) /\ UNCHANGED resp
     /\ UNCHANGED <<cur, late, pup, dropped, dstale, expired, redrop, outq, folded, paused,
                    pauses, pmeta, ctrl, subVars>>
@@ -335,7 +337,16 @@ PubFold(g) ==
     /\ \A i \in 1..Len(outq) : outq[i][1] # g
     /\ folded' = folded \cup {g}
     /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq,
-                   paused, pauses, pmeta, metaRead, streams, resp, ctrl, subVars>>
+                   paused, pauses, pmeta, metaRead, pswept, streams, resp, ctrl, subVars>>
+
+\* `note_meta` sweeps the record of the groups handed out as metadata once its runs double:
+\* it lets go of g once the cache no longer holds it, which no later copy brings back.
+PubSweep(g) ==
+    /\ g \in metaRead
+    /\ metaRead' = metaRead \ {g}
+    /\ pswept' = pswept \cup {g}
+    /\ UNCHANGED <<cur, late, pup, served, dropped, dstale, expired, redrop, reoffered, outq, folded,
+                   paused, pauses, pmeta, streams, resp, ctrl, subVars>>
 
 \* `TrackRun::update` applies a SUBSCRIBE_UPDATE: the cursor's stale verdicts reopen
 \* (`reoffer_stale`, then `owe`), and each expired stream is judged again: served
@@ -352,18 +363,22 @@ PubUpdate ==
     /\ ctrl # <<>>
     /\ LET u == Head(ctrl)
            promote == pmeta /\ u = 1
-           promoted == IF promote THEN metaRead ELSE {}
+           \* The record's sweep let go of a group once the cache no longer held it: the
+           \* promotion still gives it up (`meta_span`), as no copy is left to serve.
+           promoted == IF promote THEN metaRead \cup pswept ELSE {}
            reopened == {g \in Groups : cur[g] = "stale"}
        IN /\ ctrl' = Tail(ctrl)
           /\ pup' = u
           /\ pmeta' = (pmeta /\ ~promote)
           /\ metaRead' = metaRead \ promoted
+          /\ pswept' = IF promote THEN {} ELSE pswept
           /\ paused' = [g \in Groups |-> IF promote /\ paused[g] # 0 /\ streams[paused[g]].meta
                                         THEN 0 ELSE paused[g]]
           /\ \E held \in SUBSET promoted, gone \in SUBSET promoted :
                 LET rest == promoted \ (held \cup gone)
                     judged == expired \cup reoffered \cup redrop \cup held \cup gone
                 IN /\ held \cap gone = {}
+                   /\ pswept \cap promoted \subseteq gone
                    /\ cur' = [g \in Groups |-> IF g \in reopened \cup rest THEN "pending" ELSE cur[g]]
                    \* One cache answers both: the stale judgment re-offers what the promotion
                    \* found cached fresh, and nothing it found uncached.
@@ -681,6 +696,7 @@ Next ==
     \/ PubRedrop
     \/ PubReoffer
     \/ PubUpdate
+    \/ \E g \in Groups : PubSweep(g)
     \/ \E g \in Groups : PubFold(g)
     \/ SubHeader
     \/ SubFrame
@@ -747,7 +763,8 @@ NoViolation == ~violation
 
 \* Once quiet after asking for the payload again, the subscriber's copy holds each group's
 \* payload copy, whatever became of it, or records the group given up: none is left with
-\* nothing, or a metadata copy, for a payload reader to wait on until the grace.
+\* nothing, or a metadata copy, for a payload reader to wait on until the grace. That
+\* holds for a group the publisher's record of what it served as metadata let go too.
 PaidOnPromotion ==
     (Quiet /\ ~smeta /\ ~pmeta) =>
         \A g \in Groups : g \in paid \/ rec[g] # "none" \/ (cached[g] # "none" /\ ~metaCopy[g])

@@ -5293,6 +5293,7 @@ impl Producer {
 			parks: false,
 			meta_read: RangeSet::new(),
 			meta_swept: 0,
+			meta_span: None,
 			was_meta: false,
 			repaid: VecDeque::new(),
 		}
@@ -6932,6 +6933,7 @@ impl Subscribing {
 			parks: false,
 			meta_read: RangeSet::new(),
 			meta_swept: 0,
+			meta_span: None,
 			was_meta: false,
 			repaid: VecDeque::new(),
 		}))
@@ -7318,6 +7320,10 @@ pub struct Subscriber {
 	meta_read: RangeSet<u64>,
 	/// How many runs `meta_read` held after the groups the cache let go were last swept.
 	meta_swept: usize,
+	/// The lowest and past the highest key handed out as metadata since the last promotion,
+	/// which the sweep of `meta_read` never narrows: a promotion gives up every group in it
+	/// handed out that the cache no longer holds, remembered or not.
+	meta_span: Option<ops::Range<u64>>,
 	/// Whether the reader asked for metadata when it last read or updated, so a change through
 	/// any handle is seen on the next read.
 	was_meta: bool,
@@ -7334,8 +7340,9 @@ pub(crate) struct Promoted {
 	/// Every group handed out as metadata at or past where the payload resumes, held or not.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "a wire publisher reads it"))]
 	pub runs: RangeSet<u64>,
-	/// The part of `runs` the track caches no copy of: no payload will be handed out, so each
-	/// stays handed out.
+	/// The groups handed out at or past where the payload resumes, as metadata or not, that the
+	/// track caches no copy of: no payload will be handed out, so each stays handed out, and a
+	/// wire publisher drops it. Every group handed out as metadata the sweep let go is one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "a wire publisher reads it"))]
 	pub gone: RangeSet<u64>,
 }
@@ -10978,6 +10985,26 @@ impl Subscriber {
 		}
 		let mut groups = Vec::new();
 		let mut gone = RangeSet::new();
+		// What the sweep let go is no longer in `runs`: each group handed out in the span that
+		// the cache no longer holds is given up, so none is left neither served nor dropped. A
+		// payload copy the peer holds whole wins over that drop.
+		if let Some(span) = self.meta_span.take() {
+			let span = span.start.max(from)..span.end;
+			if !span.is_empty() {
+				let delivered = match &self.inner {
+					Inner::Plain(cursor) => &cursor.record.delivered,
+					Inner::Resume(_, logical) => &logical.record.delivered,
+				};
+				let mut handed = RangeSet::new();
+				handed.insert(span.clone());
+				for gap in delivered.gaps(span) {
+					handed.remove(gap);
+				}
+				for run in handed.iter() {
+					gone.extend(self.uncached(run.clone()).iter().cloned());
+				}
+			}
+		}
 		for run in runs.iter() {
 			gone.extend(self.uncached(run.clone()).iter().cloned());
 			groups.extend(self.repay(run.clone(), hand));
@@ -10998,6 +11025,11 @@ impl Subscriber {
 	/// what the cache no longer holds once the runs double keeps the cost per group constant.
 	pub(crate) fn note_meta(&mut self, key: u64) {
 		self.meta_read.insert(key..key.saturating_add(1));
+		let end = key.saturating_add(1);
+		self.meta_span = Some(match self.meta_span.take() {
+			Some(span) => span.start.min(key)..span.end.max(end),
+			None => key..end,
+		});
 		if self.meta_read.len() >= self.meta_swept.max(8) * 2 {
 			let runs: Vec<_> = self.meta_read.iter().cloned().collect();
 			for run in runs {
@@ -18335,6 +18367,41 @@ mod test {
 		let group = reader.recv_group().await.unwrap().expect("the next group");
 		assert_eq!(group.start, 1, "group 0 is past the budget behind the edge");
 		assert!(!group.is_meta());
+	}
+
+	/// A wire publisher's promotion gives up every group it handed out as metadata that its
+	/// cache no longer holds, even one the sweep of its record let go: none is left neither
+	/// served again nor dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn promotion_gives_up_a_metadata_group_the_sweep_let_go() {
+		let producer = track_producer("test", Info::timed());
+		for _ in 0..40 {
+			producer.append_next().unwrap().close().unwrap();
+		}
+		let mut reader = producer.subscribe(replay().with_meta(true));
+		assert_eq!(drain(&mut reader).len(), 40);
+		// The cache lets go of all but the newest.
+		for key in 0..39 {
+			producer.modify().unwrap().evict_group(key, Error::Evicted);
+		}
+		// As a wire publisher strips them: the record's runs double, so the sweep lets go of
+		// the groups the cache no longer holds.
+		for key in (0..32).step_by(2) {
+			reader.note_meta(key);
+		}
+		assert!(reader.meta_read.is_empty(), "the sweep let go of every one");
+
+		let promoted = reader
+			.update_from(replay(), 4)
+			.unwrap()
+			.expect("the update asks for the payload again");
+		let gone: Vec<_> = promoted.gone.iter().cloned().collect();
+		assert_eq!(
+			gone,
+			vec![4..31],
+			"each handed out from the payload group up is given up"
+		);
 	}
 
 	/// The upstream lets go of the metadata copy for its payload before the reader that asked
