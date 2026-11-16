@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -15086,6 +15088,7 @@ class FfiConverterMoqGroupProducer {
 
 abstract class MoqTrackProducerInterface {
   void abort({required int errorCode});
+  bool abortUnwanted({required int errorCode});
   MoqGroupProducer appendGroup();
   MoqTrackConsumer consume({required MoqSubscription? subscription});
   MoqGroupProducer createGroup({required int sequence});
@@ -15143,6 +15146,18 @@ class MoqTrackProducer implements MoqTrackProducerInterface {
         status,
       );
     }, moqExceptionErrorHandler);
+  }
+
+  bool abortUnwanted({required int errorCode}) {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqtrackproducer_abort_unwanted(
+        uniffiClonePointer(),
+        FfiConverterUInt16.lower(errorCode),
+        status,
+      ),
+      FfiConverterBool.lift,
+      moqExceptionErrorHandler,
+    );
   }
 
   MoqGroupProducer appendGroup() {
@@ -22774,6 +22789,15 @@ external void uniffi_moq_ffi_fn_method_moqtrackproducer_abort(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Int8 Function(Pointer<Void>, Uint16, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqtrackproducer_abort_unwanted(
+  Pointer<Void> ptr,
+  int error_code,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -24650,6 +24674,9 @@ external int uniffi_moq_ffi_checksum_method_moqgroupproducer_write_frame();
 external int uniffi_moq_ffi_checksum_method_moqtrackproducer_abort();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqtrackproducer_abort_unwanted();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqtrackproducer_append_group();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -25231,7 +25258,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted() != 13310) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted_changed() != 29509) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted_changed() != 24594) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqinstance_is_minted() != 53450) {
@@ -25558,6 +25585,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_abort() != 37537) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_abort_unwanted() !=
+      11974) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_group() != 30667) {

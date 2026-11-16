@@ -245,6 +245,8 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
+To end a track nobody wants, call the producer's `abort_unwanted(code)` once `wanted_changed()` returns `std::nullopt` rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+
 ## Authorization
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
