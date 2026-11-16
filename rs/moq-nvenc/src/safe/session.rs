@@ -14,7 +14,8 @@ use super::{
 use crate::{
 	sys::nvEncodeAPI::{
 		GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS,
-		NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_RECONFIGURE_PARAMS, NV_ENC_RECONFIGURE_PARAMS_VER,
+		NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_RECONFIGURE_PARAMS,
+		NV_ENC_RECONFIGURE_PARAMS_VER,
 	},
 	Bitstream, EncoderInput,
 };
@@ -102,9 +103,9 @@ impl Session {
 	}
 
 	/// Change the bitrate (bits per second) the running session is held to, taking
-	/// effect from roughly the next frame: the peak when the config set one (VBR),
-	/// else the average. The other rates and the VBV the config set keep their
-	/// ratio to it.
+	/// effect from roughly the next frame: the peak of a VBR config that set one,
+	/// else the average (CBR ignores the peak). The other rates and the VBV the
+	/// config set keep their ratio to it.
 	///
 	/// The encoder keeps running: no IDR is forced and no state is reset, so
 	/// this is safe to call as often as a congestion controller updates. That is
@@ -365,14 +366,16 @@ fn retune(
 
 	let mut candidate = *config;
 	let rc = &mut candidate.rcParams;
-	// The rate the session is held to: the peak when one is set (VBR), else the
-	// average. Every other rate the caller set keeps its ratio to it, so a VBV
-	// sized to one frame at open stays one frame, and an average below the peak
-	// stays the same share of it. Left alone, a VBV would loosen the keyframe cap
-	// as the bitrate falls, right when the link can least afford it.
-	let basis = match rc.maxBitRate {
-		0 => rc.averageBitRate,
-		peak => peak,
+	// The rate the session is held to: the peak of a VBR session that sets one,
+	// else the average (CBR ignores the peak). Every other rate the caller set
+	// keeps its ratio to it, so a VBV sized to one frame at open stays one frame,
+	// and an average below the peak stays the same share of it. Left alone, a VBV
+	// would loosen the keyframe cap as the bitrate falls, right when the link can
+	// least afford it.
+	let peaked = rc.rateControlMode == NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR && rc.maxBitRate != 0;
+	let basis = match peaked {
+		true => rc.maxBitRate,
+		false => rc.averageBitRate,
 	};
 	if basis == 0 {
 		// Nothing set yet, so there is nothing to keep in proportion.
@@ -388,7 +391,9 @@ fn retune(
 			u32::try_from(scaled).map_err(|_| invalid("a scaled rate or VBV exceeds u32"))
 		};
 		rc.averageBitRate = scale(rc.averageBitRate)?;
-		rc.maxBitRate = scale(rc.maxBitRate)?;
+		if peaked {
+			rc.maxBitRate = scale(rc.maxBitRate)?;
+		}
 		rc.vbvBufferSize = scale(rc.vbvBufferSize)?;
 		rc.vbvInitialDelay = scale(rc.vbvInitialDelay)?;
 	}
@@ -610,12 +615,13 @@ mod tests {
 	}
 
 	/// A VBR config moves its peak, and the average, if any, and the VBV keep
-	/// their share of it.
+	/// their share of it. A CBR config moves its average, whatever its peak.
 	#[test]
 	fn peak_is_the_rate_a_vbr_session_moves() {
 		let init = NV_ENC_INITIALIZE_PARAMS::default();
 		let peak = |average: u32| {
 			let mut config = rate_config(average, 133_333);
+			config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR;
 			config.rcParams.maxBitRate = 4_000_000;
 			config
 		};
@@ -629,6 +635,12 @@ mod tests {
 		let mut config = peak(3_000_000);
 		retune(&init, &mut config, 2_000_000, |_| Ok(())).unwrap();
 		assert_eq!(held(&config), (2_000_000, (1_500_000, 66_666, 66_666)));
+
+		// CBR ignores the peak, so the average is what moves, to the rate asked.
+		let mut config = peak(2_000_000);
+		config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
+		retune(&init, &mut config, 1_000_000, |_| Ok(())).unwrap();
+		assert_eq!(held(&config), (4_000_000, (1_000_000, 66_666, 66_666)));
 	}
 
 	#[test]
