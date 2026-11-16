@@ -4854,6 +4854,48 @@ test("a lite-07 consume skips a claim above a newer floor's region", async () =>
 	await pick.info;
 });
 
+// A reader below a newer floor's region is not shown a claim above it, as a consume there skips
+// it: the covering claim it sees at its own prefix is the one that floor leaves current.
+test("a lite-07 reader skips a claim above a newer floor's region", async () => {
+	const { subscriber, announced, send, another } = await routedStream();
+	const root = Path.from("live");
+	const below = Path.from("live/x");
+	const a = Instance.parse("a");
+
+	// NODE_A claims live at revision 0; a dearer NODE_B claims it too.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: root, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start", route: { node: NODE_A } });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		offer: offer(NODE_B, { metric: 5n }),
+	});
+	await send({ status: "active", suffix: root, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	// NODE_A's route at live/x presents only live/x/m there at revision 1: it withdrew live.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: below, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: Path.from("live/x/m"), route: 2n, instance: a });
+	await send({ status: "floor", id: 2n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
+
+	const { announced: under } = await another(Path.Pattern.subtree(below));
+	const shown = [await under.next(), await under.next()];
+	expect(shown).toContainEqual(
+		expect.objectContaining({ prefix: below, route: expect.objectContaining({ node: NODE_B }) }),
+	);
+	expect(shown).not.toContainEqual(
+		expect.objectContaining({ prefix: below, route: expect.objectContaining({ node: NODE_A }) }),
+	);
+
+	under.close();
+	announced.close();
+	subscriber.close();
+});
+
 // A route refused once live stops covering, as an ended one does: a held consume a narrower floor
 // of it took off a broader claim is routable again once that floor is gone.
 test("a lite-07 route refused once live gives a held consume back its broader claim", async () => {

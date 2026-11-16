@@ -442,10 +442,26 @@ impl Answer {
 			.values()
 			.filter_map(|prefix| prefix.path.clone())
 			.collect();
+		// A prefix removed and added again in one edit, as a change of Hidden is, keeps
+		// its mounts under its new Prefix ID: their routes and claims carry over rather
+		// than ending until the mount sends them again.
+		let readded: HashMap<Path, u64> = (request.add.iter())
+			.filter_map(|(id, prefix)| Some((prefix.path.clone()?, *id)))
+			.collect();
+		let mut kept = BTreeSet::new();
 		for id in &request.remove {
-			self.prefixes.remove(id);
-			let mounts = self.mounts.iter().filter(|(_, mount)| mount.prefix == *id);
-			let gone: Vec<Source> = mounts.map(|(source, _)| *source).collect();
+			let again = (self.prefixes.remove(id))
+				.and_then(|prefix| prefix.path)
+				.and_then(|path| Some((readded.get(&path).copied()?, path)));
+			let mounts = self.mounts.iter_mut().filter(|(_, mount)| mount.prefix == *id);
+			let mut gone = Vec::new();
+			for (source, mount) in mounts {
+				match &again {
+					Some((now, _)) => mount.prefix = *now,
+					None => gone.push(*source),
+				}
+			}
+			kept.extend(again.map(|(_, path)| path));
 			for source in gone {
 				self.unsource(source);
 				self.mounts.remove(&source);
@@ -486,7 +502,7 @@ impl Answer {
 			}
 			sent.floor = route.floor;
 		}
-		for (id, path) in &added {
+		for (id, path) in added.iter().filter(|(_, path)| !kept.contains(path)) {
 			for mount in self.origin.mounted(path) {
 				let interest = mount.interest.clone();
 				let stream = self.main.mount(interest).map_err(|_| Error::ProtocolViolation)?;

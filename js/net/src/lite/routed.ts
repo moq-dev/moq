@@ -410,6 +410,9 @@ export class Routed {
 				const claim = wire.shown.get(at);
 				if (!claim || seen.has(id)) continue;
 				seen.add(id);
+				// A claim above the path covers it only where the newest floor certifying the path
+				// leaves it, as a consume of the path picks.
+				if (!this.#session.floors.covers(wire.node, at, path)) continue;
 				if (this.#usable(wire)) candidates.push(this.#candidate(wire, claim));
 			}
 		}
@@ -457,6 +460,13 @@ export class Routed {
 
 	// Report the claims at `path` to every reader it shows under: at the path itself for a reader
 	// above it, and at the reader's own prefix for one below.
+	// What covers a path changed: every consume picks anew, and each reader is shown again
+	// what covers its own prefix from above it.
+	#revalidate() {
+		this.#session.revalidate();
+		for (const prefix of new Set([...this.#readers].map((reader) => reader.prefix))) this.#touch(prefix, false);
+	}
+
 	#touch(path: Path.Valid, lost: boolean) {
 		if (this.#deferred) {
 			this.#deferred.set(path, lost);
@@ -593,7 +603,7 @@ export class Routed {
 		const named = this.#key(wire.node, wire.prefix);
 		if (named !== undefined && this.#named.get(named) === wire.id) this.#named.delete(named);
 		this.#drop(wire);
-		this.#session.revalidate();
+		this.#revalidate();
 	}
 
 	// Take a route that no longer lives out of what the session shows: offline, not withdrawn.
@@ -666,7 +676,7 @@ export class Routed {
 		floors.join(wire.node, wire.carrier);
 		const others = floors.floor(wire.node, wire.carrier);
 		this.#show(wire, new Map(), true);
-		if (others) this.#session.revalidate();
+		if (others) this.#revalidate();
 	}
 
 	// The route moved to `offer`, which this node refuses with its path when it is `Unusable`.
@@ -680,7 +690,7 @@ export class Routed {
 		}
 		this.#refreshRoute(wire, !this.#usable(wire));
 		// Its floors no longer cover anything, as on ROUTE_END.
-		if (was && !this.#filed(wire)) this.#session.revalidate();
+		if (was && !this.#filed(wire)) this.#revalidate();
 	}
 
 	// A DEAD: the stream's routes through the hop it names carry on as it says, once the
@@ -820,7 +830,7 @@ export class Routed {
 		const others = filed && floors.floor(wire.node, wire.carrier);
 		this.#show(wire, touched, others);
 		// Another view of the node may now cover a consumed path differently.
-		if (others) this.#session.revalidate();
+		if (others) this.#revalidate();
 	}
 
 	// Whether the requested prefix `region` asks for hidden claims.
@@ -989,7 +999,7 @@ export class Routed {
 		for (const wire of ended) {
 			for (const path of wire.view.claims.keys()) consumes.withdraw(path, wire.owner);
 		}
-		if (fresh.length > 0 || ended.length > 0) this.#session.revalidate();
+		if (fresh.length > 0 || ended.length > 0) this.#revalidate();
 		// A claim no route carries any more was let go, not withdrawn by its origin.
 		for (const path of touched) this.#touch(path, true);
 	}

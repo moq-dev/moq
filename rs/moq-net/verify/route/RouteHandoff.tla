@@ -755,6 +755,13 @@ Marker(n, s, m) ==
                  !.rt = [k \in Keys |-> IF carry(k) # {} THEN s.rt[(CHOOSE x \in carry(k) : TRUE)[1]]
                                        ELSE s.rt[k]]]
 
+\* `ask`: the edit bringing what node n asks m for to what it watches, if any.
+\* One edit is in flight at a time: a change made meanwhile waits for its
+\* marker, which asks again (`Router::ask`, `Router::edited`).
+Asks(s, m) ==
+    IF s.edits[m] # <<>> \/ s.asked[m] = s.watch THEN [s |-> s, out |-> <<>>]
+    ELSE [s |-> [s EXCEPT !.edits[m] = <<s.watch>>], out |-> <<AskMsg(s.watch)>>]
+
 Deliver(d) ==
     LET m == d[1]
         n == d[2]
@@ -773,11 +780,14 @@ Deliver(d) ==
         s1 == CASE msg.t = "ask" -> Answer(st[n], m, msg.set)
                 [] msg.t = "edited" -> Marker(n, st[n], m)
                 [] OTHER -> Recv(n, st[n], m, msg)
-        u == Update(n, s1, OV, up, gen, ended[n], rep, quiet)
-        \* The marker goes before anything the edit sends.
+        \* The marker ends the edit in flight, so a change that waited on it goes now.
+        a == IF msg.t = "edited" THEN Asks(s1, m) ELSE [s |-> s1, out |-> <<>>]
+        u == Update(n, a.s, OV, up, gen, ended[n], rep, quiet)
+        \* The marker goes before anything the edit sends; a deferred ask follows
+        \* what the marker's rekey sends, as `Router::edited` asks last.
         rs == [x \in {n} |-> IF msg.t = "ask"
                              THEN [u EXCEPT !.out[m] = <<EditedMsg>> \o @]
-                             ELSE u]
+                             ELSE [u EXCEPT !.out[m] = @ \o a.out]]
     IN /\ q[d] # <<>>
        /\ Commit(rs, q0)
        /\ Internal(Sent(rs))
@@ -847,12 +857,6 @@ Closed(s, y) ==
               !.told[y] = {},
               !.toldDrain[y] = {},
               !.drain = @ \ {y}]
-
-\* `ask`: the edit bringing what node n asks m for to what it watches, if any.
-Asks(s, m) ==
-    LET requested == IF s.edits[m] = <<>> THEN s.asked[m] ELSE s.edits[m][Len(s.edits[m])]
-    IN IF requested = s.watch THEN [s |-> s, out |-> <<>>]
-       ELSE [s |-> [s EXCEPT !.edits[m] = Append(@, s.watch)], out |-> <<AskMsg(s.watch)>>]
 
 Connect(l) ==
     LET up1 == up \cup {l}
