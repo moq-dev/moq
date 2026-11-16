@@ -133,6 +133,9 @@ pub struct Consumer {
 	/// first packet, which the codec's own delay already primes.
 	warmup: Duration,
 	warmup_pending: bool,
+	/// Media decoded so far, up to the warmup. A gap keeps the codec's history, which primes
+	/// it as the browser's pre-roll does, so only what this falls short of is trimmed.
+	primed: Duration,
 	/// Whether a packet was read or lost yet, so the track's first packet can be told apart.
 	started: bool,
 	warmup_until: Option<moq_net::Timestamp>,
@@ -278,6 +281,7 @@ impl Consumer {
 			max_age,
 			warmup,
 			warmup_pending: !warmup.is_zero(),
+			primed: Duration::ZERO,
 			warmup_until: None,
 			started: false,
 			resolved_sample_rate: sample_rate,
@@ -429,7 +433,7 @@ impl Consumer {
 			let timestamp = mux_frame.timestamp;
 
 			// Undeclared holes are routine: a skipped stalled group, a packet the
-			// decoder refused, an ingest that resynced. Drop every stage's state at
+			// decoder refused, an ingest that resynced. Drop the timeline's state at
 			// the edge, before the packet after it goes anywhere near the decoder.
 			//
 			// Skipped once an end marker arrives, because from there the terminal
@@ -475,9 +479,12 @@ impl Consumer {
 			// first packet has no history to warm up from: the codec's pre-skip, trimmed by
 			// the decoder, is all the priming its encoder declared.
 			if std::mem::take(&mut self.warmup_pending) && !track_start {
-				let warmup = moq_net::Timestamp::try_from(self.warmup)?
-					.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
-				self.warmup_until = Some(timestamp.checked_add(warmup)?);
+				let warmup = self.warmup.saturating_sub(self.primed);
+				if !warmup.is_zero() {
+					let warmup = moq_net::Timestamp::try_from(warmup)?
+						.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
+					self.warmup_until = Some(timestamp.checked_add(warmup)?);
+				}
 			}
 			// Codec delay trimmed off the front is media this packet covered even
 			// though no samples came out, so it still moves the packet after it along.
@@ -491,6 +498,7 @@ impl Consumer {
 			if covered > 0 {
 				self.target.set_frame(covered as f64 * 1000.0 / rate as f64);
 				self.frame = Duration::from_secs_f64(covered as f64 / rate as f64);
+				self.primed = self.primed.saturating_add(self.frame).min(self.warmup);
 			}
 			if let Some(end) = self.end {
 				let terminal_start = *self
@@ -736,7 +744,8 @@ impl Consumer {
 	}
 
 	/// Start a new timeline after a gap or past a declared end. The decoder is not reset:
-	/// the next group already starts on a keyframe, and pre-skip is a play-path concern.
+	/// the next group already starts on a keyframe, and the history it keeps primes the
+	/// packets after the break, so a gap trims no more warmup than the decoder still lacks.
 	///
 	/// Samples the resampler still holds arrived before the break, so they are drained
 	/// as their own frame first rather than filtered together with what follows it.
@@ -757,17 +766,16 @@ impl Consumer {
 		Ok(())
 	}
 
-	/// Reset codec prediction and resampling state at a hole, returning whatever the
-	/// resampler was still holding from before it.
+	/// Reset resampling state at a hole, returning whatever the resampler was still
+	/// holding from before it.
 	///
 	/// Those samples arrived before the hole and belong before it, so they come
 	/// out as their own frame rather than being filtered together with the audio
 	/// on the far side. The resampler starts over from there, which is what makes
 	/// the next packet's output stamp from the packet itself: nothing is buffered
-	/// to reach back over.
+	/// to reach back over. The codec keeps its history, which primes the packets
+	/// after the hole as a pre-roll would.
 	fn gap(&mut self) -> Result<Option<Frame>, Error> {
-		self.decoder.reset_prediction()?;
-
 		let frame = self.drain()?;
 
 		self.next_start = None;
@@ -1145,7 +1153,19 @@ mod tests {
 		}
 	}
 
-	async fn warmup_output(declared: bool) -> (Vec<u128>, usize) {
+	/// How the timeline breaks between `warmup_output`'s two runs of packets.
+	#[derive(Clone, Copy, Debug)]
+	enum Break {
+		/// A declared end, so a fresh encoder follows.
+		Declared,
+		/// A lost group: a seek opens the next without declaring the starts before it skipped.
+		Lost,
+		/// A timestamp jump across contiguous groups.
+		Undeclared,
+	}
+
+	/// Decodes `first` packets, then six more a second later, past a `cut` in the timeline.
+	async fn warmup_output(cut: Break, first: u64) -> (Vec<u128>, usize) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
@@ -1159,10 +1179,14 @@ mod tests {
 		// Joined mid-stream: the track's first packet needs no warmup.
 		producer.seek(1).unwrap();
 		for epoch in 0..2 {
-			if epoch != 0 && declared {
-				producer.discontinuity().unwrap();
+			if epoch != 0 {
+				match cut {
+					Break::Declared => producer.discontinuity().unwrap(),
+					Break::Lost => producer.seek(1_000_000).unwrap(),
+					Break::Undeclared => {}
+				}
 			}
-			for packet in 0..6 {
+			for packet in 0..if epoch == 0 { first } else { 6 } {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
@@ -1455,7 +1479,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn warmup_trims_the_join_without_trimming_groups_or_declared_returns() {
-		let (stamps, frames) = warmup_output(true).await;
+		let (stamps, frames) = warmup_output(Break::Declared, 6).await;
 		assert_eq!(
 			stamps,
 			[
@@ -1466,10 +1490,28 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn warmup_restarts_after_an_undeclared_gap() {
-		let (stamps, frames) = warmup_output(false).await;
-		assert_eq!(stamps, [80_000, 100_000, 1_080_000, 1_100_000]);
-		assert_eq!(frames, 4 * 960);
+	async fn an_undeclared_gap_keeps_the_primed_decoder() {
+		let (stamps, frames) = warmup_output(Break::Undeclared, 6).await;
+		assert_eq!(
+			stamps,
+			[
+				80_000, 100_000, 1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000
+			]
+		);
+		assert_eq!(frames, 8 * 960);
+	}
+
+	/// The codec's history primes it across a gap, so only the warmup it falls short of is trimmed.
+	#[tokio::test(start_paused = true)]
+	async fn a_gap_trims_the_warmup_the_history_leaves() {
+		for cut in [Break::Lost, Break::Undeclared] {
+			let (stamps, frames) = warmup_output(cut, 2).await;
+			assert_eq!(stamps, [1_040_000, 1_060_000, 1_080_000, 1_100_000], "{cut:?}");
+			assert_eq!(frames, 4 * 960, "{cut:?}");
+			// A primed decoder trims nothing after the gap.
+			let (stamps, _) = warmup_output(cut, 6).await;
+			assert_eq!(stamps[2..], [1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000], "{cut:?}");
+		}
 	}
 
 	/// A latest join skips the cached backlog and primes the decoder on the live edge's own
@@ -2597,8 +2639,7 @@ mod tests {
 		let frames = first.data.len() / size_of::<f32>();
 		assert!(frames < 960, "the pre-skip should be trimmed, got {frames} frames");
 
-		// The hole is real, so codec prediction starts over but stream-level pre-skip
-		// does not. The audio is stamped where the packet says rather than 2.5 ms early.
+		// The hole is real, but stream-level pre-skip does not start over. The audio is stamped where the packet says rather than 2.5 ms early.
 		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		assert_eq!(second.timestamp.as_micros().unwrap(), 22_500);
 		assert_eq!(second.data.len() / size_of::<f32>(), 960, "pre-skip was reapplied");

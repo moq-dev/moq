@@ -858,7 +858,8 @@ export class Decoder {
 				this.#reprime(decoder, config, order);
 			}
 			if (!order.admit(read)) continue;
-			if (!(await this.#decode(effect, decoder, read.frame))) return false;
+			const duration = packetDuration(config.codec, read.frame);
+			if (!(await this.#decode(effect, decoder, read.frame, duration))) return false;
 		}
 		return true;
 	}
@@ -871,8 +872,14 @@ export class Decoder {
 		order.reset();
 	}
 
-	// Decode one frame once backpressure admits it, reporting whether to keep going.
-	async #decode(effect: Effect, decoder: AudioDecoder, frame: Container.ReceivedFrame): Promise<boolean> {
+	// Decode one frame once backpressure admits it, behind any pre-roll a gap left, reporting whether
+	// to keep going.
+	async #decode(
+		effect: Effect,
+		decoder: AudioDecoder,
+		frame: Container.ReceivedFrame,
+		duration: Duration | undefined,
+	): Promise<boolean> {
 		const ring = await this.#ready(effect);
 		if (!ring) return false;
 
@@ -885,6 +892,9 @@ export class Decoder {
 		// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
 		// of the loop. Stop instead: the error callback already reported the real failure.
 		if (decoder.state === "closed") return false;
+		for (const preroll of this.#terminal.preroll()) {
+			decoder.decode(new EncodedAudioChunk({ type: "key", data: preroll.payload, timestamp: preroll.timestamp }));
+		}
 		decoder.decode(
 			new EncodedAudioChunk({
 				// WebCodecs audio chunks are key even inside a MoQ group.
@@ -893,6 +903,7 @@ export class Decoder {
 				timestamp: frame.timestamp.asMicros(),
 			}),
 		);
+		this.#terminal.decoded(frame, duration);
 		return true;
 	}
 
@@ -1033,12 +1044,14 @@ export class Decoder {
 		// Whatever becomes of it, the output answers the frames it was decoded from, so the gate counts
 		// only what still decodes. Reported after any insert, so the gate always counts the frame as
 		// either decoding or in the ring.
+		// Pre-roll output answers no frame: it only primes the decoder, and the warmup trims it.
+		const preroll = this.#terminal.primes(sample);
 		const decoded = sample.timestamp + (sample.numberOfFrames / sample.sampleRate) * 1_000_000;
 		let landed: number | undefined;
 		try {
 			landed = this.#place(sample);
 		} finally {
-			this.#ring.peek()?.decoded(decoded, landed);
+			if (!preroll) this.#ring.peek()?.decoded(decoded, landed);
 		}
 		return landed;
 	}
