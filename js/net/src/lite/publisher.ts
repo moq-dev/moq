@@ -1262,7 +1262,6 @@ export class Publisher {
 				named,
 				floor,
 				bounds,
-				update: msg.update,
 				initial: BigInt(asked.length),
 			});
 
@@ -1435,8 +1434,6 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
-			/** The SUBSCRIBE's update number (0), which a drop echoes until an update replaces it. */
-			update: bigint;
 			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
 			initial: bigint;
 		},
@@ -1445,7 +1442,6 @@ export class Publisher {
 		// What the wire was told of each sequence: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
-		let updateNumber = serving.update;
 		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
 		const moveCursor = () => track.withRange({ start: { included: floor } });
@@ -1522,21 +1518,13 @@ export class Publisher {
 		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
 			hole.skip && hasSkip(this.version)
 				? { skip: new SubscribeSkip({ start, end }) }
-				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, updateNumber) };
+				: { drop: SubscribeDrop.given(start, end, hole.error, this.version) };
 
-		// Whether lite-07 names `hole` stale: an OLD drop, which the next update reopens.
-		const sentStale = (hole: Hole) => !hole.skip && toStreamCode(hole.error) === StreamCode.Old;
-
-		// What the wire is told when `hole` goes out. Mirrors the Rust `TrackRun::report`.
+		// What the wire is told when `hole` goes out: on lite-07 a drop, which only a skip replaces.
+		// Mirrors the Rust `TrackRun::report`.
 		const reportOf = (hole: Hole): Omit<Reported, "start" | "end"> => {
-			// Every drop is final before lite-07.
 			if (!hasSkip(this.version)) return { kind: "settled" };
-			if (hole.skip) return { kind: "skip" };
-			// The wire names every OLD drop stale, which the next update reopens. One given up as
-			// final, such as one relayed from a version whose drops are all final, is dropped again
-			// by each update, as an expired stream is.
-			if (sentStale(hole)) return { kind: "stale", ...(hole.stale === undefined ? { expired: true } : {}) };
-			return { kind: "dropped" };
+			return { kind: hole.skip ? "skip" : "dropped" };
 		};
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
@@ -1553,19 +1541,14 @@ export class Publisher {
 		};
 
 		// Forward a verdict the reader reached on `[start, end)`, which its record already took in,
-		// replacing what it goes out over: on lite-07, a skip any drop already sent, and a final
-		// drop a stale one, which the next update would otherwise reopen. A reader the earlier drop
-		// ended stays ended.
+		// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
+		// earlier drop ended stays ended.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
 			record.tell(start, end, reportOf(hole));
 			const msg = holeMessage(start, end, hole);
 			return controls.response(encodeSubscribeResponse(stream, msg, this.version));
 		};
-
-		// Record `[start, end)` as named stale (OLD) in a lite-07 drop that each update drops
-		// again, which a later verdict or group replaces.
-		const toldStale = (start: bigint, end: bigint) => record?.tell(start, end, { kind: "stale", expired: true });
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
 		// straight into finish_at, so it must name the track's boundary (which counts
@@ -1616,17 +1599,13 @@ export class Publisher {
 		const drops = new Signal(0);
 		// Groups whose stream failed, with why, for the control stream to name, as runs.
 		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
-		// The expired groups an update re-offers, still cached and in range, served again in turn.
-		const reoffered: group.Consumer[] = [];
 		// Lite-07: a fresh read of the group `serving` served, whose stream the session reset to make
 		// room, for a new stream to continue it at the same frames; undefined once the subscription's
 		// budget or the cache gave it up. The Rust publisher keeps an unread clone of the reset
 		// stream's cursor instead, which a read handle here cannot make.
 		const continuation = (serving: RunGroup): RunGroup | undefined => {
-			const sequence = serving.group.sequence;
 			// From the reset stream's Frame Start, which a cache holding only the group's tail can serve.
-			const [resumed, ...extra] = hooks.reofferGroups(track, sequence, sequence + 1n, serving.start).groups;
-			for (const other of extra) other.close();
+			const resumed = hooks.continueGroup(track, serving.group.sequence, serving.start);
 			if (!resumed) return undefined;
 			return { ...serving, group: resumed, givenUp: new GivenUp(resumed) };
 		};
@@ -1657,14 +1636,8 @@ export class Publisher {
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
-						const old = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-						// A stream expired under this subscription's budget is a stale verdict, which
-						// a later verdict or group replaces as any stale drop sent, and each update drops
-						// again. A re-offer an update owed again is given up now, so the end sweep never
-						// names it.
-						if (old) toldStale(start, end);
-						else record?.tell(start, end, reportOf({ error }));
-						const msg = SubscribeDrop.given(start, end, error, this.version, updateNumber);
+						record?.tell(start, end, reportOf({ error }));
+						const msg = SubscribeDrop.given(start, end, error, this.version);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
 					}
@@ -1689,7 +1662,6 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
-							updateNumber = update.update;
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 								const live = new Set(control.ids);
@@ -1718,7 +1690,7 @@ export class Publisher {
 								// A lowered floor owes the groups it newly asks for, so the end sweep
 								// covers them. A raised one sends no early drop: the subscriber already
 								// stops owing below its floor, and a later update may lower it again to
-								// reopen those groups.
+								// ask for the groups the wire was told nothing of.
 								if (startSequence !== undefined) startSequence = min(startSequence, start);
 							}
 							bounds.startGroup = update.startGroup;
@@ -1726,44 +1698,6 @@ export class Publisher {
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
 							moveCursor();
-							// Lite-07 reopens every stale drop on any update, judged under its new terms
-							// (applied as the update was decoded): what was reported stale is offered
-							// again, and dropped again under this update's number if still stale.
-							if (hasSkip(this.version)) {
-								const owe = (start: bigint, end: bigint) => record?.untell(start, end);
-								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
-								// What each update drops again: the stale runs whose stream expired, or
-								// that went out OLD for good.
-								const expired: Run[] = record?.expired() ?? [];
-								// A stale drop not sent yet, such as one an earlier update left to drop
-								// again, is judged again under these terms too.
-								for (const pending of pendingDrops.filter(
-									(d) => toStreamCode(d.error) === StreamCode.Old,
-								))
-									insertRun(expired, pending.start, pending.end);
-								pendingDrops.splice(
-									0,
-									pendingDrops.length,
-									...pendingDrops.filter((d) => toStreamCode(d.error) !== StreamCode.Old),
-								);
-								// A group re-offered that has not opened yet is judged again too, since these
-								// terms may no longer admit it.
-								for (const group of reoffered.splice(0)) {
-									insertRun(expired, group.sequence, group.sequence + 1n);
-									group.close();
-								}
-								// A group whose stream already reset as stale: one still cached, in range, and
-								// fresh under the new budget is served again; the rest is dropped again, by run.
-								for (const run of expired.splice(0)) {
-									const { groups, givenUp } = hooks.reofferGroups(track, run.start, run.end);
-									for (const group of groups) {
-										owe(group.sequence, group.sequence + 1n);
-										reoffered.push(group);
-									}
-									for (const gone of givenUp)
-										pendingDrops.push({ ...gone, error: new StreamError(StreamCode.Old) });
-								}
-							}
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary usually lets the decoder finish whatever the transport
@@ -1785,13 +1719,9 @@ export class Publisher {
 					!startSent && hasLargest(this.version)
 						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
-				// A group an update re-offers goes ahead of new ones.
-				const again = first ? undefined : reoffered.shift();
 				const recv = first
 					? ({ kind: "group", group: first.group } as const)
-					: again
-						? ({ kind: "group", group: again } as const)
-						: hooks.tryRecvGroup(track, emitRange);
+					: hooks.tryRecvGroup(track, emitRange);
 				first = undefined;
 				switch (recv.kind) {
 					case "error":
@@ -1930,15 +1860,10 @@ export class Publisher {
 				}
 
 				const group = recv.group;
-				// Never a second stream for a sequence this subscription already accounted for
-				// (served, sent as a datagram, or dropped): before lite-07 a subscriber settles a
-				// drop for good. A stale drop a lite-07 update reopened is owed again (see the update above).
-				// A lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a group
-				// handed out after one is served, as one a route the front switched to delivers: the
-				// update that reopens the drop would never re-offer it.
-				if (record?.toldStale(group.sequence)) {
-					record.replaceDrops(group.sequence, group.sequence + 1n);
-				} else if (record?.told(group.sequence)) {
+				// Never a second stream for a sequence this subscription already accounted for (served,
+				// sent as a datagram, or dropped, stale or not): a subscriber settles every drop for good,
+				// and a reader wider than a stale one asks for the group with a request of its own.
+				if (record?.told(group.sequence)) {
 					group.close();
 					continue;
 				}
@@ -2040,8 +1965,6 @@ export class Publisher {
 			}
 		} finally {
 			if (!finished) unsubscribe();
-			// An update's re-offers are reads of their own, which closing the track leaves open.
-			for (const group of reoffered.splice(0)) group.close();
 			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
 			// nothing more, even while a reply is still being written. Either way the groups still
 			// waiting for a slot are cancelled, but an opened stream may be a final group whose FIN

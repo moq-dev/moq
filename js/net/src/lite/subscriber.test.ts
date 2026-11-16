@@ -1578,11 +1578,13 @@ test("a yielded group a drop named ends", async () => {
 	}
 });
 
-// Lite-07: a stale drop that overtook the YIELDED reset of the stream it names holds only under the
-// update it names: once the subscriber sends another, the reset pauses the group, which the
-// publisher then continues or drops again. Mirrors the Rust
-// `a_yielded_group_pauses_once_an_update_supersedes_its_stale_drop`.
-test("a yielded group pauses once an update supersedes its stale drop", async () => {
+// Lite-07: a stale drop is final on its subscription, so an update sent since does not undo it: a
+// YIELDED reset of the stream it named, whether the drop overtook the reset or the stream's header,
+// ends the group with OLD rather than pausing it for a continuation that never comes.
+test.each([
+	["the reset", false],
+	["the header", true],
+])("a stale drop that overtook %s ends a yielded group after an update", async (_, beforeHeader) => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -1597,54 +1599,9 @@ test("a yielded group pauses once an update supersedes its stale drop", async ()
 		await request.reading;
 		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
 
-		const first = handStream(version);
-		first.write(await liteFrame(300, new Uint8Array([1])));
-		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
-		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(3n);
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
-		await drainReactions();
-		track.update({ priority: 1, delay: { max: Duration.millis(60_000) } });
-		await drainReactions();
-		first.reset(StreamCode.Yielded);
-		await yielded;
-		await drainReactions();
-
-		expect(group?.closed.peek()).toBeUndefined();
-		// The continuation picks the group up where the reset left it.
-		const second = handStream(version);
-		second.write(await liteFrame(10, new Uint8Array([2])));
-		second.finish();
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		expect(await group?.readFrame()).toBeUndefined();
-	} finally {
-		track.close();
-		subscriber.close();
-	}
-});
-
-// Lite-07: a stale drop that overtook the header of the stream it names holds only under the update
-// it names: once the subscriber sends another, a YIELDED reset of that stream pauses the group.
-// Mirrors the Rust `a_yielded_group_pauses_once_an_update_supersedes_a_stale_drop_before_its_header`.
-test("a yielded group pauses once an update supersedes a stale drop before its header", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber
-		.consume(Path.from("room"))
-		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		const request = await opened(1);
-		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
-
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
+		const drop = () =>
+			respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
+		if (beforeHeader) await drop();
 		await drainReactions();
 		const first = handStream(version);
 		first.write(await liteFrame(300, new Uint8Array([1])));
@@ -1652,21 +1609,20 @@ test("a yielded group pauses once an update supersedes a stale drop before its h
 		const group = await track.recvGroup();
 		expect(group?.sequence).toBe(3n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		if (!beforeHeader) await drop();
+		await drainReactions();
 
 		track.update({ priority: 1, delay: { max: Duration.millis(60_000) } });
 		await drainReactions();
 		first.reset(StreamCode.Yielded);
 		await yielded;
-		await drainReactions();
 
-		expect(group?.closed.peek()).toBeUndefined();
-		// The continuation picks the group up where the reset left it.
-		const second = handStream(version);
-		second.write(await liteFrame(10, new Uint8Array([2])));
-		second.finish();
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		expect(await group?.readFrame()).toBeUndefined();
+		const read = await group?.readFrame().then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(read).toBeInstanceOf(StreamError);
+		expect((read as StreamError).code).toBe(StreamCode.Old);
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1915,9 +1871,9 @@ test("a recovery waits for the continuation of a group a reset without its code 
 	}
 });
 
-// Lite-07: an update reopens a stale drop, so a stream that drop excused holds the end again
-// until it finishes, even once the grace the end started before the update has passed.
-test("an update restores the hold a stale drop excused", async () => {
+// Lite-07: a stale drop is final, so a stream it excused stays excused through an update: the end
+// waits for it no longer than the grace, as a browser may have lost its reset.
+test("a stream a stale drop excused stays excused after an update", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1943,18 +1899,10 @@ test("an update restores the hold a stale drop excused", async () => {
 		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
 		await drainReactions();
 
-		let fin = false;
-		void request.finished.then(() => {
-			fin = true;
-		});
 		await clock.advance(GRACE.mul(3));
-		expect(fin).toBe(false);
-		// The stream finishes the group, which lets the end go.
-		slow.write(await liteFrame(10, new Uint8Array([2])));
+		await request.finished;
 		slow.finish();
 		await running;
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		await request.finished;
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1962,9 +1910,9 @@ test("an update restores the hold a stale drop excused", async () => {
 	}
 });
 
-// Lite-07: a continuation judged against a stale drop while it waits out the copy it replaces holds
-// the end if an update reopened that drop meanwhile, as the copy it replaces would have.
-test("an update while a continuation waits keeps its hold on the end", async () => {
+// Lite-07: a duplicate stream waiting out the copy it may take over holds the end, even under a
+// stale drop that overtook the first copy's header: it is owed once that copy fails or pauses.
+test("a duplicate stream waiting out its copy holds the end", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1987,14 +1935,12 @@ test("an update while a continuation waits keeps its hold on the end", async () 
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
-		// SUBSCRIBE_FINISH starts the end's grace. The continuation arrives under the stale drop, and
-		// the update lands while it waits out the first copy.
+		// SUBSCRIBE_FINISH starts the end's grace. The duplicate arrives under the stale drop.
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
 		const second = handStream(version);
 		second.write(await liteFrame(0, new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), second.reader);
-		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
 		await drainReactions();
 
 		let fin = false;
@@ -2103,10 +2049,10 @@ test("a lite-06 group reset with YIELDED ends", async () => {
 	}
 });
 
-// A lite-07 re-offer can overtake the reset of the stream it replaces. It proves that reset, which
-// a browser can lose, so it ends that copy at once and continues the group from the frames it
-// holds: a reader already handed the group reads on, and a later one reads it whole.
-test("a re-offer ends the copy still arriving and continues its group", async () => {
+// A lite-07 continuation can overtake the YIELDED reset of the stream it replaces. It proves that
+// reset, which a browser can lose, so it ends that copy at once and continues the group from the
+// frames it holds: a reader already handed the group reads on, and a later one reads it whole.
+test("a continuation ends the copy still arriving and continues its group", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -2170,7 +2116,7 @@ test("a re-offer ends the copy still arriving and continues its group", async ()
 		expect((await next)?.payload).toEqual(new Uint8Array([8]));
 		expect(await group?.readFrame()).toBeUndefined();
 		expect(await group?.closed).toBeNull();
-		// One that had not reached it reads the re-offer whole.
+		// One that had not reached it reads the continuation whole.
 		const later = subscriber.consume(Path.from("room")).track("video").subscribe();
 		try {
 			const again = await later.recvGroup();
@@ -3328,11 +3274,10 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 	}
 });
 
-// A group that arrives over a lite-07 stale (OLD) drop wins over it, whichever lands first: the
-// publisher serves a group after its stale drop, as a front that switched routes does, and the
-// group's stream may overtake the drop. The next update owes it no more, and a group still
-// arriving is never aborted by the drop. Mirrors the Rust `a_group_wins_over_its_stale_drop`.
-test("a group wins over its stale drop on lite-07", async () => {
+// A lite-07 stale (OLD) drop accounts for its groups for good, whichever of it and a group's stream
+// lands first: an update owes none of them again, and a group still arriving, such as one another
+// subscription sharing the copy delivers, is never aborted by the drop.
+test("a stale drop accounts for its groups for good on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -3394,9 +3339,7 @@ test("a group wins over its stale drop on lite-07", async () => {
 
 		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
 		await drainReactions();
-		// Every group that arrived stays accounted for; the one that never arrived is owed again.
-		expect(entry.tail.covers(1n, 4n)).toBe(true);
-		expect(entry.tail.covers(4n, 5n)).toBe(false);
+		expect(entry.tail.covers(1n, 5n)).toBe(true);
 		// Neither the drop nor the update aborts a group still arriving.
 		expect(two.group.closed.peek()).toBeUndefined();
 		expect(three.group.closed.peek()).toBeUndefined();
@@ -3410,94 +3353,8 @@ test("a group wins over its stale drop on lite-07", async () => {
 	}
 });
 
-// A group whose stream finished wins over a lite-07 stale drop that lands after the cache evicted
-// it: the publisher served it over that drop, so the next update owes it no more. A stream that
-// finished under an earlier update says nothing of a drop under the new one. Mirrors the Rust
-// `a_finished_group_wins_over_a_late_stale_drop_once_evicted`.
-test("a finished group wins over a late stale drop once evicted on lite-07", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	type Entry = {
-		track: Producer;
-		tail: {
-			covers(start: bigint, end: bigint): boolean;
-			fold(): boolean;
-		};
-	};
-	let entry: Entry | undefined;
-	const internal = subscriber as unknown as {
-		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
-	};
-	const runResponses = internal.runResponses.bind(internal);
-	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
-		entry = captured;
-		return runResponses(stream, captured);
-	});
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const send = async (...resps: SubscribeResponse[]) => {
-			const chunks: Uint8Array[] = [];
-			const writer = new Writer(
-				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-				version,
-			);
-			for (const resp of resps) await encodeSubscribeResponse(writer, resp, version);
-			for (const chunk of chunks) stream.inbound.enqueue(chunk);
-			await drainReactions();
-		};
-		const old = (sequence: bigint, update: bigint): SubscribeResponse => ({
-			drop: new SubscribeDrop({ start: sequence, end: sequence + 1n, error: StreamCode.Old, update }),
-		});
-		// A group stream that arrives whole, through the path that records it.
-		const arrive = (sequence: bigint) =>
-			subscriber.runGroup(
-				new Group({ subscribe: 0n, sequence }),
-				new Reader(new ReadableStream({ start: (controller) => controller.close() }), undefined, version),
-			);
-		// Everything below the live edge ages out of the cache.
-		const evict = () => clock.advance(DEFAULT_EXPIRY.mul(2));
-		let priority = 0;
-		const update = async () => {
-			track.update({ priority: ++priority, delay: { max: Duration.millis(500) } });
-			await drainReactions();
-		};
-
-		await send({ start: new SubscribeStart([0n]) });
-		await arrive(1n);
-		await arrive(10n);
-		await evict();
-		await send(old(1n, 0n));
-		await update();
-		if (!entry) throw new Error("no subscription");
-		expect(entry.tail.covers(1n, 2n)).toBe(true);
-
-		// Finished under the first update, then judged stale under the second.
-		await arrive(2n);
-		await update();
-		await evict();
-		await send(old(2n, 2n));
-		await update();
-		expect(entry.tail.covers(2n, 3n)).toBe(false);
-	} finally {
-		responses.mockRestore();
-		track.close();
-		broadcast.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
-// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an update
-// reopens only stale verdicts, so the groups stay accounted for, and the skip stays final rather
-// than being superseded with the OLD drop. An empty range names nothing. Mirrors Rust.
+// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it in the copy:
+// the groups stay accounted for through an update, and the skip stays final. Mirrors Rust.
 test("a skip or final drop replaces an earlier stale one on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
@@ -3533,9 +3390,6 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 			old(4n, 5n),
 			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
 			{ drop: new SubscribeDrop({ start: 4n, end: 5n, error: StreamCode.NotFound }) },
-			// Empty ranges.
-			old(6n, 6n),
-			{ skip: new SubscribeSkip({ start: 6n, end: 6n }) },
 		] satisfies SubscribeResponse[]) {
 			await encodeSubscribeResponse(writer, resp, version);
 		}
@@ -3797,9 +3651,8 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 	}
 });
 
-// A SUBSCRIBE_DROP can only echo an update the subscriber sent: one naming a later update is a
-// protocol violation. Mirrors the Rust `a_drop_naming_an_unsent_update_is_a_protocol_violation`.
-test("a lite-07 drop naming an unsent update closes the session", async () => {
+// A lite-07 SUBSCRIBE_DROP whose Group End is not past its Group Start is a protocol violation.
+test("a lite-07 drop with an empty span closes the session", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -3816,12 +3669,9 @@ test("a lite-07 drop naming an unsent update closes the session", async () => {
 			version,
 		);
 		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 1n, end: 2n, error: StreamCode.Old, update: 1n }) },
-			version,
-		);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
+		// Type, length, Group Start 4, Group End 4, OLD.
+		stream.inbound.enqueue(new Uint8Array([2, 3, 4, 4, StreamCode.Old]));
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
