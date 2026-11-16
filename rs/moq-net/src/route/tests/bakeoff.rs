@@ -186,8 +186,9 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 		}
 		let next = (at + 1) % count;
 		for join in 0..joins {
-			// Each boundary leaves a mesh at another relay than the one it entered by.
-			let (a, b) = (at * size + size / 2 + join, next * size + 1 + join);
+			// Each boundary leaves a mesh at another relay than the one it entered by,
+			// even in a mesh of three, so a claim crosses the mesh between two grants.
+			let (a, b) = (at * size + (size / 2).max(2) + join, next * size + 1 + join);
 			mesh.links.push((a, b, 1));
 			mesh.ties.insert((a, b), Tie::Scoped);
 		}
@@ -776,7 +777,7 @@ fn benchmark_bakeoff_failures() {
 	for relays in sizes {
 		for shape in shapes(relays, 2) {
 			for arm in arms() {
-				let wanted = |var: &str, name: &str| {
+				let unwanted = |var: &str, name: &str| {
 					std::env::var(var).is_ok_and(|list| !list.split(',').any(|want| want == name))
 				};
 				// Without the session floor and a burst read first, a 32-relay mesh
@@ -784,8 +785,8 @@ fn benchmark_bakeoff_failures() {
 				let hunts = matches!(arm, Arm::Multi(tune) if !(tune.floor && tune.batch));
 				if (arm == Arm::TODAY && !shape.today)
 					|| (relays > 16 && hunts && std::env::var("MOQ_BAKEOFF_ARMS").is_err())
-					|| wanted("MOQ_BAKEOFF_ARMS", &arm.name())
-					|| wanted("MOQ_BAKEOFF_SHAPES", shape.name)
+					|| unwanted("MOQ_BAKEOFF_ARMS", &arm.name())
+					|| unwanted("MOQ_BAKEOFF_SHAPES", shape.name)
 				{
 					continue;
 				}

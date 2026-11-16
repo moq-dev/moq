@@ -60,7 +60,7 @@ the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
   once per neighbour as a closed session is (`drain`); and a node offering a
   route to itself only once it has a claim to announce, its endpoints' or one
   it announces again across a scoped grant, and from then on until it restarts
-  (`claimed`). With all four that partition cost 690.
+  (`claimed`). With all five that partition cost 690.
 - `claimed` makes the route per announcing relay, not per forwarding node:
   held routes fell from 6,576 to 207 on 32 relays with one publisher, under
   today's 221. A publisher's first claim on a relay then starts a route at
