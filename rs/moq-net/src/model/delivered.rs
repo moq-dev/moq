@@ -107,6 +107,27 @@ impl Delivered {
 		}
 	}
 
+	/// Every run, in order, emptying the record.
+	pub fn take_runs(&mut self) -> Vec<std::ops::Range<u64>> {
+		std::mem::take(&mut self.runs)
+			.into_iter()
+			.map(|(first, last)| first..last + 1)
+			.collect()
+	}
+
+	/// Drop every key below `floor`.
+	pub fn drop_below(&mut self, floor: u64) {
+		let above = self.runs.split_off(&floor);
+		if let Some((_, &last)) = self.runs.last_key_value()
+			&& last >= floor
+		{
+			self.runs = above;
+			self.runs.insert(floor, last);
+			return;
+		}
+		self.runs = above;
+	}
+
 	/// The parts of `groups` not handed out, in order.
 	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
 		let mut gaps = Vec::new();
@@ -189,6 +210,17 @@ mod test {
 
 	fn runs(delivered: &Delivered) -> Vec<(u64, u64)> {
 		delivered.runs.iter().map(|(first, last)| (*first, *last)).collect()
+	}
+
+	#[test]
+	fn drop_below_keeps_the_part_of_a_run_at_the_floor() {
+		let mut delivered = Delivered::default();
+		delivered.insert_run(0..3);
+		delivered.insert_run(5..9);
+		delivered.drop_below(6);
+		assert_eq!(runs(&delivered), vec![(6, 8)]);
+		assert_eq!(delivered.take_runs(), vec![6..9]);
+		assert_eq!(delivered.runs(), 0);
 	}
 
 	#[test]

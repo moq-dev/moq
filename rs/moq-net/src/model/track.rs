@@ -5211,6 +5211,8 @@ impl Producer {
 			_stats_sub: stats::Subscription::default(),
 			largest: Reported::default(),
 			parks: false,
+			meta_read: Default::default(),
+			was_meta: false,
 		}
 	}
 
@@ -6821,6 +6823,8 @@ impl Subscribing {
 			_stats_sub: self.stats.subscribe(),
 			largest: Reported::default(),
 			parks: false,
+			meta_read: Default::default(),
+			was_meta: false,
 		}))
 	}
 
@@ -7199,6 +7203,13 @@ pub struct Subscriber {
 	/// Whether a read past a bounded window's end parks rather than ending: a wire
 	/// publisher's, whose peer would read the end of its stream as the track's.
 	parks: bool,
+	/// The groups handed out as metadata copies, handed out again once the reader asks for the
+	/// payload and their payload copy arrives. Nothing below the delivered floor, which the
+	/// reader no longer expects.
+	meta_read: super::delivered::Delivered,
+	/// Whether the reader asked for metadata when it last read, so a change through any handle
+	/// is seen on the next read.
+	was_meta: bool,
 }
 
 /// What a [`Subscriber`]'s `largest` stream last reported.
@@ -9908,6 +9919,7 @@ impl Subscriber {
 		if self.record().failed() {
 			return Poll::Ready(Err(Error::Lagged));
 		}
+		self.settle_meta();
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
 		let walk = idle::Walk::new(ordered);
 		match &self.inner {
@@ -9941,6 +9953,7 @@ impl Subscriber {
 	/// Reserve the next group not yet handed out, without moving past it: [`Self::take`]
 	/// hands out that exact group, even if its producer evicted it meanwhile.
 	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<Reserved>>> {
+		self.settle_meta();
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let walk = idle::Walk::new(ordered);
@@ -10008,6 +10021,14 @@ impl Subscriber {
 		};
 		if let Ok(group) = &res {
 			self.hand_out(group.start, ordered);
+			if group.is_meta() {
+				self.meta_read.insert(group.start);
+			}
+			let floor = match &self.inner {
+				Inner::Plain(cursor) => cursor.record.delivered.floor(),
+				Inner::Resume(_, logical) => logical.record.delivered.floor(),
+			};
+			self.meta_read.drop_below(floor);
 		}
 		self.count_stale(&meter);
 		res.map(|group| group.with_meter(meter))
@@ -10613,13 +10634,8 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
-		// Asking for the payload again: each group handed out as a metadata copy is handed out
-		// again once its payload arrives.
-		let promoted = channel.read().meta && !subscription.meta;
 		channel.update(subscription)?;
-		if promoted {
-			self.forget_meta();
-		}
+		self.settle_meta();
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
@@ -10770,16 +10786,34 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget handing out each group the track caches as a metadata copy, so the payload copy
-	/// replacing it is handed out too. Bounded by what the cache holds.
-	fn forget_meta(&mut self) {
-		let keys = self.meta_keys();
+	/// Whether this reader asks for metadata only now, through whichever handle set it.
+	fn reads_meta(&self) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.subscription.read().meta,
+			Inner::Resume(resume, _) => resume.subscription().read().meta,
+		}
+	}
+
+	/// Once the reader asks for the payload again, forget handing out each group it took as a
+	/// metadata copy, and each the track caches as one, so the payload copy replacing it is
+	/// handed out too.
+	fn settle_meta(&mut self) {
+		let meta = self.reads_meta();
+		let promoted = std::mem::replace(&mut self.was_meta, meta) && !meta;
+		if !promoted {
+			return;
+		}
+		let mut runs = self.meta_read.take_runs();
+		runs.extend(self.meta_keys().into_iter().map(|key| key..key.saturating_add(1)));
 		let delivered = match &mut self.inner {
 			Inner::Plain(cursor) => &mut cursor.record.delivered,
 			Inner::Resume(_, logical) => &mut logical.record.delivered,
 		};
-		for key in keys {
-			delivered.remove_run(key..key.saturating_add(1));
+		let floor = delivered.floor();
+		for run in runs {
+			// Below the floor the reader no longer expects any group.
+			let run = run.start.max(floor)..run.end;
+			delivered.remove_run(run);
 		}
 	}
 
@@ -17889,6 +17923,49 @@ mod test {
 		copy.close().unwrap();
 
 		for reader in [&mut meta, &mut payload_reader] {
+			let mut group = reader.recv_group().await.unwrap().expect("the payload copy");
+			assert!(!group.is_meta());
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
+		}
+	}
+
+	/// Two metadata readers asking for the payload through their control handles, one only after
+	/// the payload copy already replaced the metadata one, both get the payload.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn promotion_through_a_control_handle_after_the_payload_landed() {
+		let producer = received_producer(Info::timed());
+		let at = Timestamp::from_millis(300).unwrap();
+		let from_start = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(5)))
+				.with_ranges([Range {
+					start: Anchor::Time(0),
+					end: None,
+				}])
+		};
+		let mut first = producer.subscribe(from_start().with_meta(true));
+		let mut second = producer.subscribe(from_start().with_meta(true));
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 3 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		copy.write_meta(at, 7).unwrap();
+		copy.close().unwrap();
+		for reader in [&mut first, &mut second] {
+			assert!(reader.recv_group().await.unwrap().expect("the metadata copy").is_meta());
+		}
+
+		first.control().update(from_start()).unwrap();
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 3 }, 0, false) else {
+			panic!("the payload copy replaces the metadata one");
+		};
+		copy.write_frame(at, &b"payload"[..]).unwrap();
+		copy.close().unwrap();
+		// The second reader asks only now, with no metadata copy left in the cache.
+		second.control().update(from_start()).unwrap();
+
+		for reader in [&mut first, &mut second] {
 			let mut group = reader.recv_group().await.unwrap().expect("the payload copy");
 			assert!(!group.is_meta());
 			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
