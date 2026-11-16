@@ -23,7 +23,6 @@ import {
 	unauthorized,
 } from "../error.ts";
 import { fillChanged, type Judged, rejectGroups } from "../fill.ts";
-import type { Producer as FrameProducer } from "../frame.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
@@ -82,7 +81,7 @@ import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
 import { type Carrier, type Claim, Floors } from "./floors.ts";
-import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
+import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -121,7 +120,6 @@ import {
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
-	hasYield,
 	keepsSubscribeOpen,
 	resolvesStart,
 	updateSupported,
@@ -257,109 +255,38 @@ interface SubscribeEntry {
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
-	// Lite-07: the groups a YIELDED reset paused, once one did or a stream waits on one.
-	paused?: Pauses;
-	// Lite-07: whether a YIELDED reset pauses the group each stream is reading, by sequence, one
-	// per stream, so stream credit bounds them.
-	yielding?: Map<bigint, Yielding>;
+	// Lite-07: the drops naming the group each stream is reading, by sequence, one per stream, so
+	// stream credit bounds them.
+	reading?: Map<bigint, Reading>;
 }
 
-// Lite-07: the groups whose stream the publisher reset with YIELDED, each held open for a later
-// stream to continue, by sequence. Mirrors the Rust `Paused`.
-interface Pauses {
-	groups: Map<bigint, PausedGroup>;
-	// How many were held after the last sweep for groups the cache gave up on, which the next
-	// waits for twice as many.
-	swept: number;
-	// Counts the pauses, waking a stream held behind a copy still arriving once that copy pauses.
-	changed: Signal<number>;
-}
-
-// A group a YIELDED reset paused: what arrived stays, and its stream still counts toward the
-// subscription's end until a continuation replaces it or a drop names the group.
-interface PausedGroup {
-	group: netGroup.Producer;
-	// The frame the reset cut short, holding the group's writer.
-	partial?: FrameProducer;
-	// Marks the paused stream read, letting go of the subscription's end.
-	read: () => void;
-}
-
-// Whether a YIELDED reset of a stream being read pauses its group.
-interface Yielding {
-	verdict: YieldVerdict;
-	// The stream's hold on the subscription's end, which a drop naming its group excuses while
-	// that drop stands: see `excused`.
+// Lite-07: a Group Stream being read, and the drops that name its group. A browser can lose the
+// reset of a stream the publisher gave up on (Chromium drops one that reaches a stream before the
+// page took it), so a drop that stands lets the subscription's end wait for the stream at most the
+// grace.
+interface Reading {
+	// The stream's hold on the subscription's end, which a standing drop excuses: see `excused`.
 	counted: Counted;
-	// End the stream as reset with YIELDED: a later stream for its group proves the publisher
-	// reset it, even where the browser lost that reset.
+	// A final drop named the group, before or after its header.
+	dropped: boolean;
+	// The update a stale drop naming the group was sent under, which only that update upholds.
+	staleUnder?: bigint;
+	// End the stream as the reset it was: a re-offer of its group proves the publisher reset it,
+	// even where the browser lost that reset.
 	supersede: () => void;
 }
 
-// Stale drops expire on the next update. An already accounted header stays accounted, and
-// `dropped` says whether a final drop overtook it, rather than a gap the grace gave up on.
-type YieldVerdict =
-	| { kind: "owed" }
-	| { kind: "accounted"; dropped: boolean }
-	| { kind: "stale"; under: bigint; error: Error }
-	| { kind: "accounted-stale"; dropped: boolean; under: bigint; error: Error }
-	| { kind: "dropped"; error: Error };
-
 // Whether a drop accounts for the group under `update`, so the subscription's end waits for its
-// stream at most the grace: a browser can lose that stream's reset. Only a drop excuses it: a stream
-// whose header came after the grace gave up on its gap is still delivering, and no reset is owed.
-// A stale drop expires; one over a final drop falls back to it, as `yieldError` does.
-function excused(verdict: YieldVerdict, update: bigint): boolean {
-	switch (verdict.kind) {
-		case "owed":
-			return false;
-		case "accounted":
-			return verdict.dropped;
-		case "stale":
-			return verdict.under >= update;
-		case "accounted-stale":
-			return verdict.dropped || verdict.under >= update;
-		case "dropped":
-			return true;
-	}
+// stream at most the grace. Only a drop excuses it: a stream whose header came after the grace gave
+// up on its gap is still delivering, and no reset is owed. A stale drop expires on the next update.
+function excused(reading: Reading, update: bigint): boolean {
+	return reading.dropped || (reading.staleUnder !== undefined && reading.staleUnder >= update);
 }
 
-// The verdict a header starts with: owed, or accounted by a final drop (`dropped`), a stale drop
-// under `staleUnder`, or a gap the grace gave up on. A stale drop over a final one falls back to it.
-function headerVerdict(owed: boolean, dropped: boolean, staleUnder: bigint | undefined): YieldVerdict {
-	if (owed) return { kind: "owed" };
-	if (staleUnder === undefined) return { kind: "accounted", dropped };
-	const error = new StreamError(StreamCode.Old);
-	return dropped
-		? { kind: "accounted-stale", dropped, under: staleUnder, error }
-		: { kind: "stale", under: staleUnder, error };
-}
-
-// Excuse the stream's hold on the end, or restore it, as its verdict now says.
-function judge(yielding: Yielding, update: bigint): void {
-	if (excused(yielding.verdict, update)) yielding.counted.excuse();
-	else yielding.counted.restore();
-}
-
-function yieldError(verdict: YieldVerdict, update: bigint): Error | undefined {
-	switch (verdict.kind) {
-		case "owed":
-			return undefined;
-		case "accounted":
-			return new StreamError(StreamCode.Old);
-		case "stale":
-			return verdict.under < update ? undefined : verdict.error;
-		case "accounted-stale":
-			return verdict.under < update ? new StreamError(StreamCode.Old) : verdict.error;
-		case "dropped":
-			return verdict.error;
-	}
-}
-
-// The paused groups of `entry`, created on first use.
-function pausesOf(entry: SubscribeEntry): Pauses {
-	entry.paused ??= { groups: new Map(), swept: 0, changed: new Signal(0) };
-	return entry.paused;
+// Excuse the stream's hold on the end, or restore it, as its drops now say.
+function judge(reading: Reading, update: bigint): void {
+	if (excused(reading, update)) reading.counted.excuse();
+	else reading.counted.restore();
 }
 
 // A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
@@ -2237,7 +2164,6 @@ export class Subscriber {
 			// Nothing more is re-offered on this subscription.
 			this.#reoffers.get(producer)?.set([]);
 			this.#reoffers.delete(producer);
-			this.#endPaused(entry);
 			entry.tail.close();
 			entry.unanswered?.held.close();
 			entry.datagramDemand?.();
@@ -2927,7 +2853,7 @@ export class Subscriber {
 					},
 				);
 				// An excused stream is waited for at most the grace, as at a subscription's end: a browser
-				// can lose its reset, while a group it paused waits on the continuation still owed.
+				// can lose its reset.
 				const stopped = new Once<null>();
 				const covered = () => entry.tail.covers(groups.start, groups.end);
 				try {
@@ -2962,7 +2888,6 @@ export class Subscriber {
 			} finally {
 				left.abort();
 				this.#subscribes.delete(id);
-				this.#endPaused(entry);
 				entry.tail.close();
 			}
 			// What nothing accounted for is refused, as nothing more arrives on it.
@@ -3021,8 +2946,7 @@ export class Subscriber {
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);
-				// A paused group the drop names ends there: no continuation follows.
-				this.#dropPaused(entry, start, end, cause);
+				this.#dropped(entry, start, end);
 				// Final, so a stream it overtook is told from one whose gap the grace gave up on.
 				entry.tail.drop(start, end);
 				giveUp(start, end, dropped(cause));
@@ -3312,10 +3236,9 @@ export class Subscriber {
 				if (stale && update < entry.update) continue;
 				this.#reoffered(entry.track, start, end);
 				// Lite-07 tells a stream a final drop overtook from one whose gap the grace gave up on.
-				if (!stale && hasYield(this.version)) entry.tail.drop(start, end);
+				if (!stale && hasSkip(this.version)) entry.tail.drop(start, end);
 				else entry.tail.account(start, end);
-				// A paused group the drop names ends there: no continuation follows.
-				this.#dropPaused(entry, start, end, error, stale ? update : undefined);
+				this.#dropped(entry, start, end, stale ? update : undefined);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
 				// A group whose stream finished under this update was served over a stale drop, so it
@@ -3554,7 +3477,7 @@ export class Subscriber {
 			entry.maxDelay = update.maxDelay;
 			entry.tail.updated();
 			// A stream a stale drop excused holds the end again: that verdict no longer stands.
-			for (const yielding of entry.yielding?.values() ?? []) judge(yielding, entry.update);
+			for (const reading of entry.reading?.values() ?? []) judge(reading, entry.update);
 			const held = hooks.supersedeStale(entry.track, judged([...ranges, ...fillRanges]));
 			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
 			// again under the new number what is still stale, so the tail owes every stale run again.
@@ -3669,25 +3592,21 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
-		// Lite-07: a YIELDED reset pauses the group, for a later stream to continue.
-		const yields = hasYield(this.version);
+		// Lite-07: a drop can name the group while its stream is read; see `Reading`.
+		const drops = hasSkip(this.version);
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
 		// A final drop that overtook this stream, rather than a gap the grace gave up on.
 		const dropped = !owed && tail.dropped(group.sequence);
-		// A stale drop that overtook this stream: the next update supersedes that verdict, so a
-		// YIELDED reset after it pauses the group.
-		const unowedUnder =
+		// A stale drop that overtook this stream, which only the current update upholds.
+		const staleUnder =
 			!owed && entry.stale?.some((run) => run.start <= group.sequence && group.sequence < run.end)
 				? entry.update
 				: undefined;
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
-		let ingest: Ingest | undefined;
-		let yielding: Yielding | undefined;
+		let reading: Reading | undefined;
 		const counted = tail.open(group.sequence);
-		// Until the stream is read, or a pause hands it to the paused group.
-		let read: (() => void) | undefined = counted.done;
 		this.#reoffered(track, group.sequence, group.sequence + 1n);
 
 		try {
@@ -3705,35 +3624,21 @@ export class Subscriber {
 			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
 			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed,
 			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
-			// wait; a clean end leaves it on the copy alone. A lite-07 copy a YIELDED reset pauses is
-			// continued by this stream instead.
+			// wait; a clean end leaves it on the copy alone.
 			for (;;) {
-				const paused = yields ? this.#resume(entry, group) : undefined;
-				if (paused) {
-					// The same copy continues, so its readers need no hold.
-					arriving?.release();
-					arriving = undefined;
-					producer = paused.group;
-					ingest = { index: group.frameStart, partial: paused.partial };
-					// The publisher owes a paused group its continuation, which may yield again.
-					owed = true;
-					break;
-				}
 				// Kept held past a failure until this copy takes the group, below.
 				const next = hooks.arrivingGroup(track, group.sequence);
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
-				// Served again once that copy fails or pauses, so owed again.
+				// Served again once that copy fails, so owed again.
 				owed = true;
 				// A later stream for the group means the publisher reset the earlier one on this
 				// subscription, so it ends now rather than wait on a reset the browser may have lost:
 				// Chromium drops a RESET_STREAM that reaches a stream it has not handed to the page.
-				entry.yielding?.get(group.sequence)?.supersede();
+				entry.reading?.get(group.sequence)?.supersede();
 				const settled = arriving.settled;
-				const waits: unknown[] = [settled, stream.closed.then(() => settled)];
-				if (yields) waits.push(Signal.race(pausesOf(entry).changed));
-				await race(waits);
+				await race([settled, stream.closed.then(() => settled)]);
 			}
 			producer ??= hooks.receiveGroup(track, {
 				sequence: group.sequence,
@@ -3743,33 +3648,33 @@ export class Subscriber {
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 			let superseded: Promise<void> | undefined;
-			if (yields) {
-				ingest ??= { index: group.frameStart };
+			if (drops) {
 				let supersede = () => {};
 				superseded = new Promise<void>((resolve) => {
 					supersede = resolve;
 				});
-				yielding = {
-					verdict: headerVerdict(owed, dropped, unowedUnder),
+				// A copy served again is owed whatever dropped the earlier one.
+				reading = {
 					counted,
+					dropped: !owed && dropped,
+					staleUnder: owed ? undefined : staleUnder,
 					supersede,
 				};
-				entry.yielding ??= new Map();
-				entry.yielding.set(group.sequence, yielding);
-				// A stale drop that still stands may already account for the group.
-				judge(yielding, entry.update);
+				entry.reading ??= new Map();
+				entry.reading.set(group.sequence, reading);
+				judge(reading, entry.update);
 			}
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
-			const reading = readFrames(stream, producer, format, ingest);
-			const reads = entry.filling ? untilAbandoned(producer, reading) : reading;
+			const frames = readFrames(stream, producer, format);
+			const reads = entry.filling ? untilAbandoned(producer, frames) : frames;
 			if (!superseded) await reads;
 			else if ((await race([reads, superseded.then(() => SUPERSEDED)])) === SUPERSEDED) {
 				// Stopping makes the read end at the next frame boundary as if finished, so wait it out
-				// and treat the stream as the YIELDED reset it was: the later stream starts no later.
+				// and treat the stream as the stale reset a re-offer follows: the later stream takes over.
 				stream.stop(new StreamError(StreamCode.Cancel));
 				await reads.catch(() => {});
-				throw new StreamError(StreamCode.Yielded, { message: "continued on a later stream" });
+				throw new StreamError(StreamCode.Old, { message: "re-offered on a later stream" });
 			}
 
 			producer.finish();
@@ -3785,124 +3690,25 @@ export class Subscriber {
 				throw err;
 			}
 			const e = await sessionCause(this.#quic, err);
-			// The publisher made room for a higher-priority stream: the group pauses, keeping what
-			// arrived and the subscription's end waiting, until a later stream continues it or a drop
-			// names it. Mirrors the Rust `GroupRecv::poll_serve`.
-			// A reset the browser lost the code of pauses the group too: a lite-07 publisher follows
-			// every reset with a continuation or a drop, unless a reliable reset kept the group's
-			// header, after which nothing follows, so the end waits for it at most the grace. Not a
-			// failure the session's close caused, which sessionCause swapped in.
-			const uncoded = stream.uncoded && e === err;
-			if (producer && ingest && yielding && (toStreamCode(e) === StreamCode.Yielded || uncoded)) {
-				this.#endYielding(entry, group.sequence, yielding);
-				if (uncoded) counted.excuse();
-				// A drop named the group first: the publisher gave it up, so nothing continues it. One
-				// that overtook the stream's header carried a stale verdict.
-				// A stale drop an update sent since superseded no longer ends the group.
-				const given = yieldError(yielding.verdict, entry.update);
-				if (given) {
-					producer.abort(given);
-					return;
-				}
-				console.debug(`group paused: subscribe=${group.subscribe} sequence=${group.sequence}`);
-				this.#pause(entry, group.sequence, { group: producer, partial: ingest.partial, read });
-				read = undefined;
-				return;
-			}
 			producer?.abort(e);
 			stream.stop(e);
 		} finally {
 			arriving?.release();
-			if (yielding) this.#endYielding(entry, group.sequence, yielding);
-			read?.();
+			if (reading && entry.reading?.get(group.sequence) === reading) entry.reading.delete(group.sequence);
+			counted.done();
 		}
 	}
 
-	// Continue the group a YIELDED reset paused with the stream whose header is `hdr`, or undefined
-	// if none with its sequence is paused, or the cache gave it up meanwhile. Mirrors the Rust
-	// `TrackEntry::resume`.
-	#resume(entry: SubscribeEntry, hdr: GroupMessage): PausedGroup | undefined {
-		const paused = entry.paused?.groups.get(hdr.sequence);
-		if (!paused) return undefined;
-		entry.paused?.groups.delete(hdr.sequence);
-		// The stream that paused it is replaced, so it no longer holds the end.
-		paused.read();
-		if (paused.group.closed.peek() !== undefined) return undefined;
-		// A continuation starting past the frames held whole would leave a hole in the group, which
-		// ends with only this stream, as a malformed FRAME does.
-		const held = hooks.groupFrameCount(paused.group) - (paused.partial ? 1 : 0);
-		if (hdr.frameStart > held) {
-			const malformed = new StreamError(StreamCode.MalformedTrack, {
-				message: `group ${hdr.sequence} continued at frame ${hdr.frameStart}, past the ${held} held`,
-			});
-			paused.group.abort(malformed);
-			throw malformed;
-		}
-		return paused;
-	}
-
-	// Pause the group `sequence`, whose stream the publisher reset with YIELDED, for a later stream
-	// to continue. Groups the cache gave up on meanwhile are swept out as the held ones double, so
-	// sweeping costs constant time per pause. Mirrors the Rust `TrackEntry::pause`.
-	#pause(entry: SubscribeEntry, sequence: bigint, paused: PausedGroup): void {
-		const registry = pausesOf(entry);
-		if (registry.groups.size >= Math.max(registry.swept, 1) * 2) {
-			for (const [held, group] of registry.groups) {
-				if (!(group.group.closed.peek() instanceof Error)) continue;
-				registry.groups.delete(held);
-				group.read();
-			}
-			registry.swept = registry.groups.size;
-		}
-		// One the cache gave up on already, which a recreated group replaces.
-		registry.groups.get(sequence)?.read();
-		registry.groups.set(sequence, paused);
-		registry.changed.update((count) => count + 1);
-	}
-
-	// Stop tracking `yielding`, the stream reading `sequence`, unless a later stream took its place.
-	#endYielding(entry: SubscribeEntry, sequence: bigint, yielding: Yielding): void {
-		if (entry.yielding?.get(sequence) === yielding) entry.yielding.delete(sequence);
-	}
-
-	// A SUBSCRIBE_DROP named `[start, end)` with `error`, under update `staleUnder` when it is a
-	// lite-07 stale verdict: a paused group ends there, and one a stream is reading ends with it if
-	// a YIELDED reset would otherwise pause it, since no continuation follows, unless an update
-	// supersedes a stale drop first. Mirrors the Rust `TrackEntry::dropped`.
-	#dropPaused(entry: SubscribeEntry, start: bigint, end: bigint, error: Error, staleUnder?: bigint): void {
-		for (const [sequence, yielding] of entry.yielding ?? []) {
+	// A SUBSCRIBE_DROP named `[start, end)`, under update `staleUnder` when it is a lite-07 stale
+	// verdict: a stream still reading a group it names holds the subscription's end at most the grace
+	// while the drop stands. Mirrors the Rust `TrackEntry::dropped`.
+	#dropped(entry: SubscribeEntry, start: bigint, end: bigint, staleUnder?: bigint): void {
+		for (const [sequence, reading] of entry.reading ?? []) {
 			if (sequence < start || sequence >= end) continue;
-			const verdict = yielding.verdict;
-			if (staleUnder === undefined) yielding.verdict = { kind: "dropped", error };
-			else if (verdict.kind !== "dropped")
-				yielding.verdict =
-					verdict.kind === "accounted" || verdict.kind === "accounted-stale"
-						? { kind: "accounted-stale", dropped: verdict.dropped, under: staleUnder, error }
-						: { kind: "stale", under: staleUnder, error };
-			// A drop that stands accounts for the group, so the end no longer waits on its stream
-			// past the grace: a browser that lost the stream's reset would otherwise hold it forever.
-			judge(yielding, entry.update);
+			if (staleUnder === undefined) reading.dropped = true;
+			else reading.staleUnder = staleUnder;
+			judge(reading, entry.update);
 		}
-		const paused = entry.paused;
-		if (!paused) return;
-		for (const [sequence, group] of paused.groups) {
-			if (sequence < start || sequence >= end) continue;
-			paused.groups.delete(sequence);
-			group.group.abort(error);
-			group.read();
-		}
-	}
-
-	// The subscription ended: its paused groups end as cancelled with it, even while a held stream
-	// still watches for them.
-	#endPaused(entry: SubscribeEntry): void {
-		const paused = entry.paused;
-		if (!paused) return;
-		for (const group of paused.groups.values()) {
-			group.group.abort(new StreamError(StreamCode.Cancel));
-			group.read();
-		}
-		paused.groups.clear();
 	}
 
 	/**

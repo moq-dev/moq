@@ -375,10 +375,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	}
 });
 
-// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the drop the
-// copy's subscription, which the fill rides, names it with: the group's own error, rather than
-// waiting paused on a continuation that never comes.
-test("copy fill: a yielded group its subscription's drop names ends", async () => {
+// Lite-07: a filled group whose stream the session reset to make room ends with TOO_FAR_BEHIND, which
+// the drop on the copy's subscription, which the fill rides, names too.
+test("copy fill: a group reset to make room ends", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
@@ -418,10 +417,10 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 		const group = await history.recvGroup();
 		expect(group?.sequence).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
-		const source = await archived;
+		await archived;
 
-		// The session resets the group's stream to make room, and the group is gone before a new
-		// stream could continue it, so the publisher drops it on the subscription the fill rides.
+		// The session resets the group's stream to make room, so the publisher drops it on the
+		// subscription the fill rides.
 		const one = await history.recvGroup();
 		expect(one?.sequence).toBe(1n);
 		while (await one?.readFrame());
@@ -430,15 +429,13 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 		const open = lines(pair.server).streams.list();
 		expect(open.length).toBe(1);
 		open[0]?.preempt();
-		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
 
-		// Still paused without it, which the deadline, fired once every pending task settled,
-		// reports as elapsed.
+		// Within the deadline, which fires once every pending task settled.
 		const ended = await clock
 			.drive(timeout(Duration.millis(1000), Promise.resolve(group?.closed)))
 			.catch((err: unknown) => err);
 		expect(ended).toBeInstanceOf(StreamError);
-		expect((ended as StreamError).code).toBe(StreamCode(70));
+		expect((ended as StreamError).code).toBe(StreamCode.TooFarBehind);
 		history.close();
 		reader.close();
 	} finally {

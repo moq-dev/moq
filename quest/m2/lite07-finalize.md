@@ -167,8 +167,7 @@ route key lane's early signal above end when
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
 
-- ✅ [YIELDED continuations](/quest/m2/yield-defer.md) leave lite-07 for
-  lite-08, where they are designed with takeover (rejected: keep them).
+- ✅ YIELDED continuations leave lite-07 for lite-08 ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)), where they are designed with takeover (rejected: keep them).
 - ✅ The `ietf` extension stays, and
   [rides only moq-transport tracks](/quest/m2/ietf-records-per-track.md)
   (rejected: as it is, where every frame on a relay link carries a record).
@@ -197,7 +196,6 @@ the version that ships them.
 
 ## Required
 
-- [YIELDED deferred](/quest/m2/yield-defer.md) - removes reset code 0x3C and continuations from the lite-07 wire
 - [ietf records per track](/quest/m2/ietf-records-per-track.md) - changes the extension's framing on relay links
 - [Path escape](/quest/m2/path-escape.md) - defines a path segment when a path carries an escape
 - [Min Age join](/quest/m2/min-age-join.md) - makes Subscriber Min Age normative

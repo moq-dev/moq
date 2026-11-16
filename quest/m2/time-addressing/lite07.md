@@ -85,10 +85,18 @@ draft already requires for delivered or finally dropped groups, and the
 `Update` numbers, re-offers, reopen rules, and their model configs go. Also
 check whether GROUP's previous-start link makes SUBSCRIBE_SKIP redundant.
 The review wrote that YIELDED continuations would keep their hold; on
-2026-11-16 they left lite-07 too ([YIELDED deferred](/quest/m2/yield-defer.md)),
+2026-11-16 they left lite-07 too ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)),
 so after both PRs a group has a second stream on one subscription only as
 a duplicate, and no "held unread until the earlier stream ends" rule
-remains for this rewrite to preserve.
+remains for this rewrite to preserve. That PR kept the rule, and the one
+that lets a subscriber end the earlier stream once a re-offer arrives, for
+re-offers alone: delete both from the draft, `lite/subscriber.rs` (the
+`Hold` wait in `GroupRecv::poll_serve`), and `js/net` with the re-offers.
+It also trimmed `rs/moq-net/verify/subscribe` to its OLD-drop rules and
+the tail (`ServedOnce`, `QuietIsSettled`, `OneReader`, `StreamWins`); with
+re-offers gone, re-derive it around final drops, duplicate streams, and the
+tail, or delete it with its skill and nightly job (recommended: re-derive,
+since tail accounting stays).
 
 Decided 2026-11-14 (maintainer, pick on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ (a) OLD drops are final on their subscription: this rewrite deletes `Update`, the reopen and re-offer paths, and their model configs (rejected: (b) keep reopening and finish the finished-across-updates quest, deleted 2026-11-16).
 
@@ -108,13 +116,11 @@ is free only until lite-07 freezes:
   "forever" is refused by JS's 53-bit read. Both constants go on lite-07.
 - ✅ GROUP loses `Frame Start` (rejected: keep it and state the one case
   that sets it). A subscription delivers whole groups, FETCH has no GROUP
-  header, and the last case that set it, a continuation, leaves with
-  [YIELDED](/quest/m2/yield-defer.md). The Rust publisher says "A lite-07
+  header, and the last case that set it, a continuation, left with
+  YIELDED ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)). The Rust publisher says "A lite-07
   range covers whole groups, so it has none", and JS sets `frameStart` only
   from a lite-06 SUBSCRIBE's bound. Before deleting it, grep both
-  publishers for a lite-07 path that opens a Group Stream past frame 0; if
-  yield-defer has not landed, the continuation is one, and the field goes
-  with whichever PR lands second. lite-06 keeps its field.
+  publishers for a lite-07 path that opens a Group Stream past frame 0. lite-06 keeps its field.
 - ✅ The Padding Stream (0x2) and Padding Datagram (0x1) types are removed;
   the datagram `Type` stays (rejected: keep the datagram one, as the
   2026-10-30 decision preferred; keep both). Both are received and
@@ -187,7 +193,6 @@ TRACKS_ADD change, and the Padding stream and datagram types go.
 
 ## Related
 
-- [YIELDED deferred](/quest/m2/yield-defer.md) - removes continuations, the last use of GROUP's `Frame Start`
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - reads the spans SUBSCRIBE_DROP names
 - [Refresh a track](/quest/m2/refresh-interval.md) - raises the `Wanted Group` this turns into a start time
 - [A cold join reaches back](/quest/m2/min-age-join.md) - gives SUBSCRIBE's `Subscriber Min Age` its reader

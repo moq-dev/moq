@@ -759,21 +759,3 @@ export function hasLengthFirst(version: Version): boolean {
 			return true;
 	}
 }
-
-/**
- * Whether a Group Stream reset with YIELDED pauses its group, which a later stream continues.
- * Added in lite-07; an earlier publisher out of stream credit gives the reset group up.
- */
-export function hasYield(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}

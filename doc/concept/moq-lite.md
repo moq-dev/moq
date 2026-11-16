@@ -291,6 +291,15 @@ A reader of a reported group, including one still arriving, ends with the publis
 Before moq-lite 07 that code is application-specific, so every reported group ends with `OLD`.
 Datagram delivery stays best effort.
 
+A peer that grants fewer streams than its subscriptions have groups in flight, as a
+browser does at about 100, gets them for the highest-priority groups. To make room
+the publisher resets the lowest-priority group's stream with `TOO_FAR_BEHIND`, on
+every moq-lite version, and from moq-lite 05 also reports that group as dropped.
+Its reader ends with that error after the frames that arrived, and no later
+stream carries the rest, even for a reader with no max delay. A reader that still
+wants the group fetches it, which returns it whole on a stream the subscriber
+opens, outside the cap.
+
 Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering

@@ -2951,10 +2951,10 @@ function qmuxPair(protocol: string, maxStreamsUni: bigint): { client: Qmux; serv
 	return { client, server };
 }
 
-// On lite-07 a group whose stream a newer one reset to make room only pauses: once credit returns,
-// a new stream continues it, and its reader receives every frame without an error. Mirrors the Rust
-// `a_reset_group_resumes_without_loss`.
-test("integration: lite-07 resumes a group reset to make room without loss", async () => {
+// On lite-07 a group whose stream a newer one reset to make room is dropped: its reader ends with
+// TOO_FAR_BEHIND, and a reader that wants the rest FETCHes it whole. Mirrors the Rust
+// `a_reset_group_is_fetched_whole`.
+test("integration: lite-07 drops a group reset to make room, and a FETCH reads it whole", async () => {
 	using clock = manual();
 	// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
 	// round trip.
@@ -2980,29 +2980,30 @@ test("integration: lite-07 resumes a group reset to make room without loss", asy
 		// Unfinished, so its stream holds the only credit until the newer group resets it.
 		const older = producer.appendGroup();
 		older.writeFrame(textFrame("a"));
-		const paused = await settled(subscriber.recvGroup(), "the older group");
-		if (!paused) throw new Error("no older group");
-		expect(paused.sequence).toBe(0n);
-		expect(await settled(paused.readString(), "its first frame")).toBe("a");
+		const reset = await settled(subscriber.recvGroup(), "the older group");
+		if (!reset) throw new Error("no older group");
+		expect(reset.sequence).toBe(0n);
+		expect(await settled(reset.readString(), "its first frame")).toBe("a");
 
 		const newer = producer.appendGroup();
 		newer.writeFrame(textFrame("new"));
 		newer.finish();
 		const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
 		expect(group?.sequence).toBe(1n);
+		expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
+			code: StreamCode.TooFarBehind,
+		});
 
-		// Written after the reset: a continuation carries them, behind the frame already held.
 		older.writeFrame(textFrame("b"));
-		older.writeFrame(textFrame("c"));
 		older.finish();
-		const rest: string[] = [];
+		const fetched = await settled(remote.track("0").fetchGroup(0n), "the FETCH of the dropped group");
+		const frames: string[] = [];
 		for (;;) {
-			const frame = await settled(paused.readString(), "the paused group's continuation");
+			const frame = await settled(fetched.readString(), "the fetched group");
 			if (frame === undefined) break;
-			rest.push(frame);
+			frames.push(frame);
 		}
-		expect(rest).toEqual(["b", "c"]);
-		expect(await paused.closed).toBeNull();
+		expect(frames).toEqual(["a", "b"]);
 	} finally {
 		subscriber.close();
 		remote.close();

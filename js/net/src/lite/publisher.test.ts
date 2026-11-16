@@ -937,15 +937,15 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 	}
 });
 
-// Lite-07: a group whose stream the session reset to make room continues on a new stream from the
-// reset one's Frame Start, even where the cache holds only the group's tail from there, rather than
-// being dropped as OLD.
-test("lite-07 continues a yielded cached tail from its Frame Start", async () => {
-	const version = Version.DRAFT_07;
-	const sub = await servedSubscription({ version, startGroup: 0n, startFrame: 5 });
+// A group whose stream the session reset to make room is a final drop on every version: the
+// publisher names it in SUBSCRIBE_DROP with TOO_FAR_BEHIND and opens no second stream for it.
+test.each([
+	{ name: "lite-06", version: Version.DRAFT_06 },
+	{ name: "lite-07", version: Version.DRAFT_07 },
+])("$name drops a group reset to make room", async ({ version }) => {
+	const sub = await servedSubscription({ version, startGroup: 0n });
 	try {
-		// A received tail: the cache holds the group from frame 5, where the subscription starts.
-		const group = hooks.receiveGroup(sub.track, { sequence: 0n, start: 5 });
+		const group = sub.track.createGroup(0n);
 		group.writeFrame(textFrame("a", Timestamp.fromMillis(0)));
 		expect(await sub.servedHeader()).toBe(0n);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
@@ -957,36 +957,16 @@ test("lite-07 continues a yielded cached tail from its Frame Start", async () =>
 		group.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
 		group.finish();
 
-		expect(await sub.servedGroup()).toEqual({ sequence: 0n, frameStart: 5, payloads: ["a", "b"] });
-
-		// Responses arrive in order, so a drop naming the continued group would precede the end.
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([0n, 1n]);
+		// Before lite-07 a drop's code is the application's.
+		if (version === Version.DRAFT_07) expect(resp.drop.error).toBe(Number(StreamCode.TooFarBehind));
+		// Responses arrive in order, and nothing serves the group again.
 		sub.track.finish();
 		const after = await decodeSubscribeResponse(sub.client.reader, version);
 		expect(Object.keys(after)).toEqual(["finish"]);
-	} finally {
-		await sub.close();
-	}
-});
-
-// Lite-07: a yielded group the publisher aborts before its continuation is dropped with the
-// publisher's error, not as stale. Mirrors the Rust `lite07_yielded_group_aborted_drops_with_its_error`.
-test("lite-07 drops a yielded group the publisher aborted with its error", async () => {
-	const version = Version.DRAFT_07;
-	const sub = await servedSubscription({ version, startGroup: 0n });
-	try {
-		const group = sub.track.createGroup(0n);
-		group.writeFrame(textFrame("a", Timestamp.fromMillis(0)));
-		expect(await sub.servedHeader()).toBe(0n);
-		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
-
-		const [open] = lines(sub.quic).streams.list();
-		if (!open) throw new Error("the group stream is not open");
-		open.preempt();
-		group.abort(new StreamError(StreamCode(70), { message: "cut" }));
-
-		const resp = await decodeSubscribeResponse(sub.client.reader, version);
-		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([0n, 1n, 70]);
+		expect(lines(sub.quic).streams.list()).toEqual([]);
 	} finally {
 		await sub.close();
 	}

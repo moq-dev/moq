@@ -1,9 +1,8 @@
 import { race } from "@moq/signals";
 import { FrameTooLarge, StreamCode, StreamError } from "../error.ts";
-import type { Producer as FrameProducer } from "../frame.ts";
 import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
-import { decodePayload, fillFrame, receiveFrame, skipPayload, type WirePayload } from "../payload.ts";
+import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
@@ -131,35 +130,8 @@ export function frameDecoder({ scale, compress = false, lengthFirst = false }: F
 	};
 }
 
-/**
- * Where a lite-07 Group Stream is in its group, which a YIELDED reset pauses and a later stream
- * continues: frames the group holds already are skipped, and the frame the reset cut short is
- * completed. Mirrors the Rust `FrameIngest` on a yielding stream.
- *
- * @internal
- */
-export interface Ingest {
-	/** The group index of the next frame on the stream, counted from its `Frame Start`. */
-	index: number;
-	/**
-	 * The frame a YIELDED reset cut short, holding the group's writer: kept on a pause, and
-	 * completed by the continuation.
-	 */
-	partial?: FrameProducer;
-}
-
-/**
- * Write a group stream's frames into `producer` until the stream ends or the producer closes.
- *
- * With `ingest`, a stream continuing a paused group skips the frames the group holds, and
- * completes the one a YIELDED reset cut short; ending before completing it is malformed.
- */
-export async function readFrames(
-	stream: Reader,
-	producer: netGroup.Producer,
-	format: FrameFormat,
-	ingest?: Ingest,
-): Promise<void> {
+/** Write a group stream's frames into `producer` until the stream ends or the producer closes. */
+export async function readFrames(stream: Reader, producer: netGroup.Producer, format: FrameFormat): Promise<void> {
 	const decode = frameDecoder(format);
 
 	for (;;) {
@@ -167,64 +139,13 @@ export async function readFrames(
 		// per batch rather than once per frame. Only the group's own stream ends it: a track
 		// that closes first has already closed (or aborted) this group through its cache.
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
-		if (frame === undefined && ingest?.partial)
-			throw malformed("a continuation ended before completing the frame it resumed");
 		if (!frame || frame instanceof Error) return;
-		if (ingest) {
-			const index = ingest.index++;
-			const held = hooks.groupFrameCount(producer);
-			if (index < held) {
-				if (!(await skipHeld(stream, producer, frame, ingest, index + 1 === held))) return;
-				continue;
-			}
-		}
 		if (frame.payload)
 			hooks.writeGroupFrame(
 				producer,
 				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.sequence) },
 				frame.inflated,
 			);
-		else if (ingest) {
-			const timestamp = Time.received(frame.timestamp, producer.sequence);
-			const open = producer.createFrame({ size: frame.size, timestamp });
-			// Kept until it completes, so a YIELDED reset cutting it short leaves it for the continuation.
-			ingest.partial = open;
-			if (!(await fillFrame(stream, producer, open))) return;
-			ingest.partial = undefined;
-		} else if (!(await receiveFrame(stream, producer, frame))) return;
+		else if (!(await receiveFrame(stream, producer, frame))) return;
 	}
-}
-
-// A continuation re-sending a frame the group holds: discard it, or for the frame a YIELDED reset
-// cut short (the `last` one held), discard the bytes held and complete it. Resolves false if the
-// group closed first.
-async function skipHeld(
-	stream: Reader,
-	producer: netGroup.Producer,
-	frame: WireFrame,
-	ingest: Ingest,
-	last: boolean,
-): Promise<boolean> {
-	const partial = last ? ingest.partial : undefined;
-	if (!partial) return frame.payload !== undefined || (await skipUnlessClosed(stream, producer, frame.size));
-	// The same frame, so the same size: a publisher reusing the group's identity is refused
-	// rather than written past.
-	if (partial.size !== frame.size) throw malformed("a continuation resent a frame at another size");
-	const skip = partial.size - partial.remaining;
-	if (frame.payload) {
-		partial.write(frame.payload.subarray(skip));
-		partial.finish();
-	} else {
-		if (!(await skipUnlessClosed(stream, producer, skip))) return false;
-		if (!(await fillFrame(stream, producer, partial))) return false;
-	}
-	ingest.partial = undefined;
-	return true;
-}
-
-// Read past `size` bytes of a held payload, as `fillFrame` reads one in: resolves false if the group
-// closed first, so a peer that stops sending holds neither the stream nor its task.
-async function skipUnlessClosed(stream: Reader, producer: netGroup.Producer, size: number): Promise<boolean> {
-	await race([skipPayload(stream, size), producer.closed]);
-	return producer.closed.peek() === undefined;
 }

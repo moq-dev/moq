@@ -1419,126 +1419,13 @@ function handStream(version: Version) {
 	};
 }
 
-// Lite-07: a stream reset with YIELDED pauses its group, keeping the frame it cut short, and a later
-// stream continues it from the paused stream's Frame Start, whether it lands after that reset or
-// overtakes it, which ends the paused stream at once, since a browser can lose its reset. The
-// group's reader gets every frame once, then its end. Mirrors the Rust
-// `a_yielded_group_continues_without_loss`, which waits for the overtaken reset instead.
-test.each([false, true])("a yielded group continues without loss (overtakes: %p)", async (overtakes) => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber
-		.consume(Path.from("room"))
-		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		await (await opened(1)).reading;
-
-		// Frame 1 streams in past one segment, so the reset cuts it short partway.
-		const big = new Uint8Array(SEGMENT_BYTES + 7).map((_, i) => i % 251);
-		const frames = [
-			{ delta: 300, payload: new TextEncoder().encode("zero") },
-			{ delta: 10, payload: big },
-			{ delta: 10, payload: new TextEncoder().encode("three") },
-		];
-		const first = handStream(version);
-		first.write(await liteFrame(frames[0].delta, frames[0].payload));
-		first.write(await liteFrame(frames[1].delta, frames[1].payload, SEGMENT_BYTES / 2));
-		const second = handStream(version);
-		for (const { delta, payload } of frames) second.write(await liteFrame(delta, payload));
-		second.finish();
-
-		const header = new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 });
-		const yielded = subscriber.runGroup(header, first.reader);
-		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(3n);
-		expect((await group?.readFrame())?.payload).toEqual(frames[0].payload);
-
-		let continued: Promise<void>;
-		if (overtakes) {
-			const stop = spyOn(first.reader, "stop");
-			continued = subscriber.runGroup(header, second.reader);
-			await yielded;
-			expect(stop).toHaveBeenCalled();
-		} else {
-			first.reset(StreamCode.Yielded);
-			await yielded;
-			await drainReactions();
-			expect(group?.closed.peek()).toBeUndefined();
-			continued = subscriber.runGroup(header, second.reader);
-		}
-		await continued;
-
-		for (const { payload } of frames.slice(1)) {
-			const frame = await group?.readFrame();
-			expect(frame?.payload.byteLength).toBe(payload.byteLength);
-			expect(Buffer.compare(frame?.payload ?? new Uint8Array(), payload)).toBe(0);
-		}
-		expect(await group?.readFrame()).toBeUndefined();
-		expect(await group?.closed).toBeNull();
-	} finally {
-		track.close();
-		subscriber.close();
-	}
-});
-
-// Lite-07: a continuation is reset with YIELDED too, pausing the group again, and a third stream
-// finishes it. Each pause keeps what arrived, and the reader gets every frame once.
-test("a group yielded twice continues without loss", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber
-		.consume(Path.from("room"))
-		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		await (await opened(1)).reading;
-
-		const frames = ["zero", "one", "two"].map((text, i) => ({
-			delta: i === 0 ? 300 : 10,
-			payload: new TextEncoder().encode(text),
-		}));
-		const header = new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 });
-		const group = (async () => track.recvGroup())();
-
-		// Each stream starts at frame 0 and carries one frame more than the last before its reset.
-		for (const sent of [1, 2]) {
-			const stream = handStream(version);
-			for (const { delta, payload } of frames.slice(0, sent)) stream.write(await liteFrame(delta, payload));
-			const running = subscriber.runGroup(header, stream.reader);
-			await drainReactions();
-			stream.reset(StreamCode.Yielded);
-			await running;
-			await drainReactions();
-			expect((await group)?.closed.peek(), `after ${sent} frames`).toBeUndefined();
-		}
-		const last = handStream(version);
-		for (const { delta, payload } of frames) last.write(await liteFrame(delta, payload));
-		last.finish();
-		await subscriber.runGroup(header, last.reader);
-
-		const reader = await group;
-		expect(reader?.sequence).toBe(3n);
-		for (const { payload } of frames) expect((await reader?.readFrame())?.payload).toEqual(payload);
-		expect(await reader?.readFrame()).toBeUndefined();
-		expect(await reader?.closed).toBeNull();
-	} finally {
-		track.close();
-		subscriber.close();
-	}
-});
-
-// Lite-07: a drop can overtake the YIELDED reset of the stream it names. The group ends with the
-// drop's error rather than waiting for a continuation the publisher never sends. Mirrors the Rust
-// `a_yielded_group_a_drop_named_ends`.
-test("a yielded group a drop named ends", async () => {
-	const version = Version.DRAFT_07;
+// A Group Stream the publisher reset to make room for a higher-priority one is a final drop on every
+// version: the group ends with TOO_FAR_BEHIND, keeping what arrived, and the drop that follows the
+// reset changes nothing. Mirrors the Rust `a_group_reset_to_make_room_ends`.
+test.each([
+	{ name: "lite-06", version: Version.DRAFT_06 },
+	{ name: "lite-07", version: Version.DRAFT_07 },
+])("$name: a group reset to make room ends", async ({ version }) => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const track = subscriber
@@ -1553,120 +1440,27 @@ test("a yielded group a drop named ends", async () => {
 		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
 
 		const first = handStream(version);
-		first.write(await liteFrame(300, new Uint8Array([1])));
-		first.write(await liteFrame(10, new Uint8Array([2, 3]), 1));
-		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
-		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(3n);
-
-		// The publisher gave the group up after pausing it, and its drop lands first.
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
-		await drainReactions();
-		first.reset(StreamCode.Yielded);
-		await yielded;
-
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		const read = await group?.readFrame().then(
-			() => undefined,
-			(err: unknown) => err,
-		);
-		expect(read).toBeInstanceOf(StreamError);
-		expect((read as StreamError).code).toBe(StreamCode.Old);
-	} finally {
-		track.close();
-		subscriber.close();
-	}
-});
-
-// Lite-07: a stale drop that overtook the YIELDED reset of the stream it names holds only under the
-// update it names: once the subscriber sends another, the reset pauses the group, which the
-// publisher then continues or drops again. Mirrors the Rust
-// `a_yielded_group_pauses_once_an_update_supersedes_its_stale_drop`.
-test("a yielded group pauses once an update supersedes its stale drop", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber
-		.consume(Path.from("room"))
-		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		const request = await opened(1);
-		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
-
-		const first = handStream(version);
-		first.write(await liteFrame(300, new Uint8Array([1])));
-		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const frame = hasLengthFirst(version)
+			? await liteFrame(300, new Uint8Array([1]))
+			: await Writer.collect(version, async (w) => {
+					await w.u62(600n);
+					await w.u53(1);
+					await w.write(new Uint8Array([1]));
+				});
+		first.write(frame);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
 		const group = await track.recvGroup();
 		expect(group?.sequence).toBe(3n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
+		first.reset(StreamCode.TooFarBehind);
+		await running;
+		expect(await group?.closed).toMatchObject({ code: StreamCode.TooFarBehind });
+		await respond(request, version, [
+			{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.TooFarBehind }) },
+		]);
 		await drainReactions();
-		track.update({ priority: 1, delay: { max: Duration.millis(60_000) } });
-		await drainReactions();
-		first.reset(StreamCode.Yielded);
-		await yielded;
-		await drainReactions();
-
-		expect(group?.closed.peek()).toBeUndefined();
-		// The continuation picks the group up where the reset left it.
-		const second = handStream(version);
-		second.write(await liteFrame(10, new Uint8Array([2])));
-		second.finish();
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		expect(await group?.readFrame()).toBeUndefined();
-	} finally {
-		track.close();
-		subscriber.close();
-	}
-});
-
-// Lite-07: a stale drop that overtook the header of the stream it names holds only under the update
-// it names: once the subscriber sends another, a YIELDED reset of that stream pauses the group.
-// Mirrors the Rust `a_yielded_group_pauses_once_an_update_supersedes_a_stale_drop_before_its_header`.
-test("a yielded group pauses once an update supersedes a stale drop before its header", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber
-		.consume(Path.from("room"))
-		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		const request = await opened(1);
-		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
-
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.Old }) }]);
-		await drainReactions();
-		const first = handStream(version);
-		first.write(await liteFrame(300, new Uint8Array([1])));
-		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
-		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(3n);
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-
-		track.update({ priority: 1, delay: { max: Duration.millis(60_000) } });
-		await drainReactions();
-		first.reset(StreamCode.Yielded);
-		await yielded;
-		await drainReactions();
-
-		expect(group?.closed.peek()).toBeUndefined();
-		// The continuation picks the group up where the reset left it.
-		const second = handStream(version);
-		second.write(await liteFrame(10, new Uint8Array([2])));
-		second.finish();
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 1 }), second.reader);
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		expect(await group?.readFrame()).toBeUndefined();
+		expect(await group?.closed).toMatchObject({ code: StreamCode.TooFarBehind });
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1674,9 +1468,9 @@ test("a yielded group pauses once an update supersedes a stale drop before its h
 });
 
 // Lite-07: Firefox reports a reset that lands before the page read the stream's data as a bare
-// TypeError, dropping its code. The publisher owes that group a continuation or a drop, so the
-// group pauses as on YIELDED, and whichever comes settles it.
-test.each(["continued", "dropped"] as const)("a reset without its code pauses the group (%s)", async (then) => {
+// TypeError, dropping its code. The group ends with it, as with any other reset; the drop that
+// follows names the reason.
+test("a reset without its code ends the group", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -1698,28 +1492,7 @@ test.each(["continued", "dropped"] as const)("a reset without its code pauses th
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		first.error(new TypeError("Error in input stream"));
 		await running;
-		await drainReactions();
-		expect(group?.closed.peek()).toBeUndefined();
-
-		if (then === "continued") {
-			const second = handStream(version);
-			second.write(await liteFrame(300, new Uint8Array([1])));
-			second.write(await liteFrame(10, new Uint8Array([2])));
-			second.finish();
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), second.reader);
-			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-			expect(await group?.readFrame()).toBeUndefined();
-			expect(await group?.closed).toBeNull();
-		} else {
-			await respond(request, version, [
-				{ drop: new SubscribeDrop({ start: 3n, end: 4n, error: StreamCode.NotFound }) },
-			]);
-			const err = await group?.readFrame().then(
-				() => undefined,
-				(e: unknown) => e,
-			);
-			expect((err as StreamError).code).toBe(StreamCode.NotFound);
-		}
+		expect(await group?.closed).toBeInstanceOf(Error);
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1838,83 +1611,6 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 	}
 });
 
-// Lite-07: a recovery holds its FIN for a group a reset without its code paused, as a subscription's
-// end does, rather than end the continuation the publisher still owes it.
-test("a recovery waits for the continuation of a group a reset without its code paused", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const consumed = subscriber.consume(Path.from("room"));
-	const live = consumed.track("video").subscribe({ delay: { max: null } });
-	let history: ReturnType<ReturnType<typeof consumed.track>["subscribe"]> | undefined;
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		const request = await opened(1);
-		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
-		// The subscription delivers groups 0 and 1, which age out of the cache below the live edge,
-		// so it never sends them again.
-		for (const sequence of [0n, 1n, 10n]) {
-			const stream = handStream(version);
-			stream.finish();
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), stream.reader);
-		}
-		await clock.advance(DEFAULT_EXPIRY.mul(2));
-
-		// A reader asks for them again, which a recovery of their own answers.
-		history = consumed.track("video").subscribe({
-			delay: { max: null },
-			order: "ascending",
-			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
-		});
-		const zeroRead = history.recvGroup();
-		const recovery = await opened(2);
-		await recovery.reading;
-		await respond(recovery, version, [{ start: new SubscribeStart([0n]) }]);
-		// Over once it FINs, or once the fills cancel it with nothing left to read.
-		let over = false;
-		void Promise.race([recovery.finished, recovery.aborted]).then(() => {
-			over = true;
-		});
-
-		const first = handStream(version);
-		first.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 1n, sequence: 0n }), first.reader).catch(() => {});
-		const zero = await zeroRead;
-		expect(zero?.sequence).toBe(0n);
-		expect((await zero?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		const one = handStream(version);
-		one.finish();
-		await subscriber.runGroup(new Group({ subscribe: 1n, sequence: 1n }), one.reader);
-		await drainReactions();
-		expect(over).toBe(false);
-		// Firefox reports the YIELDED reset as a bare TypeError, which pauses the group.
-		first.error(new TypeError("Error in input stream"));
-		await drainReactions();
-		await clock.advance(GRACE.div(2));
-		expect(over).toBe(false);
-
-		// The continuation completes the group, which lets the recovery end.
-		const second = handStream(version);
-		second.write(await liteFrame(0, new Uint8Array([1])));
-		second.write(await liteFrame(10, new Uint8Array([2])));
-		second.finish();
-		await subscriber.runGroup(new Group({ subscribe: 1n, sequence: 0n }), second.reader);
-		expect((await zero?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		expect(await zero?.readFrame()).toBeUndefined();
-		await drainReactions();
-		expect(over).toBe(true);
-	} finally {
-		history?.close();
-		live.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
 // Lite-07: an update reopens a stale drop, so a stream that drop excused holds the end again
 // until it finishes, even once the grace the end started before the update has passed.
 test("an update restores the hold a stale drop excused", async () => {
@@ -1962,9 +1658,9 @@ test("an update restores the hold a stale drop excused", async () => {
 	}
 });
 
-// Lite-07: a continuation judged against a stale drop while it waits out the copy it replaces holds
-// the end if an update reopened that drop meanwhile, as the copy it replaces would have.
-test("an update while a continuation waits keeps its hold on the end", async () => {
+// Lite-07: a re-offer judged against a stale drop while it waits out the copy it replaces holds the
+// end if an update reopened that drop meanwhile, as the copy it replaces would have.
+test("an update while a re-offer waits keeps its hold on the end", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1987,8 +1683,8 @@ test("an update while a continuation waits keeps its hold on the end", async () 
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
-		// SUBSCRIBE_FINISH starts the end's grace. The continuation arrives under the stale drop, and
-		// the update lands while it waits out the first copy.
+		// SUBSCRIBE_FINISH starts the end's grace. The re-offer arrives under the stale drop, and the
+		// update lands while it waits out the first copy.
 		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
 		await drainReactions();
 		const second = handStream(version);
@@ -2014,89 +1710,32 @@ test("an update while a continuation waits keeps its hold on the end", async () 
 	}
 });
 
-// Lite-07: a malformed FRAME on a Group Stream ends only that stream and its group, never the
-// session: a Payload Length of 0, or a continuation that resends the cut frame at another size, ends
-// before completing it, or starts past the frames held. Mirrors the Rust `UniState::Group`.
-test.each(["zero length", "resized", "unfinished", "past held"] as const)(
-	"a malformed lite-07 group stream ends only its group (%s)",
-	async (fault) => {
-		const version = Version.DRAFT_07;
-		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, toHop(1n));
-		const track = subscriber
-			.consume(Path.from("room"))
-			.track("video")
-			.subscribe({ delay: { max: Duration.millis(60_000) } });
-		try {
-			await opened(0);
-			await answerTrackInfo(streams[0], version, 1000);
-			await (await opened(1)).reading;
-
-			const zero = new TextEncoder().encode("zero");
-			// Past one segment, so the reset cuts it short partway.
-			const cut = new Uint8Array(SEGMENT_BYTES + 7);
-			const header = new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 });
-			const first = handStream(version);
-			first.write(await liteFrame(300, zero));
-			if (fault === "zero length") first.write(await Writer.collect(version, (w) => w.u53(0)));
-			else first.write(await liteFrame(10, cut, SEGMENT_BYTES / 2));
-			let running = subscriber.runGroup(header, first.reader);
-			const group = await track.recvGroup();
-			expect((await group?.readFrame())?.payload).toEqual(zero);
-
-			if (fault !== "zero length") {
-				first.reset(StreamCode.Yielded);
-				await running;
-				await drainReactions();
-				expect(group?.closed.peek()).toBeUndefined();
-				const second = handStream(version);
-				if (fault === "past held") {
-					// Only frame 0 is held whole, so frame 2 would leave a hole.
-					running = subscriber.runGroup(
-						new Group({ subscribe: 0n, sequence: 3n, frameStart: 2 }),
-						second.reader,
-					);
-				} else {
-					second.write(await liteFrame(300, zero));
-					if (fault === "resized") second.write(await liteFrame(10, new Uint8Array(cut.byteLength + 1)));
-					running = subscriber.runGroup(header, second.reader);
-				}
-				second.finish();
-			}
-
-			// The stream ends without the session: nothing escapes for the connection to close it with.
-			await expect(running).resolves.toBeUndefined();
-			expect(await group?.closed).toMatchObject({ code: StreamCode.MalformedTrack });
-		} finally {
-			track.close();
-			subscriber.close();
-		}
-	},
-);
-
-// Before lite-07 a YIELDED reset is no pause: the group ends with it, as with any other reset.
-test("a lite-06 group reset with YIELDED ends", async () => {
-	const version = Version.DRAFT_06;
+// Lite-07: a malformed FRAME on a Group Stream, such as a Payload Length of 0, ends only that stream
+// and its group, never the session. Mirrors the Rust `UniState::Group`.
+test("a malformed lite-07 group stream ends only its group", async () => {
+	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
+
+		const zero = new TextEncoder().encode("zero");
 		const first = handStream(version);
-		const frame = await Writer.collect(version, async (w) => {
-			await w.u62(600n);
-			await w.u53(1);
-			await w.write(new Uint8Array([1]));
-		});
-		first.write(frame);
-		const yielded = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), first.reader);
+		first.write(await liteFrame(300, zero));
+		first.write(await Writer.collect(version, (w) => w.u53(0)));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n, frameStart: 0 }), first.reader);
 		const group = await track.recvGroup();
-		first.reset(StreamCode.Yielded);
-		await yielded;
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		expect(await group?.closed).toMatchObject({ code: StreamCode.Yielded });
+		expect((await group?.readFrame())?.payload).toEqual(zero);
+
+		// The stream ends without the session: nothing escapes for the connection to close it with.
+		await expect(running).resolves.toBeUndefined();
+		expect(await group?.closed).toMatchObject({ code: StreamCode.MalformedTrack });
 	} finally {
 		track.close();
 		subscriber.close();
@@ -2104,8 +1743,8 @@ test("a lite-06 group reset with YIELDED ends", async () => {
 });
 
 // A lite-07 re-offer can overtake the reset of the stream it replaces. It proves that reset, which
-// a browser can lose, so it ends that copy at once and continues the group from the frames it
-// holds: a reader already handed the group reads on, and a later one reads it whole.
+// a browser can lose, so it ends that copy at once and takes the group over: a reader already handed
+// the group reads on, and a later one reads it whole.
 test("a re-offer ends the copy still arriving and continues its group", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();

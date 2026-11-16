@@ -73,9 +73,6 @@ Guidance for the PR:
   as over one without; a moq-transport track still crosses two relays with
   its Object IDs, gaps, and properties (the path the 2026-11-09 decision
   kept, which #8843 noted "is not exercised end to end": add that test).
-- With [YIELDED deferred](/quest/m2/yield-defer.md), the "never reset with
-  YIELDED" rule for such tracks is already gone; if this lands first, leave
-  that sentence to it.
 - Run `just test interop --all`.
 
 Public API: `setup::Extensions` and both `with_extensions` leave moq-net,
@@ -85,5 +82,4 @@ with the `ietf` extension only; a moq-lite track loses its records.
 
 ## Related
 
-- [YIELDED deferred](/quest/m2/yield-defer.md) - deletes the extension's yield exception
 - [moq-transport time addressing](/quest/m2/ietf-time-addressing.md) - changes what moq-transport state a track carries

@@ -216,7 +216,7 @@ A subscriber that has received frames 0 through `N-1` of group `G` and wants the
 This is what lets a subscriber move a Track to a different publisher partway through a Group instead of waiting for the next Group to start, which matters for Tracks whose current Group may stay open indefinitely.
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
 
-A partial Group is only ever delivered to a subscriber that asked for one with FETCH, or as the [continuation](#yield) of a paused Group.
+A partial Group is only ever delivered to a subscriber that asked for one with FETCH.
 A publisher that holds only part of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
 A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
 
@@ -359,8 +359,6 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 |  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it is present on an untimed track, absent on a timed one, or starts a Group before a lower-sequence one. |
 | ------- | ------------- | ----------- |
 |  0x3B  | UNAUTHORIZED | The endpoint does not authorize this request, or no longer does, such as when the [scope](#auth-stream) does not cover it. The session stays up. |
-| ------- | ------------- | ----------- |
-|  0x3C  | YIELDED | The Group Stream was reset to make room for a higher-priority stream. The Group is not given up: it [continues](#yield) on a later stream. |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
@@ -892,7 +890,7 @@ A frame MAY contain an empty payload, potentially indicating a gap in the group.
 
 The GROUP message's `Frame Start` gives the index of the first FRAME on the stream, so a stream carrying only part of a Group is self-describing.
 
-A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription, except to re-offer a Group whose stream it reset (see [SUBSCRIBE_DROP](#subscribe-drop)), or to [continue](#yield) one.
+A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription, except to re-offer a Group whose stream it reset (see [SUBSCRIBE_DROP](#subscribe-drop)).
 The re-offer can arrive before that reset: a subscriber holds a Group Stream for a sequence whose earlier stream is still arriving unread until that stream ends, then discards it if the earlier stream completed the Group, or reads it if the earlier stream was reset.
 Since the publisher reset the earlier stream, the subscriber MAY instead end that stream at once and read the later one, ignoring the frames it holds; a browser can lose a reset that reaches a stream before its application does.
 A subscriber assembling a Group from more than one publisher does so across separate subscriptions, and is responsible for concatenating the runs in index order and for ignoring any frame it has already received.
@@ -901,16 +899,9 @@ Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
 
-#### Yield {#yield}
-A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with YIELDED to make room for a higher-priority one.
-A Group Stream of a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects, is never reset with YIELDED.
-Any other Group Stream may be, including one on a session with the extension: a continuation's records start at its `Frame Start`.
-
-A Group whose stream was reset with YIELDED is paused, not given up: the subscriber keeps the frames it received, and the publisher MUST later continue the Group on another Group Stream or name it in [SUBSCRIBE_DROP](#subscribe-drop).
-A continuation is a Group Stream for the paused Group whose `Frame Start` is the reset stream's own `Frame Start`, since a reset can discard frames the transport acknowledged.
-The subscriber ignores the frames it already holds, including the part of a frame the reset cut short, and appends the rest; a continuation that starts past the frames it holds whole is malformed.
-A continuation MAY overtake the earlier stream's reset, and waits unread until that stream ends, or ends it, as for a re-offer.
-A subscriber whose transport reports a Group Stream's reset without its error code, as a browser can, pauses the Group as for YIELDED: the publisher's continuation or SUBSCRIBE_DROP settles it.
+A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with TOO_FAR_BEHIND to make room for a higher-priority one.
+That gives the Group up on the subscription: the publisher names it in [SUBSCRIBE_DROP](#subscribe-drop), and a subscriber that wants the rest of it FETCHes the Group from the first frame it lacks (see [Positions](#positions)).
+The drop settles the Group even where the subscriber's transport loses the reset or its error code, as a browser can.
 
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
@@ -2059,8 +2050,7 @@ Either way the Group Stream accounts for the sequence, and the next SUBSCRIBE_UP
 For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 This includes streams reset before their headers were delivered, and streams the subscriber stopped (STOP_SENDING), which it may have discarded unread; such a drop carries the STOP_SENDING's Error Code.
 A drop naming a stopped duplicate of a Group that another Group Stream already completed changes nothing for that Group: its readers keep it whole.
-A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it is YIELDED or answers a STOP_SENDING.
-A [paused](#yield) Group is accounted for only once a continuation completes it, a reset of one other than YIELDED ends it, or a SUBSCRIBE_DROP names it.
+A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it answers a STOP_SENDING.
 The publisher SHOULD name a sequence as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
 
 Before moq-lite-07, SUBSCRIBE_DROP carries an inclusive `Group End` in place of `Group Count`, where `Group Start = Group End + 1` is an empty range and a larger Group Start is a PROTOCOL_VIOLATION.
@@ -2312,7 +2302,7 @@ A subscriber MUST handle gaps, potentially caused by congestion.
 The index of the first FRAME message on this stream within the group (see [Positions](#positions)).
 A plain absolute index; 0 means the stream carries the group from its beginning, which is the common case.
 A non-zero value means the leading frames are not on this stream.
-The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a FETCH covers them, or the stream [continues](#yield) a paused Group.
+The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a FETCH covers them.
 
 
 ## FRAME
@@ -2467,8 +2457,7 @@ An application-specific payload.
 - Added a leading Type to datagrams: Track (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
 - A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.
-- Added [YIELDED](#yield) (0x3C): a publisher out of stream credit resets the lowest-priority Group Stream with it, which pauses the Group for a later Group Stream to continue from where the reset stream started.
-- A subscriber MAY end a Group Stream once a later stream for its Group arrives, rather than wait for its reset, and pauses a Group whose reset arrives without its error code as for YIELDED.
+- A subscriber MAY end a Group Stream once a re-offer of its Group arrives, rather than wait for its reset.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.

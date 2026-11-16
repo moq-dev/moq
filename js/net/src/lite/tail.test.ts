@@ -51,7 +51,7 @@ function groupStream(subscriber: Subscriber, sequence: bigint) {
 	return {
 		write: (payload: string) => controller.enqueue(frame(payload, subscriber.version)),
 		finish: () => controller.close(),
-		// With a code, as a publisher resets: lite-07 pauses a group whose reset lost its code.
+		// With a code, as a publisher resets.
 		reset: () => controller.error(toTransport(StreamCode.Cancel, "reset")),
 		handled,
 	};
