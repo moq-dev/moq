@@ -104,6 +104,22 @@ for the wire:
   upstream link is reachable by arrival order (decided by the coordinator on
   2026-11-16, pending the maintainer, in
   [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
+- A claim carries an unavailable bit beside its draining bit. An endpoint or
+  scoped neighbour is told what the node's own reader shows: the closest claim
+  while a route reaches one, and while none does, the claim of the best
+  precedence marked unavailable, withdrawn only when the reader's debounce
+  runs out. A scoped neighbour's adopter announces the claim again with the
+  bit, so its domain keeps the claim and fails requests closed, a request
+  reaching that adopter included, instead of withdrawing and starting it
+  again. The debounce runs from when a reader first showed the claim
+  unavailable, so the domain past a grant lets the claim go about when the
+  near one does, not a debounce later. The route exchange between routing
+  nodes keeps no timer (decided by the coordinator on 2026-11-16, pending the
+  maintainer, in [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
+- A message names each claim once, and a receiver refuses one that names a
+  claim twice, so no order within a message decides what it says (decided by
+  the implementer on 2026-11-16, pending the maintainer, in
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
 - A node offers a route to itself only once it announces a claim, so a relay
   that has never announced a claim and only forwards or only serves viewers
   has no route on the wire.

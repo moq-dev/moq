@@ -36,6 +36,16 @@ enum Spot {
 	},
 }
 
+/// A claim change one node told another, and when it arrived.
+#[derive(Clone, Debug)]
+pub(super) struct Told {
+	pub at: Instant,
+	pub from: Node,
+	pub to: Node,
+	pub claim: Path,
+	pub change: relay::Change<()>,
+}
+
 /// A network of [`relay::Router`]s and endpoints.
 #[derive(Clone)]
 pub(super) struct RelaySim {
@@ -52,6 +62,8 @@ pub(super) struct RelaySim {
 	/// Messages each node sent, the interest exchange left out.
 	pub sent: BTreeMap<Node, usize>,
 	pub events: Vec<Seen>,
+	/// Every claim change delivered to an endpoint or across a grant, in order.
+	pub told: Vec<Told>,
 	spent: usize,
 	now: Instant,
 	debounce: Duration,
@@ -79,6 +91,7 @@ fn own() -> Claim<()> {
 		cost: 0,
 		priority: i8::MAX,
 		draining: false,
+		unavailable: false,
 		chain: Vec::new(),
 	}
 }
@@ -98,6 +111,7 @@ impl RelaySim {
 			stats: Stats::default(),
 			sent: BTreeMap::new(),
 			events: Vec::new(),
+			told: Vec::new(),
 			spent: 0,
 			now: Instant::ZERO,
 			debounce,
@@ -109,6 +123,11 @@ impl RelaySim {
 		};
 		sim.spots = (0..nodes).map(|node| Spot::Relay(Box::new(sim.fresh(node)))).collect();
 		sim
+	}
+
+	/// The simulated time.
+	pub fn now(&self) -> Instant {
+		self.now
 	}
 
 	/// How `node` names itself on a path as it runs now.
@@ -486,6 +505,18 @@ impl RelaySim {
 		let Some(msg) = self.queues.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
 			return false;
 		};
+		if let Msg::Announce { changes } = &msg {
+			for ((claim, _), change) in changes {
+				let (at, claim, change) = (self.now, claim.clone(), change.clone());
+				self.told.push(Told {
+					at,
+					from,
+					to,
+					claim,
+					change,
+				});
+			}
+		}
 
 		if let Some(router) = self.relay(to)
 			&& let Err(err) = router.recv(from, msg.clone())
@@ -546,7 +577,8 @@ impl RelaySim {
 				waiting |= router.deadline().is_some();
 			}
 		}
-		self.show();
+		// What a reader going offline tells endpoints and scoped neighbours goes out now.
+		self.flush();
 		waiting
 	}
 
@@ -830,16 +862,27 @@ fn routing(row: &Row) -> Vec<(&'static str, String)> {
 	]
 }
 
-/// The fields of two rows that differ, each as the prototype's and this router's.
-fn differ(kept: &Row, relay: &Row) -> Vec<String> {
+/// The fields of two rows that differ, each named and shown as the prototype's and this
+/// router's.
+fn differ(kept: &Row, relay: &Row) -> Vec<(&'static str, String)> {
 	(routing(kept).into_iter().zip(routing(relay)))
 		.filter(|((_, a), (_, b))| a != b)
 		.map(|((field, a), (_, b))| match field {
-			"answers" => "answers".to_string(),
-			_ => format!("{field} {a}->{b}"),
+			"answers" => (field, "answers".to_string()),
+			_ => (field, format!("{field} {a}->{b}")),
 		})
 		.collect()
 }
+
+/// Where the router tells a scoped neighbour a claim unavailable that the prototype
+/// withdraws, by failure and shape.
+const UNAVAILABLE: [(&str, &str); 5] = [
+	("home_dies", "two_meshes_one_grant"),
+	("home_dies", "two_meshes_two_grants"),
+	("home_dies", "three_meshes_chain"),
+	("hub_dies_slowly", "three_meshes_chain"),
+	("home_dies", "three_meshes_ring"),
+];
 
 /// The production router, its readers letting go at once as the prototype's do, gives
 /// the prototype's answers on every shape and failure of the bake-off at the same cost:
@@ -850,6 +893,17 @@ fn differ(kept: &Row, relay: &Row) -> Vec<String> {
 /// and then hears a lagging neighbour's copy of its claims within one burst passes them
 /// on in the prototype, at a floor its neighbours already hold, on routes it withdraws
 /// in the same burst (`home_dies` on `tiers`); this router withdraws those routes first.
+///
+/// It differs in more, by design (`UNAVAILABLE`). While a claim is known but no route
+/// reaches it, the router tells a scoped neighbour what its reader shows, the claim
+/// unavailable, where the prototype withdraws it. A relay that loses its last route to
+/// the publisher's home before it hears the home's claims withdrawn therefore tells the
+/// next mesh the claim unavailable and then lost, and the adopter there passes on both.
+/// That costs more claims, and on the two-mesh shapes one more round, and fewer far
+/// readers let go and start the claim again. On the ring of grants, both rules route the
+/// two ends of one grant to each other for a moment, each on the copy of the claim that
+/// came the other way round (`home_dies`); the adopter's unavailable is one more message
+/// delivered while that lasts, and it clears in the same round.
 #[test]
 fn the_router_gives_the_prototypes_answers() {
 	let mut out = Vec::new();
@@ -858,10 +912,22 @@ fn the_router_gives_the_prototypes_answers() {
 		let relay = fail(Arm::Relay(Duration::ZERO), &shape.mesh, false);
 		assert_eq!(kept.len(), relay.len(), "{}", shape.name);
 		for ((failure, kept), (_, relay)) in kept.iter().zip(&relay) {
-			let fields = differ(kept, relay);
-			// Fewer claims is the one field allowed to differ.
-			let fewer = kept.cost.sent.claims > relay.cost.sent.claims;
-			if fields.len() > usize::from(fewer) {
+			let (a, b) = (&kept.cost, &relay.cost);
+			let unavailable = UNAVAILABLE.contains(&(failure.as_str(), shape.name));
+			let excused = |field: &str| match field {
+				"claim_items" if a.sent.claims > b.sent.claims => true,
+				"claim_items" => unavailable,
+				"settle_rounds" => unavailable && b.rounds == a.rounds + 1,
+				"starts" => unavailable && b.sent.starts < a.sent.starts,
+				"offline" => unavailable && b.sent.offline < a.sent.offline,
+				"loops" => unavailable && shape.name == "three_meshes_ring" && b.loops == a.loops + 1,
+				_ => false,
+			};
+			let fields: Vec<String> = (differ(kept, relay).into_iter())
+				.filter(|(field, _)| !excused(field))
+				.map(|(_, shown)| shown)
+				.collect();
+			if !fields.is_empty() {
 				out.push(format!("{} on {}: {}", failure.as_str(), shape.name, fields.join(", ")));
 			}
 		}
@@ -970,28 +1036,197 @@ fn a_newer_floor_travels_with_nothing_changed() {
 	assert_eq!(shown(&sim, 4), None);
 }
 
+/// What a relay tells an endpoint or scoped neighbour of a claim, as it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Said {
+	Live,
+	Unavailable,
+	Lost,
+	Ended,
+}
+
+/// A mesh where relay 1 serves a viewer endpoint asking for the whole tree, and a scoped
+/// neighbour, relay 2, which relay 3 reads beyond. The publisher's home is relay 0, and
+/// relay 5 is the one it moves to.
+mod watch {
+	use super::*;
+
+	pub const HOME: Node = 0;
+	pub const RELAY: Node = 1;
+	pub const SCOPED: Node = 2;
+	pub const FAR: Node = 3;
+	pub const PUBLISHER: Node = 4;
+	pub const NEXT: Node = 5;
+	pub const VIEWER: Node = 6;
+	pub const CLAIM: &str = "live";
+
+	pub fn mesh() -> RelaySim {
+		let mut sim = RelaySim::new(7, relay::debounce(HOP));
+		sim.client(PUBLISHER);
+		sim.publish(PUBLISHER, 100);
+		sim.client(VIEWER);
+		sim.link(HOME, RELAY, 1, Tie::Peer);
+		sim.link(NEXT, RELAY, 1, Tie::Peer);
+		sim.link(RELAY, SCOPED, 1, Tie::Scoped);
+		sim.link(SCOPED, FAR, 1, Tie::Peer);
+		sim.link(PUBLISHER, HOME, 1, Tie::Peer);
+		sim.link(VIEWER, RELAY, 1, Tie::Peer);
+		sim.ask(VIEWER, RELAY, "");
+		sim.claim(PUBLISHER, CLAIM, true);
+		quiesce(&mut sim);
+		sim
+	}
+
+	/// What relay 1 told `to` of the claim from the `since`th change on, each with when it
+	/// arrived, a run of the same kind said once.
+	pub fn said(sim: &RelaySim, to: Node, since: usize) -> Vec<(Instant, Said)> {
+		let mut out: Vec<(Instant, Said)> = Vec::new();
+		for told in &sim.told[since..] {
+			if (told.from, told.to, &told.claim) != (RELAY, to, &p(CLAIM)) {
+				continue;
+			}
+			let said = match &told.change {
+				relay::Change::Live(claim) if claim.unavailable => Said::Unavailable,
+				relay::Change::Live(_) => Said::Live,
+				relay::Change::Lost => Said::Lost,
+				relay::Change::Ended => Said::Ended,
+			};
+			if out.last().is_none_or(|(_, last)| *last != said) {
+				out.push((told.at, said));
+			}
+		}
+		out
+	}
+
+	/// What `node`'s reader showed from the `since`th event on.
+	pub fn read(sim: &RelaySim, node: Node, since: usize) -> Vec<Kind> {
+		(sim.events[since..].iter())
+			.filter(|seen| seen.node == node)
+			.map(|seen| seen.kind)
+			.collect()
+	}
+}
+
+/// An endpoint or scoped neighbour is told what the relay's own reader shows, never more:
+/// unavailable at once and never withdrawn while the claim is known or may return, and
+/// lost only when the relay's reader goes offline. A publisher that moves leaves a viewer
+/// and a scoped neighbour unavailable for a hop and then live again, and the mesh beyond
+/// the grant sees the same, with no withdrawal and no new start. A publisher that leaves
+/// is withdrawn one debounce later, and the mesh beyond the grant lets it go then too;
+/// one that ends its claim is withdrawn at once.
+#[test]
+fn a_viewer_is_told_what_the_relay_reads() {
+	use watch::*;
+	let kinds = |said: Vec<(Instant, Said)>| said.into_iter().map(|(_, said)| said).collect::<Vec<_>>();
+	let mut sim = mesh();
+	for to in [VIEWER, SCOPED] {
+		assert_eq!(kinds(said(&sim, to, 0)), [Said::Live], "{to} before");
+	}
+
+	// The move the bake-off's `Failure::Move` makes.
+	let (told, events) = (sim.told.len(), sim.events.len());
+	sim.close(PUBLISHER, HOME);
+	sim.link(PUBLISHER, NEXT, 1, Tie::Peer);
+	quiesce(&mut sim);
+	for to in [VIEWER, SCOPED] {
+		assert_eq!(
+			kinds(said(&sim, to, told)),
+			[Said::Unavailable, Said::Live],
+			"{to} on a move"
+		);
+	}
+	assert_eq!(read(&sim, RELAY, events), [Kind::Unavailable, Kind::Available]);
+	assert_eq!(
+		read(&sim, FAR, events),
+		[Kind::Unavailable, Kind::Available],
+		"beyond the grant"
+	);
+
+	// A failure that brings nothing back.
+	let (told, events, left) = (sim.told.len(), sim.events.len(), sim.now());
+	sim.close(PUBLISHER, NEXT);
+	// As `quiesce`, noting when the mesh beyond the grant lets the claim go.
+	let mut far = None;
+	for _ in 0..200 {
+		let ready = sim.ready();
+		for &((from, to), count) in &ready {
+			for _ in 0..count {
+				sim.deliver(from, to);
+			}
+		}
+		let waiting = sim.tick();
+		if far.is_none() && read(&sim, FAR, events).contains(&Kind::Offline) {
+			far = Some(sim.now());
+		}
+		if ready.is_empty() && !waiting && sim.ready().is_empty() {
+			break;
+		}
+	}
+	for to in [VIEWER, SCOPED] {
+		let said = said(&sim, to, told);
+		assert_eq!(kinds(said.clone()), [Said::Unavailable, Said::Lost], "{to} on a leave");
+		let (unavailable, lost) = (said[0].0, said[1].0);
+		assert!(unavailable <= left.saturating_add(2 * HOP), "{to}: told at once");
+		assert!(
+			lost >= left.saturating_add(relay::debounce(HOP)),
+			"{to}: lost only after the debounce"
+		);
+	}
+	assert_eq!(read(&sim, RELAY, events), [Kind::Unavailable, Kind::Offline]);
+	assert_eq!(
+		read(&sim, FAR, events),
+		[Kind::Unavailable, Kind::Offline],
+		"beyond the grant"
+	);
+	// It showed the claim unavailable from the start, so it waits no second debounce.
+	let lost = said(&sim, SCOPED, told)[1].0;
+	let far = far.expect("offline beyond the grant");
+	assert!(
+		far <= lost.saturating_add(2 * HOP),
+		"beyond the grant: {far:?}, told lost {lost:?}"
+	);
+
+	// A publisher that ends its claim is withdrawn at once, as ended.
+	let mut sim = mesh();
+	let (told, events) = (sim.told.len(), sim.events.len());
+	sim.claim(PUBLISHER, CLAIM, false);
+	quiesce(&mut sim);
+	for to in [VIEWER, SCOPED] {
+		assert_eq!(kinds(said(&sim, to, told)), [Said::Ended], "{to} on an end");
+	}
+	assert_eq!(read(&sim, FAR, events), [Kind::End], "beyond the grant");
+}
+
 /// A relay that restarts is a new node, but its neighbours file the session floor per
 /// pair of relays with the restart in the session's order, so a restart replaces the
 /// entry instead of adding one.
 #[test]
 fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
-	let mut sim = RelaySim::new(3, relay::debounce(HOP));
-	for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+	let mut sim = RelaySim::new(5, relay::debounce(HOP));
+	let links = [(0, 1), (1, 2), (0, 2), (0, 3)];
+	for (a, b) in links {
 		sim.link(a, b, 1, Tie::Peer);
 	}
+	// A publisher behind the relay that restarts, so 1 and 2 offer each other routes
+	// through their sessions to it, and name those sessions closed when it goes.
+	sim.client(4);
+	sim.publish(4, 100);
+	sim.link(4, 3, 1, Tie::Peer);
+	sim.claim(4, "live", true);
 	quiesce(&mut sim);
 	let mut kept = Vec::new();
 	for _ in 0..8 {
 		sim.reset(0);
 		quiesce(&mut sim);
-		for peer in [1, 2] {
+		for peer in [1, 2, 3] {
 			sim.open(0, peer);
 		}
 		quiesce(&mut sim);
 		kept.push(sim.kept().closed);
 	}
-	// Two ways round each of the three links at most.
-	assert!(kept.iter().all(|&pairs| pairs <= 6), "{kept:?}");
+	// Two ways round each link at most.
+	assert!(kept[0] > 0, "the restart closed sessions routes crossed: {kept:?}");
+	assert!(kept.iter().all(|&pairs| pairs <= 2 * links.len()), "{kept:?}");
 	assert_eq!(kept[0], kept[7], "{kept:?}");
 }
 
