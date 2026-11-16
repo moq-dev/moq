@@ -167,6 +167,12 @@ fn leafy(core: usize, leaves: usize, publishers: usize) -> Mesh {
 /// `count` chorded rings of `size` relays, each joined to the next by `joins`
 /// scoped links, and the last to the first when `ring`. Publishers join the first.
 fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize) -> Mesh {
+	// Each mesh leaves by relays past the ones it is entered by.
+	let exit = (size / 2).max(2);
+	assert!(
+		exit + joins <= size,
+		"a mesh of {size} relays has no room for {joins} gateways each way"
+	);
 	let one = chords(size, 1);
 	let mut mesh = Mesh {
 		relays: count * size,
@@ -188,7 +194,7 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 		for join in 0..joins {
 			// Each boundary leaves a mesh at another relay than the one it entered by,
 			// even in a mesh of three, so a claim crosses the mesh between two grants.
-			let (a, b) = (at * size + (size / 2).max(2) + join, next * size + 1 + join);
+			let (a, b) = (at * size + exit + join, next * size + 1 + join);
 			mesh.links.push((a, b, 1));
 			mesh.ties.insert((a, b), Tie::Scoped);
 		}
