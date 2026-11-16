@@ -1359,4 +1359,33 @@ mod tests {
 			assert!(controller.metrics().ssthresh.is_some(), "{end} is not running CUBIC");
 		}
 	}
+
+	/// The peers file skips this server's own entry, so every server can share it, and refuses
+	/// the whole file for one entry this server could not forward to.
+	#[test]
+	fn peers_file_is_shared_and_refused_whole() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peers.toml");
+		let own: ServerId = "01".parse().unwrap();
+		let bind: net::SocketAddr = "10.0.0.1:4443".parse().unwrap();
+		let read = |body: &str| {
+			std::fs::write(&path, body).unwrap();
+			read_peers(&path, &own, bind)
+		};
+
+		let map = read("\"01\" = \"10.0.0.1:4443\"\n\"02\" = \"10.0.0.2:4443\"\n").unwrap();
+		let expected: std::collections::HashMap<Box<[u8]>, net::SocketAddr> =
+			[(Box::from(&[2u8][..]), "10.0.0.2:4443".parse().unwrap())].into();
+		assert_eq!(map.peers(), &expected);
+
+		for (body, needle) in [
+			("\"0203\" = \"10.0.0.2:4443\"\n", "not 1 bytes"),
+			("\"02\" = \"[2001:db8::2]:4443\"\n", "cannot forward to"),
+			("\"02\" = \"0.0.0.0:4443\"\n", "cannot forward to"),
+			("\"zz\" = \"10.0.0.2:4443\"\n", "Invalid character"),
+		] {
+			let err = read(body).expect_err(body).to_string();
+			assert!(err.contains(needle), "{body}: {err}");
+		}
+	}
 }
