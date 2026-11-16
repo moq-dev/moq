@@ -95,10 +95,8 @@ pub struct Endpoint {
 }
 
 /// Observe an endpoint without keeping its socket or driver alive.
-#[cfg(feature = "quic")]
 pub(crate) struct WeakEndpoint(std::sync::Weak<EndpointInner>);
 
-#[cfg(feature = "quic")]
 impl WeakEndpoint {
 	pub(crate) fn upgrade(&self) -> Option<Endpoint> {
 		let inner = self.0.upgrade()?;
@@ -110,7 +108,6 @@ impl WeakEndpoint {
 }
 
 impl Endpoint {
-	#[cfg(feature = "quic")]
 	pub(crate) fn downgrade(&self) -> WeakEndpoint {
 		WeakEndpoint(Arc::downgrade(&self.inner.0))
 	}
@@ -125,7 +122,6 @@ impl Endpoint {
 
 	/// [`new`](Self::new), forwarding each packet whose QUIC-LB server ID names another server
 	/// and accepting the packets those servers forward here.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend forwards"))]
 	pub(crate) fn forwarding(config: Config, socket: impl Into<Socket>, forward: Forward) -> Result<Self, Error> {
 		Self::start(config, socket.into(), Some(forward))
 	}
@@ -1116,7 +1112,7 @@ struct PollProgress {
 	keep_going: bool,
 }
 
-#[cfg(all(test, any(unix, windows), feature = "_certs"))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
 	use std::net::UdpSocket;
 

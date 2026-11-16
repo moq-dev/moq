@@ -3,7 +3,6 @@
 //! A crashed or partitioned peer sends no close, so the idle timeout is the whole
 //! outage window for subscribes routed through it. The dial here runs a short
 //! timeout; moq-tokio's `defaults_apply_when_unset` pins the 10s default.
-#![cfg(feature = "quic")]
 
 use std::time::Duration;
 
@@ -98,10 +97,7 @@ async fn silent_peer_detected() {
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	connect.tls.insecure = Some(true);
-	#[cfg(feature = "websocket")]
-	{
-		connect.websocket.enabled = Some(false);
-	}
+	connect.websocket.enabled = Some(false);
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://127.0.0.1:{port}/"))];

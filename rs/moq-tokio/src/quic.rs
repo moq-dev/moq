@@ -3,7 +3,7 @@
 //! One [`Config`] (`--quic-*`) carries the per-connection knobs (stream limits,
 //! GSO, timeouts) that each backend applies. They mean the same thing whichever
 //! way a connection was opened, so it is spelled once and shared by
-//! the MoQ `connect` and `listen` helpers (`net` feature) rather than owned by either.
+//! the MoQ `connect` and `listen` helpers rather than owned by either.
 //!
 //! The knobs that only apply when accepting (the QUIC preferred address and the
 //! QUIC-LB connection-ID encoding) live on `listen::Config` instead.
@@ -14,19 +14,13 @@ use std::time::Duration;
 
 use crate::cli::Duration as CliDuration;
 
-#[cfg(feature = "quic")]
 mod backend;
-#[cfg(feature = "quic")]
 pub use backend::Error;
-#[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
-#[cfg(feature = "quic")]
 pub mod demux;
-#[cfg(feature = "driver")]
 pub mod driver;
 
 /// WebTransport over the moq-quic [`driver`], usable without a MoQ session.
-#[cfg(feature = "quic")]
 pub mod web;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
@@ -38,7 +32,6 @@ pub mod web;
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
-	#[allow(dead_code, reason = "only the QUIC backend reads it")]
 	pub(crate) fn len(&self) -> usize {
 		self.0.len()
 	}
@@ -59,7 +52,6 @@ impl std::str::FromStr for ServerId {
 }
 
 /// Resolved QUIC-LB connection-ID encoding.
-#[cfg(feature = "quic")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoadBalancer {
 	/// The routable server identifier encoded into each connection ID.
@@ -71,7 +63,6 @@ pub(crate) struct LoadBalancer {
 }
 
 /// Resolved QUIC-LB forwarding, every setting present.
-#[cfg(feature = "quic")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Forward {
 	/// The forward socket's address.
@@ -85,11 +76,9 @@ pub(crate) struct Forward {
 /// A congestion controller of the application's own, built fresh for each connection.
 ///
 /// Implement [`moq_congestion::Factory`] and install it with [`Config::controller`].
-#[cfg(feature = "driver")]
 #[derive(Clone)]
 pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);
 
-#[cfg(feature = "driver")]
 impl std::fmt::Debug for Controller {
 	/// Opaque: a factory carries no description of its own.
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -138,7 +127,6 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
 /// streams for slow readers (half the window, a stream window each).
 pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
-#[cfg(feature = "_transport")]
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
@@ -255,7 +243,6 @@ pub struct Config {
 	///
 	/// Code-only, since a controller has no text form: no flag or setting reaches it.
 	/// Both the QUIC backend and the relay's io_uring runtime run it.
-	#[cfg(feature = "driver")]
 	#[serde(skip)]
 	#[usage(skip)]
 	pub controller: Option<Controller>,
@@ -560,7 +547,6 @@ impl Config {
 
 	/// Reject knobs this build can't honor, including limits QUIC cannot
 	/// advertise. Called when the endpoint is built.
-	#[cfg(feature = "_transport")]
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.keylog.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
 			return Err(crate::Error::KeylogUnset);
@@ -569,7 +555,6 @@ impl Config {
 	}
 
 	/// Reject limits QUIC cannot advertise, through moq-quic's own checks.
-	#[cfg(feature = "_transport")]
 	fn validate_limits(&self) -> crate::Result<()> {
 		use moq_quic::{ConfigError, LimitsError};
 
@@ -636,7 +621,6 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
-			#[cfg(feature = "driver")]
 			controller: self.controller.clone(),
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
@@ -681,7 +665,6 @@ pub struct Resolved {
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
 	/// The application's own congestion controller, in place of the family.
-	#[cfg(feature = "driver")]
 	pub controller: Option<Controller>,
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
@@ -705,26 +688,22 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend uses it"))]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
 
 	/// The directory to write qlog traces into, if any.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than
 	/// ours, using moq-quic's 30s default (a 9s interval) when neither peer sets one.
-	#[cfg(feature = "_transport")]
 	pub fn keep_alive_interval(&self) -> Duration {
 		moq_quic::transport::keep_alive_interval(self.keep_alive, self.idle_timeout)
 	}
 
 	/// The flow-control limits as moq-quic and qmux spell them.
-	#[cfg(feature = "_transport")]
 	pub fn limits(&self) -> moq_quic::Limits {
 		use std::num::NonZeroU64;
 
@@ -743,15 +722,12 @@ mod tests {
 
 	/// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
 	/// can't go on the wire.
-	#[cfg(feature = "_transport")]
 	const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
 
 	/// The largest value a QUIC varint can carry.
-	#[cfg(feature = "_transport")]
 	const MAX_VARINT: u64 = (1 << 62) - 1;
 
 	/// The largest stream limit QUIC can advertise, 2^60.
-	#[cfg(feature = "_transport")]
 	const MAX_STREAMS: u64 = 1 << 60;
 	/// A minimal parser so we can exercise the `--quic-*` args (and the legacy
 	/// role-prefixed spellings) in isolation.
@@ -783,7 +759,6 @@ mod tests {
 		assert!(quic.keylog.is_none());
 	}
 
-	#[cfg(feature = "_transport")]
 	#[test]
 	fn keep_alive_interval_derives_from_the_idle_timeout() {
 		let interval = |idle: u64, keep_alive: Option<Duration>| {
@@ -915,7 +890,6 @@ mod tests {
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
-	#[cfg(feature = "_transport")]
 	#[test]
 	fn idle_timeout_beyond_the_varint_is_rejected() {
 		let over = Config {
@@ -959,7 +933,6 @@ mod tests {
 
 	/// A zero window credits nothing, so it would wedge the connection rather than
 	/// tighten it. Reject it here, where the message can name the knob.
-	#[cfg(feature = "_transport")]
 	#[test]
 	fn zero_windows_are_rejected() {
 		for (name, config) in [
@@ -992,7 +965,6 @@ mod tests {
 
 	/// Incomplete messages hold connection credit, so a connection window that can't fit
 	/// the largest one could stall it forever, so `[quic]` refuses it.
-	#[cfg(feature = "_transport")]
 	#[test]
 	fn the_receive_window_fits_the_largest_message() {
 		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
@@ -1009,7 +981,6 @@ mod tests {
 
 	/// The receive windows go on the wire as transport parameters, so they have to fit
 	/// a varint. The send window is local bookkeeping and does not.
-	#[cfg(feature = "_transport")]
 	#[test]
 	fn receive_windows_must_fit_a_varint() {
 		let over = Config {
@@ -1041,7 +1012,6 @@ mod tests {
 
 	/// A MAX_STREAMS past 2^60 is a frame encoding error at the peer, and zero lets
 	/// the peer open nothing, so `[quic]` refuses both.
-	#[cfg(feature = "_transport")]
 	#[test]
 	fn stream_limits_must_fit_a_stream_id() {
 		for max_streams in [0, MAX_STREAMS + 1] {

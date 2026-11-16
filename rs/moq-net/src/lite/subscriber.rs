@@ -922,9 +922,6 @@ impl Subscriber {
 			| lite::AnnounceBroadcast::RouteEnd { .. }
 			| lite::AnnounceBroadcast::Dead(_)
 			| lite::AnnounceBroadcast::Floor { .. }
-			| lite::AnnounceBroadcast::WarmStart { .. }
-			| lite::AnnounceBroadcast::WarmUpdate { .. }
-			| lite::AnnounceBroadcast::WarmEnd { .. }
 			| lite::AnnounceBroadcast::Refused { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
@@ -2050,17 +2047,10 @@ impl FrameIngest {
 
 	/// Where the frame `header` opens goes: a new frame of the group, or on a continuation,
 	/// one the group holds already, skipped, or the one a YIELDED reset cut short, completed.
-	fn dispatch(&mut self, group: &mut crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
+	fn dispatch(&mut self, group: &crate::recv::Group, header: frame::Header) -> Result<IngestPhase, Error> {
 		let index = self.index;
 		// The peer's Frame Start can number a frame past any count.
 		self.index = index.checked_add(1).ok_or(Error::ProtocolViolation)?;
-		// A response from a byte: the header states the frame's full size, and only the rest
-		// of it follows.
-		if group.lead_at(index).is_some() {
-			return Ok(IngestPhase::Payload {
-				frame: group.create_lead(header)?,
-			});
-		}
 		let held = group.frame_count() as u64;
 		if index >= held {
 			return Ok(IngestPhase::Admit { header });
@@ -2111,12 +2101,9 @@ impl FrameIngest {
 				let lite::ietf::Decoded { properties, gap } =
 					lite::ietf::decode_properties(&block, self.framing, true)?;
 				group.mark_gap(id, gap)?;
-				// The rest of a frame the copy starts partway into is numbered below its count.
 				// A plain group's frames are numbered by index, so a continuation re-sending
-				// frames its group holds finds them below its count too.
-				let next = id == group.frame_count() as u64
-					|| group.lead_at(id).is_some()
-					|| (!records.relayed && id == self.index);
+				// frames its group holds finds them below its count.
+				let next = id == group.frame_count() as u64 || (!records.relayed && id == self.index);
 				let plain = next && properties.is_empty();
 				if !plain && !records.relayed {
 					return Err(Error::ProtocolViolation);
@@ -2755,6 +2742,15 @@ impl AnnouncePrefix {
 		}
 	}
 
+	/// Let go of this request, all but the claims its route layer serves, which stay in
+	/// the origin until the caller drops them.
+	fn retire(mut self: Box<Self>) -> Option<routed::Retired> {
+		match &mut self.state {
+			PrefixState::Run(step) => step.run.routed.as_mut().map(routed::Routed::retire),
+			_ => None,
+		}
+	}
+
 	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
 	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -2924,17 +2920,23 @@ impl AnnouncePrefix {
 				match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(waiter) {
 					Poll::Ready(Ok(Some(announce))) => {
 						if matches!(announce, lite::AnnounceBroadcast::Synced) {
+							// This request now carries what the one it replaces did. The old
+							// stream closes first, so the node hands this one its claims, but
+							// what it served leaves the origin only once this one serves it:
+							// a claim this request files under another route prefix or
+							// identity, such as a region widened to the root, would otherwise
+							// be let go in between.
+							let retired = self.replacing.take().and_then(|old| old.retire());
 							// What the initial set put in the node is served before the
 							// snapshot lets readers see the origin synced.
 							if let Some(routed) = &mut run.routed {
 								routed.outputs(&self.subscriber);
 							}
+							drop(retired);
 							if std::mem::replace(&mut run.synced, true) {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							self.snapshot = None;
-							// This request now carries what the one it replaces did.
-							self.replacing = None;
 							continue;
 						}
 						if run.initial > 0 {
@@ -10845,6 +10847,65 @@ mod tests {
 		}
 	}
 
+	/// Every well-formed message naming a Route ID closes the session when the neighbour
+	/// never assigned it (5, past its two routes) or already retired it (0, after its
+	/// ROUTE_END), as the draft requires: a route's state is the neighbour's to keep in
+	/// step, so a stray ID means the two ends disagree on which routes live.
+	#[kio::test]
+	async fn an_unassigned_or_retired_route_id_closes_the_session() {
+		type Encode = Box<dyn Fn(&mut crate::coding::Encoder<'_>)>;
+		let encode = |message: lite::AnnounceBroadcast| -> Encode {
+			Box::new(move |w| message.encode(w, Version::Lite07).unwrap())
+		};
+		let offer = crate::route::path::Offer {
+			path: [crate::route::path::Hop { node: 7, session: 0 }].into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 0,
+			down_only: false,
+		};
+		let naming = |id: u64| -> [(&str, Encode); 6] {
+			[
+				(
+					"ROUTE_UPDATE",
+					Box::new(raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))),
+				),
+				("ROUTE_HOLD", encode(lite::AnnounceBroadcast::RouteHold { id })),
+				("ROUTE_END", encode(lite::AnnounceBroadcast::RouteEnd { id })),
+				("ANNOUNCE_FLOOR", Box::new(floor(id, Some(1)))),
+				("ANNOUNCE_START", Box::new(claim_on(id, "x"))),
+				(
+					"DEAD",
+					encode(lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
+						hop: crate::route::path::Hop { node: 7, session: 0 },
+						far: 7,
+						gone: false,
+						more: false,
+						moved: vec![(id, Ok(offer.clone()))],
+					})),
+				),
+			]
+		};
+		let end = encode(lite::AnnounceBroadcast::RouteEnd { id: 0 });
+		for (id, before, what) in [(5, None, "unassigned"), (0, Some(&end), "retired")] {
+			for (message, naming) in naming(id) {
+				let mut script = two_routes();
+				let messages: Vec<&dyn Fn(&mut crate::coding::Encoder<'_>)> =
+					before.into_iter().map(|end| &**end).chain([&*naming]).collect();
+				script.extend(announce_script(Version::Lite07, &messages));
+				let (mut prefix, _consumer) = root_prefix(
+					Version::Lite07,
+					crate::lite::test_transport::ScriptedSession::new(script),
+				);
+				let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+				assert!(
+					matches!(err, Error::ProtocolViolation),
+					"{message} of a {what} route: {err}"
+				);
+			}
+		}
+	}
+
 	#[kio::test]
 	async fn a_duplicate_synced_is_refused() {
 		const VERSION: Version = Version::Lite07;
@@ -14327,7 +14388,6 @@ enum FetchRunState {
 		request: Option<track::GroupFill>,
 		stream: Stream<Transport, Version>,
 		frame_start: u64,
-		byte_start: u64,
 		frame_end: Option<u64>,
 	},
 	/// Flushed; waiting for the publisher to answer before accepting.
@@ -14335,7 +14395,6 @@ enum FetchRunState {
 		request: Option<track::GroupFill>,
 		stream: Stream<Transport, Version>,
 		frame_start: u64,
-		byte_start: u64,
 		frame_end: Option<u64>,
 	},
 	Ingest {
@@ -14505,15 +14564,6 @@ impl kio::Task for FetchServeRun {
 						false => 0,
 					};
 
-					// Only the rest of a frame a reader got partway through, which a compressed
-					// frame cannot start at: it inflates only from its first byte. Nor can a
-					// moq-transport track's, whose object records name whole objects.
-					let whole_objects = matches!(self.info.peek(), Some(Ok(info)) if info.ietf().is_some());
-					let byte_start = match self.serve.subscriber.version.has_byte_start() {
-						true if plain && !whole_objects && frame_start == request.frame_start() => request.byte_start(),
-						_ => 0,
-					};
-
 					let frame_end = if self.serve.subscriber.version.has_frame_bounds() && plain {
 						request.frame_end()
 					} else {
@@ -14533,7 +14583,6 @@ impl kio::Task for FetchServeRun {
 							.filter(|_| self.serve.subscriber.version.has_fetch_max_delay()),
 						group: self.group,
 						start_frame: frame_start,
-						start_byte: byte_start,
 						// A bounded plain copy keeps this provenance in the cache; older wires
 						// and compressed groups widen to a complete representation.
 						end_frame: frame_end.and_then(|end| end.checked_sub(1)),
@@ -14553,7 +14602,6 @@ impl kio::Task for FetchServeRun {
 						request: Some(request),
 						stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					};
 				}
@@ -14572,7 +14620,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						mut stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
@@ -14585,7 +14632,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					};
 				}
@@ -14622,7 +14668,6 @@ impl kio::Task for FetchServeRun {
 						request,
 						mut stream,
 						frame_start,
-						byte_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
@@ -14654,7 +14699,6 @@ impl kio::Task for FetchServeRun {
 						group_info,
 						group::Bounds {
 							start: frame_start,
-							byte: byte_start,
 							end: frame_end,
 						},
 					) {

@@ -5,8 +5,6 @@
 //! The predecessor "crashes" by dropping its runtime, which stops every task before
 //! it can send a CONNECTION_CLOSE, and the successor binds the same port.
 
-#![cfg(feature = "quic")]
-
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use moq_tokio::quic::driver;

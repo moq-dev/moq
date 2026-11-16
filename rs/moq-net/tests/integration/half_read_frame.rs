@@ -1,13 +1,12 @@
 #![cfg(feature = "async")]
 
 //! A frame read partway when its route dies continues on the next route from the byte it
-//! reached: over lite-07 the subscriber asks for only the rest of the frame, so the new route
-//! sends none of the bytes already read.
+//! reached: the subscriber FETCHes the whole frame again and skips the bytes already read.
 //!
 //! The publisher `P` is pulled by relays `A` and `B`. The subscribing relay `E` reads a large
 //! frame of group 0 halfway through `A`, then a cheaper route through `B` wins and `A`'s
-//! session to `E` dies. `B`'s subscription starts at group 1, so `E` FETCHes the rest of the
-//! frame from `B`.
+//! session to `E` dies. `B`'s subscription starts at group 1, so `E` FETCHes the frame from
+//! `B`.
 
 use crate::route_change::{link, priced_link, produce_origin, settle, timed};
 use crate::support::harness::{MockConnectOptions, connect_mock};
@@ -35,7 +34,7 @@ fn sent(registry: &stats::Registry) -> u64 {
 }
 
 #[kio::test]
-async fn a_half_read_frame_continues_from_its_byte() {
+async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let publisher = produce_origin(1);
 	let relay_a = produce_origin(2);
@@ -113,12 +112,12 @@ async fn a_half_read_frame_continues_from_its_byte() {
 	assert!(got == payload, "the frame continues at its byte");
 
 	// A publisher bills what the transport acknowledged, which trails what `E` read.
+	// `B` sends the whole frame again, plus group 1's.
 	settle().await;
-	let rest = (SIZE - HALF) as u64;
 	let sent = sent(&registry);
-	assert!(sent >= rest, "{sent} bytes cannot carry the {rest} left");
+	let whole = SIZE as u64;
 	assert!(
-		sent < rest + 1024,
-		"{sent} bytes resent what `E` read: only {rest} were left"
+		(whole..whole + 1024).contains(&sent),
+		"{sent} bytes for a {whole}-byte frame"
 	);
 }

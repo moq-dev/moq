@@ -108,7 +108,6 @@ impl Stream {
 	}
 
 	/// Poll a write without retaining or copying the caller's buffer.
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
 		self.half.poll_write(waiter, buf)
 	}
@@ -165,7 +164,6 @@ impl Stream {
 	}
 
 	/// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
-	#[cfg(feature = "quic")]
 	pub(crate) fn set_drop_reset(&mut self, offset: Option<Offset>, code: VarInt) {
 		if let Some(offset) = &offset {
 			self.half.own(offset);
@@ -190,7 +188,6 @@ impl Stream {
 	}
 
 	/// How many leading bytes the peer acknowledged
-	#[cfg(feature = "quic")]
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.half.acked_len()
 	}
@@ -202,7 +199,6 @@ impl Stream {
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		self.half.poll_acked(waiter, offset)
 	}
@@ -260,13 +256,11 @@ impl Finished {
 	}
 
 	/// The offset just past the data written. See [`Stream::offset()`].
-	#[cfg(feature = "quic")]
 	pub(crate) fn offset(&self) -> Offset {
 		self.half.offset()
 	}
 
 	/// How many leading bytes the peer acknowledged. See [`Stream::acked_len()`].
-	#[cfg(feature = "quic")]
 	pub(crate) fn acked_len(&self) -> u64 {
 		self.half.acked_len()
 	}
@@ -275,7 +269,6 @@ impl Finished {
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		self.half.poll_acked(waiter, offset)
 	}
@@ -400,14 +393,12 @@ impl Half {
 	}
 
 	/// How many leading bytes the peer acknowledged, each counted once.
-	#[cfg(feature = "quic")]
 	fn acked_len(&self) -> u64 {
 		let mut conn = self.stream.conn.state.lock();
 		conn.inner.send_stream(self.stream.id).acked_len()
 	}
 
 	/// Wait for the peer to acknowledge every byte before `offset`.
-	#[cfg(feature = "quic")]
 	fn poll_acked(&self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		self.own(&offset);
 		let mut conn = self.stream.conn.state.lock();

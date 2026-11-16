@@ -50,17 +50,12 @@ impl Recorder {
 
 	/// Present the newest due frame, just as the window does on a redraw.
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<moq_net::Timestamp> {
-		self.present_frame(media).map(|frame| frame.timestamp)
-	}
-
-	/// [`present`](Self::present), returning the picture itself.
-	pub fn present_frame(&self, media: &super::media::Media<Self>) -> Option<moq_video::Frame> {
 		let mut video = media.video.lock().unwrap();
 		let presentation = media.presentation.consume();
 		let mut shown = None;
 		if let Some(index) = presentation.present(video.iter().map(|frame| frame.timestamp), kio::clock::now()) {
 			for _ in 0..=index {
-				shown = video.pop_front();
+				shown = video.pop_front().map(|frame| frame.timestamp);
 			}
 		}
 		if shown.is_some() {

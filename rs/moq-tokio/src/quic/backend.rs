@@ -1333,7 +1333,6 @@ mod tests {
 				"client controller cannot probe"
 			);
 			// BBRv3 can probe, so moq-net gets a target to write.
-			#[cfg(feature = "net")]
 			assert!(
 				session.connection().probe().is_some(),
 				"BBRv3 connection has no probe target"

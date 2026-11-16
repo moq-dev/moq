@@ -1,5 +1,4 @@
 //! Transport wire counters across the shared-runtime and io_uring listener boundary.
-#![cfg(feature = "_quic")]
 
 use moq_net::stats::{Presence, Registry, Tier};
 use moq_relay::{Config, Relay};
@@ -139,7 +138,7 @@ async fn native_sessions_supply_direct_wire_counters() {
 	wire_sources(false).await;
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_sessions_supply_direct_wire_counters() {
 	match moq_uring::Worker::new(Default::default()) {

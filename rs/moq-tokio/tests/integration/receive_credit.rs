@@ -10,8 +10,6 @@
 //! Some runs go through a bufferbloated path instead of loopback, so a sender held back by
 //! a slow link and a deep queue is shown not to look like a stuck window.
 
-#![cfg(feature = "quic")]
-
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;

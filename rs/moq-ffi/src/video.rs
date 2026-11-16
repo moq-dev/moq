@@ -1409,7 +1409,7 @@ mod decode_tests {
 		}
 	}
 
-	/// The max-delay decoder opens only for a catalog warmup, so it must survive the trip through
+	/// The decoder joins earlier and hides the warmup it reads, so it must survive the trip through
 	/// the FFI record.
 	#[test]
 	fn video_config_keeps_the_warmup() {

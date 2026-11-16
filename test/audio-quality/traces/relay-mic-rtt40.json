@@ -1,9 +1,10 @@
 {
-	"version": 3,
-	"source": "https://cdn.moq.dev/anon aq-kixtop-mic-1793728306.hang, <moq-publish> in Chrome 156 on a MacBook Air (macOS 26.6.2) capturing its built-in microphone, played by the harness page in a second Chrome 156 profile on the same laptop through a userspace UDP relay adding 20 ms each way, recorded 2026-11-03",
+	"version": 4,
+	"source": "https://cdn.moq.dev/anon aq-kixtop-mic-1793728306.hang, <moq-publish> in Chrome 156 on a MacBook Air (macOS 26.6.2) capturing its built-in microphone, played by the harness page in a second Chrome 156 profile on the same laptop through a userspace UDP relay adding 20 ms each way, recorded 2026-11-03. Version 4 adds largest, the publisher's largest group as the subscription began. This recording predates it, so it is derived (2026-11-15): the newest group whose first frame's media timestamp plus the trace's lowest lag (the smallest at minus timestamp) falls at or before the first arrival, the live edge as the first frame arrived.",
 	"description": "A real microphone through the public relay with 40 ms of added round trip: the steady-state re-stalls the estimator's 0.95 quantile leaves without time stretch, kept as the baseline time stretch must bring to zero.",
 	"transport": "webtransport",
 	"rtt": 47,
+	"largest": 8994,
 	"config": {
 		"codec": "opus",
 		"container": {

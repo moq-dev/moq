@@ -474,7 +474,6 @@ impl StreamsState {
 	/// `None` if `id` cannot receive data now, such as a closed stream or our own
 	/// unidirectional one. On an ordered transport, data at any other offset is a protocol
 	/// violation.
-	#[cfg(feature = "mux")]
 	pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
 		// A peer stream not opened yet starts at offset 0 too
 		if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {

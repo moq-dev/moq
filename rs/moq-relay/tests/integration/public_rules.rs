@@ -7,8 +7,6 @@
 //! the dialed path, `anon/**` at `/anon` meant `anon/anon/**`, and at `/rooms/123`
 //! it let an anonymous client into `rooms/123/anon/**`.
 
-#![cfg(feature = "websocket")]
-
 use std::time::Duration;
 
 use moq_relay::{auth, cluster, web};

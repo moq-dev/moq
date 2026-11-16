@@ -92,17 +92,6 @@ pub(super) fn decode_forwarded(r: &mut Decoder<'_>) -> Result<Option<(Instance, 
 	Ok(instance.map(|instance| (instance, epoch)))
 }
 
-/// Encode the instance of a copy a warm route names, which is never none.
-pub(super) fn encode_copy(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
-	encode(w, instance)
-}
-
-/// Decode the instance of a copy a warm route names, `None` when it is well framed but
-/// not one this node can use; see [`encode_copy`].
-pub(super) fn decode_copy(r: &mut Decoder<'_>) -> Result<Option<Instance>, DecodeError> {
-	Ok(decode(r.bytes()?, r.bool()?).ok())
-}
-
 fn encode(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
 	w.bytes(instance.as_str().as_bytes())?;
 	w.bool(instance.is_minted());

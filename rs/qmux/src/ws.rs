@@ -174,7 +174,6 @@ pub struct Client {
 	require_protocol: bool,
 	keep_alive: Option<KeepAlive>,
 	session: Config,
-	#[cfg(feature = "wss")]
 	tls: Option<std::sync::Arc<rustls::ClientConfig>>,
 }
 
@@ -230,7 +229,6 @@ impl Client {
 	}
 
 	/// Dial `wss://` URLs with this TLS policy instead of the platform's root store.
-	#[cfg(feature = "wss")]
 	pub fn with_tls(mut self, tls: std::sync::Arc<rustls::ClientConfig>) -> Self {
 		self.tls = Some(tls);
 		self
@@ -267,7 +265,6 @@ impl Client {
 		let ws_config = capped(&self.session);
 
 		// `true` disables Nagle: records are already batched, see `Server::accept`.
-		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
 			let connector = match (
 				&self.tls,
@@ -302,11 +299,6 @@ impl Client {
 				.await
 				.map_err(Error::websocket)?
 		};
-
-		#[cfg(not(feature = "wss"))]
-		let (ws_stream, response) = tokio_tungstenite::connect_async_with_config(request, Some(ws_config), true)
-			.await
-			.map_err(Error::websocket)?;
 
 		let negotiated = response
 			.headers()

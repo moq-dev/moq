@@ -103,7 +103,6 @@ pub enum Error {
 	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// The WebSocket failed.
-	#[cfg(feature = "ws")]
 	#[error(transparent)]
 	WebSocket(WebSocketError),
 
@@ -169,25 +168,21 @@ impl From<std::io::Error> for Error {
 }
 
 /// A WebSocket failure, opaque so the WebSocket implementation is not part of this API.
-#[cfg(feature = "ws")]
 #[derive(Clone, Debug)]
 pub struct WebSocketError(Arc<tokio_tungstenite::tungstenite::Error>);
 
-#[cfg(feature = "ws")]
 impl std::fmt::Display for WebSocketError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		self.0.fmt(f)
 	}
 }
 
-#[cfg(feature = "ws")]
 impl std::error::Error for WebSocketError {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		self.0.source()
 	}
 }
 
-#[cfg(feature = "ws")]
 impl Error {
 	/// Classify a WebSocket failure.
 	pub(crate) fn websocket(err: tokio_tungstenite::tungstenite::Error) -> Self {
@@ -226,7 +221,7 @@ impl moq_net::transport::Error for Error {
 	}
 }
 
-#[cfg(all(test, feature = "ws"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use tokio_tungstenite::tungstenite::{self, http};
