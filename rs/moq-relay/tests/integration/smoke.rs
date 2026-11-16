@@ -423,7 +423,10 @@ async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
 		let mut announcements = sub_consumer.routes();
 		let (_sub_client, sub_connection) = kio::clock::timeout(
 			TIMEOUT,
-			connect_once(client_version(Some(subscriber)).with_subscriber(sub_origin), url.clone()),
+			connect_once(
+				client_version(Some(subscriber)).with_subscriber(sub_origin),
+				url.clone(),
+			),
 		)
 		.await
 		.expect("subscriber connect timeout")
@@ -436,8 +439,16 @@ async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
 		assert!(active, "{publisher} -> {subscriber}: expected an announcement");
 		assert_eq!(update.prefix, path, "{publisher} -> {subscriber}");
 
-		let broadcast = sub_consumer.request(&path, None).await.expect("announced broadcast resolves");
-		let mut track_sub = broadcast.track("video").unwrap().subscribe(None).await.expect("subscribe");
+		let broadcast = sub_consumer
+			.request(&path, None)
+			.await
+			.expect("announced broadcast resolves");
+		let mut track_sub = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
 		let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timeout")

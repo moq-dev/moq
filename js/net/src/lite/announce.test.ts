@@ -625,9 +625,7 @@ test("AnnounceHistory keeps whole segments across an escaped slash", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("a\\/b/c") });
 	// `a\/b` is one segment, so keeping one keeps all of it.
-	expect(history.start({ suffix: Path.from("d"), pathBase: { distance: 1n, keep: 1 } })).toBe(
-		Path.from("a\\/b/d"),
-	);
+	expect(history.start({ suffix: Path.from("d"), pathBase: { distance: 1n, keep: 1 } })).toBe(Path.from("a\\/b/d"));
 	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 2n, keep: 1 } })).toBe(Path.from("a\\/b"));
 	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 3n, keep: 3 } })).toThrow(
 		ProtocolViolation,

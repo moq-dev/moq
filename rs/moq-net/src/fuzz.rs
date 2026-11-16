@@ -1983,14 +1983,19 @@ pub fn path(data: &[u8]) -> bool {
 	// escapes back to the segment.
 	let segments = escaped_segments(target.as_str());
 	assert_eq!(target.parts().collect::<Vec<_>>(), segments, "{target:?} split wrongly");
-	assert!(target.parts().rev().eq(segments.iter().rev()), "{target:?} split wrongly from the back");
+	assert!(
+		target.parts().rev().eq(segments.iter().rev()),
+		"{target:?} split wrongly from the back"
+	);
 	for segment in &segments {
 		let content = crate::path::unescape(segment);
 		assert_eq!(&content.replace('\\', r"\\").replace('/', r"\/"), segment);
 	}
 	assert_eq!(
 		target.is_hidden(),
-		segments.iter().any(|segment| crate::path::unescape(segment).starts_with('.')),
+		segments
+			.iter()
+			.any(|segment| crate::path::unescape(segment).starts_with('.')),
 		"{target:?} hid wrongly"
 	);
 

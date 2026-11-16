@@ -83,10 +83,12 @@ impl Segment {
 			"**" => Ok(Self::Globstar),
 			_ => match text.split_once('*') {
 				None if is_segment(text) => Ok(Self::Literal(text.to_string())),
-				Some((prefix, suffix)) if !suffix.contains('*') && is_segment(prefix) && is_segment(suffix) => Ok(Self::Partial {
-					prefix: prefix.to_string(),
-					suffix: suffix.to_string(),
-				}),
+				Some((prefix, suffix)) if !suffix.contains('*') && is_segment(prefix) && is_segment(suffix) => {
+					Ok(Self::Partial {
+						prefix: prefix.to_string(),
+						suffix: suffix.to_string(),
+					})
+				}
 				// More than one star in a segment is reserved, and so is a malformed escape.
 				_ => Err(InvalidPattern::InvalidSegment(text.to_string())),
 			},
@@ -1070,7 +1072,10 @@ mod tests {
 					let want = a.matches(&path) && b.matches(&path);
 					assert_eq!(both.matches(&path), want, "{a} with {b} on {field:?}");
 					if a.contains(&b) {
-						assert!(!b.matches(&path) || a.matches(&path), "{a} contains {b} but not {field:?}");
+						assert!(
+							!b.matches(&path) || a.matches(&path),
+							"{a} contains {b} but not {field:?}"
+						);
 					}
 				}
 			}

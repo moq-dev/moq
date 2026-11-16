@@ -319,7 +319,10 @@ mod tests {
 			let route = Route::parse(url).unwrap();
 			assert_eq!(route.broadcast, broadcast, "{url}");
 			let path = moq_net::Path::new(&route.broadcast).unwrap();
-			assert!(!path.has_prefix(&moq_net::Path::from_static("project/private")), "{url}");
+			assert!(
+				!path.has_prefix(&moq_net::Path::from_static("project/private")),
+				"{url}"
+			);
 		}
 	}
 

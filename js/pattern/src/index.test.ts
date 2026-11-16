@@ -1,15 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import * as Segments from "./index.ts";
 import {
 	compareSpecificity,
-	escape,
 	IntersectionError,
 	InvalidPattern,
 	Pattern,
 	Patterns,
 	parts,
 	type Segment,
-	unescape,
 } from "./index.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
@@ -595,11 +594,11 @@ describe("parts", () => {
 
 	test("escape and unescape are inverses", () => {
 		for (const content of ["", "plain", "/", "\\", "a/\\b", "\\\\//", "café/"]) {
-			const segment = escape(content);
+			const segment = Segments.escape(content);
 			expect(parts(segment)).toHaveLength(content === "" ? 0 : 1);
-			expect(unescape(segment)).toBe(content);
+			expect(Segments.unescape(segment)).toBe(content);
 		}
-		expect(escape("a/b\\c")).toBe("a\\/b\\\\c");
+		expect(Segments.escape("a/b\\c")).toBe("a\\/b\\\\c");
 	});
 });
 

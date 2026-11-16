@@ -99,11 +99,13 @@ export function parts(path: string, limit?: number): string[] {
  * Expects a segment as {@link parts} yields it from a valid path, where every `\` escapes
  * the character after it.
  */
+// biome-ignore lint/suspicious/noShadowRestrictedNames: the name mirrors Rust; the deprecated global is unused.
 export function unescape(segment: string): string {
 	return segment.includes("\\") ? segment.replace(/\\(.)/gs, "$1") : segment;
 }
 
 /** The segment holding `content`: each `\` or `/` escaped by a `\`. The inverse of {@link unescape}. */
+// biome-ignore lint/suspicious/noShadowRestrictedNames: the name mirrors Rust; the deprecated global is unused.
 export function escape(content: string): string {
 	return /[\\/]/.test(content) ? content.replace(/[\\/]/g, "\\$&") : content;
 }

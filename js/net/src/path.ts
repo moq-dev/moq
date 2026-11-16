@@ -118,7 +118,6 @@ export function head(path: Valid, n: number): Valid | undefined {
 	return n <= segments.length ? (segments.slice(0, n).join("/") as Valid) : undefined;
 }
 
-
 /**
  * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and a 4096 byte limit.
  *

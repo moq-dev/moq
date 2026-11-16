@@ -297,7 +297,10 @@ mod tests {
 			let decoded = decode_ns(&tuple);
 			assert_eq!(decoded.parts().count(), fields.len(), "{fields:?}");
 			assert_eq!(
-				decoded.parts().map(|part| crate::path::unescape(part)).collect::<Vec<_>>(),
+				decoded
+					.parts()
+					.map(|part| crate::path::unescape(part))
+					.collect::<Vec<_>>(),
 				fields,
 			);
 			assert_eq!(encode_path(&decoded), tuple, "{fields:?}");

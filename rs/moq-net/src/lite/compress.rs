@@ -243,7 +243,9 @@ impl AnnounceEncoder {
 			return literal();
 		};
 		// Where the segments after `keep` start, sharing the suffix's buffer.
-		let end = suffix.head_len(keep).expect("the longest shared head is within the suffix");
+		let end = suffix
+			.head_len(keep)
+			.expect("the longest shared head is within the suffix");
 		let rest = suffix.slice_from((end + 1).min(suffix.len()));
 
 		let base = next - id;

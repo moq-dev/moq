@@ -76,11 +76,31 @@ mod tests {
 
 	#[test]
 	fn test_validate() {
-		for root in ["", "foo", "foo/bar", r"a\\b", r"a\/b", ".hidden/x", r"a\/", r"\/", r"a\//b"] {
+		for root in [
+			"",
+			"foo",
+			"foo/bar",
+			r"a\\b",
+			r"a\/b",
+			".hidden/x",
+			r"a\/",
+			r"\/",
+			r"a\//b",
+		] {
 			assert!(validate(root).is_ok(), "{root:?}");
 		}
 		let long = "a".repeat(MAX_BYTES + 1);
-		for root in ["/", "/foo", "foo/", "foo//bar", r"a\b", r"a\", r"a\///b", r"\//", long.as_str()] {
+		for root in [
+			"/",
+			"/foo",
+			"foo/",
+			"foo//bar",
+			r"a\b",
+			r"a\",
+			r"a\///b",
+			r"\//",
+			long.as_str(),
+		] {
 			assert!(matches!(validate(root), Err(crate::Error::InvalidRoot(_))), "{root:?}");
 		}
 		assert!(validate(&long[1..]).is_ok());
