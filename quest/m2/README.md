@@ -59,7 +59,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   `mpegts`, one strict rule);
   [the archive as version 2](/quest/m2/archive-v2.md);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
-  [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),
+  [TS outcomes](/quest/m2/ts-typed-outcomes.md)
   and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),

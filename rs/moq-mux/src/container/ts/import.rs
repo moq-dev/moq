@@ -3492,7 +3492,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				let published = video::avc(split, import, assembly, true)?;
 				*split = Default::default();
 				assembly.finish();
-				import.end()?;
+				import.finish_in_place()?;
 				return Ok(published);
 			}
 			Stream::H265 {
@@ -3503,7 +3503,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				let published = video::hevc(split, import, assembly, true)?;
 				*split = Default::default();
 				assembly.finish();
-				import.end()?;
+				import.finish_in_place()?;
 				return Ok(published);
 			}
 			Stream::Opus(stream) => stream.finish()?,
@@ -4179,7 +4179,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.reserved.take();
 		}
 		if let Some(import) = &mut self.import {
-			import.end()?;
+			import.finish_in_place()?;
 		}
 		Ok(drained)
 	}
@@ -4244,7 +4244,7 @@ impl OpusStream {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		Ok(self.import.end()?)
+		Ok(self.import.finish_in_place()?)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -4788,7 +4788,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			self.reserved.take();
 		}
 		if let Some(import) = &mut self.import {
-			import.end()?;
+			import.finish_in_place()?;
 		}
 		Ok(drained)
 	}

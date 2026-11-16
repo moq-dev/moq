@@ -168,7 +168,7 @@ impl Import {
 	}
 
 	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
-	pub(crate) fn end(&mut self) -> crate::Result<()> {
+	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
 		self.track.end_with(None)
 	}
 

@@ -75,4 +75,3 @@ change wording, exit codes do not.
 ## Related
 
 - [A multi-program TS import survives a source switch](/quest/m5/ts-multi-program-restart.md) - deferred; would add a restart value to `Programs`
-- [Finishing an importer or the video producer returns a Finished handle](/quest/m2/finish-sweep.md) - the other change to importer signatures
