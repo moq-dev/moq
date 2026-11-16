@@ -1941,7 +1941,7 @@ The largest position the publisher knows of for the track when it answers: the l
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
 
 **Largest Ended**:
-Whether the largest group has ended: 0x1 when it finished, closed, or was aborted, so no frame follows `Largest Frame`, and 0x0 when it may still grow.
+Whether the largest group has ended: 0x1 when it finished or closed, so no frame follows `Largest Frame`, and 0x0 otherwise, an aborted group included.
 Any other value is a PROTOCOL_VIOLATION.
 A subscriber joining a Track whose newest group ended knows at once that the group is not the live one, without waiting for its stream to end.
 
