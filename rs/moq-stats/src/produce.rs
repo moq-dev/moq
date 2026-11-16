@@ -1024,19 +1024,23 @@ impl BucketTrack {
 }
 
 /// Each prefix of `path` from the root down to `path` itself, paired with the
-/// next segment below it (`None` at `path`).
+/// next segment below it (`None` at `path`). An escaped `/` stays in its segment.
 fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
-	let mut at = Some(0);
+	let mut parts = moq_net::path::parts(path);
+	let mut end = Some(0);
 	std::iter::from_fn(move || {
-		let end = at?;
-		if end == path.len() {
-			at = None;
+		let prefix = &path[..end?];
+		let Some(segment) = parts.next() else {
+			end = None;
 			return Some((path, None));
-		}
-		let start = if end == 0 { 0 } else { end + 1 };
-		let next = path[start..].find('/').map_or(path.len(), |i| start + i);
-		at = Some(next);
-		Some((&path[..end], Some(&path[start..next])))
+		};
+		// Segments are contiguous, one `/` apart.
+		end = Some(if prefix.is_empty() {
+			segment.len()
+		} else {
+			prefix.len() + 1 + segment.len()
+		});
+		Some((prefix, Some(segment)))
 	})
 }
 
@@ -2623,6 +2627,11 @@ mod tests {
 				("a/bc", Some("d")),
 				("a/bc/d", None)
 			]
+		);
+		// An escaped `/` is content of its segment, never a level of its own.
+		assert_eq!(
+			walk(r"a\/b/c\\"),
+			[("", Some(r"a\/b")), (r"a\/b", Some(r"c\\")), (r"a\/b/c\\", None)]
 		);
 	}
 
