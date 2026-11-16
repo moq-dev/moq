@@ -5211,8 +5211,10 @@ impl Producer {
 			_stats_sub: stats::Subscription::default(),
 			largest: Reported::default(),
 			parks: false,
-			meta_read: Default::default(),
+			meta_read: RangeSet::new(),
+			meta_swept: 0,
 			was_meta: false,
+			repaid: VecDeque::new(),
 		}
 	}
 
@@ -6823,8 +6825,10 @@ impl Subscribing {
 			_stats_sub: self.stats.subscribe(),
 			largest: Reported::default(),
 			parks: false,
-			meta_read: Default::default(),
+			meta_read: RangeSet::new(),
+			meta_swept: 0,
 			was_meta: false,
+			repaid: VecDeque::new(),
 		}))
 	}
 
@@ -7203,13 +7207,32 @@ pub struct Subscriber {
 	/// Whether a read past a bounded window's end parks rather than ending: a wire
 	/// publisher's, whose peer would read the end of its stream as the track's.
 	parks: bool,
-	/// The groups handed out as metadata copies, handed out again once the reader asks for the
-	/// payload and their payload copy arrives. Nothing below the delivered floor, which the
-	/// reader no longer expects.
-	meta_read: super::delivered::Delivered,
-	/// Whether the reader asked for metadata when it last read, so a change through any handle
-	/// is seen on the next read.
+	/// The groups handed out as metadata, handed out again with their payload once the reader
+	/// asks for it. Bounded by the track's cache: a group no copy of which is cached is let go
+	/// once the runs double.
+	meta_read: RangeSet<u64>,
+	/// How many runs `meta_read` held after the groups the cache let go were last swept.
+	meta_swept: usize,
+	/// Whether the reader asked for metadata when it last read or updated, so a change through
+	/// any handle is seen on the next read.
 	was_meta: bool,
+	/// The payload copies a promotion handed out again, read ahead of the walk: its cursor may
+	/// be past them.
+	repaid: VecDeque<group::Consumer>,
+}
+
+/// What a reader that asks for the payload again hands out once more; see
+/// [`Subscriber::update_from`].
+pub(crate) struct Promoted {
+	/// The payload copies the track caches, already counted as handed out.
+	pub groups: Vec<group::Consumer>,
+	/// Every group handed out as metadata at or past where the payload resumes, held or not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "a wire publisher reads it"))]
+	pub runs: RangeSet<u64>,
+	/// The part of `runs` the track caches no copy of: no payload will be handed out, so each
+	/// stays handed out.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "a wire publisher reads it"))]
+	pub gone: RangeSet<u64>,
 }
 
 /// What a [`Subscriber`]'s `largest` stream last reported.
@@ -9920,6 +9943,12 @@ impl Subscriber {
 			return Poll::Ready(Err(Error::Lagged));
 		}
 		self.settle_meta();
+		// A payload copy a promotion owes comes first: the walk may already be past it.
+		if let Some(index) = self.repaid.iter().position(|group| admit.contains(&group.start))
+			&& let Some(group) = self.repaid.remove(index)
+		{
+			return Poll::Ready(Ok(Some(group.with_meter(self.stats.meter()))));
+		}
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
 		let walk = idle::Walk::new(ordered);
 		match &self.inner {
@@ -9935,7 +9964,13 @@ impl Subscriber {
 		}
 		match self.poll_peek_group(ordered, waiter) {
 			Poll::Ready(Ok(Some(reserved))) if admit.contains(&reserved.key()) => {
-				Poll::Ready(self.take(reserved).map(Some))
+				let group = self.take(reserved);
+				if let Ok(group) = &group
+					&& group.is_meta()
+				{
+					self.note_meta(group.start);
+				}
+				Poll::Ready(group.map(Some))
 			}
 			res => {
 				// What the peek skipped for age counts even when nothing is handed out.
@@ -9953,7 +9988,6 @@ impl Subscriber {
 	/// Reserve the next group not yet handed out, without moving past it: [`Self::take`]
 	/// hands out that exact group, even if its producer evicted it meanwhile.
 	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<Reserved>>> {
-		self.settle_meta();
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let walk = idle::Walk::new(ordered);
@@ -10021,14 +10055,6 @@ impl Subscriber {
 		};
 		if let Ok(group) = &res {
 			self.hand_out(group.start, ordered);
-			if group.is_meta() {
-				self.meta_read.insert(group.start);
-			}
-			let floor = match &self.inner {
-				Inner::Plain(cursor) => cursor.record.delivered.floor(),
-				Inner::Resume(_, logical) => logical.record.delivered.floor(),
-			};
-			self.meta_read.drop_below(floor);
 		}
 		self.count_stale(&meter);
 		res.map(|group| group.with_meter(meter))
@@ -10630,12 +10656,21 @@ impl Subscriber {
 	/// if the track already ended; the update is meaningless at that point and can usually
 	/// be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		if let Some(promoted) = self.update_from(subscription, 0)? {
+			self.repaid.extend(promoted.groups);
+		}
+		Ok(())
+	}
+
+	/// [`Self::update`], returning what it hands out again instead of queueing it when it asks
+	/// for the payload of groups this reader handed out as metadata: those below group `from`
+	/// stay handed out. For a wire publisher, which serves them from where its peer resumes.
+	pub(crate) fn update_from(&mut self, subscription: Subscription, from: u64) -> Result<Option<Promoted>> {
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
 		channel.update(subscription)?;
-		self.settle_meta();
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
@@ -10644,9 +10679,10 @@ impl Subscriber {
 			// sources even while nobody reads.
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
+		let promoted = self.promoting().then(|| self.promote_from(from));
 		// A reader the pool ended reports it on its next read.
 		let _ = self.settle_record(None);
-		Ok(())
+		Ok(promoted)
 	}
 
 	/// Poll for the track's largest location within [`Self::with_range`]: the current one, then each newer one, and `None` once the track ends.
@@ -10755,7 +10791,6 @@ impl Subscriber {
 
 	/// The parts of `run` this subscriber's track caches no copy of, payload or metadata. A
 	/// front's reader asks its serving route's copy, and with none serving holds nothing.
-	#[cfg(feature = "async")]
 	pub(crate) fn uncached(&self, run: ops::Range<u64>) -> RangeSet<u64> {
 		let mut gaps = RangeSet::new();
 		gaps.insert(run.clone());
@@ -10770,22 +10805,6 @@ impl Subscriber {
 		}
 	}
 
-	/// The keys this subscriber's track caches as metadata copies, ascending: a front's reader
-	/// asks each of its copies.
-	pub(super) fn meta_keys(&self) -> Vec<u64> {
-		match &self.inner {
-			Inner::Plain(cursor) => cursor
-				.state
-				.read()
-				.lookup
-				.iter()
-				.filter(|(_, slot)| slot.is_meta())
-				.map(|(&key, _)| key)
-				.collect(),
-			Inner::Resume(resume, _) => resume.meta_keys(),
-		}
-	}
-
 	/// Whether this reader asks for metadata only now, through whichever handle set it.
 	fn reads_meta(&self) -> bool {
 		match &self.inner {
@@ -10794,26 +10813,61 @@ impl Subscriber {
 		}
 	}
 
-	/// Once the reader asks for the payload again, forget handing out each group it took as a
-	/// metadata copy, and each the track caches as one, so the payload copy replacing it is
-	/// handed out too.
-	fn settle_meta(&mut self) {
+	/// Whether the reader asks for the payload now after asking for metadata when it last
+	/// looked, through whichever handle changed it.
+	fn promoting(&mut self) -> bool {
 		let meta = self.reads_meta();
-		let promoted = std::mem::replace(&mut self.was_meta, meta) && !meta;
-		if !promoted {
-			return;
+		std::mem::replace(&mut self.was_meta, meta) && !meta
+	}
+
+	/// Once the reader asks for the payload again, queue the payload copies of the groups it
+	/// handed out as metadata ahead of the walk.
+	fn settle_meta(&mut self) {
+		if self.promoting() {
+			let promoted = self.promote_from(0);
+			self.repaid.extend(promoted.groups);
 		}
-		let mut runs = self.meta_read.take_runs();
-		runs.extend(self.meta_keys().into_iter().map(|key| key..key.saturating_add(1)));
+	}
+
+	/// Hand out again each group at or past `from` this reader handed out as metadata: the
+	/// payload copies its track caches now, and each other it still caches once its payload
+	/// arrives.
+	fn promote_from(&mut self, from: u64) -> Promoted {
+		let mut runs = std::mem::take(&mut self.meta_read);
+		self.meta_swept = 0;
+		if from > 0 {
+			runs.remove(0..from);
+		}
+		let mut groups = Vec::new();
+		let mut gone = RangeSet::new();
+		for run in runs.iter() {
+			gone.extend(self.uncached(run.clone()).iter().cloned());
+			groups.extend(self.repay(run.clone()));
+		}
+		// No copy of these is left to arrive: the reader does not wait for one.
 		let delivered = match &mut self.inner {
 			Inner::Plain(cursor) => &mut cursor.record.delivered,
 			Inner::Resume(_, logical) => &mut logical.record.delivered,
 		};
-		let floor = delivered.floor();
-		for run in runs {
-			// Below the floor the reader no longer expects any group.
-			let run = run.start.max(floor)..run.end;
-			delivered.remove_run(run);
+		for run in gone.iter() {
+			delivered.insert_run(run.clone());
+		}
+		Promoted { groups, runs, gone }
+	}
+
+	/// Record that `key` was handed out as metadata, so asking for the payload hands it out
+	/// again. Contiguous groups take one run, so only skipped groups add more: letting go of
+	/// what the cache no longer holds once the runs double keeps the cost per group constant.
+	pub(crate) fn note_meta(&mut self, key: u64) {
+		self.meta_read.insert(key..key.saturating_add(1));
+		if self.meta_read.len() >= self.meta_swept.max(8) * 2 {
+			let runs: Vec<_> = self.meta_read.iter().cloned().collect();
+			for run in runs {
+				for gone in self.uncached(run).iter() {
+					self.meta_read.remove(gone.clone());
+				}
+			}
+			self.meta_swept = self.meta_read.len();
 		}
 	}
 
@@ -10821,7 +10875,6 @@ impl Subscriber {
 	/// it asked for the payload: the payload copies its track caches and its range admits now,
 	/// and each other key once its payload arrives. A front's reader asks its serving route's
 	/// copy.
-	#[cfg(feature = "async")]
 	pub(crate) fn repay(&mut self, run: ops::Range<u64>) -> Vec<group::Consumer> {
 		let (groups, delivered) = match &mut self.inner {
 			Inner::Plain(cursor) => {
@@ -17970,6 +18023,89 @@ mod test {
 			assert!(!group.is_meta());
 			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
 		}
+	}
+
+	/// A metadata read of the lowest group moves the reader's delivered floor past it, and
+	/// asking for the payload still hands that group out again once its payload lands.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn promotion_hands_out_a_group_below_the_delivered_floor() {
+		let producer = received_producer(Info::timed());
+		let at = Timestamp::from_millis(300).unwrap();
+		let from_start = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(5)))
+				.with_ranges([Range {
+					start: Anchor::Time(0),
+					end: None,
+				}])
+		};
+		let mut reader = producer.subscribe(from_start().with_meta(true));
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 0 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		copy.write_meta(at, 7).unwrap();
+		copy.close().unwrap();
+		assert!(reader.recv_group().await.unwrap().expect("the metadata copy").is_meta());
+
+		reader.update(from_start()).unwrap();
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 0 }, 0, false) else {
+			panic!("the payload copy replaces the metadata one");
+		};
+		copy.write_frame(at, &b"payload"[..]).unwrap();
+		copy.close().unwrap();
+
+		let mut group = reader.recv_group().await.unwrap().expect("the payload copy");
+		assert_eq!(group.start, 0);
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
+	}
+
+	/// A payload copy that replaces a group while its reader still asks for metadata is passed
+	/// over as already handed out, and asking for the payload afterwards hands it out from the
+	/// cache, though the reader's walk is already past it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn promotion_hands_out_a_payload_copy_passed_over_as_metadata() {
+		let producer = received_producer(Info::timed());
+		let at = Timestamp::from_millis(300).unwrap();
+		let from_start = || {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(5)))
+				.with_ranges([Range {
+					start: Anchor::Time(0),
+					end: None,
+				}])
+		};
+		let mut reader = producer.subscribe(from_start().with_meta(true));
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 3 }, 0, true) else {
+			panic!("the metadata copy opens");
+		};
+		copy.write_meta(at, 7).unwrap();
+		copy.close().unwrap();
+		assert!(reader.recv_group().await.unwrap().expect("the metadata copy").is_meta());
+
+		let Ok(Received::Group(mut copy)) = producer.create_group_at(group::Info { start: 3 }, 0, false) else {
+			panic!("the payload copy replaces the metadata one");
+		};
+		copy.write_frame(at, &b"payload"[..]).unwrap();
+		copy.close().unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(
+			reader.poll_recv_group(&waiter).is_pending(),
+			"a metadata reader took the same group twice"
+		);
+
+		reader.update(from_start()).unwrap();
+		let mut group = reader.recv_group().await.unwrap().expect("the payload copy");
+		assert_eq!(group.start, 3);
+		assert!(!group.is_meta());
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"payload");
+		assert!(
+			reader.poll_recv_group(&waiter).is_pending(),
+			"the payload copy was handed out twice"
+		);
 	}
 
 	/// A reader on a received copy that fails waits out a re-offer still held for its group,

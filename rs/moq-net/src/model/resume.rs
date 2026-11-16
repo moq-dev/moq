@@ -947,7 +947,6 @@ impl Subscriber {
 	}
 
 	/// The parts of `run` no ready copy's track caches.
-	#[cfg(feature = "async")]
 	pub(super) fn uncached(&self, run: std::ops::Range<u64>) -> RangeSet<u64> {
 		let reader = self.reader();
 		let mut gaps = RangeSet::new();
@@ -966,25 +965,8 @@ impl Subscriber {
 		gaps
 	}
 
-	/// The keys any copy's track caches as metadata copies, ascending and without repeats.
-	pub(super) fn meta_keys(&self) -> Vec<u64> {
-		let reader = self.reader();
-		let mut keys: Vec<u64> = reader
-			.copies
-			.iter()
-			.flat_map(|copy| match &copy.sub {
-				Sub::Ready(sub) => sub.meta_keys(),
-				Sub::Pending(_) => Vec::new(),
-			})
-			.collect();
-		keys.sort_unstable();
-		keys.dedup();
-		keys
-	}
-
 	/// Hand out again the groups in `run` the reader handed out as metadata; see
 	/// [`track::Subscriber::repay`].
-	#[cfg(feature = "async")]
 	pub(super) fn repay(&mut self, run: std::ops::Range<u64>) -> Vec<group::Consumer> {
 		self.reader().repay(run)
 	}
@@ -1868,7 +1850,6 @@ impl Reader {
 
 	/// The serving copy's groups in `run` handed out again, as any group of that copy is;
 	/// nothing while no copy serves.
-	#[cfg(feature = "async")]
 	fn repay(&mut self, run: std::ops::Range<u64>) -> Vec<group::Consumer> {
 		let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) else {
 			return Vec::new();

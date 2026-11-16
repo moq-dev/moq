@@ -5181,12 +5181,6 @@ struct TrackRun {
 	/// Lite-07: whether the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for metadata only, the
 	/// mode each new Group Stream opens in.
 	meta: bool,
-	/// Lite-07: the groups served in metadata mode, which an update asking for the payload
-	/// serves again. Bounded by the track's cache: a group it no longer holds cannot be served
-	/// again, and is let go once the runs double.
-	meta_served: RangeSet<u64>,
-	/// How many runs `meta_served` held after the groups the cache let go were last swept.
-	meta_swept: usize,
 	/// Lite-07: where the payload resumes in the one group served again from partway through,
 	/// as the update asking for it said.
 	payload_from: Option<track::Position>,
@@ -5245,8 +5239,6 @@ impl TrackRun {
 			idle: None,
 			datagrams: None,
 			meta: false,
-			meta_served: RangeSet::new(),
-			meta_swept: 0,
 			payload_from: None,
 		}
 	}
@@ -5305,40 +5297,39 @@ impl TrackRun {
 
 		let groups = bounds.groups();
 		let (start, end) = (groups.start(), groups.end());
-		// A refusal leaves the model's ranges as they were, so this side keeps them too.
-		if let Err(err) = self.track.update(crate::track::Subscription {
-			priority: upd.priority,
-			delay: crate::track::Delay {
-				min: upd.min_delay,
-				max: serving_max_delay(self.ctx.version, upd.max_delay),
+		// A refusal leaves the model's ranges as they were, so this side keeps them too. Asking
+		// for the payload again hands out every group served as metadata again, from where the
+		// update says it resumes: groups below it stay delivered.
+		let from = upd.payload.map_or(0, |payload| payload.group);
+		let promoted = match self.track.update_from(
+			crate::track::Subscription {
+				priority: upd.priority,
+				delay: crate::track::Delay {
+					min: upd.min_delay,
+					max: serving_max_delay(self.ctx.version, upd.max_delay),
+				},
+				order: upd.order,
+				meta: upd.meta,
+				..groups
 			},
-			order: upd.order,
-			meta: upd.meta,
-			..groups
-		}) {
-			self.refused = Some(err);
-			return;
-		}
-		// Asking for the payload again serves every group served as metadata again, from where
-		// the update says it resumes: groups below it stay delivered. Open streams keep their
-		// mode either way.
-		let promoted = self.meta && !upd.meta;
+			from,
+		) {
+			Ok(promoted) => promoted,
+			Err(err) => {
+				self.refused = Some(err);
+				return;
+			}
+		};
 		self.meta = upd.meta;
-		if promoted {
-			let mut runs = std::mem::take(&mut self.meta_served);
-			if let Some(payload) = upd.payload {
-				runs.remove(0..payload.group);
-			}
+		// Open streams keep their mode either way.
+		if let Some(promoted) = promoted {
 			self.payload_from = upd.payload.filter(|payload| payload.frame > 0);
-			self.meta_swept = 0;
-			for run in runs.iter() {
-				// A group the track no longer caches has no payload to serve: it is given up.
-				let gone = self.track.uncached(run.clone());
-				let groups = self.track.repay(run.clone());
+			for run in promoted.runs.iter() {
 				self.track.record_mut().unserve(run.clone());
-				self.reoffered.extend(groups);
-				self.redrop.extend(gone.iter().cloned());
 			}
+			self.reoffered.extend(promoted.groups);
+			// A group the track no longer caches has no payload to serve: it is given up.
+			self.redrop.extend(promoted.gone.iter().cloned());
 		}
 		self.named = start;
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
@@ -6162,19 +6153,9 @@ impl TrackRun {
 		self.mark_served(key);
 		// A metadata copy has no payload to serve, whatever the subscription asks now.
 		let meta = self.meta || group.is_meta();
+		// The reader owes it again with its payload once the peer asks for that.
 		if meta {
-			self.meta_served.insert(key..key.saturating_add(1));
-			// Contiguous groups take one run, so only skipped groups add more: sweeping once the
-			// runs double keeps the cost per group constant.
-			if self.meta_served.len() >= self.meta_swept.max(8) * 2 {
-				let runs: Vec<_> = self.meta_served.iter().cloned().collect();
-				for run in runs {
-					for gone in self.track.uncached(run).iter() {
-						self.meta_served.remove(gone.clone());
-					}
-				}
-				self.meta_swept = self.meta_served.len();
-			}
+			self.track.note_meta(key);
 		}
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, meta, "serving group");
 		self.give_way();
