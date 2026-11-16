@@ -163,7 +163,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			}
 		};
 		let update = decode_update(r, version)?;
-		decode_warm(r, version)?;
 		let meta = decode_meta(r, version)?;
 
 		Ok(Self {
@@ -202,7 +201,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			}
 		}
 		encode_update(w, version, self.update)?;
-		encode_warm(w, version);
 		encode_meta(w, version, self.meta)?;
 
 		Ok(())
@@ -245,24 +243,6 @@ fn encode_update(w: &mut Encoder<'_>, version: Version, update: u64) -> Result<(
 		true => w.varint(update),
 		false => Ok(()),
 	}
-}
-
-/// Encode whether the pull joins the copy the publisher offered (1) or follows the
-/// subscriber's route (0). This endpoint chooses no source per broadcast, so it always
-/// follows its route.
-fn encode_warm(w: &mut Encoder<'_>, version: Version) {
-	if version.has_warm() {
-		w.u8(0);
-	}
-}
-
-/// Decode whether the pull joins the publisher's copy, and ignore it: only a relay
-/// choosing a source per broadcast acts on it, which this endpoint does not do.
-fn decode_warm(r: &mut Decoder<'_>, version: Version) -> Result<(), DecodeError> {
-	if version.has_warm() && r.u8()? > 1 {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok(())
 }
 
 /// Decode the `Subscriber Min Age` after the max age: milliseconds plus one, zero meaning not
@@ -825,7 +805,6 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			true => r.varint()?.checked_sub(1),
 			false => None,
 		};
-		decode_warm(r, version)?;
 		let meta = decode_meta(r, version)?;
 		let payload = match version.has_meta() {
 			true => {
@@ -877,7 +856,6 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		if version.has_refresh() {
 			w.varint_opt(self.wanted_group)?;
 		}
-		encode_warm(w, version);
 		encode_meta(w, version, self.meta)?;
 		if version.has_meta() {
 			w.varint_opt(self.payload.map(|payload| payload.group))?;
@@ -1561,26 +1539,6 @@ mod test {
 		));
 	}
 
-	/// Lite-07 ends SUBSCRIBE with whether the pull joins the publisher's copy: this
-	/// endpoint follows its route (0), and reads and ignores 0 or 1. Any other value is
-	/// malformed.
-	#[test]
-	fn warm_trails_subscribe_only_on_lite07() {
-		let msg = subscribe_sample();
-		let lite07 = encode(&msg, Version::Lite07).unwrap();
-		// Warm, then Meta.
-		assert_eq!(&lite07[lite07.len() - 2..], &[0, 0]);
-		let head = &lite07[..lite07.len() - 2];
-		let decode = |warm: &[u8]| {
-			let buf = [head, warm, &[0]].concat();
-			crate::coding::decode_from(&mut buf.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
-		};
-		decode(&[0]).unwrap();
-		decode(&[1]).unwrap();
-		assert!(decode(&[2]).is_err());
-		assert!(decode(&[]).is_err());
-	}
-
 	/// SUBSCRIBE carries the metadata mode on lite-07 alone: an older wire refuses to ask for
 	/// it rather than carry payload the subscriber would discard, and any byte but 0 or 1 is
 	/// malformed.
@@ -2096,10 +2054,10 @@ mod test {
 
 		msg.ranges = vec![Range::OLDEST];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last but for the update number, whether the pull joins a copy, and the
-		// metadata mode: a count of one, then two anchors of type 0.
-		let at = buf.len() - 6;
-		assert_eq!(&buf[at..], [1, 0, 0, 0, 0, 0]);
+		// The list is last but for the update number and the metadata mode: a count of one,
+		// then two anchors of type 0.
+		let at = buf.len() - 5;
+		assert_eq!(&buf[at..], [1, 0, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -2108,7 +2066,7 @@ mod test {
 		));
 
 		let mut buf = encode(&msg, version).unwrap();
-		let last = buf.len() - 4;
+		let last = buf.len() - 3;
 		buf[last] = 4;
 		assert!(matches!(
 			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),

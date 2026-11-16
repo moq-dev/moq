@@ -25,21 +25,20 @@
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC
-//!   too, behind the default-on `aac` feature, since a broadcast that came in
-//!   through a gateway is AAC rather than one of the codecs we encode in software.
+//!   too, since a broadcast that came in through a gateway is AAC rather than one
+//!   of the codecs we encode in software.
 //! - `playback` plays decoded PCM out a speaker. `playback::Engine` owns the
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
 //!   these names are unlinked here too.
 //! - `bus` mixes any number of PCM sources, each with its own gain, mute, pan,
 //!   sync delay, and meter, into several mixes advanced on the caller's own
-//!   clock: a studio's program audio and its return feeds. Behind the
-//!   default-on `bus` feature.
+//!   clock: a studio's program audio and its return feeds.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
 //!   on a laptop needs to not send itself back. [`aec::Processor`] processes PCM
-//!   supplied by any audio stack without enabling device features. The `aec`
-//!   feature wires `playback::Engine::canceller` to
-//!   `capture::Config::aec` and implies both device features.
+//!   supplied by any audio stack without enabling device features. With both
+//!   `capture` and `playback`, `playback::Engine::canceller` wires it to
+//!   `capture::Config::aec`.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
@@ -59,10 +58,8 @@ pub(crate) fn single<T: std::fmt::Debug>(outputs: Vec<T>) -> T {
 	output
 }
 
-#[cfg(feature = "aac")]
 mod aac;
 mod activity;
-#[cfg(any(feature = "bus", feature = "playback"))]
 mod comfort;
 mod error;
 mod format;
@@ -73,13 +70,10 @@ mod level;
 mod opus;
 mod pcm;
 mod resample;
-#[cfg(any(feature = "bus", feature = "playback"))]
 mod ring;
-#[cfg(any(feature = "bus", feature = "playback"))]
 mod stretch;
 
 pub mod aec;
-#[cfg(feature = "bus")]
 pub mod bus;
 #[cfg(feature = "capture")]
 pub mod capture;

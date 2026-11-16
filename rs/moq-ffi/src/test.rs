@@ -334,7 +334,6 @@ fn referencing(reference: Option<&str>, instance: Option<&str>) -> MoqRendition 
 }
 
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
-#[cfg(feature = "audio")]
 fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	use crate::media::{MoqAudio, MoqContainer};
 
@@ -355,7 +354,6 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	}
 }
 
-#[cfg(feature = "audio")]
 fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 	use crate::audio::{MoqAudioDecoderOutput, MoqAudioSampleFormat};
 	MoqAudioDecoderOutput {
@@ -563,7 +561,6 @@ async fn raw_track_activity() {
 		.unwrap();
 }
 
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_activity() {
 	use crate::audio::*;
@@ -680,7 +677,6 @@ async fn raw_audio_activity() {
 }
 
 /// Distinct channel tones, continuous across calls from different producer threads.
-#[cfg(feature = "audio")]
 fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
 	(start..start + frames)
 		.flat_map(|sample| {
@@ -692,7 +688,6 @@ fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
 		.collect()
 }
 
-#[cfg(feature = "audio")]
 fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 	let coefficient = 2.0 * (std::f64::consts::TAU * frequency / 48_000.0).cos();
 	let (mut previous, mut older) = (0.0, 0.0);
@@ -705,7 +700,6 @@ fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 }
 
 /// PCM written and finished from separate host threads survives the binding's locking and drain.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_raw_publish_from_many_threads() {
 	use crate::audio::*;
@@ -804,7 +798,6 @@ async fn audio_raw_publish_from_many_threads() {
 }
 
 /// Reject incomplete PCM channel frames before feeding the codec.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_raw_publish_rejects_bad_frames() {
 	use crate::audio::*;
@@ -846,7 +839,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 
 /// The decoder's playout delay is configurable and stays observable while a read waits:
 /// the decoder sits behind the read's lock, so the getter must not need it.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_decode_delay() {
 	use crate::audio::*;
@@ -951,7 +943,6 @@ async fn raw_audio_decode_delay() {
 
 /// Each encoder the publisher stops, by a reanchor or a finish, reaches the caller as an
 /// end in microseconds rather than vanishing between frames.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_decode_reports_encoder_ends() {
 	use crate::audio::*;
@@ -1043,7 +1034,6 @@ async fn raw_audio_decode_reports_encoder_ends() {
 
 /// Opus' 2.5 ms frame survives the trip to the encoder, and a duration Opus can't frame is
 /// refused.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_frame_durations() {
 	use crate::audio::*;
@@ -1101,7 +1091,6 @@ async fn raw_audio_frame_durations() {
 
 /// An absent frame duration takes the codec's own frame, and AAC, which encodes only
 /// through a platform encoder, is refused where there is none.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_codec_default_frame() {
 	use crate::audio::*;
@@ -3433,7 +3422,6 @@ async fn follow_keeps_the_requested_path() {
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
 /// there, not on the broadcast the catalog came from. Dropping the reference either fails to
 /// find the track or silently decodes a same-named local one with mismatched metadata.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -4084,7 +4072,6 @@ async fn video_publish_consume() {
 /// The raw-video publish path: hand mid-gray RGBA to `MoqVideoProducer` and check
 /// that the encoder's own output reaches a subscriber, described by a catalog
 /// rendition the importer built from the encoded keyframe.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_consume() {
 	use crate::video::*;
@@ -4210,7 +4197,6 @@ async fn video_raw_publish_consume() {
 /// readable after its consumer is cancelled and dropped and the track is gone.
 /// A surface decode keeps the decoder's pixel buffer and still downloads on
 /// demand, where the platform has one (macOS) and is refused where it has none.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_frame_ownership() {
 	use crate::video::*;
@@ -4361,7 +4347,6 @@ async fn video_decode_frame_ownership() {
 
 /// The default start decodes a cached track from its oldest group, while
 /// `Latest` skips that backlog and joins at the newest group.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_start() {
 	use crate::media::MoqDecodeStart;
@@ -4482,7 +4467,6 @@ async fn video_decode_start() {
 /// whichever thread dropped the object. The confinement itself is asserted in
 /// moq-video (`encode::sink`); this pins that the binding supports the usage
 /// end to end, including the drain on `finish`.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_from_many_threads() {
 	use crate::video::*;
@@ -4565,7 +4549,6 @@ async fn video_raw_publish_from_many_threads() {
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it, and rejects any write
 /// after `finish`.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_rejects_bad_frames() {
 	use crate::video::*;
@@ -7733,7 +7716,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 }
 
 /// The built-in encoder's applied bitrate follows a shrinking grant.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
 	use crate::bandwidth::MoqAllocator;
@@ -7793,7 +7775,6 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	broadcast.close().unwrap();
 }
 
-#[cfg(feature = "video")]
 fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::video::MoqVideoEncoderOutput) {
 	use crate::video::*;
 	(
@@ -7817,7 +7798,6 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 
 /// Dropping a producer parked in `changed()` must stop the follow thread, not
 /// leak it until the session allocator dies.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn dropping_a_video_producer_stops_the_rate_follower() {
 	use crate::bandwidth::MoqAllocator;
@@ -7847,7 +7827,6 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 }
 
 /// `set_bitrate` is the manual ceiling: a later grant cannot retune above it.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	use crate::bandwidth::MoqAllocator;
@@ -9626,7 +9605,6 @@ async fn demand_cancelled_before_free_leaves_the_change() {
 }
 
 /// Setup, rather than the first packet, decides whether a rendition is usable.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_subscribe_configuration_boundary() {
 	use crate::audio::MoqAudioConsumer;
@@ -9719,7 +9697,6 @@ async fn audio_subscribe_configuration_boundary() {
 	broadcast.close().unwrap();
 }
 
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_subscribe_configuration_boundary() {
 	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};

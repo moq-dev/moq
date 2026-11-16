@@ -229,7 +229,7 @@ impl Processor {
 		self.stream_delay
 	}
 
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub(super) fn capture(&self) -> Stream {
 		self.capture
 	}
@@ -256,12 +256,12 @@ impl Processor {
 		self.capture_processed.clear();
 	}
 
-	#[cfg(all(test, feature = "aec"))]
+	#[cfg(all(test, feature = "capture", feature = "playback"))]
 	pub(super) fn pending_samples(&self) -> usize {
 		self.capture_pending.len()
 	}
 
-	#[cfg(all(test, feature = "aec"))]
+	#[cfg(all(test, feature = "capture", feature = "playback"))]
 	pub(super) fn processed_samples(&self) -> usize {
 		self.capture_processed.len()
 	}

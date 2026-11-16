@@ -397,16 +397,6 @@ impl Version {
 		)
 	}
 
-	/// Whether the announce stream carries warm routes (WARM_START, WARM_UPDATE, and
-	/// WARM_END), and SUBSCRIBE and SUBSCRIBE_UPDATE say whether each pull joins the
-	/// publisher's copy. Added in lite-07.
-	pub(crate) fn has_warm(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and GROUP carry the metadata mode, whose Group
 	/// Streams carry each frame's header without its payload. Added in lite-07; an older peer
 	/// cannot be asked for it.

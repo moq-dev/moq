@@ -65,19 +65,12 @@ broken media automatically.
 
 A video rendition encoded with intra refresh has no keyframes, and its catalog
 `warmup` says how long a decoder takes to clean up after joining. The player
-decodes such a rendition twice: one decoder holds your delay and may show
-refresh stripes after a join or a skip, while a second starts one group earlier
-and tolerates `warmup` more lateness, so its picture is clean. The clean
-picture shows whenever it has caught up. Each decoder costs its own CPU and
-decoder memory, and both share one subscription. A rendition without `warmup`
-uses one decoder.
-
-An H.264 group of such a rendition opens on a recovery point that is not an
-IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
-an IDR or a recovery point that counts zero frames. So when a decoder opens on
-one, the player inserts a second recovery point with a zero count before its
-first slice. The slices are untouched; the stripes clear as the sweep
-completes.
+joins such a rendition that much earlier and decodes from the group start, but
+shows nothing until the warmup has passed, after a join and after each skip.
+An H.264 group opens on a recovery point that is not an IDR, which Chromium's
+WebCodecs refuses unless it counts zero frames, so the player inserts one that
+does before the first slice. Firefox and Safari are untested, and Chromium
+refuses an H.265 group that opens without an IDR.
 
 `el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
 It reads `connecting` until a session could have announced the broadcast: while the

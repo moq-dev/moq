@@ -29,10 +29,8 @@ const ROUTE_UPDATE: u64 = 7;
 const ROUTE_END: u64 = 8;
 const ANNOUNCE_FLOOR: u64 = 9;
 const ROUTE_HOLD: u64 = 11;
-// lite-07: warm routes, copies of one broadcast offered toward the subscriber.
-const WARM_START: u64 = 12;
-const WARM_UPDATE: u64 = 13;
-const WARM_END: u64 = 14;
+// 12 to 14 were WARM_START, WARM_UPDATE, and WARM_END, which return in a later wip version
+// with an implementation that picks a source per broadcast.
 // lite-07: news of a closed session or a draining node on the routes the sender offered.
 const DEAD: u64 = 15;
 
@@ -131,19 +129,6 @@ pub enum AnnounceBroadcast {
 	/// with this id, certifying them across the whole requested prefix at the origin's
 	/// revision, or certifying nothing (`None`).
 	Floor { id: u64, revision: Option<route::Rev> },
-	/// WARM_START (lite-07+): under the route with Route ID `route`, the sender offers the
-	/// copy of the broadcast at `suffix` that the receiver gets by joining it, and assigns
-	/// it the next Warm ID. See [`Warm`] for what the copy carries.
-	WarmStart {
-		route: u64,
-		suffix: Path,
-		instance: Instance,
-		warm: Warm,
-	},
-	/// WARM_UPDATE (lite-07+): the warm route with this id carries `warm` now.
-	WarmUpdate { id: u64, warm: Warm },
-	/// WARM_END (lite-07+): the sender withdrew the warm route with this id.
-	WarmEnd { id: u64 },
 	/// A route message (lite-07+) whose content, which the sender only forwarded, this
 	/// node refuses. The receiver withdraws what it names and keeps the session. Decoded
 	/// only as far as keeps the stream's ids in step; never sent.
@@ -169,10 +154,6 @@ pub(crate) enum Refusable {
 	Start { route: u64, suffix: Option<PathRef> },
 	/// ANNOUNCE_UPDATE or ANNOUNCE_RESTART of the claim with this Announce ID.
 	Change { id: u64 },
-	/// WARM_START under the route with Route ID `route`: assigns the next Warm ID.
-	WarmStart { route: u64 },
-	/// WARM_UPDATE of the warm route with this id.
-	WarmUpdate { id: u64 },
 }
 
 /// Why a node refuses content a peer forwarded: well framed, but nothing it can use.
@@ -184,8 +165,6 @@ pub(crate) enum Refusal {
 	Flags(u8),
 	#[error("{0} hops, past the limit")]
 	Hops(u64),
-	#[error("a warm route with no hops, so no carrier")]
-	Carrier,
 	#[error("an invalid path")]
 	Path,
 	#[error("an invalid instance")]
@@ -202,76 +181,6 @@ type Content<T> = Result<Result<T, Refusal>, DecodeError>;
 fn refuse<T>(r: &mut Decoder<'_>, reason: Refusal) -> Content<T> {
 	r.rest();
 	Ok(Err(reason))
-}
-
-/// A copy of a broadcast a warm route offers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Warm {
-	/// What pulling the copy through the sender costs, in the units of the route's
-	/// metric: 0 at its carrier, the relay with a local reader that offers it.
-	pub cost: u64,
-	/// A node on `hops` sent GOAWAY, which ranks the copy below every source that avoids one.
-	pub draining: bool,
-	/// The lowest local priority of a link on `hops`, ranked before cost; the carrier's
-	/// own copy has no link to lower it, so `i8::MAX`.
-	pub priority: i8,
-	/// Every relay the copy crossed, the carrier first and the sender last.
-	pub hops: Arc<[route::Id]>,
-}
-
-/// WARM_START and WARM_UPDATE flag: a node on the copy's hops drains.
-const WARM_DRAINING: u8 = 0x1;
-
-/// Encode a warm route's cost, drain, priority, and hops. No relay offers a copy with no
-/// carrier, or that crossed too many hops.
-fn encode_warm(w: &mut Encoder<'_>, warm: &Warm) -> Result<(), EncodeError> {
-	if warm.hops.is_empty() || warm.hops.len() > route::MAX_HOPS {
-		return Err(EncodeError::InvalidState);
-	}
-	w.varint(warm.cost)?;
-	w.u8(if warm.draining { WARM_DRAINING } else { 0 });
-	w.u8(warm.priority as u8);
-	w.varint(warm.hops.len() as u64)?;
-	for hop in warm.hops.iter() {
-		w.varint(*hop)?;
-	}
-	Ok(())
-}
-
-fn decode_warm(r: &mut Decoder<'_>) -> Content<Warm> {
-	let cost = r.varint()?;
-	let draining = match r.u8()? {
-		0 => false,
-		WARM_DRAINING => true,
-		flags => return refuse(r, Refusal::Flags(flags)),
-	};
-	let priority = r.u8()? as i8;
-	let count = r.varint()?;
-	if count > route::MAX_HOPS as u64 {
-		return refuse(r, Refusal::Hops(count));
-	}
-	if count == 0 {
-		return refuse(r, Refusal::Carrier);
-	}
-	let hops = (0..count).map(|_| r.varint()).collect::<Result<_, _>>()?;
-	Ok(Ok(Warm {
-		cost,
-		draining,
-		priority,
-		hops,
-	}))
-}
-
-/// Decode a WARM_START's body after its Route ID.
-fn decode_warm_start(r: &mut Decoder<'_>) -> Content<(Path, Instance, Warm)> {
-	let suffix = match decode_path(r)? {
-		Ok(suffix) => suffix,
-		Err(reason) => return refuse(r, reason),
-	};
-	let Some(instance) = super::instance::decode_copy(r)? else {
-		return refuse(r, Refusal::Instance);
-	};
-	Ok(decode_warm(r)?.map(|warm| (suffix, instance, warm)))
 }
 
 /// Route Offer flag: an upstream link is on the path, so the route is down-only.
@@ -797,18 +706,12 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::RouteEnd { .. } if version.has_routes() => ROUTE_END,
 				Self::Dead(_) if version.has_routes() => DEAD,
 				Self::Floor { .. } if version.has_routes() => ANNOUNCE_FLOOR,
-				Self::WarmStart { .. } if version.has_warm() => WARM_START,
-				Self::WarmUpdate { .. } if version.has_warm() => WARM_UPDATE,
-				Self::WarmEnd { .. } if version.has_warm() => WARM_END,
 				Self::RouteStart { .. }
 				| Self::RouteUpdate { .. }
 				| Self::RouteHold { .. }
 				| Self::RouteEnd { .. }
 				| Self::Dead(_)
-				| Self::Floor { .. }
-				| Self::WarmStart { .. }
-				| Self::WarmUpdate { .. }
-				| Self::WarmEnd { .. } => return Err(EncodeError::Version),
+				| Self::Floor { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type or refused content is never sent.
@@ -868,22 +771,6 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::RouteHold { id } | Self::RouteEnd { id } => w.varint(*id)?,
 				Self::Dead(dead) => encode_dead(w, dead)?,
 				Self::Floor { id, revision } => encode_floor(w, *id, *revision)?,
-				Self::WarmStart {
-					route,
-					suffix,
-					instance,
-					warm,
-				} => {
-					w.varint(*route)?;
-					suffix.encode(w, version)?;
-					super::instance::encode_copy(w, instance)?;
-					encode_warm(w, warm)?;
-				}
-				Self::WarmUpdate { id, warm } => {
-					w.varint(*id)?;
-					encode_warm(w, warm)?;
-				}
-				Self::WarmEnd { id } => w.varint(*id)?,
 				Self::Ended { .. } | Self::Skipped | Self::Refused { .. } => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -929,10 +816,7 @@ impl Encode<Version> for AnnounceBroadcast {
 			| Self::RouteHold { .. }
 			| Self::RouteEnd { .. }
 			| Self::Dead(_)
-			| Self::Floor { .. }
-			| Self::WarmStart { .. }
-			| Self::WarmUpdate { .. }
-			| Self::WarmEnd { .. } => {
+			| Self::Floor { .. } => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -1019,32 +903,6 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 					ROUTE_HOLD if version.has_routes() => Self::RouteHold { id: body.varint()? },
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
 					ANNOUNCE_FLOOR if version.has_routes() => decode_floor(&mut body)?,
-					WARM_START if version.has_warm() => {
-						let route = body.varint()?;
-						decode_warm_start(&mut body)?.map_or_else(
-							|reason| Self::Refused {
-								message: Refusable::WarmStart { route },
-								reason,
-							},
-							|(suffix, instance, warm)| Self::WarmStart {
-								route,
-								suffix,
-								instance,
-								warm,
-							},
-						)
-					}
-					WARM_UPDATE if version.has_warm() => {
-						let id = body.varint()?;
-						decode_warm(&mut body)?.map_or_else(
-							|reason| Self::Refused {
-								message: Refusable::WarmUpdate { id },
-								reason,
-							},
-							|warm| Self::WarmUpdate { id, warm },
-						)
-					}
-					WARM_END if version.has_warm() => Self::WarmEnd { id: body.varint()? },
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
 					_ => {
@@ -1628,92 +1486,6 @@ mod tests {
 			}),
 			[3, 6, 7, 1, b'a', 0, 5, 6]
 		);
-	}
-
-	/// The draft's warm route layouts, byte for byte: WARM_START is the Route ID, the path
-	/// suffix, the instance and its minted flag, then the copy's cost, its flags, its
-	/// priority as a signed byte, and its hops; WARM_UPDATE the Warm ID and the same four;
-	/// WARM_END the Warm ID. Lite-06 skips the types as unknown.
-	#[test]
-	fn lite07_warm_route_layout() {
-		let encode = |msg: &AnnounceBroadcast, version: Version| {
-			let mut buf = Vec::new();
-			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
-				.map(|()| buf)
-		};
-		let warm = Warm {
-			cost: 4,
-			draining: true,
-			priority: -1,
-			hops: Arc::from([5, 9, 6]),
-		};
-		let start = AnnounceBroadcast::WarmStart {
-			route: 3,
-			suffix: Path::from_static("c"),
-			instance: "a".parse().unwrap(),
-			warm: warm.clone(),
-		};
-		let update = AnnounceBroadcast::WarmUpdate { id: 7, warm };
-		let end = AnnounceBroadcast::WarmEnd { id: 7 };
-		let layouts: [(&AnnounceBroadcast, &[u8]); 3] = [
-			(&start, &[12, 13, 3, 1, b'c', 1, b'a', 0, 4, 1, 0xff, 3, 5, 9, 6]),
-			(&update, &[13, 8, 7, 4, 1, 0xff, 3, 5, 9, 6]),
-			(&end, &[14, 1, 7]),
-		];
-		for (msg, wire) in layouts {
-			assert_eq!(encode(msg, Version::Lite07).unwrap(), wire);
-			assert_eq!(&broadcast_round_trip(msg, Version::Lite07), msg);
-			assert!(matches!(encode(msg, Version::Lite06), Err(EncodeError::Version)));
-			let got =
-				crate::coding::decode_buf(&mut &wire[..], Version::Lite06, |r, v| AnnounceBroadcast::decode(r, v));
-			assert_eq!(got.unwrap(), AnnounceBroadcast::Skipped);
-		}
-	}
-
-	/// A warm route starts at its carrier, so it has at least one hop and at most 32, and
-	/// sets no flag but drain. A receiver refuses one that breaks any, without failing
-	/// the stream.
-	#[test]
-	fn lite07_warm_route_hops_and_flags_are_bounded() {
-		let empty = AnnounceBroadcast::WarmUpdate {
-			id: 7,
-			warm: Warm {
-				cost: 4,
-				draining: false,
-				priority: 0,
-				hops: Arc::from([]),
-			},
-		};
-		let mut buf = Vec::new();
-		assert!(matches!(
-			empty.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07),
-			Err(EncodeError::InvalidState)
-		));
-		let decode = |wire: &[u8]| {
-			crate::coding::decode_buf(&mut &wire[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v))
-		};
-		let refused = |reason| AnnounceBroadcast::Refused {
-			message: Refusable::WarmUpdate { id: 7 },
-			reason,
-		};
-		assert_eq!(
-			decode(&[13, 5, 7, 4, 0, 0, 0]).unwrap(),
-			refused(Refusal::Carrier),
-			"no hops, so no carrier"
-		);
-		assert_eq!(
-			decode(&[13, 6, 7, 4, 2, 0, 1, 5]).unwrap(),
-			refused(Refusal::Flags(2)),
-			"an unknown flag"
-		);
-		decode(&[13, 6, 7, 4, 0, 0, 1, 5]).unwrap();
-		let mut long = vec![13, 38, 7, 4, 0, 0, 33];
-		long.extend([1; 33]);
-		assert_eq!(decode(&long).unwrap(), refused(Refusal::Hops(33)));
-		long[1] = 37;
-		long[6] = 32;
-		long.pop();
-		decode(&long).unwrap();
 	}
 
 	/// Lite-07 carries a lite-06 chain after the cost, only when it is not empty, so an

@@ -317,6 +317,13 @@ pub struct Session {
 }
 
 impl Session {
+	/// A handle that closes this session without keeping it open, as a cut link would.
+	pub fn closer(&self) -> Closer {
+		Closer {
+			conn: self.side.conn.clone(),
+		}
+	}
+
 	fn conn(&self) -> &Conn {
 		&self.side.conn
 	}
@@ -340,6 +347,25 @@ impl Session {
 		queue
 			.try_push(item)
 			.map_err(|_| closed(&self.conn().close).expect("peer dropped"))
+	}
+}
+
+/// Closes a [`Session`] from outside it, holding neither side open: the session still
+/// closes once both of its handles drop.
+#[derive(Clone)]
+pub struct Closer {
+	conn: Arc<Conn>,
+}
+
+impl Closer {
+	/// Close the session for both sides, unless it already closed.
+	pub fn close(&self, code: u32, reason: &str) {
+		self.conn.close(code, reason);
+	}
+
+	/// Whether the session has closed, by either side or by this handle.
+	pub fn is_closed(&self) -> bool {
+		self.conn.close.read().is_some()
 	}
 }
 
@@ -904,6 +930,23 @@ mod tests {
 	fn bounds() {
 		fn boxable<S: poll::Boxable>() {}
 		boxable::<Session>();
+	}
+
+	#[test]
+	fn closer_cuts_without_holding_open() {
+		// A closer closes the session for both sides.
+		let (a, b) = pair(Config::default());
+		let closer = a.closer();
+		closer.close(7, "cut");
+		assert!(closer.is_closed());
+		assert!(matches!(ready(b.poll_closed(&noop())), Error::Session { code: 7, .. }));
+
+		// A side dropped closes the session even while a closer is held.
+		let (a, b) = pair(Config::default());
+		let closer = b.closer();
+		drop(b);
+		assert!(closer.is_closed());
+		assert!(a.poll_closed(&noop()).is_ready());
 	}
 
 	#[test]

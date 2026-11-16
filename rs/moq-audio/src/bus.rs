@@ -47,7 +47,7 @@
 //! # }
 //! ```
 //!
-//! Enabled by the default-on `bus` feature; `Bus::capture` also needs `capture`.
+//! `Bus::capture` needs the `capture` feature.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};

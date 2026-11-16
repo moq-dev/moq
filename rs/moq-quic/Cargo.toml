@@ -15,9 +15,6 @@ categories = ["network-programming", "asynchronous"]
 default = []
 # Enable qlog support
 qlog = ["dep:qlog"]
-# The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
-# transport. Driven by the `qmux` crate.
-mux = []
 # The seeded, impaired network path (`sim::Link`) the tests run endpoints across, for a
 # driver that runs QUIC on kio's simulator. Meant for dev-dependencies.
 sim = []
@@ -59,8 +56,6 @@ hex-literal = "1"
 kio = { path = "../kio", features = ["runtime", "sim"] }
 # The candidate controllers and BBR3's delay bound the simulated comparisons run.
 moq-congestion = { path = "../moq-congestion", features = ["lab"] }
-# The mux module's tests run in the default merge gate.
-moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
 rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }

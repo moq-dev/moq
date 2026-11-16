@@ -150,6 +150,51 @@ test("the observer asks for the decoder's delay plus its stretch and warmup, not
 	}
 });
 
+test("the observer reads the publisher's largest group as its subscription began, not a later one", async () => {
+	const origin = new Origin.Producer();
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
+	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	publishedRoute.announce();
+	const frame = (group: Group.Producer, micros: number) =>
+		group.writeFrame({
+			timestamp: Time.Timestamp.fromMicros(micros),
+			payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.micros(micros)),
+		});
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
+	const capture = new Capture({
+		broadcast: new Signal(source),
+		track: new Signal("audio"),
+		config: new Signal({
+			codec: "opus",
+			sampleRate: 48000,
+			numberOfChannels: 1,
+			container: { kind: "legacy" },
+		} as Catalog.AudioConfig),
+		delay: new Signal(Duration.millis(250)),
+		maxDelay: new Signal(Duration.millis(250)),
+	});
+	try {
+		while (!track.subscription.peek()) await track.subscription.changed();
+		const first = track.createGroup(7n);
+		frame(first, 0);
+		while (capture.largest() === undefined) await yieldNow();
+		// Live groups landing after the answer raise the track's largest, not the join's.
+		const later = track.createGroup(12n);
+		frame(later, 20_000);
+		const seen: Arrival[] = [];
+		while (seen.length < 2) {
+			seen.push(...capture.drain());
+			await yieldNow();
+		}
+		expect(capture.largest()).toBe(7);
+	} finally {
+		await capture.close();
+		source.close();
+		origin.close();
+	}
+});
+
 /** Capture a legacy track, then end its first group with `end` once that group's reader is in flight. */
 async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<string | undefined> {
 	const origin = new Origin.Producer();

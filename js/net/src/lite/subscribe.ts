@@ -29,7 +29,6 @@ import {
 	hasRanges,
 	hasRefresh,
 	hasSkip,
-	hasWarm,
 	resolvesStart,
 	Version,
 } from "./version.ts";
@@ -42,18 +41,6 @@ async function decodeUpdate(r: Reader, version: Version): Promise<bigint> {
 /** Encode the `Update` number, dropping it on a wire without the field. */
 async function encodeUpdate(w: Writer, version: Version, update: bigint) {
 	if (hasSkip(version)) await w.u62(update);
-}
-
-/** Encode `Warm`: the pull follows this endpoint's route (0), since it chooses no source per broadcast. */
-async function encodeWarm(w: Writer, version: Version) {
-	if (hasWarm(version)) await w.u8(0);
-}
-
-/** Decode `Warm`, whether the pull joins this side's copy, and ignore it: only a relay choosing a source per broadcast acts on it. */
-async function decodeWarm(r: Reader, version: Version) {
-	if (!hasWarm(version)) return;
-	const warm = await r.u8();
-	if (warm > 1) throw new ProtocolViolation(`unknown warm ${warm}`);
 }
 
 /** Decode a one-byte boolean: 0 or 1, anything else malformed. */
@@ -743,7 +730,6 @@ export class SubscribeUpdate {
 				}
 				await encodeUpdate(w, version, this.update);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
-				await encodeWarm(w, version);
 				await encodeMeta(w, version, this.meta);
 				if (hasMeta(version)) {
 					await w.u62(this.payload === undefined ? 0n : this.payload.group + 1n);
@@ -774,7 +760,6 @@ export class SubscribeUpdate {
 				}
 				const update = await decodeUpdate(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
-				await decodeWarm(r, version);
 				const meta = await decodeMeta(r, version);
 				let payload: Position | undefined;
 				if (hasMeta(version)) {
@@ -929,7 +914,6 @@ export class Subscribe {
 				break;
 		}
 		await encodeUpdate(w, version, this.update);
-		await encodeWarm(w, version);
 		await encodeMeta(w, version, this.meta);
 	}
 
@@ -951,7 +935,6 @@ export class Subscribe {
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
 				const update = await decodeUpdate(r, version);
-				await decodeWarm(r, version);
 				const meta = await decodeMeta(r, version);
 				return new Subscribe({
 					id,
