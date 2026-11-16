@@ -59,15 +59,7 @@ fn resolve(base: Option<&Path>, path: PathRef) -> Result<Option<Path>, Error> {
 
 /// The first `keep` segments of `path`, or `None` if it has fewer.
 fn head(path: &Path, keep: usize) -> Option<&str> {
-	if keep == 0 {
-		return Some("");
-	}
-	let s = path.as_str();
-	let mut ends = s
-		.match_indices('/')
-		.map(|(i, _)| i)
-		.chain((!s.is_empty()).then_some(s.len()));
-	ends.nth(keep - 1).map(|end| &s[..end])
+	path.head_len(keep).map(|end| &path.as_str()[..end])
 }
 
 /// Resolves the bases on a received announce stream. Only used on versions with
@@ -251,9 +243,8 @@ impl AnnounceEncoder {
 			return literal();
 		};
 		// Where the segments after `keep` start, sharing the suffix's buffer.
-		let s = suffix.as_str();
-		let start = s.match_indices('/').nth(keep - 1).map_or(s.len(), |(i, _)| i + 1);
-		let rest = suffix.slice_from(start);
+		let end = suffix.head_len(keep).expect("the longest shared head is within the suffix");
+		let rest = suffix.slice_from((end + 1).min(suffix.len()));
 
 		let base = next - id;
 		let keep = keep as u64;

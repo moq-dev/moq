@@ -1,13 +1,14 @@
 //! Broadcast paths and the patterns that match them.
 //!
 //! [`Path`] is a literal coordinate: `/`-separated non-empty segments, with
-//! segment-aware prefix operations. [`Pattern`] describes a set of paths with
+//! segment-aware prefix operations. A `\` escapes the `\` or `/` after it, so `a\/b` is one
+//! segment holding a `/`; [`parts`] is the one walk every segment reading goes through. [`Pattern`] describes a set of paths with
 //! wildcards, and [`Patterns`] is a union of them reduced by containment. The
 //! grammar and algebra live in [`moq-pattern`](moq_pattern); this module
 //! re-exports them beside [`Path`] so grants, origin scopes, and announce
 //! interests can share one dialect.
 
-pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
+pub use moq_pattern::{InvalidPattern, Parts, Pattern, Patterns, Segment, Specificity, escape, parts, unescape};
 
 use std::fmt::{self, Display};
 use std::sync::Arc;
@@ -76,15 +77,19 @@ fn validate(s: &str) -> Result<(), Error> {
 	if s.len() > Path::MAX_BYTES {
 		return Err(Error::TooLong);
 	}
-	if !s.is_empty() && (s.starts_with('/') || s.ends_with('/') || s.contains("//")) {
-		return Err(Error::EmptySegment);
+	if s.is_empty() {
+		return Ok(());
 	}
-	validate_escapes(s)
-}
-
-// A `\` escapes the byte after it, which must be `\` or `/`: the IETF namespace mapping writes
-// a field's `\` and `/` that way and nothing else, so any other spelling could not round-trip.
-fn validate_escapes(s: &str) -> Result<(), Error> {
+	// Without a `\`, every `/` separates, so the plain checks are the whole rule.
+	if !s.as_bytes().contains(&b'\\') {
+		return match s.starts_with('/') || s.ends_with('/') || s.contains("//") {
+			true => Err(Error::EmptySegment),
+			false => Ok(()),
+		};
+	}
+	// A `\` escapes the byte after it, which must be `\` or `/`: the IETF namespace mapping
+	// writes a field's `\` and `/` that way and nothing else, so any other spelling could not
+	// round-trip.
 	let mut rest = s.as_bytes();
 	while let Some(i) = rest.iter().position(|&b| b == b'\\') {
 		match rest.get(i + 1) {
@@ -92,12 +97,11 @@ fn validate_escapes(s: &str) -> Result<(), Error> {
 			_ => return Err(Error::InvalidEscape),
 		}
 	}
-	Ok(())
-}
-
-// Whether the byte at `end` is escaped, so a valid path cut there splits an escape in two.
-fn is_escaped(s: &str, end: usize) -> bool {
-	s.as_bytes()[..end].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
+	// An escaped `/` is content, so only a bare one can leave a segment empty.
+	match parts(s).any(str::is_empty) {
+		true => Err(Error::EmptySegment),
+		false => Ok(()),
+	}
 }
 
 /// A broadcast path that provides safe prefix matching operations.
@@ -108,7 +112,9 @@ fn is_escaped(s: &str, end: usize) -> bool {
 /// A path is a key of non-empty segments joined by `/`, so it has one spelling:
 /// [`Path::new`] refuses a leading, trailing, or doubled `/` rather than collapsing it.
 /// A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
-/// either one is spelled, and any other `\` is refused. Segments still split at every `/`.
+/// either one is spelled, and any other `\` is refused. An escaped `/` never splits a segment:
+/// `a\/b` is one segment, so it counts once against [`Path::MAX_PARTS`], a prefix never ends
+/// inside it, and a pattern's `*` matches all of it.
 /// A path is at most [`Path::MAX_BYTES`] long. The empty path has no segments; it is the
 /// origin's root and prefixes every other path. The same type names an exact broadcast
 /// and the prefix a route or announcement covers, so a broadcast's own path is the prefix
@@ -138,7 +144,7 @@ fn is_escaped(s: &str, end: usize) -> bool {
 pub struct Path(Repr);
 
 impl Path {
-	/// Maximum number of slash-separated parts in a path.
+	/// Maximum number of segments in a path.
 	///
 	/// Matches the IETF moq-transport limit of 32 fields in a namespace tuple.
 	/// moq-lite enforces the same bound: encoding or decoding a deeper path fails,
@@ -241,8 +247,7 @@ impl Path {
 		Some(self.slice_from(n))
 	}
 
-	/// The first `n` segments, or `None` if the path has fewer or the `/` after them is
-	/// escaped, since no path ends in half an escape.
+	/// The first `n` segments, or `None` if the path has fewer.
 	///
 	/// # Examples
 	/// ```
@@ -253,30 +258,32 @@ impl Path {
 	/// assert_eq!(path.head(0), Some(Path::empty()));
 	/// assert_eq!(path.head(4), None);
 	///
-	/// // `foo\` would end in a lone `\`.
-	/// assert_eq!(Path::from_static(r"foo\/bar").head(1), None);
+	/// // An escaped `/` is inside a segment.
+	/// assert_eq!(Path::from_static(r"foo\/bar/baz").head(1), Some(Path::from_static(r"foo\/bar")));
 	/// ```
 	pub fn head(&self, n: usize) -> Option<Path> {
-		if n == 0 {
-			return Some(Path::empty());
-		}
+		let end = self.head_len(n)?;
 		let s = self.as_str();
-		let end = s
-			.match_indices('/')
-			.map(|(i, _)| i)
-			.chain((!s.is_empty()).then_some(s.len()))
-			.nth(n - 1)?;
-		if is_escaped(s, end) {
-			return None;
-		}
-		// Otherwise a run of whole segments of a valid path is itself valid.
+		// A run of whole segments of a valid path is itself valid.
 		Some(match &self.0 {
 			Repr::Static(s) => Path(Repr::Static(&s[..end])),
 			_ => Path(Repr::copy_bounded(&s[..end])),
 		})
 	}
 
-	/// Iterate over the slash-separated parts of the path.
+	// The bytes the first `n` segments span, without the `/` after them, or `None` if the
+	// path has fewer.
+	pub(crate) fn head_len(&self, n: usize) -> Option<usize> {
+		let mut parts = self.parts();
+		let mut end = 0;
+		for i in 0..n {
+			end += parts.next()?.len() + usize::from(i > 0);
+		}
+		Some(end)
+	}
+
+	/// Iterate over the segments of the path, split only at a `/` no `\` escapes, each still
+	/// escaped as written. See [`unescape`] for a segment's content.
 	///
 	/// The empty path has no parts.
 	///
@@ -284,14 +291,14 @@ impl Path {
 	/// ```
 	/// use moq_net::Path;
 	///
-	/// let path = Path::from_static("foo/bar/baz");
-	/// assert_eq!(path.parts().collect::<Vec<_>>(), ["foo", "bar", "baz"]);
+	/// let path = Path::from_static(r"foo/bar\/baz");
+	/// assert_eq!(path.parts().collect::<Vec<_>>(), ["foo", r"bar\/baz"]);
 	/// assert_eq!(Path::empty().parts().count(), 0);
 	/// ```
-	pub fn parts(&self) -> impl Iterator<Item = &str> + Clone {
-		// Segments are never empty, so only the empty path ends in an empty substring,
-		// which a terminator split skips; the route table walks this on every lookup.
-		self.as_str().split_terminator('/')
+	pub fn parts(&self) -> Parts<'_> {
+		// The route table walks this on every lookup, so a path without `\` costs a byte
+		// compare per separator over a plain split.
+		parts(self.as_str())
 	}
 
 	/// Whether a segment starts with `.`, which hides the path from announce
@@ -394,8 +401,7 @@ impl Path {
 	/// [`Relative::new`] strips redundant `.` segments, but preserves a lone `.` so it can
 	/// reference the base's parent.
 	///
-	/// Fails if the result is longer than [`Path::MAX_BYTES`], or ends a segment in a lone `\`
-	/// because resolution dropped the escaped `/` after it.
+	/// Fails if the result is longer than [`Path::MAX_BYTES`].
 	///
 	/// # Examples
 	/// ```
@@ -415,7 +421,7 @@ impl Path {
 		let mut segments: Vec<&str> = self.parts().collect();
 		segments.pop();
 
-		for seg in rel.as_str().split('/') {
+		for seg in rel.0.parts() {
 			if seg == "." {
 				continue;
 			} else if seg == ".." {
@@ -425,7 +431,7 @@ impl Path {
 			}
 		}
 
-		// Splitting at an escaped `/` and dropping a segment can strand its `\`.
+		// Whole segments of valid paths rejoin into a valid path, unless it is too long.
 		Path::new(&segments.join("/"))
 	}
 
@@ -443,7 +449,7 @@ impl Path {
 		let mut segments: Vec<&str> = self.parts().collect();
 		segments.pop();
 
-		for seg in rel.as_str().split('/') {
+		for seg in rel.0.parts() {
 			if seg == "." {
 				continue;
 			} else if seg == ".." {
@@ -720,7 +726,7 @@ impl<'a, V> Decode<'a, V> for Patterns {
 /// JSON payload, which itself travels as a track).
 ///
 /// It is spelled like a [`Path`], so a leading, trailing, or doubled `/` or a lone `\` is
-/// refused rather than collapsed. Redundant `.` segments are stripped on creation. A reference
+/// refused rather than collapsed, and an escaped `/` never splits a segment. Redundant `.` segments are stripped on creation. A reference
 /// made only of `.` segments normalizes to `.` rather than empty because `.` resolves to the
 /// base's parent while empty resolves to the base itself. `..` is preserved for resolve time.
 ///
@@ -758,8 +764,8 @@ impl Relative {
 		if !path.parts().any(|seg| seg == ".") {
 			return Ok(Self(path));
 		}
-		// Dropping a `.` after an escaped `/` strands its `\`, so the result is checked again.
-		Ok(Self(Path::new(&normalize_relative_segments(s))?))
+		// Dropping whole segments leaves a valid path no longer than this one.
+		Ok(Self(Path::new(&normalize_relative_segments(&path))?))
 	}
 
 	/// The normalized path as a string slice.
@@ -808,8 +814,8 @@ impl TryFrom<String> for Relative {
 }
 
 // A valid path with at least one `.` segment, without its redundant ones.
-fn normalize_relative_segments(s: &str) -> String {
-	let segments = s.split('/').filter(|seg| *seg != ".").collect::<Vec<_>>().join("/");
+fn normalize_relative_segments(path: &Path) -> String {
+	let segments = path.parts().filter(|seg| *seg != ".").collect::<Vec<_>>().join("/");
 	if segments.is_empty() { ".".to_string() } else { segments }
 }
 
@@ -876,6 +882,32 @@ mod tests {
 		for s in [r"\\", r"a\/b", r"\/a", r"a\\/b", r"a\\\/b", r"\\\\"] {
 			assert_eq!(p(s).as_str(), s);
 		}
+	}
+
+	#[test]
+	fn test_an_escaped_separator_is_content() {
+		// An escaped `/` neither ends nor empties a segment, wherever it sits.
+		for s in [r"\/", r"a\/", r"\/a", r"a\//b", r"\/\/", r"a/\/", r"\//a"] {
+			assert_eq!(p(s).as_str(), s, "refused {s:?}");
+			assert!(p(s).parts().all(|part| !part.is_empty()), "{s:?}");
+		}
+		// A bare one beside it still does.
+		for s in [r"a\///b", r"/\/", r"\//", r"a\\/", r"\\//a"] {
+			assert_eq!(Path::new(s), Err(Error::EmptySegment), "accepted {s:?}");
+		}
+
+		let path = p(r"room/a\/b/.c\/d");
+		assert_eq!(path.parts().collect::<Vec<_>>(), ["room", r"a\/b", r".c\/d"]);
+		assert!(path.has_prefix(&p(r"room/a\/b")));
+		assert!(!path.has_prefix(&p("room/a")));
+		assert_eq!(path.strip_prefix(&p(r"room/a\/b")), Some(p(r".c\/d")));
+		assert!(path.is_hidden());
+		// No field starts with `.`, so nothing hides.
+		assert!(!p(r"a\/.b").is_hidden());
+		assert_eq!(
+			path.parts().map(|part| unescape(part).into_owned()).collect::<Vec<_>>(),
+			["room", "a/b", ".c/d"]
+		);
 	}
 
 	#[test]
@@ -952,11 +984,12 @@ mod tests {
 		let long = p(&format!("{}/tail", "a".repeat(INLINE + 1)));
 		assert_eq!(long.head(1).unwrap().as_str(), "a".repeat(INLINE + 1));
 
-		// No head ends in half an escape, but an escaped `\` before a separator is whole.
+		// An escaped `/` is inside its segment, and an escaped `\` before a separator is whole.
 		let escaped = p(r"a\/b/c\\/d");
-		assert_eq!(escaped.head(1), None);
-		assert_eq!(escaped.head(2), Some(p(r"a\/b")));
-		assert_eq!(escaped.head(3), Some(p(r"a\/b/c\\")));
+		assert_eq!(escaped.head(1), Some(p(r"a\/b")));
+		assert_eq!(escaped.head(2), Some(p(r"a\/b/c\\")));
+		assert_eq!(escaped.head(3), Some(escaped.clone()));
+		assert_eq!(escaped.head(4), None);
 	}
 
 	#[test]
@@ -1088,6 +1121,10 @@ mod tests {
 		assert_eq!(Path::empty().parts().count(), 0);
 		assert_eq!(Path::from_static("foo").parts().collect::<Vec<_>>(), ["foo"]);
 		assert_eq!(Path::from_static("foo/bar").parts().collect::<Vec<_>>(), ["foo", "bar"]);
+		assert_eq!(
+			Path::from_static(r"foo\/bar/baz").parts().rev().collect::<Vec<_>>(),
+			["baz", r"foo\/bar"]
+		);
 	}
 
 	#[test]
@@ -1126,6 +1163,17 @@ mod tests {
 			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, |r, v| Path::decode(r, v)),
 			Err(DecodeError::BoundsExceeded)
 		));
+
+		// An escaped `/` separates nothing, so it never counts against the limit.
+		let escaped = (0..Path::MAX_PARTS)
+			.map(|i| format!(r"{i}\/{i}"))
+			.collect::<Vec<_>>()
+			.join("/");
+		let escaped = Path::new(&escaped).unwrap();
+		assert_eq!(escaped.parts().count(), Path::MAX_PARTS);
+		let mut buf = escaped.encode_bytes(Version::Lite07).unwrap();
+		let decoded = crate::coding::decode_buf(&mut buf, Version::Lite07, |r, v| Path::decode(r, v)).unwrap();
+		assert_eq!(decoded, escaped);
 	}
 
 	#[test]
@@ -1189,8 +1237,9 @@ mod tests {
 		assert_eq!(Relative::new(".").unwrap().as_str(), ".");
 		assert_eq!(Relative::new("./.").unwrap().as_str(), ".");
 		assert_eq!(Relative::new("./foo").unwrap().as_str(), "foo");
-		// Dropping a `.` cannot strand the `\` of an escaped `/` before it.
-		assert_eq!(Relative::new(r"a\/."), Err(Error::InvalidEscape));
+		// A `.` after an escaped `/` is inside its segment, not one of its own.
+		assert_eq!(Relative::new(r"a\/.").unwrap().as_str(), r"a\/.");
+		assert_eq!(Relative::new(r"./a\/.").unwrap().as_str(), r"a\/.");
 		assert_eq!(Relative::new(r"a\\/.").unwrap().as_str(), r"a\\");
 		assert_eq!(Relative::new("foo/./bar").unwrap().as_str(), "foo/bar");
 		assert_eq!(Relative::new("./../foo").unwrap().as_str(), "../foo");
@@ -1271,13 +1320,19 @@ mod tests {
 	}
 
 	#[test]
-	fn test_resolve_refuses_a_stranded_escape() {
-		// Segments split at an escaped `/` too, so popping past one strands its `\`.
-		let base = p(r"a\/b/c");
+	fn test_resolve_walks_whole_escaped_segments() {
+		// `a\/b` is one segment, so `..` pops all of it.
+		let base = p(r"a\/b/c/d");
 		let up = Relative::new("..").unwrap();
-		assert_eq!(base.resolve(&up), Err(Error::InvalidEscape));
-		assert_eq!(base.try_resolve(&up), None);
-		assert_eq!(base.resolve(&Relative::new("d").unwrap()).unwrap().as_str(), r"a\/b/d");
+		assert_eq!(base.resolve(&up), Ok(p(r"a\/b")));
+		assert_eq!(base.try_resolve(&Relative::new("../..").unwrap()), Some(Path::empty()));
+		assert_eq!(base.try_resolve(&Relative::new("../../..").unwrap()), None);
+		assert_eq!(base.resolve(&Relative::new(r"x\/y").unwrap()), Ok(p(r"a\/b/c/x\/y")));
+
+		let target = p(r"a\/b/e\/f");
+		let rel = target.relative(&base).unwrap();
+		assert_eq!(rel.as_str(), r"../e\/f");
+		assert_eq!(base.resolve(&rel), Ok(target));
 	}
 
 	#[test]

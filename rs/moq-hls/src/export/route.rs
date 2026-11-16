@@ -9,8 +9,8 @@ use super::segments;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Route {
-	/// The broadcast path, percent-decoded. An embedder that scopes its origin rewrites
-	/// this relative to that scope before looking it up.
+	/// The broadcast path, each URL segment percent-decoded and escaped into one path segment.
+	/// An embedder that scopes its origin rewrites this relative to that scope before looking it up.
 	pub broadcast: String,
 	/// The include ID and publisher instance, when the resource belongs to one.
 	pub include: Option<Include>,
@@ -87,9 +87,9 @@ impl Route {
 	///
 	/// The broadcast occupies every segment before the resource suffix, which for every
 	/// resource but the master and manifest starts with the `@{instance}` segment. Each segment is
-	/// percent-decoded. An instance or rendition can contain an encoded `/`, but a broadcast
-	/// segment cannot, so an encoded separator cannot smuggle a different broadcast past a
-	/// policy check on [`broadcast`](Self::broadcast).
+	/// percent-decoded. A broadcast segment's decoded bytes are one path segment's content, so an
+	/// encoded `/` is escaped into its segment rather than splitting it, and cannot smuggle a
+	/// different broadcast past a policy check on [`broadcast`](Self::broadcast).
 	pub fn parse(path: &str) -> Option<Self> {
 		let mut parts = path
 			.strip_prefix('/')?
@@ -170,9 +170,10 @@ impl Route {
 			_ => return None,
 		};
 
-		if broadcast.is_empty() || broadcast.iter().any(|part| part.contains('/')) {
+		if broadcast.is_empty() {
 			return None;
 		}
+		let broadcast: Vec<_> = broadcast.iter().map(|part| moq_net::path::escape(part)).collect();
 		Some(Self {
 			broadcast: broadcast.join("/"),
 			include,
@@ -309,9 +310,17 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_encoded_broadcast_separators() {
-		assert!(Route::parse("/project/private%2F/master.m3u8").is_none());
-		assert!(Route::parse("/project%2Fprivate/master.m3u8").is_none());
+	fn an_encoded_separator_stays_in_its_broadcast_segment() {
+		for (url, broadcast) in [
+			("/project/private%2F/master.m3u8", r"project/private\/"),
+			("/project%2Fprivate/master.m3u8", r"project\/private"),
+			("/a%5Cb/master.m3u8", r"a\\b"),
+		] {
+			let route = Route::parse(url).unwrap();
+			assert_eq!(route.broadcast, broadcast, "{url}");
+			let path = moq_net::Path::new(&route.broadcast).unwrap();
+			assert!(!path.has_prefix(&moq_net::Path::from_static("project/private")), "{url}");
+		}
 	}
 
 	#[test]
@@ -340,7 +349,8 @@ mod tests {
 		let own = Route::parse("/room/@parent/include/id/@child/video/main/media.m3u8").unwrap();
 		assert_eq!(own.broadcast, "room/@parent/include/id");
 		assert!(own.include.is_none());
-		assert!(Route::parse("/room%2Flive/@parent/include/id/video/main/@child/media.m3u8").is_none());
+		let escaped = Route::parse("/room%2Flive/@parent/include/id/video/main/@child/media.m3u8").unwrap();
+		assert_eq!(escaped.broadcast, r"room\/live");
 		// Include-shaped but for the child slot: an ordinary URL on a longer broadcast path.
 		let own = Route::parse("/room/@parent/include/id/video/@run/audio/seg/media.m3u8").unwrap();
 		assert_eq!(own.broadcast, "room/@parent/include/id/video");

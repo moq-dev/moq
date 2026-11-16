@@ -1335,7 +1335,7 @@ impl NodePublisher {
 			let Some(rest) = entry.path.strip_prefix(&path) else {
 				continue;
 			};
-			let child = rest.as_str().split('/').next().filter(|child| !child.is_empty());
+			let child = rest.parts().next();
 			track.add(entry, child, tick);
 		}
 		track.publish(tick, stamp);

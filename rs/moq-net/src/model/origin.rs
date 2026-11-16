@@ -2096,27 +2096,16 @@ impl Default for OriginScope {
 
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
+///
+/// A pattern's literal segments are spelled like a path's, so a head fails only when it
+/// is too long for a path, and then it asks for nothing.
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<Path> {
-	let mut heads: Vec<Path> = allowed.iter().filter_map(|pattern| covering(pattern.head())).collect();
+	let mut heads: Vec<Path> = allowed.iter().filter_map(|pattern| Path::new(pattern.head()).ok()).collect();
 	heads.sort();
 	heads.dedup();
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
-}
-
-/// The nearest path at or above a pattern head.
-///
-/// A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
-/// falls back to its parent. A head too long for a path covers none, so it asks for nothing.
-fn covering(mut head: &str) -> Option<Path> {
-	loop {
-		match Path::new(head) {
-			Ok(path) => return Some(path),
-			Err(crate::path::Error::InvalidEscape) => head = head.rsplit_once('/').map_or("", |(parent, _)| parent),
-			Err(_) => return None,
-		}
-	}
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.

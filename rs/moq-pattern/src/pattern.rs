@@ -3,6 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use super::Patterns;
+use crate::parts::{is_segment, parts};
 
 /// Why an exact pattern intersection could not be represented safely.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,9 +29,9 @@ impl std::error::Error for IntersectionError {}
 pub enum InvalidPattern {
 	/// A segment is empty: a leading, trailing, or doubled `/`.
 	EmptySegment,
-	/// A segment is malformed: a literal, prefix, or suffix contains `/` or `*`, a
-	/// partial has neither prefix nor suffix (that is a wildcard), or a segment has
-	/// more than one `*`, which is reserved.
+	/// A segment is malformed: a literal, prefix, or suffix contains `*`, a bare `/`, or a
+	/// `\` that escapes neither `\` nor `/`, a partial has neither prefix nor suffix (that is
+	/// a wildcard), or a segment has more than one `*`, which is reserved.
 	InvalidSegment(String),
 	/// More than one `**`.
 	MultipleGlobstars,
@@ -55,12 +56,14 @@ impl std::error::Error for InvalidPattern {}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Segment {
-	/// Matches exactly this segment. Never empty, and never contains `/` or `*`.
+	/// Matches exactly this segment, spelled as in a path: never empty, no `*`, and every
+	/// `/` or `\` it holds escaped by a `\`.
 	Literal(String),
 	/// `*`: matches any one segment.
 	Wildcard,
 	/// `prefix*suffix`: matches any one segment that starts with `prefix` and ends
-	/// with `suffix`, without the two overlapping. Either may be empty, not both.
+	/// with `suffix`, without the two overlapping. Either may be empty, not both, and each
+	/// is spelled like a [`Literal`](Self::Literal).
 	Partial {
 		/// What the segment must start with; may be empty.
 		prefix: String,
@@ -78,15 +81,14 @@ impl Segment {
 			"" => Err(InvalidPattern::EmptySegment),
 			"*" => Ok(Self::Wildcard),
 			"**" => Ok(Self::Globstar),
-			_ if text.contains('/') => Err(InvalidPattern::InvalidSegment(text.to_string())),
 			_ => match text.split_once('*') {
-				None => Ok(Self::Literal(text.to_string())),
-				Some((prefix, suffix)) if !suffix.contains('*') => Ok(Self::Partial {
+				None if is_segment(text) => Ok(Self::Literal(text.to_string())),
+				Some((prefix, suffix)) if !suffix.contains('*') && is_segment(prefix) && is_segment(suffix) => Ok(Self::Partial {
 					prefix: prefix.to_string(),
 					suffix: suffix.to_string(),
 				}),
-				// More than one star in a segment is reserved.
-				Some(_) => Err(InvalidPattern::InvalidSegment(text.to_string())),
+				// More than one star in a segment is reserved, and so is a malformed escape.
+				_ => Err(InvalidPattern::InvalidSegment(text.to_string())),
 			},
 		}
 	}
@@ -334,13 +336,15 @@ impl Pattern {
 		for (i, segment) in segments.iter().enumerate() {
 			match segment {
 				Segment::Literal(literal) if literal.is_empty() => return Err(InvalidPattern::EmptySegment),
-				Segment::Literal(literal) if literal.contains(['*', '/']) => {
+				Segment::Literal(literal) if literal.contains('*') || !is_segment(literal) => {
 					return Err(InvalidPattern::InvalidSegment(literal.clone()));
 				}
 				Segment::Partial { prefix, suffix }
 					if (prefix.is_empty() && suffix.is_empty())
-						|| prefix.contains(['*', '/'])
-						|| suffix.contains(['*', '/']) =>
+						|| prefix.contains('*')
+						|| suffix.contains('*')
+						|| !is_segment(prefix)
+						|| !is_segment(suffix) =>
 				{
 					return Err(InvalidPattern::InvalidSegment(format!("{prefix}*{suffix}")));
 				}
@@ -790,9 +794,9 @@ impl Pattern {
 }
 
 /// The non-empty segments of a path: leading, trailing, and doubled slashes are dropped,
-/// matching how a broadcast path is normalized.
+/// matching how a broadcast path is normalized. An escaped `/` never splits a segment.
 fn split_path(path: &str) -> impl DoubleEndedIterator<Item = &str> {
-	path.split('/').filter(|part| !part.is_empty())
+	parts(path).filter(|part| !part.is_empty())
 }
 
 /// The segments of a path as literals, leaving validation to [`Pattern::new`].
@@ -811,7 +815,7 @@ impl FromStr for Pattern {
 		if text.is_empty() {
 			return Self::new([]);
 		}
-		text.split('/')
+		parts(text)
 			// One past the limit is enough for `new` to refuse, without splitting a
 			// peer's megabytes of `a/a/...` into segments first.
 			.take(Self::MAX_SEGMENTS + 1)
@@ -983,6 +987,94 @@ mod tests {
 			Pattern::new([Segment::Literal(String::new())]),
 			Err(InvalidPattern::EmptySegment)
 		);
+	}
+
+	#[test]
+	fn an_escaped_separator_stays_in_its_segment() {
+		let grant = pattern(r"room/a\/b/*");
+		assert_eq!(
+			grant.segments(),
+			&[
+				Segment::Literal("room".into()),
+				Segment::Literal(r"a\/b".into()),
+				Segment::Wildcard,
+			]
+		);
+		assert_eq!(grant.head(), r"room/a\/b");
+		assert!(grant.matches(r"room/a\/b/cam"));
+		assert!(!grant.matches("room/a/b/cam"));
+		// `*` takes the whole field, never half of it.
+		assert!(pattern("room/*").matches(r"room/a\/b"));
+		assert!(!pattern("room/*/*").matches(r"room/a\/b"));
+		assert!(pattern(r"a\/*").matches(r"a\/b\/c"));
+		assert!(pattern(r"*\\").matches(r"x\\"));
+		assert!(!pattern(r"*\\").matches(r"x\\\/"));
+		assert!(Pattern::literal(r"a\/b").unwrap().matches(r"a\/b"));
+		assert_eq!(pattern(r"x/**").rebase(r"x/a\/b").len(), 1);
+
+		for bad in [r"a\b", r"a\", r"a\*", r"\*b", r"a\\\"] {
+			assert!(
+				matches!(bad.parse::<Pattern>(), Err(InvalidPattern::InvalidSegment(_))),
+				"{bad:?}"
+			);
+		}
+		assert!(Pattern::literal(r"a\b").is_err());
+	}
+
+	/// Matching, containment, and intersection read an escaped segment exactly as they would
+	/// its content, over every short field of `a`, `\`, and `/`.
+	#[test]
+	fn escaped_segments_match_by_content() {
+		let escape = |field: &str| field.replace('\\', r"\\").replace('/', r"\/");
+		let mut fields = vec![String::new()];
+		let mut all = Vec::new();
+		for _ in 0..4 {
+			fields = fields
+				.iter()
+				.flat_map(|field| ['a', '\\', '/'].map(|c| format!("{field}{c}")))
+				.collect();
+			all.extend(fields.iter().cloned());
+		}
+		let short: Vec<&String> = all.iter().filter(|field| field.chars().count() <= 2).collect();
+		let partials: Vec<(String, String, Segment)> = short
+			.iter()
+			.chain(std::iter::once(&&String::new()))
+			.flat_map(|prefix| short.iter().map(move |suffix| (prefix.to_string(), suffix.to_string())))
+			.filter(|(prefix, suffix)| !prefix.is_empty() || !suffix.is_empty())
+			.map(|(prefix, suffix)| {
+				let segment = Segment::Partial {
+					prefix: escape(&prefix),
+					suffix: escape(&suffix),
+				};
+				(prefix, suffix, segment)
+			})
+			.collect();
+
+		for (prefix, suffix, segment) in &partials {
+			let one = Pattern::new([segment.clone()]).unwrap();
+			for field in &all {
+				let want = field.len() >= prefix.len() + suffix.len()
+					&& field.starts_with(prefix.as_str())
+					&& field.ends_with(suffix.as_str());
+				assert_eq!(one.matches(&escape(field)), want, "{one} on {field:?}");
+			}
+		}
+
+		for (_, _, a) in partials.iter().step_by(7) {
+			let a = Pattern::new([a.clone()]).unwrap();
+			for (_, _, b) in &partials {
+				let b = Pattern::new([b.clone()]).unwrap();
+				let both = a.intersect(&b).unwrap();
+				for field in &all {
+					let path = escape(field);
+					let want = a.matches(&path) && b.matches(&path);
+					assert_eq!(both.matches(&path), want, "{a} with {b} on {field:?}");
+					if a.contains(&b) {
+						assert!(!b.matches(&path) || a.matches(&path), "{a} contains {b} but not {field:?}");
+					}
+				}
+			}
+		}
 	}
 
 	#[test]

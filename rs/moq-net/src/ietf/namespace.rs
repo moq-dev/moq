@@ -1,31 +1,5 @@
 use crate::{Path, coding::*};
 
-/// The escaped text of each tuple field in `path`, split at every `/` no escape covers.
-///
-/// `/` and `\` are ASCII, so they never appear inside a multi-byte character and the
-/// scan can step over bytes.
-fn escaped_fields(path: &str) -> impl Iterator<Item = &str> {
-	let mut rest = (!path.is_empty()).then_some(path);
-	std::iter::from_fn(move || {
-		let s = rest?;
-		let bytes = s.as_bytes();
-		let mut i = 0;
-		while i < bytes.len() {
-			match bytes[i] {
-				b'/' => {
-					rest = Some(&s[i + 1..]);
-					return Some(&s[..i]);
-				}
-				// The escaped byte is never a separator.
-				b'\\' => i += 2,
-				_ => i += 1,
-			}
-		}
-		rest = None;
-		Some(s)
-	})
-}
-
 /// A field's bytes with its escapes undone, in pieces. Every `\` in a valid path escapes
 /// the `\` or `/` after it.
 fn unescape(field: &str) -> impl Iterator<Item = &[u8]> {
@@ -50,10 +24,9 @@ fn unescaped_len(field: &str) -> usize {
 	unescape(field).map(<[u8]>::len).sum()
 }
 
-// Every `\` and `/` in a field is escaped, the only spelling a path accepts, so every path
-// returns from its own tuple unchanged. A field ending in `/` escapes to a path with an empty
-// segment, so it is refused, as is a namespace whose separators and escapes push its path
-// past `Path::MAX_BYTES`.
+// Every `\` and `/` in a field is escaped, the only spelling a path accepts, so each field is
+// one path segment and every path returns from its own tuple unchanged. A namespace whose
+// separators and escapes push its path past `Path::MAX_BYTES` is refused.
 fn from_tuple(parts: &[&str]) -> Result<Path, crate::path::Error> {
 	// Joined on the stack, which `arrayvec` leaves uninitialized, so the path's own copy
 	// is the only allocation, and a short path makes none.
@@ -82,7 +55,7 @@ pub fn encode_namespace(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), Enc
 /// Encode a Full Track Name: a Track Namespace, then a Track Name, at most 4096 bytes together.
 pub fn encode_track(w: &mut Encoder<'_>, namespace: &Path, name: &str) -> Result<(), EncodeError> {
 	check_fields(namespace)?;
-	if escaped_fields(namespace.as_str()).map(unescaped_len).sum::<usize>() + name.len() > MAX_BYTES {
+	if namespace.parts().map(unescaped_len).sum::<usize>() + name.len() > MAX_BYTES {
 		return Err(BoundsExceeded.into());
 	}
 	write_fields(w, namespace)?;
@@ -90,9 +63,10 @@ pub fn encode_track(w: &mut Encoder<'_>, namespace: &Path, name: &str) -> Result
 }
 
 fn check_fields(namespace: &Path) -> Result<(), EncodeError> {
-	// The fields drop the path's separators and escapes, so `Path::MAX_BYTES` already bounds
-	// their bytes. A path's depth is unbounded until it reaches a wire.
-	if escaped_fields(namespace.as_str()).count() > Path::MAX_PARTS {
+	// Each segment is one field, and the fields drop the path's separators and escapes, so
+	// `Path::MAX_BYTES` already bounds their bytes. A path's depth is unbounded until it
+	// reaches a wire.
+	if namespace.parts().count() > Path::MAX_PARTS {
 		return Err(BoundsExceeded.into());
 	}
 	Ok(())
@@ -100,8 +74,8 @@ fn check_fields(namespace: &Path) -> Result<(), EncodeError> {
 
 /// Write each field straight from the path's text, so encoding copies nothing first.
 fn write_fields(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), EncodeError> {
-	w.varint(escaped_fields(namespace.as_str()).count() as u64)?;
-	for field in escaped_fields(namespace.as_str()) {
+	w.varint(namespace.parts().count() as u64)?;
+	for field in namespace.parts() {
 		w.varint(unescaped_len(field) as u64)?;
 		for piece in unescape(field) {
 			w.slice(piece);
@@ -119,7 +93,7 @@ const _: () = assert!(Path::MAX_BYTES <= MAX_BYTES);
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
 /// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
-/// more than 32 fields, an empty field, a field ending in `/`, or more than 4096 bytes.
+/// more than 32 fields, an empty field, or more than 4096 bytes.
 /// So does a namespace too long as a [`Path`], which the draft allows but no path can hold.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path, usize), DecodeError> {
 	let count = r.varint()?;
@@ -170,9 +144,8 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 	if matches!(version, super::Version::Draft18) {
 		return None;
 	}
-	// Reserved literals contain no escapes. Comparing the first escaped field keeps
-	// a slash within a field from becoming a reserved name.
-	if !matches!(namespace.as_str().split('/').next(), Some("." | ".session")) {
+	// Reserved literals contain no escapes, so the first field compares as written.
+	if !matches!(namespace.parts().next(), Some("." | ".session")) {
 		return None;
 	}
 	Some(super::RequestError::refuse(
@@ -310,20 +283,37 @@ mod tests {
 	}
 
 	#[test]
-	fn slashes_at_part_boundaries() {
-		// A leading `/` escapes to a non-empty `\` segment.
-		let tuple = encode_tuple(&["/foo", "/bar"]);
-		let decoded = decode_ns(&tuple);
-		assert_eq!(decoded.as_str(), r"\/foo/\/bar");
-		assert_eq!(encode_path(&decoded), tuple);
-
-		// A trailing `/` escapes to an empty segment, which every later `Path` operation
-		// assumes away, such as stats grouping a path by its leading segments.
-		for fields in [&["/foo", "bar/", "/baz/"][..], &["foo/", "bar"], &["/"], &["a//"]] {
+	fn slashes_at_field_boundaries() {
+		// A `/` anywhere in a field escapes to content of one segment, never an empty one.
+		for fields in [
+			&["/foo", "/bar"][..],
+			&["/foo", "bar/", "/baz/"],
+			&["foo/", "bar"],
+			&["/"],
+			&["a//"],
+			&["//", "/"],
+		] {
 			let tuple = encode_tuple(fields);
-			let err = decode_namespace(&mut Decoder::new(&tuple, FORM)).unwrap_err();
-			assert!(matches!(err, DecodeError::InvalidValue), "{fields:?}: {err:?}");
+			let decoded = decode_ns(&tuple);
+			assert_eq!(decoded.parts().count(), fields.len(), "{fields:?}");
+			assert_eq!(
+				decoded.parts().map(|part| crate::path::unescape(part)).collect::<Vec<_>>(),
+				fields,
+			);
+			assert_eq!(encode_path(&decoded), tuple, "{fields:?}");
 		}
+		assert_eq!(decode_ns(&encode_tuple(&["a//", "b"])).as_str(), r"a\/\//b");
+	}
+
+	/// A namespace of 32 fields stays 32 segments however many of them hold a `/`.
+	#[test]
+	fn escaped_separators_never_add_fields() {
+		let fields: Vec<String> = (0..Path::MAX_PARTS).map(|i| format!("{i}/{i}")).collect();
+		let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+		let tuple = encode_tuple(&fields);
+		let decoded = decode_ns(&tuple);
+		assert_eq!(decoded.parts().count(), Path::MAX_PARTS);
+		assert_eq!(encode_path(&decoded), tuple);
 	}
 
 	/// Draft-22 section 8.7: every field holds a byte, and a namespace or a whole Full Track
