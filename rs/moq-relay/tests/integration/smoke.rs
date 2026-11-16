@@ -390,6 +390,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 /// split the field, and each wire reads back the same broadcast the other published.
 #[tokio::test]
 async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
+	kio::clock::host_time(); // a real relay on real sockets
 	let lite: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 	let ietf: moq_net::Version = "moq-transport-22".parse().unwrap();
 	let (port, web_handle) = spawn_public_relay(vec![lite, ietf], vec!["room/*".parse().unwrap()]).await;

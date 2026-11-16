@@ -1416,10 +1416,10 @@ PYCODE
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
                     ffmpeg -hide_banner -loglevel error -copyts -i - \
-                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
+                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/${broadcast//[^[:alnum:]._-]/-}.raw" \
                         -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
                         -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
-                [[ -s "$HARNESS_RUN/$broadcast.raw" ]] || return
+                [[ -s "$HARNESS_RUN/${broadcast//[^[:alnum:]._-]/-}.raw" ]] || return
                 python3 - "$audio_out" "$codecs" <<'PYCODE'
 import struct, sys
 out, codec = sys.argv[1:]

@@ -8,9 +8,10 @@
  * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it.
  * A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
  * either one is spelled, and any other `\` is refused. An escaped `/` never splits a segment:
- * `a\/b` is one segment, so it counts once against {@link MAX_PARTS}, a prefix never ends
- * inside it, and a pattern's `*` matches all of it. {@link parts} is the one walk every
- * segment reading goes through.
+ * `a\/b` is one segment, a prefix never ends inside it, and a pattern's `*` matches all of it.
+ * {@link parts} is the one walk every segment reading goes through. Until the previous release
+ * is gone, an escaped `/` still counts against {@link MAX_PARTS}, and one beside a bare `/` or at
+ * the end is refused, since that release splits at every `/`.
  * The empty path is the root, which prefixes every path; a prefix needs no trailing slash.
  * A path names a point in the origin's tree from its root. The same type names an exact
  * broadcast and the prefix a route or announcement covers, so a broadcast's own path is
@@ -99,6 +100,10 @@ function spelling(path: string): string | undefined {
 	if (/\\(?!\/)/.test(path.replaceAll("\\\\", ""))) {
 		return "path contains a `\\` that escapes neither `\\` nor `/`";
 	}
+	// TEMPORARY MIGRATION, delete at the next version cut: the previous release splits at every
+	// `/`, escaped or not, and trims and collapses the empty segments that leaves, so it would
+	// re-spell `a\//b` as `a\/b`, another broadcast's path. Refuse what it would re-spell.
+	if (path.endsWith("/") || path.includes("//")) return "path contains an empty segment";
 	// An escaped `/` is content, so only a bare one can leave a segment empty.
 	if (split(path).includes("")) return "path contains an empty segment";
 	return undefined;
@@ -124,14 +129,16 @@ export function head(path: Valid, n: number): Valid | undefined {
  * Throws when the path has an empty segment or is too deep or too long; use at wire decode sites.
  */
 export function decode(raw: string): Valid {
-	return encode(from(raw));
+	// The limits first, so a hostile path is refused before its spelling is split.
+	encode(raw as Valid);
+	return from(raw);
 }
 
 /** Like {@link decode}, but `undefined` for an invalid path rather than a throw. @internal */
 export function tryDecode(raw: string): Valid | undefined {
-	if (spelling(raw) !== undefined) return undefined;
 	const path = raw as Valid;
-	return check(path) === undefined ? path : undefined;
+	if (check(path) !== undefined) return undefined;
+	return spelling(raw) === undefined ? path : undefined;
 }
 
 /**
@@ -148,15 +155,13 @@ export function encode(path: Valid): Valid {
 
 /** Why `path` breaks the wire limits, or undefined when it fits. @internal */
 export function check(path: Valid): string | undefined {
-	if (path.includes("\\")) {
-		// One past the limit is enough to refuse, without splitting a hostile path further.
-		if (split(path, MAX_PARTS + 1).length > MAX_PARTS) return `path exceeds ${MAX_PARTS} parts`;
-	} else {
-		// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
-		let count = path === "" ? 0 : 1;
-		for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
-			if (++count > MAX_PARTS) return `path exceeds ${MAX_PARTS} parts`;
-		}
+	// TEMPORARY MIGRATION, delete at the next version cut and count `parts` instead: the previous
+	// release splits at every `/`, escaped or not, and ends the whole announce stream on a path
+	// past 32 parts by that count, so until it is gone the limit counts every `/`.
+	// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
+	let count = path === "" ? 0 : 1;
+	for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
+		if (++count > MAX_PARTS) return `path exceeds ${MAX_PARTS} parts`;
 	}
 	// A UTF-16 unit is at most 3 UTF-8 bytes, so only a long path needs encoding to measure.
 	if (path.length > MAX_BYTES / 3 && utf8.encode(path).length > MAX_BYTES) {

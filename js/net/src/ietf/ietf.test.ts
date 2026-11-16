@@ -446,13 +446,23 @@ test("Namespace: literal backslash round trips", async () => {
 
 test("Namespace: slashes at field boundaries", async () => {
 	// A slash anywhere in a field escapes to content of one segment, never an empty one.
-	for (const fields of [["/foo", "/bar"], ["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"], ["//", "/"]]) {
+	for (const fields of [
+		["/foo", "/bar"],
+		["/foo", "b/ar", "/baz"],
+	]) {
 		const tuple = await encodeNamespaceTuple(fields);
 		const decoded = await decodeNamespace(tuple);
 		expect(Path.parts(decoded).map(Path.unescape)).toEqual(fields);
 		expect(await encodeNamespace(decoded)).toEqual(tuple);
 	}
-	expect(await decodeNamespace(await encodeNamespaceTuple(["a//", "b"]))).toBe("a\\/\\//b" as Path.Valid);
+	expect(await decodeNamespace(await encodeNamespaceTuple(["/a/b", "c"]))).toBe("\\/a\\/b/c" as Path.Valid);
+
+	// TEMPORARY MIGRATION, delete at the next version cut and move these up: a field ending in a
+	// slash, or holding `//`, spells a bare slash beside an escaped one, which the previous release
+	// would trim or collapse into another path, so it is refused until it is gone.
+	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"], ["//", "/"]]) {
+		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow();
+	}
 
 	// A namespace of 32 fields stays 32 segments however many of them hold a slash.
 	const fields = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}/${i}`);

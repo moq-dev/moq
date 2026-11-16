@@ -27,9 +27,14 @@ test("from refuses a backslash that escapes neither a backslash nor a slash", ()
 
 test("an escaped slash is content, never a separator", () => {
 	// It neither ends nor empties a segment, wherever it sits.
-	for (const raw of ["\\/", "a\\/", "\\/a", "a\\//b", "\\/\\/", "a/\\/", "\\//a"]) {
+	for (const raw of ["\\/a", "\\/\\/a", "a/\\/b"]) {
 		expect(Path.from(raw)).toBe(raw as Path.Valid);
 		expect(Path.parts(Path.from(raw)).includes("")).toBe(false);
+	}
+	// TEMPORARY MIGRATION, delete at the next version cut and move these up: the previous
+	// release would trim or collapse the bare `/` an escaped one leaves at an end or doubled.
+	for (const raw of ["\\/", "a\\/", "a\\//b", "\\/\\/", "a/\\/", "\\//a"]) {
+		expect(() => Path.from(raw)).toThrow("empty segment");
 	}
 	// A bare one beside it still does.
 	for (const raw of ["a\\///b", "/\\/", "\\//", "a\\\\/", "\\\\//a"]) {
@@ -45,10 +50,11 @@ test("an escaped slash is content, never a separator", () => {
 	expect(Path.head(path, 2)).toBe(Path.from("room/a\\/b"));
 	expect(Path.head(path, 4)).toBeUndefined();
 
-	// 32 segments stay 32 however many escaped slashes they hold.
+	// TEMPORARY MIGRATION, delete at the next version cut and expect 32 segments to decode: the
+	// previous release counts every `/`, so an escaped one still counts against the limit.
 	const deep = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}\\/${i}`).join("/");
-	expect(Path.decode(deep)).toBe(deep as Path.Valid);
-	expect(() => Path.decode(`${deep}/x`)).toThrow("parts");
+	expect(Path.parts(Path.from(deep))).toHaveLength(Path.MAX_PARTS);
+	expect(() => Path.decode(deep)).toThrow("parts");
 });
 
 test("resolve walks whole escaped segments", () => {
@@ -320,7 +326,7 @@ test("decode never allocates per slash of a hostile path", () => {
 	const split = spyOn(String.prototype, "split");
 	const indexOf = spyOn(String.prototype, "indexOf");
 	try {
-		expect(() => Path.decode(slashes)).toThrow("empty segment");
+		expect(() => Path.decode(slashes)).toThrow("parts");
 		indexOf.mockClear();
 		let error: unknown;
 		try {

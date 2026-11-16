@@ -54,7 +54,7 @@ fn resolve(base: Option<&Path>, path: PathRef) -> Result<Option<Path>, Error> {
 		(false, true) => Path::new(head),
 		(false, false) => Path::concat(head, path.rest.as_str()),
 	};
-	Ok(suffix.ok().filter(|suffix| suffix.parts().count() <= Path::MAX_PARTS))
+	Ok(suffix.ok().filter(|suffix| suffix.depth() <= Path::MAX_PARTS))
 }
 
 /// The first `keep` segments of `path`, or `None` if it has fewer.

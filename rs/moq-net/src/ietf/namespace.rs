@@ -26,7 +26,8 @@ fn unescaped_len(field: &str) -> usize {
 
 // Every `\` and `/` in a field is escaped, the only spelling a path accepts, so each field is
 // one path segment and every path returns from its own tuple unchanged. A namespace whose
-// separators and escapes push its path past `Path::MAX_BYTES` is refused.
+// separators and escapes push its path past `Path::MAX_BYTES` is refused, as, until the previous
+// release is gone, is a field ending in `/` or holding `//`, which `Path::new` refuses.
 fn from_tuple(parts: &[&str]) -> Result<Path, crate::path::Error> {
 	// Joined on the stack, which `arrayvec` leaves uninitialized, so the path's own copy
 	// is the only allocation, and a short path makes none.
@@ -93,7 +94,8 @@ const _: () = assert!(Path::MAX_BYTES <= MAX_BYTES);
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
 /// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
-/// more than 32 fields, an empty field, or more than 4096 bytes.
+/// more than 32 fields, an empty field, a field ending in `/` or holding `//` (until the previous
+/// release is gone, see `Path::new`), or more than 4096 bytes.
 /// So does a namespace too long as a [`Path`], which the draft allows but no path can hold.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path, usize), DecodeError> {
 	let count = r.varint()?;
@@ -285,14 +287,7 @@ mod tests {
 	#[test]
 	fn slashes_at_field_boundaries() {
 		// A `/` anywhere in a field escapes to content of one segment, never an empty one.
-		for fields in [
-			&["/foo", "/bar"][..],
-			&["/foo", "bar/", "/baz/"],
-			&["foo/", "bar"],
-			&["/"],
-			&["a//"],
-			&["//", "/"],
-		] {
+		for fields in [&["/foo", "/bar"][..], &["/foo", "b/ar", "/baz"]] {
 			let tuple = encode_tuple(fields);
 			let decoded = decode_ns(&tuple);
 			assert_eq!(decoded.parts().count(), fields.len(), "{fields:?}");
@@ -305,10 +300,27 @@ mod tests {
 			);
 			assert_eq!(encode_path(&decoded), tuple, "{fields:?}");
 		}
-		assert_eq!(decode_ns(&encode_tuple(&["a//", "b"])).as_str(), r"a\/\//b");
+		assert_eq!(decode_ns(&encode_tuple(&["/a/b", "c"])).as_str(), r"\/a\/b/c");
+
+		// TEMPORARY MIGRATION, delete at the next version cut and move these up: a field ending
+		// in `/`, or holding `//`, spells a bare `/` beside an escaped one, which the previous
+		// release would trim or collapse into another path, so it is refused until it is gone.
+		for fields in [
+			&["/foo", "bar/", "/baz/"][..],
+			&["foo/", "bar"],
+			&["/"],
+			&["a//"],
+			&["//", "/"],
+		] {
+			let tuple = encode_tuple(fields);
+			let err = decode_namespace(&mut Decoder::new(&tuple, FORM)).unwrap_err();
+			assert!(matches!(err, DecodeError::InvalidValue), "{fields:?}: {err:?}");
+		}
 	}
 
-	/// A namespace of 32 fields stays 32 segments however many of them hold a `/`.
+	/// A namespace of 32 fields stays 32 segments however many of them hold a `/`. Until the
+	/// previous release is gone, `Path::depth` still counts each escaped `/`, so an origin
+	/// refuses to publish this one and no lite peer is ever sent it.
 	#[test]
 	fn escaped_separators_never_add_fields() {
 		let fields: Vec<String> = (0..Path::MAX_PARTS).map(|i| format!("{i}/{i}")).collect();

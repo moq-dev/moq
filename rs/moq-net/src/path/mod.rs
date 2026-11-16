@@ -97,6 +97,12 @@ fn validate(s: &str) -> Result<(), Error> {
 			_ => return Err(Error::InvalidEscape),
 		}
 	}
+	// TEMPORARY MIGRATION, delete at the next version cut: the previous release splits at every
+	// `/`, escaped or not, and trims and collapses the empty segments that leaves, so it would
+	// re-spell `a\//b` as `a\/b`, another broadcast's path. Refuse what it would re-spell.
+	if s.ends_with('/') || s.contains("//") {
+		return Err(Error::EmptySegment);
+	}
 	// An escaped `/` is content, so only a bare one can leave a segment empty.
 	match parts(s).any(str::is_empty) {
 		true => Err(Error::EmptySegment),
@@ -113,8 +119,9 @@ fn validate(s: &str) -> Result<(), Error> {
 /// [`Path::new`] refuses a leading, trailing, or doubled `/` rather than collapsing it.
 /// A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
 /// either one is spelled, and any other `\` is refused. An escaped `/` never splits a segment:
-/// `a\/b` is one segment, so it counts once against [`Path::MAX_PARTS`], a prefix never ends
-/// inside it, and a pattern's `*` matches all of it.
+/// `a\/b` is one segment, a prefix never ends inside it, and a pattern's `*` matches all of it.
+/// Until the previous release is gone, an escaped `/` still counts against [`Path::MAX_PARTS`],
+/// and one beside a bare `/` or at the end is refused, since that release splits at every `/`.
 /// A path is at most [`Path::MAX_BYTES`] long. The empty path has no segments; it is the
 /// origin's root and prefixes every other path. The same type names an exact broadcast
 /// and the prefix a route or announcement covers, so a broadcast's own path is the prefix
@@ -280,6 +287,16 @@ impl Path {
 			end += parts.next()?.len() + usize::from(i > 0);
 		}
 		Some(end)
+	}
+
+	/// How deep the path counts against [`Path::MAX_PARTS`].
+	///
+	/// TEMPORARY MIGRATION, delete at the next version cut (and count [`Path::parts`] instead):
+	/// the previous release splits at every `/`, escaped or not, and its decoder refuses a
+	/// path past 32 parts by that count by ending the whole announce stream. So until it is
+	/// gone, the limit counts every `/`, which is never fewer than the segments.
+	pub(crate) fn depth(&self) -> usize {
+		self.as_str().split_terminator('/').count()
 	}
 
 	/// Iterate over the segments of the path, split only at a `/` no `\` escapes, each still
@@ -666,7 +683,7 @@ impl<'a, V> Decode<'a, V> for Path {
 	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		// Borrowed from the wire bytes, so the path's own copy is the only one.
 		let path = Path::new(r.str()?)?;
-		if path.parts().count() > Path::MAX_PARTS {
+		if path.depth() > Path::MAX_PARTS {
 			return Err(DecodeError::BoundsExceeded);
 		}
 		Ok(path)
@@ -675,7 +692,7 @@ impl<'a, V> Decode<'a, V> for Path {
 
 impl<V> Encode<V> for Path {
 	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-		if self.parts().count() > Path::MAX_PARTS {
+		if self.depth() > Path::MAX_PARTS {
 			return Err(EncodeError::BoundsExceeded);
 		}
 		w.string(self.as_str())
@@ -887,9 +904,15 @@ mod tests {
 	#[test]
 	fn test_an_escaped_separator_is_content() {
 		// An escaped `/` neither ends nor empties a segment, wherever it sits.
-		for s in [r"\/", r"a\/", r"\/a", r"a\//b", r"\/\/", r"a/\/", r"\//a"] {
+		for s in [r"\/a", r"\/\/a", r"a/\/b"] {
 			assert_eq!(p(s).as_str(), s, "refused {s:?}");
 			assert!(p(s).parts().all(|part| !part.is_empty()), "{s:?}");
+		}
+		// TEMPORARY MIGRATION, delete at the next version cut and move these up: the previous
+		// release would trim or collapse the bare `/` an escaped one leaves at an end or
+		// doubled, re-spelling the path, so they are refused until it is gone.
+		for s in [r"\/", r"a\/", r"a\//b", r"\/\/", r"a/\/", r"\//a"] {
+			assert_eq!(Path::new(s), Err(Error::EmptySegment), "accepted {s:?}");
 		}
 		// A bare one beside it still does.
 		for s in [r"a\///b", r"/\/", r"\//", r"a\\/", r"\\//a"] {
@@ -1164,16 +1187,19 @@ mod tests {
 			Err(DecodeError::BoundsExceeded)
 		));
 
-		// An escaped `/` separates nothing, so it never counts against the limit.
+		// TEMPORARY MIGRATION, delete at the next version cut and expect a round trip: the
+		// previous release counts every `/` and ends the whole announce stream past 32, so an
+		// escaped `/` still counts against the limit, though it separates nothing.
 		let escaped = (0..Path::MAX_PARTS)
 			.map(|i| format!(r"{i}\/{i}"))
 			.collect::<Vec<_>>()
 			.join("/");
 		let escaped = Path::new(&escaped).unwrap();
 		assert_eq!(escaped.parts().count(), Path::MAX_PARTS);
-		let mut buf = escaped.encode_bytes(Version::Lite07).unwrap();
-		let decoded = crate::coding::decode_buf(&mut buf, Version::Lite07, |r, v| Path::decode(r, v)).unwrap();
-		assert_eq!(decoded, escaped);
+		assert!(matches!(
+			escaped.encode_bytes(Version::Lite07),
+			Err(EncodeError::BoundsExceeded)
+		));
 	}
 
 	#[test]
