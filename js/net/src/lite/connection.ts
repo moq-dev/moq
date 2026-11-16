@@ -20,6 +20,7 @@ import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire, wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
+import { AnnounceStream } from "./announce_stream.ts";
 import { LiteAuthWire } from "./auth.ts";
 import { Datagrams } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
@@ -236,6 +237,15 @@ export class Connection implements Session {
 			this.#auth.close();
 		};
 		void quic.closed.then(leave, leave);
+		// Lite-07: a send on this endpoint's Announce Stream failed while the session lives, so
+		// what it said is lost and the session cannot go on, as rs/moq-net closes it. An ending
+		// session's own end says why.
+		if (hasRoutes(version)) {
+			void AnnounceStream.of(quic, version).broken.then((err) => {
+				if (this.#transportClosed || this.#phase.kind === "closed") return;
+				this.#fail(error(err));
+			});
+		}
 		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
 		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
 		// client, whose origin holds that endpoint.

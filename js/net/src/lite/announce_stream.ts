@@ -17,10 +17,20 @@ export class AnnounceStream {
 	// The last write queued, which the next one follows.
 	#tail: Promise<void> = Promise.resolve();
 	#finished = false;
+	#break!: (err: unknown) => void;
+
+	/**
+	 * Settles with the first send that failed: what this endpoint said is lost, and the session
+	 * with it.
+	 */
+	readonly broken: Promise<unknown>;
 
 	private constructor(quic: WebTransport, version: Version) {
 		this.#quic = quic;
 		this.#version = version;
+		this.broken = new Promise((resolve) => {
+			this.#break = resolve;
+		});
 	}
 
 	/** The session's one stream, shared by the half that asks and the half that answers. */
@@ -52,7 +62,7 @@ export class AnnounceStream {
 			const writer = await this.#open();
 			for (const msg of msgs) await encodeAnnounceBroadcast(writer, msg, this.#version);
 		});
-		this.#tail = sent.catch(() => {});
+		this.#tail = sent.catch((err: unknown) => this.#break(err));
 		return sent;
 	}
 
@@ -62,8 +72,9 @@ export class AnnounceStream {
 	 */
 	finish(): Promise<void> {
 		this.#finished = true;
-		const opened = this.#writer;
 		const done = this.#tail.then(async () => {
+			// Read once the sends queued before finishing are written, which may have opened it.
+			const opened = this.#writer;
 			if (!opened) return;
 			const writer = await opened;
 			writer.close();

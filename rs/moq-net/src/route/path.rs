@@ -67,7 +67,7 @@ use kio::clock::Instant;
 use crate::Path;
 
 use super::reader::Reader;
-use super::view::{ancestors, below, covering, within_any, within_set};
+use super::view::{ancestors, below, covering, heads, within_any, within_set};
 use super::{Error, Event, GENERATED, Id, Key, Link, MAX, MAX_HOPS, Metric, QUALIFIED, Rev, Shown, View, within};
 
 /// One node on a route's path, and the session it learned the route on. A
@@ -702,13 +702,14 @@ fn widest(set: &BTreeSet<Path>) -> BTreeSet<Path> {
 /// so the node asks for more than it wants and never for more than the scope allows.
 /// Regions that are too many on their own lose the last of them.
 fn coarsen(mut set: BTreeSet<Path>, regions: &[Path], root: &Path) -> BTreeSet<Path> {
+	// Looked up by each prefix's heads, so filing a prefix costs its depth, not the scope's
+	// size.
+	let regions: BTreeSet<Path> = regions.iter().cloned().collect();
 	while ask_bytes(&set, root) > ASK_BYTES {
-		// Each prefix files under the widest region holding it.
+		// Each prefix files under the widest region holding it, its first head that is one.
 		let mut groups: BTreeMap<Option<&Path>, Vec<&Path>> = BTreeMap::new();
 		for prefix in &set {
-			let region = (regions.iter())
-				.filter(|region| within(prefix, region))
-				.min_by_key(|region| region.as_str().len());
+			let region = heads(prefix).find_map(|head| regions.get(head));
 			groups.entry(region).or_default().push(prefix);
 		}
 		let bytes = |group: &[&Path]| group.iter().map(|prefix| prefix.as_str().len()).sum::<usize>();
@@ -733,7 +734,9 @@ fn coarsen(mut set: BTreeSet<Path>, regions: &[Path], root: &Path) -> BTreeSet<P
 				set = widest(&set);
 			}
 			None => {
-				set.pop_last();
+				// Nothing is left to widen: the scope's regions alone pass one request.
+				let dropped = set.pop_last();
+				tracing::warn!(?dropped, "a scope too wide for one ANNOUNCE_REQUEST goes unasked");
 			}
 		}
 	}

@@ -625,23 +625,28 @@ export class Publisher {
 	}
 
 	/**
+	 * Whether the peer's edit continues in its next message, which must be its next ANNOUNCE_REQUEST.
+	 *
+	 * @internal
+	 */
+	continuing(): boolean {
+		return this.#answer?.continuing() ?? false;
+	}
+
+	/**
 	 * Lite-07 ANNOUNCE_REQUEST: the peer edits the prefixes it asks for, answered on this
 	 * session's Announce Stream. Throws a {@link ProtocolViolation} for an edit the peer may not send.
 	 *
 	 * @internal
 	 */
-	/** Whether the peer's edit continues in its next message, which must be its next ANNOUNCE_REQUEST. */
-	continuing(): boolean {
-		return this.#answer?.continuing() ?? false;
-	}
-
 	request(more: boolean, remove: bigint[], add: Add[]): void {
 		if (!this.#answer) throw new ProtocolViolation("ANNOUNCE_REQUEST before lite-07");
 		const started = this.#answering === undefined;
 		const answering = this.#answer.request(more, remove, add);
 		if (!started) return;
 		this.#answering = this.#withdrawal.track(answering);
-		// The session is ending under it: its close says why.
+		// The session is ending under it, or its Announce Stream broke, which closes it: its close
+		// says why.
 		this.#answering.catch((err: unknown) => console.debug("announce stream failed:", err));
 	}
 

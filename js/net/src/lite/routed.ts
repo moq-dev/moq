@@ -170,6 +170,8 @@ export class Routed {
 	#history = new AnnounceHistory();
 	#nextRoute = 0n;
 	#moving?: Moving;
+	// While a DEAD applies: the paths it touched, each marked whether lost, reported once it is done.
+	#deferred?: Map<Path.Valid, boolean>;
 
 	// Set once the session lets go of its routes, which then show nothing anew.
 	#closing = false;
@@ -456,6 +458,10 @@ export class Routed {
 	// Report the claims at `path` to every reader it shows under: at the path itself for a reader
 	// above it, and at the reader's own prefix for one below.
 	#touch(path: Path.Valid, lost: boolean) {
+		if (this.#deferred) {
+			this.#deferred.set(path, lost);
+			return;
+		}
 		for (const reader of this.#readers) {
 			const at = presentedAt(reader, path);
 			if (at !== undefined) this.#refresh(reader, at, lost);
@@ -722,8 +728,20 @@ export class Routed {
 		this.#applyDead(moving);
 	}
 
-	// Apply a DEAD and the offers its ROUTE_UPDATEs gave as one.
-	#applyDead({ hop, gone, offers }: Moving) {
+	// Apply a DEAD and the offers its ROUTE_UPDATEs gave as one: readers and consumes see only
+	// where every route it moves ends up.
+	#applyDead(moving: Moving) {
+		const touched = new Map<Path.Valid, boolean>();
+		this.#deferred = touched;
+		try {
+			this.#session.consumes.batch(() => this.#deadRoutes(moving));
+		} finally {
+			this.#deferred = undefined;
+		}
+		for (const [path, lost] of touched) this.#touch(path, lost);
+	}
+
+	#deadRoutes({ hop, gone, offers }: Moving) {
 		const crossing = [...this.#routes.values()].filter((wire) => through(wire, hop));
 		for (const wire of crossing) {
 			const moved = offers.get(wire.id);

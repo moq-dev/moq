@@ -5478,6 +5478,59 @@ test("a lite-07 DEAD and its ROUTE_UPDATEs apply as one", async () => {
 	subscriber.close();
 });
 
+// A reader sees only where a DEAD leaves every route it moves, never a route only the middle of
+// it preferred: the publisher wins before and after, so its fallback never shows.
+test("a lite-07 DEAD shows readers only its end", async () => {
+	const { subscriber, announced, send, settled } = await routedStream();
+	const x = Path.from("live/x");
+	const [a, b] = [Instance.parse("a"), Instance.parse("b")];
+	// Two routes to NODE_A over the peer's session to it, the second held, and NODE_B dearer.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.from("live"), offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	await send({ status: "routeHold", id: 1n });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		offer: offer(NODE_B, { metric: 9n }),
+	});
+	await send({ status: "active", suffix: x, route: 2n, instance: b });
+	await send({ status: "floor", id: 2n, revision: 0n });
+	await settled();
+
+	const shown: { route: { node?: bigint } }[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const event = await announced.next();
+			if (!event) break;
+			shown.push(event);
+		}
+	})();
+	// The session to NODE_A closed for good: the first route ends, and the held one moves to a
+	// usable path.
+	const detour = [
+		{ node: NODE_A, session: 0n },
+		{ node: 3n, session: 1n },
+		{ node: PEER_NODE, session: 3n },
+	];
+	const hop = { node: PEER_NODE, session: NODE_A };
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 1n } });
+	await send({ status: "routeUpdate", id: 1n, offer: offer(NODE_A, { metric: 4n, path: detour }) });
+	await settled();
+	expect(shown.length).toBeGreaterThan(0);
+	for (const event of shown) expect(event).toMatchObject({ prefix: x, route: { node: NODE_A } });
+
+	announced.close();
+	await reading;
+	subscriber.close();
+});
+
 // A reader of a wider prefix widens the route in place: the claim it carried stays shown to
 // both readers, and only what the wider prefix adds arrives.
 test("a lite-07 edit to a wider prefix keeps the claims the route carried", async () => {
