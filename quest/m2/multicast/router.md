@@ -114,7 +114,7 @@ the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
 - Selected routes looped for a moment in partitions and deaths (up to 3 rounds
   at 32 relays, where today's reached 4); requests must fail closed first.
 
-Found 2026-11-16 by the [proof](/quest/m2/multicast/proof.md)
+Found 2026-11-16 by the [proof](/rs/moq-net/verify/route-algebra/README.md)
 ([moq-dev/moq#8904](https://github.com/moq-dev/moq/pull/8904), whose
 `rs/moq-net/verify/route-algebra/README.md` holds the arguments):
 

@@ -119,7 +119,7 @@ Settled:
    sends only what the node originates, which ends a LAN peer publishing
    through a neighbour whose uplink survived; both switches).
 7. ✅ **The proof is mechanized, with TLA+ and sweeps beside it**
-   ([proof](/quest/m2/multicast/proof.md); rejected: a written proof with
+   ([proof](/rs/moq-net/verify/route-algebra/README.md); rejected: a written proof with
    property tests, the kind of argument that passed review here and failed
    for the echo, the deferred echo, and belief by distance; TLA+ and sweeps
    alone, which say nothing about an arbitrary topology).
@@ -216,7 +216,7 @@ publishers, in route messages, unless noted):
       equal rank, one learned over a marked link, had kept whichever came
       first, so a neighbour behind its own marked link was reachable or not
       by arrival order, and under a fixed order by the neighbours' keys
-      ([proof](/quest/m2/multicast/proof.md)). The mark only turns on along
+      ([proof](/rs/moq-net/verify/route-algebra/README.md)). The mark only turns on along
       a path, so extending a route still never improves it. A strictly
       cheaper marked route still wins; an operator who wants the unmarked
       side preferred raises its priority. On the bake-off it moved no
