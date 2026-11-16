@@ -295,7 +295,9 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A reader that has accounted for every group its bounded ranges cover
+served or reported. A report is final: raising max delay afterwards does not
+bring back a group reported `OLD`, though a relay whose own reader allows more
+asks upstream for it again. A reader that has accounted for every group its bounded ranges cover
 ends, and repeated reads end immediately too. Widening the ranges resumes reading.
 A moq-lite-07 publisher ends a bounded subscription once it covered it, and the
 copy stays cached for the same ranges until an update asks for groups it did not

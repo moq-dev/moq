@@ -86,8 +86,8 @@ Rust, and the interop clients use them.
 
 Not here: sockets leave `@moq/net` with
 [the socket move](/quest/m2/sockets/README.md), and the `NO_MAX_DELAY`
-sentinel (`js/net/src/internal.ts`) goes with the Max Age change in
-[the lite-07 wire](/quest/m2/time-addressing/lite07.md). The browser media
+sentinel (`js/net/src/internal.ts`) stays: it left the wire with
+[the lite-07 wire](https://github.com/moq-dev/moq/pull/8908), but still means no limit inside the package. The browser media
 packages' leftovers are [their own sweep](/quest/m2/unused-api/media.md).
 
 For the PR: regenerate `js/net/api/index.api.md` and check that every

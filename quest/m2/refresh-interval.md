@@ -48,7 +48,7 @@ Decided 2026-11-13:
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 
 - ✅ `refresh()` takes no argument and raises `Wanted Group`, which
-  [time addressing](/quest/m2/time-addressing/lite07.md) makes a start
+  [time addressing](https://github.com/moq-dev/moq/pull/8908) makes a start
   time: the node asks for a group that starts after the newest it holds
   (rejected: a request counter riding SUBSCRIBE_UPDATE's update number,
   with every group tagged by the highest update its publisher had seen,
@@ -123,8 +123,8 @@ Recommendations for the PR:
 - Update the lite draft (TRACK_INFO's interval, `Wanted Group`'s text, and
   the changelog), `doc/concept/moq-lite.md`, and the matching JS. Run
   `just test interop --all`.
-- Land after [time addressing](/quest/m2/time-addressing/lite07.md), so
-  `Wanted Group` is written once, as a time.
+- `Wanted Group` is `Wanted Start` since [time addressing](https://github.com/moq-dev/moq/pull/8908):
+  the wanted group's start plus one.
 
 Tests: a relay chain where many readers join and call `refresh()` on a
 one-frame track produces one group per interval at the publisher, with time
@@ -136,10 +136,6 @@ Public API: breaking for `track::Demand::wanted()` in Rust, `@moq/net`, and
 the bindings; additive otherwise (`refresh()`, the interval on `Info`).
 Wire: lite-07-wip TRACK_INFO gains the interval; SUBSCRIBE_UPDATE keeps
 `Wanted Group` and gains nothing.
-
-## Required
-
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - `Wanted Group` becomes the start time this requests by
 
 ## Related
 

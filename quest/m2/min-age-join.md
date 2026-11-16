@@ -85,5 +85,4 @@ the aggregate rule changes if the recommendation is taken.
 
 ## Related
 
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - rewrites the same SUBSCRIBE fields, and gives the group starts this measures by
 - [Refresh a track by interval](/quest/m2/refresh-interval.md) - the other thing a live join does: it may ask for a new group

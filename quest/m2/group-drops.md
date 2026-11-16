@@ -61,10 +61,9 @@ wire at every hop for a number few readers use. A reader that needs a count
 measures what it lost in time, which the span gives, or counts the groups
 it did receive. So "count losses" in the Goal means account for every span:
 the receive-windows benchmark's overcommitted cells finish when delivered
-groups plus reported spans cover everything sent. At HEAD
-`SubscribeDrop`'s `Group Count` (`rs/moq-net/src/lite/subscribe.rs`) is a
-count of keys, which [the wire rewrite](/quest/m2/time-addressing/lite07.md)
-turns into the span's end.
+groups plus reported spans cover everything sent. Since
+[the wire rewrite](https://github.com/moq-dev/moq/pull/8908) `SubscribeDrop`
+(`rs/moq-net/src/lite/subscribe.rs`) carries the span's exclusive end.
 
 Public API: breaking for `track::Ordered` only. Its one read,
 `poll_next_group` (and its async wrapper), returns
@@ -79,5 +78,4 @@ Wire: none.
 
 ## Related
 
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - SUBSCRIBE_DROP names the time spans `Gap` reports
 - [The receive-windows benchmark](/quest/m3/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)

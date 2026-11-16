@@ -8,7 +8,7 @@ model, lite-07 wire, and legacy mapping, with the same names.
 ## Plan
 
 Mirror [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md) and
-[the lite-07 wire](/quest/m2/time-addressing/lite07.md), including strictly
+[the lite-07 wire](https://github.com/moq-dev/moq/pull/8908), including strictly
 increasing starts, the three group ends, reach from a group's own end, and
 `Relative(n)` counting groups. The gap machinery that assumes `sequence + 1`
 (`delivered.ts`, `ledger.ts`, `track.ts`, `resume.ts`) follows
@@ -47,7 +47,3 @@ inside the class (`js/net/src/time.ts:53`, `:128`) with one caller,
 key stays as decided 2026-11-08.
 
 Public API: breaking, mirroring Rust's. Wire: as the lite-07 quest.
-
-## Required
-
-- [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - the wire this speaks
