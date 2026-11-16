@@ -122,8 +122,9 @@ GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
 broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
-marked N/A. A pinned moq-transport pass records the case as skipped until
-[`quest/m3/ietf-finish.md`](../../quest/m3/ietf-finish.md) makes it pass.
+marked N/A. A pinned moq-transport pass records the case as skipped:
+moq-transport is a compatibility layer, and a finished broadcast's late tail
+between our own clients is not planned work.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -550,10 +551,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Firefox's replacement case is quarantined from the default run after intermittent
-audio-tone failures. Investigate the missing tone samples alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
-Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
+The replacement case is quarantined from the default run on every engine: under CPU
+load it intermittently leaves the audio stalled past the switch bound after a route
+switch or fallback (the viewer logs `skipping missing groups` on the audio track first),
+and Firefox also showed intermittent missing tone samples. Run it explicitly with
+`just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
 its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with

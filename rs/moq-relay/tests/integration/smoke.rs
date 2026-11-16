@@ -9,11 +9,9 @@
 
 use std::time::Duration;
 
-#[cfg(all(feature = "quic", feature = "websocket"))]
 use moq_relay::{Config, Relay};
 use moq_relay::{Connection, auth, cluster, web};
 
-#[cfg(feature = "websocket")]
 use crate::logs::Logs;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -86,7 +84,6 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 }
 
 /// Stand up the assembled relay path with `--server-version` restricted.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -116,10 +113,7 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
 	// Zero head start so the WebSocket path runs immediately.
-	#[cfg(feature = "websocket")]
-	{
-		config.websocket.delay = Some((std::time::Duration::ZERO).into());
-	}
+	config.websocket.delay = Some((std::time::Duration::ZERO).into());
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -135,7 +129,6 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
 /// one frame end-to-end, and assert both sides see the newest moq-lite ALPN.
 /// Regression for the `serve_ws` downgrade to Lite02.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_websocket_round_trip_uses_newest_version() {
 	let (port, web_handle) = spawn_relay().await;
@@ -225,7 +218,6 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 /// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 	let logs = Logs::default();
@@ -264,7 +256,6 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 }
 
 /// Read announcements until `until` shows up, returning every active prefix seen.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &str) -> Vec<String> {
 	let mut seen = Vec::new();
 	while !seen.iter().any(|prefix| prefix == until) {
@@ -286,7 +277,6 @@ async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &st
 /// A `.`-named broadcast stays out of discovery unless the reader opts in, and
 /// a client that predates the opt-in (moq-lite-06) never discovers it. Subscribing
 /// by exact path needs no opt-in.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	// lite-07 is work-in-progress and off by default, so the relay must enable it.
@@ -387,7 +377,6 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 }
 
 /// `--server-version` applies to the WebSocket fallback as well as QUIC.
-#[cfg(all(feature = "quic", feature = "websocket"))]
 #[tokio::test]
 async fn relay_websocket_honors_server_version() {
 	let allowed: moq_net::Version = "moq-transport-18".parse().expect("parse allowed version");
@@ -503,7 +492,6 @@ async fn relay_https_terminates_tls() {
 /// root auth scope (same as the internal listener). Regression for the
 /// `/{*path}`-only route, which left bare-URL clients (e.g.
 /// `moqsink url="https://host:4443"`) with a silently dead WS fallback.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn relay_websocket_root_path_upgrades() {
 	let (port, web_handle) = spawn_relay().await;
@@ -726,7 +714,7 @@ async fn internal_tcp_round_trip() {
 
 /// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux. A per-call counter
@@ -750,7 +738,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 /// Connect over `unix://` (qmux on a Unix socket) and confirm a frame
 /// round-trips. Also asserts both sides land on the newest moq-lite version,
 /// which proves the in-band ALPN negotiation populated the protocol.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 #[tokio::test]
 async fn internal_unix_round_trip() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -916,7 +904,7 @@ async fn internal_tcp_path_reaches_server() {
 /// `unix://<socket>` carries no resource path in its URL (that's the socket), so
 /// the request path rides in the `?path=` query. Same assertion as TCP, across
 /// every version whose SETUP carries a path.
-#[cfg(all(unix, feature = "uds"))]
+#[cfg(unix)]
 #[tokio::test]
 async fn internal_unix_path_reaches_server() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -940,7 +928,6 @@ async fn internal_unix_path_reaches_server() {
 /// Stand up the relay listening only on a QUIC `--server-bind` on an ephemeral
 /// loopback port, with fully public auth (no-JWT => whole root). Returns the bound
 /// address and an abort handle.
-#[cfg(feature = "quic")]
 async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -956,7 +943,6 @@ async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
 /// Raw QUIC has no request URI either, so `moqt://host:port/<path>` only reaches the
 /// relay if the client puts it in the SETUP. Same assertion as TCP: the relay scopes
 /// the publisher's grant to that root, across every version whose SETUP carries a path.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn raw_quic_path_reaches_server() {
 	let (addr, handle) = spawn_quic_relay().await;

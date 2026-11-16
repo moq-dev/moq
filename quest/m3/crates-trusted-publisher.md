@@ -8,12 +8,16 @@ for `moq-dev/moq`, workflow `release-rs.yml`, and environment `publish`, so
 Delete this quest once every crate has one.
 
 Corrected 2026-11-12 (/quest-audit): moq-bench leaves the list, since it
-sets `publish = false`; seven crates remain.
+sets `publish = false`; seven crates remain. Corrected 2026-11-16
+(/quest-plan of the pre-cut audit): moq-c leaves it too, since the
+hand-written C API ships as `libmoq`, which has a trusted publisher, and
+`moq-c` stays unpublished for the generated API
+([the C crate's name](/quest/m2/libmoq-name.md)); six remain.
 
 ## Waiting
 
 - Maintainer: after [the cut](/quest/m3/release/cut.md) publishes kio-macros,
-  moq-c, moq-congestion, moq-crypto, moq-quic, moq-rtsp, and moq-webrtc by token, add
+  moq-congestion, moq-crypto, moq-quic, moq-rtsp, and moq-webrtc by token, add
   their trusted publishers the same way. Settings pages need a crates.io
   login, so check with a `release-rs.yml` run that publishes through OIDC.
 
@@ -58,7 +62,11 @@ crates.io has none of the seven in Waiting.
 Decided 2026-11-05 (maintainer, /quest-audit): moq-e2ee, published but
 retired in favor of moq-crypto, gets no trusted publisher;
 a later change took it out of the
-workspace instead.
+workspace instead. Reversed 2026-11-16 (maintainer, /quest-plan of the
+pre-cut audit): moq-e2ee is a crate again, unpublished at the cut
+([the crate move](/quest/m2/e2ee-crate.md)), and gets its trusted publisher
+when [the finished format](/quest/m3/e2ee-format.md) publishes it, which
+that quest's `Waiting` item tracks.
 
 ## Required
 

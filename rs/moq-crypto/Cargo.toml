@@ -1,6 +1,6 @@
 [package]
 name = "moq-crypto"
-description = "Cryptography for MoQ: content signing, end-to-end encryption, and the rind provider the transports share."
+description = "Cryptography for MoQ: end-to-end encryption, the endpoint key, and the rind provider the transports share."
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -16,20 +16,20 @@ categories = ["cryptography", "multimedia", "network-programming"]
 all-features = true
 
 [features]
-# Without `sign` or `e2ee`, the crate holds only `sign::PublicKey`, the endpoint ID, and its
+# Without `endpoint` or `e2ee`, the crate holds only `endpoint::PublicKey`, the endpoint ID, and its
 # z-base-32 text: no `moq-net` and no rind, for crates that only name endpoints.
-default = ["sign", "e2ee"]
-# Per-frame signing: `sign::SecretKey` and the signed broadcast wrappers.
-sign = ["dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:zeroize"]
+default = ["endpoint", "e2ee"]
+# The persistent `endpoint::SecretKey`, which converts to `moq_net::origin::RouteKey`.
+endpoint = ["dep:moq-net", "dep:rind", "dep:zeroize"]
 # End-to-end encryption: the `e2ee` module.
 e2ee = ["cpu", "dep:base64", "dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:uuid", "dep:zeroize"]
 # CPU support and its shared error need only rind.
 cpu = ["dep:rind"]
 # The rustls provider adds TLS without needing `moq-net`.
 provider = ["cpu", "dep:rind-rustls", "dep:rustls"]
-# `sign::PublicKey` serializes as its canonical z-base-32 text.
+# `endpoint::PublicKey` serializes as its canonical z-base-32 text.
 serde = ["dep:serde"]
-# Generated async wrappers for the `sign` and `e2ee` poll methods. Enable where you `.await` them.
+# Generated async wrappers for the `e2ee` poll methods. Enable where you `.await` them.
 async = ["kio?/async"]
 
 [dependencies]
@@ -62,11 +62,6 @@ workspace-hack = { path = "../workspace-hack" }
 name = "protect"
 harness = false
 required-features = ["e2ee"]
-
-[[bench]]
-name = "sign"
-harness = false
-required-features = ["sign"]
 
 [[test]]
 name = "transport"

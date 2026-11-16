@@ -1,5 +1,6 @@
 //! One script on [`path::Router`], which keeps its doubt until the timer fires. The
-//! ignored benchmarks also compare the rejected early-collection policy.
+//! ignored benchmarks also compare the rejected early-collection policy, and the
+//! replaced rule where doubt kept relays off every route to a doubted publisher.
 //!
 //! A [`Lab`] builds the same mesh on each, applies one change at a time, and
 //! delivers in rounds: every message queued when a round starts crosses its link
@@ -16,7 +17,7 @@ use super::*;
 const RULES: [Rule; 1] = [Rule::PATH];
 
 /// The rules compared, in the report's order.
-pub(super) const COMPARED: [Rule; 2] = [Rule::EARLY, Rule::PATH];
+pub(super) const COMPARED: [Rule; 3] = [Rule::EARLY, Rule::ORIGIN, Rule::PATH];
 
 /// A queue of messages from one node to another.
 pub(super) type Chan = (Node, Node);
@@ -559,6 +560,14 @@ impl Lab {
 		}
 		self.net.reset(relay);
 		self.revive(relay);
+		// Unlike after a crash, the links the mesh lacks reconnect too, such as a
+		// publisher's second home.
+		let linked: Vec<(Node, Node)> = (self.linked.iter().copied())
+			.filter(|&(a, b)| (a == relay || b == relay) && !self.is_up(a, b))
+			.collect();
+		for (a, b) in linked {
+			self.mend(a, b);
+		}
 	}
 
 	/// Deliver one message from a queue `pick` chooses. False if none waits.
@@ -763,8 +772,9 @@ pub(super) struct Churn {
 /// random meshes of three to five relays where links flap, the publisher's most of
 /// all, relays restart, and every message is delivered in a random order. Each rule
 /// sees the same meshes and the same changes at the same steps. Once the churn
-/// stops the mesh must settle and be right.
-pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
+/// stops the mesh must settle and be right. With `two_homes` the publisher also
+/// joins a second relay, and its flaps pick either link.
+pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>, two_homes: bool) -> Churn {
 	let mut total = Churn::default();
 	for case in cases {
 		let mut script = XorShift(0x0bad_c0de + case as u64 * 0x9e37_79b9);
@@ -786,11 +796,18 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 		};
 		let mut lab = Lab::new(rule, &mesh);
 		let (node, _) = mesh.publisher(0);
+		let mut homes = vec![mesh.homes[0]];
+		if two_homes {
+			homes.push((mesh.homes[0] + 1 + script.next(relays as u64 - 1) as usize) % relays);
+			lab.attach(node, homes[1]);
+			assert!(lab.settle());
+		}
 		let before = lab.net.sent();
 		for _ in 0..300 {
 			match script.next(40) {
 				0 | 1 => {
 					let (a, b) = match script.chance(60) {
+						true if two_homes => (node, homes[script.next(2) as usize]),
 						true => (node, mesh.homes[0]),
 						false => {
 							let (a, b, _) = mesh.links[script.next(mesh.links.len() as u64) as usize];
@@ -802,7 +819,11 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 						false => lab.mend(a, b),
 					}
 				}
-				2 if case % 4 == 0 && script.chance(25) => lab.restart(script.next(relays as u64) as usize),
+				2 if case % 4 == 0 && script.chance(25) => {
+					let relay = script.next(relays as u64) as usize;
+					lab.restart(relay);
+					assert!(homes.iter().all(|&home| home != relay || lab.is_up(node, home)));
+				}
 				_ => {
 					lab.deliver(&mut pick);
 				}
@@ -838,7 +859,9 @@ pub(super) fn churn(rule: Rule, cases: std::ops::Range<usize>) -> Churn {
 #[test]
 fn every_rule_settles_after_churn() {
 	for rule in RULES {
-		churn(rule, 0..60);
+		for two_homes in [false, true] {
+			churn(rule, 0..60, two_homes);
+		}
 	}
 }
 
@@ -852,9 +875,27 @@ fn benchmark_route_churn() {
 	println!("rule,route_messages,claim_messages");
 	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in COMPARED {
-		let churn = churn(rule, 0..400);
+		let churn = churn(rule, 0..400, false);
 		let (rule, steps, sent) = (rule.as_str(), churn.steps, churn.sent);
 		println!("{rule},{},{}", sent.msgs, sent.claims);
+		eprintln!(
+			"{rule},{steps},{},{},{},{},{},{},{},{}",
+			churn.loops, churn.stale, churn.dark, sent.msgs, sent.items, sent.claims, sent.offline, sent.unavailable,
+		);
+	}
+}
+
+/// The same churn with the publisher on two relays: what keeping its other link
+/// usable while one flaps costs, per rule.
+#[test]
+#[ignore = "a benchmark; Nightly reports it"]
+fn benchmark_route_churn_two_homes() {
+	println!("rule,homes,route_messages,claim_messages");
+	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
+	for rule in COMPARED {
+		let churn = churn(rule, 0..400, true);
+		let (rule, steps, sent) = (rule.as_str(), churn.steps, churn.sent);
+		println!("{rule},2,{},{}", sent.msgs, sent.claims);
 		eprintln!(
 			"{rule},{steps},{},{},{},{},{},{},{},{}",
 			churn.loops, churn.stale, churn.dark, sent.msgs, sent.items, sent.claims, sent.offline, sent.unavailable,

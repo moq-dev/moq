@@ -3,7 +3,7 @@
 //! Linux-only, because the mode is: every worker binds the listen address with
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port across
 //! the group.
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(target_os = "linux")]
 
 use std::net::UdpSocket;
 
@@ -174,10 +174,7 @@ async fn stopping_the_group_closes_its_sessions() {
 
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.fingerprint = fingerprints;
-	#[cfg(feature = "websocket")]
-	{
-		connect.websocket.enabled = Some(false);
-	}
+	connect.websocket.enabled = Some(false);
 	// Far past the wait below, so only a close on the wire can end the session.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((std::time::Duration::from_secs(600)).into());
@@ -773,7 +770,6 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 }
 
 /// Every member's next fresh handshake uses the fingerprint exposed by the group.
-#[cfg(feature = "watch")]
 #[tokio::test]
 async fn rotated_identity_reaches_every_worker() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
@@ -825,10 +821,7 @@ async fn rotated_identity_reaches_every_worker() {
 				// Fresh client endpoints make independent handshakes, without session resumption.
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.fingerprint = expected.clone();
-				#[cfg(feature = "websocket")]
-				{
-					config.websocket.enabled = Some(false);
-				}
+				config.websocket.enabled = Some(false);
 				let client = config.init(Default::default()).unwrap().with_reconnect(false);
 				let url: url::Url = format!("https://{addr}/").parse().unwrap();
 				let session = client

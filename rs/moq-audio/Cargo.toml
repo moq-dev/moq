@@ -17,36 +17,23 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 ignored-paths = ["src/decode/conformance.rs"]
 
 [features]
-# On by default: what costs the build nothing beyond cargo, which here is `aac`
-# and `bus` (pure Rust). Off by default: the device features, because on Linux cpal links
-# libasound at build time, the one system build dependency in this crate. macOS
-# and Windows would pay nothing, but a default is one setting for every host.
-# The always-available echo processor does not link libasound. The
-# features exist so a consumer can pick what it wants, not to hide code from
-# the default compile: `just check` lints default features only, so the device
-# code is compiled by nightly's `just rs features` and platform.yml's
+# Off by default: the device features, because on Linux cpal links libasound at
+# build time, the one system build dependency in this crate. macOS and Windows
+# would pay nothing, but a default is one setting for every host. The echo
+# canceller, the codecs, and the mixing bus are pure Rust and always compile, so
+# the device code is compiled by nightly's `just rs features` and platform.yml's
 # `just rs macos`. Workspace consumers opt in at the root manifest
 # (`default-features = false`) per crate, which keeps cpal out of the language
 # bindings.
-default = ["aac", "bus"]
-# AAC-LC decode via symphonia. Pure Rust, so it costs no toolchain: the trade
-# this crate already refused for Opus. Only a subscriber to an ingest-sourced
-# broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all publish AAC, while
-# this crate encodes in software is Opus or PCM), so a publish-only build can
-# drop it and the two crates it pulls.
-aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
-# The program mixing bus. Pure Rust: it resamples and de-jitters each source
-# through the same ring the playback mixer uses.
-bus = ["dep:ringbuf"]
+default = []
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
 # ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple
 # puts it. On Linux cpal links libasound, the one system build dependency in
-# this crate, which is why `capture`, `playback`, and `aec` are opt-in. On macOS it
+# this crate, which is why `capture` and `playback` are opt-in. On macOS it
 # also pulls AVFoundation for the TCC permission pre-check (the objc deps below
 # are target-gated, so this is a no-op elsewhere).
 capture = [
     "dep:cpal",
-    "dep:ringbuf",
     "dep:tokio",
     "dep:tracing",
     "dep:block2",
@@ -61,7 +48,7 @@ capture = [
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
 # stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
 # as `capture`.
-playback = ["dep:cpal", "dep:ringbuf", "dep:tokio", "dep:tracing"]
+playback = ["dep:cpal", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
@@ -69,9 +56,6 @@ playback = ["dep:cpal", "dep:ringbuf", "dep:tokio", "dep:tracing"]
 # every platform.
 pipewire = ["cpal?/pipewire"]
 pulseaudio = ["cpal?/pulseaudio"]
-# Acoustic echo cancellation wired directly between `playback` and `capture`,
-# so a speakerphone doesn't send its own output back.
-aec = ["capture", "playback"]
 
 [dependencies]
 bitstream-io = { workspace = true }
@@ -87,14 +71,14 @@ moq-net = { workspace = true }
 rand = { workspace = true }
 # Fixed-capacity SPSC rings keep buffer handoff lock-free on the capture
 # callback, and carry PCM into the playback mixer and the bus.
-ringbuf = { version = "0.6.0", optional = true }
+ringbuf = "0.6.0"
 # Decoded and captured audio converts through the sinc resampler, and the PCM
 # rings through the cubic one, which an audio callback can afford. Neither is
 # the FFT resampler, so skip the default fft_resampler feature and its
 # RustFFT/realfft dependencies.
 rubato = { version = "5.0", default-features = false }
 # Pure-Rust port of WebRTC's audio processing module (AEC3, noise suppression,
-# AGC2). The reason the `aec` feature can exist at all: every other option is a
+# AGC2). The reason the echo canceller can always compile: every other option is a
 # C++ build (webrtc-audio-processing wants CMake and abseil), which is the same
 # trade we refused for Opus. BSD-3-Clause like the upstream it was
 # ported from.
@@ -109,8 +93,8 @@ sonora = "0.3"
 # publishes; HE-AAC (SBR/PS) is unimplemented upstream and rejected at
 # construction rather than decoded wrong. `symphonia-core` supplies the codec
 # parameter and packet types the decoder is driven with.
-symphonia-codec-aac = { version = "0.6.1", optional = true }
-symphonia-core = { version = "0.6.1", optional = true }
+symphonia-codec-aac = "0.6.1"
+symphonia-core = "0.6.1"
 thiserror = { workspace = true }
 # Only the device features need an async runtime: the on-demand capture loop
 # awaits frames and demand transitions, and playback awaits the driver thread.
@@ -166,7 +150,6 @@ required-features = ["capture"]
 [[bench]]
 name = "bus"
 harness = false
-required-features = ["bus"]
 
 [lints]
 workspace = true

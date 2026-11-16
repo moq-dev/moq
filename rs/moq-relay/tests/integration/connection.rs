@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use moq_net::stats;
+use moq_relay::sim;
 
 use crate::memory::{self, connect, newest};
 
@@ -18,7 +19,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let version = alpn.parse().unwrap();
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
-		let publisher = memory::origin();
+		let publisher = sim::origin();
 		let broadcast = publisher
 			.route("ladder", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
@@ -33,7 +34,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		)
 		.await
 		.unwrap();
-		let subscriber = memory::origin();
+		let subscriber = sim::origin();
 		let _subscriber = connect(
 			moq_net::Client::new().with_subscriber(subscriber.clone()),
 			version,
@@ -83,7 +84,7 @@ fn publish(
 	moq_net::origin::Route,
 	moq_net::track::Producer,
 ) {
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let broadcast = origin
 		.route(name, moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -156,7 +157,7 @@ async fn a_session_declaring_the_relays_own_hop_is_refused() {
 			"{alpn}"
 		);
 
-		let client = moq_net::Client::new().with_publisher(memory::origin().consume());
+		let client = moq_net::Client::new().with_publisher(sim::origin().consume());
 		let session = connect(client, version, &cluster, &auth)
 			.await
 			.expect("another hop connects");
@@ -178,9 +179,9 @@ fn a_relay_dialing_itself_on_lite07_is_refused() {
 async fn a_relay_dialing_itself_on_lite07_is_refused_inner() {
 	use futures::StreamExt;
 
-	let net = memory::Net::new();
+	let net = sim::Net::new();
 	let auth = memory::public(&["**"], &[], &[]);
-	let cluster = memory::spawn_cluster(net.options(&["self"]));
+	let cluster = memory::spawn_cluster(net.options("self", &["self"]));
 	let (_trigger, shutdown) = moq_relay::shutdown::Observer::new(TIMEOUT);
 	let mut accepts = net.relay("self", &cluster, &auth, &shutdown);
 	let mut connect = moq_tokio::connect::Config::default();
@@ -210,7 +211,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 #[kio::test]
 async fn subscribe_only_public_accepts_subscriber_role() {
 	let auth = memory::public(&[], &[], &["**"]);
-	let client = moq_net::Client::new().with_subscriber(memory::origin());
+	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	let session = connect(client, newest(), &memory::cluster(), &auth)
 		.await
 		.expect("subscriber connects");
@@ -224,7 +225,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 #[kio::test]
 async fn publish_only_public_rejects_subscriber_role() {
 	let auth = memory::public(&[], &["**"], &[]);
-	let client = moq_net::Client::new().with_subscriber(memory::origin());
+	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	assert_refused(connect(client, newest(), &memory::cluster(), &auth).await).await;
 }
 
@@ -254,7 +255,7 @@ async fn two_publish_only_clients_coexist() {
 	.await
 	.expect("beta connects");
 
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let mut announced = origin.consume().routes();
 	let _subscriber = connect(
 		moq_net::Client::new().with_subscriber(origin),
@@ -298,7 +299,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 		.await
 		.expect("publisher connects");
 
-	let origin = memory::origin();
+	let origin = sim::origin();
 	let consumer = origin.consume();
 	let mut announced = consumer.routes();
 	let _subscriber = connect(
@@ -359,7 +360,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 	};
 	let auth = memory::public(&[], &[], &["**"]);
 
-	let client = moq_net::Client::new().with_subscriber(memory::origin());
+	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	let session = connect(client, newest(), &cluster, &auth)
 		.await
 		.expect("subscriber connects");

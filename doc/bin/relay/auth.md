@@ -442,9 +442,9 @@ security boundary: approximate across relay crashes and server restarts, and
 they gate admission without revoking.
 
 `--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
-loopback address needs `--listen-public`, which needs `--listen-secret FILE`:
-every request must then carry the file's secret as its HTTP Basic password, so
-only relays can record sessions and fill the session limits. A relay sends it
+loopback address needs `--listen-secret FILE`: every request must then carry
+the file's secret as its HTTP Basic password, so only relays can record
+sessions and fill the session limits. A relay sends it
 from its URL, `--auth-url https://relay:<secret>@auth.example.com/` (percent-encode
 reserved characters), through the TLS proxy in front of the server. `--listen-secret`
 also guards a loopback listener. See `moq auth serve --help` for the rest.

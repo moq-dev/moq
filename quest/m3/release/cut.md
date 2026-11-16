@@ -209,9 +209,34 @@ after [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) until the
 re-run fixed them. Run those browser checks by hand on the cut tree, along
 with the suites above.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
+
+- ✅ The cut waits on [the relay's memory growth](/quest/m2/relay-memory.md)
+  by name: the chat scenario's relay uses about 17% more memory on `main`
+  than on `release`, and 0.22 is not announced with that unexplained
+  (rejected: cutting and investigating after).
+- ✅ The cut waits on [the rind 0.4 adapters](/quest/m0/rind-adapters.md)
+  ([moq-dev/moq#8432](https://github.com/moq-dev/moq/pull/8432)), so the
+  `UnsupportedCpu` error that exists only for rind 0.3 is never published.
+- ✅ [The FFI abort](/quest/m1/ffi-abort-unwanted.md) lands first: it adds a
+  method to an existing binding object, which the API diff counts as a
+  break once 0.22 is published.
+- ✅ End-to-end encryption does not publish at this cut
+  ([its own unpublished crate](/quest/m2/e2ee-crate.md)), so `moq-e2ee` is
+  no longer a retired name, and the paragraph above about publishing a
+  pointer above 0.0.25 no longer applies: the name is held for
+  [the finished format](/quest/m3/e2ee-format.md).
+- ✅ The hand-written C API publishes as `libmoq` 0.22
+  ([its final line](/quest/m2/libmoq-name.md)), reversing 2026-10-25, so the
+  cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
+  quests for a code-free `libmoq` stub were deleted.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
+- [Relay memory](/quest/m2/relay-memory.md) - the relay's memory growth since `release` is fixed or recorded before 0.22 is announced
+- [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
+- [FFI abort](/quest/m1/ffi-abort-unwanted.md) - a new method on an existing binding object is a break once 0.22 is out
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed

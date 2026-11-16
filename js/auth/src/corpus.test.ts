@@ -54,9 +54,13 @@ describe("tokens", () => {
 	}
 });
 
+// A key or set given as a string is its raw text, for what a JSON value cannot spell,
+// such as a repeated member.
+const text = (document: unknown) => (typeof document === "string" ? document : JSON.stringify(document));
+
 const sections: [string, Case[], (input: unknown) => unknown][] = [
-	["jwk", corpus.jwk, (jwk) => Key.parse(JSON.stringify(jwk))],
-	["sets", corpus.sets, (jwks) => KeySet.parse(JSON.stringify(jwks))],
+	["jwk", corpus.jwk, (jwk) => Key.parse(text(jwk))],
+	["sets", corpus.sets, (jwks) => KeySet.parse(text(jwks))],
 	["grants", corpus.grants, (grant) => GrantSchema.parse(grant)],
 ];
 for (const [section, cases, parse] of sections) {

@@ -57,7 +57,11 @@ each other. Both role segments start with `.`, so endpoints are
 
 The announcements are used only for routing: they are how a relay finds an
 endpoint. Connections are never announced. An endpoint's broadcasts hold only
-session tracks, served on request.
+session tracks, served on request. A worker that acts on every announced
+broadcast, such as a recorder, skips them: a path whose parent segment is
+`.server` or `.client` is an endpoint's. Every library checks it as
+`is_endpoint` (`isEndpoint` in JS, Swift, Kotlin, and Dart, `IsEndpoint` in Go,
+and `moq_socket_is_endpoint` in C).
 
 ## Sessions
 

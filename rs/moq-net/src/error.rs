@@ -471,8 +471,9 @@ pub enum Error {
 	#[error("unknown ALPN: {0}")]
 	UnknownAlpn(String),
 
-	/// The producer was dropped without finishing, so the content is incomplete.
-	#[error("dropped")]
+	/// The producer was dropped without finishing or aborting, so the content is incomplete:
+	/// released by its owner, as a binding's garbage collector does, with no cause to report.
+	#[error("dropped without a finish or abort")]
 	Dropped,
 
 	/// The handle was already closed by this side.

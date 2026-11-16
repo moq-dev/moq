@@ -140,7 +140,7 @@ install-formula *args:
 trigger-repo-publish *args:
     sh/gh/trigger-repo-publish.sh "$@"
 
-# Measure a workflow run's release uploads, the minimal FFI build, and bundled first-load JS entries.
+# Measure a workflow run's release uploads and bundled first-load JS entries.
 size-collect output run="":
     sh/size/collect.sh '{{ output }}' '{{ run }}'
 
@@ -152,6 +152,11 @@ size-report *args:
 # Collect and compare nightly shipping sizes through the existing alert path.
 size-nightly output run:
     sh/size/nightly.sh '{{ output }}' '{{ run }}'
+
+# Run a command against Ubuntu's GStreamer in the pinned gstreamer-ci image (Linux).
+[positional-arguments]
+gstreamer *args:
+    sh/gh/gstreamer.sh "$@"
 
 # Install the rendered GStreamer formula against the current macOS tarball.
 [positional-arguments]

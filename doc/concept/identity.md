@@ -148,7 +148,8 @@ one holds a follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, an
 request failing is never the signal to restart; the follower handing out a new
 broadcast is. Nor is a track's error kind: a track withdrawn
 unfinished ends `Unroutable` over moq-lite but `Internal` over moq-transport,
-whose wire has no code for it.
+whose wire has no code for it, and one its publisher releases unfinished ends
+`Internal` over both.
 
 **Hold one stream** when the output must not splice two, as an exporter or
 recorder does. Rust and JavaScript `request(path)` and `moq_mux::Source` keep

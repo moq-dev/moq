@@ -80,6 +80,10 @@ for crate in openh264 openh264-sys2 wgpu; do
 done
 run cargo nextest run --locked -p moq-video --no-default-features --features vpx -E 'test(/::vpx::/)'
 
+# The portals' D-Bus handshake must get through a Flatpak's proxy. libpipewire
+# keeps the `pipewire` feature out of the gate's test build, so it runs here.
+run cargo nextest run --locked -p moq-video --no-default-features --features pipewire -E 'test(portal_handshake)'
+
 if ((all)); then check -p moq-video --no-default-features --features render; fi
 render=$(tree -p moq-video --no-default-features --features render)
 require_crate "$render" wgpu "moq-video rendering"

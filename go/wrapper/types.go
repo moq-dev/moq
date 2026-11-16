@@ -19,7 +19,9 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation Timestamp.
 	AudioFrame = ffi.MoqAudioFrame
-	// CongestionControl is the congestion control family for a QUIC connection.
+	// CongestionControl is the congestion control family for a QUIC connection. Build one with
+	// DelayCongestionControl, LossCongestionControl, or NoneCongestionControl; a new algorithm
+	// joins as a new builder.
 	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
 	ErrorScope = ffi.MoqErrorScope
@@ -29,7 +31,7 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream) and its static production and link cost (lower wins), and its informational Rtt to the origin node.
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), its static production and link cost (lower wins), and whether a usable path reaches it (Available).
 	RouteInfo = ffi.MoqRouteInfo
 	// Instance names one continuous stream at a path. Compare two with Eq: a session mints one
 	// for a route whose wire carries none, and it differs from a named instance with the same Text.
@@ -164,15 +166,20 @@ const (
 	CompressionDeflate = ffi.MoqCompressionDeflate
 )
 
-// CongestionControl values.
-const (
-	// CongestionControlLoss is loss-based (CUBIC): it chases throughput, so the send rate sawtooths.
-	CongestionControlLoss = ffi.MoqCongestionControlLoss
-	// CongestionControlDelay is delay-based (BBR): it keeps queues short and the send rate steady.
-	CongestionControlDelay = ffi.MoqCongestionControlDelay
-	// CongestionControlNone runs no congestion control and no pacing, for tests and controlled links.
-	CongestionControlNone = ffi.MoqCongestionControlNone
-)
+// LossCongestionControl is loss-based (CUBIC): it chases throughput, so the send rate sawtooths.
+func LossCongestionControl() *CongestionControl {
+	return ffi.MoqCongestionControlLoss()
+}
+
+// DelayCongestionControl is delay-based (BBR v3), the default: it keeps queues short and the send rate steady.
+func DelayCongestionControl() *CongestionControl {
+	return ffi.MoqCongestionControlDelay()
+}
+
+// NoneCongestionControl runs no congestion control and no pacing, for tests and controlled links.
+func NoneCongestionControl() *CongestionControl {
+	return ffi.MoqCongestionControlNone()
+}
 
 // ParseInstance names an instance with text, failing with ErrInvalidInstance when it is empty.
 func ParseInstance(text string) (*Instance, error) {
@@ -183,11 +190,6 @@ func ParseInstance(text string) (*Instance, error) {
 // first, spelled the way ClientConfig.Versions takes them.
 func Versions() []string {
 	return ffi.MoqVersions()
-}
-
-// QlogSupported reports whether this build can write qlog traces for QUICConfig.Qlog.
-func QlogSupported() bool {
-	return ffi.MoqQlogSupported()
 }
 
 // LogLevel configures the native tracing log level (e.g. "info", "debug").

@@ -114,7 +114,6 @@ impl Config {
 	}
 
 	/// This config with the out-of-band negotiation's outcome applied.
-	#[cfg(any(feature = "tls", feature = "ws"))]
 	pub(crate) fn with_negotiated(self, version: Version, protocol: Option<String>) -> Self {
 		Self {
 			version,

@@ -318,7 +318,7 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Er
 /// A [`Consumer`]'s [`Delay`] and the catalog rendition's warmup, applied together.
 ///
 /// The warmup is how much media a decoder needs before its output is clean, such as an Opus
-/// decoder or the max-delay decoder of an intra-refresh rendition: pass the catalog rendition's
+/// decoder or an intra-refresh video decoder: pass the catalog rendition's
 /// `warmup`. Subscribe with [`subscription`](Self::subscription), then build the consumer with
 /// [`consumer`](Self::consumer).
 ///
@@ -780,17 +780,24 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
+			// Step to the next group at once when nothing lies between: every group ends this
+			// way, so it comes before the scans below, which walk every pending group.
+			if let Some(front) = self.pending.front_mut()
+				&& front.start > self.current
+				&& !front.reapable(waiter)
+				&& self.poll_continues(waiter).0
+			{
+				self.current = self.pending.front().unwrap().start;
+				self.note_group_edge();
+				continue;
+			}
+
 			// Reap later aborts only when delivery blocks. An aborted group beyond a
 			// sequence gap must not park the reader forever. Buffered frames and faults
 			// stay in delivery order; the current group has its eviction path above.
 			// Live groups register the waiter here so a later abort wakes the reader.
 			let current = self.current;
-			self.discard(|group| {
-				group.start > current
-					&& group.buffered.is_empty()
-					&& group.fault.is_none()
-					&& group.poll_aborted(waiter)
-			})?;
+			self.discard(|group| group.start > current && group.reapable(waiter))?;
 
 			// The current group's furthest presentation point (timestamp + duration).
 			let current_end = if let Some(current) = self.pending.front_mut()
@@ -849,16 +856,7 @@ impl<F: Container> Consumer<F> {
 				// The groups past the hole already fill the max buffer, so it can hold none of what
 				// would arrive into it.
 				let full = self.memory.full();
-				// Group starts are timestamps, so the key past the cursor is rarely the next group's.
-				// The publisher declares the starts it never produced, so a run it skipped holds no
-				// group to wait for or lose. Nor does one ending at a group whose first frame, or a
-				// marker's bound, continues where the content read so far ended. Either way the
-				// cursor steps to it without waiting.
-				let skipped = self.is_skipped(self.current..sequence);
-				let front = self.pending.front_mut().unwrap();
-				let first = front.poll_min_timestamp(waiter, &self.format, false);
-				let start = front.min_timestamp.and_then(time).or(front.max_end);
-				let continues = skipped || start.is_some_and(|start| pts_contiguous(self.presented_end, start));
+				let (continues, first) = self.poll_continues(waiter);
 				// A run nothing will fill, such as one dropped over a wire that can't say it was
 				// skipped, still waits for the group past it to show where it starts: stepping
 				// before that frame lands would call a contiguous timeline a loss.
@@ -1142,6 +1140,21 @@ impl<F: Container> Consumer<F> {
 		if self.edge.is_none_or(|edge| end > edge) {
 			self.edge = Some(end);
 		}
+	}
+
+	// Whether the cursor may step to the first pending group past it without waiting or losing
+	// anything, and that group's first-timestamp poll. Group starts are timestamps, so the key
+	// past the cursor is rarely the next group's. The publisher declares the starts it never
+	// produced, so a run it skipped holds no group to wait for or lose. Nor does one ending at a
+	// group whose first frame, or a marker's bound, continues where the content read so far ended.
+	fn poll_continues(&mut self, waiter: &kio::Waiter) -> (bool, Poll<Option<Timestamp>>) {
+		let next = self.pending.front().expect("a group past the cursor").start;
+		let skipped = self.is_skipped(self.current..next);
+		let front = self.pending.front_mut().unwrap();
+		let first = front.poll_min_timestamp(waiter, &self.format, false);
+		let start = front.min_timestamp.and_then(time).or(front.max_end);
+		let continues = skipped || start.is_some_and(|start| pts_contiguous(self.presented_end, start));
+		(continues, first)
 	}
 
 	fn note_group_edge(&mut self) {
@@ -1685,6 +1698,12 @@ impl<F: Container> GroupBuffer<F> {
 	/// the stream was reset (evicted, `Old`, cancelled, oversized, ...).
 	fn poll_aborted(&mut self, waiter: &kio::Waiter) -> bool {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
+	}
+
+	/// True if this group holds nothing to deliver and never will: aborted with nothing
+	/// buffered and no fault to report.
+	fn reapable(&mut self, waiter: &kio::Waiter) -> bool {
+		self.buffered.is_empty() && self.fault.is_none() && self.poll_aborted(waiter)
 	}
 
 	fn note_end(&mut self, end: std::time::Duration) {

@@ -695,8 +695,9 @@ impl MoqTrackRequest {
 
 /// A stream track to which groups and frames can be published.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	phase: std::sync::Mutex<TrackPhase>,
@@ -748,7 +749,7 @@ impl Drop for MoqTrackProducer {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
 		// A finished track lives on in its broadcast, and may still take groups below its end.
-		std::mem::take(self.phase.get_mut().unwrap()).abort(moq_net::Error::Unroutable);
+		std::mem::take(self.phase.get_mut().unwrap()).abort(moq_net::Error::Dropped);
 	}
 }
 
@@ -981,7 +982,7 @@ impl Drop for MoqGroupProducer {
 		if let GroupPhase::Writing(group) = std::mem::take(self.inner.get_mut())
 			&& group.poll_closed(&kio::Waiter::noop()).is_pending()
 		{
-			let _ = group.abort(moq_net::Error::Unroutable);
+			let _ = group.abort(moq_net::Error::Dropped);
 		}
 	}
 }
@@ -1113,7 +1114,7 @@ mod metadata_tests {
 		drop(binding);
 		assert!(matches!(
 			consumer.poll_read_frame(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Err(moq_net::Error::Unroutable))
+			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
 		));
 	}
 

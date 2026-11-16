@@ -1,8 +1,6 @@
 //! A GOAWAY migration closes the old session once nothing flows on it, rather than holding
 //! it to the handover cap.
 
-#![cfg(feature = "tcp")]
-
 use std::time::Duration;
 
 /// The only version whose routes carry the epoch that lets a subscription resume across

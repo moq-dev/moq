@@ -9,6 +9,14 @@ use crate::ffi::{Background, OneShot, Polled};
 use crate::origin::MoqOriginProducer;
 use crate::producer::{MoqTrackInfo, MoqTrackProducer};
 
+/// Whether `path` is a socket endpoint's broadcast, which only routes sessions and carries
+/// no media, so a worker that acts on every announced broadcast can skip it.
+#[uniffi::export]
+pub fn moq_socket_is_endpoint(path: String) -> Result<bool, MoqError> {
+	let path = moq_net::Path::new(&path).map_err(moq_net::Error::from)?;
+	Ok(moq_net::socket::is_endpoint(&path))
+}
+
 /// A socket endpoint: its first dial announces it as a client, and its first accept as a
 /// server.
 #[derive(uniffi::Object)]

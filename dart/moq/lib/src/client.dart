@@ -131,7 +131,7 @@ final class QuicConfig {
   /// The congestion control family; null leaves the choice to the backend.
   final CongestionControl? congestionControl;
 
-  /// Directory to write qlog traces into; fails unless [qlogSupported].
+  /// Directory, which must exist, to write qlog traces into.
   final String? qlog;
 
   /// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
@@ -181,9 +181,6 @@ final class WebSocketConfig {
 /// The protocol versions offered by default, most preferred first, spelled the
 /// way [ConnectOptions.versions] takes them.
 List<String> versions() => moqVersions();
-
-/// Whether this build can write qlog traces for [QuicConfig.qlog].
-bool qlogSupported() => moqQlogSupported();
 
 /// A MoQ session with publishing and subscription conveniences.
 final class Moq {

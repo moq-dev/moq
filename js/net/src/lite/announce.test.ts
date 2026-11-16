@@ -13,7 +13,6 @@ import {
 	decodeAnnounceBroadcastMaybe,
 	encodeAnnounceBroadcast,
 	type Offer,
-	ROUTE_MAX,
 	ROUTE_MAX_HOPS,
 } from "./announce.ts";
 import { Version } from "./version.ts";
@@ -80,8 +79,8 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 	const instance = Instance.random();
 	for (const msg of [
-		{ status: "restart" as const, id: 3n, instance, epoch: 0n, cost: 12n },
-		{ status: "restart" as const, id: 3n, instance, epoch: 7n, cost: 12n },
+		{ status: "restart" as const, id: 3n, instance, epoch: 0n, cost: 12n, above: 0n },
+		{ status: "restart" as const, id: 3n, instance, epoch: 7n, cost: 12n, above: 2n },
 	]) {
 		expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
 	}
@@ -339,7 +338,7 @@ const GOLDEN_RESOLVED = [
 
 // Rust's compressed output, pinned by `lite::compress::tests::golden_stream_is_pinned`.
 const GOLDEN =
-	"001300000a726f6f6d2f612f63616d000161000000000c0102036d696300016100000002020000010101000a02010162000161000000";
+	"001400000a726f6f6d2f612f63616d00016100000000000d0102036d6963000161000000000203000000010101000b0201016200016100000000";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -347,8 +346,8 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally. Rust's `js_literal_stream_decodes` pins the same bytes.
 const JS_LITERAL =
-	"001300000a726f6f6d2f612f63616d000161000000001300000a726f6f6d2f612f6d6963000161000000020200000101010" +
-	"00f000006726f6f6d2f62000161000000";
+	"001400000a726f6f6d2f612f63616d00016100000000001400000a726f6f6d2f612f6d69630001610000000002030000000101010" +
+	"010000006726f6f6d2f6200016100000000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -383,7 +382,6 @@ test("the route layer round-trips on draft-07", async () => {
 		priority: 0,
 		metric: 5n,
 		downOnly: true,
-		rtt: undefined,
 	};
 	const one: Offer = { ...offer, path: [{ node: 7n, session: 0n }], downOnly: false, metric: 0n };
 	const cases: [AnnounceBroadcast, number[]][] = [
@@ -392,7 +390,7 @@ test("the route layer round-trips on draft-07", async () => {
 			{ status: "routeStart", node: 0x1234n, suffix: Path.empty(), offer },
 			[6, 11, 0x92, 0x34, 0, 2, 7, 0, 9, 2, 1, 128, 5],
 		],
-		// Flag 0x2: an RTT follows. Flag 0x4: a node on the path drains.
+		// Flag 0x2: a node on the path drains.
 		[
 			{
 				status: "routeUpdate",
@@ -403,14 +401,9 @@ test("the route layer round-trips on draft-07", async () => {
 					draining: true,
 					priority: -3,
 					downOnly: false,
-					rtt: 25n,
 				},
 			},
-			[7, 8, 1, 1, 7, 0, 6, 125, 5, 25],
-		],
-		[
-			{ status: "routeUpdate", id: 1n, offer: { ...offer, rtt: ROUTE_MAX } },
-			[7, 18, 1, 2, 7, 0, 9, 2, 3, 128, 5, ...Array(9).fill(0xff)],
+			[7, 7, 1, 1, 7, 0, 2, 125, 5],
 		],
 		// As many hops as a route may carry.
 		[
@@ -475,7 +468,7 @@ test("the route layer round-trips on draft-07", async () => {
 
 	// Lite-07 claims name their route and carry no hop chain.
 	const literal: AnnounceBroadcast = { status: "active", suffix: Path.from("x"), route: 2n, instance: a, epoch: 1n };
-	expect(await roundTrip(literal, v)).toEqual({ ...literal, cost: 0n });
+	expect(await roundTrip(literal, v)).toEqual({ ...literal, cost: 0n, above: 0n });
 	await expect(bytes((w) => encodeAnnounceBroadcast(w, { ...literal, route: undefined }, v), v)).rejects.toThrow();
 	await expect(bytes((w) => encodeAnnounceBroadcast(w, { ...literal, hops: [toHop(1n)] }, v), v)).rejects.toThrow();
 });
@@ -488,7 +481,6 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 		priority: 0,
 		metric: 0n,
 		downOnly: false,
-		rtt: undefined,
 	};
 	const encode = (msg: AnnounceBroadcast) => bytes((w) => encodeAnnounceBroadcast(w, msg, v), v);
 	// No node sends an offer it would refuse.
@@ -546,13 +538,14 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 		reason: "node",
 	});
 	expect(await decode(await start(1n, [0n], 0))).toMatchObject({ status: "refused", reason: "node" });
-	// A flag no version defines is refused, and the RTT flag without its field is malformed.
-	expect(await decode(await start(1n, [1n], 8))).toEqual({
-		status: "refused",
-		message: { kind: "routeStart", node: 1n, suffix: Path.empty(), path },
-		reason: "flags",
-	});
-	await expect(decode(await start(1n, [1n], 2))).rejects.toThrow();
+	// A flag no version defines is refused.
+	for (const flags of [4, 8]) {
+		expect(await decode(await start(1n, [1n], flags))).toEqual({
+			status: "refused",
+			message: { kind: "routeStart", node: 1n, suffix: Path.empty(), path },
+			reason: "flags",
+		});
+	}
 	// More hops than a route may carry.
 	const over = Array.from({ length: ROUTE_MAX_HOPS + 1 }, () => 1n);
 	expect(await decode(await start(1n, over, 0))).toMatchObject({ status: "refused", reason: "hops" });
@@ -597,7 +590,7 @@ test("the route layer refuses Node ID 0, unknown flags, and too many hops", asyn
 				{ id: 3n, offer: { refused: "flags", path } },
 				{
 					id: 4n,
-					offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false, rtt: undefined },
+					offer: { path, draining: false, priority: 0, metric: 0n, downOnly: false },
 				},
 			],
 		},
@@ -688,12 +681,13 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	}
 
 	// ANNOUNCE_START: path base, path keep, empty suffix, route 0, instance "a", unminted, epoch 0,
-	// then a cost of 2^64-1, which only lite-07's varints can carry.
+	// then a cost of 2^64-1, which only lite-07's varints can carry, and its above.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(17);
+		await w.u53(18);
 		for (const byte of [0, 0, 0, 0, 1, 0x61, 0, 0]) await w.u8(byte);
 		await w.u62(huge);
+		await w.u8(0);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got).toMatchObject({ cost: ceiling });
@@ -710,10 +704,33 @@ test("wip start and update carry one static cost", async () => {
 			),
 		v,
 	);
-	// Path base, path keep, empty suffix, route 0, instance "b", unminted, epoch 0, cost.
-	expect([...start]).toEqual([0, 9, 0, 0, 0, 0, 1, 0x62, 0, 0, 0]);
+	// Path base, path keep, empty suffix, route 0, instance "b", unminted, epoch 0, cost, above.
+	expect([...start]).toEqual([0, 10, 0, 0, 0, 0, 1, 0x62, 0, 0, 0, 0]);
 	const update = await bytes((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, cost: Cost.zero }, v), v);
-	expect([...update]).toEqual([2, 2, 0, 0]);
+	expect([...update]).toEqual([2, 3, 0, 0, 0]);
+});
+
+test("a lite-07 claim carries how far above its path it is", async () => {
+	const v = Version.DRAFT_07;
+	const start: AnnounceBroadcast = { status: "active", suffix: Path.empty(), route: 0n, instance: b, above: 3n };
+	expect(await roundTrip(start, v)).toEqual({ ...start, cost: 0n, epoch: 0n });
+	const update: AnnounceBroadcast = { status: "update", id: 0n, cost: Cost.zero, above: 2n };
+	expect(await roundTrip(update, v)).toEqual(update);
+	const wire = await bytes((w) => encodeAnnounceBroadcast(w, update, v), v);
+	expect([...wire]).toEqual([2, 3, 0, 0, 2]);
+
+	// Earlier versions have no such field, so a claim above its path cannot travel on them.
+	await expect(
+		bytes(
+			(w) =>
+				encodeAnnounceBroadcast(
+					w,
+					{ status: "active", suffix: Path.empty(), hops: [], above: 1n },
+					Version.DRAFT_06,
+				),
+			Version.DRAFT_06,
+		),
+	).rejects.toThrow();
 });
 
 test("lite06 ignores a legacy cold price and writes its saturation ceiling", async () => {

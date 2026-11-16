@@ -51,9 +51,9 @@ pub use device::{Device, devices};
 pub use observe::{Gap, Observation, Observer, Stall};
 pub use sink::{Control, Drain, Input, Sink, Write};
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 pub(crate) use driver::Shared;
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 pub(crate) use mixer::REFERENCE_CHANNELS;
 
 use crate::Error;
@@ -116,7 +116,7 @@ impl Engine {
 		shared.observe.wake_with(commands.clone());
 		// A canceller holds no `Handle`, so `Shared` is where it reaches the
 		// driver to ask for a retry.
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		shared.wake_with(commands.clone());
 
 		let engine = Self {
@@ -173,8 +173,8 @@ impl Engine {
 	/// reference; a second call returns [`Error::Busy`] until every control and
 	/// microphone attachment from the first is dropped.
 	///
-	/// Requires the `aec` feature.
-	#[cfg(feature = "aec")]
+	/// Requires the `capture` and `playback` features.
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub fn canceller(&self, config: crate::aec::Config) -> Result<crate::aec::Control, Error> {
 		crate::aec::Control::new(self.shared.clone(), config)
 	}

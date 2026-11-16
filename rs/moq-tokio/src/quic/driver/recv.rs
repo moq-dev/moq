@@ -89,7 +89,6 @@ impl Stream {
 	}
 
 	/// Poll a read without retaining the destination buffer.
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_read_buf(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -202,7 +201,6 @@ impl Stream {
 	}
 
 	/// Stop with `code`, instead of code 0, if dropped before the end
-	#[cfg(feature = "quic")]
 	pub(crate) fn set_drop_stop(&mut self, code: VarInt) {
 		self.reader.drop_stop = code;
 	}
@@ -222,12 +220,10 @@ impl Stream {
 
 	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
 	/// left as it was.
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		self.reader.poll_received_reset(waiter)
 	}
 	/// Observe FIN without consuming application bytes, including an empty stream's end.
-	#[cfg(feature = "quic")]
 	pub(crate) fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		// A read that met the reset marks every byte read, so only the cached code still says how it ended.
 		if let Some(code) = self.reader.reset {
