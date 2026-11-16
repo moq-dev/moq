@@ -190,7 +190,7 @@ audio-warmup-bench:
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bun crypto/bench/pump.ts
+    bun e2ee/bench/pump.ts
 
 # Sweep audio renditions x raw retention through native WebCodecs in Chromium.
 raw-audio-bench:
