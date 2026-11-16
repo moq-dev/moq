@@ -91,7 +91,7 @@ window.runRecovery = async (packets) => {
 		catalogFormat: "manual",
 		catalog: { video: { renditions: { video: config } } },
 	});
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
 	const sync = new Sync({ delay: Duration.millis(0), lookahead: Duration.millis(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {

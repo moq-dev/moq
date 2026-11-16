@@ -450,7 +450,7 @@ async fn sleep_until(at: Option<kio::clock::Instant>) {
 /// [`Server`] applies this to every socket it accepts. Call it yourself when you own
 /// the listener and hand the stream to [`accept_stream`]: the keepalive is the ONLY
 /// thing bounding a play session whose viewer vanished without a FIN while its
-/// broadcast was quiet. [`PUBLISH_IDLE_TIMEOUT`] covers the publish direction, but
+/// broadcast was quiet. A media timeout covers the publish direction, but
 /// nothing reads or writes on a silent play socket, so it would otherwise live until
 /// the process restarted, holding its origin consumer open.
 ///

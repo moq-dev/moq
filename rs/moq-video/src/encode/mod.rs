@@ -21,8 +21,8 @@
 //! capture wait for its first viewer at all.
 //!
 //! `Capture` (with `capture`) / [`Kind`] / [`Config`] configure them.
-//! [`Encoder::applied`] reports the [`Preset`] whose latency and compression
-//! controls the backend applied. The decode/consume
+//! [`Config::preset`] picks a [`Preset`], how the encoder trades latency for
+//! compression at the configured bitrate. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
 //!

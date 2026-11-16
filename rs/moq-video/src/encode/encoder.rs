@@ -171,9 +171,6 @@ pub struct Config {
 	pub kind: Kind,
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
-	///
-	/// Hidden until an application chooses a preset; `encode-presets` measures them.
-	#[doc(hidden)]
 	pub preset: Preset,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
@@ -435,8 +432,8 @@ impl Encoder {
 		self.backend.name()
 	}
 
-	/// The latency and compression controls the backend applied for the
-	/// requested preset, and whether it cuts, fixed for the session's lifetime.
+	/// The latency and compression controls the backend applied for
+	/// [`Config::preset`], and whether it cuts, fixed for the session's lifetime.
 	pub fn applied(&self) -> Applied {
 		Applied {
 			cut: self.backend.can_cut(),
