@@ -85,21 +85,23 @@ pub async fn handle_viewers(
 ) -> anyhow::Result<()> {
 	let mut announced = viewers.announced();
 	// The follower per viewer, which reads each broadcast a restarted viewer replaces the old with.
-	let mut readers: std::collections::HashMap<ViewerId, tokio::task::AbortHandle> = Default::default();
+	let mut readers: std::collections::HashMap<ViewerId, tokio::task::JoinHandle<()>> = Default::default();
 	while let Some(event) = announced.next().await {
 		match event {
 			moq_net::announce::Event::Present(announce) => {
 				let viewer = announce.prefix.to_string();
 				let reader = tokio::spawn(follow_viewer(viewers.clone(), announce.prefix, cmd_tx.clone()));
-				if let Some(old) = readers.insert(viewer, reader.abort_handle()) {
-					old.abort();
+				if let Some(old) = readers.insert(viewer.clone(), reader) {
+					// The new follower may never restate what the old one held, so release it.
+					stop(old).await;
+					let _ = cmd_tx.send(Command::Left { viewer }).await;
 				}
 			}
 			moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
 				let viewer = announce.prefix.to_string();
-				// Dropping an abort handle leaves its task running, so stop it here.
+				// Dropping a join handle leaves its task running, so stop it here.
 				if let Some(old) = readers.remove(&viewer) {
-					old.abort();
+					stop(old).await;
 				}
 				tracing::info!(%viewer, "viewer went offline");
 				let _ = cmd_tx.send(Command::Left { viewer }).await;
@@ -109,6 +111,14 @@ pub async fn handle_viewers(
 		}
 	}
 	anyhow::bail!("viewer origin closed")
+}
+
+/// Stop a viewer's follower and wait until it has, so no command it was partway through sending
+/// lands after the `Left` that follows: on the multi-thread runtime, an aborted task may still be
+/// running on another worker.
+async fn stop(follower: tokio::task::JoinHandle<()>) {
+	follower.abort();
+	let _ = follower.await;
 }
 
 /// Read the commands of each broadcast a viewer publishes at `path`, switching to the new one
@@ -128,6 +138,12 @@ async fn follow_viewer(
 		tokio::select! {
 			change = following.available() => match change {
 				Ok(Some(broadcast)) => {
+					// A restarted viewer can replace its broadcast before the old one ends: release the
+					// old one's buttons and latency, since the new one may never restate them.
+					if reading.take().is_some() {
+						tracing::info!(%viewer, "viewer replaced");
+						let _ = cmd_tx.send(Command::Left { viewer: viewer.clone() }).await;
+					}
 					tracing::info!(%viewer, "viewer connected");
 					reading = Some(Box::pin(read_commands(&viewer, broadcast, &cmd_tx)));
 				}
@@ -380,6 +396,27 @@ mod tests {
 
 		bob.send(r#"{"type":"reset"}"#);
 		assert!(matches!(recv(&mut rx).await, Command::Reset));
+	}
+
+	/// A restarted viewer whose new broadcast takes over the path while the old one is still live
+	/// releases the old one's buttons, even if the new one never restates them.
+	#[tokio::test(start_paused = true)]
+	async fn a_replaced_broadcast_releases_its_buttons() {
+		let (origin, mut rx) = setup();
+		let mut old = Viewer::new(&origin, "alice");
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		old.send(r#"{"type":"buttons","buttons":["a"]}"#);
+		assert!(matches!(recv(&mut rx).await, Command::Buttons { .. }));
+
+		let mut new = Viewer::new(&origin, "alice");
+		let Command::Left { viewer } = recv(&mut rx).await else {
+			panic!("the replaced broadcast kept its buttons");
+		};
+		assert_eq!(viewer, "alice");
+
+		new.send(r#"{"type":"reset"}"#);
+		assert!(matches!(recv(&mut rx).await, Command::Reset));
+		drop(old);
 	}
 
 	/// A viewer whose handler refuses it stays followed: the listing reports nothing new when a

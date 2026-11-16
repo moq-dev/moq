@@ -13,7 +13,7 @@ use crate::emulator::Button;
 use crate::stats::StatsReport;
 
 /// A single latency component measurement.
-#[derive(Serialize, Clone)]
+#[derive(Serialize)]
 pub struct LatencyEntry {
 	pub label: String,
 	pub ms: u32,

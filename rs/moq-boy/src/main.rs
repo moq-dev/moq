@@ -242,26 +242,6 @@ impl Session {
 		self.pause.wait();
 		tracing::info!("resuming encoding");
 	}
-
-	/// Publish status if it changed since last frame.
-	fn publish_status(
-		&self,
-		emu: &emulator::Emulator,
-		latency: &BTreeMap<input::ViewerId, Vec<status::LatencyEntry>>,
-		game_stats: &stats::Stats,
-		publisher: &mut status::StatusPublisher,
-	) {
-		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-
-		let status = status::Status {
-			buttons: held,
-			latency: latency.clone(),
-			stats: game_stats.report(),
-			location: self.location.clone(),
-		};
-
-		publisher.publish(&status);
-	}
 }
 
 async fn run(config: &Config) -> Result<()> {
@@ -374,8 +354,13 @@ fn run_emulator(
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: BTreeMap<input::ViewerId, Vec<status::LatencyEntry>> = BTreeMap::new();
 	let mut game_stats = stats::Stats::new();
+	let mut status = status::Status {
+		buttons: Vec::new(),
+		latency: BTreeMap::new(),
+		stats: game_stats.report(),
+		location: session.location.clone(),
+	};
 	let mut was_audio_active = false;
 
 	loop {
@@ -441,11 +426,11 @@ fn run_emulator(
 							breakdown.push(entry("input", ms_saturating(latency)));
 						}
 
-						viewer_latency.insert(viewer, breakdown);
+						status.latency.insert(viewer, breakdown);
 					}
 					input::Command::Left { viewer } => {
 						emu.viewer_left(&viewer);
-						viewer_latency.remove(&viewer);
+						status.latency.remove(&viewer);
 					}
 					input::Command::Reset => {
 						tracing::info!("resetting emulator (viewer request)");
@@ -482,8 +467,11 @@ fn run_emulator(
 		// Tick the emulator.
 		emu.tick();
 
-		// Publish status (only if changed).
-		session.publish_status(&emu, &viewer_latency, &game_stats, &mut status_publisher);
+		// Publish status (only if changed). It is updated in place, so a frame copies none of the
+		// viewers' latency breakdowns just to serialize them.
+		status.buttons = emu.pressed_buttons().iter().copied().collect();
+		status.stats = game_stats.report();
+		status_publisher.publish(&status);
 
 		// Encode and publish video frame.
 		if is_video {

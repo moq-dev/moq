@@ -34,6 +34,9 @@ export interface GameConfig {
 interface Command {
 	cmd: Record<string, unknown>;
 	timestamps: { label: string; ts: number }[];
+	// Counts the commands sent, so a repeated one, such as a second reset while the video is
+	// stalled, is a new value the snapshot producer publishes rather than skips as unchanged.
+	seq: number;
 }
 
 // Stop publishing commands after 60s of no input.
@@ -117,6 +120,7 @@ export class Game {
 
 	// The newest command, which the command broadcast publishes once it is open.
 	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
+	#seq = 0;
 	readonly #connection: Moq.Connection;
 	#feedbackActive = new Moq.Signals.Signal(false);
 
@@ -222,7 +226,7 @@ export class Game {
 		// Publish commands on input, with idle timeout.
 		this.#feedbackActive.set(true);
 
-		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
+		this.#command.set({ cmd, timestamps: this.#timestamps(), seq: ++this.#seq }, true);
 	}
 
 	/** Collect media timestamps, in milliseconds, at each pipeline stage for latency measurement. */
@@ -347,7 +351,10 @@ export class Game {
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({ value: { ...command.cmd, timestamps: command.timestamps }, at: Moq.Time.Timestamp.now() });
+		producer.update({
+			value: { ...command.cmd, timestamps: command.timestamps, seq: command.seq },
+			at: Moq.Time.Timestamp.now(),
+		});
 	}
 }
 

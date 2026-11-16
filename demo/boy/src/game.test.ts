@@ -150,12 +150,12 @@ test("input publishes a command broadcast until the idle timer or deactivation c
 		const first = game.viewerId.peek();
 		expect(first).toHaveLength(6);
 		const reader = await commands(origin, first as string);
-		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: ["a"], timestamps: [] });
+		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: ["a"], timestamps: [], seq: 1 });
 
 		// A later command is a delta on the same track.
 		game.heldButtons.delete("a");
 		game.sendButtons();
-		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: [], timestamps: [] });
+		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: [], timestamps: [], seq: 2 });
 
 		// A minute without input withdraws the broadcast, so the emulator counts this viewer gone.
 		await clock.advance(Duration.secs(60));
@@ -169,7 +169,11 @@ test("input publishes a command broadcast until the idle timer or deactivation c
 		expect(second).toBeDefined();
 		expect(second).not.toBe(first);
 		const again = await commands(origin, second as string);
-		expect((await again.next())?.value).toEqual({ type: "reset", timestamps: [] });
+		expect((await again.next())?.value).toEqual({ type: "reset", timestamps: [], seq: 3 });
+
+		// A repeated reset is its own command, not an unchanged value the producer skips.
+		game.sendCommand({ type: "reset" });
+		expect((await again.next())?.value).toEqual({ type: "reset", timestamps: [], seq: 4 });
 
 		game.hovered.set(false);
 		await settle();
@@ -216,7 +220,7 @@ test("a command sent while disconnected is dropped, not replayed on reconnect", 
 		game.sendButtons();
 		await settle();
 		const reader = await commands(origin, game.viewerId.peek() as string);
-		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: ["a"], timestamps: [] });
+		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: ["a"], timestamps: [], seq: 1 });
 	} finally {
 		game.close();
 		origin.close();
