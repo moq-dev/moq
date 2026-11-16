@@ -229,7 +229,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let frame_type = first >> 4;
 		let codec_id = first & 0x0f;
 		if codec_id != VIDEO_CODEC_AVC {
-			return Err(crate::Error::UnknownFormat(format!("FLV video CodecID {codec_id}")).into());
+			return Err(crate::Error::UnknownFormat(format!("FLV video CodecID {codec_id}")));
 		}
 
 		ensure!(body.len() >= 5, "AVC video tag too short");
@@ -306,7 +306,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		timestamp: u64,
 	) -> crate::Result<()> {
 		if !matches!(fourcc, b"avc1" | b"hvc1" | b"av01" | b"vp09") {
-			return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {fourcc:?}")).into());
+			return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {fourcc:?}")));
 		}
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
@@ -318,7 +318,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// redundant with the key-frame header we configure from.
 					b"vp09" => return Ok(()),
 					other => {
-						return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {other:?}")).into());
+						return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {other:?}")));
 					}
 				};
 				self.init_video(track_id, config)
@@ -373,7 +373,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return self.write_audio(DEFAULT_TRACK_ID, frame, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
-			return Err(crate::Error::UnknownFormat(format!("FLV audio SoundFormat {sound_format}")).into());
+			return Err(crate::Error::UnknownFormat(format!(
+				"FLV audio SoundFormat {sound_format}"
+			)));
 		}
 
 		ensure!(body.len() >= 2, "AAC audio tag too short");
@@ -437,7 +439,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		timestamp: u64,
 	) -> crate::Result<()> {
 		if !matches!(fourcc, b"Opus" | b"mp4a" | b".mp3" | b"ac-3" | b"ec-3") {
-			return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {fourcc:?}")).into());
+			return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {fourcc:?}")));
 		}
 		match packet_type {
 			AUDIO_PACKET_SEQUENCE_START => {
@@ -447,7 +449,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// MP3 / AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
 					other => {
-						return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {other:?}")).into());
+						return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {other:?}")));
 					}
 				};
 				self.init_audio(track_id, config)
@@ -490,8 +492,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(crate::Error::NegativeFlvPts {
 				dts_ms: dts,
 				composition_time_ms: composition_time,
-			}
-			.into());
+			});
 		}
 		if !self.video.contains_key(&track_id) {
 			tracing::debug!("video frame before sequence header, dropping");
@@ -630,7 +631,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		&self,
 		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
 	) -> crate::Result<()> {
-		Ok(track.end()?)
+		track.end()
 	}
 
 	/// Close the current group on every track and reopen at `start`.

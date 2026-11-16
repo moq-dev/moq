@@ -94,6 +94,5 @@ unpublished. CLI: the `rtc` endpoint is renamed. Wire: none.
 ## Related
 
 - [moq-webrtc's server binds at startup](/quest/m2/webrtc-bind.md) - changes the same crate's server constructor and the same CLI file
-- [TS import reports its outcomes as values](/quest/m2/ts-typed-outcomes.md) - removes the CLI's downcasts of moq-srt and moq-rtsp errors
 - [moq-srt per-connection rate handle](/quest/m3/srt-rate-handle.md) - enforces the ingest cap this gives a home, and adds the egress cap as a request field
 - [moq-webrtc paces WHEP viewers](/quest/m3/rtc-pacing.md) - adds `rate` to `whep::Request`

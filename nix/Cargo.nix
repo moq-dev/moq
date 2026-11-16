@@ -19534,10 +19534,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "anyhow";
-            packageId = "anyhow";
-          }
-          {
             name = "base64";
             packageId = "base64 0.23.1";
           }
@@ -19656,6 +19652,10 @@ rec {
           }
         ];
         devDependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
           {
             name = "bench-harness";
             packageId = "bench-harness";

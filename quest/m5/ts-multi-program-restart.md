@@ -40,8 +40,9 @@ import.
   rules for PAT changes that aren't a source switch (a moved PMT PID, a
   program added or removed) as they are.
 
-[Typed TS outcomes](/quest/m2/ts-typed-outcomes.md) makes `Import`'s restart
-a returned value; give `Programs` the same shape, not a second one.
+`ts::Import::decode` returns its restart as a value
+(`Result<Option<Restart>, ts::Error>`); give `Programs` the same shape, not a
+second one.
 
 Public API: possibly additive on `Programs` (a restart result like
 `Import`'s). Wire: none.
