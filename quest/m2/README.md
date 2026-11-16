@@ -45,9 +45,8 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
   [config names](/quest/m2/relay-config-names.md) and
-  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md);
-  [transport names](/quest/m2/transport-names.md); and
-  [stats names](/quest/m2/stats-old-names.md).
+  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
+  [transport names](/quest/m2/transport-names.md).
 - **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
   [claims](/quest/m2/auth-claims.md), and
   [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
