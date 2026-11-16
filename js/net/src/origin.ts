@@ -2483,11 +2483,16 @@ export class Consumer implements Reader {
 		};
 		if (!announced) taken.absent.add(absent);
 		// The table moved while the same route may still win: a read stranded on it asks again.
-		// Queued behind the route's own flush, so a route that changed is served first.
-		const moved = () =>
+		// Queued behind the route's own flush, so a route that changed is served first, and
+		// checked again then: a takeover gone pending meanwhile is no news.
+		const moved = () => {
+			const at = route.peek()?.source;
 			queueMicrotask(() => {
-				if (!released) logical?.moved();
+				const now = route.peek();
+				if (released || now?.source !== at || now?.pending || taken.failover) return;
+				logical?.moved();
 			});
+		};
 		taken.moved.add(moved);
 
 		const unsubscribe = route.subscribe((resolution) => {

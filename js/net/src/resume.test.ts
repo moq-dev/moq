@@ -1442,6 +1442,82 @@ test("a replacement that refuses a track as unroutable is asked again once the t
 	for (const broadcast of [a, b]) broadcast.close();
 });
 
+// The table moving twice in one turn, the second time toward a cheaper route that has yet to
+// answer: the first move's news is stale by the time the read could act on it.
+test("a read stranded on a route waits out a takeover that went pending in the same turn", async () => {
+	const { origin, a, b, active, close } = await setup();
+	const first = copy(a);
+	const sub = active.track("seq").subscribe();
+	first.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	first.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	const second = copy(a);
+	second.write(1n);
+	// A dearer route moves the table while the stranded one still wins, then a cheaper one does.
+	const dearer = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 10n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	const asked = next.requested();
+	await settle();
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	const tb = copy(b);
+	const { value: pending } = await asked.next();
+	pending.serve(b.consume());
+	await settle();
+	await settle();
+	tb.write(2n);
+	await settle();
+	expect(drain(sub)).toEqual([2n]);
+
+	sub.close();
+	dearer.close();
+	next.close();
+	close();
+});
+
+// A concluded front has no route left to move: the copy that serves it losing its route ends the
+// read rather than strand it, even when it serves again after a replacement failed.
+test("a concluded front's copy that loses its route ends the read", async () => {
+	const front = new Front();
+	const [a, b] = [new BroadcastProducer(), new BroadcastProducer()];
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n);
+	await settle();
+	expect(drain(sub)).toEqual([0n]);
+
+	front.serve(b.consume());
+	await settle();
+	tb.producer.abort(new StreamError(StreamCode.Unroutable));
+	front.conclude();
+	await settle();
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
+
+	ta.producer.abort(new StreamError(StreamCode.Unroutable));
+	await settle();
+	let ended: unknown;
+	try {
+		sub.tryRecvGroup();
+	} catch (err) {
+		ended = err;
+	}
+	expect(ended).toBeInstanceOf(StreamError);
+
+	sub.close();
+	front.consumer.close();
+	for (const broadcast of [a, b]) broadcast.close();
+});
+
 // Mirrors `a_stranded_track_still_draining_asks_again_when_the_table_moves` in rs/moq-net/src/model/front.rs.
 test("a replacement that loses its route is asked again once the table moves, the replaced copy feeding meanwhile", async () => {
 	const front = new Front();

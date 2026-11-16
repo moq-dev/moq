@@ -278,7 +278,6 @@ class Route {
 		this.#bump();
 	}
 
-	/** Subscribe every reader afresh to the source that still serves, once its copy failed. */
 	/** A read idles on `source`, which lost the route, until the table moves: see {@link Front.moved}. */
 	strand(source: Source): void {
 		this.#stranded = source;
@@ -291,6 +290,7 @@ class Route {
 		return true;
 	}
 
+	/** Subscribe every reader afresh to the source that still serves, once its copy failed. */
 	resubscribe(): void {
 		if (!this.source) return;
 		this.generation++;
@@ -1045,9 +1045,10 @@ class Reader implements ResumeSource {
 			// again could only replace the withdrawal's cause with a refusal, and that route's
 			// news follows on the same session. A local broadcast's word is the track's verdict.
 			// Otherwise one that delivered nothing is the route refusing the track, and one that
-			// did is subscribed afresh.
+			// did is subscribed afresh. A concluded route has no front left to move it, so its
+			// loss ends the read.
 			if (serving && route.source === serving.source && !closing(ended)) {
-				if (strands(ended, serving.source)) {
+				if (!route.concluded && strands(ended, serving.source)) {
 					route.strand(serving.source);
 					return { kind: "idle" };
 				}
