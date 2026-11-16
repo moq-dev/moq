@@ -43,8 +43,12 @@ Measured 2026-11-15 by the [bake-off](https://github.com/moq-dev/moq/pull/8880),
 and decided 2026-11-16
 ([maintainer](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514)).
 The rank is the epic's: not draining, the lowest priority on the path, the
-summed cost, each link adding at least 1, then the next hop in use, the
-shorter path, and the neighbour. Four more lemmas for what it added:
+summed cost, each link adding at least 1, then no marked link on the path,
+the next hop in use, the shorter path, and the neighbour. The mark's place
+was decided by the coordinator on 2026-11-16 while the maintainer was away,
+pending their confirmation (rejected: leaving it to arrival order; dropping
+the next hop in use; ranking the mark ahead of cost). Four more lemmas for
+what it added:
 
 - The session floor is a filter: a path naming a pair of relays at or below
   the highest session known closed between them maps to invalid, a session
