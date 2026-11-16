@@ -59,7 +59,8 @@ pub enum MoqProtocolKind {
 	TimestampMismatch,
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	App,
-	/// A code this version does not recognize; [`MoqProtocolError::code`] is the value.
+	/// A code moq-lite does not name, such as one only moq-transport defines;
+	/// [`MoqProtocolError::code`] is the value.
 	Unknown,
 	/// The session exceeded its announcement or subscription cap.
 	TooManyRequests,

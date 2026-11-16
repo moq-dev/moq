@@ -147,7 +147,7 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH = 22,
 	/// App.
 	MOQ_PROTOCOL_KIND_APP = 23,
-	/// Unknown.
+	/// A code moq-lite does not name, such as one only moq-transport defines.
 	MOQ_PROTOCOL_KIND_UNKNOWN = 24,
 	/// The session exceeded its announcement or subscription cap.
 	MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS = 25,
