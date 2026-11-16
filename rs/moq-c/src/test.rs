@@ -8183,14 +8183,17 @@ fn announce_route_crosses_a_relay_session() {
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	for (session, cb) in [
-		(downstream, &downstream_cb),
-		(downstream_client, &downstream_client_cb),
-		(upstream, &upstream_cb),
-		(upstream_client, &upstream_client_cb),
+	// Each client first: closed by its peer before it was healthy, it would end on its own.
+	// Its peer gone, the accepted session ends too.
+	for (client, client_cb, accepted, accepted_cb) in [
+		(downstream_client, &downstream_client_cb, downstream, &downstream_cb),
+		(upstream_client, &upstream_client_cb, upstream, &upstream_cb),
 	] {
-		assert_eq!(moq_session_close(session), 0);
-		cb.recv_terminal();
+		assert_eq!(moq_session_close(client), 0);
+		client_cb.recv_terminal();
+		accepted_cb.recv_terminal();
+		// The terminal snapshot already released the handle.
+		assert!(moq_session_close(accepted) < 0);
 	}
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
@@ -8297,10 +8300,12 @@ fn a_minted_instance_pins_request_and_follow() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	for (session, cb) in [(session, &session_cb), (client, &client_cb)] {
-		assert_eq!(moq_session_close(session), 0);
-		cb.recv_terminal();
-	}
+	// The client first: closed by its peer before it was healthy, it would end on its own.
+	assert_eq!(moq_session_close(client), 0);
+	client_cb.recv_terminal();
+	// Its peer gone, the accepted session ends too, which releases its handle.
+	session_cb.recv_terminal();
+	assert!(moq_session_close(session) < 0);
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
 	assert_eq!(moq_route_free(route), 0);
@@ -8448,18 +8453,14 @@ fn server_rejects_a_session() {
 	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
 
 	// The rejection closes a session the transport already established, so the client
-	// sees it connect first, then reports the rejection while it redials, whatever its kind.
-	let protocol = loop {
-		if let Some(protocol) = client_cb.recv().protocol {
-			break protocol;
-		}
-	};
+	// sees it connect first. Refused before it was healthy, the session then ends with the
+	// rejection rather than redialing, as a refused first dial does.
+	let terminal = client_cb.recv_terminal();
+	let protocol = terminal.protocol.expect("the terminal snapshot names the rejection");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
 	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32);
-	let again = id(server_cb.recv());
-	assert_eq!(moq_session_request_reject(again, 403), 0);
-	assert_eq!(moq_session_close(client), 0);
-	client_cb.recv_terminal();
+	// The terminal snapshot already released the handle.
+	assert!(moq_session_close(client) < 0);
 
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
@@ -9477,7 +9478,13 @@ fn a_credential_rides_every_reconnect() {
 	let _first = first.accept(moq_net::auth::Grant::all());
 	assert_eq!(answer.recv().0, 0);
 
-	// The server ends the session; the client redials and presents the token again.
+	// The server ends the session once it was healthy; the client redials and presents the
+	// token again.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the test thread has no runtime; the C API's session ages on the real clock"
+	)]
+	std::thread::sleep(Duration::from_secs(1));
 	server.admit();
 	let again = server.token();
 	assert_eq!(again.token().as_ref(), b"kept", "the reconnect presents it again");

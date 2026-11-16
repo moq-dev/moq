@@ -1781,9 +1781,10 @@ unsafe fn connect_session(
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// Once connected, the session reconnects automatically with exponential backoff if the
-/// connection drops. A first dial that reaches no session ends it instead, with that dial's
-/// error as the terminal snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
-/// since the origins outlive the underlying connection.
+/// connection drops. Until a session has stayed up past 1s or been drained by a GOAWAY, a
+/// failed dial or a closed session, such as a refused credential, ends it instead, with that error as the terminal
+/// snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on
+/// each reconnect, since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
 /// connect, drop, migration, and failed dial, carrying the phase with its data and the
