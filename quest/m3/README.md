@@ -35,7 +35,9 @@ federation) land. Superseded 2026-11-12 (maintainer, /quest-audit): both moved
 to [m1](/quest/m1/README.md), since the cut no longer waits on m1. The mesh
 libraries came back 2026-11-13, below; byte streams moved to Kixel 2026-11-14.
 The mesh libraries left moq for Kixel on 2026-11-14 (maintainer): moq keeps
-what a large live-media platform would use.
+what a large live-media platform would use. Socket endpoints, the first of
+those prerequisites, [leave for Kixel too](/quest/m2/sockets/README.md)
+(2026-11-16).
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut), from a read of
 every quest against the code and the downstream quest trees:

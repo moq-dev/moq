@@ -3,7 +3,7 @@
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
-use rangemap::RangeInclusiveMap;
+use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 
 /// The groups a reader skipped as stale and never handed out, with the budget each was
 /// judged under, as runs of consecutive keys.
@@ -22,6 +22,10 @@ struct Runs {
 	/// At most the narrowest budget any run was judged under, so a poll whose budget did
 	/// not widen past it skips the scan.
 	narrowest: Duration,
+	/// Keys whose verdict may have become final since [`Skipped::take_released`]: no
+	/// longer skipped, or never were. A reader settles only these, so a hand-out costs
+	/// what changed rather than every run, which sparse keys never merge.
+	released: RangeInclusiveSet<u64>,
 }
 
 impl Skipped {
@@ -34,12 +38,27 @@ impl Skipped {
 		skipped.runs.insert(key..=key, budget);
 	}
 
-	/// Forget `key`, now handed out.
+	/// Forget `key`, now handed out or final.
 	pub fn remove(&mut self, key: u64) {
 		if let Some(skipped) = &mut self.0
-			&& !skipped.runs.is_empty()
+			&& skipped.runs.contains_key(&key)
 		{
 			skipped.runs.remove(key..=key);
+			skipped.released.insert(key..=key);
+		}
+	}
+
+	/// Mark `key` as one whose verdict may be final, whether or not it is skipped.
+	pub fn release(&mut self, key: u64) {
+		self.0.get_or_insert_default().released.insert(key..=key);
+	}
+
+	/// The keys released since the last call: removed or pruned, or marked by
+	/// [`Self::release`]. Each may still be skipped again since.
+	pub fn take_released(&mut self) -> RangeInclusiveSet<u64> {
+		match &mut self.0 {
+			Some(skipped) => std::mem::take(&mut skipped.released),
+			None => RangeInclusiveSet::new(),
 		}
 	}
 
@@ -111,7 +130,8 @@ impl Skipped {
 			if !gone(&run) {
 				break;
 			}
-			skipped.runs.remove(run);
+			skipped.runs.remove(run.clone());
+			skipped.released.insert(run);
 		}
 		if skipped.runs.len() > cached.saturating_mul(2) {
 			let gone: Vec<_> = skipped
@@ -121,7 +141,8 @@ impl Skipped {
 				.filter(&mut gone)
 				.collect();
 			for run in gone {
-				skipped.runs.remove(run);
+				skipped.runs.remove(run.clone());
+				skipped.released.insert(run);
 			}
 		}
 	}
@@ -202,5 +223,26 @@ mod test {
 		// More runs than twice the cache prunes every one that holds nothing.
 		skipped.prune(0, |run| *run.start() != 5);
 		assert_eq!(skipped.widened(WIDE), vec![5..=5]);
+	}
+
+	#[test]
+	fn released_holds_only_what_left_since_the_last_take() {
+		let mut skipped = Skipped::default();
+		assert!(skipped.take_released().is_empty());
+		for key in [10, 20, 30] {
+			skipped.insert(key, NARROW);
+		}
+		skipped.remove(20);
+		skipped.remove(25);
+		skipped.prune(3, |run| *run.start() < 20);
+		skipped.release(u64::MAX);
+		let released: Vec<_> = skipped.take_released().into_iter().collect();
+		assert_eq!(
+			released,
+			[10..=10, 20..=20, u64::MAX..=u64::MAX],
+			"never-skipped 25 is not"
+		);
+		assert!(skipped.take_released().is_empty(), "taken once");
+		assert_eq!(skipped.lowest(), Some(30));
 	}
 }

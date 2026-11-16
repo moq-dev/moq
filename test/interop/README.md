@@ -122,8 +122,9 @@ GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
 broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
-marked N/A. A pinned moq-transport pass records the case as skipped until
-[`quest/m3/ietf-finish.md`](../../quest/m3/ietf-finish.md) makes it pass.
+marked N/A. A pinned moq-transport pass records the case as skipped:
+moq-transport is a compatibility layer, and a finished broadcast's late tail
+between our own clients is not planned work.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.

@@ -23554,9 +23554,9 @@ rec {
       };
       "notify" = rec {
         crateName = "notify";
-        version = "8.2.1";
+        version = "8.2.2";
         edition = "2021";
-        sha256 = "0x2651clb8sbwaifxv7lk2a7xgi597h89y6k2rad6xdw5xq15y42";
+        sha256 = "1aq5088m1j07fs25yb5j35hq344zsz96sa2pqqn35ycxynjh86n4";
         authors = [
           "Félix Saparelli <me@passcod.name>"
           "Daniel Faust <hessijames@gmail.com>"
@@ -41926,9 +41926,9 @@ rec {
       };
       "rind" = rec {
         crateName = "rind";
-        version = "0.3.1";
+        version = "0.3.2";
         edition = "2024";
-        sha256 = "1f6gajqygj5qif4nj1nm6hs9p4al4bfq3dd99ay3kam7gfg5a6sv";
+        sha256 = "1mbh8981cvpbzr5pllrxd94hisqcp35p6fqcigks5pw3av76l1af";
         dependencies = [
           {
             name = "cfg-if";
@@ -42070,9 +42070,9 @@ rec {
       };
       "rind-jsonwebtoken" = rec {
         crateName = "rind-jsonwebtoken";
-        version = "11.0.2";
+        version = "11.0.3";
         edition = "2024";
-        sha256 = "1sxp9gf64z3gsgxhza9czm6a5afdbbdx6cgwv2j386jsd7afjd6x";
+        sha256 = "1y0wqd87lb4wp1y7vihwlqfw3fsfwjr5pi2i7ak2fa9l3n6y1r09";
         libName = "rind_jsonwebtoken";
         dependencies = [
           {
@@ -42103,9 +42103,9 @@ rec {
       };
       "rind-object-store" = rec {
         crateName = "rind-object-store";
-        version = "0.14.2";
+        version = "0.14.3";
         edition = "2024";
-        sha256 = "1ma4s650h61wcsdnnnagyn6njh5f5g91r5vargh8k1vg98kw6l4i";
+        sha256 = "1fjx4m3rin3sx8sh7nb5dn6vlpkjgvjv8qwwq1rnnlh2v9z0jdxa";
         libName = "rind_object_store";
         dependencies = [
           {
@@ -42141,9 +42141,9 @@ rec {
       };
       "rind-rcgen" = rec {
         crateName = "rind-rcgen";
-        version = "0.14.2";
+        version = "0.14.3";
         edition = "2024";
-        sha256 = "1pyz4ggxa52610077dq4al2754aysqsc41frhzsxxxxnacs86acc";
+        sha256 = "0nzlda9vpd75b5wxr3yszx9d5wa6p6y8f1ha2nl666wy4bd3wr1r";
         libName = "rind_rcgen";
         dependencies = [
           {
@@ -42176,9 +42176,9 @@ rec {
       };
       "rind-rustls" = rec {
         crateName = "rind-rustls";
-        version = "0.23.2";
+        version = "0.23.3";
         edition = "2024";
-        sha256 = "0lk7rzkkkxdcc0b932p8kss51hrfipmdp0plh8kxalzn2pnwg4cg";
+        sha256 = "1pdx5pjjqnkrxqrw77lyvzfvcw83f4m1mqj6kmsm29rh5l4in8wi";
         libName = "rind_rustls";
         dependencies = [
           {
@@ -51361,9 +51361,9 @@ rec {
       };
       "uuid" = rec {
         crateName = "uuid";
-        version = "1.29.1";
+        version = "1.29.2";
         edition = "2021";
-        sha256 = "1p3b7vh4jvpj5q64q1qrvlrd15c5h1wkwzdgpg3rn03bhn5g01ja";
+        sha256 = "0z161qj1jw91fz64pmz1vqs9l1y7dpbf8yziwp7vbjfsywwr3ndy";
         dependencies = [
           {
             name = "getrandom";
@@ -51373,7 +51373,7 @@ rec {
               { target, features }:
               (
                 !(
-                  ("wasm32" == target."arch" or null)
+                  (builtins.elem "wasm" target."family")
                   && (("unknown" == target."os" or null) || ("none" == target."os" or null))
                 )
               );
@@ -51386,7 +51386,7 @@ rec {
             target =
               { target, features }:
               (
-                ("wasm32" == target."arch" or null)
+                (builtins.elem "wasm" target."family")
                 && (("unknown" == target."os" or null) || ("none" == target."os" or null))
                 && (builtins.elem "atomics" targetFeatures)
               );
@@ -51405,7 +51405,7 @@ rec {
             target =
               { target, features }:
               (
-                ("wasm32" == target."arch" or null)
+                (builtins.elem "wasm" target."family")
                 && (("unknown" == target."os" or null) || ("none" == target."os" or null))
               );
           }
@@ -51417,7 +51417,7 @@ rec {
             target =
               { target, features }:
               (
-                ("wasm32" == target."arch" or null)
+                (builtins.elem "wasm" target."family")
                 && (("unknown" == target."os" or null) || ("none" == target."os" or null))
               );
           }

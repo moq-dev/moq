@@ -350,7 +350,8 @@ enum SentState<A> {
 struct SentOffer<A> {
 	offer: Offer,
 	/// The prefix of the view its claims were presented from, or `None` once an edit
-	/// rekeyed it: the next batch is diffed against all it holds.
+	/// rekeyed it or it was held or kept, missing batches: the next batch is diffed
+	/// against all it holds.
 	from: Option<Path>,
 	view: View<A>,
 }
@@ -377,6 +378,14 @@ impl<A> Sent<A> {
 				unreachable!()
 			};
 			self.state = SentState::Held(sent);
+		}
+		self.behind();
+	}
+
+	/// It is sent nothing for now, so its next batch is diffed against all it holds.
+	fn behind(&mut self) {
+		if let SentState::Live(sent) | SentState::Held(sent) = &mut self.state {
+			sent.from = None;
 		}
 	}
 
@@ -570,6 +579,8 @@ pub(crate) struct Retained {
 	/// Claims on routes sent.
 	pub sent: usize,
 	pub routes: usize,
+	/// Routes heard, one per neighbour offering one.
+	pub offers: usize,
 	pub dead: usize,
 	pub doubt: usize,
 	pub draining: usize,
@@ -1897,6 +1908,7 @@ impl<N: Key, A: Item> Router<N, A> {
 				.keys()
 				.filter(|(id, _)| !self.origins.contains_key(id))
 				.count(),
+			offers: self.sessions.values().map(|session| session.heard.len()).sum(),
 			dead: self.dead.len(),
 			doubt: self.doubted.len(),
 			draining: self.draining.len(),
@@ -2380,11 +2392,26 @@ impl<N: Key, A: Item> Router<N, A> {
 
 	/// Whether a neighbour offers a route for `key` that only doubt keeps this node off.
 	fn hopes(&self, key: &RouteId) -> bool {
-		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| {
-			heard.state == State::Live
-				&& !names(&heard.offer.path, self.hop)
-				&& heard.offer.metric.checked_add(self.sessions[peer].link.cost).is_some()
-				&& self.doubts_path(*peer, &heard.offer.path)
+		(self.rx.get(key).into_iter().flatten()).any(|(peer, heard)| self.kept_off(*peer, heard))
+	}
+
+	/// Whether only doubt keeps this node off the route `heard` from `peer`.
+	fn kept_off(&self, peer: N, heard: &Heard<A>) -> bool {
+		heard.state == State::Live
+			&& !names(&heard.offer.path, self.hop)
+			&& heard.offer.metric.checked_add(self.sessions[&peer].link.cost).is_some()
+			&& self.doubts_path(peer, &heard.offer.path)
+	}
+
+	/// Whether `peer` offers a route that only doubt keeps this node off, where it has
+	/// no live one: it takes the route once the doubt lifts.
+	pub fn doubted(&self, peer: N) -> bool {
+		let Some(session) = self.sessions.get(&peer) else {
+			return false;
+		};
+		session.heard.iter().any(|key| {
+			!self.routes.get(key).is_some_and(Route::live)
+				&& (self.rx.get(key).and_then(|heard| heard.get(&peer))).is_some_and(|heard| self.kept_off(peer, heard))
 		})
 	}
 
@@ -2991,7 +3018,11 @@ impl<N: Key, A: Item> Router<N, A> {
 			let sent = self.answering[&peer].tx.get(&key);
 			let on = sent.is_some_and(|sent| sent.offer().is_some());
 			match want {
-				Want::Keep => {}
+				Want::Keep => {
+					if let Some(sent) = self.answering.get_mut(&peer).expect("answering").tx.get_mut(&key) {
+						sent.behind();
+					}
+				}
 				Want::Hold => {
 					if on && !sent.expect("sent").held() {
 						self.answering
@@ -3126,16 +3157,7 @@ impl<N: Key, A: Item> Router<N, A> {
 		let changes: Vec<(Path, Option<A>)> = match (sent, dirty.all || fresh) {
 			(Some(sent), false) => {
 				let old = &sent.active().expect("offered").view;
-				let mut claims: BTreeSet<&Path> = dirty.claims.iter().collect();
-				// A held stream may have missed withdrawals the local reader already
-				// consumed. When its region changes, include its own previous claims.
-				for region in &dirty.regions {
-					if let Some(region) = meet(prefix, region) {
-						claims.extend(below(&old.items, &region).map(|(claim, _)| claim));
-					}
-				}
-				let mut changes: Vec<(&Path, Option<A>)> = claims
-					.into_iter()
+				let mut changes: Vec<(&Path, Option<A>)> = (dirty.claims.iter())
 					.filter(|claim| within(claim, prefix) && *claim != prefix)
 					.map(|claim| (claim, view.items.get(claim).cloned()))
 					.collect();

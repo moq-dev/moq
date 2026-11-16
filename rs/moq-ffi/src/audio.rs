@@ -396,8 +396,9 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
@@ -420,7 +421,7 @@ impl crate::producer::Child for MoqAudioProducer {
 
 impl Drop for MoqAudioProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+		crate::producer::Child::abort(self, moq_net::Error::Dropped);
 	}
 }
 

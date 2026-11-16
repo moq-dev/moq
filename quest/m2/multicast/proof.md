@@ -39,9 +39,31 @@ What to show, each a lemma about one message handler:
   the iteration would remove, so it only arrives sooner.
 - The chain is the same algebra at the grain of trust boundaries.
 
+Measured 2026-11-15 by the [bake-off](https://github.com/moq-dev/moq/pull/8880),
+and decided 2026-11-16
+([maintainer](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514)).
+The rank is the epic's: not draining, the lowest priority on the path, the
+summed cost, each link adding at least 1, then the next hop in use, the
+shorter path, and the neighbour. Four more lemmas for what it added:
+
+- The session floor is a filter: a path naming a pair of relays at or below
+  the highest session known closed between them maps to invalid, a session
+  ordering by its relay's start and then its number, and the set only grows,
+  so it removes only routes the iteration would remove.
+- A node that announces no claim offers no route to itself, which removes
+  only routes no request names.
+- A named drain sets a route's drain from its path and the nodes known
+  draining, and the drain still travels in the offer, so the order stays one
+  order.
+- A claim ranks by the route to its announcer joined with its own drain,
+  priority, and cost; show an echo across two grants never beats the claim it
+  echoes.
+
+A node advertising once per burst changes no fixed point.
+
 State plainly what the theorem does not give, and where each is covered:
 
-- No loop at every instant: [requests](/quest/m2/multicast/requests.md) fail
+- No loop at every instant: [requests](https://github.com/moq-dev/moq/pull/8881) fail
   closed instead.
 - A cost that depends on who subscribed:
   [warmth](/quest/m2/multicast/warmth.md) argues it separately.
@@ -56,7 +78,3 @@ goes with it in the [switch](/quest/m2/multicast/switch.md). Report how long
 the Agda check takes.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The bake-off](/quest/m2/multicast/bakeoff.md) - fixes the rank and the transformations to prove

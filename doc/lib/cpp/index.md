@@ -245,6 +245,8 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
+To end a track nobody wants, call the producer's `abort_unwanted(code)` once `wanted_changed()` returns `std::nullopt` rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+
 ## Authorization
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
@@ -266,9 +268,10 @@ its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
 The broadcast stays announced and keeps serving the finished tracks, so a
 subscriber still catching up can drain them, until `broadcast->close()` takes it
 offline. How long to keep it up is yours to decide. A track still open at the
-close, or released without a finish, ends with `Unroutable` (`Internal` over
-moq-transport, which has no such code). Readers follow a publisher's runs by
-announcement, not by that error: see [identity and recovery](/concept/identity).
+close ends with `Unroutable` (`Internal` over moq-transport, which has no such
+code), and one released without a finish ends `Dropped`, which readers see as
+`Internal`. Readers follow a publisher's runs by announcement, not by that error:
+see [identity and recovery](/concept/identity).
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

@@ -1931,17 +1931,69 @@ async fn track_request_demand_survives_accept() {
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
 	demand.until_unwanted().await.unwrap();
-	// Released unfinished, the track aborts, and its watcher keeps the cause.
+	// Released unfinished, the track ends dropped, which its watcher reports as `Closed`, as a
+	// track released without an abort.
 	drop(track);
 	broadcast.close().unwrap();
 	let Err(err) = demand.until_wanted().await else {
 		panic!("the watcher outlived its track");
 	};
-	assert_protocol(
-		&err,
-		crate::error::MoqErrorScope::Stream,
-		crate::error::MoqProtocolKind::Unroutable,
-	);
+	assert!(matches!(err, MoqError::Closed), "{err:?}");
+}
+
+/// An on-demand track ends once unwanted, but a reader that joined first keeps it, and a later
+/// reader requests it afresh.
+#[tokio::test]
+async fn abort_unwanted_keeps_a_late_reader() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let first = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
+	};
+	let track = dynamic.requested_track().await.unwrap().accept(None).unwrap();
+	let demand = track.demand().unwrap();
+	first.await.unwrap().unwrap().cancel();
+	demand.until_unwanted().await.unwrap();
+
+	// A reader joins after the publisher saw nobody wanted the track.
+	let late = consumer.subscribe_track("events".into(), None).await.unwrap();
+	assert!(!track.abort_unwanted(7).unwrap());
+	track.append_group().unwrap().finish().unwrap();
+	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
+		.await
+		.expect("timed out waiting for the late reader's group")
+		.unwrap();
+	assert!(group.is_some());
+
+	// The publisher's demand loop sees the reader come and go; then the same teardown
+	// commits, and later calls find the handle closed.
+	demand.until_wanted().await.unwrap();
+	drop(group);
+	late.cancel();
+	demand.until_unwanted().await.unwrap();
+	assert!(track.abort_unwanted(7).unwrap());
+	assert!(matches!(track.abort_unwanted(7), Err(MoqError::Closed)));
+	assert!(matches!(track.append_group(), Err(MoqError::Closed)));
+
+	// The next reader asks the publisher again instead of finding the aborted track.
+	let next = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the track to be requested again")
+		.unwrap();
+	assert_eq!(request.name().unwrap(), "events");
+	request.reject(404).unwrap();
+	assert!(next.await.unwrap().is_err());
+
+	// A finished track is kept for its readers the same way.
+	let finished = broadcast.publish_track("status".into(), None).unwrap();
+	let reader = finished.consume(None).unwrap();
+	finished.finish().unwrap();
+	assert!(!finished.abort_unwanted(7).unwrap());
+	reader.cancel();
+	assert!(finished.abort_unwanted(7).unwrap());
 }
 
 /// A datagram handler keeps its broadcast alive independently of the stream handler.
@@ -4836,6 +4888,18 @@ async fn assert_left<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
 	}
 }
 
+/// Each reader ends without a cause, as a handle released before its finish or abort leaves it:
+/// `Dropped`, which keeps `Unroutable` for a route losing the content.
+async fn assert_released<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
+	for reader in readers {
+		let read = kio::clock::timeout(TIMEOUT, reader.read_frame()).await;
+		let Err(err) = read.expect("the track carried on") else {
+			panic!("the track ended cleanly");
+		};
+		assert!(matches!(err, MoqError::Internal { .. }), "{err:?}");
+	}
+}
+
 /// Closing a broadcast ends every track handle still open on it the way a publisher leaving
 /// does, and the handles refuse later calls.
 #[tokio::test(start_paused = true)]
@@ -4855,14 +4919,14 @@ async fn closing_a_broadcast_ends_its_open_tracks() {
 	assert!(matches!(media.finish(), Err(MoqError::Closed)));
 }
 
-/// A track handle released without a finish, as a garbage collector does, ends its track as a
-/// publisher leaving rather than a cause-less drop.
+/// A track handle released without a finish, as a garbage collector does, ends its track as
+/// dropped: its broadcast stays, so no route was lost.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_track_handle_ends_it() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (raw, media, readers) = children(&broadcast).await;
 	drop((raw, media));
-	assert_left(readers).await;
+	assert_released(readers).await;
 	broadcast.close().unwrap();
 }
 
@@ -4932,13 +4996,13 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 	assert!(matches!(json_window.push("1".into(), us(0)), Err(MoqError::Closed)));
 }
 
-/// A data writer released without a finish ends its track as a publisher leaving.
+/// A data writer released without a finish ends its track as dropped.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_data_writer_ends_it() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (writers, readers) = data_children(&broadcast).await;
 	drop(writers);
-	assert_left(readers).await;
+	assert_released(readers).await;
 	broadcast.close().unwrap();
 }
 

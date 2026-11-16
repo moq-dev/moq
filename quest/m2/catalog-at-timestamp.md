@@ -24,6 +24,10 @@ value.value)`), and `js/hang` does likewise; both return it with the
 catalog. A consumer that reads an update ahead of its timestamp holds it
 until media reaches that time; one that reads it late applies it at once.
 
+The clock itself is the catalog section
+[`sync`](/quest/m2/hang04/sync.md) names (`media.clock` on main today), so
+the draft's rule cites whichever name has landed.
+
 A scale-less broadcast's catalog has no media time to wait for, so it applies
 on arrival, as today.
 
