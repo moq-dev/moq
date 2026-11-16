@@ -5285,10 +5285,10 @@ impl Finished {
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
 ///
-/// A live handle also lets a reader at a frame a group copy shed replay it: a [`Fill`] of
+/// A live handle also lets a reader at a frame a group copy shed replay it: a [`FillGroups`] of
 /// that one group from that frame asks for a flight, a copy of its own paced by the readers
 /// riding it, which they leave for the copy ahead once it holds their frame within reach.
-/// Serve it like any group, and stop once nobody reads it: see [`Fill::is_wanted`].
+/// Serve it like any group, and stop once nobody reads it: see [`FillGroups::is_wanted`].
 pub struct Requests {
 	name: Arc<str>,
 	// Kept to insert served groups into the cache and observe track abort.
@@ -6423,7 +6423,7 @@ impl Consumer {
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
 	/// (past the final key, or no [`Requests`] on the track), the handler's
 	/// rejection (a relay's upstream miss is [`StreamError::NotFound`](StreamError::NotFound)),
-	/// or the track's abort error if it's already closed. A miss queues a one-group [`Fill`],
+	/// or the track's abort error if it's already closed. A miss queues a one-group [`FillGroups`],
 	/// which concurrent fetches of the same key join.
 	pub fn fetch_group(&self, key: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		self.fetching(
@@ -22757,7 +22757,7 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		// The window inside `Fill::accept` between caching the group and publishing the answer.
+		// The window inside `FillGroups::accept` between caching the group and publishing the answer.
 		let _writing = producer
 			.state
 			.write()
@@ -22796,7 +22796,7 @@ mod test {
 		assert!(fill.poll_withdrawn(&waiter).is_ready(), "nobody waits on the fill now");
 	}
 
-	/// A parked [`Fill::poll_wanted_changed`] wakes on every move of the group owed: a
+	/// A parked [`FillGroups::poll_wanted_changed`] wakes on every move of the group owed: a
 	/// reader narrowing past it, a reader picking up an answer, and the last reader leaving,
 	/// which ends at `None`.
 	#[test]
@@ -22845,7 +22845,7 @@ mod test {
 	}
 
 	/// The owed group arriving through the live feed wakes a parked
-	/// [`Fill::poll_wanted_changed`]: the cache answers it, so the fill no longer owes it.
+	/// [`FillGroups::poll_wanted_changed`]: the cache answers it, so the fill no longer owes it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn fill_wanted_changed_follows_a_live_arrival() {
@@ -23980,7 +23980,7 @@ mod test {
 
 	/// A run that passes over a group another request is bringing serves the groups around
 	/// it, across the runs that answered groups split the fill into, and leaves that group
-	/// to [`Fill::next_run`] once nothing else is owed.
+	/// to [`FillGroups::next_run`] once nothing else is owed.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_run_passes_over_a_skipped_group() {

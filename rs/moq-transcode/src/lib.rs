@@ -1511,7 +1511,7 @@ mod tests {
 	/// source, so the source publishes no group at all and serves this one
 	/// through a [`moq_net::track::Requests`] instead. That handle also parks the
 	/// fetch at exactly the point in question: past the rung's handler, before
-	/// its `Fill::accept`.
+	/// its `FillGroups::accept`.
 	#[tokio::test]
 	async fn retirement_waits_for_an_unclaimed_fetch() {
 		let mut source = source_catalog(320, 240);
@@ -1558,7 +1558,7 @@ mod tests {
 		let fetching = rung.fetch_group(7, None);
 
 		// The rung's fetch task is now inside its source read, which is upstream of
-		// both its decoder and the `Fill::accept` that claims output group 7.
+		// both its decoder and the `FillGroups::accept` that claims output group 7.
 		let request = source_fetches
 			.requested_fill()
 			.await
