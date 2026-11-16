@@ -969,12 +969,18 @@ mod tests {
 			.decode(b"opus payload", Some(Timestamp::from_micros(21_000).unwrap()))
 			.unwrap();
 		let mut group = track.recv_group().await.unwrap().expect("the open group");
-		assert!(group.read_frame().await.unwrap().is_some(), "the write before the check");
+		assert!(
+			group.read_frame().await.unwrap().is_some(),
+			"the write before the check"
+		);
 		assert!(group.read_frame().await.unwrap().is_some(), "the write after the check");
 
 		drop(group);
 		drop(track);
-		import.abort_unwanted(moq_net::Error::App(7)).ok().expect("nobody wants it");
+		import
+			.abort_unwanted(moq_net::Error::App(7))
+			.ok()
+			.expect("nobody wants it");
 		assert!(!catalog.snapshot().audio.renditions.contains_key("audio"));
 	}
 
