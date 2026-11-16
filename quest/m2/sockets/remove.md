@@ -90,7 +90,3 @@ Public API: breaking for `main`-only API in every language; nothing on
 
 - [MoQ Boy viewers publish their commands again](/quest/m2/sockets/boy.md) - the emulator and its element stop using `moq_net::socket` and `@moq/net`'s `Socket`
 - [CARLA drivers publish their controls again](/quest/m2/sockets/carla.md) - the worker stops using the Python wrapper and the player `@moq/net`'s `Socket`
-
-## Related
-
-- [moq-net publishes no item without a caller](/quest/m2/unused-api/net.md) - the sweep this keeps `is_endpoint` out of

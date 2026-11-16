@@ -10764,7 +10764,7 @@ impl Ordered {
 
 	/// The next group with a higher key than any previously returned.
 	///
-	/// Honors the group range set by [`Self::with_range`]:
+	/// Honors the group range set by [`Subscriber::with_range`] before [`Subscriber::ordered`]:
 	/// a group past the cap stays in the producer's cache and becomes eligible again if
 	/// the cap rises or is removed. Ranges that all end end the read once they are
 	/// accounted for, as for [`Subscriber::poll_recv_group`].
@@ -10779,16 +10779,18 @@ impl Ordered {
 		self.inner.poll_next_group(waiter)
 	}
 
-	/// Limit subsequent reads to these group keys, returning `self` for chaining.
-	///
-	/// See [`Subscriber::with_range`] for how the bounds apply. An ordered read never goes
-	/// back, so lowering the floor below a group it already returned offers nothing.
-	pub fn with_range(mut self, groups: impl RangeBounds<u64>) -> Self {
+	/// Narrow subsequent reads to these group keys, as [`Subscriber::with_range`] does: a
+	/// read in key order never goes back, so lowering the floor below a group it already
+	/// returned offers nothing.
+	#[cfg(test)]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_range(mut self, groups: impl RangeBounds<u64>) -> Self {
 		self.set_range(groups);
 		self
 	}
 
 	/// [`Self::with_range`] on a reader held in place.
+	#[cfg(test)]
 	fn set_range(&mut self, groups: impl RangeBounds<u64>) {
 		self.inner.set_range(groups);
 	}
@@ -10820,7 +10822,7 @@ impl Ordered {
 		self.inner.poll_finished(waiter)
 	}
 
-	/// The largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
+	/// The largest location within [`Subscriber::with_range`]; see [`Subscriber::poll_largest`].
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		self.inner.poll_largest(waiter)
@@ -19144,7 +19146,7 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let mut everything = producer.subscribe(replay());
 		let mut empty = producer.subscribe(replay().with_order(Order::Ascending));
-		empty.set_range((Bound::Unbounded, Position::group(0).group_end()));
+		empty.set_range((Bound::Unbounded, Bound::Excluded(0)));
 
 		for s in 0..3 {
 			producer
@@ -19178,8 +19180,8 @@ mod test {
 	fn end_at_frame_limited_last_group() {
 		let producer = track_producer("test", Info::timed());
 		let mut consumer = producer.subscribe(replay()).ordered();
-		let end = Position::after(1, 1).unwrap();
-		consumer.set_range((Bound::Unbounded, end.group_end()));
+		let end = Position::new(1, 2);
+		consumer.set_range((Bound::Unbounded, Bound::Included(end.group)));
 
 		for s in 0..3u64 {
 			let mut group = producer.create_group(group::Info { start: s }).unwrap();

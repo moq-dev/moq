@@ -66,6 +66,17 @@ groups plus reported spans cover everything sent. At HEAD
 count of keys, which [the wire rewrite](/quest/m2/time-addressing/lite07.md)
 turns into the span's end.
 
+Decided 2026-11-16 (the unused moq-net API sweep): once the container reader
+reads gaps through `Gap`, `track::Subscriber::next_in_range`, `is_skipped`,
+and `poll_start` (their one consumer is moq-mux's container reader, which
+orders groups itself) go crate-private in the same PR. So does
+`Subscriber::with_range`, whose last production caller is
+`rs/moq-mux/src/container/source.rs`'s resubscription, which leaves out the
+group it already read (a time start names the group containing it, so a
+`Subscription` range cannot exclude one); if the reader can skip that group
+through `Gap` or its own cursor, the sweep's other callers (tests in moq-mux
+and moq-json) move to `Subscription::ranges`, otherwise it stays.
+
 Public API: breaking for `track::Ordered` only. Its one read,
 `poll_next_group` (and its async wrapper), returns
 `Result<Option<Item>>` instead of `Result<Option<group::Consumer>>`, where
