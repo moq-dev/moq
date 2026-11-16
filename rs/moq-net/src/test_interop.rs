@@ -167,19 +167,30 @@ fn ietf_range_updates_interop() {
 				let mut r = Decoder::new(bytes, version.into());
 				let header = ietf::GroupHeader::decode(&mut r, version).unwrap();
 				assert_eq!(header.track_alias, 0, "updates must retain the subscription alias");
-				assert!(header.flags.has_end, "a complete group must end");
+				// A FIN claims nothing: a complete group ends with an explicit END_OF_GROUP.
+				assert!(!header.flags.has_end, "the header never claims the end");
 				let mut objects = Vec::new();
+				let mut prior = None;
+				let mut ended = false;
 				while !r.is_empty() {
+					assert!(!ended, "nothing follows END_OF_GROUP");
 					let delta = r.varint().unwrap();
-					let object = objects.last().map_or(delta, |prior| prior + delta + 1);
+					let object = prior.map_or(delta, |prior: u64| prior + delta + 1);
+					prior = Some(object);
 					if header.flags.has_extensions {
 						let len = r.varint().unwrap() as usize;
 						r.slice(len).unwrap();
 					}
 					let len = r.varint().unwrap() as usize;
+					if len == 0 {
+						assert_eq!(r.varint().unwrap(), ietf::object::END_OF_GROUP);
+						ended = true;
+						continue;
+					}
 					assert_eq!(r.slice(len).unwrap(), [header.group_id as u8, object as u8]);
 					objects.push(object);
 				}
+				assert!(ended, "a complete group must end");
 				groups.push((header.group_id, objects));
 			}
 		}

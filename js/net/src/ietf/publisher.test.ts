@@ -2244,12 +2244,15 @@ const V22 = Version.DRAFT_22;
 const TRACK_ENDED_STATUS = 0x2;
 
 /** A group stream the publisher opened, decoded down to its objects. */
+/** The END_OF_GROUP object status. */
+const END_OF_GROUP = 3;
+
 interface ServedGroup {
 	/** The group's sequence number. */
 	sequence: bigint;
 	/** Whether the header claimed the stream starts at the group's first object. */
 	firstObject: boolean;
-	/** Whether the header claimed the stream's FIN ends the group (END_OF_GROUP). */
+	/** Whether the stream ended with an explicit END_OF_GROUP; the header never claims one. */
 	endOfGroup: boolean;
 	/** Each object's absolute id (reconstructed from its delta) and payload. */
 	objects: { id: number; payload: string }[];
@@ -2362,11 +2365,14 @@ async function readGroup(stream: ReadableStream<Uint8Array> | Reader): Promise<S
 
 	// Decoded by hand rather than through Frame: a filter that trims a group's head puts the
 	// first object's absolute id in the delta, which Frame.decode refuses on principle.
+	expect(header.flags.hasEnd).toBe(false);
 	const objects: { id: number; payload: string }[] = [];
 	const gaps = new Map<number, bigint>();
 	let id = 0;
 	let first = true;
+	let endOfGroup = false;
 	while (!(await reader.done())) {
+		expect(endOfGroup).toBe(false);
 		const delta = await reader.u53();
 		id = first ? delta : id + delta + 1;
 		first = false;
@@ -2375,14 +2381,23 @@ async function readGroup(stream: ReadableStream<Uint8Array> | Reader): Promise<S
 			const gap = new Cursor(properties, reader.version).exact(properties.byteLength, decodeGroupGap);
 			if (gap !== undefined) gaps.set(id, gap);
 		}
-		const payload = await reader.read(await reader.u53());
+		const size = await reader.u53();
+		if (size === 0) {
+			const status = await reader.u53();
+			if (status === END_OF_GROUP) {
+				endOfGroup = true;
+				continue;
+			}
+			expect(status).toBe(0);
+		}
+		const payload = await reader.read(size);
 		objects.push({ id, payload: new TextDecoder().decode(payload) });
 	}
 
 	return {
 		sequence: header.groupId,
 		firstObject: header.flags.firstObject,
-		endOfGroup: header.flags.hasEnd,
+		endOfGroup,
 		objects,
 		gaps: gaps.size > 0 ? gaps : undefined,
 	};
@@ -3040,6 +3055,9 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 		}
 		if (finished) {
 			group.finish();
+			// The group finished before the track named its end, so it claims its own.
+			const end = await reader.decode((c) => Frame.decode(c, header.flags));
+			expect(end.isObject || end.endOfTrack).toBe(false);
 			expect(await reader.done()).toBe(true);
 		}
 		track.finishAt({ group: 5n, frame: 5 });

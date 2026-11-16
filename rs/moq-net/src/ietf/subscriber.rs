@@ -6677,6 +6677,8 @@ pub(crate) struct GroupIngest {
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
 	gap: Option<u64>,
+	/// The object's Prior Group ID Gap, applied only once the object proves to be a frame.
+	group_gap: Option<u64>,
 	inflated: Option<u64>,
 	phase: IngestPhase,
 }
@@ -6714,6 +6716,7 @@ impl GroupIngest {
 			properties: Default::default(),
 			raw: bytes::Bytes::new(),
 			gap: None,
+			group_gap: None,
 			inflated: None,
 			phase: IngestPhase::Delta,
 		}
@@ -8338,6 +8341,9 @@ impl GroupIngest {
 
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
 		let id = self.prior_object.expect("payload follows object ID");
+		// A status object refused for its properties must not have skipped keys already.
+		let gap = self.group_gap.take();
+		self.skip_prior(group.start, gap)?;
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
 		let plain = id == group.frame_count() as u64 && self.properties.is_empty();
 		let fields = (!plain).then(|| {
@@ -8381,6 +8387,7 @@ impl GroupIngest {
 					self.properties = Default::default();
 					self.raw = bytes::Bytes::new();
 					self.gap = None;
+					self.group_gap = None;
 					self.inflated = None;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
@@ -8394,7 +8401,7 @@ impl GroupIngest {
 				IngestPhase::ExtBytes { size } => {
 					let ext = ready!(reader.poll_read_exact(waiter, *size))?;
 					let decoded = super::object::read(&ext, self.version)?;
-					self.skip_prior(group.start, decoded.group_gap)?;
+					self.group_gap = decoded.group_gap;
 					self.properties = decoded.properties;
 					self.raw = ext;
 					self.gap = decoded.gap;
@@ -15578,6 +15585,16 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+
+		// A status object may not carry properties, so one refused for them skips nothing.
+		let h = Harness::new(
+			Fill::Done,
+			vec![object_stream(VERSION, true, &[(0, &[0x3c, 2], Some(END_OF_GROUP))])],
+		);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(res.is_err(), "{res:?}");
+		assert_eq!(h.track.consume().skipped_below(KEY), 0);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {

@@ -8214,9 +8214,12 @@ impl GroupServe {
 										}
 										// The track ends right after this group's last object, so
 										// the marker rides this stream rather than a separate one.
+										// Not after an END_OF_GROUP already took that Object ID: a
+										// track finished while it waited to flush ends on its own
+										// stream instead.
 										if !self.marked
-											&& let Some(end) =
-												self.terminal.as_ref().and_then(|terminal| terminal.end.get())
+											&& !self.ended && let Some(end) =
+											self.terminal.as_ref().and_then(|terminal| terminal.end.get())
 											&& end.group == self.msg.group_id && end.frame == self.group.index()
 										{
 											writer.buffer_varint(object_delta(self.prior_object, end.frame)?)?;

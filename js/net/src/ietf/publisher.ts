@@ -1274,9 +1274,9 @@ export class Publisher {
 					hasExtensions: groupGap > 0n,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
-					// A stream capped by the range stops before the group may end, so its FIN
-					// cannot claim END_OF_GROUP.
-					hasEnd: slice.until === undefined,
+					// A FIN never claims the group's end: an explicit END_OF_GROUP does, once the
+					// group finished, as in Rust.
+					hasEnd: false,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
 					// a trimmed head starts partway through.
@@ -1316,6 +1316,8 @@ export class Publisher {
 				// group) is empty, and starting here is what lets the check below see that
 				// before the read parks on an object the range already excludes.
 				let next = slice.skip;
+				// Whether the group finished, rather than the range or a stop ending the read.
+				let ended = false;
 
 				for (;;) {
 					// The filter ends inside this group: everything at `until` and beyond is
@@ -1324,9 +1326,14 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, false, slice.skip), stream.closed, stopped]);
+					const read = await race([
+						hooks.readGroupFrame(group, false, slice.skip),
+						stream.closed.then(() => false as const),
+						stopped,
+					]);
 					if (left) throw left;
 					if (rangeError) throw rangeError;
+					if (read === undefined) ended = true;
 					if (!read) break;
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) break;
@@ -1348,7 +1355,12 @@ export class Publisher {
 				// stream rather than a separate one.
 				const end = hooks.subscriberEnd(track);
 				const marked = end?.group === group.sequence && end.frame === next;
-				if (marked) {
+				// A finished group ends with END_OF_GROUP one past its last object, unless the
+				// END_OF_TRACK below marks that place or the range stops short of it.
+				if (ended && !marked && (slice.until === undefined || next < slice.until)) {
+					await send(() => new Frame().encode(stream, header.flags, this.#session.version, first ? next : 0));
+					first = false;
+				} else if (marked) {
 					await new Frame({ endOfTrack: true }).encode(
 						stream,
 						header.flags,
