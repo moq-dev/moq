@@ -430,7 +430,7 @@ fn run_emulator(
 						// Compute latency for each viewer-reported timestamp.
 						for t in &timestamps {
 							let latency = elapsed.saturating_sub(t.ts);
-							breakdown.push(entry(&t.label, ms_saturating(latency)));
+							breakdown.push(entry(t.label, ms_saturating(latency)));
 						}
 
 						// Input: gap between what the viewer sees and what the server

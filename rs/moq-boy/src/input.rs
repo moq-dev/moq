@@ -19,11 +19,27 @@ struct RawTimestamp {
 	ts: f64,
 }
 
+/// The pipeline stages a viewer reports, in order. Anything else is dropped, so the latency the
+/// shared status retains per viewer stays this small whatever a viewer sends.
+const STAGES: [&str; 3] = ["received", "decoded", "rendered"];
+
 /// A parsed timestamp entry with Duration.
 #[derive(Debug)]
 pub struct TimestampEntry {
-	pub label: String,
+	pub label: &'static str,
 	pub ts: Duration,
+}
+
+/// The first timestamp of each known stage, in pipeline order, dropping one no Duration can hold.
+fn stages(timestamps: Vec<RawTimestamp>) -> Vec<TimestampEntry> {
+	STAGES
+		.iter()
+		.filter_map(|&label| {
+			let t = timestamps.iter().find(|t| t.label == label)?;
+			let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
+			Some(TimestampEntry { label, ts })
+		})
+		.collect()
 }
 
 /// A command sent by a viewer.
@@ -161,20 +177,11 @@ async fn read_commands(
 		};
 
 		let command = match command {
-			RawCommand::Buttons { buttons, timestamps } => {
-				let timestamps = timestamps
-					.into_iter()
-					.filter_map(|t| {
-						let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
-						Some(TimestampEntry { label: t.label, ts })
-					})
-					.collect();
-				Command::Buttons {
-					viewer: viewer.to_string(),
-					buttons,
-					timestamps,
-				}
-			}
+			RawCommand::Buttons { buttons, timestamps } => Command::Buttons {
+				viewer: viewer.to_string(),
+				buttons,
+				timestamps: stages(timestamps),
+			},
 			RawCommand::Reset {} => {
 				tracing::info!(%viewer, "reset");
 				Command::Reset
@@ -246,8 +253,8 @@ mod tests {
 			.expect("handler ended")
 	}
 
-	/// A viewer is untrusted: an unknown command, or a timestamp no Duration can hold, is dropped
-	/// without ending that viewer's commands.
+	/// A viewer is untrusted: an unknown command, or a timestamp of an unknown stage or one no Duration
+	/// can hold, is dropped without ending that viewer's commands.
 	#[tokio::test(start_paused = true)]
 	async fn unknown_commands_are_skipped() {
 		let (origin, mut rx) = setup();
@@ -259,7 +266,7 @@ mod tests {
 			kio::clock::sleep(Duration::from_millis(100)).await;
 		}
 		viewer.send(
-			r#"{"type":"buttons","buttons":["a"],"timestamps":[{"label":"past","ts":-5},{"label":"far","ts":1e300},{"label":"ok","ts":1500}]}"#,
+			r#"{"type":"buttons","buttons":["a"],"timestamps":[{"label":"rendered","ts":3000},{"label":"evil","ts":1},{"label":"received","ts":-5},{"label":"decoded","ts":1500},{"label":"decoded","ts":9}]}"#,
 		);
 
 		let Command::Buttons {
@@ -272,9 +279,27 @@ mod tests {
 		};
 		assert_eq!(from, "alice");
 		assert_eq!(buttons, vec![Button::A]);
-		assert_eq!(timestamps.len(), 1, "{timestamps:?}");
-		assert_eq!(timestamps[0].label, "ok");
-		assert_eq!(timestamps[0].ts, Duration::from_millis(1500));
+		// Only known stages, the first of each, in pipeline order, without the one no Duration holds.
+		let timestamps: Vec<_> = timestamps.iter().map(|t| (t.label, t.ts)).collect();
+		assert_eq!(
+			timestamps,
+			[
+				("decoded", Duration::from_millis(1500)),
+				("rendered", Duration::from_millis(3000))
+			]
+		);
+	}
+
+	/// However many timestamps a viewer sends, the shared status retains at most one per stage.
+	#[test]
+	fn timestamps_are_bounded_by_the_stages() {
+		let timestamps = (0..10_000)
+			.map(|n| RawTimestamp {
+				label: ["received", "decoded", "rendered", "other"][n % 4].to_string(),
+				ts: n as f64,
+			})
+			.collect();
+		assert_eq!(stages(timestamps).len(), STAGES.len());
 	}
 
 	/// A frame that isn't JSON ends only its own viewer: the other keeps playing.
