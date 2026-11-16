@@ -57,9 +57,6 @@ pub(super) struct Video<O> {
 	pub min_delay: Duration,
 	/// The rendition's catalog `delay`, held as this track's playout target.
 	pub delay: tokio::sync::watch::Receiver<Option<Duration>>,
-	/// The rendition's catalog `warmup`: after a join or a skip, pictures before the
-	/// recovery point plus this decode but never show.
-	pub warmup: Duration,
 }
 
 /// The production sink and the deterministic buffered decoder used by tests.
@@ -140,8 +137,7 @@ impl<O: Output> Video<O> {
 		shared.saturating_sub(self.min_delay)
 	}
 
-	/// A subscription's budget with `held` on top of its own. The container adds the
-	/// warmup to the subscription's max itself.
+	/// A subscription's budget with `held` on top of its own.
 	fn budget(&self, held: Duration) -> moq_net::track::Delay {
 		moq_net::track::Delay {
 			min: Some(self.min_delay + held),
@@ -186,8 +182,6 @@ impl<O: Output> Video<O> {
 			// The group of a declared end no later group has followed yet. The media
 			// buffered before the end still plays out.
 			let mut end = None;
-			// Whether a frame was read yet, so only the first can be the track's start.
-			let mut started = false;
 
 			loop {
 				// Stop reading while media queued behind the front segment arrived more
@@ -242,33 +236,21 @@ impl<O: Output> Video<O> {
 									buffers.remove(index);
 								}
 							}
-							// A fresh encoder opens on a picture of its own, with nothing before it
-							// to warm up from.
-							buffers.push_back(Segment {
-								media: Buffer::fresh(),
-								..Default::default()
-							});
+							buffers.push_back(Segment::default());
 							// Another timeline: its arrivals stop holding the clock until this one.
 							role.reset();
 						}
-						// The clock anchors on the arrival furthest ahead of its media, so a warmup
-						// trailing the live edge never holds playback back.
 						if role.received(frame.timestamp, Instant::now()) {
 							self.output.send(Event::Wake);
 						}
 						let back = buffers.back_mut().unwrap();
-						// A group with nothing below it is the track's first, decoded from the
-						// encoder's first picture.
-						if !std::mem::replace(&mut started, true) && track.is_skipped(0..group) {
-							back.joined = false;
-						}
-						back.push(frame, self.max_delay + held, self.warmup);
+						back.push(frame, self.max_delay + held);
 						back.arrived.get_or_insert_with(Instant::now);
 						false
 					}
-					// Lost media discards every picture still buffered, and what follows warms
-					// up again. An end declared before the loss still holds, as on the audio
-					// side: a later group comes from the replacement encoder.
+					// Lost media discards every picture still buffered. An end declared
+					// before the loss still holds, as on the audio side: a later group comes
+					// from the replacement encoder.
 					Some(Read::Gap { .. }) => {
 						buffers.clear();
 						buffers.push_back(Segment::default());
@@ -429,24 +411,19 @@ impl<O: Output> Video<O> {
 					}
 				}
 				// A codec may return pictures it held across the keyframe that resumed a
-				// skipped timeline, which no longer have a slot, and pictures still warming up
-				// after it, which would show refresh stripes.
-				let (floor, present) = {
-					let buffers = buffers.lock().unwrap();
-					let front = buffers.front().unwrap();
-					(front.floor, front.present)
-				};
-				// A picture that doesn't compare with a bound isn't known to precede it.
-				let below = |at: moq_net::Timestamp, bound: Option<moq_net::Timestamp>| {
-					bound.is_some_and(
-						|bound| matches!((at.as_micros(), bound.as_micros()), (Ok(at), Ok(bound)) if at < bound),
+				// skipped timeline, which no longer have a slot.
+				let floor = buffers.lock().unwrap().front().unwrap().floor;
+				// A picture that doesn't compare with the floor isn't known to precede it.
+				let below = |at: moq_net::Timestamp| {
+					floor.is_some_and(
+						|floor| matches!((at.as_micros(), floor.as_micros()), (Ok(at), Ok(floor)) if at < floor),
 					)
 				};
 				while let Some(frame) = decoder.receive()? {
 					// A codec returns display order, so a picture held before one it
 					// returned was dropped rather than delayed.
 					held.retain(|held| held.0 > frame.timestamp);
-					if !below(frame.timestamp, floor) && !below(frame.timestamp, present) {
+					if !below(frame.timestamp) {
 						pending.push_back(frame);
 					}
 				}
@@ -556,7 +533,6 @@ mod tests {
 			max_delay,
 			min_delay: max_delay,
 			delay: tokio::sync::watch::channel(None).1,
-			warmup: Duration::ZERO,
 		}
 	}
 
@@ -1235,72 +1211,6 @@ mod tests {
 			decoded < SEGMENTS,
 			"media queued behind the front past the age budget was kept, not evicted: {decoded}"
 		);
-	}
-
-	/// Play a group starting at `first` holding media from 1 s, and the live group from 2 s,
-	/// through a rendition with a one-second warmup. Returns each picture shown, in
-	/// milliseconds, and when after the groups were published.
-	async fn warmup_join(first: u64) -> Vec<(u128, Duration)> {
-		let delay = Duration::from_secs(2);
-		let warmup = Duration::from_secs(1);
-		let media = media(delay);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let published = broadcast
-			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
-		let playout = moq_mux::container::Playout::new(
-			moq_net::track::Delay {
-				min: Some(delay),
-				max: Some(delay),
-			},
-			warmup,
-		);
-		let subscriber = published
-			.consume()
-			.subscribe(playout.subscription(moq_net::track::Subscription::default()))
-			.await
-			.unwrap();
-		let wire = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		for (start, stamps) in [(first, 1_000..=1_900), (2_000, 2_000..=2_200)] {
-			let mut group = published.append_group(start).unwrap();
-			let frames: Vec<_> = stamps
-				.step_by(100)
-				.enumerate()
-				.map(|(index, ms)| frame(ms, index == 0))
-				.collect();
-			wire().write(&mut group, &frames).unwrap();
-			group.close().unwrap();
-		}
-		let _published = published.finish().unwrap();
-		let begin = Instant::now();
-		let video = Video {
-			warmup,
-			..playback(&media, delay)
-		};
-		let task = tokio::spawn(video.run(playout.consumer(subscriber, wire()), Buffered::new(0)));
-		let mut shown = Vec::new();
-		for _ in 0..10_000 {
-			tokio::task::yield_now().await;
-			if let Some(timestamp) = media.output.present(&media) {
-				shown.push((timestamp.as_millis().unwrap(), Instant::now() - begin));
-			}
-			tokio::time::advance(Duration::from_millis(1)).await;
-		}
-		task.await.unwrap().unwrap();
-		shown
-	}
-
-	/// A join mid-track decodes the group before the live one as its warmup and never shows
-	/// it, so the live group's pictures play when they would have anyway. The track's first
-	/// group decodes from the encoder's first picture, so nothing warms up there.
-	#[tokio::test(start_paused = true)]
-	async fn a_warmup_join_shows_only_the_recovered_pictures() {
-		let joined = warmup_join(1_000).await;
-		let start = warmup_join(0).await;
-		let millis = |shown: &[(u128, Duration)]| shown.iter().map(|(ms, _)| *ms).collect::<Vec<_>>();
-		assert_eq!(millis(&joined), [2_000, 2_100, 2_200]);
-		assert_eq!(millis(&start), (1_000..=2_200).step_by(100).collect::<Vec<_>>());
-		assert_eq!(joined, start[10..], "the warmup moved the live group's schedule");
 	}
 
 	/// Play one burst of 33 ms pictures, given by slot in decode order, through a

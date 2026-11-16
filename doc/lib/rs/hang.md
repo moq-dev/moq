@@ -27,7 +27,7 @@ hang is the format, not the pipeline. [`moq-mux`](/lib/rs/moq-mux) produces the
 catalog for you and decodes any container in group order
 (`moq_mux::container::Consumer`). Its `Delay { min, max }` says how far behind
 the live edge to play: it skips groups that fall past `max`, and starts at the
-group covering the live edge less `min` (your playout delay), plus a rendition's
+group covering the live edge less `min` (your playout delay), plus an audio rendition's
 catalog `warmup` passed to a `Playout`, waiting up to that long for it when the
 newest group arrives first. Both default to zero, which starts at the newest
 group at once. A backlog that landed before the first read starts within `max`
