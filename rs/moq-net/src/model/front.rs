@@ -397,13 +397,12 @@ impl Front {
 		match best {
 			// The serving route is still the best one. The table moved, which is the
 			// evidence a track it lost waits for: ask it again, as for a track that waited
-			// on a switch given up on.
+			// on a switch given up on, however that switch ended (a refused request clears
+			// `upstream` before it reselects).
 			Some(candidate) if Some(candidate.route) == serving_route => {
-				let gave_up = self.upstream.take().is_some();
+				self.upstream = None;
 				self.unstrand(actions);
-				if gave_up {
-					self.redispatch_idle(actions);
-				}
+				self.redispatch_idle(actions);
 			}
 			// Already asking through it.
 			Some(candidate) if self.upstream.is_some_and(|upstream| upstream.route == candidate.route) => {}
@@ -1769,6 +1768,47 @@ mod tests {
 			result: Err(Error::Dropped),
 			delivered: true,
 		});
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+	}
+
+	/// A switch the target retracted ends with a refusal that is not standing: the serving
+	/// route winning the reselect still asks the track that waited on it.
+	#[test]
+	fn a_switch_refused_without_standing_asks_the_serving_source_again() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Dropped),
+				delivered: true,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Err(Refusal {
+					err: Error::NotFound,
+					standing: false,
+				}),
+			}),
+			&[Action::Reselect],
+		);
 		assert_actions(
 			front.step(Event::Selected {
 				best: Some(remote(1)),
