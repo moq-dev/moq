@@ -177,6 +177,49 @@ async fn read_exact(recv: &mut RecvStream, want: usize) -> Result<Bytes, Error> 
 	.await
 }
 
+/// What `send` answers about the bytes below `offset`, without waiting.
+fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<poll::Acked, Error>> {
+	send.poll_acked(&kio::Waiter::noop(), offset)
+}
+
+/// A stream's bytes count as sent once the transport takes them, which a stalled link holds
+/// back. A reset discards what the link still holds, so only the prefix that went out stays sent,
+/// and egress never bills the rest.
+#[tokio::test(start_paused = true)]
+async fn bytes_count_as_sent_once_the_link_takes_them() {
+	for &version in Version::ALL {
+		let (client, server, up, _down) = link();
+		let (client, server) = establish(client, server, config(version), config(version)).await;
+
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		let first = payload(1000, 5);
+		write_all(&mut send, first.clone()).await;
+		let mut recv = server.accept_uni().await.unwrap();
+		assert_eq!(read_exact(&mut recv, first.len()).await.unwrap(), first, "{version:?}");
+		let went_out = send.offset();
+		assert!(
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			"{version:?}: the link took it"
+		);
+
+		up.send(Flow::Stall).unwrap();
+		// More than the pipe holds, within the peer's stream window.
+		write_all(&mut send, payload(2 * PIPE, 6)).await;
+		let held = send.offset();
+		assert!(acked(&send, &held).is_pending(), "{version:?}: the link holds the rest");
+
+		send.reset(1);
+		assert!(
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			"{version:?}: what went out stays sent"
+		);
+		assert!(
+			matches!(acked(&send, &held), Poll::Ready(Err(_))),
+			"{version:?}: the reset discarded the rest"
+		);
+	}
+}
+
 /// Leased bytes keep their credit, so incomplete messages fill the receive window rather than
 /// memory outside it. Once no reader can make progress, the lowest priority holder is evicted,
 /// and the credit it held lets the others carry on.

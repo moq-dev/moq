@@ -527,10 +527,26 @@ impl SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
-	// Writing into TCP is not delivery, so acknowledgments stay unsupported.
-	type Offset = ();
+	type Offset = send::Offset;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> send::Offset {
+		self.inner.lock().conn.send_stream(self.id).offset()
+	}
+
+	/// [`Acked::Sent`](poll::Acked::Sent) once the transport took the bytes, which is not the
+	/// peer acknowledging them. A reset or stop keeps the prefix that went out before it.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<poll::Acked, Error>> {
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		if u64::from(*offset) <= stream.acked_len() {
+			return Poll::Ready(Ok(poll::Acked::Sent));
+		}
+		match ready!(stream.poll_acked(waiter, *offset)) {
+			Ok(()) => Poll::Ready(Ok(poll::Acked::Sent)),
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
 		self.poll_write_buf(waiter, &mut buf)

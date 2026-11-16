@@ -53,7 +53,8 @@
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model. A
 //!   session's egress `bytes` / `frames` count only payload the peer
-//!   acknowledged (see [`SendStream::poll_acked`](crate::transport::poll::SendStream::poll_acked)),
+//!   acknowledged, or that a reliable link such as qmux's took (see
+//!   [`SendStream::poll_acked`](crate::transport::poll::SendStream::poll_acked)),
 //!   never what a reset or a lost session discarded: a frame's bytes once an
 //!   offset past them is acknowledged, and the frame with its last byte. A
 //!   transport that cannot see acknowledgments counts the bytes the stream
