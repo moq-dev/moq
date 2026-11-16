@@ -1349,7 +1349,7 @@ impl Listen {
 			|| !self.key.is_empty()
 			|| !self.generate.is_empty()
 			|| !self.root.is_empty()
-			|| { self.identity.is_some() }
+			|| self.identity.is_some()
 	}
 
 	/// The released spellings in use, each paired with what replaced it.

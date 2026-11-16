@@ -570,7 +570,6 @@ mod tests {
 		assert_eq!(sni.as_deref(), Some("localhost"));
 		let (_server, identity, _) = mtls_dial(server, None).await.expect("token-only client refused");
 		assert!(identity.is_none());
-
 	}
 
 	/// Dial `server` over `tls://localhost`, presenting `cert` (a PEM cert and key)

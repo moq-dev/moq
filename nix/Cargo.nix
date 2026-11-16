@@ -20639,6 +20639,11 @@ rec {
             features = [ "lab" ];
           }
           {
+            name = "moq-quic";
+            packageId = "moq-quic";
+            features = [ "lab" ];
+          }
+          {
             name = "proptest";
             packageId = "proptest";
             usesDefaultFeatures = false;
@@ -20684,10 +20689,12 @@ rec {
             "dep:arbitrary"
             "sim"
           ];
+          "lab" = [ "moq-congestion/lab" ];
         };
         resolvedDefaultFeatures = [
           "default"
           "fuzz"
+          "lab"
           "sim"
         ];
       };
@@ -21052,6 +21059,11 @@ rec {
             features = [ "test" ];
           }
           {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            features = [ "test-support" ];
+          }
+          {
             name = "moq-uring";
             packageId = "moq-uring";
             usesDefaultFeatures = false;
@@ -21112,7 +21124,7 @@ rec {
           "jemalloc" = [ "moq-tokio/jemalloc" ];
           "test-support" = [
             "kio/sim"
-            "moq-tokio/sim"
+            "moq-tokio/test-support"
           ];
         };
         resolvedDefaultFeatures = [
@@ -22069,7 +22081,7 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
-            features = [ "sim" ];
+            features = [ "test-support" ];
           }
           {
             name = "pem";
@@ -22132,14 +22144,14 @@ rec {
             "dep:tikv-jemallocator"
             "dep:tikv-jemalloc-ctl"
           ];
-          "sim" = [
+          "test-support" = [
             "kio/sim"
             "moq-quic/sim"
           ];
         };
         resolvedDefaultFeatures = [
           "jemalloc"
-          "sim"
+          "test-support"
         ];
       };
       "moq-transcode" = rec {
@@ -22450,6 +22462,7 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             target = { target, features }: ("linux" == target."os" or null);
+            features = [ "test-support" ];
           }
           {
             name = "moq-uring";
