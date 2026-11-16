@@ -2795,18 +2795,19 @@ impl kio::Task for Fetching {
 						recovering: false,
 					})))
 				}
+				// A finished track's last copy failed: the copy served after the end is already
+				// there, whether or not a front may still replace it.
+				Err(err) if (err.retryable() || copy_failed(&serving)) && served != generation => {
+					self.left = Some(served);
+					continue;
+				}
 				// The route failed: ask the next one, unless none will come. Kept as the answer,
 				// since the same copy is never asked twice.
 				Err(err) if (err.retryable() || copy_failed(&serving)) && self.route.moves() => {
 					if let Some(asked) = &mut self.pending {
 						asked.answer = Some(Err(err));
 					}
-					// A finished track's last copy failing leaves the fetch to the copy served
-					// after the end, already there.
-					match served != generation {
-						true => self.left = Some(served),
-						false => ready!(self.poll_moved(generation, staged_id, waiter)),
-					}
+					ready!(self.poll_moved(generation, staged_id, waiter));
 					continue;
 				}
 				Err(err) => Poll::Ready(Err(err)),
@@ -4345,7 +4346,9 @@ mod test {
 			"the rerouted copy is not asked"
 		);
 
-		// The last copy failing a fetch, or failing outright, leaves it to the rerouted one.
+		// The last copy failing a fetch, or failing outright, leaves it to the rerouted one,
+		// even once no front is left to replace that.
+		routes.conclude();
 		let mut fetch = logical.consume().fetch_group(1, None);
 		assert!((&mut fetch).now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
