@@ -16849,6 +16849,65 @@ mod test {
 		producer.consume().fetch_group(1, None).await.unwrap();
 	}
 
+	/// `fail` ends the track in error at its live edge: a reader gets every group below it, then
+	/// the error, and the track takes no second end.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_failed_track_serves_its_groups_then_the_error() {
+		let producer = track_producer("test", Info::default().with_max_age(None));
+		for _ in 0..3 {
+			producer.append_group(None).unwrap().finish().unwrap();
+		}
+		let mut reader = producer.subscribe(replay().with_range(0..)).ordered();
+		let _finished = producer.clone().fail(Error::App(7)).unwrap();
+		for key in 0..3 {
+			assert_eq!(reader.next_group().await.unwrap().unwrap().start, key);
+		}
+		assert!(matches!(reader.next_group().await, Err(Error::App(7))));
+		assert!(matches!(producer.append_group(None), Err(Error::Closed)));
+		assert!(matches!(producer.clone().finish(), Err(Error::Closed)));
+		assert!(matches!(producer.clone().fail(Error::App(7)), Err(Error::Closed)));
+	}
+
+	/// With no start, a group starts one past the largest start the track holds, or at 0 on an
+	/// empty track, and the start just below the reserved one is the last it takes.
+	#[test]
+	fn an_append_with_no_start_takes_the_next() {
+		let producer = track_producer("test", Info::default());
+		assert_eq!(producer.append_group(None).unwrap().start, 0);
+		assert_eq!(producer.append_group(None).unwrap().start, 1);
+		producer.append_group(5).unwrap();
+		assert_eq!(producer.append_group(None).unwrap().start, 6);
+		producer.append_group(u64::MAX - 1).unwrap();
+		assert!(matches!(producer.append_group(None), Err(Error::BoundsExceeded(_))));
+	}
+
+	/// A group ended by `finish` reads whole but says nothing about where it ends; `finish_at`
+	/// declares the end a media reader checks against the next group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_group_declares_no_end() {
+		let producer = track_producer("test", Info::timed());
+		let mut open = producer.append_group(None).unwrap();
+		open.write_frame(Timestamp::from_millis(0).unwrap(), &b"a"[..]).unwrap();
+		open.write_frame(Timestamp::from_millis(10).unwrap(), &b"b"[..])
+			.unwrap();
+		open.finish().unwrap();
+		let mut ended = producer.append_group(20).unwrap();
+		ended
+			.write_frame(Timestamp::from_millis(20).unwrap(), &b"c"[..])
+			.unwrap();
+		ended.finish_at(30).unwrap();
+
+		let mut reader = producer.subscribe(replay().with_range(0..));
+		let mut first = reader.assert_group();
+		assert_eq!(first.read_frame().await.unwrap().unwrap().payload, &b"a"[..]);
+		assert_eq!(first.read_frame().await.unwrap().unwrap().payload, &b"b"[..]);
+		assert!(first.read_frame().await.unwrap().is_none(), "every frame is read");
+		assert_eq!(first.end(), None);
+		assert_eq!(reader.assert_group().end(), Some(30));
+	}
+
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn readers_end_at_the_boundary_with_missing_lower_groups() {
