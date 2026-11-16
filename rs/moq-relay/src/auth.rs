@@ -853,7 +853,7 @@ impl Decider {
 			}
 			// Nothing here can verify a token, so one is refused rather than ignored:
 			// its holder expects it to count, and the public grant is not what it says.
-			Self::Public(_) if presents_token(&request) => {
+			Self::Public(_) if request.token.is_some() => {
 				tracing::debug!(path = ?request.path, "a token was presented to public rules");
 				Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default())))))
 			}
@@ -872,16 +872,6 @@ impl Decider {
 			Self::Refuse => Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default()))))),
 		}
 	}
-}
-
-/// Whether `request` carries a token: a SETUP token of any type, or a non-empty
-/// `jwt` query parameter, form-decoded as `moq auth serve` reads it, so an escaped
-/// key such as `%6Awt` counts too.
-fn presents_token(request: &Request) -> bool {
-	request.token.is_some()
-		|| request.query.as_deref().is_some_and(|query| {
-			url::form_urlencoded::parse(query.as_bytes()).any(|(key, jwt)| key == "jwt" && !jwt.is_empty())
-		})
 }
 
 /// Admits sessions through one admission decider.
@@ -1706,36 +1696,26 @@ mod tests {
 		}
 	}
 
-	/// Public rules verify nothing, so a token is refused rather than ignored, in
-	/// whichever form it arrives.
+	/// Public rules verify nothing, so a token is refused rather than ignored.
 	#[tokio::test]
 	async fn public_rules_refuse_a_token() {
 		let auth = config(None, &["**"])
 			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
-		query.query = Some("a=1&jwt=eyJ".into());
 		let mut setup = auth.request(moq_auth::Transport::Quic, "/");
 		setup.token = Some(moq_auth::Token {
 			kind: moq_auth::Token::CAT,
 			value: b"anything".to_vec(),
 		});
-		let mut http = auth.request(moq_auth::Transport::Http, "/");
-		http.query = Some("jwt=eyJ".into());
-		// `moq auth serve` form-decodes the key, so an escaped one is a token too.
-		let mut escaped = auth.request(moq_auth::Transport::WebSocket, "/");
-		escaped.query = Some("%6Awt=eyJ".into());
-		for request in [query, setup, http, escaped] {
-			let Err(err) = auth.admit(request).await else {
-				panic!("a token was admitted on the public grant");
-			};
-			assert!(matches!(err, Error::Refused(_)), "{err}");
-		}
+		let Err(err) = auth.admit(setup).await else {
+			panic!("a token was admitted on the public grant");
+		};
+		assert!(matches!(err, Error::Refused(_)), "{err}");
 
-		// An empty `jwt=` is no token.
-		let mut empty = auth.request(moq_auth::Transport::WebSocket, "/");
-		empty.query = Some("jwt=&b=2".into());
-		assert!(auth.admit(empty).await.is_ok());
+		// A query is the client's own: the relay reads no parameter in it as a token.
+		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
+		query.query = Some("jwt=eyJ".into());
+		assert!(auth.admit(query).await.is_ok());
 	}
 
 	/// A certificate is a fact the public rules ignore: it gets exactly what anyone does.

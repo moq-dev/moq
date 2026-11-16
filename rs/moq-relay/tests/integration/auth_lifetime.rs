@@ -1942,6 +1942,24 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		script.on_connect(Answer::Grant(replacement));
 		let token = subscriber.auth().add("replacement").unwrap();
 		kio::clock::timeout(TIMEOUT, token.answered()).await.unwrap().unwrap();
+		// The credential rides `token`; the query is exactly what the client dialed.
+		let attach = script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.find(|request| request.event == Event::Attach)
+			.cloned()
+			.expect("the token was never attached");
+		assert_eq!(attach.query.as_deref(), Some("jwt=token"), "{scheme}");
+		assert_eq!(
+			attach.token,
+			Some(moq_auth::Token {
+				kind: moq_auth::Token::OUT_OF_BAND,
+				value: b"replacement".to_vec(),
+			}),
+			"{scheme}"
+		);
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
