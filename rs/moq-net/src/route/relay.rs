@@ -2598,6 +2598,7 @@ mod tests {
 		router.recv(4, route(5, 4, Metric::MAX)).unwrap();
 		assert_eq!(router.best(node(5)), None);
 		assert_eq!(router.pick(&broadcast), None);
+		assert_eq!(router.step(me, &broadcast), None, "named, still closed");
 		let shown = &router.shown()[&(7, p("live"))];
 		assert_eq!((shown.item, shown.available), (run(3), false));
 	}
