@@ -49,7 +49,7 @@ Order: the two demos move first, each in its own PR, and
 [the removal](/quest/m2/sockets/remove.md) lands once nothing in the
 repository dials or accepts. Kixel ports the Rust endpoint from history, from the
 removal PR's parent commit, in [its own quest](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m0/mesh/sockets.md),
-and needs only `reserve_unlisted_track` public; it ports no JS.
+and needs `reserve_unlisted_track` and the session cleanup [the removal](/quest/m2/sockets/remove.md) lists made public; it ports no JS.
 
 ## Related
 

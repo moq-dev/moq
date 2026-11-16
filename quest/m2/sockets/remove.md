@@ -53,11 +53,19 @@ What exists only for sockets, to check before deleting:
 - `broadcast::Producer::reserve_unlisted_track`
   (`rs/moq-net/src/model/broadcast.rs:406`), `pub(super)`: a track a peer
   who knows its name finds, never announced or listed. Sockets are its one
-  caller. Kixel's copy is built on moq-net's public API and needs exactly
-  this. Decided 2026-11-16 (maintainer, kixel.ai's unblock triage): ✅ make
+  caller. Kixel's copy is built on moq-net's public API and needs it.
+  Decided 2026-11-16 (maintainer, kixel.ai's unblock triage): ✅ make
   it public, with [Kixel's socket endpoint](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m0/mesh/sockets.md)
   as its named consumer (rejected: deleting it, which puts Kixel's session
-  tracks in track listings).
+  tracks in track listings). Its doc says unlisted controls discovery, not
+  authorization, and a moq-net test that outlives the socket tests shows an
+  accepted reservation is readable by name and absent from track listings.
+- `track::Producer::weak` and `TrackWeak` (`rs/moq-net/src/model/track.rs`),
+  `pub(super)`: the endpoint keeps a weak handle to each open session's
+  track (`socket.rs:236`) so closing the endpoint aborts its sessions
+  without holding them open. Kixel's port needs the same cleanup. Make them
+  public too, or name the public API that already does it, such as holding
+  producers and pruning each on its close, and record which in the PR.
 - `origin::Consumer::hidden_withheld` and the hold a pre-lite-07 client
   session takes on it (`rs/moq-net/src/lite/session.rs:311-315`), which make
   a dial fail `Unsupported` while a hop cannot carry hidden broadcasts.
@@ -89,7 +97,7 @@ For the PR:
 - Run `just test interop --all` (moq-ffi changes) and `just api-diff`.
 
 Public API: breaking for `main`-only API in every language; nothing on
-`release` has sockets. Adds `reserve_unlisted_track` if kept. Wire: none
+`release` has sockets. Adds `reserve_unlisted_track`, and `TrackWeak` with `track::Producer::weak` unless the PR names a public alternative. Wire: none
 (sockets were a path and track naming convention).
 
 ## Required
