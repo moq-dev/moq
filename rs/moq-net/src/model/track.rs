@@ -1749,13 +1749,10 @@ impl TrackState {
 					.range(run)
 					.map(|(_, slot)| slot)
 					.take_while(|slot| super::subscription::before_end(slot.group.start, end_key))
-					.find(|slot| slot.serves_end() || slot.cut().is_some())
+					// A payload reader waits for a metadata copy's group as for any owed one,
+					// in the walk's owed check.
+					.find(|slot| (meta || !slot.is_meta()) && (slot.serves_end() || slot.cut().is_some()))
 			});
-		// A payload reader waits at a metadata copy as at a group still arriving: its session
-		// replaces it with the payload, or gives it up, once it asks for the payload.
-		if best.is_some_and(|slot| !meta && slot.is_meta()) {
-			return Poll::Pending;
-		}
 		let best = best.map(Slot::serving);
 
 		if let Some(group) = best {
@@ -3101,14 +3098,31 @@ impl TrackState {
 	/// one only a subscription owes, so a received copy's live feed may still land it. Not a
 	/// group accounted for by its arrivals (since evicted or aborted), dropped,
 	/// outside the feed, or in a gap its grace stopped waiting for. A local track owes none.
-	fn owed(&self, groups: ops::Range<u64>, window: &Window) -> Option<u64> {
+	///
+	/// To a `payload` reader a metadata copy landed nothing it can read, so its group is owed
+	/// too until the payload replaces it, a drop gives it up, or the copy aborts.
+	fn owed(&self, groups: ops::Range<u64>, window: &Window, payload: bool) -> Option<u64> {
 		if !self.anchors.received() || self.outcome.is_released() || !self.readable() {
 			return None;
 		}
 		let asked = self.start.key().is_some();
-		self.find_landable(groups, asked, self.arrival_grace(), |open, _| {
+		let landing = self.find_landable(groups.clone(), asked, self.arrival_grace(), |open, _| {
 			window.clip(open).map(|run| run.start)
-		})
+		});
+		let meta = match payload {
+			true => {
+				self.lookup
+					.range(groups)
+					.find(|&(&key, slot)| {
+						slot.is_meta()
+							&& !slot.is_aborted() && window.contains(key)
+							&& self.drops.gaps(&(key..key.saturating_add(1))).next().is_some()
+					})
+					.map(|(&key, _)| key)
+			}
+			false => None,
+		};
+		landing.into_iter().chain(meta).min()
 	}
 
 	/// The runs of `groups` a received copy's live feed still owes: neither accounted for by
@@ -8973,13 +8987,14 @@ impl Cursor {
 			return Poll::Ready(Ok(()));
 		}
 		let window = &self.filter.window;
+		let meta = self.subscription.read().meta;
 		self.poll(waiter, |state| {
 			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
 			let floor = groups.start.max(state.cache_floor(drift.budget));
 			if floor >= groups.end {
 				return Poll::Ready(Ok(()));
 			}
-			let Some(owed) = state.owed(floor..groups.end, window) else {
+			let Some(owed) = state.owed(floor..groups.end, window, !meta) else {
 				return Poll::Ready(Ok(()));
 			};
 			if state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter) {
@@ -18963,6 +18978,54 @@ mod test {
 		for key in 3..10 {
 			put(&producer, key, None);
 			assert_eq!(drain_ordered(&mut consumer), [key]);
+		}
+	}
+
+	/// A key-order payload reader waits for a group it read only as metadata as for any owed
+	/// group: until the budget gives up on it, a drop does, or the metadata copy aborts.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_payload_read_gives_up_a_metadata_group_as_any_owed_one() {
+		for verdict in ["budget", "drop", "abort"] {
+			let budget = Duration::from_millis(50);
+			let max = if verdict == "budget" {
+				budget
+			} else {
+				Duration::from_secs(3600)
+			};
+			let producer = received_producer(Info::timed());
+			let sub = Subscription::default().with_delay(Delay::default().with_max(max));
+			let mut consumer = producer.subscribe(sub.clone().with_meta(true)).ordered();
+			let control = consumer.control();
+			let at = |millis| Timestamp::from_millis(millis).unwrap();
+			let Ok(Received::Group(mut lower)) = producer.create_group_at(group::Info { start: 0 }, 0, true) else {
+				panic!("the lower metadata copy opens");
+			};
+			lower.write_meta(at(0), 5).unwrap();
+			let Ok(Received::Group(mut higher)) = producer.create_group_at(group::Info { start: 1 }, 0, true) else {
+				panic!("the higher metadata copy opens");
+			};
+			higher.write_meta(at(100), 5).unwrap();
+			higher.close().unwrap();
+			assert_eq!(drain_ordered(&mut consumer), [0, 1], "{verdict}");
+			let Ok(Received::Group(mut payload)) = producer.create_group_at(group::Info { start: 1 }, 0, false) else {
+				panic!("the higher payload copy lands");
+			};
+			payload.write_frame(at(100), &b"x"[..]).unwrap();
+			payload.close().unwrap();
+
+			control.update(sub).unwrap();
+			let waiter = kio::Waiter::noop();
+			assert!(
+				consumer.poll_next_group(&waiter).is_pending(),
+				"{verdict}: waits for group 0's payload"
+			);
+			match verdict {
+				"budget" => elapse(&producer, budget),
+				"drop" => producer.drop_groups(0..1, StreamError::Cancel),
+				_ => lower.abort(Error::Cancel).unwrap(),
+			}
+			assert_eq!(drain_ordered(&mut consumer), [1], "{verdict}");
 		}
 	}
 

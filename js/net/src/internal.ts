@@ -454,6 +454,11 @@ export interface Land {
 	grace: Duration;
 	/** When given, only a group it lacks counts. */
 	delivered?: Delivered;
+	/**
+	 * For a payload reader: a metadata copy of a group lands nothing it can read, so the group
+	 * stays owed until its payload replaces the copy, a drop gives it up, or the copy aborts.
+	 */
+	payload?: boolean;
 }
 
 /**

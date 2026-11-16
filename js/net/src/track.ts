@@ -919,8 +919,19 @@ let mayLand: (producer: Producer, land: Land) => boolean;
 // Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
 // static block.
 let resubscribe: (producer: Producer) => void;
-let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
-let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: Instant } | undefined;
+// With `payload`, for a payload reader, to which a metadata copy is a group still owed.
+let owedRuns: (
+	producer: Producer,
+	start: bigint,
+	end: bigint,
+	payload?: boolean,
+) => Iterable<Run & { folds?: Instant }>;
+let owedGroup: (
+	producer: Producer,
+	start: bigint,
+	end: bigint,
+	payload?: boolean,
+) => { sequence: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
@@ -1431,7 +1442,7 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
-		owedRuns = (producer, start, end) => {
+		owedRuns = (producer, start, end, payload = false) => {
 			if (!producer.#wire) return [];
 			const feed = producer.#feedStart();
 			const floor = feed === "pending" ? producer.#wire.served?.requested : feed;
@@ -1440,10 +1451,11 @@ export class Producer {
 				end,
 				floor: floor !== undefined,
 				grace: producer.#grace(),
+				payload,
 			});
 		};
-		owedGroup = (producer, start, end) => {
-			for (const run of owedRuns(producer, start, end)) return { sequence: run.start, folds: run.folds };
+		owedGroup = (producer, start, end, payload = false) => {
+			for (const run of owedRuns(producer, start, end, payload)) return { sequence: run.start, folds: run.folds };
 			return undefined;
 		};
 	}
@@ -1474,13 +1486,26 @@ export class Producer {
 		const at = now();
 		const limit = land.grace;
 		const drops = this.#state.drops;
+		const owed: (Run & { folds?: Instant })[] = [];
 		for (const gap of this.#arrivals.gaps(start, end)) {
 			const folds = gap.since?.saturatingAdd(limit);
 			if (folds !== undefined && at.ge(folds)) continue;
 			for (const open of runGaps(drops.overlapping(gap.start, gap.end), gap.start, gap.end)) {
-				yield { ...open, folds };
+				if (!land.payload) yield { ...open, folds };
+				else owed.push({ ...open, folds });
 			}
 		}
+		if (!land.payload) return;
+		// A metadata copy landed nothing a payload reader can read: still owed, in sequence order.
+		const gaps = owed.length;
+		for (const sequence of cachedIn(this, start, end)) {
+			const group = this.#cached.get(sequence)?.group;
+			if (!group || !hooks.groupMeta(group) || group.closed.peek() instanceof Error) continue;
+			if (drops.overlapping(sequence, sequence + 1n).length > 0) continue;
+			owed.push({ start: sequence, end: sequence + 1n });
+		}
+		if (owed.length > gaps) owed.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+		yield* owed;
 	}
 
 	// Record `[start, end)` given up as `hole` says, returning the runs recorded. A skip is final
@@ -3655,7 +3680,7 @@ export class Subscriber {
 				// Reordered streams still owed by the live feed are not cache misses, and stay unjudged
 				// until the feed gives them up.
 				const accounted: Run[] = [];
-				for (const run of owedRuns(producer, from, to)) {
+				for (const run of owedRuns(producer, from, to, this.#readsPayload())) {
 					insertRun(accounted, run.start, run.end);
 					if (run.folds !== undefined) this.#wakeAt(run.folds.since(Instant.ZERO).asNanos());
 				}
@@ -3976,7 +4001,7 @@ export class Subscriber {
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 					const index = timelineIndex(held, open.start);
 					if (held[index] && held[index].sequence < open.end) return false;
-					const owed = producer && owedGroup(producer, open.start, open.end);
+					const owed = producer && owedGroup(producer, open.start, open.end, this.#readsPayload());
 					if (owed) {
 						if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 						return false;
@@ -4866,7 +4891,7 @@ export class Subscriber {
 		// Only a hole in this reader's ranges is owed to it.
 		let owed: { sequence: bigint; folds?: Instant } | undefined;
 		for (const run of this.#window.runs(start, end)) {
-			owed = owedGroup(producer, run.start, run.end);
+			owed = owedGroup(producer, run.start, run.end, this.#readsPayload());
 			if (owed) break;
 		}
 		if (!owed) {
@@ -4882,22 +4907,9 @@ export class Subscriber {
 		return true;
 	}
 
-	// Whether a payload read waits, in sequence order, on a metadata copy in `[start, end)` it has
-	// yet to read: its payload replaces it, as after a promotion. Mirrors the Rust ordered read,
-	// which parks at a metadata slot.
-	#waitMeta(start: bigint, end: bigint, drift: Drift): boolean {
-		const producer = this.#state.producer;
-		if (start >= end || !producer || this.#state.update.peek()?.meta === true) return false;
-		const waits = hooks
-			.cachedMeta(producer, start, end)
-			.some(
-				(sequence) =>
-					this.#window.contains(sequence) &&
-					!this.#delivered.has(sequence) &&
-					!this.#staleAt(sequence, drift),
-			);
-		if (waits) this.#state.waitingOrdered = true;
-		return waits;
+	// Whether this reader reads the payload, to which a metadata copy is a group still owed.
+	#readsPayload(): boolean {
+		return this.#state.update.peek()?.meta !== true;
 	}
 
 	// The lowest buffered candidate in range that the budget spares. An ordered take may
@@ -4971,7 +4983,6 @@ export class Subscriber {
 				continue;
 			}
 			if (this.#waitOwed(start, group.sequence, drift)) return { kind: "idle" };
-			if (this.#waitMeta(start, group.sequence, drift)) return { kind: "idle" };
 			// A group missing its head comes from the fill asked for it, in its turn.
 			if (this.#lacksHead(group)) {
 				if (this.#askHead(group.sequence)) {

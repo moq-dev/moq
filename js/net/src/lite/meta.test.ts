@@ -3,8 +3,9 @@
 
 import { afterEach, expect, mock, test } from "bun:test";
 import { Duration, sleep } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { accept, connect, type Session } from "../connection/index.ts";
-import { ProtocolViolation, Unsupported } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError, Unsupported } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -317,8 +318,7 @@ test("promoting a reader hands out again the groups it read as metadata, from th
 test("an ordered reader reads the groups it passed as metadata again, in order, once promoted", async () => {
 	// Which payloads land before the reader asks for them: none, all, or only the higher one.
 	for (const early of [[], [0n, 1n], [1n]]) {
-		const track = new TrackProducer("video");
-		track.accept({ timescale: Timescale.MILLI, maxAge: null });
+		const track = receivedTrack();
 		const ordered = track.subscribe({ meta: true, delay: { max: null } }).ordered();
 		for (const sequence of [0n, 1n]) {
 			receive(track, sequence, true, [5]).finish();
@@ -339,6 +339,60 @@ test("an ordered reader reads the groups it passed as metadata again, in order, 
 		}
 		ordered.close();
 	}
+});
+
+// A track received from a session, whose live feed owes the groups it has yet to land.
+function receivedTrack(): TrackProducer {
+	const track = new TrackProducer("video");
+	track.accept({ timescale: Timescale.MILLI, maxAge: null });
+	hooks.receiveTrack(track);
+	return track;
+}
+
+// Read groups 0 and 1 as metadata in order, land only group 1's payload, and ask for the payload.
+async function promotedPastAPendingPayload(track: TrackProducer, max: Duration | null) {
+	const ordered = track.subscribe({ meta: true, delay: { max } }).ordered();
+	const lower = receive(track, 0n, true, [5]);
+	receive(track, 1n, true, [5]).finish();
+	for (const sequence of [0n, 1n]) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
+	receive(track, 1n, false, [5]).finish();
+	ordered.update({ meta: false, delay: { max } });
+	return { ordered, lower };
+}
+
+test("an ordered payload read gives up a metadata group's payload at its budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = receivedTrack();
+	const { ordered } = await promotedPastAPendingPayload(track, Duration.millis(100));
+	try {
+		let resolved = false;
+		const next = ordered.nextGroup().then((group) => {
+			resolved = true;
+			return group;
+		});
+		await clock.advance(Duration.millis(50));
+		expect(resolved).toBe(false);
+		await clock.advance(Duration.millis(200));
+		expect(resolved).toBe(true);
+		expect([(await next)?.sequence, (await next)?.meta]).toEqual([1n, false]);
+	} finally {
+		ordered.close();
+		installed.close();
+	}
+});
+
+test("an ordered payload read stops waiting for a metadata group the upstream drops", async () => {
+	const track = receivedTrack();
+	const { ordered, lower } = await promotedPastAPendingPayload(track, null);
+	const next = ordered.nextGroup();
+	await sleep(Duration.ZERO);
+	const cut = new StreamError(StreamCode.Cancel, { message: "cut upstream" });
+	hooks.dropTrackGroups(track, 0n, 1n, { error: cut });
+	lower.abort(cut);
+	const group = await next;
+	expect([group?.sequence, group?.meta]).toEqual([1n, false]);
+	ordered.close();
 });
 
 test("an update re-reads the unread groups in the new mode, and leaves handed-out ones alone", async () => {
