@@ -3659,7 +3659,7 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s leav
 test.each([
 	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
 	["ends", (answer: Lister) => answer.end()],
-	["changes", (answer: Lister) => answer.add("gone", INFO)],
+	["changes", (answer: Lister) => answer.add("gone", { info: INFO })],
 ])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -3701,8 +3701,8 @@ test("a concluded front's listing keeps its closed source's finishes", async () 
 	const a = new BroadcastProducer();
 	const from = a.consume();
 	const answer = wireOf(from).lister();
-	answer.add("seq", INFO);
-	answer.add("live", INFO);
+	answer.add("seq", { info: INFO });
+	answer.add("live", { info: INFO });
 	answer.synced();
 	front.serve(from);
 	const tracks = front.consumer.tracks();

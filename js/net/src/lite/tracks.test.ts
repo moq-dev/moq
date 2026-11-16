@@ -14,6 +14,7 @@ import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Limits } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
+import { DatagramsInfo } from "./datagram.ts";
 import { Publisher } from "./publisher.ts";
 import { StreamId } from "./stream.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -98,6 +99,47 @@ test("events and the request round-trip", async () => {
 	expect(got.instance).toBe(instance);
 });
 
+test("a datagram track's events carry its kind ahead of its name", async () => {
+	const info = new DatagramsInfo({ priority: 0 });
+	// Type, length, kind 1, name "a", then DATAGRAMS_INFO: length 2, priority 0x80, no timescale.
+	expect(
+		await bytes((w) => encodeTracksEvent(w, { kind: "added", name: "a", datagrams: true, info }, version)),
+	).toEqual(new Uint8Array([0x00, 0x06, 0x01, 0x01, 0x61, 0x02, 0x80, 0x00]));
+	expect(await bytes((w) => encodeTracksEvent(w, { kind: "removed", name: "a", datagrams: true }, version))).toEqual(
+		new Uint8Array([0x01, 0x03, 0x01, 0x01, 0x61]),
+	);
+
+	const events: TracksEvent[] = [
+		{
+			kind: "added",
+			name: "a",
+			datagrams: true,
+			info: new DatagramsInfo({ priority: -2, timescale: Timescale.MILLI }),
+		},
+		{ kind: "finished", name: "a", datagrams: true },
+		{ kind: "removed", name: "a", datagrams: true },
+	];
+	const encoded = await bytes(async (w) => {
+		for (const event of events) await encodeTracksEvent(w, event, version);
+	});
+	const reader = new Reader(undefined, encoded, version);
+	const added = await decodeTracksEventMaybe(reader, version);
+	expect(added).toMatchObject({ kind: "added", name: "a", datagrams: true, info: { priority: -2 } });
+	expect(added?.kind === "added" && added.info.timescale).toBe(Timescale.MILLI);
+	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "finished", name: "a", datagrams: true });
+	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "removed", name: "a", datagrams: true });
+
+	// Any kind but the two is malformed.
+	for (const typ of [0x00, 0x01, 0x02]) {
+		await expect(
+			decodeTracksEventMaybe(
+				new Reader(undefined, new Uint8Array([typ, 0x03, 0x02, 0x01, 0x61]), version),
+				version,
+			),
+		).rejects.toThrow("unknown listed track kind");
+	}
+});
+
 test("older versions have no tracks stream", async () => {
 	await expect(bytes((w) => new TracksMessage(Path.from("room")).encode(w, Version.DRAFT_06))).rejects.toThrow(
 		"not supported",
@@ -155,8 +197,18 @@ test("a session forwards the peer's tracks as they arrive, and syncs when the pe
 	await peer.send({ kind: "removed", name: "b" });
 	expect(await next(tracks)).toBe("-b");
 
+	// A datagram track of a listed name is a track apart.
+	await peer.send({ kind: "added", name: "a", datagrams: true, info: new DatagramsInfo({ priority: 1 }) });
+	expect(await tracks.next()).toEqual({
+		kind: "added",
+		name: "a",
+		datagrams: true,
+		info: { priority: 1, timescale: null },
+	});
 	await peer.send({ kind: "removed", name: "a" });
-	expect(await next(tracks)).toBe("-a");
+	expect(await tracks.next()).toEqual({ kind: "removed", name: "a" });
+	await peer.send({ kind: "finished", name: "a", datagrams: true });
+	expect(await tracks.next()).toEqual({ kind: "finished", name: "a", datagrams: true });
 
 	// The peer's broadcast ended: so does the listing, whether or not its retraction arrived.
 	peer.stream.writer.close();
@@ -495,6 +547,15 @@ test("a listing over a session carries each track's info, end to end", async () 
 	expect(await next(tracks)).toBe("+b");
 	broadcast.removeTrack("a");
 	expect(await next(tracks)).toBe("-a");
+	const datagrams = broadcast.createDatagrams("a", { timescale: Timescale.MILLI, priority: 3 });
+	expect(await tracks.next()).toEqual({
+		kind: "added",
+		name: "a",
+		datagrams: true,
+		info: { timescale: Timescale.MILLI, priority: 3 },
+	});
+	datagrams.finish();
+	expect(await tracks.next()).toEqual({ kind: "finished", name: "a", datagrams: true });
 	broadcast.close();
 	expect(await next(tracks)).toBe("end");
 	client.abort();

@@ -68,7 +68,7 @@ import {
 	runGaps,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
-import type { Lister, Tracks, TracksEvent } from "./listing.ts";
+import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/sequence.ts";
 import { clamped, type Resolved, type Window } from "./window.ts";
@@ -1851,12 +1851,13 @@ export class Front {
 	 */
 	async #list(lister: Lister): Promise<void> {
 		const closed = this.consumer.closed;
-		// What the front lists, the source being read, and its pending next event.
+		// What the front lists, by kind and name, the source being read, and its pending next event.
+		type Named = { name: string; datagrams?: boolean };
 		let listing:
 			| {
-					listed: Set<string>;
-					/** Names an earlier source listed that the current one has yet to list. */
-					stale: Set<string>;
+					listed: Map<string, Named>;
+					/** Tracks an earlier source listed that the current one has yet to list. */
+					stale: Map<string, Named>;
 					source?: Source;
 					reader?: Tracks;
 					next?: Promise<{ event?: TracksEvent; err?: Error }>;
@@ -1874,14 +1875,15 @@ export class Front {
 			);
 		// Forwarded as the source reported it, finished or not.
 		const unlist = (
-			listed: Set<string>,
-			stale: Set<string>,
-			event: { kind: "removed" | "finished"; name: string },
+			listed: Map<string, Named>,
+			stale: Map<string, Named>,
+			event: { kind: "removed" | "finished"; name: string; datagrams?: boolean },
 		) => {
-			stale.delete(event.name);
-			if (!listed.delete(event.name)) return;
-			if (event.kind === "finished") lister.finish(event.name);
-			else lister.remove(event.name);
+			const key = keyOf(event.name, event.datagrams);
+			stale.delete(key);
+			if (!listed.delete(key)) return;
+			if (event.kind === "finished") lister.finish(event.name, event.datagrams);
+			else lister.remove(event.name, event.datagrams);
 		};
 		try {
 			for (;;) {
@@ -1908,11 +1910,11 @@ export class Front {
 					lister.end();
 					continue;
 				}
-				listing ??= { listed: new Set(), stale: new Set() };
+				listing ??= { listed: new Map(), stale: new Map() };
 				if (listing.source !== this.#source) {
 					listing.reader?.close();
 					listing.source = this.#source;
-					listing.stale = new Set(listing.listed);
+					listing.stale = new Map(listing.listed);
 					listing.next = undefined;
 					try {
 						listing.reader = this.#source?.wire.tracks();
@@ -1955,17 +1957,18 @@ export class Front {
 						lister.end();
 					}
 				} else if (event.kind === "added") {
-					if (!listing.stale.delete(event.name) && !listing.listed.has(event.name)) {
-						listing.listed.add(event.name);
-						lister.add(event.name, event.info);
+					const key = keyOf(event.name, event.datagrams);
+					if (!listing.stale.delete(key) && !listing.listed.has(key)) {
+						listing.listed.set(key, { name: event.name, datagrams: event.datagrams });
+						lister.add(event.name, event);
 					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
 					unlist(listing.listed, listing.stale, event);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
-					for (const name of listing.stale) {
-						listing.listed.delete(name);
-						lister.remove(name);
+					for (const [key, { name, datagrams }] of listing.stale) {
+						listing.listed.delete(key);
+						lister.remove(name, datagrams);
 					}
 					listing.stale.clear();
 					lister.synced();

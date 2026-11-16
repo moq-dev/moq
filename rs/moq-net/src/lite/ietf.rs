@@ -1153,7 +1153,10 @@ mod hop_tests {
 			let mut tracks = broadcast.tracks().unwrap();
 			let listed = loop {
 				match kio::clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
-					Some(crate::broadcast::TracksEvent::Added { name, info }) if &*name == "video" => break info,
+					Some(crate::broadcast::TracksEvent::Added {
+						name,
+						info: crate::broadcast::Listed::Track(info),
+					}) if &*name == "video" => break info,
 					Some(_) => continue,
 					None => panic!("listing ended before the track"),
 				}

@@ -82,7 +82,7 @@ import {
 	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { encodeTracksEvent, type Tracks as TracksMessage } from "./tracks.ts";
+import { encodeTracksEvent, type Tracks as TracksMessage, type TracksEvent as TracksMessageEvent } from "./tracks.ts";
 import {
 	hasAnnounceId,
 	hasAnnounceOk,
@@ -172,6 +172,14 @@ function acknowledged(writer: Writer): Promise<void> {
 }
 
 // The TRACK_INFO a TRACK stream, or a listing's TRACKS_ADD, answers for a track.
+/** A listing event as TRACKS carries it: an added track's info as its kind's request would answer. */
+function tracksEvent(event: broadcast.TracksEvent, version: Version): TracksMessageEvent {
+	if (event.kind !== "added") return event;
+	if (event.datagrams)
+		return { kind: "added", name: event.name, datagrams: true, info: new DatagramsInfo(event.info) };
+	return { kind: "added", name: event.name, info: trackInfoMessage(event.info, version) };
+}
+
 function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage {
 	return new TrackInfoMessage({
 		priority: info.priority,
@@ -2180,11 +2188,7 @@ export class Publisher {
 				const event = await untilAborted(tracks.next(), cancel.signal);
 				if (!event) break;
 				await untilAborted(
-					encodeTracksEvent(
-						stream.writer,
-						event.kind === "added" ? { ...event, info: trackInfoMessage(event.info, this.version) } : event,
-						this.version,
-					),
+					encodeTracksEvent(stream.writer, tracksEvent(event, this.version), this.version),
 					cancel.signal,
 				);
 			}

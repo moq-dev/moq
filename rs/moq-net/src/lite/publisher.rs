@@ -2330,12 +2330,19 @@ impl Request for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				info: lite::TrackInfo::serve(&info, shared.version),
+				info: match info {
+					crate::broadcast::Listed::Track(info) => {
+						lite::Listed::Track(lite::TrackInfo::serve(&info, shared.version))
+					}
+					crate::broadcast::Listed::Datagrams(info) => lite::Listed::Datagrams(info.into()),
+				},
 			},
-			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
+			Some(crate::broadcast::TracksEvent::Removed { kind, name }) => lite::TracksEvent::Removed {
+				kind,
 				name: name.to_string().into(),
 			},
-			Some(crate::broadcast::TracksEvent::Finished { name }) => lite::TracksEvent::Finished {
+			Some(crate::broadcast::TracksEvent::Finished { kind, name }) => lite::TracksEvent::Finished {
+				kind,
 				name: name.to_string().into(),
 			},
 			Some(crate::broadcast::TracksEvent::Synced) => lite::TracksEvent::Synced,

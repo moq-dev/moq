@@ -2334,7 +2334,7 @@ export class Subscriber {
 		const entry = pending?.get(track.name);
 		let producer: datagram.Producer;
 		try {
-			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info);
+			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info, false);
 		} catch (err) {
 			entry?.request.reject(error(err));
 			console.debug(`serving the stream track without datagrams: ${reason(err)}`);

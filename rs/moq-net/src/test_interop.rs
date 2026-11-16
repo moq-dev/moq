@@ -558,8 +558,8 @@ fn lite_auth_unsupported_interop() {
 }
 
 /// moq-lite-07 TRACKS across the Rust/JS boundary: the JS publisher answers a Rust TRACKS request
-/// with a listing Rust decodes, and JS decodes Rust's listing events and re-encodes them byte for
-/// byte.
+/// with a listing Rust decodes, a datagram track among its tracks, and JS decodes Rust's listing
+/// events of both kinds and re-encodes them byte for byte.
 #[test]
 #[ignore = "requires Bun; run by just test interop"]
 fn lite_tracks_interop() {
@@ -579,8 +579,15 @@ fn lite_tracks_interop() {
 	let mut r = Decoder::new(&answer, version.into());
 	let mut events = Vec::new();
 	while !r.is_empty() {
+		let named = |kind: crate::broadcast::Kind, name: &str| match kind {
+			crate::broadcast::Kind::Track => name.to_string(),
+			crate::broadcast::Kind::Datagrams => format!("d:{name}"),
+		};
 		events.push(match lite::TracksEvent::decode(&mut r, version).unwrap() {
-			lite::TracksEvent::Added { name, info } => {
+			lite::TracksEvent::Added {
+				name,
+				info: lite::Listed::Track(info),
+			} => {
 				if name == "a" {
 					assert_eq!(info.timescale, Some(crate::Timescale::MILLI));
 					assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
@@ -589,13 +596,21 @@ fn lite_tracks_interop() {
 				}
 				format!("+{name}")
 			}
-			lite::TracksEvent::Removed { name } => format!("-{name}"),
-			lite::TracksEvent::Finished { name } => format!("~{name}"),
+			lite::TracksEvent::Added {
+				name,
+				info: lite::Listed::Datagrams(info),
+			} => {
+				assert_eq!(info.timescale, Some(crate::Timescale::MILLI));
+				assert_eq!(info.priority, 2);
+				format!("+d:{name}")
+			}
+			lite::TracksEvent::Removed { kind, name } => format!("-{}", named(kind, &name)),
+			lite::TracksEvent::Finished { kind, name } => format!("~{}", named(kind, &name)),
 			lite::TracksEvent::Synced => "synced".to_string(),
 		});
 	}
 	// The broadcast's end is the JS publisher's FIN, after the last event.
-	assert_eq!(events, ["+a", "+b", "synced", "-a"]);
+	assert_eq!(events, ["+a", "+b", "+d:a", "synced", "-a", "~d:a"]);
 
 	let info = lite::TrackInfo {
 		refresh: Some(4),
@@ -609,9 +624,23 @@ fn lite_tracks_interop() {
 	for event in [
 		lite::TracksEvent::Added {
 			name: "video".into(),
-			info,
+			info: lite::Listed::Track(info),
 		},
-		lite::TracksEvent::Removed { name: "video".into() },
+		lite::TracksEvent::Added {
+			name: "video".into(),
+			info: lite::Listed::Datagrams(lite::DatagramsInfo {
+				priority: -3,
+				timescale: Some(crate::Timescale::MILLI),
+			}),
+		},
+		lite::TracksEvent::Removed {
+			kind: crate::broadcast::Kind::Track,
+			name: "video".into(),
+		},
+		lite::TracksEvent::Finished {
+			kind: crate::broadcast::Kind::Datagrams,
+			name: "video".into(),
+		},
 		lite::TracksEvent::Synced,
 	] {
 		event.encode(&mut w, version).unwrap();

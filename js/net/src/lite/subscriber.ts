@@ -1903,8 +1903,11 @@ export class Subscriber {
 			lister.abort(refused);
 			return;
 		}
-		// Each listed track holds an announces slot: discovery state the peer makes us hold.
-		const listed = new Set<string>();
+		// Each listed track holds an announces slot: discovery state the peer makes us hold. Each
+		// kind is a namespace apart.
+		const listedTracks = new Set<string>();
+		const listedDatagrams = new Set<string>();
+		const listed = (datagrams?: boolean) => (datagrams ? listedDatagrams : listedTracks);
 		const unused = new AbortController();
 		const stop = AbortSignal.any([unused.signal, revoked.signal, this.#closed.signal]);
 		const disposeWanted = lister.wanted.subscribe((wanted) => {
@@ -1937,18 +1940,24 @@ export class Subscriber {
 					return;
 				}
 				if (event.kind === "added") {
-					if (listed.has(event.name)) throw new ProtocolViolation(`track listed twice: ${event.name}`);
+					if (listed(event.datagrams).has(event.name))
+						throw new ProtocolViolation(`track listed twice: ${event.name}`);
 					if (!this.#announces.tryAcquire()) {
 						throw new SessionError(SessionCode.TooManyRequests, { reason: "too many listed tracks" });
 					}
-					listed.add(event.name);
-					lister.add(event.name, this.#toModelInfo(event.info));
+					listed(event.datagrams).add(event.name);
+					if (event.datagrams) {
+						const info = { priority: event.info.priority, timescale: event.info.timescale ?? null };
+						lister.add(event.name, { datagrams: true, info });
+					} else {
+						lister.add(event.name, { info: this.#toModelInfo(event.info) });
+					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
-					if (!listed.delete(event.name))
+					if (!listed(event.datagrams).delete(event.name))
 						throw new ProtocolViolation(`unlisted track removed: ${event.name}`);
 					this.#announces.release();
-					if (event.kind === "finished") lister.finish(event.name);
-					else lister.remove(event.name);
+					if (event.kind === "finished") lister.finish(event.name, event.datagrams);
+					else lister.remove(event.name, event.datagrams);
 				} else {
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
 					synced = true;
@@ -1978,7 +1987,7 @@ export class Subscriber {
 		} finally {
 			disposeGrant?.();
 			disposeWanted();
-			this.#announces.release(listed.size);
+			this.#announces.release(listedTracks.size + listedDatagrams.size);
 		}
 	}
 
@@ -2409,7 +2418,7 @@ export class Subscriber {
 			this.#legacyRequests.delete(state.legacyKey);
 			const datagrams = request
 				? request.accept(info)
-				: wireOf(state.consumer).createDatagrams(producer.name, info);
+				: wireOf(state.consumer).createDatagrams(producer.name, info, false);
 			entry.datagrams = { producer: datagrams, timescale: framing.scale };
 			entry.legacyKey = state.legacyKey;
 			this.#datagrams.set(id, entry.datagrams);
