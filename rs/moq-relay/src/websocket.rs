@@ -696,10 +696,7 @@ mod tests {
 			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		let server = tokio::spawn(accept(
-			Pipe::new(server_io, frozen.clone()),
-			options,
-		));
+		let server = tokio::spawn(accept(Pipe::new(server_io, frozen.clone()), options));
 
 		// A real qmux peer, so the transport handshake completes and its 10s
 		// timeout is out of the picture before we go silent. It never speaks moq,
@@ -747,10 +744,7 @@ mod tests {
 		);
 		options.link.alpn = Some(alpn.clone());
 		let start = kio::clock::now();
-		let server = tokio::spawn(accept(
-			Pipe::new(server_io, Arc::new(AtomicBool::new(false))),
-			options,
-		));
+		let server = tokio::spawn(accept(Pipe::new(server_io, Arc::new(AtomicBool::new(false))), options));
 
 		// A live qmux peer that answers keep-alives but never speaks moq.
 		let (client, driver) = qmux::ws::Upgraded::new(Pipe::new(client_io, Arc::new(AtomicBool::new(false))), &alpn)

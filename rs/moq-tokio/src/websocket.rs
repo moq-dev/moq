@@ -192,7 +192,12 @@ pub struct Setup {
 impl Setup {
 	/// Read SETUP by the accept deadline, leaving admission to the returned request.
 	pub async fn read(self) -> crate::Result<crate::server::Request> {
-		crate::runtime::scope(crate::server::accept_websocket(self.session, self.options, self.deadline)).await
+		crate::runtime::scope(crate::server::accept_websocket(
+			self.session,
+			self.options,
+			self.deadline,
+		))
+		.await
 	}
 }
 
