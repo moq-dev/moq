@@ -141,6 +141,10 @@ pub(super) enum Action {
 	/// arrived meanwhile: it went unread for the linger, or the source is local.
 	/// Feed back [`Event::Forgotten`] once it is gone.
 	Forget { track: Arc<str> },
+	/// Ask `source` for its copy of the finished `track`, for the reads still holding it:
+	/// a group read on it continues from that copy if its own route dies. Nothing to do
+	/// when nothing holds the track; else feed the answer back as [`Event::TrackInfo`].
+	Reroute { track: Arc<str>, source: u64 },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
 	/// The logical track failed for good, with the Retry Interval of the upstream refusal it
@@ -199,9 +203,18 @@ struct Track {
 	/// table to move, rather than ask that source again at once or end; a draining copy
 	/// keeps feeding it meanwhile.
 	stranded: Option<u64>,
-	/// The track finished or aborted: nothing is spliced again, and it stays only
-	/// until it goes unread for the linger.
-	ended: bool,
+	/// How the track ended, once it did. It stays only until it goes unread for the linger.
+	ended: Option<Ended>,
+}
+
+/// How a logical track ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+	/// Completed: its readers have all it holds, but a group still read on it moves with
+	/// the serving source, from a copy only that group's reads use.
+	Finished,
+	/// Failed for good: nothing is spliced again.
+	Aborted,
 }
 
 /// One front's state; see the module docs.
@@ -323,7 +336,7 @@ impl Front {
 						refusal: None,
 						lost: None,
 						wanted: false,
-						ended: false,
+						ended: None,
 						draining: None,
 						stranded: None,
 					},
@@ -464,14 +477,22 @@ impl Front {
 			self.resolved = true;
 			actions.push(Action::Resolve);
 		}
-		// A read track is never parked, so idle is the only state to re-query.
+		// A read track is never parked, so idle is the only state to re-query. A finished
+		// one keeps its state, lingering as before, while a read on it follows the source.
 		for (name, track) in &mut self.tracks {
-			if track.wanted && !track.ended && track.state == TrackState::Idle {
-				track.state = TrackState::Querying { source };
-				actions.push(Action::Query {
+			match track.ended {
+				None if track.wanted && track.state == TrackState::Idle => {
+					track.state = TrackState::Querying { source };
+					actions.push(Action::Query {
+						track: name.clone(),
+						source,
+					});
+				}
+				Some(Ended::Finished) => actions.push(Action::Reroute {
 					track: name.clone(),
 					source,
-				});
+				}),
+				_ => {}
 			}
 		}
 	}
@@ -519,9 +540,18 @@ impl Front {
 		result: Result<track::Info, (Error, Option<Duration>)>,
 		actions: &mut Vec<Action>,
 	) {
+		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
+		// A rerouted copy of a finished track joins its reads only from the serving source,
+		// and only with the same metadata. Anything else leaves the reads where they are.
+		if track.ended == Some(Ended::Finished) {
+			if serving && result.is_ok_and(|info| self.info.get(&name) == Some(&info)) {
+				actions.push(Action::Splice { track: name, source });
+			}
+			return;
+		}
 		if track.state != (TrackState::Querying { source }) {
 			return;
 		}
@@ -572,9 +602,9 @@ impl Front {
 			// Every source of a front serves one broadcast, so a copy that completed ends
 			// the track whoever serves it now. One that failed leaves the track to the
 			// serving source.
-			if result.is_ok() && !track.ended {
+			if result.is_ok() && track.ended.is_none() {
 				track.state = TrackState::Idle;
-				track.ended = true;
+				track.ended = Some(Ended::Finished);
 				actions.push(Action::Finish { track: name });
 				return;
 			}
@@ -590,7 +620,7 @@ impl Front {
 			// once unread for the linger, like any other track.
 			Ok(()) => {
 				track.state = TrackState::Idle;
-				track.ended = true;
+				track.ended = Some(Ended::Finished);
 				actions.push(Action::Finish { track: name });
 			}
 			// Died mid-serve after delivering from the same instance: normal
@@ -618,7 +648,7 @@ impl Front {
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
-				track.ended = true;
+				track.ended = Some(Ended::Aborted);
 				actions.push(Action::Abort {
 					track: name,
 					err,
@@ -686,12 +716,12 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.wanted || track.ended || track.state != TrackState::Idle || track.stranded == Some(source) {
+		if !track.wanted || track.ended.is_some() || track.state != TrackState::Idle || track.stranded == Some(source) {
 			return;
 		}
 		if track.refused.contains(&source) {
 			let (err, retry) = track.refusal.clone().unwrap_or((Error::NotFound, None));
-			track.ended = true;
+			track.ended = Some(Ended::Aborted);
 			actions.push(Action::Abort {
 				track: name,
 				err,
@@ -729,7 +759,9 @@ impl Front {
 			track.stranded = None;
 			match track.state {
 				TrackState::Spliced { source: draining }
-					if track.draining == Some(draining) && track.wanted && !track.ended && !self.serving_closing =>
+					if track.draining == Some(draining)
+						&& track.wanted && track.ended.is_none()
+						&& !self.serving_closing =>
 				{
 					track.state = TrackState::Querying { source };
 					actions.push(Action::Query {
@@ -786,7 +818,7 @@ impl Front {
 				track.state = TrackState::Parked { since: now };
 				track.lost = None;
 				// An ended track has nothing to drop.
-				if !track.ended {
+				if track.ended.is_none() {
 					actions.push(Action::Park { track: name });
 				}
 			}
@@ -1939,7 +1971,8 @@ mod tests {
 	}
 
 	/// A finished track stays for readers still draining it and for the linger
-	/// after the last one, is never spliced again, and is then forgotten.
+	/// after the last one, and is then forgotten. A replacement source reroutes it for the
+	/// reads still holding it, without touching the linger.
 	#[test]
 	fn a_finished_track_lingers_then_is_forgotten() {
 		let mut front = serving(remote(1), 100);
@@ -1968,7 +2001,8 @@ mod tests {
 			front.step(Event::Wanted { track: name("video") }),
 			&[Action::Arm { at: None }],
 		);
-		// A replacement source does not re-splice it either.
+		// A replacement source asks for its copy, and splices the answer, for a group still
+		// read on the track. Nothing ends or lingers again.
 		front.step(Event::Selected {
 			best: Some(remote(2)),
 			serving_closing: false,
@@ -1978,10 +2012,39 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach {
-				source: 100,
-				drain: false,
+			&[
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
+				Action::Reroute {
+					track: name("video"),
+					source: 200,
+				},
+			],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
 			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(()),
+				delivered: false,
+			}),
+			&[],
 		);
 		let t1 = t0.saturating_add(LINGER);
 		front.step(Event::Unwanted {
@@ -1996,6 +2059,54 @@ mod tests {
 		);
 		front.step(Event::Forgotten { track: name("video") });
 		assert!(!front.tracks.contains_key(&name("video")));
+	}
+
+	/// A rerouted copy of a finished track joins its reads only from the serving source and
+	/// with the track's metadata; a parked one keeps its linger either way.
+	#[test]
+	fn a_finished_track_splices_only_a_matching_copy_from_the_serving_source() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Ok(()),
+			delivered: true,
+		});
+		let t0 = Instant::now();
+		front.step(Event::Unwanted {
+			track: name("video"),
+			now: t0,
+		});
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		let answer = |source, result| Event::TrackInfo {
+			track: name("video"),
+			source,
+			closing: false,
+			result,
+			retry: None,
+		};
+		// From a source the front no longer serves from.
+		assert_actions(front.step(answer(100, Ok(info()))), &[]);
+		// Other metadata, or a refusal.
+		assert_actions(front.step(answer(200, Ok(track::Info::default()))), &[]);
+		assert_actions(front.step(answer(200, Err(Error::NotFound))), &[]);
+		assert_actions(
+			front.step(answer(200, Ok(info()))),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_index_matches_scan(&front);
+		assert_eq!(front.next_deadline(), Some(t0.saturating_add(LINGER)));
 	}
 
 	/// An aborted track lingers the same way rather than staying for the life of

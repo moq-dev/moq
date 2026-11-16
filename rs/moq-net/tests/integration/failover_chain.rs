@@ -209,21 +209,18 @@ async fn a_fetch_after_the_finished_copies_linger_goes_on_the_wire() {
 	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }
 
-/// Pins a hang that `verify/failover/EndedRelay.cfg` finds (`NoSkipWhileHeld`). `E`'s fetch
-/// of the rest of group 0 goes through `B`, which serves it through `A`. The publisher ends
-/// the track, then `A` dies: `B`'s fetch fails, and `B`'s front, whose track ended, splices
-/// no copy from `P` for it though `B` still reaches `P`, so the read waits out the
-/// subscriber's budget. A fix moves the fetch to `P`, so the frame arrives.
+/// `E`'s fetch of the rest of group 0 goes through `B`, which serves it through `A`. The
+/// publisher ends the track, then `A` dies: `B`'s fetch fails, so `B`'s front, whose track
+/// ended, moves it to `P`, which `B` still reaches, and the rest arrives (`NoSkipWhileHeld`
+/// in `verify/failover/FailoverChain.tla` with `Mesh`).
 #[kio::test]
-async fn residual_a_fetch_cannot_move_off_a_dying_route_after_the_end() {
+async fn a_fetch_moves_off_a_dying_route_after_the_end() {
 	let mut chain = Chain::mesh().await;
 	let mut rx = chain.read_on();
 	settle().await;
 	chain.end().await;
 	chain.kill_a().await;
 	chain.finish_group0();
-	assert!(
-		kio::clock::timeout(PATIENCE, rx.next()).await.is_err(),
-		"group 0 continued"
-	);
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }

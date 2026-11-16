@@ -4845,8 +4845,9 @@ impl FrontServe {
 						}
 					}
 					// An awaited copy follows the readers, or it may never send the group
-					// they now want.
-					if asked.info.is_some() {
+					// they now want. The readers of an ended track stay on the copy it ended
+					// on, so one rerouted for its group reads subscribes nothing.
+					if asked.info.is_some() && !matches!(io.logical, Logical::Ended) {
 						follow_demand(
 							&mut asked.sub,
 							Some(&asked.copy),
@@ -5126,6 +5127,29 @@ impl kio::Task for FrontServe {
 								None => {}
 							}
 						}
+						Action::Reroute { track: name, source } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							// Nothing reads it any more, so nothing would continue on the copy.
+							if !io.weak.is_held() {
+								continue;
+							}
+							let Some(Ok(lookup)) = self.sources.get(&source).map(|s| s.track(&name)) else {
+								continue;
+							};
+							io.ready.wake_by_ref();
+							// No subscription: the track is over, and a read that continues on the
+							// copy asks it for what it needs.
+							let query = lookup.info().into_inner();
+							let copy = query.track();
+							io.query = Some(Asked {
+								source,
+								staged: io.routes.stage(copy.clone()),
+								copy,
+								query,
+								info: None,
+								sub: None,
+							});
+						}
 						Action::Splice { track: name, source } => {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };
 							let Some(asked) = io.staged.take() else {
@@ -5385,10 +5409,11 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
-					// Staged only while the track has a reader: without one the machine
-					// will not splice, and a held copy would keep the source subscribed.
+					// Staged only while the track has a reader, or a read holds the finished
+					// track: without one the machine will not splice, and a held copy would
+					// keep the source subscribed.
 					if let Ok(info) = &result
-						&& io.wanted
+						&& (io.wanted || io.routes.ended())
 					{
 						io.staged = Some(Asked {
 							info: Some(info.clone()),

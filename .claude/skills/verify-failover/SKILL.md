@@ -24,18 +24,10 @@ Each rule is an INVARIANT, except `Settles`, which is TLC's deadlock check: ever
 ```sh
 quest gate just rs tla moq-net/verify/failover/FailoverChain.tla
 quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Leave.cfg
-quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/EndedRelay.cfg
+quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Mesh.cfg
 ```
 
-The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.2M states. Each takes seconds and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop: it fails at the sync commit on the open finding below at depth 31, after about 50M distinct states and minutes.
-
-## Open finding: an ended relay cannot move a fetch off a dying route
-
-`EndedRelay.cfg` breaks `NoSkipWhileHeld`. `E` reads group 0 through `A` and hands out group 1, then switches to `B`, asking it from group 1, and fetches the rest of group 0 from `B`. `B` moves its route to `A`, its copy from group 1 completes, and its track ends (`Action::Finish`); then `A` dies. `B`'s front no longer switches, so its fetch for group 0 fails although `B` still reaches `O` directly, and `E`, whose serving route gave up on the group, cuts it short.
-
-`residual_a_fetch_cannot_move_off_a_dying_route_after_the_end` in `rs/moq-net/tests/integration/failover_chain.rs` replays it, and the real stack does worse: the read waits out the subscriber's budget (`Settles` too). `B`'s logical track closes once it finished, so its front reads the track as unread and splices no copy from the route to `O` that replaces `A`'s; the fetch's `Recover` waits on a concluded route whose serving copy completed cleanly before its FETCH failed. A fix keeps an ended track routable for a fetch, here and in the model's `Switch` and `Abort`; then flip the test, merge `EndedRelay.cfg`'s `Mesh` into `FailoverChain.cfg` if the bounds allow, and delete `EndedRelay.cfg`.
-
-The model lets a fetch reach the serving route whenever that route lives, after the track ended too. Without the mesh the code now does: a relay's finished copy keeps answering fetches while it is read (`ending_the_track_keeps_a_fetch_in_flight`, `a_fetch_from_a_completed_copy_goes_on_the_wire`).
+The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 2.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 2.3M states. Each takes under a minute and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop, after `B`'s track ended too (`Action::Reroute`): MESH_STATES, so it stays out of the first config.
 
 ## Reading a failure
 
@@ -53,7 +45,7 @@ Sync commit: `88572c583e2f64c7f5fc9bfa59df90706308497e`. Run `git log 88572c583e
 | `rs/moq-net/src/model/resume.rs` `Recover::wants`, `poll`, `held`, `poll_serving` | `Recover`, `Holders`, `Exhausted`, `Abort` |
 | `rs/moq-net/src/model/resume.rs` `Recover::poll_fetch`, `Fetching`; `rs/moq-net/src/model/track.rs` `fetch_group` | `Ask` |
 | `rs/moq-net/src/model/front.rs` `track_ended`, `Action::Finish`; `rs/moq-net/src/model/origin.rs` `TrackIo::end` | `FrontFinish`, `Whole` |
-| `rs/moq-net/src/model/front.rs` failover and its unroutable end | `Switch`, `FrontFail` |
+| `rs/moq-net/src/model/front.rs` failover and its unroutable end, `Action::Reroute` | `Switch`, `FrontFail` |
 
 ## Not covered
 
