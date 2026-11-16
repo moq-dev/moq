@@ -1250,14 +1250,12 @@ impl MoqMediaTrackProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		if let Err(err) = media.import.finish() {
-			media.import.abort(cause(&err));
-			return Err(MoqError::Codec {
-				reason: format!("finish failed: {err}"),
-			});
-		}
-		self.children.keep(media);
+		let media = guard.take().ok_or(MoqError::Closed)?;
+		// A failed finish already ended the track with its cause.
+		let finished = media.import.finish().map_err(|err| MoqError::Codec {
+			reason: format!("finish failed: {err}"),
+		})?;
+		self.children.keep(finished);
 		Ok(())
 	}
 }
@@ -1389,24 +1387,13 @@ impl MoqMediaTrackStreamProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		if let Err(err) = media.import.finish() {
-			media.import.abort(cause(&err));
-			return Err(MoqError::Codec {
-				reason: format!("finish failed: {err}"),
-			});
-		}
-		self.children.keep(media);
+		let media = guard.take().ok_or(MoqError::Closed)?;
+		// A failed finish already ended the track with its cause.
+		let finished = media.import.finish().map_err(|err| MoqError::Codec {
+			reason: format!("finish failed: {err}"),
+		})?;
+		self.children.keep(finished);
 		Ok(())
-	}
-}
-
-/// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
-/// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
-fn cause(err: &moq_mux::Error) -> moq_net::Error {
-	match err {
-		moq_mux::Error::Moq(err) => err.clone(),
-		_ => moq_net::StreamError::Internal.into(),
 	}
 }
 

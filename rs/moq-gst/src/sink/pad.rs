@@ -98,6 +98,8 @@ impl Names {
 #[derive(Default)]
 pub(super) struct Closed {
 	_track: Option<Sink>,
+	/// A finished audio or video track, which no longer has a [`Sink`].
+	_media: Option<import::track::Finished>,
 	/// A finished text track, which no longer has a [`Sink`].
 	_text: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::TextConfig>>,
 	/// The catalog `_track` published in, kept open until the owner drops.
@@ -986,11 +988,12 @@ impl Pad {
 			self.names.end(track.name());
 		}
 		let mut text = None;
+		let mut media = None;
 		let (result, track) = match track {
-			Sink::Media(mut media) => (
-				media.track.finish().map_err(anyhow::Error::from),
-				Some(Sink::Media(media)),
-			),
+			Sink::Media(sink) => {
+				let result = sink.track.finish().map(|finished| media = Some(finished));
+				(result.map_err(anyhow::Error::from), None)
+			}
 			Sink::Text(sink) => {
 				let result = sink.producer.finish().map(|finished| text = Some(finished));
 				(result.map_err(anyhow::Error::from), None)
@@ -1007,6 +1010,7 @@ impl Pad {
 		};
 		let closed = Closed {
 			_track: track,
+			_media: media,
 			_text: text,
 			_catalog: Some(catalog),
 		};

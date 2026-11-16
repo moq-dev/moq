@@ -230,33 +230,53 @@ impl Producer {
 
 	/// Finalize the track.
 	///
-	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
-	/// run after a successful finish.
-	pub fn finish(&mut self) -> Result<(), Error> {
-		// Each publish flushed its access unit, so the splitter holds only input storage, which
-		// ends here. The import stays, keeping the finished track and its rendition published.
-		match &mut self.codecs {
-			Codecs::H264 { split, import } => {
-				*split = Default::default();
-				import.finish()?
-			}
-			Codecs::H265 { split, import } => {
-				*split = Default::default();
-				import.finish()?
-			}
-		}
-		Ok(())
+	/// Consumes the producer, releasing the splitter. The returned [`Finished`] keeps the track
+	/// and its catalog rendition published, and can still [`abort`](Finished::abort) them. A
+	/// finish that fails ends the track with an error instead.
+	pub fn finish(self) -> Result<Finished, Error> {
+		// Each publish flushed its access unit, so the splitter holds only input storage.
+		let track = match self.codecs {
+			Codecs::H264 { import, .. } => import.finish()?,
+			Codecs::H265 { import, .. } => import.finish()?,
+		};
+		Ok(Finished { track })
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	///
-	/// Consumes the producer. Still callable after [`finish`](Self::finish).
 	pub fn abort(self, err: moq_net::Error) {
 		match self.codecs {
 			Codecs::H264 { import, .. } => import.abort(err),
 			Codecs::H265 { import, .. } => import.abort(err),
 		}
+	}
+}
+
+/// A video track whose [`Producer`] [finished](Producer::finish) it: every frame is published,
+/// and it can still be watched or aborted, but not written to.
+///
+/// Dropping it releases the track like dropping a [`Producer`].
+///
+/// ```compile_fail,E0599
+/// # fn cannot_publish(track: moq_video::encode::Finished, encoded: &moq_video::encode::Encoded) {
+/// track.publish(encoded).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases the track and its catalog rendition"]
+pub struct Finished {
+	track: moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
+}
+
+impl Finished {
+	/// A watch-only handle to the track's subscriber demand; see [`Producer::demand`].
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.track.demand()
+	}
+
+	/// Abort the track with `err`, so subscribers that have not drained it see the real cause; see
+	/// [`Producer::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		self.track.abort(err);
 	}
 }
 
@@ -521,10 +541,10 @@ enum Owned {
 impl Owned {
 	/// End the track cleanly, best effort: it is usually already going away.
 	fn finish(self) {
+		// The caller is done with the track, so the finished handle goes with it.
 		let ended = match self {
-			// The caller is done with the track, so the finished handle goes with it.
 			Self::Track(track) => track.finish().map(drop).map_err(Error::from),
-			Self::Producer(mut producer) => producer.finish(),
+			Self::Producer(producer) => producer.finish().map(drop),
 			Self::Done => Ok(()),
 		};
 		if let Err(err) = ended {
@@ -1199,7 +1219,7 @@ mod tests {
 				producer.publish(&encoded).unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![1, 1, 1]);
 	}
@@ -1326,7 +1346,7 @@ mod tests {
 		assert_eq!(rendition.bitrate, Some(6_000_000));
 	}
 
-	/// Finish leaves the handle, so abort can still run.
+	/// Finish returns a handle, so abort can still run.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
 	async fn abort_after_finish() {
@@ -1352,9 +1372,9 @@ mod tests {
 			producer.publish(&encoded).unwrap();
 		}
 
-		producer.finish().unwrap();
+		let finished = producer.finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
-		producer.abort(moq_net::Error::Cancel);
+		finished.abort(moq_net::Error::Cancel);
 	}
 
 	#[tokio::test]
@@ -1424,7 +1444,7 @@ mod tests {
 			_broadcast: moq_net::broadcast::Producer,
 			opens: tokio::sync::mpsc::UnboundedSender<capture::Stream>,
 			stop: Option<tokio::sync::oneshot::Sender<()>>,
-			task: tokio::task::JoinHandle<Result<(), Error>>,
+			task: tokio::task::JoinHandle<Result<Finished, Error>>,
 		}
 
 		impl Fixture {
@@ -1530,7 +1550,7 @@ mod tests {
 			/// Stop the loop and finalize the track, as a clean end of capture does.
 			async fn finish(mut self) -> (moq_mux::catalog::Producer, moq_net::broadcast::Consumer) {
 				let _ = self.stop.take().expect("finished once").send(());
-				self.task.await.unwrap().unwrap();
+				drop(self.task.await.unwrap().unwrap());
 				(self.catalog, self.consumer)
 			}
 
@@ -2486,8 +2506,7 @@ mod finished {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();
 						producer.publish(&Encoded::new(keyframe(), pts, true)).unwrap();
 					}
-					producer.finish().unwrap();
-					producer
+					producer.finish().unwrap()
 				})
 				.collect();
 

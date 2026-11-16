@@ -134,10 +134,19 @@ impl Import {
 		self.track.track()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(
+		self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
+		self.track.finish()
+	}
+
+	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		self.track.end_with(None)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
