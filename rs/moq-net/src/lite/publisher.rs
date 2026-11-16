@@ -6988,8 +6988,8 @@ mod serve_group_test {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let four = track.append_group(Timestamp::unscaled(4)).unwrap();
-		let seven = track.append_group(Timestamp::unscaled(7)).unwrap();
+		let four = track.append_group(Timestamp::from_millis(4).unwrap()).unwrap();
+		let seven = track.append_group(Timestamp::from_millis(7).unwrap()).unwrap();
 		assert!(position_group(four.consume(), &legacy.frames).is_none());
 		assert!(position_group(seven.consume(), &legacy.frames).is_some());
 	}
@@ -7242,7 +7242,7 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			let mut subscriber = track.subscribe(None);
-			let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 			for _ in 0..FRAMES {
 				group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 			}
@@ -7317,7 +7317,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
 		let consumer = subscriber
@@ -12311,7 +12311,7 @@ mod tests {
 			.create_track("video", track::Info::timed())
 			.unwrap();
 		broadcast.announce().unwrap();
-		let mut group = track.append_group(crate::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		for _ in 0..FRAMES {
 			group.write_frame(crate::Timestamp::ZERO, b"x".to_vec()).unwrap();
 		}

@@ -207,7 +207,7 @@ pub fn catalog(data: &[u8]) -> bool {
 	};
 
 	let mut group = track
-		.append_group(moq_net::Timestamp::unscaled(0))
+		.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 		.expect("a fresh track takes a group");
 	let mut accepted = false;
 	for frame in data.split(|&byte| byte == 0) {

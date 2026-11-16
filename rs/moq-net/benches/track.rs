@@ -238,10 +238,10 @@ impl FetchReaders {
 	fn new(readers: usize, history: usize) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut open = track.append_group(Timestamp::unscaled(0)).unwrap();
+		let mut open = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"f")).unwrap();
 		for key in 1..=history as u64 {
-			let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"f")).unwrap();
 			group.finish().unwrap();
 		}
@@ -314,7 +314,10 @@ impl Fanout {
 
 	/// Append the next group, whose frames start at its key.
 	fn append(&mut self) -> moq_net::group::Producer {
-		let group = self.track.append_group(Timestamp::unscaled(self.next)).unwrap();
+		let group = self
+			.track
+			.append_group(Timestamp::from_millis(self.next).unwrap())
+			.unwrap();
 		self.next += 1;
 		group
 	}
@@ -402,7 +405,7 @@ impl Swept {
 		let tracks = (0..tracks)
 			.map(|i| {
 				let track = broadcast.create_track(format!("bench{i}"), timed()).unwrap();
-				let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
+				let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 				group.finish().unwrap();
 				track
@@ -751,11 +754,11 @@ impl FetchBudgets {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		for key in (0..4u64).map(|second| second * 1000) {
-			let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"f")).unwrap();
 			group.finish().unwrap();
 		}
-		let mut open = track.append_group(Timestamp::unscaled(4000)).unwrap();
+		let mut open = track.append_group(Timestamp::from_millis(4000).unwrap()).unwrap();
 		open.write_frame(at(4000), Bytes::from_static(b"f")).unwrap();
 
 		let mut fetched = Self {
@@ -867,7 +870,7 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 					barrier.wait();
 					barrier.wait();
 					for key in 0..iterations {
-						let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+						let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 						group.write_frame(at(key), payload.clone()).unwrap();
 						group.finish().unwrap();
 					}
@@ -1227,7 +1230,9 @@ fn bench_parked_read(c: &mut Criterion) {
 				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
 				let mut reads: Vec<_> = (0..parked)
 					.map(|read| {
-						let mut group = track.append_group(Timestamp::unscaled(millis(micros))).unwrap();
+						let mut group = track
+							.append_group(Timestamp::from_millis(millis(micros)).unwrap())
+							.unwrap();
 						group
 							.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
 							.unwrap();
@@ -1262,7 +1267,9 @@ fn bench_parked_read(c: &mut Criterion) {
 
 				let start = WallInstant::now();
 				for _ in 0..iterations {
-					let mut next = track.append_group(Timestamp::unscaled(millis(micros))).unwrap();
+					let mut next = track
+						.append_group(Timestamp::from_millis(millis(micros)).unwrap())
+						.unwrap();
 					next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();
 					next.finish().unwrap();
@@ -1404,7 +1411,7 @@ impl Idle {
 	fn new(readers: usize, ordered: bool) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut open = track.append_group(Timestamp::unscaled(0)).unwrap();
+		let mut open = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
 		let waiter = kio::Waiter::noop();
 		let (mut recv, mut next) = (Vec::new(), Vec::new());
@@ -1624,7 +1631,7 @@ impl EmptyRun {
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		// A group at `key` milliseconds, with a frame there or none.
 		let append = |key: u64, frame: bool| {
-			let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			if frame {
 				group.write_frame(at(key), Bytes::from_static(b"x")).unwrap();
 			}

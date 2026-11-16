@@ -307,7 +307,7 @@ impl Cache {
 				}
 				// A group starts at its first frame's timestamp, in the track's milliseconds.
 				let group = self.tracks[frame.track]
-					.append_group(Timestamp::unscaled(frame.timestamp))
+					.append_group(Timestamp::from_millis(frame.timestamp).unwrap())
 					.unwrap();
 				*slot = Some((GroupRecv::new(group), 0));
 			}

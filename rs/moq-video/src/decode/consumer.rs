@@ -1379,7 +1379,7 @@ mod tests {
 
 	/// Append a group at `start` holding frames at `seconds`, skipping the starts since the last.
 	fn group(track: &mut moq_net::track::Producer, start: u64, seconds: &[u64]) -> moq_net::group::Producer {
-		let mut group = track.append_group(Timestamp::unscaled(start)).unwrap();
+		let mut group = track.append_group(Timestamp::from_micros(start).unwrap()).unwrap();
 		write(&mut group, seconds);
 		group
 	}

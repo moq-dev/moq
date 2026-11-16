@@ -691,7 +691,7 @@ where
 					if self.inner.largest().is_none() {
 						self.inner.skip_groups(0..start);
 					}
-					self.inner.append_group(moq_net::Timestamp::unscaled(start))?
+					self.inner.append_group(timestamp)?
 				}
 				(None, None) => unreachable!("a keyframe without a pending start has one"),
 			};
@@ -949,7 +949,7 @@ where
 		};
 		self.pending_start = None;
 		let mut group = match appended {
-			true => self.inner.append_group(moq_net::Timestamp::unscaled(start))?,
+			true => self.inner.append_group(timestamp)?,
 			false => self.inner.create_group(moq_net::group::Info { start })?,
 		};
 		match self.container.kind() {

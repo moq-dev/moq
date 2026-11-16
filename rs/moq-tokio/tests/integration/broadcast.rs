@@ -161,9 +161,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	// zigzag timestamp delta carries a negative value.
 	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track
-		.append_group(Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
@@ -281,9 +279,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	// stream carries a negative zigzag delta too).
 	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track
-		.append_group(Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
@@ -522,9 +518,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	// Group 0 is the "past" group only reachable via FETCH; group 1 is the latest,
 	// delivered live over the subscription.
 	let mut group0 = track
-		.append_group(Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group 0"); // seq 0
 	group0
 		.write_frame(Timestamp::new(10_000, Timescale::MICRO).unwrap(), b"old".as_slice())
@@ -532,9 +526,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	group0.finish().expect("finish group 0");
 
 	let mut group1 = track
-		.append_group(Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group 1"); // seq 1
 	group1
 		.write_frame(Timestamp::new(20_000, Timescale::MICRO).unwrap(), b"new".as_slice())

@@ -88,7 +88,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	for key in 0..groups {
 		// Each group starts at its first frame's time.
 		let mut group = track
-			.append_group(Timestamp::unscaled(tick * STEP.as_millis() as u64))
+			.append_group(Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap())
 			.unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();

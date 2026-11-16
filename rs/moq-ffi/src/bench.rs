@@ -222,7 +222,7 @@ async fn net_round(
 	for track in &mut tracks {
 		// The group starts at its first frame's time, in the track's microseconds.
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(n * case.frames() as u64))
+			.append_group(moq_net::Timestamp::from_micros(n * case.frames() as u64).unwrap())
 			.unwrap();
 		for f in 0..case.frames() {
 			let timestamp = moq_net::Timestamp::from_micros(n * case.frames() as u64 + f as u64).unwrap();

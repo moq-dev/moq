@@ -62,7 +62,7 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	let mut sub = remote.track("file").unwrap().subscribe(prefs).await.unwrap();
 
 	let payload = pattern(SIZE);
-	let group0 = track.append_group(Timestamp::unscaled(0)).unwrap();
+	let group0 = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	let mut writing = group0
 		.create_frame(frame::Info {
 			size: SIZE as u64,
@@ -80,7 +80,7 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	}
 	assert_eq!(got, payload[..HALF]);
 
-	let mut group1 = track.append_group(Timestamp::unscaled(1)).unwrap();
+	let mut group1 = track.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group1
 		.write_frame(Timestamp::from_millis(1).unwrap(), b"next".to_vec())
 		.unwrap();

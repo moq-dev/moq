@@ -62,7 +62,9 @@ impl Fixture {
 		for index in 0..groups {
 			let mut group = match spacing {
 				1 => track.create_group(moq_net::group::Info { start: index }).unwrap(),
-				spacing => track.append_group(Timestamp::unscaled(index * spacing)).unwrap(),
+				spacing => track
+					.append_group(Timestamp::from_millis(index * spacing).unwrap())
+					.unwrap(),
 			};
 			group
 				.write_frame(Timestamp::from_millis(index * 1000).unwrap(), b"x".as_slice())
@@ -193,7 +195,10 @@ async fn sparse_history_is_recovered_across_its_skips() {
 
 		// The session survives the skips, so the live subscription goes on.
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		let mut group = fixture.track.append_group(Timestamp::unscaled(6000)).unwrap();
+		let mut group = fixture
+			.track
+			.append_group(Timestamp::from_millis(6000).unwrap())
+			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();

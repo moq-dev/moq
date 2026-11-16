@@ -9868,7 +9868,7 @@ mod tests {
 
 		let mut subscriber = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let bill = subscriber.bill();
-		let mut group = track.append_group(crate::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"dropped".as_ref()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"sent".as_ref()).unwrap();
 		group.finish().unwrap();

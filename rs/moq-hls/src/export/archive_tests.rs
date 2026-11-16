@@ -155,7 +155,10 @@ impl Recording {
 	fn add(&mut self, track: &str, groups: &[&[u64]]) {
 		let source = self.sources.get_mut(track).unwrap();
 		for &frames in groups {
-			let mut group = source.media.append_group(Timestamp::unscaled(frames[0])).unwrap();
+			let mut group = source
+				.media
+				.append_group(Timestamp::from_micros(frames[0]).unwrap())
+				.unwrap();
 			for (index, &micros) in frames.iter().enumerate() {
 				let timestamp = Timestamp::from_micros(micros).unwrap();
 				group.write_frame(timestamp, legacy(track, micros, index == 0)).unwrap();

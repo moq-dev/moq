@@ -1533,9 +1533,9 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	// 5.12Mb/s of media behind a 64kb/s link, for a second.
 	for sequence in 2..22 {
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(
-				track.largest().map_or(0, |largest| largest.group + 1),
-			))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
@@ -1544,9 +1544,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 	let mut newest = track
-		.append_group(moq_net::Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.unwrap();
 	newest
 		.write_frame(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")

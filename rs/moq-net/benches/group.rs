@@ -105,7 +105,7 @@ struct Ctx<G = group::Producer> {
 fn fresh_group() -> Ctx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	let track = broadcast.create_track("bench", timed()).unwrap();
-	let group = track.append_group(Timestamp::unscaled(0)).unwrap();
+	let group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	Ctx {
 		_broadcast: broadcast,
 		_track: track,
@@ -262,7 +262,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	let track = broadcast.create_track("bench", timed()).unwrap();
 	for key in 0..n as u64 {
-		let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 		group.write_frame(at(key), payload.clone()).unwrap();
 		group.finish().unwrap();
 	}
@@ -339,7 +339,7 @@ fn bench_track_recv(c: &mut Criterion) {
 				},
 				|(ctx, mut subscriber)| {
 					for key in (n..n + LIVE_BATCH).map(|key| key as u64) {
-						let mut group = ctx.track.append_group(Timestamp::unscaled(key)).unwrap();
+						let mut group = ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 						group.write_frame(at(key), payload.clone()).unwrap();
 						group.finish().unwrap();
 						let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
@@ -454,7 +454,7 @@ fn bench_stamp(c: &mut Criterion) {
 						let batch = left.min(n as u64);
 						let start = Instant::now();
 						for key in n as u64..n as u64 + batch {
-							let mut group = ctx.track.append_group(Timestamp::unscaled(key)).unwrap();
+							let mut group = ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 							group.write_frame(at(key), payload.clone()).unwrap();
 							group.finish().unwrap();
 						}
@@ -474,7 +474,7 @@ fn bench_stamp(c: &mut Criterion) {
 				while left > 0 {
 					let ctx = filled_track(0, &payload);
 					let mut groups: Vec<_> = (0..n as u64)
-						.map(|key| ctx.track.append_group(Timestamp::unscaled(key)).unwrap())
+						.map(|key| ctx.track.append_group(Timestamp::from_millis(key).unwrap()).unwrap())
 						.collect();
 					let batch = left.min(n as u64);
 					let start = Instant::now();
@@ -516,7 +516,7 @@ fn bench_inflate(c: &mut Criterion) {
 							.unwrap();
 						let consumers: Vec<group::Consumer> = (0..groups as u64)
 							.flat_map(|key| {
-								let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+								let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 								for payload in &payloads {
 									group.write_frame(at(key), payload.clone()).unwrap();
 								}
@@ -949,7 +949,7 @@ fn pooled_group(capacity: Option<u64>) -> Ctx {
 	}
 	let broadcast = broadcast::Producer::new(info);
 	let track = broadcast.create_track("bench", timed()).unwrap();
-	let group = track.append_group(Timestamp::unscaled(0)).unwrap();
+	let group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	Ctx {
 		_broadcast: broadcast,
 		_track: track,

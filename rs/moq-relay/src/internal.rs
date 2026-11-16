@@ -1832,9 +1832,9 @@ mod tests {
 		}
 		{
 			let mut group = pub_track
-				.append_group(Timestamp::unscaled(
-					pub_track.largest().map_or(0, |largest| largest.group + 1),
-				))
+				.append_group(
+					Timestamp::from_millis(pub_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])

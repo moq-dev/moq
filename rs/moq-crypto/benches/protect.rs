@@ -40,7 +40,7 @@ fn bench_protect(c: &mut Criterion) {
 		let mut ms = 0u64;
 		b.iter(|| {
 			ms += 1;
-			let mut group = producer.append_group(Timestamp::unscaled(ms)).unwrap();
+			let mut group = producer.append_group(Timestamp::from_millis(ms).unwrap()).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(ms).unwrap(), black_box(&grouped))
 				.unwrap();

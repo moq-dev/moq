@@ -100,6 +100,17 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	}
 }
 
+/// One past the newest group's start, or 0 on an empty track, in the track's timescale: where a
+/// group the caller gave no start for begins, which stands in until every write carries a
+/// timestamp.
+fn next_start(track: &moq_net::track::Producer) -> moq_net::Result<moq_net::Timestamp> {
+	let key = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
+	match track.info().timescale {
+		Some(scale) => moq_net::Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch),
+		None => Ok(moq_net::Timestamp::unscaled(key)),
+	}
+}
+
 fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, MoqError> {
 	info.map(moq_net::track::Info::try_from)
 		.transpose()
@@ -842,9 +853,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group(moq_net::Timestamp::unscaled(
-			raw.largest().map_or(0, |largest| largest.group + 1),
-		))?;
+		let group = raw.append_group(next_start(raw)?)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 

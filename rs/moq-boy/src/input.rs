@@ -71,10 +71,9 @@ impl Replies {
 /// A session track carries no timescale, so its groups have no time to start at: each starts one
 /// past the newest the track holds.
 fn send(track: &moq_net::track::Producer, message: Vec<u8>) -> moq_net::Result<()> {
-	let mut group = track.append_group(Timestamp::unscaled(
-		track.largest().map_or(0, |largest| largest.group + 1),
-	))?;
-	group.write_frame(moq_net::Timestamp::unscaled(group.start), message)?;
+	let start = moq_net::Timestamp::unscaled(track.largest().map_or(0, |largest| largest.group + 1));
+	let mut group = track.append_group(start)?;
+	group.write_frame(start, message)?;
 	group.finish()?;
 	Ok(())
 }
@@ -299,7 +298,7 @@ mod tests {
 		// The reader parks on this group's first frame, which never arrives.
 		let _stalled = session
 			.producer
-			.append_group(Timestamp::unscaled(
+			.append_group(moq_net::Timestamp::unscaled(
 				session.producer.largest().map_or(0, |largest| largest.group + 1),
 			))
 			.unwrap();

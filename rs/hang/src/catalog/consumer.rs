@@ -136,7 +136,7 @@ mod test {
 				.unwrap();
 			let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
 			let published = serde_json::json!({ "echo": { "path": reference } }).to_string();
-			let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, published).unwrap();
 			group.finish().unwrap();
 			let result = consumer.next().await;
@@ -160,7 +160,7 @@ mod test {
 			"audio".into(),
 			crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, 2),
 		);
-		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, published.to_json().unwrap())
 			.unwrap();
@@ -189,7 +189,7 @@ mod test {
 			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
 			.unwrap();
 		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
 			.unwrap();

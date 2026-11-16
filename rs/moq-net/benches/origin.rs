@@ -1115,7 +1115,7 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::default())
 							.unwrap();
 						let track = incumbent.broadcast().create_track("video", timed()).unwrap();
-						let mut first = track.append_group(Timestamp::unscaled(0)).unwrap();
+						let mut first = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
 
@@ -1236,7 +1236,7 @@ impl Watching {
 		let key = self.next;
 		self.next += 1;
 		for track in &self.tracks[..self.subscriptions.len()] {
-			let mut group = track.append_group(Timestamp::unscaled(key)).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			group.write_frame(at(key), b"frame".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -1362,7 +1362,7 @@ fn bench_relay(c: &mut Criterion) {
 						let key = next;
 						next += 1;
 						for source in &sources {
-							let mut group = source.append_group(Timestamp::unscaled(key)).unwrap();
+							let mut group = source.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 							for _ in 0..RELAY_FRAMES {
 								group.write_frame(at(key), b"frame".as_ref()).unwrap();
 							}
@@ -1425,7 +1425,7 @@ fn bench_passthrough(c: &mut Criterion) {
 						for _ in 0..open {
 							let key = next;
 							next += 1;
-							let mut group = source.append_group(Timestamp::unscaled(key)).unwrap();
+							let mut group = source.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 							group.write_frame(at(key), b"frame".as_ref()).unwrap();
 							group.finish().unwrap();
 							for (subscription, held) in subscriptions.iter_mut().zip(&mut held) {
@@ -1533,7 +1533,7 @@ impl Generation {
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
 			let track = broadcast.broadcast().create_track(format!("{i}"), timed()).unwrap();
-			let mut written = track.append_group(Timestamp::unscaled(0)).unwrap();
+			let mut written = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			written.finish().unwrap();
 			held.push(track);

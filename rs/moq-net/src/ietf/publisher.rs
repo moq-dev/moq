@@ -9230,7 +9230,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
 		let consumer = subscriber

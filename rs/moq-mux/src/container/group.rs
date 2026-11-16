@@ -200,7 +200,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
-		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 
 		format

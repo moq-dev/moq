@@ -114,7 +114,7 @@ mod test {
 			.expect("catalog track should create");
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("catalog group should append");
 
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
@@ -171,7 +171,7 @@ mod test {
 		let mut consumer = Consumer::new(catalog_track);
 
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("catalog group should append");
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
 		group
@@ -352,7 +352,7 @@ mod test {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("catalog group should append");
 
 		let waiter = kio::Waiter::noop();
@@ -372,7 +372,7 @@ mod test {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer: Consumer = Consumer::new(track.consume());
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("catalog group should append");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
@@ -390,7 +390,7 @@ mod test {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("catalog group should append");
 
 		let _track = track.finish().expect("catalog track should finish");
@@ -417,7 +417,7 @@ mod test {
 		let (latest, latest_payload) = catalog_payload("latest");
 
 		let mut old_group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("old catalog group should append");
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
@@ -425,7 +425,7 @@ mod test {
 		old_group.finish().expect("old catalog group should finish");
 
 		let mut latest_group = track
-			.append_group(moq_net::Timestamp::unscaled(1))
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
 			.expect("latest catalog group should append");
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
@@ -447,7 +447,7 @@ mod test {
 		let (latest, latest_payload) = catalog_payload("latest");
 
 		let mut old_group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("old catalog group should append");
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
@@ -455,7 +455,7 @@ mod test {
 		old_group.finish().expect("old catalog group should finish");
 
 		let mut latest_group = track
-			.append_group(moq_net::Timestamp::unscaled(1))
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
 			.expect("latest catalog group should append");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
@@ -478,13 +478,13 @@ mod test {
 		let (latest, latest_payload) = catalog_payload("latest");
 
 		let mut old_group = track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
 			.expect("old catalog group should append");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let mut latest_group = track
-			.append_group(moq_net::Timestamp::unscaled(1))
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
 			.expect("latest catalog group should append");
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)

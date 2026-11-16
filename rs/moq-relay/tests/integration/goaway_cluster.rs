@@ -175,9 +175,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	// The first group is open, its first frame read, when A redirects to B.
 	let mut split = track
-		.append_group(moq_net::Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	write(&mut split, "a");
 	let mut reading = within("recv the split group", sub.recv_group())
@@ -225,9 +223,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	assert_eq!(read(&mut reading).await, (0, None));
 
 	let mut after = track
-		.append_group(moq_net::Timestamp::unscaled(
-			track.largest().map_or(0, |largest| largest.group + 1),
-		))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	write(&mut after, "c");
 	after.finish().expect("finish");

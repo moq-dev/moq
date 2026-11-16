@@ -1262,7 +1262,9 @@ mod tests {
 			.unwrap();
 		let wire = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		for (start, stamps) in [(first, 1_000..=1_900), (2_000, 2_000..=2_200)] {
-			let mut group = published.append_group(Timestamp::unscaled(start)).unwrap();
+			let mut group = published
+				.append_group(moq_net::Timestamp::from_micros(start).unwrap())
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.step_by(100)
 				.enumerate()

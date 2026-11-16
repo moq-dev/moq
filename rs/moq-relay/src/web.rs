@@ -1620,7 +1620,9 @@ mod tests {
 		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
 		// edge: past the 500ms max age, so it is no longer served.
 		for millis in [0, 1000, 2000] {
-			let mut group = track.append_group(moq_net::Timestamp::unscaled(millis)).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_millis(millis).unwrap())
+				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();

@@ -1041,7 +1041,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
@@ -1156,7 +1156,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();

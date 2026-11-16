@@ -1389,12 +1389,12 @@ mod tests {
 			.unwrap();
 		if !empty {
 			video
-				.append_group(moq_net::Timestamp::unscaled(0))
+				.append_group(moq_net::Timestamp::from_micros(0).unwrap())
 				.unwrap()
 				.finish()
 				.unwrap();
 			video
-				.append_group(moq_net::Timestamp::unscaled(HOUR))
+				.append_group(moq_net::Timestamp::from_micros(HOUR).unwrap())
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -1446,7 +1446,7 @@ mod tests {
 			// As a media producer's first group does, saying nothing came before it.
 			video.skip_groups(0..HOUR + 1);
 			video
-				.append_group(moq_net::Timestamp::unscaled(HOUR + 1))
+				.append_group(moq_net::Timestamp::from_micros(HOUR + 1).unwrap())
 				.unwrap()
 				.finish()
 				.unwrap();

@@ -4337,8 +4337,13 @@ impl Producer {
 	/// only corrupts this broadcast for its readers. Datagram sequences name no cached content
 	/// and are exempt.
 	pub fn append_group(&self, start: Timestamp) -> Result<group::Producer> {
+		let start = self.modify()?.info.as_ref().unwrap().rescale(start)?.value();
+		self.append_key(start)
+	}
+
+	/// [`Self::append_group`] at `start`, the group's key in the track's timescale.
+	fn append_key(&self, start: u64) -> Result<group::Producer> {
 		let mut state = self.modify()?;
-		let start = state.info.as_ref().unwrap().rescale(start)?.value();
 		// Reserved, so every group fits an exclusive range.
 		if start == u64::MAX {
 			return Err(coding::BoundsExceeded.into());
@@ -4373,14 +4378,8 @@ impl Producer {
 	/// track: for tests that count groups rather than time them.
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn append_next(&self) -> Result<group::Producer> {
-		let state = self.modify()?;
-		let key = state.next_key();
-		let start = match state.info.as_ref().unwrap().timescale {
-			Some(scale) => Timestamp::new(key, scale).map_err(|_| Error::TimestampMismatch)?,
-			None => Timestamp::unscaled(key),
-		};
-		drop(state);
-		self.append_group(start)
+		let start = self.modify()?.next_key();
+		self.append_key(start)
 	}
 
 	/// Append a group holding one frame at `timestamp`, which is where the group starts.
@@ -13059,7 +13058,7 @@ mod test {
 	async fn a_whole_group_ages_only_once_it_ends() {
 		let producer = track_producer("test", Info::timed().with_max_age(Duration::ZERO));
 		elapse(&producer, Duration::ZERO);
-		let mut group = producer.append_group(Timestamp::unscaled(0)).unwrap();
+		let mut group = producer.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
 			.unwrap();
@@ -15800,7 +15799,7 @@ mod test {
 			let producer = track_producer("test", Info::timed());
 			// Group 10 is held, so the time start names it.
 			producer
-				.append_group(Timestamp::unscaled(10))
+				.append_group(Timestamp::from_millis(10).unwrap())
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -16888,21 +16887,38 @@ mod test {
 		assert!(matches!(producer.clone().fail(Error::App(7)), Err(Error::Closed)));
 	}
 
-	/// With no start, a group starts one past the largest start the track holds, or at 0 on an
-	/// empty track, and the start just below the reserved one is the last it takes.
+	/// A start is a timestamp: a timed track converts it into its timescale, an untimed track
+	/// takes the key as an unscaled one, and a start that doesn't match its track is refused
+	/// before any group exists.
 	#[test]
-	fn an_append_with_no_start_takes_the_next() {
-		let producer = track_producer("test", Info::default());
-		assert_eq!(producer.append_next().unwrap().start, 0);
-		assert_eq!(producer.append_next().unwrap().start, 1);
-		producer.append_group(Timestamp::unscaled(5)).unwrap().finish().unwrap();
-		assert_eq!(producer.append_next().unwrap().start, 6);
-		producer
+	fn an_append_starts_at_a_timestamp_matching_its_track() {
+		let timed = track_producer("timed", Info::timed());
+		assert_eq!(
+			timed.append_group(Timestamp::from_secs(1).unwrap()).unwrap().start,
+			1_000
+		);
+		assert!(matches!(
+			timed.append_group(Timestamp::unscaled(2_000)),
+			Err(Error::TimestampMismatch)
+		));
+		assert_eq!(timed.largest().map(|largest| largest.group), Some(1_000));
+
+		let untimed = track_producer("untimed", Info::default());
+		assert_eq!(untimed.append_group(Timestamp::unscaled(5)).unwrap().start, 5);
+		assert!(matches!(
+			untimed.append_group(Timestamp::from_millis(6).unwrap()),
+			Err(Error::TimestampMismatch)
+		));
+		assert_eq!(untimed.largest().map(|largest| largest.group), Some(5));
+		untimed
 			.append_group(Timestamp::unscaled(u64::MAX - 1))
 			.unwrap()
 			.finish()
 			.unwrap();
-		assert!(matches!(producer.append_next(), Err(Error::BoundsExceeded(_))));
+		assert!(matches!(
+			untimed.append_group(Timestamp::unscaled(u64::MAX)),
+			Err(Error::BoundsExceeded(_))
+		));
 	}
 
 	/// A group ended by `finish` reads whole but says nothing about where it ends; `finish_at`
@@ -16916,7 +16932,7 @@ mod test {
 		open.write_frame(Timestamp::from_millis(10).unwrap(), &b"b"[..])
 			.unwrap();
 		open.finish().unwrap();
-		let mut ended = producer.append_group(Timestamp::unscaled(20)).unwrap();
+		let mut ended = producer.append_group(Timestamp::from_millis(20).unwrap()).unwrap();
 		ended
 			.write_frame(Timestamp::from_millis(20).unwrap(), &b"c"[..])
 			.unwrap();

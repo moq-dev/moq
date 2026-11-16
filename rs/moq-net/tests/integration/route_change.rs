@@ -837,7 +837,9 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let mut after = BTreeMap::<u64, Vec<String>>::new();
 	for key in 0..=E_NOTICES + 3 {
 		// Each group starts at its first frame, a second after the last.
-		let mut group = track.append_group(Timestamp::unscaled(key * 1_000)).unwrap();
+		let mut group = track
+			.append_group(Timestamp::from_millis(key * 1_000).unwrap())
+			.unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(key * 1_000 + frame * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();

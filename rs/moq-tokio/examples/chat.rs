@@ -58,7 +58,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Create a group, which starts at its first frame's timestamp.
 	// Each group is independent and the newest group(s) will be prioritized.
 	let hello = now()?;
-	let mut group = track.append_group(moq_net::Timestamp::unscaled(hello.value()))?;
+	let mut group = track.append_group(hello)?;
 
 	// Write frames to the group.
 	// Each frame is dependent on the previous frame, so older frames are prioritized.

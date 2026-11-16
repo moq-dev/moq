@@ -1301,7 +1301,7 @@ mod tests {
 		let consumer = egress.request(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track.append_group(Timestamp::unscaled(0)).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
 		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
@@ -1418,7 +1418,7 @@ mod tests {
 			let at = next_stamp(&self.track);
 			let mut group = self
 				.track
-				.append_group(Timestamp::unscaled(at.value()))
+				.append_group(Timestamp::from_millis(at.value()).unwrap())
 				.expect("append group");
 			group.write_frame(at, b"not json".to_vec()).expect("write frame");
 			group.finish().expect("close group");

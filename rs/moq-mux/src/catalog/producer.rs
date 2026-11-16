@@ -320,7 +320,7 @@ impl<E: CatalogExt> Outputs<E> {
 		// tracks, so one landing in the same millisecond as the last is stamped a unit later
 		// instead of refused.
 		let (_, at) = crate::start::next(&self.hang_track, clock.now())?;
-		let (start, at) = crate::start::next(&self.msf_track, at)?;
+		let (_, at) = crate::start::next(&self.msf_track, at)?;
 		// One snapshot per group while deltas are disabled.
 		#[cfg(test)]
 		let before = self.hang_track.largest();
@@ -335,7 +335,7 @@ impl<E: CatalogExt> Outputs<E> {
 		let Some(msf) = msf.render(catalog, &self.msf_track.broadcast().path)? else {
 			return Ok(());
 		};
-		let mut group = self.msf_track.append_group(moq_net::Timestamp::unscaled(start))?;
+		let mut group = self.msf_track.append_group(at)?;
 		#[cfg(test)]
 		self.published[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		group.write_frame(at, msf)?;
