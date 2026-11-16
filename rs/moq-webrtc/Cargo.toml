@@ -58,7 +58,9 @@ reqwest = { workspace = true, features = ["rustls-no-provider"] }
 # The vendored stack's crypto: DTLS, SRTP, and STUN MESSAGE-INTEGRITY.
 rind = { workspace = true }
 rind-rcgen = { workspace = true }
+rind-str0m = { workspace = true }
 serde = { workspace = true }
+str0m = { workspace = true }
 spki = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }

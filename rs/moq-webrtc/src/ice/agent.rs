@@ -1,4 +1,3 @@
-use crate::vendor::str0m;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::{Deref, DerefMut};
@@ -326,7 +325,7 @@ mod tests {
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
 		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
-		Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap()
+		Agent::new(crate::session::rtc_config().unwrap().build(Instant::now().into_std()), socket).unwrap()
 	}
 
 	#[tokio::test]
@@ -343,7 +342,7 @@ mod tests {
 	/// connects, which reports as ICE never connecting rather than a DTLS failure.
 	#[tokio::test(start_paused = true)]
 	async fn a_handshake_giving_up_before_ice_connects_is_a_timeout() {
-		let mut offerer = Rtc::builder().build(Instant::now().into_std());
+		let mut offerer = crate::session::rtc_config().unwrap().build(Instant::now().into_std());
 		let mut api = offerer.sdp_api();
 		api.add_media(
 			str0m::media::MediaKind::Audio,
@@ -353,7 +352,7 @@ mod tests {
 			None,
 		);
 		let (offer, pending) = api.apply().unwrap();
-		let answer = Rtc::builder()
+		let answer = crate::session::rtc_config().unwrap()
 			.build(Instant::now().into_std())
 			.sdp_api()
 			.accept_offer(offer)
