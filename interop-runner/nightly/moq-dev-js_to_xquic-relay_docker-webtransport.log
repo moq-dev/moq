@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-xquic-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    https://relay:4443
-time="2026-11-15T15:47:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-15T15:47:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-15T15:47:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-15T15:47:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-15T15:47:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-16T18:25:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-16T18:25:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-16T18:25:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-16T18:25:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-16T18:25:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-test-client-1 Recreate 
  Container runner-upstream-test-client-1 Recreated 
 Attaching to relay-1, test-client-1
@@ -23,113 +23,215 @@ test-client-1  | TAP version 14
 test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
 test-client-1  | # Relay: https://relay:4443
 test-client-1  | 1..8
-relay-1        | [2026/11/15 15:47:22 412615] [error] |scid:967de110616ec780|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 412629] [error] |scid:967de110616ec780|xqc_process_conn_close_frame|conn:00005E9B17F5B0D0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-967de110616ec780 p-172.18.0.3-59449-6fb91d6f893f7196|
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 1 - setup-only
+relay-1        | [2026/11/16 18:25:22 734010] [report] |scid:9bd485cda32d736e|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853522641321|blkd:0|nblkd:0|hdr_b:2|hdr_e:11|bdy_b:11884|fin:11882|recv_end:11892|hrd_send:50|bdy_send:11913|fin_send:11998|fin_ack:12107|last_send:11998|last_recv:12094|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,2)#0-2-2-26-233-296-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:11998|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,48923,97846,0)|end_state:(0,16,0,0,52224,104449,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:22 753740] [error] |scid:9bd485cda32d736e|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:22 753752] [error] |scid:9bd485cda32d736e|xqc_process_conn_close_frame|conn:00006452281300D0|err:0x52e4a40fa8db|l-0.0.0.0-4443-9bd485cda32d736e p-172.18.0.3-38391-58d0d0cb2dfb6a7d|
+test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 109
-test-client-1  |   message: "remote error: 1"
+test-client-1  |   duration_ms: 214
 test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 417818] [error] |scid:6721f949e69a59fa|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 417828] [error] |scid:6721f949e69a59fa|xqc_process_conn_close_frame|conn:00005E9B17F95C10|err:0x52e4a40fa8dc|l-0.0.0.0-4443-6721f949e69a59fa p-172.18.0.3-34166-5a0cc6b86a04cb40|
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 2 - announce-only
+relay-1        | [2026/11/16 18:25:22 834691] [report] |scid:9bd485cda32d736e|xqc_conn_destroy|00006452281300D0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:2182|first_send_delay:2555|conn_persist:195883|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-9bd485cda32d736e p-172.18.0.3-38391-58d0d0cb2dfb6a7d|hsk_recv:2007|close_recv:114933|close_send:114969|last_recv:114916|last_send:114969|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,25,22,20,71,0,299,i0,4,33,42,40004,17,114,0,4,31,40,80,15,14,0,4,22,31,4,16,14,0,4,35,40000,18,114,4,19,10,16,14,4,20,80,17,14,0-2,0-2,0-0,0-0,0-0,0-0,0-3546,0-9029,0-19,0-20,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:19|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
+relay-1        | [2026/11/16 18:25:23 341639] [report] |scid:780738809ac4db45|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853522758484|blkd:0|nblkd:0|hdr_b:2|hdr_e:9|bdy_b:502232|fin:502228|recv_end:502238|hrd_send:38|bdy_send:502269|fin_send:502417|fin_ack:502511|last_send:527338|last_recv:502492|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-228-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:502417|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,53480,106961,0)|end_state:(0,16,0,0,67933,135867,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:23 362156] [error] |scid:780738809ac4db45|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:23 362169] [error] |scid:780738809ac4db45|xqc_process_conn_close_frame|conn:000064522816C8F0|err:0x52e4a40fa8db|l-0.0.0.0-4443-780738809ac4db45 p-172.18.0.3-35010-8c1c08771456fb44|
+test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 4
-test-client-1  |   message: "remote error: 1"
+test-client-1  |   duration_ms: 609
 test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 420450] [error] |scid:cc292e34ec07a7b1|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 420459] [error] |scid:cc292e34ec07a7b1|xqc_process_conn_close_frame|conn:00005E9B17FC9C80|err:0x52e4a40fa8dc|l-0.0.0.0-4443-cc292e34ec07a7b1 p-172.18.0.3-42518-cf3e6e01a6140505|
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 3 - publish-namespace-done
+relay-1        | [2026/11/16 18:25:23 440978] [report] |scid:780738809ac4db45|xqc_conn_destroy|000064522816C8F0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1577|first_send_delay:1935|conn_persist:684400|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-780738809ac4db45 p-172.18.0.3-35010-8c1c08771456fb44|hsk_recv:1418|close_recv:605577|close_send:605616|last_recv:605558|last_send:605616|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,30,28,26,75,0,325,i0,4,33,42,40004,24,605,0,4,24,33,4,22,504,0,4,24,33,4,23,504,0,4,20,80,32,504,4,19,4,33,529,4,35,40000,40,605,0-2,0-2,0-0,0-0,0-0,0-0,0-3727,0-9240,0-22,0-26,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:22|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+relay-1        | [2026/11/16 18:25:24 171099] [error] |scid:b32a3e9bec2e67ce|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:24 171119] [error] |scid:b32a3e9bec2e67ce|xqc_process_conn_close_frame|conn:0000645228199FF0|err:0x52e4a40fa8db|l-0.0.0.0-4443-b32a3e9bec2e67ce p-172.18.0.3-34368-01f06e2c2d81e0e5|
+test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2
-test-client-1  |   message: "remote error: 1"
+test-client-1  |   duration_ms: 808
 test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 422758] [error] |scid:2e5b6a531cb38836|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 422769] [error] |scid:2e5b6a531cb38836|xqc_process_conn_close_frame|conn:00005E9B17FFDBB0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-2e5b6a531cb38836 p-172.18.0.3-59445-38e27af2c96c343e|
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 4 - subscribe-namespace-lifecycle
+test-client-1  | subscribe_namespace written: requestId=0
+relay-1        | [2026/11/16 18:25:24 178979] [report] |scid:b32a3e9bec2e67ce|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:-1542477605|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853523367452|blkd:0|nblkd:0|hdr_b:4|hdr_e:17|bdy_b:702812|fin:702809|recv_end:702816|hrd_send:49|bdy_send:702838|fin_send:702893|fin_ack:729237|last_send:803692|last_recv:803634|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-532-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:702893|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,74868,149736,0)|end_state:(0,16,0,0,40576,81152,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/954f2faaabf924c719f6a60008d540e8 active=true
+relay-1        | [2026/11/16 18:25:24 255068] [report] |scid:b32a3e9bec2e67ce|xqc_conn_destroy|0000645228199FF0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1367|first_send_delay:1689|conn_persist:889264|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-b32a3e9bec2e67ce p-172.18.0.3-34368-01f06e2c2d81e0e5|hsk_recv:1255|close_recv:805294|close_send:805340|last_recv:805282|last_send:805340|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,32,30,28,75,0,325,i0,4,22,31,4,23,704,0,4,23,32,4,24,730,0,4,33,42,40004,25,805,0,4,19,4,27,730,4,35,40000,28,805,4,20,80,26,704,0-2,0-2,0-0,0-0,0-0,0-0,0-3792,0-9323,0-21,0-28,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:21|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/954f2faaabf924c719f6a60008d540e8 active=false
+relay-1        | [2026/11/16 18:25:24 392185] [error] |scid:13c7b0cc6563baeb|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:24 392203] [error] |scid:13c7b0cc6563baeb|xqc_process_conn_close_frame|conn:00006452281A8370|err:0x52e4a40fa8db|l-0.0.0.0-4443-13c7b0cc6563baeb p-172.18.0.3-40863-84419d99f152c8ad|
+relay-1        | [2026/11/16 18:25:24 398886] [report] |scid:13c7b0cc6563baeb|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:-1542477605|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853524179820|blkd:0|nblkd:0|hdr_b:4|hdr_e:12|bdy_b:111357|fin:111354|recv_end:111361|hrd_send:65|bdy_send:111382|fin_send:111459|fin_ack:137554|last_send:212413|last_recv:212326|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-3429-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:111459|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,68492,136984,0)|end_state:(0,16,0,0,48676,97353,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:24 471255] [report] |scid:bd8d8a52601bdf67|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853524174323|blkd:0|nblkd:0|hdr_b:3|hdr_e:12|bdy_b:218063|fin:218061|recv_end:218068|hrd_send:42|bdy_send:218096|fin_send:218196|fin_ack:218320|last_send:243187|last_recv:218296|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-180-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:218196|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,62873,125747,0)|end_state:(0,17,0,0,88562,177124,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:24 493843] [error] |scid:bd8d8a52601bdf67|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:24 493857] [error] |scid:bd8d8a52601bdf67|xqc_process_conn_close_frame|conn:000064522814F820|err:0x52e4a40fa8db|l-0.0.0.0-4443-bd8d8a52601bdf67 p-172.18.0.3-47112-3536b89525d137c0|
+test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2
+test-client-1  |   duration_ms: 323
 test-client-1  |   test_spec_revision: 1
-test-client-1  |   message: "remote error: 1"
-test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 425007] [error] |scid:2b0befffbd0411fc|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 425018] [error] |scid:2b0befffbd0411fc|xqc_process_conn_close_frame|conn:00005E9B18031AB0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-2b0befffbd0411fc p-172.18.0.3-60352-aa380d31b688f042|
-test-client-1  | https://relay:4443/ connected via WebTransport
-test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 5 - subscribe-error
-test-client-1  |   ---
-test-client-1  |   duration_ms: 3
-test-client-1  |   message: "remote error: 1"
-test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 427443] [error] |scid:f4b8572e29899fa4|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 427454] [error] |scid:f4b8572e29899fa4|xqc_process_conn_close_frame|conn:00005E9B180659C0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-f4b8572e29899fa4 p-172.18.0.3-39480-f6313992c0577ef0|
-test-client-1  | https://relay:4443/ connected via WebTransport
-test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 6 - announce-subscribe
-test-client-1  |   ---
-test-client-1  |   duration_ms: 2
-test-client-1  |   message: "remote error: 1"
 test-client-1  |   ...
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-relay-1        | [2026/11/15 15:47:22 429818] [error] |scid:f0ef207e71e76924|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 429830] [error] |scid:f0ef207e71e76924|xqc_process_conn_close_frame|conn:00005E9B180998C0|err:0x52e4a40fa8dc|l-0.0.0.0-4443-f0ef207e71e76924 p-172.18.0.3-37857-f55f8643059c603b|
-test-client-1  | not ok 7 - subscribe-before-announce
+test-client-1  | subscribe start: id=2 broadcast=nonexistent/namespace track=test-track
+test-client-1  | subscribe_namespace written: requestId=0
+test-client-1  | subscribe written: id=2 broadcast=nonexistent/namespace track=test-track
+test-client-1  | subscribe error: id=2 broadcast=nonexistent/namespace track=test-track error=SUBSCRIBE error: does_not_exist (code=16) 
+relay-1        | [2026/11/16 18:25:24 555232] [report] |scid:13c7b0cc6563baeb|xqc_conn_destroy|00006452281A8370|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1410|first_send_delay:1858|conn_persist:377218|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-13c7b0cc6563baeb p-172.18.0.3-40863-84419d99f152c8ad|hsk_recv:1287|close_recv:214171|close_send:214219|last_recv:214132|last_send:214219|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,30,29,27,75,0,388,i0,4,23,32,4,23,139,0,4,33,42,40004,24,214,0,4,22,31,4,22,113,0,4,20,80,23,113,4,19,4,24,138,4,35,40000,25,214,0-2,0-2,0-0,0-0,0-0,0-3,0-3727,0-9350,0-21,0-27,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:21|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+relay-1        | [2026/11/16 18:25:24 573933] [report] |scid:bd8d8a52601bdf67|xqc_conn_destroy|000064522814F820|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1236|first_send_delay:1483|conn_persist:401059|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-bd8d8a52601bdf67 p-172.18.0.3-47112-3536b89525d137c0|hsk_recv:896|close_recv:320969|close_send:321004|last_recv:320951|last_send:321004|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,32,29,26,83,0,388,i0,4,22,31,4,22,219,0,4,33,42,40004,23,320,0,4,37,46,84,21,219,0,4,19,4,28,244,4,35,40000,29,321,4,20,80,27,219,0-2,0-2,0-0,0-0,0-0,0-0,0-3799,0-9312,0-23,0-26,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:23|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+test-client-1  | subscribe_namespace error: session error: connection error: closed
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  |                                                        ^
+test-client-1  | error: session error: connection error: closed
+test-client-1  |  code: "GenericFailure"
+test-client-1  | 
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
+test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
+test-client-1  | 
+relay-1        | [2026/11/16 18:25:24 885137] [report] |scid:7dfb2dd7765f2c1b|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853524497137|blkd:0|nblkd:0|hdr_b:2|hdr_e:12|bdy_b:308948|fin:308942|recv_end:308954|hrd_send:43|bdy_send:308985|fin_send:309118|fin_ack:309350|last_send:309374|last_recv:309332|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-162-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:309118|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,67069,134138,0)|end_state:(0,17,0,0,97717,195435,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:24 906913] [error] |scid:7dfb2dd7765f2c1b|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:24 906937] [error] |scid:7dfb2dd7765f2c1b|xqc_process_conn_close_frame|conn:000064522817DDB0|err:0x52e4a40fa8db|l-0.0.0.0-4443-7dfb2dd7765f2c1b p-172.18.0.3-52693-fdca9aa36e3831f5|
+test-client-1  | ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 2
-test-client-1  |   message: "remote error: 1"
+test-client-1  |   duration_ms: 413
 test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 432241] [error] |scid:0804fc9136f3ab13|xqc_process_conn_close_frame|with err:0x52e4a40fa8dc|
-relay-1        | [2026/11/15 15:47:22 432252] [error] |scid:0804fc9136f3ab13|xqc_process_conn_close_frame|conn:00005E9B180CD830|err:0x52e4a40fa8dc|l-0.0.0.0-4443-0804fc9136f3ab13 p-172.18.0.3-53490-a56318c912675436|
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
-test-client-1  | not ok 8 - data-subgroup-basic
+relay-1        | [2026/11/16 18:25:24 987061] [report] |scid:7dfb2dd7765f2c1b|xqc_conn_destroy|000064522817DDB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1296|first_send_delay:1560|conn_persist:491450|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-7dfb2dd7765f2c1b p-172.18.0.3-52693-fdca9aa36e3831f5|hsk_recv:1197|close_recv:411302|close_send:411361|last_recv:411282|last_send:411361|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,34,32,30,81,0,359,i0,4,33,42,c,26,310,0,4,33,42,40004,27,411,0,4,22,31,4,25,310,0,4,35,40000,32,411,4,20,80,30,310,4,18,4,31,310,0-2,0-2,0-0,0-0,0-0,0-0,0-3865,0-9417,0-23,0-30,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:23|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:3|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:3|
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | subscribe_namespace written: requestId=0
+test-client-1  | announced: broadcast=moq-test/interop active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
+test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
+test-client-1  | publish done: broadcast=moq-test/interop track=test-track
+test-client-1  | publish error: broadcast=moq-test/interop track=test-track error=session error: connection error: closed
+test-client-1  | announced: broadcast=moq-test/interop active=false
+test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-track error=RESET_STREAM: 3
+relay-1        | [2026/11/16 18:25:25 326886] [error] |scid:61719708460b667d|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:25 326909] [error] |scid:61719708460b667d|xqc_process_conn_close_frame|conn:00006452281D18E0|err:0x52e4a40fa8db|l-0.0.0.0-4443-61719708460b667d p-172.18.0.3-38738-24733f39bb422a8c|
+test-client-1  | subscribe_namespace error: session error: connection error: closed
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  |                                                        ^
+test-client-1  | error: session error: connection error: closed
+test-client-1  |  code: "GenericFailure"
+test-client-1  | 
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
+test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
+test-client-1  | 
+relay-1        | [2026/11/16 18:25:25 335995] [report] |scid:61719708460b667d|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:-1542477605|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853524911535|blkd:0|nblkd:0|hdr_b:2|hdr_e:11|bdy_b:314389|fin:314386|recv_end:314392|hrd_send:53|bdy_send:314449|fin_send:314631|fin_ack:340967|last_send:415407|last_recv:415325|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-607-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:314631|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,79681,159363,0)|end_state:(0,17,0,0,33810,67620,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:25 408312] [report] |scid:1491f9e3c0a3726b|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853525216328|blkd:0|nblkd:0|hdr_b:3|hdr_e:12|bdy_b:110868|fin:110866|recv_end:110872|hrd_send:43|bdy_send:110890|fin_send:110966|fin_ack:111067|last_send:111262|last_recv:111220|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-352-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:110966|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,49834,99669,0)|end_state:(0,17,0,0,43571,87143,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:25 412504] [report] |scid:61719708460b667d|xqc_conn_destroy|00006452281D18E0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1250|first_send_delay:1567|conn_persist:502497|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-61719708460b667d p-172.18.0.3-38738-24733f39bb422a8c|hsk_recv:1129|close_recv:416879|close_send:416935|last_recv:416853|last_send:416935|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,36,33,31,121,0,338,i0,4,22,31,4,27,316,0,4,23,32,4,28,342,0,4,33,42,40004,29,416,0,4,20,80,33,316,4,18,4,34,316,4,35,40000,35,416,0-2,0-2,0-0,0-0,0-0,0-0,0-3972,0-9412,0-25,0-31,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:25|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+relay-1        | [2026/11/16 18:25:25 427396] [error] |scid:1491f9e3c0a3726b|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:25 427409] [error] |scid:1491f9e3c0a3726b|xqc_process_conn_close_frame|conn:000064522817DDB0|err:0x52e4a40fa8db|l-0.0.0.0-4443-1491f9e3c0a3726b p-172.18.0.3-55850-497e0f28a9feabe9|
+test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 3
+test-client-1  |   duration_ms: 520
+test-client-1  |   ...
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | subscribe_namespace written: requestId=0
+relay-1        | [2026/11/16 18:25:25 509145] [report] |scid:1491f9e3c0a3726b|xqc_conn_destroy|000064522817DDB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1476|first_send_delay:1844|conn_persist:294627|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-1491f9e3c0a3726b p-172.18.0.3-55850-497e0f28a9feabe9|hsk_recv:1033|close_recv:212877|close_send:212929|last_recv:212849|last_send:212929|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,38,36,33,130,0,354,i0,4,24,33,4,29,112,0,4,28,37,8,30,113,0,4,33,42,40004,31,212,0,4,18,4,36,113,4,35,40000,41,212,4,20,80,35,112,0-2,0-2,0-0,0-0,0-0,0-0,0-4058,0-9503,0-26,0-33,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:26|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:3|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:3|
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | announced: broadcast=moq-test/interop active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
+test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
+test-client-1  | publish done: broadcast=moq-test/interop track=test-track
+test-client-1  | publish error: broadcast=moq-test/interop track=test-track error=session error: connection error: closed
+test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-track error=RESET_STREAM: 3
+test-client-1  | announced: broadcast=moq-test/interop active=false
+relay-1        | [2026/11/16 18:25:26 021444] [report] |scid:aff643f20bf2b148|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853525936888|blkd:0|nblkd:0|hdr_b:3|hdr_e:12|bdy_b:5223|fin:5220|recv_end:5226|hrd_send:44|bdy_send:5280|fin_send:5514|fin_ack:5705|last_send:5627|last_recv:5693|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-190-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:5514|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,66519,133038,0)|end_state:(0,17,0,0,87570,175140,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:26 043126] [error] |scid:aff643f20bf2b148|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:26 043141] [error] |scid:aff643f20bf2b148|xqc_process_conn_close_frame|conn:000064522817DDB0|err:0x52e4a40fa8db|l-0.0.0.0-4443-aff643f20bf2b148 p-172.18.0.3-58826-1994119e36083d18|
+test-client-1  | subscribe_namespace error: session error: connection error: closed
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  |                                                        ^
+test-client-1  | error: session error: connection error: closed
+test-client-1  |  code: "GenericFailure"
+test-client-1  | 
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
+test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
+test-client-1  | 
+relay-1        | [2026/11/16 18:25:26 122130] [report] |scid:aff643f20bf2b148|xqc_conn_destroy|000064522817DDB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1308|first_send_delay:1602|conn_persist:186808|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-aff643f20bf2b148 p-172.18.0.3-58826-1994119e36083d18|hsk_recv:1216|close_recv:107804|close_send:107846|last_recv:107789|last_send:107846|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,36,31,29,121,0,338,i0,4,33,42,40004,27,107,0,4,22,31,4,25,7,0,4,22,31,4,26,7,0,4,20,80,31,7,4,18,4,32,7,4,35,40000,33,107,0-2,0-2,0-0,0-0,0-0,0-0,0-3981,0-9347,0-25,0-29,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:25|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+relay-1        | [2026/11/16 18:25:26 124307] [report] |scid:925acc47ab4a3773|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:0|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853525431096|blkd:0|nblkd:0|hdr_b:3|hdr_e:17|bdy_b:612258|fin:612256|recv_end:612261|hrd_send:56|bdy_send:612284|fin_send:612361|fin_ack:612463|last_send:612521|last_recv:612497|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-299-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:612361|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,79681,159363,0)|end_state:(0,17,0,0,51754,103509,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:26 145084] [error] |scid:925acc47ab4a3773|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:26 145098] [error] |scid:925acc47ab4a3773|xqc_process_conn_close_frame|conn:000064522816F200|err:0x52e4a40fa8db|l-0.0.0.0-4443-925acc47ab4a3773 p-172.18.0.3-57705-953411691906b5de|
+test-client-1  | ok 7 - subscribe-before-announce
+test-client-1  |   ---
+test-client-1  |   duration_ms: 718
+test-client-1  |   ...
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-22
+test-client-1  | subscribe_namespace written: requestId=0
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/5942e33f5558c6ea3ecf24e785ce332f active=false
+relay-1        | [2026/11/16 18:25:26 226819] [report] |scid:925acc47ab4a3773|xqc_conn_destroy|000064522816F200|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1325|first_send_delay:1652|conn_persist:797328|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-925acc47ab4a3773 p-172.18.0.3-57705-953411691906b5de|hsk_recv:1213|close_recv:715593|close_send:715632|last_recv:715578|last_send:715632|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,38,36,34,130,0,354,i0,4,24,33,4,29,614,0,4,28,37,8,30,614,0,4,33,42,40004,31,715,0,4,18,4,44,614,4,35,40000,45,715,4,20,80,43,613,0-2,0-2,0-0,0-0,0-0,0-0,0-4060,0-9540,0-27,0-34,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:27|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:1|cli_bidi_s:3|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:3|
+relay-1        | [2026/11/16 18:25:26 299988] [error] |scid:8ad7e1054723fec3|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:26 300002] [error] |scid:8ad7e1054723fec3|xqc_process_conn_close_frame|conn:000064522817DDB0|err:0x52e4a40fa8db|l-0.0.0.0-4443-8ad7e1054723fec3 p-172.18.0.3-48588-a642fe1bd5cf53c4|
+test-client-1  | subscribe_namespace error: session error: connection error: closed
+test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
+test-client-1  | 173 |             return false;
+test-client-1  | 174 |         }
+test-client-1  | 175 |         // Every read of this stream funnels through here, so decoding the peer's reset code
+test-client-1  | 176 |         // once is enough to keep the raw transport error out of every caller (and every app).
+test-client-1  | 177 |         const result = await this.#reader.read().catch((err) => {
+test-client-1  |                                                        ^
+test-client-1  | error: session error: connection error: closed
+test-client-1  |  code: "GenericFailure"
+test-client-1  | 
+test-client-1  |       at async #fill (/app/node_modules/@moq/net/stream.js:177:50)
+test-client-1  |       at async done (/app/node_modules/@moq/net/stream.js:343:29)
+test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/subscriber.js:278:58)
+test-client-1  | 
+relay-1        | [2026/11/16 18:25:26 304867] [report] |scid:8ad7e1054723fec3|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:-1542477605|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853526149502|blkd:0|nblkd:0|hdr_b:3|hdr_e:11|bdy_b:48869|fin:48865|recv_end:48873|hrd_send:50|bdy_send:48927|fin_send:49072|fin_ack:75229|last_send:150528|last_recv:150467|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-319-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:49072|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,79691,159382,0)|end_state:(0,17,0,0,86202,172404,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+relay-1        | [2026/11/16 18:25:26 381277] [report] |scid:8ad7e1054723fec3|xqc_conn_destroy|000064522817DDB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1274|first_send_delay:1583|conn_persist:233324|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-8ad7e1054723fec3 p-172.18.0.3-48588-a642fe1bd5cf53c4|hsk_recv:1161|close_recv:152036|close_send:152078|last_recv:152017|last_send:152078|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,74,127,125,207,0,1097,i0,4,34,43,40004,124,152,0,4,23,32,4,122,50,0,4,24,33,4,123,76,0,4,19,4,68,50,4,35,40000,69,152,4,20,80,67,50,0-2,0-2,0-0,0-0,0-0,0-0,0-5398,0-13075,0-24,0-125,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:24|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:6|cli_bidi_s:2|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:2|
+relay-1        | [2026/11/16 18:25:26 402158] [error] |scid:a31aa5d4ee680c31|xqc_process_conn_close_frame|with err:0x52e4a40fa8db|
+relay-1        | [2026/11/16 18:25:26 402171] [error] |scid:a31aa5d4ee680c31|xqc_process_conn_close_frame|conn:0000645228192C90|err:0x52e4a40fa8db|l-0.0.0.0-4443-a31aa5d4ee680c31 p-172.18.0.3-45554-f5b51134c25204c4|
+test-client-1  | ok 8 - data-subgroup-basic
+test-client-1  |   ---
+test-client-1  |   duration_ms: 257
 test-client-1  |   test_spec_revision: 2
-test-client-1  |   message: "remote error: 1"
 test-client-1  |   ...
-relay-1        | [2026/11/15 15:47:22 492136] [report] |scid:967de110616ec780|xqc_conn_destroy|00005E9B17F5B0D0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1445|first_send_delay:1653|conn_persist:81327|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-967de110616ec780 p-172.18.0.3-59449-6fb91d6f893f7196|hsk_recv:1164|close_recv:1806|close_send:1835|last_recv:1798|last_send:1835|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,15,12,69,0,255,i0,4,24,33,4,7,1,0,4,1380,1389,3,8,1,0,4,34,43,40004,9,1,0,4,41,4000,8,1,4,55,84,14,1,4,35,40000,15,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3301,0-5927,0-15,0-12,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 492175] [report] |scid:967de110616ec780|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642412430|blkd:0|nblkd:0|hdr_b:3|hdr_e:10|bdy_b:0|fin:0|recv_end:0|hrd_send:39|bdy_send:48|fin_send:51|fin_ack:98|last_send:214|last_recv:177|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,1)#0-1-1-33-224-205-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:51|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,63627,127254,0)|end_state:(0,16,0,0,73726,147452,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 496463] [report] |scid:6721f949e69a59fa|xqc_conn_destroy|00005E9B17F95C10|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:971|first_send_delay:1148|conn_persist:79901|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-6721f949e69a59fa p-172.18.0.3-34166-5a0cc6b86a04cb40|hsk_recv:693|close_recv:1256|close_send:1300|last_recv:1243|last_send:1300|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,32,41,40004,8,1,0,4,22,31,4,6,1,0,4,41,4000,8,1,4,55,84,9,1,4,35,40000,12,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3301,0-5892,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 496495] [report] |scid:6721f949e69a59fa|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642417691|blkd:0|nblkd:0|hdr_b:2|hdr_e:7|bdy_b:0|fin:0|recv_end:0|hrd_send:26|bdy_send:32|fin_send:35|fin_ack:119|last_send:171|last_recv:114|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-161-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:35|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,84724,169449,0)|end_state:(0,16,0,0,97165,194330,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 500720] [report] |scid:cc292e34ec07a7b1|xqc_conn_destroy|00005E9B17FC9C80|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:923|first_send_delay:1099|conn_persist:81483|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-cc292e34ec07a7b1 p-172.18.0.3-42518-cf3e6e01a6140505|hsk_recv:844|close_recv:1212|close_send:1240|last_recv:1199|last_send:1240|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,13,11,69,0,255,i0,4,32,41,40004,8,1,0,4,24,33,4,6,1,0,4,1380,1389,3,7,1,0,4,41,4000,10,1,4,55,84,11,1,4,35,40000,12,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5898,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 500753] [report] |scid:cc292e34ec07a7b1|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642420318|blkd:0|nblkd:0|hdr_b:1|hdr_e:6|bdy_b:0|fin:0|recv_end:0|hrd_send:25|bdy_send:31|fin_send:34|fin_ack:124|last_send:159|last_recv:118|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-164-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:34|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,85620,171241,0)|end_state:(0,16,0,0,96049,192098,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 502896] [report] |scid:2e5b6a531cb38836|xqc_conn_destroy|00005E9B17FFDBB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:939|first_send_delay:1116|conn_persist:81367|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-2e5b6a531cb38836 p-172.18.0.3-59445-38e27af2c96c343e|hsk_recv:689|close_recv:1229|close_send:1254|last_recv:1220|last_send:1254|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,8,1,0,4,34,43,40004,9,1,0,4,24,33,4,7,1,0,4,41,4000,9,1,4,55,84,10,1,4,35,40000,11,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3301,0-5900,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 502925] [report] |scid:2e5b6a531cb38836|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642422626|blkd:0|nblkd:0|hdr_b:2|hdr_e:6|bdy_b:0|fin:0|recv_end:0|hrd_send:25|bdy_send:31|fin_send:34|fin_ack:127|last_send:157|last_recv:123|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-151-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:34|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,94138,188276,0)|end_state:(0,16,0,0,105059,210119,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 505067] [report] |scid:2b0befffbd0411fc|xqc_conn_destroy|00005E9B18031AB0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:883|first_send_delay:1084|conn_persist:81266|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-2b0befffbd0411fc p-172.18.0.3-60352-aa380d31b688f042|hsk_recv:647|close_recv:1206|close_send:1231|last_recv:1198|last_send:1231|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,34,43,40004,8,1,0,4,24,33,4,6,1,0,4,41,4000,12,0,4,55,84,13,1,4,35,40000,14,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3299,0-5896,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 505091] [report] |scid:2b0befffbd0411fc|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642424837|blkd:0|nblkd:0|hdr_b:28|hdr_e:34|bdy_b:0|fin:0|recv_end:0|hrd_send:55|bdy_send:61|fin_send:65|fin_ack:166|last_send:195|last_recv:162|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-160-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:65|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,94686,189372,0)|end_state:(0,16,0,0,99459,198918,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 507230] [report] |scid:f4b8572e29899fa4|xqc_conn_destroy|00005E9B180659C0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:906|first_send_delay:1082|conn_persist:80973|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-f4b8572e29899fa4 p-172.18.0.3-39480-f6313992c0577ef0|hsk_recv:655|close_recv:1186|close_send:1211|last_recv:1179|last_send:1211|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,8,1,0,4,32,41,40004,9,1,0,4,22,31,4,7,1,0,4,41,4000,8,1,4,55,84,9,1,4,35,40000,10,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3300,0-5892,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 507262] [report] |scid:f4b8572e29899fa4|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642427321|blkd:0|nblkd:0|hdr_b:1|hdr_e:6|bdy_b:0|fin:0|recv_end:0|hrd_send:24|bdy_send:30|fin_send:33|fin_ack:117|last_send:147|last_recv:115|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-166-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:33|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,81713,163427,0)|end_state:(0,16,0,0,94435,188871,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 509397] [report] |scid:f0ef207e71e76924|xqc_conn_destroy|00005E9B180998C0|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1012|first_send_delay:1236|conn_persist:80965|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-f0ef207e71e76924 p-172.18.0.3-37857-f55f8643059c603b|hsk_recv:707|close_recv:1386|close_send:1429|last_recv:1370|last_send:1429|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,32,41,40004,8,1,0,4,24,33,4,6,1,0,4,41,4000,10,1,4,55,84,11,1,4,35,40000,12,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3301,0-5900,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 509419] [report] |scid:f0ef207e71e76924|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642429650|blkd:0|nblkd:0|hdr_b:1|hdr_e:6|bdy_b:0|fin:0|recv_end:0|hrd_send:25|bdy_send:31|fin_send:34|fin_ack:160|last_send:211|last_recv:152|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,1)#0-1-1-33-224-185-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:34|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,77392,154785,0)|end_state:(0,16,0,0,86202,172405,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-relay-1        | [2026/11/15 15:47:22 511550] [report] |scid:0804fc9136f3ab13|xqc_conn_destroy|00005E9B180CD830|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:909|first_send_delay:1087|conn_persist:80497|keyupdate_cnt:0|err:0x52e4a40fa8dc|close_msg:remote error|l-0.0.0.0-4443-0804fc9136f3ab13 p-172.18.0.3-53490-a56318c912675436|hsk_recv:643|close_recv:1188|close_send:1213|last_recv:1176|last_send:1213|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,18,14,11,69,0,255,i0,4,1380,1389,3,7,1,0,4,32,41,40004,8,1,0,4,24,33,4,6,1,0,4,41,4000,15,1,4,55,84,16,1,4,35,40000,17,1,0-2,0-2,0-0,0-0,0-0,0-0,0-3301,0-5900,0-15,0-11,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:15|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:0|cli_bidi_s:1|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:1|
-relay-1        | [2026/11/15 15:47:22 511573] [report] |scid:0804fc9136f3ab13|xqc_h3_request_destroy|stream_id:0|close_msg:conn closed|err:-1542477604|rcvd_bdy_sz:0|snd_bdy_sz:7|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794757642432122|blkd:0|nblkd:0|hdr_b:2|hdr_e:6|bdy_b:0|fin:0|recv_end:0|hrd_send:25|bdy_send:31|fin_send:34|fin_ack:112|last_send:144|last_recv:107|mp_state:0|path_info:(1,0,0/0/0/a/0,33,224,0,0,0)#0-1-1-33-224-141-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:34|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,103196,206392,0)|end_state:(0,16,0,0,112070,224140,0)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
-[Ktest-client-1 exited with code 1
+relay-1        | [2026/11/16 18:25:26 451756] [report] |scid:a31aa5d4ee680c31|xqc_h3_request_destroy|stream_id:0|close_msg:finished|err:-1542477605|rcvd_bdy_sz:7|snd_bdy_sz:0|rcvd_hdr_sz:249|snd_hdr_sz:30|create:1794853526153895|blkd:0|nblkd:0|hdr_b:3|hdr_e:9|bdy_b:146486|fin:146484|recv_end:146488|hrd_send:34|bdy_send:146505|fin_send:146606|fin_ack:146691|last_send:248302|last_recv:248245|mp_state:0|path_info:(1,0,0/0/0/a/0,26,233,0,0,1)#0-2-2-26-233-2503-2|comp_hdr_s:22|comp_hdr_r:221|fst_fin_snd:146606|sched_blk:0|sched_blk_time:0|cwnd_blk:0|cwnd_blk_time:0|pacing_blk:0|pacing_blk_time:0|begin_state:(0,16,0,0,52261,104523,0)|end_state:(0,18,0,0,6346,12693,2)|is_fec_protected:0|fec_reco_pkt_cnt:0|fec_block_size_mode:0|fst_rpr_ts:0|last_rpr_ts:0|fec_fin_delay:0|external_stream_info:{}|fastpath:0|
+[Ktest-client-1 exited with code 0
  Compose Stopping Aborting on container exit...
+relay-1        | [2026/11/16 18:25:26 544133] [report] |scid:a31aa5d4ee680c31|xqc_conn_destroy|0000645228192C90|has_0rtt:0|0rtt_accept:0|token_ok:0|handshake_time:1309|first_send_delay:1694|conn_persist:391906|keyupdate_cnt:0|err:0x52e4a40fa8db|close_msg:remote error|l-0.0.0.0-4443-a31aa5d4ee680c31 p-172.18.0.3-45554-f5b51134c25204c4|hsk_recv:1147|close_recv:249931|close_send:249970|last_recv:249913|last_send:249970|mp_enable:0|create:1|validated:1|active:1|path_info:0/0/0/a/0,1,1,1,0,0,0,0,0,0,0,55,45,43,804,0,502,i0,4,22,31,4,39,148,0,4,29,38,8,40,148,0,4,33,42,40004,41,249,0,4,35,40000,51,249,4,20,80,49,148,4,18,4,50,148,0-2,0-2,0-0,0-0,0-0,0-2,0-5318,0-9951,0-44,0-43,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0|alpn:h3|rebind_count:0|rebind_valid:0|rtx_pkt:0|tlp_pkt:0|snd_pkt:44|spurious_loss:0|detected_loss:0|max_pto:0|finished_streams:6|cli_bidi_s:3|svr_bidi_s:0|fec_exist:0|fec_ensch:NO_FEC|fec_desch:NO_FEC|fec_neg_fail:0|fec_mp_mode:NO_FEC|send_fec_pkts:0|recovered_fec_num:0|max_po_size:1200|max_probing_size:1420|ppo_size:1420|ext_conn_info:{"common": "0,0,0,0,0",}|max_acked_po_size:1200|enable_pmtud:0|avg_closed_time:0|passive_bidi_s_max:3|
  Container runner-upstream-test-client-1 Stopping 
  Container runner-upstream-test-client-1 Stopped 
  Container runner-upstream-relay-1 Stopping 
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/huffman/xqc_huffman.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_prefixed_str.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_prefixed_int.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/2d_hash/xqc_2d_hash_table.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/ringmem/xqc_ring_mem.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/vint/xqc_discrete_int_parser.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/tls/xqc_null_crypto.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
@@ -137,31 +239,9 @@ relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_conn.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ext_bytestream.c.gcda:Skip
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_prefixed_str.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/dtable/xqc_dtable.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/stable/xqc_stable.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_ins.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_rep.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_encoder.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_decoder.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_qpack.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_header.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/frame/xqc_h3_frame.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_request.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_stream.c.gcda:Skip
-relay-1        | profiling:/src:Cannot create directory
-relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_conn.c.gcda:Skip
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_prefixed_int.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/congestion_control/xqc_sample.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
@@ -169,9 +249,15 @@ relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/var_buf/xqc_var_buf.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/2d_hash/xqc_2d_hash_table.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/ringmem/xqc_ring_mem.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/ringarray/xqc_ring_array.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/vint/xqc_variable_len_int.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/utils/vint/xqc_discrete_int_parser.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/common/xqc_time.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
@@ -259,9 +345,35 @@ relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/webtransport/xqc_webtransport_ctx.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ext_bytestream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ext_dgram.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/dtable/xqc_dtable.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/stable/xqc_stable.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_ins.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_rep.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_encoder.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_decoder.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/qpack/xqc_qpack.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_ctx.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_header.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/frame/xqc_h3_frame.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_request.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_stream.c.gcda:Skip
+relay-1        | profiling:/src:Cannot create directory
+relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/src/http3/xqc_h3_conn.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
 relay-1        | profiling:/src/build/validation/CMakeFiles/xquic-static.dir/moq/moqt/xqc_moqt_webtransport.c.gcda:Skip
 relay-1        | profiling:/src:Cannot create directory
@@ -303,4 +415,4 @@ relay-1        | profiling:/src/build/validation/tests/CMakeFiles/moqt_interop.d
  Container runner-upstream-relay-1 Stopped 
 [Krelay-1 exited with code 0
 
-make: *** [Makefile:86: test] Error 1
+Test results in mlog/
