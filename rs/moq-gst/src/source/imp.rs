@@ -2593,6 +2593,7 @@ mod session_tests {
 			moq_net::Error::Stream(moq_net::StreamError::NotFound),
 			moq_net::Error::Stream(moq_net::StreamError::Unauthorized),
 			moq_net::Error::Stream(moq_net::StreamError::MalformedTrack),
+			moq_net::Error::Stream(moq_net::StreamError::App(1)),
 		] {
 			assert!(!super::source_lost(&err), "{err:?}");
 		}
@@ -6124,25 +6125,19 @@ mod session_tests {
 		assert!(error.is_none(), "a refused redial failed the pipeline: {error:?}");
 	}
 
+	/// A session the relay closes for a protocol violation ends like any other: the connection
+	/// redials, which is its call rather than the source's, and the pads play on.
 	#[test]
-	fn a_protocol_violation_posts_a_bus_error_after_playback() {
+	fn a_protocol_violation_redials_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let mut publisher = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
 		relay.close.send(moq_net::Error::ProtocolViolation).unwrap();
-		let error = pipeline
-			.bus()
-			.unwrap()
-			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
-		pipeline.set_state(gst::State::Null).unwrap();
+		rendered(&sink, &mut publisher, 2);
+		assert_played_cleanly(pipeline);
 		relay.stop();
-		let error = error.expect("protocol violation did not fail the pipeline");
-		let gst::MessageView::Error(error) = error.view() else {
-			unreachable!()
-		};
-		assert!(error.debug().unwrap().contains("protocol violation"), "{error:?}");
 	}
 
 	/// End to end through a relay: a publisher restarted under a new instance, the old one still up.
@@ -6311,7 +6306,9 @@ mod session_tests {
 		rendered(&sink, &mut old, 1);
 
 		let mut announced = announced(&relay.origin);
-		session.abort(moq_net::Error::App(1));
+		// Not an application code: a relay forwards one to its readers as the publisher's
+		// verdict, which fails the source.
+		session.abort(moq_net::SessionError::Internal.into());
 		await_event(&mut announced, |event| {
 			matches!(
 				event,

@@ -171,8 +171,9 @@ its pads without EOS until it is announced again, so the pipeline does not end
 on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A first connect
 that reaches no relay posts an error rather than retrying. A refused
-connection, refused path or catalog, or malformed protocol input or catalog posts
-an error. Properties: `url`,
+connection, refused path or catalog, malformed input or catalog, or a track its
+publisher ended with an application code posts an error. A session the relay
+closes is redialed, whatever its code. Properties: `url`,
 `broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
