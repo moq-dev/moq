@@ -307,6 +307,16 @@ struct Told<A> {
 	from: Path,
 }
 
+/// The claim a lost broadcast showed, kept while it waits out the debounce so a
+/// neighbour that asks meanwhile is told it as one that asked before is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Gone<N, A> {
+	claimant: NodeId,
+	claim: Claim<A>,
+	/// The neighbour that gave this node's own claim, which is never told it back.
+	source: Option<N>,
+}
+
 impl<I, A> Peer<I, A> {
 	fn routing(&self) -> Option<NodeId> {
 		match self.port.role {
@@ -441,6 +451,11 @@ pub(crate) struct Router<N, I, A> {
 	waiting: BTreeMap<Broadcast<I>, Instant>,
 	/// When the reader began showing each claim unavailable, which the debounce runs from.
 	since: BTreeMap<Broadcast<I>, Instant>,
+	/// What each waiting claim showed.
+	gone: BTreeMap<Broadcast<I>, Gone<N, A>>,
+	/// The claims lost in this input, with their claimants, until `refresh` keeps what
+	/// a waiting claim showed.
+	dropped: BTreeMap<Broadcast<I>, Vec<Gone<N, A>>>,
 	deadlines: BTreeSet<(Instant, Broadcast<I>)>,
 	reader: Reader<A, I>,
 	out: Vec<(N, Msg<I, A>)>,
@@ -525,6 +540,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			dirty: BTreeSet::new(),
 			waiting: BTreeMap::new(),
 			since: BTreeMap::new(),
+			gone: BTreeMap::new(),
+			dropped: BTreeMap::new(),
 			deadlines: BTreeSet::new(),
 			reader: Reader::default(),
 			out: Vec::new(),
@@ -584,6 +601,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			let broadcast = (path, instance);
 			self.waiting.remove(&broadcast);
 			self.since.remove(&broadcast);
+			self.gone.remove(&broadcast);
 			let (path, instance) = broadcast;
 			due.entry(instance).or_default().insert(path, None);
 		}
@@ -1009,9 +1027,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.heard.remove(&origin);
 		if let Some(known) = self.known.remove(&origin) {
 			self.count(known.items.len());
-			for broadcast in known.items.into_keys() {
+			for (broadcast, claim) in known.items {
 				self.unclaim(&broadcast, origin);
-				self.dirty.insert(broadcast);
+				self.dirty.insert(broadcast.clone());
+				self.drop_claim(broadcast, origin, claim, None);
 			}
 			// Without any copy, this node no longer knows how new a claim of `origin` is:
 			// a stale one may start it again, until the newer floor behind it arrives.
@@ -1446,6 +1465,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let floor = known.floor;
 		let mut claimed = Vec::new();
 		let mut unclaimed = Vec::new();
+		let mut lost = Vec::new();
 		for (broadcast, change) in &changes {
 			match change {
 				Change::Live(claim) => {
@@ -1455,8 +1475,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					self.ended.remove(broadcast);
 				}
 				Change::Ended | Change::Lost => {
-					if known.items.remove(broadcast).is_some() {
+					if let Some(claim) = known.items.remove(broadcast) {
 						unclaimed.push(broadcast.clone());
+						// `restate` keeps its own claim's source.
+						if *change == Change::Lost && origin != self.me {
+							lost.push((broadcast.clone(), claim));
+						}
 					}
 					if *change == Change::Ended {
 						self.ended.insert(broadcast.clone());
@@ -1464,6 +1488,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 			}
 			self.dirty.insert(broadcast.clone());
+		}
+		for (broadcast, claim) in lost {
+			self.drop_claim(broadcast, origin, claim, None);
 		}
 		for broadcast in &claimed {
 			self.claim(broadcast, origin);
@@ -1496,6 +1523,20 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if let Some(other) = other {
 			self.rank(other, broadcast, true);
 		}
+	}
+
+	/// `claimant` lost its claim of `broadcast`, which `source` gave this node if its own.
+	fn drop_claim(&mut self, broadcast: Broadcast<I>, claimant: NodeId, claim: Claim<A>, source: Option<N>) {
+		let claim = Claim {
+			unavailable: true,
+			..claim
+		};
+		let gone = Gone {
+			claimant,
+			claim,
+			source,
+		};
+		self.dropped.entry(broadcast).or_default().push(gone);
 	}
 
 	fn unclaim(&mut self, broadcast: &Broadcast<I>, origin: NodeId) {
@@ -1664,9 +1705,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				Change::Live(claim)
 			}
 			None => {
-				self.sources.remove(&broadcast);
-				if was.is_none() {
+				let source = self.sources.remove(&broadcast);
+				let Some(was) = was.cloned() else {
 					return;
+				};
+				if cause == Change::Lost {
+					self.drop_claim(broadcast.clone(), me, was, source);
 				}
 				cause
 			}
@@ -1824,6 +1868,16 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						} else {
 							self.since.insert(broadcast.clone(), since);
 							let item = was.item.clone();
+							// The claim it showed: of those just lost, one with its item, by
+							// precedence and claimant as an unreachable one is shown.
+							let gone = (self.dropped.get(broadcast).into_iter().flatten())
+								.min_by_key(|gone| {
+									(gone.claim.item != item, precedence(&gone.claim.item), gone.claimant)
+								})
+								.cloned();
+							if let Some(gone) = gone {
+								self.gone.insert(broadcast.clone(), gone);
+							}
 							self.waiting.insert(broadcast.clone(), at);
 							self.deadlines.insert((at, broadcast.clone()));
 							Some(Some(Shown {
@@ -1858,12 +1912,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for broadcast in dirty {
 			self.ended.remove(&broadcast);
 		}
+		self.dropped.clear();
 	}
 
 	fn unwait(&mut self, broadcast: &Broadcast<I>) {
 		if let Some(at) = self.waiting.remove(broadcast) {
 			self.deadlines.remove(&(at, broadcast.clone()));
 		}
+		self.gone.remove(broadcast);
 	}
 
 	/// Tell each endpoint and scoped neighbour asking for `broadcast` what it shows there.
@@ -1949,8 +2005,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// What `peer`, told at `path`, is shown of the claim of `instance` at `from`, if this
 	/// node's reader shows one there and it did not come from `peer`. It is the closest
 	/// claim while one is reachable; else the claim of the best precedence, unavailable;
-	/// else, while the reader waits to show it offline, what `peer` was told of it,
-	/// unavailable. Never a withdrawal while the reader still shows the claim.
+	/// else, while the reader waits to show it offline, the claim it showed, unavailable.
+	/// Never a withdrawal while the reader still shows the claim.
 	fn stands(&self, peer: N, path: &Path, from: &Path, instance: &I) -> Option<Told<A>> {
 		self.reader.get(instance.clone(), from)?;
 		let broadcast = (from.clone(), instance.clone());
@@ -1978,20 +2034,13 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					unavailable: true,
 					..claim.clone()
 				},
-				// Lost, and waiting out the debounce.
+				// Lost, and waiting out the debounce: what it showed, to every asker alike.
 				None => {
-					let told = self.peers[&peer].told.get(path)?.get(instance)?;
-					if told.from != *from {
+					let gone = self.gone.get(&broadcast)?;
+					if gone.source == Some(peer) {
 						return None;
 					}
-					let claim = Claim {
-						unavailable: true,
-						..told.claim.clone()
-					};
-					return Some(Told {
-						claim,
-						from: from.clone(),
-					});
+					gone.claim.clone()
 				}
 			},
 		};
@@ -2160,6 +2209,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			dirty,
 			waiting,
 			since,
+			gone,
+			dropped: _,
 			deadlines: _,
 			reader,
 			out,
@@ -2180,7 +2231,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let state = (
 			(me, debounce, sessions, peers, routing, fresh, heard, unnamed),
 			(dead, closed, draining, stale, best, known, rev, announced),
-			(sources, ended, dirty, waiting, since, reader.shown(), out),
+			(sources, ended, dirty, waiting, since, gone, reader.shown(), out),
 		);
 		super::digest(hasher, &state);
 	}
@@ -2276,6 +2327,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.map(|(broadcast, at)| (*at, broadcast.clone()))
 			.collect();
 		assert_eq!(self.deadlines, deadlines, "deadlines");
+		assert!(
+			self.gone.keys().all(|broadcast| self.waiting.contains_key(broadcast)),
+			"gone"
+		);
+		assert!(self.dropped.is_empty(), "dropped");
 		for (path, instance) in self.since.keys() {
 			let shown = self.reader.get(instance.clone(), path);
 			assert!(shown.is_some_and(|shown| !shown.available), "unavailable since");
@@ -2590,6 +2646,62 @@ mod tests {
 			router.timeout(router.deadline().expect("a debounce"));
 			assert_eq!(told(&router.drain(), 3), [lost]);
 		}
+	}
+
+	/// A neighbour that asks while a lost claim waits out the debounce is told what one
+	/// that asked before is: the lost claim, unavailable, not the broader claim above it,
+	/// which the reader does not show there yet. Both are shown the broader one once the
+	/// lost claim goes offline.
+	#[test]
+	fn an_ask_during_the_debounce_is_told_what_an_earlier_one_is() {
+		let ask = |router: &mut Relay, peer: usize| {
+			open(router, peer, Role::Endpoint);
+			let edit = Edit {
+				remove: Vec::new(),
+				add: vec![p("a/b")],
+			};
+			router.edit(peer, edit).unwrap();
+		};
+		let told = |out: &[(usize, Msg<u64, u64>)], peer: usize| -> Vec<Change<u64>> {
+			(out.iter())
+				.filter(|(to, _)| *to == peer)
+				.filter_map(|(_, msg)| match msg {
+					Msg::Announce { changes } => Some(changes.clone()),
+					_ => None,
+				})
+				.flatten()
+				.inspect(|((path, _), _)| assert_eq!(*path, p("a/b")))
+				.map(|(_, change)| change)
+				.collect()
+		};
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Endpoint);
+		let announce = Msg::Announce {
+			changes: vec![((p("a"), 7), live(0)), ((p("a/b"), 7), live(0))],
+		};
+		router.recv(2, announce).unwrap();
+		ask(&mut router, 3);
+		router.drain();
+		let lost = Msg::Announce {
+			changes: vec![((p("a/b"), 7), Change::Lost)],
+		};
+		router.recv(2, lost).unwrap();
+		ask(&mut router, 4);
+		let out = router.drain();
+		let (before, after) = (told(&out, 3), told(&out, 4));
+		assert!(
+			matches!(before.as_slice(), [Change::Live(claim)] if claim.unavailable),
+			"{before:?}"
+		);
+		assert_eq!(after, before, "the same unavailable claim");
+		router.timeout(router.deadline().expect("a debounce"));
+		let out = router.drain();
+		let (before, after) = (told(&out, 3), told(&out, 4));
+		assert!(
+			matches!(before.as_slice(), [Change::Live(claim)] if !claim.unavailable),
+			"{before:?}"
+		);
+		assert_eq!(after, before, "the broader claim");
 	}
 
 	/// A scoped neighbour's claim whose chain this relay would carry to the longest path
