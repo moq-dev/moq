@@ -101,8 +101,10 @@ impl Session {
 		&self.encoder
 	}
 
-	/// Change the average bitrate (bits per second) of the running session,
-	/// taking effect from roughly the next frame.
+	/// Change the bitrate (bits per second) the running session is held to, taking
+	/// effect from roughly the next frame: the peak when the config set one (VBR),
+	/// else the average. The other rates and the VBV the config set keep their
+	/// ratio to it.
 	///
 	/// The encoder keeps running: no IDR is forced and no state is reset, so
 	/// this is safe to call as often as a congestion controller updates. That is
@@ -115,8 +117,8 @@ impl Session {
 	///
 	/// Returns [`ErrorKind::InvalidParam`] when the session was started without
 	/// an encode config, since there is then no config to resubmit, when
-	/// `bitrate` is zero, when a nonzero VBV would scale to zero, or when the
-	/// proportionally scaled VBV overflows.
+	/// `bitrate` is zero, or when a nonzero rate or VBV would scale to zero or
+	/// overflow.
 	/// Otherwise returns whatever `NvEncReconfigureEncoder` reports, e.g.
 	/// [`ErrorKind::UnsupportedParam`] if the driver rejects the rate change.
 	/// After any error the session keeps its last accepted rate settings.
@@ -363,24 +365,33 @@ fn retune(
 
 	let mut candidate = *config;
 	let rc = &mut candidate.rcParams;
-	// Keep a caller-sized VBV proportional to the rate, so a buffer sized to
-	// one frame at open stays one frame: left alone it would loosen the
-	// keyframe cap as the bitrate falls, right when the link can least afford it.
-	if rc.vbvBufferSize != 0 && rc.averageBitRate != 0 {
-		let basis = u64::from(rc.averageBitRate);
+	// The rate the session is held to: the peak when one is set (VBR), else the
+	// average. Every other rate the caller set keeps its ratio to it, so a VBV
+	// sized to one frame at open stays one frame, and an average below the peak
+	// stays the same share of it. Left alone, a VBV would loosen the keyframe cap
+	// as the bitrate falls, right when the link can least afford it.
+	let basis = match rc.maxBitRate {
+		0 => rc.averageBitRate,
+		peak => peak,
+	};
+	if basis == 0 {
+		// Nothing set yet, so there is nothing to keep in proportion.
+		rc.averageBitRate = bitrate;
+	} else {
 		let scale = |v: u32| {
-			let scaled = u64::from(v) * u64::from(bitrate) / basis;
-			// Rounding a nonzero VBV to zero is the same dead end as a zero rate:
-			// the next retune would skip this branch and could never restore it.
+			let scaled = u64::from(v) * u64::from(bitrate) / u64::from(basis);
+			// Rounding a nonzero rate to zero is the same dead end as a zero rate:
+			// the next retune would skip it and could never restore it.
 			if v != 0 && scaled == 0 {
-				return Err(invalid("scaled VBV must be nonzero"));
+				return Err(invalid("a scaled rate or VBV must be nonzero"));
 			}
-			u32::try_from(scaled).map_err(|_| invalid("scaled VBV exceeds u32"))
+			u32::try_from(scaled).map_err(|_| invalid("a scaled rate or VBV exceeds u32"))
 		};
+		rc.averageBitRate = scale(rc.averageBitRate)?;
+		rc.maxBitRate = scale(rc.maxBitRate)?;
 		rc.vbvBufferSize = scale(rc.vbvBufferSize)?;
 		rc.vbvInitialDelay = scale(rc.vbvInitialDelay)?;
 	}
-	rc.averageBitRate = bitrate;
 
 	// NVENC copies the config during the call, so pointing it at the local
 	// candidate is sound; `init` keeps pointing at the committed copy.
@@ -596,6 +607,28 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(rates(&config), (2_000_000, 200_000, 200_000));
+	}
+
+	/// A VBR config moves its peak, and the average, if any, and the VBV keep
+	/// their share of it.
+	#[test]
+	fn peak_is_the_rate_a_vbr_session_moves() {
+		let init = NV_ENC_INITIALIZE_PARAMS::default();
+		let peak = |average: u32| {
+			let mut config = rate_config(average, 133_333);
+			config.rcParams.maxBitRate = 4_000_000;
+			config
+		};
+		let held = |config: &NV_ENC_CONFIG| (config.rcParams.maxBitRate, rates(config));
+
+		// Constant quality: no average, only the peak.
+		let mut config = peak(0);
+		retune(&init, &mut config, 2_000_000, |_| Ok(())).unwrap();
+		assert_eq!(held(&config), (2_000_000, (0, 66_666, 66_666)));
+
+		let mut config = peak(3_000_000);
+		retune(&init, &mut config, 2_000_000, |_| Ok(())).unwrap();
+		assert_eq!(held(&config), (2_000_000, (1_500_000, 66_666, 66_666)));
 	}
 
 	#[test]
