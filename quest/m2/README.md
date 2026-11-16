@@ -35,8 +35,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Groups](/quest/m2/group-api.md),
-  [reconnect](/quest/m2/reconnect-off.md), [names](/quest/m2/net-renames.md),
+- **moq-net API.** [Reconnect](/quest/m2/reconnect-off.md), [names](/quest/m2/net-renames.md),
   and [session codes](/quest/m2/session-codes.md).
   [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
