@@ -40,14 +40,18 @@ What to show, each a lemma about one message handler:
 - The chain is the same algebra at the grain of trust boundaries.
 
 Measured 2026-11-15 by the [bake-off](https://github.com/moq-dev/moq/pull/8880),
-pending the maintainer's pick there. The rank is the epic's: not draining,
-the lowest priority on the path, the summed cost, each link adding at least
-1, then the next hop in use, the shorter path, and the neighbour. Three more
-lemmas if its recommendations stand:
+and decided 2026-11-16
+([maintainer](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514)).
+The rank is the epic's: not draining, the lowest priority on the path, the
+summed cost, each link adding at least 1, then the next hop in use, the
+shorter path, and the neighbour. Four more lemmas for what it added:
 
-- The session floor is a filter: a path naming a pair of nodes at or below the
-  highest session known closed between them maps to invalid, and the set only
-  grows, so it removes only routes the iteration would remove.
+- The session floor is a filter: a path naming a pair of relays at or below
+  the highest session known closed between them maps to invalid, a session
+  ordering by its relay's start and then its number, and the set only grows,
+  so it removes only routes the iteration would remove.
+- A node that announces no claim offers no route to itself, which removes
+  only routes no request names.
 - A named drain sets a route's drain from its path and the nodes known
   draining, and the drain still travels in the offer, so the order stays one
   order.

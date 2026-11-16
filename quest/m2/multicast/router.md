@@ -45,8 +45,10 @@ for the path rule.
   the compiled code and retire the TLA+ route model.
 
 Measured 2026-11-15 by the [bake-off](https://github.com/moq-dev/moq/pull/8880),
-whose prototype is `rs/moq-net/src/route/tests/multi.rs`; its recommendations
-stand until the maintainer picks otherwise on that PR:
+whose prototype is `rs/moq-net/src/route/tests/multi.rs`, and decided
+2026-11-16
+([maintainer](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514),
+the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
 
 - The rule as written hunts: 6.6 million route messages for a partition of a
   32-relay CDN, against 579 today. Build these five with it, each an arm of

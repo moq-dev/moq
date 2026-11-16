@@ -37,7 +37,9 @@ is a decision to list in the PR:
   API change to report.
 
 Measured 2026-11-15 by the [bake-off](https://github.com/moq-dev/moq/pull/8880),
-for the wire, pending the maintainer's pick there:
+and decided 2026-11-16
+([maintainer](https://github.com/moq-dev/moq/pull/8880#issuecomment-6911055514)),
+for the wire:
 
 - The closed-session message names the session and the node at its far end,
   and ends every route its sender offered through it, so no end follows per
