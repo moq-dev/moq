@@ -185,9 +185,9 @@ struct Track {
 	/// The most recent refusal, reported when every source has refused, with the Retry
 	/// Interval an upstream refusal asked for.
 	refusal: Option<(Error, Option<Duration>)>,
-	/// Why the serving copy died mid-serve, or before delivering from a closing source, while
-	/// a re-splice is awaited. A refusal of that re-splice, or the front ending first,
-	/// reports this instead: the source closing is what ended the track.
+	/// Why the serving copy died mid-serve, or what a closing source answered, while a
+	/// re-splice is awaited. A refusal of that re-splice, or the front ending first, reports
+	/// this instead: the source closing is what ended the track.
 	lost: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	wanted: bool,
@@ -626,14 +626,8 @@ impl Front {
 					retry: None,
 				});
 			}
-			// Died before producing anything from a source on its way out: not a refusal, but
-			// what ended the track unless a replacement serves it.
-			Err(err) if closing => {
-				track.state = TrackState::Idle;
-				track.lost = Some(err);
-			}
 			// Died before producing anything: a refusal.
-			Err(err) => self.refuse(name, source, false, (err, None), actions),
+			Err(err) => self.refuse(name, source, closing, (err, None), actions),
 		}
 	}
 
@@ -651,9 +645,11 @@ impl Front {
 		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
 		let track = self.tracks.get_mut(&name).expect("refusing a known track");
 		track.state = TrackState::Idle;
-		// A closing source's answer is not a verdict: it is on its way out and
-		// its replacement is asked afresh.
+		// A closing source's answer is not a verdict: it is on its way out and its
+		// replacement is asked afresh. It is still what ended the track if nothing replaces
+		// the source, unless an earlier loss did.
 		if closing {
+			track.lost.get_or_insert(refusal.0);
 			return;
 		}
 		// A route that lost the content says nothing of the track: wait for another of its
@@ -1268,59 +1264,74 @@ mod tests {
 	/// A copy reset before delivering, seen only once its source began closing, such as a
 	/// session of a closing socket endpoint, is no refusal, yet ends the track with the reset
 	/// rather than `Unroutable` when nothing replaces the source, or when its replacement
-	/// refuses.
+	/// refuses. The driver reports it as the copy's end once spliced, or as the answer to
+	/// its query when the reset came before the metadata was read.
 	#[test]
-	fn an_undelivered_copy_of_a_closing_source_reports_the_loss() {
+	fn a_closing_source_reset_reports_the_loss() {
 		let reset = || Error::from(crate::StreamError::Session(crate::SessionError::Cancel));
-		let mut front = serving(local(1), 100);
-		assert_actions(
-			front.step(Event::TrackEnded {
+		let ended = || {
+			let mut front = serving(local(1), 100);
+			let actions = front.step(Event::TrackEnded {
 				track: name("video"),
 				source: 100,
 				closing: true,
 				result: Err(reset()),
 				delivered: false,
-			}),
-			&[],
-		);
-		assert!(front.tracks[&name("video")].refused.is_empty());
-		front.step(Event::SourceClosed { source: 100 });
-
-		let mut replaced = front.clone();
-		replaced.step(Event::Selected {
-			best: Some(local(2)),
-			serving_closing: false,
-		});
-		replaced.step(Event::Resolved {
-			route: 2,
-			result: Ok(200),
-		});
-		assert_actions(
-			replaced.step(Event::TrackInfo {
+			});
+			(front, actions)
+		};
+		let answered = || {
+			let mut front = querying(local(1), 100);
+			let actions = front.step(Event::TrackInfo {
 				track: name("video"),
-				source: 200,
-				closing: false,
-				result: Err(Error::NotFound),
+				source: 100,
+				closing: true,
+				result: Err(reset()),
 				retry: None,
-			}),
-			&[Action::Abort {
-				track: name("video"),
-				err: reset(),
-				retry: None,
-			}],
-		);
+			});
+			(front, actions)
+		};
+		for (mut front, actions) in [ended(), answered()] {
+			assert_actions(actions, &[]);
+			assert!(front.tracks[&name("video")].refused.is_empty());
+			front.step(Event::SourceClosed { source: 100 });
 
-		assert_actions(
-			front.step(Event::Selected {
-				best: None,
+			let mut replaced = front.clone();
+			replaced.step(Event::Selected {
+				best: Some(local(2)),
 				serving_closing: false,
-			}),
-			&[Action::End { err: Error::Unroutable }],
-		);
-		assert_eq!(
-			front.lost("video").map(|err| err.to_string()),
-			Some(reset().to_string())
-		);
+			});
+			replaced.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			assert_actions(
+				replaced.step(Event::TrackInfo {
+					track: name("video"),
+					source: 200,
+					closing: false,
+					result: Err(Error::NotFound),
+					retry: None,
+				}),
+				&[Action::Abort {
+					track: name("video"),
+					err: reset(),
+					retry: None,
+				}],
+			);
+
+			assert_actions(
+				front.step(Event::Selected {
+					best: None,
+					serving_closing: false,
+				}),
+				&[Action::End { err: Error::Unroutable }],
+			);
+			assert_eq!(
+				front.lost("video").map(|err| err.to_string()),
+				Some(reset().to_string())
+			);
+		}
 	}
 
 	/// A source that loses a copy mid-serve and then refuses its re-splice, such as a
