@@ -827,9 +827,10 @@ async fn an_exact_route_stays_where_a_widening_leaves_it() {
 	let requests = routed.outputs(&subscriber);
 	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
 	routed.receive(Msg::Ok).unwrap();
-	let routes: Vec<_> = (routed.routes.iter())
+	let mut routes: Vec<_> = (routed.routes.iter())
 		.map(|(id, route)| (*id, route.node, route.wire.clone(), route.exact))
 		.collect();
+	routes.sort_unstable();
 	assert_eq!(
 		routes,
 		[
