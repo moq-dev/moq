@@ -1449,7 +1449,7 @@ impl Publish {
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		config: moq_json::window::ProducerConfig,
+		config: moq_json::window::Config,
 	) -> Result<Id, Error> {
 		let data = self.data_track(broadcast, name, Some(8), |_, track| {
 			Ok(moq_json::window::Producer::new(track, config))

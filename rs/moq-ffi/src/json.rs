@@ -45,11 +45,11 @@ pub struct MoqJsonWindowConfig {
 	pub checkpoint_records: Option<u64>,
 }
 
-impl TryFrom<MoqJsonWindowConfig> for moq_json::window::ProducerConfig {
+impl TryFrom<MoqJsonWindowConfig> for moq_json::window::Config {
 	type Error = MoqError;
 
 	fn try_from(config: MoqJsonWindowConfig) -> Result<Self, MoqError> {
-		let mut out = moq_json::window::ProducerConfig::default();
+		let mut out = moq_json::window::Config::default();
 		if let Some(records) = config.checkpoint_records {
 			let records = usize::try_from(records)
 				.ok()
@@ -72,7 +72,7 @@ mod tests {
 	fn record_defaults_match_moq_json() {
 		let snapshot = moq_json::snapshot::Config::default();
 		assert!(snapshot.deltas, "update #[uniffi(default)] on deltas");
-		let window = moq_json::window::ProducerConfig::default();
+		let window = moq_json::window::Config::default();
 		assert_eq!(
 			window.checkpoint_records, None,
 			"update #[uniffi(default)] on MoqJsonWindowConfig::checkpoint_records"

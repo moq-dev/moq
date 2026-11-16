@@ -4398,7 +4398,7 @@ pub unsafe extern "C" fn moq_publish_json_window(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut producer = moq_json::window::ProducerConfig::default();
+		let mut producer = moq_json::window::Config::default();
 		if config.checkpoint_records > 0 {
 			let records = usize::try_from(config.checkpoint_records)
 				.map_err(|_| Error::InvalidConfig(format!("checkpoint_records {}", config.checkpoint_records)))?;

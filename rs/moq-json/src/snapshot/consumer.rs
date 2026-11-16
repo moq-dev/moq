@@ -49,7 +49,9 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track.
 	///
-	/// Subscribes right away at [`Config::priority`] and a zero
+	/// Takes the track where the stream and window consumers take a subscriber: a superseded value
+	/// is worthless, so the consumer owns its subscription instead of letting a caller pick a budget
+	/// that would deliver one. Subscribes right away at [`Config::priority`] and a zero
 	/// [`max`](moq_net::track::Delay::max) delay, with default preferences otherwise; no handle to that subscription leaves the
 	/// consumer, so nothing can change its budget. A read waits until the subscription resolves,
 	/// and fails if it cannot. A [compressed](moq_net::track::Info::compression) track reads the

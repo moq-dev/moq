@@ -32,7 +32,7 @@
 //! window in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a
 //! roll: a header restating records a reader already has yields nothing, so however often the
 //! publisher rolls, the reader sees one continuous stream of [`Event`]s.
-//! [`ProducerConfig::checkpoint_records`] bounds the suffix repeated on each roll for a long-lived
+//! [`Config::checkpoint_records`] bounds the suffix repeated on each roll for a long-lived
 //! window.
 //!
 //! # What a reader is told
@@ -49,18 +49,18 @@
 //! retained window and says where the group boundaries fall, and the decoder turns frames into
 //! events.
 
-mod consumer;
+pub mod consumer;
 mod decoder;
 mod encoder;
 mod op;
-mod producer;
+pub mod producer;
 
 #[cfg(test)]
 mod properties;
 
 pub use consumer::Consumer;
-pub use decoder::{ConsumerConfig, Decoder, Event, Group};
-pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
+pub use decoder::{Decoder, Event, Group};
+pub use encoder::{Config, Encoded, Encoder, Pending};
 pub use producer::{Finished, Producer};
 
 #[cfg(test)]
@@ -83,7 +83,7 @@ mod test {
 
 	#[test]
 	fn pushes_and_pops_keep_the_callers_timestamps() {
-		let (mut producer, mut groups) = producer_on(ProducerConfig::default(), timed());
+		let (mut producer, mut groups) = producer_on(Config::default(), timed());
 		let first = moq_net::Timestamp::from_millis(100).unwrap();
 		let second = moq_net::Timestamp::from_millis(200).unwrap();
 		producer.push(&json!({ "n": 1 }), first).unwrap();
@@ -103,7 +103,7 @@ mod test {
 	/// Refused before the header's group is published, so the window carries on cleanly.
 	#[test]
 	fn a_timed_track_refuses_a_bare_publish() {
-		let (mut producer, mut track) = producer_on(ProducerConfig::default(), timed());
+		let (mut producer, mut track) = producer_on(Config::default(), timed());
 		assert!(matches!(
 			producer.push(&json!({ "n": 0 }), key()),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
@@ -131,7 +131,7 @@ mod test {
 	/// publishes no group, and an op leaves the open group to carry on rather than rolling it.
 	#[test]
 	fn a_timed_track_refuses_an_unconvertible_timestamp() {
-		let (mut producer, mut track) = producer_on(ProducerConfig::default(), timed());
+		let (mut producer, mut track) = producer_on(Config::default(), timed());
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
 		let largest = |track: &mut moq_net::track::Subscriber| {
@@ -172,7 +172,7 @@ mod test {
 			.unwrap();
 		let mut live = consumer(track.subscribe(None));
 		let late = track.subscribe(None);
-		let mut producer = Producer::new(track, ProducerConfig::default());
+		let mut producer = Producer::new(track, Config::default());
 		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 
 		producer.push(&rec(1), at(100)).unwrap();
@@ -230,7 +230,7 @@ mod test {
 
 	#[test]
 	fn scale_less_events_carry_their_keys() {
-		let (mut producer, track) = producer(ProducerConfig::default());
+		let (mut producer, track) = producer(Config::default());
 		producer.push(&rec(1), key()).unwrap();
 		producer.pop(1, key()).unwrap();
 		let events = drain_timed(&mut consumer(track));
@@ -245,7 +245,7 @@ mod test {
 			.create_track("untimed", moq_net::track::Info::default())
 			.unwrap();
 		let mut groups = track.subscribe(None);
-		let mut producer = Producer::new(track, ProducerConfig::default());
+		let mut producer = Producer::new(track, Config::default());
 		producer.push(&json!({ "n": 1 }), key()).unwrap();
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
@@ -262,12 +262,12 @@ mod test {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
+	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
 		producer_on(config, moq_net::track::Info::default())
 	}
 
 	fn producer_on(
-		config: ProducerConfig,
+		config: Config,
 		info: moq_net::track::Info,
 	) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
@@ -281,7 +281,7 @@ mod test {
 	#[test]
 	#[should_panic(expected = "checkpoint_records must be positive")]
 	fn zero_checkpoint_records_is_rejected() {
-		let config = ProducerConfig {
+		let config = Config {
 			checkpoint_records: Some(0),
 			..Default::default()
 		};
@@ -289,7 +289,7 @@ mod test {
 	}
 
 	fn consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
-		Consumer::new(track, ConsumerConfig::default())
+		Consumer::new(track, consumer::Config::default())
 	}
 
 	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
@@ -350,11 +350,11 @@ mod test {
 	}
 
 	impl Live {
-		fn new(config: ProducerConfig) -> Self {
+		fn new(config: Config) -> Self {
 			Self::on(config, moq_net::track::Info::default())
 		}
 
-		fn on(config: ProducerConfig, info: moq_net::track::Info) -> Self {
+		fn on(config: Config, info: moq_net::track::Info) -> Self {
 			let (producer, track) = producer_on(config, info);
 			Self {
 				producer,
@@ -402,7 +402,7 @@ mod test {
 
 	#[test]
 	fn push_and_pop_round_trip() {
-		let mut live = Live::new(ProducerConfig::default());
+		let mut live = Live::new(Config::default());
 		live.push(0);
 		live.push(1);
 		live.pop(1);
@@ -430,7 +430,7 @@ mod test {
 
 	#[test]
 	fn the_window_slides() {
-		let (mut producer, _track) = producer(ProducerConfig::default());
+		let (mut producer, _track) = producer(Config::default());
 		for n in 0..5 {
 			producer.push(&rec(n), key()).unwrap();
 			if n >= 2 {
@@ -446,7 +446,7 @@ mod test {
 	#[test]
 	fn a_popped_record_is_never_restated() {
 		// Ops disabled, so every single edit is its own group restating the whole window.
-		let mut live = Live::new(ProducerConfig::default().with_ops(false));
+		let mut live = Live::new(Config::default().with_ops(false));
 		live.push(0);
 		live.push(1);
 		live.pop(1);
@@ -476,7 +476,7 @@ mod test {
 
 	#[test]
 	fn bounded_checkpoints_keep_a_following_consumer_contiguous() {
-		let config = ProducerConfig::default().with_ops(false).with_checkpoint_records(2);
+		let config = Config::default().with_ops(false).with_checkpoint_records(2);
 		let mut live = Live::new(config);
 		for n in 0..6 {
 			live.push(n);
@@ -491,7 +491,7 @@ mod test {
 
 	#[test]
 	fn a_late_consumer_skips_to_the_bounded_checkpoint() {
-		let config = ProducerConfig::default().with_ops(false).with_checkpoint_records(2);
+		let config = Config::default().with_ops(false).with_checkpoint_records(2);
 		let mut encoder = Encoder::<Value>::new(config);
 		let mut latest = None;
 		for n in 0..5 {
@@ -500,7 +500,7 @@ mod test {
 			frame.commit();
 		}
 
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		decoder.group().decode(&latest.unwrap()).unwrap();
 		assert_eq!(
 			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
@@ -520,7 +520,7 @@ mod test {
 
 	#[test]
 	fn pops_cross_the_omitted_checkpoint_prefix() {
-		let config = ProducerConfig::default().with_checkpoint_records(2);
+		let config = Config::default().with_checkpoint_records(2);
 		let mut encoder = Encoder::<Value>::new(config);
 		for n in 0..5 {
 			encoder.push(&rec(n)).unwrap().commit();
@@ -543,7 +543,7 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_ops(false));
+		let mut producer = Producer::<Value>::new(track, Config::default().with_ops(false));
 
 		for n in 0..5 {
 			producer.push(&rec(n), key()).unwrap();
@@ -584,8 +584,8 @@ mod test {
 		// Ops are disabled, so every edit opens a new group. Feed the first two groups to the
 		// decoder, skip the middle groups as a lagging track subscriber would, then resume at the
 		// latest header.
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_ops(false));
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut encoder = Encoder::<Value>::new(Config::default().with_ops(false));
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		for n in 0..2 {
 			let frame = encoder.push(&rec(n)).unwrap();
 			let mut group = decoder.group();
@@ -662,7 +662,7 @@ mod test {
 				.create_track("test", timed())
 				.unwrap();
 			let mut consumer = consumer(track.subscribe(None));
-			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_ops(false));
+			let mut encoder = Encoder::<Value>::new(Config::default().with_ops(false));
 
 			let first = encoder.push(&rec(0)).unwrap();
 			let payload = first.payload.clone();
@@ -704,7 +704,7 @@ mod test {
 	fn a_joiner_over_the_ratio_gets_a_fresh_header() {
 		let waiter = kio::Waiter::noop();
 		let (mut producer, _track) = producer_on(
-			ProducerConfig::default(),
+			Config::default(),
 			moq_net::track::Info::default().with_refresh(1),
 		);
 
@@ -753,7 +753,7 @@ mod test {
 	fn a_refresh_reuses_the_newest_timestamp() {
 		let waiter = kio::Waiter::noop();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(1));
 		for n in 0..4 {
 			producer.push(&rec(n), ms(100 + n)).unwrap();
 		}
@@ -780,7 +780,7 @@ mod test {
 	fn a_refresh_after_older_edits_waits_for_a_later_one() {
 		let (waiter, woken) = crate::refresh::flagged();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(1));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
 			producer.push(&rec(n as u64), ms(at)).unwrap();
 		}
@@ -810,7 +810,7 @@ mod test {
 	/// Without a ratio no join asks for a group, and a finished producer stops refreshing.
 	#[test]
 	fn refresh_needs_a_ratio_and_an_open_track() {
-		let (mut producer, _track) = producer(ProducerConfig::default());
+		let (mut producer, _track) = producer(Config::default());
 		for n in 0..8 {
 			producer.push(&rec(n), key()).unwrap();
 		}
@@ -825,7 +825,7 @@ mod test {
 	#[test]
 	fn compressed_round_trip_across_rolls() {
 		let mut live = Live::on(
-			ProducerConfig::default(),
+			Config::default(),
 			moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 		);
 		for n in 0..40 {
@@ -844,7 +844,7 @@ mod test {
 
 	#[test]
 	fn an_empty_pop_writes_nothing() {
-		let (mut producer, mut track) = producer(ProducerConfig::default());
+		let (mut producer, mut track) = producer(Config::default());
 		producer.pop(5, key()).unwrap();
 		let _finished = producer.finish().unwrap();
 
@@ -859,7 +859,7 @@ mod test {
 	fn a_rejected_edit_leaves_the_window_unchanged() {
 		let track = rejecting_track();
 		let mut subscriber = track.subscribe(None).ordered();
-		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
+		let mut producer = Producer::<Value>::new(track, Config::default());
 
 		// Rewound past the first group, so the header group is published before the write fails.
 		assert!(producer.push(&rec(1), rewound()).is_err());
@@ -875,7 +875,7 @@ mod test {
 
 	#[test]
 	fn the_window_stays_readable_after_finish() {
-		let (producer, mut track) = producer(ProducerConfig::default());
+		let (producer, mut track) = producer(Config::default());
 		let mut clone = producer.clone();
 		clone.push(&rec(1), key()).unwrap();
 		let finished = producer.finish().unwrap();
@@ -903,7 +903,7 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		let mut producer = Producer::<Value>::new(track.clone(), Config::default());
 		producer.push(&rec(1), key()).unwrap();
 		// Another handle ends the track, so finishing it fails.
 		track.abort(moq_net::Error::Cancel).unwrap();
@@ -922,7 +922,7 @@ mod test {
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
-		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		let mut producer = Producer::<Value>::new(track.clone(), Config::default());
 		producer.push(&rec(1), key()).unwrap();
 		let _track = track.finish().unwrap();
 		let _finished = producer.clone().finish().unwrap();
@@ -945,7 +945,7 @@ mod test {
 	/// Clones of an aborted producer report the abort's cause, not just a closed track.
 	#[test]
 	fn edits_after_an_abort_report_its_cause() {
-		let (mut producer, _track) = producer(ProducerConfig::default());
+		let (mut producer, _track) = producer(Config::default());
 		producer.push(&rec(1), key()).unwrap();
 		producer.clone().abort(moq_net::Error::Cancel).unwrap();
 
@@ -961,7 +961,7 @@ mod test {
 
 	#[test]
 	fn writes_after_another_clone_finishes_are_rejected() {
-		let (mut producer, _track) = producer(ProducerConfig::default());
+		let (mut producer, _track) = producer(Config::default());
 		producer.push(&rec(1), key()).unwrap();
 		let _finished = producer.clone().finish().unwrap();
 
@@ -978,7 +978,7 @@ mod test {
 
 	#[test]
 	fn a_pop_is_clamped_to_the_window() {
-		let mut live = Live::new(ProducerConfig::default());
+		let mut live = Live::new(Config::default());
 		live.push(0);
 		live.pop(9);
 		live.push(1);
@@ -1001,7 +1001,7 @@ mod test {
 
 	#[test]
 	fn a_large_gap_is_one_skip_event() {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 		let mut group = decoder.group();
@@ -1013,11 +1013,11 @@ mod test {
 
 	#[test]
 	fn indices_must_fit_the_shared_safe_integer_range() {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		assert!(group.decode(br#"{"offset":9007199254740992,"records":[]}"#).is_err());
 
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		group.decode(br#"{"offset":9007199254740991,"records":[]}"#).unwrap();
 		assert!(group.decode(br#"{"push":null}"#).is_err());
@@ -1025,14 +1025,14 @@ mod test {
 
 	#[test]
 	fn a_checkpoint_cannot_start_before_the_window() {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		assert!(group.decode(br#"{"offset":2,"start":1,"records":[]}"#).is_err());
 	}
 
 	#[test]
 	fn every_group_requires_a_header() {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 		let mut group = decoder.group();
@@ -1042,7 +1042,7 @@ mod test {
 
 	#[test]
 	fn a_header_is_only_valid_as_frame_zero() {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
 
@@ -1059,7 +1059,7 @@ mod test {
 		let replay = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let mut groups = track.subscribe(replay);
-		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
+		let mut producer = Producer::<Value>::new(track, Config::default());
 
 		producer.cut().unwrap();
 		producer.push(&rec(0), key()).unwrap();
@@ -1088,7 +1088,7 @@ mod test {
 
 	#[test]
 	fn trailing_data_after_a_frame_is_rejected() {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		assert!(group.decode(br#"{"offset":0,"records":[]} {}"#).is_err());
 
@@ -1103,7 +1103,7 @@ mod test {
 	fn duplicate_keys_are_refused() {
 		let vectors = crate::strict::test::vectors();
 		for record in &vectors.refused {
-			let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+			let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 			let mut group = decoder.group();
 			let header = format!(r#"{{"offset":0,"records":[{record}]}}"#);
 			let err = group.decode(header.as_bytes()).unwrap_err();
@@ -1115,7 +1115,7 @@ mod test {
 			assert!(matches!(err, crate::Error::DuplicateKey), "{push}: {err}");
 		}
 		for record in &vectors.accepted {
-			let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+			let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 			let mut group = decoder.group();
 			group
 				.decode(format!(r#"{{"offset":0,"records":[{record}]}}"#).as_bytes())
@@ -1123,7 +1123,7 @@ mod test {
 			group.decode(format!(r#"{{"push":{record}}}"#).as_bytes()).unwrap();
 		}
 
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut group = decoder.group();
 		let err = group.decode(br#"{"offset":0,"offset":0,"records":[]}"#).unwrap_err();
 		assert!(matches!(err, crate::Error::DuplicateKey), "{err}");
@@ -1136,7 +1136,7 @@ mod test {
 	fn rolling_is_invisible_to_the_consumer() {
 		// The same edits, framed two ways: one group for everything, versus a roll per edit.
 		let edits = |ops: bool| {
-			let mut live = Live::new(ProducerConfig::default().with_ops(ops));
+			let mut live = Live::new(Config::default().with_ops(ops));
 			for n in 0..6 {
 				live.push(n);
 				if n >= 3 {

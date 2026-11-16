@@ -36,6 +36,9 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
+	/// Takes a subscriber where [`snapshot::Consumer::new`](crate::snapshot::Consumer::new) takes the
+	/// track: every record matters here, so the caller picks the subscription's delay budget and
+	/// priority, while a snapshot only wants the newest value and subscribes itself at a zero delay.
 	/// A [compressed](moq_net::track::Info::compression) track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {

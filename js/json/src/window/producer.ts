@@ -2,10 +2,7 @@ import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 
 import { frameTime, openGroup, startsPast } from "../time.ts";
-import { type Config, type Encoded, Encoder } from "./encoder.ts";
-
-/** Window producer options, including the destination track. */
-export type ProducerConfig = Config & { track: Moq.Track.Producer };
+import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * A window its producer finished: its records can still be read, but not edited.
@@ -58,7 +55,7 @@ export class Producer<T> {
 	#deferred = false;
 
 	/** Wrap a track to publish a window into it. */
-	constructor(config: ProducerConfig) {
+	constructor(config: Producer.Config) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 
@@ -215,4 +212,10 @@ export class Producer<T> {
 			this.#track.close();
 		}
 	}
+}
+
+/** Types for {@link Producer}. */
+export namespace Producer {
+	/** Window producer options, including the destination track. */
+	export type Config = CodecConfig & { track: Moq.Track.Producer };
 }
