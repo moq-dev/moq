@@ -710,6 +710,9 @@ pub(crate) struct TrackState {
 	// Bumped when `judged` changes, which settles received stale runs differently, so a
 	// wire cursor scans the whole drop set again.
 	judged_revision: u64,
+	// Bumped whenever a stale run leaves `drops` or another verdict replaces it, so a front's
+	// reader rechecks the received stale runs it queued only after one may be gone.
+	stale_revision: u64,
 	drops_changes: ledger::Changes,
 	// The pool tick past which each run of `drops` outlives the pool's expiry window, as of
 	// when it was last given up, rounded up to a quarter of the window so runs given up
@@ -1386,6 +1389,14 @@ impl TrackState {
 	/// Keep the change index aligned with the range map, including the neighbours an
 	/// insertion coalesces and the two pieces a removal can leave.
 	fn change_drops(&mut self, groups: ops::Range<u64>, hole: Option<Hole>) {
+		if hole.as_ref().is_none_or(|hole| hole.stale_budget().is_none())
+			&& self
+				.drops
+				.overlapping(&groups)
+				.any(|(_, held)| held.stale_budget().is_some())
+		{
+			self.stale_revision += 1;
+		}
 		let mut affected = groups.start.saturating_sub(1)..groups.end.saturating_add(1);
 		let old: Vec<_> = self.drops.overlapping(&affected).map(|(run, _)| run.clone()).collect();
 		for run in &old {
@@ -10644,6 +10655,16 @@ impl Subscriber {
 				.collect(),
 			// A front's reader checks its own routes' copies.
 			Inner::Resume(..) => RangeSet::new(),
+		}
+	}
+
+	/// Bumped whenever a run [`Self::stale_held`] reported may no longer be held, so a caller
+	/// rechecks the runs it holds only after a change.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn stale_revision(&self) -> u64 {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().stale_revision,
+			Inner::Resume(..) => 0,
 		}
 	}
 

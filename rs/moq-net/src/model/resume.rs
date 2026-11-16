@@ -399,6 +399,7 @@ impl Consumer {
 				out: Vec::new(),
 				drops: RangeMap::new(),
 				received: RangeSet::new(),
+				received_checked: None,
 				reported_stale: RangeSet::new(),
 				declared: None,
 				declared_error: None,
@@ -1119,6 +1120,10 @@ struct Reader {
 	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
 	/// new terms can supersede. Kept apart so a poll costs these runs, not every queued one.
 	received: RangeSet<u64>,
+	/// The serving copy's [`track::Subscriber::stale_revision`] when [`Self::received`] was
+	/// last checked against it, so a poll rechecks those runs only after one may be gone.
+	/// `None` until the serving copy is first checked.
+	received_checked: Option<u64>,
 	/// The stale runs reported since the last [`Reader::reoffer_stale`], whichever copy gave
 	/// them up: an update reopens each, and the copy that reported it may no longer serve.
 	reported_stale: RangeSet<u64>,
@@ -1255,6 +1260,7 @@ impl Reader {
 		// What a former route gave up is no verdict on the one that serves now.
 		self.drops = RangeMap::new();
 		self.received = RangeSet::new();
+		self.received_checked = None;
 		let Some(track) = serving else { return };
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
@@ -1866,15 +1872,22 @@ impl Reader {
 		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
-		let queued: Vec<_> = self.received.iter().cloned().collect();
 		let mut given_up = Vec::new();
 		let mut superseded = Vec::new();
-		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
+		let ready = matches!(self.poll_serving(waiter), Poll::Ready(Some(_)));
+		// The serving copy's subscription, borrowed apart from the received runs it checks.
+		if let Some(Sub::Ready(sub)) = self.copies.last_mut().filter(|_| ready).map(|copy| &mut copy.sub) {
 			// A received stale run queued here that new terms superseded since is unknown again:
-			// the copy no longer holds it, and its upstream re-offers or drops it again.
-			for run in queued {
-				superseded.extend(sub.stale_held(run.clone()).gaps(&run));
+			// the copy no longer holds it, and its upstream re-offers or drops it again. Checked
+			// only once the copy let a stale run go, never on every poll: each poll reports one
+			// run, so a check per poll would cost the received runs squared to drain them.
+			let current = sub.stale_revision();
+			if self.received_checked != Some(current) {
+				for run in self.received.iter() {
+					superseded.extend(sub.stale_held(run.clone()).gaps(run));
+				}
 			}
+			self.received_checked = Some(current);
 			loop {
 				let polled = match probe {
 					true => sub.poll_drop(waiter),
