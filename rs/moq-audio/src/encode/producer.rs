@@ -360,9 +360,15 @@ impl Producer {
 	/// partial input frame. Call this when resuming after an idle gap (e.g. a
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
-	/// being compressed out by the running sample count. Mirrors moq-boy's
-	/// `reanchor`. If the codec had started, a marker group is published before
-	/// the next packet so subscribers jump the playhead.
+	/// being compressed out by the running sample count. If the codec had
+	/// started, a marker group is published before the next packet so
+	/// subscribers jump the playhead.
+	///
+	/// This is for a gap the caller learns of only once audio returns, such as
+	/// a device stall: until then subscribers see an undeclared stall. A stop
+	/// known as it happens, such as a mute, takes
+	/// [`discontinuity`](Self::discontinuity) instead, which needs no
+	/// `reanchor` after it.
 	pub fn reanchor(&mut self) {
 		if self.encoder.started() || !self.backlog.is_empty() {
 			self.pending_discontinuity = true;
@@ -665,6 +671,11 @@ impl Producer {
 	/// switching source, or anything else that resumes on a new anchor. Buffered samples
 	/// are dropped, and the next frame sets a fresh anchor. See
 	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
+	///
+	/// Unlike [`reanchor`](Self::reanchor), the marker goes out now and closes the
+	/// open group, so subscribers hear the silence as declared from its start: the
+	/// decoder reports it as [`Read::End`](crate::decode::Read::End), and a player
+	/// fills it with comfort noise rather than counting a gap.
 	pub fn discontinuity(&mut self) -> Result<(), Error> {
 		self.track.discontinuity()?;
 		self.pending_discontinuity = false;
