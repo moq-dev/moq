@@ -65,5 +65,12 @@ Not to be filed:
   rejected (`rs/moq-webrtc/src/sdp.rs`, `refuse_channels`). A
   `RtcConfig` switch that answers it rejected and starts no SCTP would
   retire that. The switch's PR body holds a draft. Same approval rule.
+- **str0m:** two bugs the vendored copy had patched, worked around in
+  moq-webrtc since the switch, each with a test that fails without it.
+  An answer puts its candidates only on the first section even when that
+  section is rejected and out of BUNDLE (`sdp.rs`,
+  `candidates_on_accepted`). ICE asks for no timeout until its first one,
+  so a side that hears no checks, facing an ICE-lite peer, never sends any
+  (`ice/agent.rs`, `Agent::new`). Same approval rule.
 
 Public API: none. Wire: none.
