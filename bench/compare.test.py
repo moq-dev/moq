@@ -26,6 +26,9 @@ class Paired(unittest.TestCase):
     def test_known_degradation(self):
         self.assertAlmostEqual(compare.reduce([pair(-20)] * 3)["metrics"]["recv_mbps"]["delta_pct"], -20)
 
+    def test_memory_is_compared(self):
+        self.assertAlmostEqual(compare.reduce([pair(17)] * 3)["metrics"]["rss_bytes"]["delta_pct"], 17)
+
     def test_noisy(self):
         metric = compare.reduce([pair(-10), pair(), pair(10)])["metrics"]["recv_mbps"]
         self.assertEqual(metric["status"], "sign varies across pairs")

@@ -20,6 +20,8 @@ METRICS = (
     "generator_cpu_cores",
     "loss_pct",
     "latency_p99_ms",
+    # The relay's peak resident memory over the window; per-connection state shows here, not in CPU.
+    "rss_bytes",
 )
 CPU_METRICS = ("cpu_cores", "cpu_us_per_frame", "cpu_cores_per_gbps", "generator_cpu_cores")
 
