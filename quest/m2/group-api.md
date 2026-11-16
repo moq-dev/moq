@@ -45,7 +45,7 @@ Facts found by the audit, counted again at `80ca9787e3` over `rs/` outside
 - `track.largest().map_or(0, |largest| largest.group + 1)` is written out
   108 times in 38 files, in production in moq-audio, moq-boy, moq-json, and
   moq-mux; moq-ffi (`rs/moq-ffi/src/producer.rs:105`) and moq-c
-  (`rs/moq-c/src/publish.rs:117`) each keep a private `next_start` for it.
+  (`rs/libmoq/src/publish.rs:117`) each keep a private `next_start` for it.
   moq-net already has the operation: `append_next`
   (`rs/moq-net/src/model/track.rs:4366`) is `pub(crate)` and test-only.
 - `group.close()` appears 252 times; `group.finish(end)` on a
@@ -62,7 +62,7 @@ Facts found by the audit, counted again at `80ca9787e3` over `rs/` outside
   `rs/moq-archive/src/consumer/track.rs:138`).
 - Every fill handler branches on `Fill::time()` before anything else
   (`rs/moq-archive/src/consumer/track.rs:148`,
-  `rs/moq-ffi/src/producer.rs:493`, `rs/moq-c/src/publish.rs:1049`), and a
+  `rs/moq-ffi/src/producer.rs:493`, `rs/libmoq/src/publish.rs:1049`), and a
   lookup's `wanted` is `None` and `is_wanted` false throughout
   (`rs/moq-net/src/model/track/fill.rs:949`).
 

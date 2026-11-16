@@ -28,7 +28,7 @@ Facts found by the audit, checked at `80ca9787e3`:
   which removed KEY_VALUE_FORMATTING_ERROR in lite-07. Six were added in the
   window.
 - Each is mirrored into moq-ffi (`rs/moq-ffi/src/error.rs`) and moq-c
-  (`rs/moq-c/src/error.rs`), 7 lines each, and JS lists them in
+  (`rs/libmoq/src/error.rs`), 7 lines each, and JS lists them in
   `js/net/src/error.ts:43-63`.
 - The only classification, `Error::retryable`, `unroutable`, and `transient`
   (`rs/moq-net/src/error.rs:609-620`), is `pub(crate)`. moq-gst rebuilt it by

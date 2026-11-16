@@ -410,7 +410,7 @@ impl Publish {
 	}
 
 	/// Store an origin-created broadcast producer, attaching the catalog track
-	/// every moq-c broadcast carries.
+	/// every libmoq broadcast carries.
 	pub fn create(
 		&mut self,
 		(mut broadcast, driver): (moq_net::broadcast::Producer, crate::ffi::Background),

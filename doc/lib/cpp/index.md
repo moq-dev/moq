@@ -14,7 +14,7 @@ C++17 is the floor, and C++20 adds `co_await` on a future. The bindings are
 generated from the same [UniFFI](https://mozilla.github.io/uniffi-rs/) crate as
 the other wrappers, so
 a method means the same thing here as in Python or Go. For a plain C ABI, use
-[moq-c](/lib/c/).
+[libmoq](/lib/c/).
 
 ## Install
 
@@ -51,7 +51,7 @@ an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the defaul
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
 current checkout unless given an explicit native directory. The package is
-`moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
+`moq-cpp`. It and the C package, `libmoq`, each link in their own copy of the
 Rust core, so a program links one of the two, never both.
 
 ## Example

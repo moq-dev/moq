@@ -57,9 +57,9 @@ impl Quic<'_> {
 }
 
 /// What sessions opened through this library advertise in SETUP: the caller's `prefix`,
-/// then moq-c, then its core.
+/// then libmoq, then its core.
 pub fn implementation(prefix: Option<&str>) -> Result<String, Error> {
-	let core = format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	let core = format!("libmoq/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
 	let Some(prefix) = prefix else {
 		return Ok(core);
 	};

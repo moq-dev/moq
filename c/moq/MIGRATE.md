@@ -37,9 +37,9 @@ Viewer ceilings and PROBE target overrides are refused with the new `MOQ_ERROR_O
 
 Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when the decoder refuses a codec, layout, or description, or when every video decoder for the codec reports that this device cannot decode the stream. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a missing driver or no device, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
 
-## moq-c 0.7, the hand-written ABI
+## libmoq 0.6 -> 0.22
 
-The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
+The hand-written API's last line, which ships as libmoq 0.22: a libmoq 0.6 user applies these entries before moving to the generated API.
 
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
@@ -187,7 +187,7 @@ Set `moq_client_config::quic_keylog` or `moq_server_config::quic_keylog` as well
 ### OpenH264 is a build feature (#5771)
 
 The release archives and the CMake build still carry the software H.264 fallback.
-A bare `cargo build -p moq-c` leaves it out; add `--features openh264` to keep it.
+A bare `cargo build -p libmoq` leaves it out; add `--features openh264` to keep it.
 
 ### Subscriptions carry group ranges (#5732)
 
@@ -217,19 +217,6 @@ Free each handle with `moq_consume_close` once its successor arrives.
 
 A frame write fails with a protocol error of kind `MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH` when a group's first frame starts before a lower-sequence group's, or after a higher one's.
 A publisher whose timeline restarts publishes a new broadcast instead.
-
-### libmoq is moq-c (#4288)
-
-The C bindings ship as the `moq-c` crate, starting at 0.7.0.
-The header is still `moq.h` and the library is still `libmoq.a` / `moq.lib` (`-lmoq`); the C ABI did not change with the rename.
-The CMake package, pkg-config name, release tags, and archives follow the new name.
-
-| Before | After |
-| --- | --- |
-| `find_package(moq)`, target `moq` | `find_package(moq-c)`, target `moq::c` |
-| `pkg-config --libs moq` | `pkg-config --libs moq-c` |
-| nix `.#libmoq` | nix `.#moq-c` |
-| tags `libmoq-v*`, archives `libmoq-<version>-<target>` | tags `moq-c-v*`, archives `moq-c-<version>-<target>` |
 
 ### Background panics are reported (#5562)
 

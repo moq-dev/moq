@@ -18,7 +18,7 @@ default-members = [
     "rs/kio",
     "rs/kio/macros",
     "rs/hang",
-    # "rs/moq-c",     # requires C toolchain
+    # "rs/libmoq",     # requires C toolchain
     "rs/moq-congestion",
     "rs/moq-archive",
     "rs/moq-auth",
@@ -185,7 +185,7 @@ moq-vaapi = { version = "0.2.1", path = "rs/moq-vaapi" }
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
 # whole device graph into every one of them. Codec features are independent of
-# that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
+# that argument, so moq-ffi and libmoq opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
 moq-webrtc = { version = "0.3.12", path = "rs/moq-webrtc" }

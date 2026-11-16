@@ -72,7 +72,7 @@ For the PR, what goes (find the rest with `grep -rn -i warmup rs js doc`):
   buffer's hold in `rs/moq-cli/src/play/{video,buffer,media}.rs`; the video
   `warmup` in moq-ffi (`rs/moq-ffi/src/{video,media}.rs`) and every wrapper,
   and `warmup_us` with `has_warmup` on moq-c's video config
-  (`rs/moq-c/src/api.rs`); moq-gst's video branch
+  (`rs/libmoq/src/api.rs`); moq-gst's video branch
   (`rs/moq-gst/src/source/imp.rs`).
 - What stays: `moq_mux::container::Playout { delay, warmup }`, the
   consumer's reach in both languages, and every audio use. Check that no

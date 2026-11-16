@@ -75,7 +75,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
 - **Bindings.** [Open selectors](/quest/m2/ffi-open-selectors.md),
   [Dart as experimental](/quest/m2/dart-experimental.md), and
-  [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
+  the C API as `libmoq` (done), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
 

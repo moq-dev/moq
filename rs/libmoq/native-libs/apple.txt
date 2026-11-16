@@ -2,8 +2,8 @@
 # targets. Cargo injects these itself for Rust consumers, but a C/C++ toolchain
 # linking the staticlib has to spell them out.
 #
-# Canonical list. nix/overlay.nix bakes it into moq-c.pc, CMakeLists.txt reads it for the
-# moq::c target and the installed find_package config, test/interop/interop.sh
+# Canonical list. nix/overlay.nix bakes it into moq.pc, CMakeLists.txt reads it for the
+# moq::moq target and the installed find_package config, test/interop/interop.sh
 # links its C client with it, and cpp/moq/CMakeLists.txt reuses it for moq-ffi,
 # which has the same dependency tree. Keep the derived consumers reading this file rather
 # than repeating the list.
@@ -12,7 +12,7 @@
 # plain library name. `#` comments and blank lines are ignored.
 #
 # Regenerate after a dependency change with:
-#   cargo rustc -p moq-c --crate-type staticlib -- --print native-static-libs
+#   cargo rustc -p libmoq --crate-type staticlib -- --print native-static-libs
 
 # rustls / std
 framework:CoreFoundation

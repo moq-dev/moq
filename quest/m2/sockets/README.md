@@ -30,7 +30,7 @@ Facts found by the audit:
   one crate-private call, `reserve_unlisted_track`
   (`rs/moq-net/src/model/broadcast.rs:406`).
 - The surface that leaves: `js/net/src/socket.ts` (541 lines, 694 of tests),
-  `rs/moq-ffi/src/socket.rs` (318), `rs/moq-c/src/socket.rs` (511), a wrapper
+  `rs/moq-ffi/src/socket.rs` (318), `rs/libmoq/src/socket.rs` (511), a wrapper
   in Python, Swift, Kotlin, Dart, and Go, `doc/concept/socket.md` (225), and
   `test/interop/socket.sh` with four clients.
 - It was built by the m1 socket epic between 2026-10-28 and 2026-11-15:

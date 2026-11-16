@@ -383,7 +383,7 @@ class MetadataTest(unittest.TestCase):
         artifact = {"reason": "compiler-artifact", "filenames": [str(self.scratch / "libmoq.a")]}
         header = {
             "reason": "build-script-executed",
-            "package_id": "path+file:///rs/moq-c#1.0.0",
+            "package_id": "path+file:///rs/libmoq#1.0.0",
             "out_dir": str(self.scratch),
         }
         # Cargo emits a stream, not an array. Both selectors must reject an

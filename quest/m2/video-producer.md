@@ -32,12 +32,12 @@ Facts found by the audit:
   the config, reserve a catalog slot with the effective join, build the
   producer, run the encode, receive, publish loop. `rs/moq-boy/src/video.rs:59-65`
   is the shortest witness; `rs/moq-ffi/src/video.rs` (2,129 lines) and
-  `rs/moq-c/src/video.rs` (1,820 lines) carry the rest.
+  `rs/libmoq/src/video.rs` (1,820 lines) carry the rest.
 - Grant following with rung disable, the part that is easy to get wrong,
   exists three times: private in the capture driver
   (`rs/moq-video/src/encode/producer.rs:718`, `:840`, `:940`), in moq-ffi
   (`rs/moq-ffi/src/video.rs:370`, `:524`), and in moq-c
-  (`rs/moq-c/src/video.rs:286`, `:319`, `:363`).
+  (`rs/libmoq/src/video.rs:286`, `:319`, `:363`).
 - No quest owns it: [the grant getter](/quest/m3/video-publish-grant.md)
   only adds a getter to the capture handle, and
   [the mux wrap](/quest/m5/net-wrap/mux.md) only makes the producer generic.

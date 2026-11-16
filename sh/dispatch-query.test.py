@@ -816,7 +816,7 @@ esac
             (".cargo/config.toml", True),
             ("rs/moq-net/src/lib.rs", False),
             ("rs/moq-net/Cargo.toml", True),
-            ("rs/moq-c/native-libs/linux.txt", True),
+            ("rs/libmoq/native-libs/linux.txt", True),
             ("rs/moq-video/src/frame/nv12_resize.ptx", True),
             ("Cargo.toml", True),
             ("Cargo.lock", True),
@@ -838,7 +838,7 @@ esac
         for path, expected in (
             ("Cargo.lock", True),
             ("rs/moq-net/Cargo.toml", True),
-            ("rs/moq-c/build.rs", True),
+            ("rs/libmoq/build.rs", True),
             ("rs/moq-net/src/lib.rs", True),
             ("rs/moq-cli/src/main.rs", True),
             ("rs/moq-cli/src/bin/extra.rs", True),

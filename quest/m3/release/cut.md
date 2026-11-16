@@ -227,8 +227,8 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   no longer a retired name, and the paragraph above about publishing a
   pointer above 0.0.25 no longer applies: the name is held for
   [the finished format](/quest/m3/e2ee-format.md).
-- ✅ The hand-written C API publishes as `libmoq` 0.22
-  ([its final line](/quest/m2/libmoq-name.md)), reversing 2026-10-25, so the
+- ✅ The hand-written C API publishes as `libmoq` 0.22, its final line,
+  reversing 2026-10-25, so the
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
   quests for a code-free `libmoq` stub were deleted.
 

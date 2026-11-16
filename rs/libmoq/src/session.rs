@@ -21,7 +21,7 @@ pub(crate) struct Lifecycle {
 	phase: Stage,
 }
 
-/// A [`Lifecycle`]'s phase and its data, mirroring [`Phase`] with moq-c's errors.
+/// A [`Lifecycle`]'s phase and its data, mirroring [`Phase`] with libmoq's errors.
 enum Stage {
 	Connecting {
 		failure: Option<Error>,
@@ -438,7 +438,7 @@ impl Session {
 	/// Deliver each lifecycle change until the connection stops, then return its result.
 	///
 	/// Changes coalesce: a snapshot is the state when the callback runs, not every step
-	/// between. No lock is held, so the C callback is free to re-enter moq-c.
+	/// between. No lock is held, so the C callback is free to re-enter libmoq.
 	async fn report(
 		callback: ffi::OnState,
 		connection: &moq_tokio::Connection,

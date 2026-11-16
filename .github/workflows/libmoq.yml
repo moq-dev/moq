@@ -1,9 +1,9 @@
-name: moq-c
+name: libmoq
 
 on:
   push:
     tags:
-      - "moq-c-v*"
+      - "libmoq-v*"
   # Dry-run: build everything, publish nothing. Nightly calls every release
   # workflow this way so a broken build surfaces before the tag is cut.
   workflow_call:
@@ -55,7 +55,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: just gh release parse-version moq-c
+        run: just gh release parse-version libmoq
 
       - name: Build and package
         shell: bash
@@ -63,7 +63,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          just rs package-moq-c \
+          just rs package-libmoq \
             --target "$TARGET" \
             --version "$VERSION" \
             --output dist
@@ -71,7 +71,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: moq-c-${{ matrix.target }}
+          name: libmoq-${{ matrix.target }}
           path: dist/*
 
   release:
@@ -92,11 +92,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: just gh release parse-version moq-c
+        run: just gh release parse-version libmoq
 
       - name: Find previous tag
         id: prev_tag
-        run: just gh release prev-tag moq-c
+        run: just gh release prev-tag libmoq
 
       - name: Download artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -108,7 +108,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TITLE: "moq-c v${{ steps.parse.outputs.version }}"
+          RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: just gh release create artifacts
 

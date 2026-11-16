@@ -33,7 +33,7 @@ C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
-Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
+Go, and C++, `libmoq` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 `@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
 600 ms of PCM and frame timestamps of each rendition, named by its codec, for
 [`tone.py`](tone.py), which requires the
@@ -158,7 +158,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/moq-c` | `cargo build -p moq-c` + `cc` | subscribe |
+| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
@@ -205,7 +205,7 @@ Clients that print the grant the relay sent back over AUTH, as an
 their token implies: the Rust CLI (a `moq_net::auth` debug log), the Python,
 Go, and C++ clients (read through moq-ffi before they start), and the native
 JS subscribers. A cell whose grant is missing or wrong fails even when media
-flowed. moq-c's frozen ABI and GStreamer expose no grant, and the browser's
+flowed. libmoq's frozen ABI and GStreamer expose no grant, and the browser's
 shared connection keeps its session private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
@@ -625,7 +625,7 @@ clients/
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
   js-native/hls.ts        the HLS grid publisher via @moq/hang
-  c/subscribe.c           subscribe via rs/moq-c
+  c/subscribe.c           subscribe via rs/libmoq
 ```
 
 ## CI

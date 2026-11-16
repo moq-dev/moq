@@ -44,7 +44,7 @@ Facts found by the audit:
   doc (`rs/moq-net/src/setup.rs:81-88`). Every caller that sets it false is
   a test or a benchmark (`rs/moq-net/benches/auth.rs`,
   `rs/moq-relay/tests/integration/auth_lifetime.rs`, `rs/moq-ffi/src/test.rs`,
-  `rs/moq-c/src/test.rs`). JS has the same one-field `Extensions`
+  `rs/libmoq/src/test.rs`). JS has the same one-field `Extensions`
   (`js/net/src/connection/extensions.ts`).
 - `rs/moq-net/AGENTS.md`: a moq-transport feature never adds public API. The
   root file: no opt-out flags.

@@ -132,7 +132,7 @@ int main(void) {
     // Creating the datagram consumer joins its live cursor before this write.
     CHECK(moq_publish_datagrams_append((uint32_t)datagram_track, payload, sizeof(payload), &tick, NULL) == 0);
     WAIT_FOR(&c, c.datagram);
-    // JSON tracks moq-c creates count milliseconds.
+    // JSON tracks libmoq creates count milliseconds.
     const moq_timestamp stamped = {1500, 1000, true};
     CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), &stamped) == 0);
     WAIT_FOR(&c, c.value);

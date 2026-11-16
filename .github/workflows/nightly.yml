@@ -220,8 +220,8 @@ jobs:
             uncached: true
             artifact: js-coverage
             artifact-path: target/coverage/js
-          # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
-          # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
+          # OBS (over moq-ffi) and libmoq's C fixtures link a Rust staticlib from
+          # outside cargo, so a stale `rs/libmoq/native-libs/*.txt` breaks them and
           # no cargo build. release-gate.yml's OBS filter can't list every such input;
           # this diff-independent run catches what it misses, a day late.
           - name: OBS
@@ -232,7 +232,7 @@ jobs:
           # 60 to 90 s instead of about 8; the suite took 2 to 4.5 min locally.
           - name: OBS TSan
             recipe: obs test
-          - name: moq-c C fixtures
+          - name: libmoq C fixtures
             recipe: rs c-tests
 
     steps:
@@ -695,9 +695,9 @@ jobs:
       contents: write
       id-token: write
 
-  release-moq-c:
-    name: moq-c
-    uses: ./.github/workflows/moq-c.yml
+  release-libmoq:
+    name: libmoq
+    uses: ./.github/workflows/libmoq.yml
     permissions:
       contents: write
 
@@ -759,7 +759,7 @@ jobs:
   sizes:
     name: Shipping sizes
     # Measures what these release jobs upload rather than rebuilding it.
-    needs: [release-py-ffi, release-shared-ffi, release-moq-c, release-moq-relay, release-moq-cli]
+    needs: [release-py-ffi, release-shared-ffi, release-libmoq, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}

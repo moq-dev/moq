@@ -36,14 +36,14 @@ take `sequence` (`:582-601`); `MoqTrackProducer::create_group(sequence)`
 `finish_at(final_sequence)` (`:950`); `MoqGroupProducer::sequence()`
 (`:1002`, filled from `group.start` at `:993`); and `MoqPosition.group`'s
 doc calls it "The group sequence" (`:17`). The hand-written C API has
-`moq_group_request_sequence` (`rs/moq-c/src/api.rs:4035`) and
+`moq_group_request_sequence` (`rs/libmoq/src/api.rs:4035`) and
 `moq_publish_group_sequence` (`:4154`). Rename all of them in the same PR,
 then grep every wrapper and `doc/lib` page for `sequence` once more: a name
 left behind is a second breaking release.
 
 Decided 2026-11-16 (maintainer, same run): the hand-written C API ships as
-`libmoq` ([its name](/quest/m2/libmoq-name.md)), so where this quest says
-`moq-c` it means that crate, whichever name it carries when this lands. The
+`libmoq` (`rs/libmoq`), so where this quest says `moq-c` it means that
+crate. The
 JS half renames a frame's `sequence` to `index`
 ([JS](/quest/m2/time-addressing/js.md)); a frame's position in the bindings
 takes the same name if any binding exposes one.

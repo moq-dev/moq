@@ -58,8 +58,8 @@ case "$1" in
             while [[ "$1" != --target-dir ]]; do shift; done
             mkdir -p "$2/debug"
             cp "$FIXTURE_TARGET/adapter" "$2/debug/compat-container"
-        elif [[ "$*" == *'-p moq-c'* ]]; then
-            printf '{"reason":"build-script-executed","package_id":"/moq-c#0.0.0","out_dir":"%s/header"}\n' \
+        elif [[ "$*" == *'-p libmoq'* ]]; then
+            printf '{"reason":"build-script-executed","package_id":"/libmoq#0.0.0","out_dir":"%s/header"}\n' \
                 "$FIXTURE_TARGET"
         fi
         ;;

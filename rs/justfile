@@ -35,7 +35,7 @@ tamarin spec *args:
 # superset of it, and the two use different rustc wrappers, so running both
 # compiles the workspace twice.
 #
-# A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
+# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
 # and moq-gst; pass `--workspace` for all of it.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
@@ -240,7 +240,7 @@ audit:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     sh/rs/c-tests.sh
 
@@ -540,10 +540,10 @@ package-nfpm *args:
 package-ffi *args:
     rs/moq-ffi/build.sh "$@"
 
-# Build and package moq-c.
+# Build and package libmoq.
 [positional-arguments]
-package-moq-c *args:
-    rs/moq-c/build.sh "$@"
+package-libmoq *args:
+    rs/libmoq/build.sh "$@"
 
 # Build and package the moq-gst GStreamer plugin.
 [positional-arguments]

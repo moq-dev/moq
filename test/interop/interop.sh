@@ -5,7 +5,7 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/moq-c, all
+# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/libmoq, all
 # talking to each other. There's no apt/brew/npm/PyPI here, just
 # cargo/bun/uv/go/cmake/cc.
 #
@@ -84,7 +84,7 @@ FINISH_ONLY=0
 VERSIONS="auto"
 IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 
-# Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
+# Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
 
@@ -286,7 +286,7 @@ COMPAT=0
 [[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
 
 # The clients that print the grant they received as an `auth granted` line. The
-# Python, Go, and C++ clients read it through moq-ffi; moq-c's frozen ABI and
+# Python, Go, and C++ clients read it through moq-ffi; libmoq's frozen ABI and
 # GStreamer expose none, and the browser's shared connection keeps its session private.
 # Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
 prints_grant() {
@@ -621,7 +621,7 @@ require_tools() {
         exit 1
     fi
     # Resolve the cargo target dir once (honors a custom CARGO_TARGET_DIR, which
-    # the self-hosted CI runner sets), so the built binaries and moq-c's header
+    # the self-hosted CI runner sets), so the built binaries and libmoq's header
     # are found wherever cargo actually writes them.
     TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -811,7 +811,7 @@ prepare_cpp() {
     CPP_INTEROP="$build/client/cpp-interop"
 }
 
-# Build moq-c (the C staticlib + cbindgen header) and compile the C subscriber
+# Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
 # against it. cargo writes libmoq.a to the profile dir, and build.rs writes
 # moq.h into its OUT_DIR, which only cargo's JSON messages name.
 prepare_c() {
@@ -820,30 +820,30 @@ prepare_c() {
         mark_broken c "no C compiler ($cc) on PATH"
         return
     }
-    echo "building c client (workspace moq-c + cc)..."
+    echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-c --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
-        mark_broken c "cargo build -p moq-c failed"
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
+        mark_broken c "cargo build -p libmoq failed"
         sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
-    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/moq-c#' |
+    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/libmoq#' |
         sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
     header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
     [[ -f "$header" && -f "$lib" ]] || {
-        mark_broken c "moq-c artifacts missing ($header / $lib)"
+        mark_broken c "libmoq artifacts missing ($header / $lib)"
         return
     }
     harness_stage c/include/moq.h "$header"
     harness_stage c/libmoq.a "$lib"
     # cargo can't inject libmoq.a's native deps into an external link, so read
-    # them from the same list moq-c.pc and CMake use.
+    # them from the same list moq.pc and CMake use.
     local native_libs
     case "$(uname -s)" in
-        Darwin) native_libs="$WORKSPACE/rs/moq-c/native-libs/apple.txt" ;;
-        *) native_libs="$WORKSPACE/rs/moq-c/native-libs/linux.txt" ;;
+        Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;
+        *) native_libs="$WORKSPACE/rs/libmoq/native-libs/linux.txt" ;;
     esac
     os_libs=()
     while read -r entry; do

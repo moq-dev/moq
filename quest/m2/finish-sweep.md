@@ -58,7 +58,7 @@ For the PR:
   [the frame-taking video producer](/quest/m2/video-producer.md); whichever
   lands second merges main and keeps both changes.
 - Callers hold these behind locks in moq-ffi and moq-c
-  (`rs/moq-ffi/src/{video,media,audio}.rs`, `rs/moq-c/src/{video,publish}.rs`):
+  (`rs/moq-ffi/src/{video,media,audio}.rs`, `rs/libmoq/src/{video,publish}.rs`):
   move the producer out of its slot on finish and store the `Finished`, as
   the audio encoder bindings already do. moq-cli, moq-gst, moq-rtsp, and
   moq-boy follow. The bindings' own API does not change shape.

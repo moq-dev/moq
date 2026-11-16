@@ -28,13 +28,13 @@ Delete, as listed at `80ca9787e3`:
   the `Socket` export (`js/net/src/index.ts:39`), `js/net/api/index.api.md`,
   and `doc/lib/js/net.md`.
 - Bindings: `rs/moq-ffi/src/socket.rs` (and the `MoqSocketEndpoint` entry in
-  `rs/moq-ffi/uniffi.toml`), `rs/moq-c/src/socket.rs` and its `moq.h`
+  `rs/moq-ffi/uniffi.toml`), `rs/libmoq/src/socket.rs` and its `moq.h`
   functions, `py/moq-rs/moq/socket.py` with `tests/test_socket.py` and the
   `sockets` bench in `benches/ffi.py`, `swift/Sources/Moq/Socket.swift`,
   `kt/moq/.../socket/Socket.kt`, `dart/moq/lib/socket.dart`,
   `go/wrapper/socket/`, their tests (`rs/moq-ffi/src/test.rs`,
-  `rs/moq-c/src/test/parity.rs`), README and docs mentions
-  (`rs/moq-c/README.md`, `py/moq-rs/README.md`, `doc/lib/py/index.md`), and
+  `rs/libmoq/src/test/parity.rs`), README and docs mentions
+  (`rs/libmoq/README.md`, `py/moq-rs/README.md`, `doc/lib/py/index.md`), and
   the generated Dart file's socket classes.
 - Interop: `test/interop/socket.sh`, the `--sockets` lane and `run_sockets`
   in `test/interop/interop.sh`, `clients/rust/socket.rs`,

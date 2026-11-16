@@ -43,7 +43,7 @@ For the PR:
   `pop(count, at)`. JS: `update(value, at)`, `append(value, at)`, and
   `push(value, at)`. `Timed` keeps its place on `next()`, `latest()`, and
   the iterators.
-- The bindings' JSON producers (`rs/moq-ffi`, `rs/moq-c`, and the
+- The bindings' JSON producers (`rs/moq-ffi`, `rs/libmoq`, and the
   wrappers) already take the value and the time as two arguments; check
   each and leave them.
 - Recommended while the signatures are open, as one rename each: the

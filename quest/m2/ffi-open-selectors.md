@@ -74,7 +74,7 @@ For the PR:
   as `MoqSubscription.delay` is required. Python, Go, and Dart already
   default an omitted value in the wrapper; check each still defaults to
   zero, and that Swift and Kotlin callers must now state it. Remove the
-  flag from moq-ffi, the hand-written C API (`rs/moq-c/src/api.rs`), every
+  flag from moq-ffi, the hand-written C API (`rs/libmoq/src/api.rs`), every
   wrapper, and their tests.
 - Follow the sync table from `rs/moq-ffi` outward: every wrapper, `cpp/moq`,
   `cpp/obs` if it names a codec, each `doc/lib` page, and the Impact section

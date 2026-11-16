@@ -179,7 +179,7 @@ struct ClaimEntry {
 impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
-		// lands on the dedicated moq-c runtime.
+		// lands on the dedicated libmoq runtime.
 		let (producer, driver) = moq_net::origin::Producer::new(Default::default());
 		self.active.insert(Producer {
 			producer,

@@ -1,4 +1,4 @@
-# moq-c CMake version file
+# moq CMake version file
 
 set(PACKAGE_VERSION "@VERSION@")
 
