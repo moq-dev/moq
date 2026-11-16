@@ -32,7 +32,7 @@ const JUMP = 10_000;
  *     frame lies far ahead, and the ring plays the hole as silence. A stall keeps releasing by the
  *     playhead: the ring resumes on a cushion and slows down to rebuild, and media past the floor
  *     stays encoded, counted toward the level the ring decides on. A playhead trailing the shared
- *     clock past the ring's bound counts from the bound behind the clock instead, where the ring
+ *     clock past the ring's bound, stalled or not, counts from the clock instead, where the ring
  *     skips to, so a backlog behind it goes at once rather than a window per state report.
  *
  * The playhead comes from the worklet's state messages.
@@ -230,8 +230,10 @@ export class Backpressure {
 	#due(timestamp: number): boolean {
 		const playhead = this.#playhead;
 		if (this.#started && playhead !== undefined) {
-			// The ring skips audio trailing the clock past its bound, so it plays on from there.
-			const from = this.#clock === undefined ? playhead : Math.max(playhead, this.#clock - this.#bound);
+			// The ring skips onto the clock once it trails it past the bound, so it plays on from there.
+			// Within the bound it stretches onto the clock, playing everything from its playhead.
+			const clock = this.#clock;
+			const from = clock !== undefined && clock - playhead > this.#bound ? clock : playhead;
 			return this.#reach(from) - from < this.#headroom + WINDOW;
 		}
 

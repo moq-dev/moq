@@ -337,9 +337,22 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(wait)).toBe("pending");
 		gate.observe(ms(0), true, ms(2000));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
-		// Released up to a floor and window past where the ring skips to.
-		for (let t = 260; t <= 2020; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(2040), signal))).toBe("pending");
+		// Released up to a floor and window past the clock, where the ring skips to.
+		for (let t = 260; t <= 2220; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2240), signal))).toBe("pending");
+	});
+
+	// The ring skips all the way onto the clock, not to the bound behind it, so a floor short of the
+	// bound must still be released past the clock or the skip lands on an empty ring and stalls.
+	it("releases past the clock with a floor short of the bound", () => {
+		// At 48 kHz the floor is the 50 ms asked for, not a render quantum's 128 ms at 1 kHz.
+		const gate = new Backpressure(48_000, false, Duration.millis(50), Duration.millis(200));
+		const signal = new AbortController().signal;
+		gate.observe(ms(0), false, ms(0));
+		for (let t = 0; t < 80; t += 20) gate.inserted(ms(t), ms(t + 20));
+		gate.observe(ms(0), true, ms(2000));
+		for (let t = 80; t <= 2060; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2080), signal))).toBe("pending");
 	});
 
 	// The next frame past a hole lies far ahead of the playhead, which never nears it while the ring
@@ -646,8 +659,9 @@ describe("AudioBuffer steering", () => {
 			position = 3000;
 			state(ms(1000), true, 0, 1);
 			expect(Bun.peek.status(wait)).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(ms(2800), signal))).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(ms(2950), signal))).toBe("pending");
+			// Released up to a floor and window past the clock, where the ring skips to.
+			for (const t of [2800, 2950, 3100]) expect(Bun.peek.status(buffer.wait(ms(t), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(ms(3250), signal))).toBe("pending");
 		} finally {
 			buffer.close();
 			clock.close();
