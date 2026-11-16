@@ -106,6 +106,12 @@ pub(crate) struct Link {
 	pub proxy: bool,
 	/// Set when the neighbor publishes under a scoped grant.
 	pub scope: Option<Scope>,
+	/// The prefixes this side wants of the neighbor, which it asks for where they meet
+	/// the node's own interest and the scope.
+	pub interest: std::collections::BTreeSet<Path>,
+	/// The prefix the session names its paths beneath: an asked prefix travels as what
+	/// follows it.
+	pub root: Path,
 	/// Which of the neighbor's sessions the stream belongs to: every stream of one session
 	/// shares it, and a later session has a higher one. [`node::Node`] sets it. Among equal
 	/// routes through one neighbor a node takes its latest session's, since an earlier one
@@ -121,6 +127,8 @@ impl Default for Link {
 			upstream: false,
 			proxy: true,
 			scope: None,
+			interest: [Path::empty()].into(),
+			root: Path::empty(),
 			session: 0,
 		}
 	}

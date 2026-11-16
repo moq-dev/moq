@@ -213,4 +213,3 @@ extension on moq-transport is no longer sent or read.
 ## Required
 
 - [The router](/quest/m2/multicast/router.md) - the rule these sessions drive
-- [The route stream](/quest/m2/cluster-routes/route-stream.md) - one announce stream per side, which this builds on

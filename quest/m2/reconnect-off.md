@@ -70,8 +70,8 @@ For the PR:
   `redirect` and `handover`); `session.goaway(Goaway)` replaces
   `drain().send(..)`, and `draining()` stays. The names are the PR's to
   settle, mirrored in moq-ffi and moq-c.
-- Leave what [a first session refused at SETUP](/quest/m1/first-dial-refusal.md)
-  owns ([moq-dev/moq#8817](https://github.com/moq-dev/moq/pull/8817)).
+- Keep [moq-dev/moq#8817](https://github.com/moq-dev/moq/pull/8817)'s rule:
+  a first session that fails or is refused before it is healthy ends the loop.
 
 Tests: one table of (unset, off, zero, value) per field run against
 moq-net, moq-tokio's config parse, JS, and moq-ffi, asserting the same
@@ -85,4 +85,3 @@ change meaning. Wire: none.
 ## Related
 
 - [The connect policy's state lives in one place, in both languages](/quest/m4/connect-policy-state.md) - reworks the same policy after the cut
-- [A first session refused at SETUP fails fast](/quest/m1/first-dial-refusal.md) - changes the first dial's rule in the same files
