@@ -593,6 +593,37 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try catalog.now())
     }
 
+    /// Updates published before the reader joins reach a holding reader in order, each with its
+    /// timestamp; an arrival reader takes only the newest.
+    func testHoldingCatalogReaderReadsEveryUpdateWithinItsDelay() async throws {
+        let broadcast = try BroadcastProducer()
+        defer { try? broadcast.close() }
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+        for value in ["1", "2"] {
+            try catalog.setSection(name: "app", json: value)
+        }
+        let consumer = try broadcast.consume()
+
+        for (delay, expected) in [(0.0, ["2"]), (60.0, ["1", "2"])] {
+            let reader = try await Media.CatalogConsumer.subscribe(broadcast: consumer, delay: delay)
+            var read: [String] = []
+            var last: UInt64 = 0
+            while read.last != "2" {
+                let next = try await reader.next()
+                let update = try XCTUnwrap(next, "\(delay)s delay")
+                XCTAssertNotNil(update.timestamp.scale)
+                XCTAssertGreaterThan(update.timestamp.value, last, "\(delay)s delay")
+                last = update.timestamp.value
+                // The broadcast's first catalog, published before any section, is not one of ours.
+                if let app = update.sections["app"] {
+                    read.append(app)
+                }
+            }
+            reader.cancel()
+            XCTAssertEqual(read, expected, "\(delay)s delay")
+        }
+    }
+
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))

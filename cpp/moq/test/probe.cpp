@@ -186,7 +186,7 @@ void audio_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
 	auto receiver = ok(broadcast->consume(), "audio receiver");
-	auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver).get(), "audio catalog consumer");
+	auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver, {}).get(), "audio catalog consumer");
 	auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "audio catalog producer");
 	moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
 	moq::AudioEncoderOutput output{};

@@ -92,10 +92,17 @@ extension Json {
         let ffi: MoqJsonSnapshotConsumer
 
         /// Subscribe to the track `name` on `broadcast` and read it as a JSON snapshot track.
-        /// The consumer owns its subscription, at a zero `delay.max` and `priority` (higher
-        /// first); a read waits for it to resolve and throws if it cannot.
-        public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0) throws {
-            ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, priority: priority)
+        /// The consumer owns its subscription, at `priority` (higher first) and `delay`; a read
+        /// waits for it to resolve and throws if it cannot.
+        ///
+        /// `delay` is the reader's playout delay behind the live edge in seconds, the
+        /// subscription's `delay.min` and `delay.max`. Zero skips a snapshot the moment a newer
+        /// one arrives. A reader that holds each snapshot until media reaches its timestamp sets
+        /// its delay, so a superseded snapshot it may still need stays deliverable that long and
+        /// `next()` yields it.
+        public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0, delay: TimeInterval = 0) throws {
+            let config = MoqJsonSnapshotConsumerConfig(priority: priority, delay: delay)
+            ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, config: config)
         }
 
         /// The next state in order, or `nil` once the track ends or is closed.

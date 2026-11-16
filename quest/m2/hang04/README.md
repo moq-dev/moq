@@ -45,5 +45,4 @@ Public API: each child's. Wire: the hang-04 catalog JSON, unpublished.
 
 ## Related
 
-- [hang applies catalog updates at their timestamp](/quest/m2/catalog-at-timestamp.md) - the other catalog rule that freezes with hang-04
 - [Media consumers address groups by start](/quest/m2/time-addressing/consumers.md) - removes the markers from the draft's container rules
