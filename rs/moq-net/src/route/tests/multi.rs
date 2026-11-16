@@ -5,9 +5,13 @@
 //! belong to the relay it connects to, which announces them under its own Node ID
 //! and revision. A route carries its path, drain, priority, and cost, and a node
 //! never uses one whose path names it. A closed session is named once per
-//! neighbour in a fixed-size [`Msg::Dead`], and a route through that hop is unusable
-//! until the neighbour that offered it says what became of it. There is no hold, no
-//! doubt, and no timer: [`Router`] has no clock.
+//! neighbour in a fixed-size [`Msg::Dead`], which ends every route its sender offered
+//! through that hop; one another neighbour offered is unusable until that neighbour
+//! says what became of it. There is no hold, no doubt, and no timer: [`Router`] has
+//! no clock.
+//!
+//! [`Tune`] holds what the bake-off tried on top of the rule as written, each
+//! switched on its own so its cost and gain are measured apart. None is a timer.
 //!
 //! Across a scoped grant only claims travel: the receiver announces each again
 //! under its own Node ID with the chain of nodes that did so, and refuses one whose
@@ -48,6 +52,11 @@ pub(super) struct Tune {
 	/// offered one through it has said so too: it uses its new routes at once and
 	/// advertises them once the news has settled around it.
 	pub quiet: bool,
+	/// A node keeps, per pair of nodes it heard a closed session for, the highest
+	/// session known closed, and refuses any path naming that pair at or below it,
+	/// for good: sessions between a pair are numbered upward, so the fact carries
+	/// its own order and no stale offer revives the path.
+	pub floor: bool,
 	/// A node advertises once it has read everything delivered to it, not after
 	/// every message.
 	pub batch: bool,
@@ -244,6 +253,8 @@ pub(super) struct Kept {
 	pub foreign: usize,
 	/// Dead hops and suspected nodes.
 	pub pending: usize,
+	/// Pairs of nodes with a session known closed, kept for good.
+	pub closed: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +268,8 @@ pub(super) struct Router<N> {
 	dead: BTreeMap<Hop, Id>,
 	/// Nodes at the far end of a closed session, by the near ends that said so.
 	suspects: BTreeMap<Id, BTreeSet<Hop>>,
+	/// The highest session known closed that the first node held to the second.
+	closed: BTreeMap<(Id, Id), u64>,
 	/// Nodes named as draining that some heard route still crosses.
 	draining: BTreeSet<Id>,
 	/// Forwarding nodes whose route changed since the neighbours were last told.
@@ -296,6 +309,7 @@ impl<N: Key> Router<N> {
 			heard: BTreeMap::new(),
 			dead: BTreeMap::new(),
 			suspects: BTreeMap::new(),
+			closed: BTreeMap::new(),
 			draining: BTreeSet::new(),
 			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
@@ -466,7 +480,9 @@ impl<N: Key> Router<N> {
 		let role = peer.port.role;
 		match msg {
 			Msg::Route { origin, offer } if role == Role::Routing => self.route(from, origin, offer),
-			Msg::Claims { origin, changes, floor } if role == Role::Routing => self.claims(from, origin, changes, floor),
+			Msg::Claims { origin, changes, floor } if role == Role::Routing => {
+				self.claims(from, origin, changes, floor)
+			}
 			Msg::Dead { hop, far } if role == Role::Routing => self.closed(hop, far, Some(from)),
 			Msg::Drain { node } if role == Role::Routing => self.drains(node, Some(from)),
 			Msg::Foreign { changes } if role != Role::Routing => self.adopt(from, changes),
@@ -722,6 +738,10 @@ impl<N: Key> Router<N> {
 				heard.ended |= heard.offer.path.contains(&hop);
 			}
 		}
+		if self.tune.floor {
+			let highest = self.closed.entry((hop.node, far)).or_default();
+			*highest = (*highest).max(hop.session);
+		}
 		let named = (self.heard.values())
 			.flat_map(BTreeMap::values)
 			.any(|heard| !heard.ended && heard.offer.path.contains(&hop));
@@ -745,13 +765,18 @@ impl<N: Key> Router<N> {
 			}
 			for peer in tell {
 				self.out.push((peer, Msg::Dead { hop, far }));
-				for offer in self.sent.get_mut(&peer).into_iter().flat_map(BTreeMap::values_mut) {
+				for (origin, offer) in self.sent.get_mut(&peer).into_iter().flatten() {
 					if offer.as_ref().is_some_and(|offer| offer.path.contains(&hop)) {
 						*offer = None;
+						// Owed its next offer, or its explicit end.
+						self.stale.insert(*origin);
 					}
 				}
 			}
-			let answered = self.dead.iter().any(|(word, about)| word.node == far && *about == hop.node);
+			let answered = self
+				.dead
+				.iter()
+				.any(|(word, about)| word.node == far && *about == hop.node);
 			if self.tune.suspect != Suspect::Never && !answered {
 				self.suspects.entry(far).or_default().insert(hop);
 			}
@@ -767,7 +792,12 @@ impl<N: Key> Router<N> {
 		}
 		let mut hops = BTreeSet::new();
 		let mut nodes = BTreeSet::new();
-		for heard in self.heard.values().flat_map(BTreeMap::values).filter(|heard| !heard.ended) {
+		for heard in self
+			.heard
+			.values()
+			.flat_map(BTreeMap::values)
+			.filter(|heard| !heard.ended)
+		{
 			for hop in &heard.offer.path {
 				hops.insert(*hop);
 				nodes.insert(hop.node);
@@ -796,10 +826,16 @@ impl<N: Key> Router<N> {
 				continue;
 			};
 			let offer = &heard.offer;
-			if heard.ended {
+			let floored = offer.path.windows(2).any(|pair| {
+				(self.closed.get(&(pair[1].node, pair[0].node))).is_some_and(|highest| pair[1].session <= *highest)
+			});
+			if heard.ended || floored {
 				continue;
 			}
-			if offer.names(self.me) || offer.path.len() >= MAX_HOPS || offer.path.iter().any(|hop| self.dead.contains_key(hop)) {
+			if offer.names(self.me)
+				|| offer.path.len() >= MAX_HOPS
+				|| offer.path.iter().any(|hop| self.dead.contains_key(hop))
+			{
 				continue;
 			}
 			if self.tune.agree && !self.agrees(origin, via, offer) {
@@ -821,7 +857,14 @@ impl<N: Key> Router<N> {
 			};
 			let (draining, priority, cost) = mine.rank();
 			// Among equal ranks a node stays on its next hop.
-			let key = (draining, priority, cost, current != Some(via), mine.offer.path.len(), via);
+			let key = (
+				draining,
+				priority,
+				cost,
+				current != Some(via),
+				mine.offer.path.len(),
+				via,
+			);
 			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
 				pick = Some((mine, key));
 			}
@@ -853,13 +896,15 @@ impl<N: Key> Router<N> {
 		let Some(offers) = self.heard.get(&origin) else {
 			return true;
 		};
-		(offers.iter()).filter(|(peer, own)| **peer != via && !own.ended).all(|(peer, own)| {
-			let id = self.peers[peer].id;
-			match offer.path.iter().position(|hop| hop.node == id) {
-				Some(at) => offer.path[..=at] == own.offer.path[..],
-				None => true,
-			}
-		})
+		(offers.iter())
+			.filter(|(peer, own)| **peer != via && !own.ended)
+			.all(|(peer, own)| {
+				let id = self.peers[peer].id;
+				match offer.path.iter().position(|hop| hop.node == id) {
+					Some(at) => offer.path[..=at] == own.offer.path[..],
+					None => true,
+				}
+			})
 	}
 
 	/// What `peer` should hear of `origin` now.
@@ -959,16 +1004,6 @@ impl<N: Key> Router<N> {
 		}
 	}
 
-	/// The neighbour this node routes `origin` through.
-	pub fn via(&self, origin: Id) -> Option<N> {
-		self.best.get(&origin).map(|best| best.via)
-	}
-
-	/// The cost of the route this node uses to `origin`.
-	pub fn cost(&self, origin: Id) -> Option<Metric> {
-		self.best.get(&origin).map(|best| best.offer.cost)
-	}
-
 	/// Bring what a reader sees, and what scoped neighbours are told, up to date.
 	fn refresh(&mut self) {
 		while let Some(broadcast) = self.dirty.pop_first() {
@@ -1066,6 +1101,7 @@ impl<N: Key> Router<N> {
 			heard: heard().map(|heard| heard.items.len()).sum(),
 			foreign: self.foreign.values().map(BTreeMap::len).sum(),
 			pending: self.dead.len() + self.suspects.len() + self.draining.len(),
+			closed: self.closed.len(),
 		}
 	}
 }
@@ -1075,7 +1111,10 @@ impl<N: Key> Router<N> {
 enum Spot {
 	Relay(Box<Router<Node>>),
 	/// A publisher: an endpoint that never forwards.
-	Endpoint { id: Option<Id>, claims: BTreeSet<Path> },
+	Endpoint {
+		id: Option<Id>,
+		claims: BTreeSet<Path>,
+	},
 }
 
 /// How one side of a link relates to the other.
@@ -1339,20 +1378,6 @@ impl MultiSim {
 		true
 	}
 
-	/// Deliver in rounds until every unheld queue is empty. False if that never happens.
-	pub fn run(&mut self) -> bool {
-		for _ in 0..10_000 {
-			let ready = self.ready();
-			if ready.is_empty() {
-				return true;
-			}
-			for ((from, to), _) in ready {
-				self.deliver(from, to);
-			}
-		}
-		false
-	}
-
 	fn live(&self, broadcast: &Broadcast) -> bool {
 		self.spots.iter().enumerate().any(|(node, spot)| match spot {
 			Spot::Endpoint { id, claims } => {
@@ -1428,7 +1453,11 @@ impl MultiSim {
 	}
 
 	pub fn work(&self) -> usize {
-		self.spent + (0..self.spots.len()).filter_map(|node| self.router(node)).map(Router::work).sum::<usize>()
+		self.spent
+			+ (0..self.spots.len())
+				.filter_map(|node| self.router(node))
+				.map(Router::work)
+				.sum::<usize>()
 	}
 
 	pub fn kept(&self) -> Kept {
@@ -1442,6 +1471,7 @@ impl MultiSim {
 			out.heard += kept.heard;
 			out.foreign += kept.foreign;
 			out.pending += kept.pending;
+			out.closed += kept.closed;
 		}
 		out
 	}
@@ -1466,5 +1496,8 @@ pub(super) fn revivals(events: &[Seen]) -> usize {
 
 /// Ends shown while a connected publisher still claimed the broadcast.
 pub(super) fn false_ends(events: &[Seen]) -> usize {
-	events.iter().filter(|event| event.kind == Kind::End && event.live).count()
+	events
+		.iter()
+		.filter(|event| event.kind == Kind::End && event.live)
+		.count()
 }

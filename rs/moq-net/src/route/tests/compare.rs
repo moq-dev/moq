@@ -28,14 +28,16 @@ impl Arm {
 	pub const PLAIN: Self = Self::Multi(Tune {
 		suspect: Suspect::Never,
 		quiet: false,
+		floor: false,
 		batch: false,
 		agree: false,
 		drain: false,
 	});
 	/// The epic's rule with what the bake-off found worth adding.
 	pub const TUNED: Self = Self::Multi(Tune {
-		suspect: Suspect::Flagged,
-		quiet: true,
+		suspect: Suspect::Never,
+		quiet: false,
+		floor: true,
 		batch: true,
 		agree: false,
 		drain: true,
@@ -57,6 +59,7 @@ impl Arm {
 			(tune.suspect == Suspect::Flagged, "+suspect"),
 			(tune.suspect == Suspect::Local, "+local"),
 			(tune.quiet, "+quiet"),
+			(tune.floor, "+floor"),
 			(tune.batch, "+batch"),
 			(tune.agree, "+agree"),
 			(tune.drain, "+drain"),
@@ -87,6 +90,8 @@ pub(super) struct Held {
 	pub claims: usize,
 	/// What waits on another node: dead hops, doubts, and suspected nodes.
 	pub pending: usize,
+	/// What is kept for good: pairs of nodes with a session known closed.
+	pub lasting: usize,
 }
 
 /// What readers were shown that the publishers never did.
@@ -312,6 +317,7 @@ impl Net for Sim {
 			routes: kept.routes,
 			claims: kept.items + kept.heard + kept.sent,
 			pending: kept.dead + kept.doubt + kept.draining,
+			lasting: 0,
 		}
 	}
 
@@ -421,6 +427,7 @@ impl Net for MultiSim {
 			routes: kept.routes,
 			claims: kept.items + kept.heard + kept.foreign,
 			pending: kept.pending,
+			lasting: kept.closed,
 		}
 	}
 

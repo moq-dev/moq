@@ -21,21 +21,25 @@ fn arms() -> Vec<Arm> {
 		Arm::with(|tune| tune.suspect = Suspect::Flagged),
 		Arm::with(|tune| tune.suspect = Suspect::Local),
 		Arm::with(|tune| tune.quiet = true),
+		Arm::with(|tune| tune.floor = true),
 		Arm::with(|tune| tune.batch = true),
 		Arm::with(|tune| tune.agree = true),
 		Arm::with(|tune| tune.drain = true),
 		Arm::with(|tune| {
 			tune.quiet = true;
 			tune.batch = true;
-			tune.drain = true;
 		}),
 		Arm::with(|tune| {
-			tune.suspect = Suspect::Local;
-			tune.quiet = true;
+			tune.floor = true;
+			tune.batch = true;
+		}),
+		Arm::TUNED,
+		Arm::with(|tune| {
+			tune.suspect = Suspect::Flagged;
+			tune.floor = true;
 			tune.batch = true;
 			tune.drain = true;
 		}),
-		Arm::TUNED,
 	]
 }
 
@@ -115,7 +119,11 @@ fn chords(relays: usize, publishers: usize) -> Mesh {
 	}
 	Mesh {
 		relays,
-		links: links.into_iter().filter(|(a, b)| a != b).map(|(a, b)| (a, b, 1)).collect(),
+		links: links
+			.into_iter()
+			.filter(|(a, b)| a != b)
+			.map(|(a, b)| (a, b, 1))
+			.collect(),
 		ties: BTreeMap::new(),
 		homes: spread(&(0..relays).collect::<Vec<_>>(), publishers),
 		claims: 1,
@@ -165,7 +173,11 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 		claims: 1,
 	};
 	for at in 0..count {
-		(mesh.links).extend(one.links.iter().map(|&(a, b, cost)| (at * size + a, at * size + b, cost)));
+		(mesh.links).extend(
+			one.links
+				.iter()
+				.map(|&(a, b, cost)| (at * size + a, at * size + b, cost)),
+		);
 		if at + 1 == count && !(ring && count > 2) {
 			continue;
 		}
@@ -286,6 +298,8 @@ struct Row {
 	faults: Faults,
 	/// Dead hops, doubts, and suspected nodes left once it settled.
 	pending: usize,
+	/// Pairs of nodes with a session known closed, kept for good.
+	lasting: usize,
 	/// The hops every relay's request crosses once it settled, summed.
 	hops: usize,
 	/// Whether every relay with a path routed to its publisher once it settled.
@@ -303,6 +317,7 @@ fn observe(lab: &mut Lab, change: &dyn Fn(&mut Lab)) -> Row {
 			revivals: after.revivals - before.revivals,
 		},
 		pending: lab.net.held().pending,
+		lasting: lab.net.held().lasting,
 		hops: lab.hops(),
 		right: match cost.settled {
 			true => lab.check(),
@@ -477,42 +492,118 @@ fn the_prototype_settles_after_churn() {
 	}
 }
 
-/// The prototype carries every failure on every shape: it settles, every relay with a
-/// path routes to its publisher, and no reader sees an end the publisher never made
-/// or a life it had seen end.
-#[test]
-fn the_prototype_carries_every_failure_on_every_shape() {
-	for shape in shapes(12, 2) {
-		for arm in MULTI {
-			for (failure, row) in fail(arm, &shape.mesh, false) {
-				let case = format!("{}: {} on {}", arm.name(), failure.as_str(), shape.name);
-				assert_eq!(row.right, Ok(()), "{case}");
-				assert_eq!(row.faults, Faults::default(), "{case}");
+/// Every failure on every shape under `arm`: it settles, every relay with a path
+/// routes to its publisher, and no reader sees an end the publisher never made or a
+/// life it had seen end. On three meshes in a ring that includes the chain stopping
+/// a claim circling: once the publisher leaves, every relay lets go.
+fn carries(arm: Arm, relays: usize) {
+	for shape in shapes(relays, 2) {
+		for (failure, row) in fail(arm, &shape.mesh, relays > 16) {
+			let case = format!("{}: {} on {}", arm.name(), failure.as_str(), shape.name);
+			assert_eq!(row.right, Ok(()), "{case}");
+			assert_eq!(row.faults, Faults::default(), "{case}");
+			// A relay that sent GOAWAY stays named while routes cross it.
+			if failure != Failure::Goaway {
+				assert_eq!(row.pending, 0, "{case}");
 			}
 		}
 	}
 }
 
+#[test]
+fn the_prototype_carries_every_failure_on_every_shape() {
+	for arm in MULTI {
+		carries(arm, 9);
+	}
+}
+
+/// The same at the quest's largest size, for the rule the bake-off recommends.
+#[test]
+#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+fn sweep_the_prototype_carries_every_failure_at_32_relays() {
+	carries(Arm::TUNED, 32);
+}
+
+/// A publisher is an endpoint of its relay, so one leaving, moving, or losing a home
+/// changes claims and no route, however the mesh is shaped.
+#[test]
+fn an_endpoint_changes_no_route() {
+	for shape in shapes(9, 2) {
+		for (failure, row) in fail(Arm::TUNED, &shape.mesh, false) {
+			if matches!(
+				failure,
+				Failure::Leave | Failure::Move | Failure::LoseOne | Failure::LoseBoth
+			) {
+				assert_eq!(row.cost.sent.msgs, 0, "{} on {}", failure.as_str(), shape.name);
+			}
+		}
+	}
+}
+
+/// A failure costs route messages per forwarding node, never per publisher behind it.
+#[test]
+fn a_failure_costs_the_same_with_more_publishers() {
+	let cost = |publishers: usize| {
+		let mesh = tiers(3, 3, true, publishers);
+		let rows = fail(Arm::TUNED, &mesh, false);
+		let of = |failure: Failure| {
+			rows.iter()
+				.find(|(found, _)| *found == failure)
+				.map(|(_, row)| row.cost.sent.msgs)
+		};
+		(of(Failure::Close), of(Failure::Partition))
+	};
+	assert_eq!(cost(1), cost(12));
+}
+
+/// Remembering the highest session closed between a pair of nodes stops a stale
+/// offer reviving a path through it, which is most of what the rule as written
+/// hunts through when a relay drains and closes.
+#[test]
+fn a_session_floor_stops_most_of_the_hunting() {
+	let mesh = chords(12, 2);
+	let cost = |arm: Arm| {
+		let rows = fail(arm, &mesh, false);
+		let drained = rows.iter().find(|(failure, _)| *failure == Failure::Drained);
+		drained.expect("a transit relay").1.cost.sent.msgs
+	};
+	let (plain, floored) = (cost(Arm::PLAIN), cost(Arm::with(|tune| tune.floor = true)));
+	assert!(floored * 10 < plain, "{floored} against {plain}");
+}
+
 /// Every failure on every shape, per arm: what it cost and what readers saw.
 #[test]
-#[ignore = "a benchmark; Nightly reports it"]
+#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_failures() {
 	println!(
-		"shape,relays,links,failure,rule,route_messages,claim_messages,settle_ms,fed_ms,unfed,loops,offline,unavailable,false_ends,revivals,pending,hops,right"
+		"shape,relays,links,failure,rule,route_messages,claim_messages,settle_ms,fed_ms,unfed,loops,offline,unavailable,false_ends,revivals,pending,lasting,hops,right"
 	);
 	let sizes: Vec<usize> = std::env::var("MOQ_BAKEOFF_RELAYS").map_or(vec![12, 32], |sizes| {
-		sizes.split(',').map(|size| size.parse().expect("MOQ_BAKEOFF_RELAYS")).collect()
+		sizes
+			.split(',')
+			.map(|size| size.parse().expect("MOQ_BAKEOFF_RELAYS"))
+			.collect()
 	});
 	for relays in sizes {
 		for shape in shapes(relays, 2) {
 			for arm in arms() {
-				if arm == Arm::TODAY && !shape.today {
+				let wanted = |var: &str, name: &str| {
+					std::env::var(var).is_ok_and(|list| !list.split(',').any(|want| want == name))
+				};
+				// Without the session floor and a burst read first, a 32-relay mesh
+				// hunts through millions of messages: the 12-relay rows show it.
+				let hunts = matches!(arm, Arm::Multi(tune) if !(tune.floor && tune.batch));
+				if (arm == Arm::TODAY && !shape.today)
+					|| (relays > 16 && hunts && std::env::var("MOQ_BAKEOFF_ARMS").is_err())
+					|| wanted("MOQ_BAKEOFF_ARMS", &arm.name())
+					|| wanted("MOQ_BAKEOFF_SHAPES", shape.name)
+				{
 					continue;
 				}
 				for (failure, row) in fail(arm, &shape.mesh, relays > 16) {
 					let ms = |rounds: usize| rounds as f64 * HOP.as_secs_f64() * 1000.0;
 					println!(
-						"{},{},{},{},{},{},{},{:.0},{:.0},{},{},{},{},{},{},{},{},{}",
+						"{},{},{},{},{},{},{},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{}",
 						shape.name,
 						shape.mesh.relays,
 						shape.mesh.links.len(),
@@ -529,11 +620,140 @@ fn benchmark_bakeoff_failures() {
 						row.faults.false_ends,
 						row.faults.revivals,
 						row.pending,
+						row.lasting,
 						row.hops,
-						row.right.as_ref().map_or_else(|err| err.replace(',', ";"), |()| "yes".into()),
+						row.right
+							.as_ref()
+							.map_or_else(|err| err.replace(',', ";"), |()| "yes".into()),
 					);
 				}
 			}
 		}
+	}
+}
+
+/// What a mesh costs to build and hold, and what one link closing and one relay
+/// dying cost on it, as relays, publishers, and broadcasts grow.
+#[test]
+#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+fn benchmark_bakeoff_growth() {
+	println!(
+		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_messages,held_routes,held_claims,held_lasting,close_route_messages,death_route_messages,death_claim_messages,work"
+	);
+	let tiers_of = |relays: usize, publishers: usize, claims: usize| {
+		let (regions, edges) = match relays {
+			..24 => (3, 3),
+			24..48 => (4, 6),
+			_ => (6, 8),
+		};
+		Mesh {
+			claims,
+			..tiers(regions, edges, true, publishers)
+		}
+	};
+	let mut cases = Vec::new();
+	cases.extend([15, 32, 60].map(|relays| ("relays", tiers_of(relays, 8, 1))));
+	cases.extend([1, 8, 64, 256].map(|publishers| ("publishers", tiers_of(32, publishers, 1))));
+	cases.extend([1, 8, 64].map(|claims| ("broadcasts", tiers_of(32, 8, claims))));
+	cases.extend([8, 16, 32].map(|relays| ("links", clique(relays, 8))));
+	for (grows, mesh) in cases {
+		for arm in [Arm::TODAY, Arm::TUNED] {
+			let tree = mesh.tree();
+			let mut lab = Lab::new(arm, &mesh);
+			lab.coarse = true;
+			let (built, held) = (lab.net.sent(), lab.net.held());
+			let close = lab.tree_link(0, true, &tree).map(|(a, b)| {
+				let cost = lab.measure(&|lab| lab.cut(a, b));
+				lab.mend(a, b);
+				assert!(lab.settle());
+				cost.sent.msgs
+			});
+			let death = transit(&mesh, &tree).map(|relay| lab.measure(&|lab| lab.crash(relay)));
+			println!(
+				"{grows},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				mesh.relays,
+				mesh.links.len(),
+				mesh.homes.len(),
+				mesh.homes.len() * mesh.claims,
+				arm.name(),
+				built.msgs,
+				built.claims,
+				held.routes,
+				held.claims,
+				lab.net.held().lasting,
+				close.unwrap_or(0),
+				death.map_or(0, |cost| cost.sent.msgs),
+				death.map_or(0, |cost| cost.sent.claims),
+				lab.net.work(),
+			);
+		}
+	}
+}
+
+/// The cases the routes epic measured today's rule on, for both.
+#[test]
+#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+fn benchmark_bakeoff_baseline() {
+	println!("case,rule,route_messages,claim_messages,settle_ms,fed_ms,loops,stale,dark");
+	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
+	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED] {
+		let mut rng = XorShift(0x6d6f_7100 + 24);
+		let sparse: Vec<Mesh> = (0..16).map(|_| Mesh::sparse(24, &mut rng)).collect();
+		let groups = [
+			("sparse_24", sparse),
+			("clique_24", vec![Mesh::clique(24, 1)]),
+			("clique_24_8_publishers", vec![Mesh::clique(24, 8)]),
+		];
+		for (shape, meshes) in &groups {
+			let mut all: BTreeMap<super::compare::Change, Vec<Cost>> = BTreeMap::new();
+			for mesh in meshes {
+				for (change, cost) in run(arm, mesh) {
+					all.entry(change).or_default().push(cost);
+				}
+			}
+			for (change, costs) in all {
+				let mean =
+					|field: fn(&Cost) -> usize| costs.iter().map(field).sum::<usize>() as f64 / costs.len() as f64;
+				println!(
+					"{shape}:{},{},{:.1},{:.1},{:.0},{:.0},{:.1},{:.1},{:.1}",
+					change.as_str(),
+					arm.name(),
+					mean(|cost| cost.sent.msgs),
+					mean(|cost| cost.sent.claims),
+					ms(mean(|cost| cost.rounds)),
+					ms(mean(|cost| cost.right)),
+					mean(|cost| cost.loops),
+					mean(|cost| cost.stale),
+					mean(|cost| cost.dark),
+				);
+			}
+		}
+		// One link comes up on a full mesh of 32.
+		let mut mesh = Mesh::clique(32, 1);
+		mesh.links.retain(|&(a, b, _)| (a, b) != (30, 31));
+		let mut lab = Lab::new(arm, &mesh);
+		let cost = lab.measure(&|lab| lab.attach(30, 31));
+		println!(
+			"clique_32:link_comes_up,{},{},{},{:.0},{:.0},{},{},{}",
+			arm.name(),
+			cost.sent.msgs,
+			cost.sent.claims,
+			ms(cost.rounds as f64),
+			ms(cost.right as f64),
+			cost.loops,
+			cost.stale,
+			cost.dark,
+		);
+		let churn = churn(arm, 0..400, false);
+		println!(
+			"churn_{}_steps,{},{},{},0,0,{},{},{}",
+			churn.steps,
+			arm.name(),
+			churn.sent.msgs,
+			churn.sent.claims,
+			churn.loops,
+			churn.stale,
+			churn.dark,
+		);
 	}
 }

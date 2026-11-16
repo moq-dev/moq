@@ -73,7 +73,7 @@ Settled:
    interoperate for a release; lite-07 without a route layer, a large strip
    that leaves lite-07 clusters with lite-06's hunting). The route stream and
    the acceptance fixtures still land: they are the baseline the
-   [bake-off](/quest/m2/multicast/bakeoff.md) measures against, and one
+   [bake-off](https://github.com/moq-dev/moq/pull/8880) measures against, and one
    announce stream per side is wanted by any design. The quests that only
    polish holds, doubt, or the path router's indexes wait on the bake-off.
 3. ✅ **A routing node is a node that forwards and is trusted to; claims,
