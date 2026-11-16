@@ -27,9 +27,8 @@
 //! ([`super::compare::Arm::KEPT`]), its messages interleaved with these at random.
 
 use std::{
-	cell::RefCell,
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
 };
 
 use super::cache::rendezvous;
@@ -68,6 +67,19 @@ pub(super) enum Audience {
 	Shared,
 	/// Never over a link marked upstream.
 	Down,
+	/// As [`Audience::Useful`], but never to a neighbour whose route runs through this
+	/// relay: its path join lands here anyway, though it then prices this relay cold
+	/// against another warm neighbour.
+	NotNext,
+	/// As [`Audience::Useful`], but never over a link the neighbour marked upstream: an
+	/// edge relies on its path join and the rendezvous hash among equal upstreams.
+	NotDown,
+	/// As [`Audience::NotDown`], and a relay with demand whose route ties between
+	/// upstreams asks them on subscribe, without waiting for their answers.
+	NotDownAsk,
+	/// As [`Audience::NotDown`], and a relay with demand asks every upstream besides the
+	/// one its path join takes, on subscribe, without waiting for their answers.
+	NotDownAskUp,
 }
 
 /// One way to find a warm copy, as measured.
@@ -92,6 +104,10 @@ impl Arm {
 			Mode::Advertise(Audience::Useful) => "advertise_useful".into(),
 			Mode::Advertise(Audience::Shared) => "advertise_shared".into(),
 			Mode::Advertise(Audience::Down) => "advertise_down".into(),
+			Mode::Advertise(Audience::NotNext) => "advertise_not_next".into(),
+			Mode::Advertise(Audience::NotDown) => "advertise_not_down".into(),
+			Mode::Advertise(Audience::NotDownAsk) => "advertise_not_down_ask".into(),
+			Mode::Advertise(Audience::NotDownAskUp) => "advertise_not_down_ask_up".into(),
 		};
 		let hops = if self.hops { "+hops" } else { "" };
 		let merge = if self.merge { "+merge" } else { "" };
@@ -142,13 +158,23 @@ struct Pull {
 	state: State,
 	/// The merge made it, so a cycle through it is one the merge added.
 	merged: bool,
+	/// The relays whose demand alone it carries, as last told the parent.
+	chain: Vec<Node>,
 }
 
 #[derive(Clone, Debug)]
 enum Msg {
+	/// A payload subscription opening, with the relays whose demand alone it carries,
+	/// or closing.
 	Subscribe {
 		stream: u64,
 		open: bool,
+		chain: Vec<Node>,
+	},
+	/// A change to the relays whose demand alone a payload subscription carries.
+	Chain {
+		stream: u64,
+		chain: Vec<Node>,
 	},
 	/// A parent's answer and each change to it: its offer, or that it lost its upstream.
 	Answer {
@@ -195,6 +221,8 @@ struct Carry {
 	next: Option<Pull>,
 	/// What each subscription through it was last answered.
 	answered: BTreeMap<(Node, u64), Option<Signal>>,
+	/// The relays whose demand alone each subscription through it carries.
+	chains: BTreeMap<(Node, u64), Vec<Node>>,
 	/// Neighbours it asks, with each one's latest word.
 	asks: BTreeMap<Node, Option<Signal>>,
 	/// The query it holds open to each.
@@ -213,9 +241,36 @@ impl Carry {
 		self.reader || !self.down.is_empty()
 	}
 
-	/// Demand besides `peer`'s.
+	/// Demand besides `peer`'s, counting a pull that carries only demand passing
+	/// through `peer` as `peer`'s: otherwise `peer`'s own pull through another neighbour
+	/// would make this relay's offer to `peer` warm, and `peer` would move here and back
+	/// for good.
 	fn others(&self, peer: Node) -> bool {
-		self.reader || self.down.keys().any(|&child| child != peer)
+		self.reader
+			|| (self.down.iter()).any(|(&child, streams)| {
+				child != peer
+					&& (streams.iter()).any(|&stream| {
+						!self
+							.chains
+							.get(&(child, stream))
+							.is_some_and(|chain| chain.contains(&peer))
+					})
+			})
+	}
+
+	/// The relays whose demand alone `node`'s pull carries: each below it with one
+	/// neighbour pulling and no reader, down to the first with a reader or more than one,
+	/// then `node`.
+	fn chain(&self, node: Node) -> Vec<Node> {
+		let mut children = self.down.iter();
+		let mut chain = match (self.reader, children.next(), children.next()) {
+			(false, Some((&child, streams)), None) => (streams.last())
+				.and_then(|&stream| self.chains.get(&(child, stream)).cloned())
+				.unwrap_or_else(|| vec![child]),
+			_ => Vec::new(),
+		};
+		chain.push(node);
+		chain
 	}
 }
 
@@ -231,16 +286,18 @@ pub(super) struct Sent {
 	/// Their answers and updates.
 	pub told: usize,
 	pub adverts: usize,
+	/// Updates to the relays whose demand alone a payload subscription carries.
+	pub chains: usize,
 }
 
 impl Sent {
 	pub fn total(self) -> usize {
-		self.subscribes + self.answers + self.asks + self.told + self.adverts
+		self.subscribes + self.answers + self.warm()
 	}
 
-	/// What only a warm signal costs: queries, their answers, and adverts.
+	/// What only a warm signal costs: queries, their answers, adverts, and chain updates.
 	pub fn warm(self) -> usize {
-		self.asks + self.told + self.adverts
+		self.asks + self.told + self.adverts + self.chains
 	}
 }
 
@@ -254,6 +311,7 @@ impl std::ops::Add for Sent {
 			asks: self.asks + more.asks,
 			told: self.told + more.told,
 			adverts: self.adverts + more.adverts,
+			chains: self.chains + more.chains,
 		}
 	}
 }
@@ -268,6 +326,7 @@ impl std::ops::Sub for Sent {
 			asks: self.asks - was.asks,
 			told: self.told - was.told,
 			adverts: self.adverts - was.adverts,
+			chains: self.chains - was.chains,
 		}
 	}
 }
@@ -364,11 +423,11 @@ pub(super) struct WarmSim {
 	prices: BTreeMap<(Node, Node), Price>,
 	/// Links marked upstream.
 	marked: BTreeSet<(Node, Node)>,
+	/// The same, as the relay that marked it and its upstream.
+	upstream: BTreeSet<(Node, Node)>,
 	open: BTreeSet<(Node, Node)>,
 	/// Each node's open links.
 	adjacent: Vec<BTreeSet<Node>>,
-	/// Cheapest cold costs between nodes over open links, until one opens or closes.
-	distances: RefCell<Option<Vec<Vec<Metric>>>>,
 	casts: Vec<Broadcast>,
 	carry: Vec<BTreeMap<usize, Carry>>,
 	queues: BTreeMap<Key, VecDeque<(usize, Msg)>>,
@@ -378,6 +437,9 @@ pub(super) struct WarmSim {
 	dirty: BTreeSet<(Node, usize)>,
 	/// Broadcasts whose pulls changed since cycles were last looked for.
 	changed: BTreeSet<usize>,
+	/// The relays holding state for each broadcast, as of the last step: only they
+	/// can pull, so only they can circle.
+	members: BTreeMap<usize, BTreeSet<Node>>,
 	/// Broadcasts whose pulls circle: whether a reader's lead into it, and whether it
 	/// holds a pull the merge made.
 	circling: BTreeMap<usize, (bool, bool)>,
@@ -402,15 +464,16 @@ impl WarmSim {
 			homes: BTreeMap::new(),
 			prices: BTreeMap::new(),
 			marked: BTreeSet::new(),
+			upstream: BTreeSet::new(),
 			open: BTreeSet::new(),
 			adjacent: vec![BTreeSet::new(); nodes],
-			distances: RefCell::new(None),
 			casts: Vec::new(),
 			carry: vec![BTreeMap::new(); nodes],
 			queues: BTreeMap::new(),
 			streams: 0,
 			dirty: BTreeSet::new(),
 			changed: BTreeSet::new(),
+			members: BTreeMap::new(),
 			circling: BTreeMap::new(),
 			sent: Sent::default(),
 			watch: Watch::default(),
@@ -428,6 +491,7 @@ impl WarmSim {
 		self.prices.insert(pair(a, b), price);
 		if tie == Tie::Up {
 			self.marked.insert(pair(a, b));
+			self.upstream.insert((a, b));
 		}
 		self.join(a, b);
 		self.net.link(a, b, price.cold, tie);
@@ -437,14 +501,12 @@ impl WarmSim {
 		self.open.insert(pair(a, b));
 		self.adjacent[a].insert(b);
 		self.adjacent[b].insert(a);
-		self.distances.replace(None);
 	}
 
 	fn part(&mut self, a: Node, b: Node) {
 		self.open.remove(&pair(a, b));
 		self.adjacent[a].remove(&b);
 		self.adjacent[b].remove(&a);
-		self.distances.replace(None);
 	}
 
 	/// Every broadcast `node` holds state for reacts next, as when its routes change.
@@ -509,6 +571,7 @@ impl WarmSim {
 		}
 		match &msg {
 			Msg::Subscribe { .. } => self.sent.subscribes += 1,
+			Msg::Chain { .. } => self.sent.chains += 1,
 			Msg::Answer { .. } => self.sent.answers += 1,
 			Msg::Ask { .. } => self.sent.asks += 1,
 			Msg::Told { .. } => self.sent.told += 1,
@@ -517,6 +580,7 @@ impl WarmSim {
 		// The announce stream is one per session, whatever the broadcast.
 		let stream = match &msg {
 			Msg::Subscribe { stream, .. }
+			| Msg::Chain { stream, .. }
 			| Msg::Answer { stream, .. }
 			| Msg::Ask { stream, .. }
 			| Msg::Told { stream, .. } => *stream as usize,
@@ -605,7 +669,10 @@ impl WarmSim {
 			Mode::Ask(_) => (carry.asks.iter())
 				.filter_map(|(&peer, signal)| Some((peer, signal.as_ref()?)))
 				.collect(),
-			Mode::Advertise(_) => carry.heard.iter().map(|(&peer, signal)| (peer, signal)).collect(),
+			// Adverts, and what any upstream it asked said.
+			Mode::Advertise(_) => (carry.heard.iter().map(|(&peer, signal)| (peer, signal)))
+				.chain((carry.asks.iter()).filter_map(|(&peer, signal)| Some((peer, signal.as_ref()?))))
+				.collect(),
 		};
 		for (via, signal) in heard {
 			if !self.is_open(node, via)
@@ -644,6 +711,7 @@ impl WarmSim {
 		}
 		self.queries(node, cast);
 		self.pull(node, cast);
+		self.own(node, cast);
 		self.answer(node, cast);
 		self.tell(node, cast);
 		self.advertise(node, cast);
@@ -651,11 +719,20 @@ impl WarmSim {
 
 	/// Open and close the metadata-only subscriptions that ask.
 	fn queries(&mut self, node: Node, cast: usize) {
-		let Mode::Ask(count) = self.arm.mode else {
-			return;
+		let (count, patient) = match self.arm.mode {
+			Mode::Ask(count) => (count, true),
+			Mode::Advertise(Audience::NotDownAsk) => (0, false),
+			Mode::Advertise(Audience::NotDownAskUp) => (usize::MAX, false),
+			_ => return,
 		};
 		let carry = self.entry(node, cast).clone();
 		let want: BTreeSet<Node> = match () {
+			// Its upstreams, when its route ties between more than one.
+			_ if !patient => match (carry.demand(), count) {
+				(false, _) => BTreeSet::new(),
+				(true, 0) => self.tied(node, cast),
+				(true, _) => self.upstreams(node, cast),
+			},
 			_ if carry.demand() => {
 				let mut peers: Vec<Node> = self.peers(node).into_iter().filter(|&peer| self.relay(peer)).collect();
 				peers.sort_by_key(|&peer| (self.price(node, peer).cold, Reverse(self.hash(cast, peer)), peer));
@@ -682,27 +759,89 @@ impl WarmSim {
 			let carry = self.entry(node, cast);
 			carry.asks.insert(new, None);
 			carry.asking.insert(new, stream);
-			carry.unanswered.insert(new);
+			if patient {
+				carry.unanswered.insert(new);
+			}
 			self.send(node, new, Lane::Ask, cast, Msg::Ask { stream, open: true });
 		}
+	}
+
+	/// The upstreams `node`'s route to `cast` ties between, if more than one.
+	fn tied(&self, node: Node, cast: usize) -> BTreeSet<Node> {
+		let Some(router) = self.net.router(node) else {
+			return BTreeSet::new();
+		};
+		let Some(origin) = router.pick(&self.casts[cast]) else {
+			return BTreeSet::new();
+		};
+		let tied: BTreeSet<Node> = (router.ties(origin).into_iter())
+			.filter(|&peer| self.upstream.contains(&(node, peer)))
+			.collect();
+		match tied.len() > 1 {
+			true => tied,
+			false => BTreeSet::new(),
+		}
+	}
+
+	/// The upstreams of `node` besides the one its path join to `cast` takes.
+	fn upstreams(&self, node: Node, cast: usize) -> BTreeSet<Node> {
+		let next = self.route(node, cast).map(|(next, _)| next);
+		(self.peers(node).into_iter())
+			.filter(|&peer| self.upstream.contains(&(node, peer)) && Some(peer) != next)
+			.collect()
 	}
 
 	fn subscribe(&mut self, node: Node, cast: usize, via: Node) -> Pull {
 		self.streams += 1;
 		let stream = self.streams;
-		self.send(node, via, Lane::Pull, cast, Msg::Subscribe { stream, open: true });
+		let chain = self
+			.carry(node, cast)
+			.map_or_else(|| vec![node], |carry| carry.chain(node));
+		let open = Msg::Subscribe {
+			stream,
+			open: true,
+			chain: chain.clone(),
+		};
+		self.send(node, via, Lane::Pull, cast, open);
 		Pull {
 			via,
 			stream,
 			state: State::Pending,
 			merged: false,
+			chain,
+		}
+	}
+
+	/// Tell each parent when the relays whose demand alone its pull carries change.
+	fn own(&mut self, node: Node, cast: usize) {
+		// A join along the route prices nothing, so it needs no chain.
+		if self.arm.mode == Mode::Path {
+			return;
+		}
+		let carry = self.entry(node, cast);
+		let chain = carry.chain(node);
+		let mut told = Vec::new();
+		for pull in [&mut carry.up, &mut carry.next].into_iter().flatten() {
+			if pull.chain != chain {
+				pull.chain = chain.clone();
+				told.push((pull.via, pull.stream));
+			}
+		}
+		for (via, stream) in told {
+			let chain = chain.clone();
+			self.send(node, via, Lane::Pull, cast, Msg::Chain { stream, chain });
 		}
 	}
 
 	fn unsubscribe(&mut self, node: Node, cast: usize, pull: Option<Pull>) {
 		if let Some(pull) = pull {
 			let stream = pull.stream;
-			self.send(node, pull.via, Lane::Pull, cast, Msg::Subscribe { stream, open: false });
+			let close = Msg::Subscribe {
+				stream,
+				open: false,
+				chain: Vec::new(),
+			};
+			self.send(node, pull.via, Lane::Pull, cast, close);
 		}
 	}
 
@@ -903,18 +1042,24 @@ impl WarmSim {
 
 	/// Whether `audience` lets `node` advertise `signal` to `peer`.
 	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
+		let price = signal.cost + self.price(node, peer).cold;
+		let heard = self
+			.net
+			.router(node)
+			.and_then(|router| router.heard(&self.casts[cast], peer));
+		let useful = || match heard {
+			Some((cost, false)) => price <= cost,
+			// Its route runs through this relay, which a neighbour offers nobody back: it
+			// costs this relay's route and the link, so only an offer below that route
+			// can beat it.
+			_ => self.route(node, cast).is_none_or(|(_, cost)| signal.cost < cost),
+		};
 		match audience {
 			Audience::All => true,
-			Audience::Useful => {
-				let price = signal.cost + self.price(node, peer).cold;
-				let router = self.net.router(node);
-				match router.and_then(|router| router.heard(&self.casts[cast], peer)) {
-					Some((cost, false)) => price <= cost,
-					// Its route runs through this relay, which a neighbour offers nobody
-					// back: it costs this relay's route and the link, so only an offer
-					// below that route can beat it.
-					_ => self.route(node, cast).is_none_or(|(_, cost)| signal.cost < cost),
-				}
+			Audience::Useful => useful(),
+			Audience::NotNext => matches!(heard, Some((cost, false)) if price <= cost),
+			Audience::NotDown | Audience::NotDownAsk | Audience::NotDownAskUp => {
+				!self.upstream.contains(&(peer, node)) && useful()
 			}
 			Audience::Shared => self.carry(node, cast).is_some_and(|carry| {
 				let children = carry.down.keys().filter(|&&child| child != peer).count();
@@ -939,13 +1084,18 @@ impl WarmSim {
 			if self.carry(node, cast).is_some_and(|carry| *carry == Carry::default()) {
 				self.carry[node].remove(&cast);
 			}
+			let members = self.members.entry(cast).or_default();
+			match self.carry[node].contains_key(&cast) {
+				true => members.insert(node),
+				false => members.remove(&node),
+			};
 		}
 	}
 
 	fn recv(&mut self, from: Node, to: Node, cast: usize, msg: Msg) {
 		self.dirty.insert((to, cast));
 		// A publisher answers at once.
-		if let Msg::Subscribe { stream, open: true } = msg
+		if let Msg::Subscribe { stream, open: true, .. } = msg
 			&& !self.relay(to)
 		{
 			let offer = self.offer(to, cast, from);
@@ -953,12 +1103,26 @@ impl WarmSim {
 		}
 		let carry = self.entry(to, cast);
 		match msg {
-			Msg::Subscribe { stream, open: true } => {
+			Msg::Subscribe {
+				stream,
+				open: true,
+				chain,
+			} => {
 				carry.down.entry(from).or_default().insert(stream);
+				carry.chains.insert((from, stream), chain);
 			}
-			Msg::Subscribe { stream, open: false } => {
+			// Only while the subscription is open: it may have closed since.
+			Msg::Chain { stream, chain } => {
+				if carry.down.get(&from).is_some_and(|streams| streams.contains(&stream)) {
+					carry.chains.insert((from, stream), chain);
+				}
+			}
+			Msg::Subscribe {
+				stream, open: false, ..
+			} => {
 				close(&mut carry.down, from, stream);
 				carry.answered.remove(&(from, stream));
+				carry.chains.remove(&(from, stream));
 			}
 			Msg::Answer { stream, offer } => {
 				for pull in [&mut carry.up, &mut carry.next].into_iter().flatten() {
@@ -1026,6 +1190,7 @@ impl WarmSim {
 				}
 				carry.down.remove(&y);
 				carry.answered.retain(|&(child, _), _| child != y);
+				carry.chains.retain(|&(child, _), _| child != y);
 				carry.asks.remove(&y);
 				carry.unanswered.remove(&y);
 				carry.asking.remove(&y);
@@ -1221,26 +1386,25 @@ impl WarmSim {
 
 	/// Whether following `node`'s pulls for `cast` goes round a cycle.
 	fn circles(&self, node: Node, cast: usize) -> bool {
+		self.cycle(node, cast).is_some()
+	}
+
+	/// A relay on the cycle `node`'s pulls for `cast` run into, if they do.
+	fn cycle(&self, node: Node, cast: usize) -> Option<Node> {
+		let mut seen = BTreeSet::new();
 		let mut at = node;
-		for _ in 0..=self.nodes {
-			match self.parent(at, cast) {
-				Some(next) => at = next,
-				None => return false,
-			}
+		while seen.insert(at) {
+			at = self.parent(at, cast)?;
 		}
-		true
+		Some(at)
 	}
 
 	/// Whether the cycle `node`'s pulls for `cast` run into holds a pull the merge made.
 	fn merged(&self, node: Node, cast: usize) -> bool {
-		let mut at = node;
-		for _ in 0..=self.nodes {
-			match self.parent(at, cast) {
-				Some(next) => at = next,
-				None => return false,
-			}
-		}
-		let start = at;
+		let Some(start) = self.cycle(node, cast) else {
+			return false;
+		};
+		let mut at = start;
 		loop {
 			let Some(pull) = self.carry(at, cast).and_then(|carry| carry.up.as_ref()) else {
 				return false;
@@ -1271,7 +1435,8 @@ impl WarmSim {
 	fn observe(&mut self) {
 		self.watch.steps += 1;
 		for cast in std::mem::take(&mut self.changed) {
-			let circling: Vec<Node> = (0..self.relays).filter(|&node| self.circles(node, cast)).collect();
+			let members = self.members.get(&cast).into_iter().flatten();
+			let circling: Vec<Node> = members.copied().filter(|&node| self.circles(node, cast)).collect();
 			match circling.is_empty() {
 				true => self.circling.remove(&cast),
 				false => {
@@ -1294,16 +1459,21 @@ impl WarmSim {
 	/// The relays a path over open links joins to `cast`'s publisher.
 	fn reach(&self, cast: usize) -> BTreeSet<Node> {
 		let start = self.endpoints[&self.casts[cast].0];
-		let mut seen = BTreeSet::from([start]);
-		let mut queue = vec![start];
-		while let Some(at) = queue.pop() {
+		// A route that came down a link marked upstream never goes back up one.
+		let mut seen = BTreeSet::from([(start, false)]);
+		let mut queue = vec![(start, false)];
+		while let Some((at, marked)) = queue.pop() {
 			for peer in self.peers(at) {
-				if self.relay(peer) && seen.insert(peer) {
-					queue.push(peer);
+				if !self.relay(peer) || (marked && self.upstream.contains(&(at, peer))) {
+					continue;
+				}
+				let next = (peer, marked || self.upstream.contains(&(peer, at)));
+				if seen.insert(next) {
+					queue.push(next);
 				}
 			}
 		}
-		seen
+		seen.into_iter().map(|(node, _)| node).collect()
 	}
 
 	/// Count unfed readers as a round ends, and the first frames that arrived.
@@ -1406,46 +1576,43 @@ impl WarmSim {
 		}
 	}
 
-	/// The cheapest tree joining `cast`'s publisher to every relay reading it, over open
-	/// links at their cold prices: Dreyfus and Wagner's exact dynamic program.
-	/// The cheapest cold cost between every two nodes over open links, through relays.
-	fn distances(&self) -> Vec<Vec<Metric>> {
-		if let Some(dist) = self.distances.borrow().as_ref() {
-			return dist.clone();
-		}
-		let n = self.nodes;
-		let mut dist = vec![vec![Metric::MAX / 4; n]; n];
-		for (node, row) in dist.iter_mut().enumerate() {
-			row[node] = 0;
-		}
-		for &(a, b) in &self.open {
-			let cost = self.price(a, b).cold;
-			dist[a][b] = dist[a][b].min(cost);
-			dist[b][a] = dist[b][a].min(cost);
-		}
-		// Only relays forward.
-		for via in (0..n).filter(|&node| self.relay(node)) {
-			for a in 0..n {
-				for b in 0..n {
-					dist[a][b] = dist[a][b].min(dist[a][via] + dist[via][b]);
+	/// Lower each node's cost in `costs` to the cheapest reached from any node over open
+	/// links at their cold prices: Dijkstra from every node at once.
+	fn relax(&self, costs: &mut [Metric]) {
+		let mut heap: BinaryHeap<Reverse<(Metric, Node)>> = (costs.iter().enumerate())
+			.filter(|&(_, &cost)| cost < Metric::MAX / 4)
+			.map(|(node, &cost)| Reverse((cost, node)))
+			.collect();
+		let start = costs.to_vec();
+		while let Some(Reverse((cost, at))) = heap.pop() {
+			// Only relays carry a copy on; an endpoint only starts or ends one.
+			if cost > costs[at] || (!self.relay(at) && cost != start[at]) {
+				continue;
+			}
+			for &peer in &self.adjacent[at] {
+				let next = cost + self.price(at, peer).cold;
+				if next < costs[peer] {
+					costs[peer] = next;
+					heap.push(Reverse((next, peer)));
 				}
 			}
 		}
-		self.distances.replace(Some(dist.clone()));
-		dist
 	}
 
+	/// The cheapest tree joining `cast`'s publisher to every relay reading it, over open
+	/// links at their cold prices: Dreyfus and Wagner's exact dynamic program.
 	pub fn cheapest(&self, cast: usize) -> Metric {
 		let endpoint = self.endpoints[&self.casts[cast].0];
 		let mut terminals = vec![endpoint];
 		terminals.extend((0..self.relays).filter(|&node| self.reading(node, cast)));
 		let n = self.nodes;
-		let dist = self.distances();
 		let count = terminals.len();
 		let full = (1usize << count) - 1;
 		let mut tree = vec![vec![Metric::MAX / 4; n]; full + 1];
 		for (index, &terminal) in terminals.iter().enumerate() {
-			tree[1 << index][..n].copy_from_slice(&dist[terminal]);
+			let row = &mut tree[1 << index];
+			row[terminal] = 0;
+			self.relax(row);
 		}
 		for mask in 1..=full {
 			if mask.count_ones() < 2 {
@@ -1459,10 +1626,9 @@ impl WarmSim {
 				}
 				sub = (sub - 1) & mask;
 			}
-			let row = tree[mask].clone();
-			for at in 0..n {
-				tree[mask][at] = (0..n).map(|from| row[from] + dist[from][at]).min().unwrap_or(row[at]);
-			}
+			let mut row = std::mem::take(&mut tree[mask]);
+			self.relax(&mut row);
+			tree[mask] = row;
 		}
 		tree[full][endpoint]
 	}
