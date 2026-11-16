@@ -1297,30 +1297,32 @@ for (const delivered of [true, false]) {
 // Mirrors `an_unroutable_route_strands_the_track_until_the_table_moves` in rs/moq-net/src/model/front.rs:
 // the same route winning again once the table moves asks it afresh.
 test("a read stranded on a route asks it again once the table moves", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const from = a.consume();
+	const { origin, a, b, active, request, close } = await setup();
 	const first = copy(a);
-	front.serve(from);
-	const sub = front.consumer.track("seq").subscribe();
+	const sub = active.track("seq").subscribe();
 	first.write(0n);
 	await settle();
 	expect(drain(sub)).toEqual([0n]);
 
 	first.producer.abort(new StreamError(StreamCode.Unroutable));
 	await settle();
+	// The route could serve again, but reading the handle is no news: the read keeps waiting.
+	const second = copy(a);
+	second.write(1n);
+	expect(request.active.peek()).toBe(active);
+	await settle();
 	expect(sub.tryRecvGroup()).toBeUndefined();
 	expect(sub.closed.peek()).toBeUndefined();
 
-	const second = copy(a);
-	second.write(1n);
-	front.serve(from);
+	// A dearer route of the instance moves the table while the same route still wins.
+	const disposeB = serve(origin, b, 10n);
+	await settle();
 	await settle();
 	expect(drain(sub)).toEqual([1n]);
 
 	sub.close();
-	front.consumer.close();
-	a.close();
+	disposeB();
+	close();
 });
 
 // A local broadcast's word on a track is its verdict: no route news can overtake it.

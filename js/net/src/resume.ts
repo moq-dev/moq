@@ -285,7 +285,7 @@ class Route {
 
 	/**
 	 * The table moved while `source` still serves: subscribe afresh a read it lost as unroutable.
-	 * Mirrors the Rust front's `unstrand`.
+	 * Mirrors the Rust front's `unstrand`; see {@link Front.moved}.
 	 */
 	unstrand(source: Source): void {
 		if (this.#stranded !== source || this.source !== source) return;
@@ -1975,14 +1975,7 @@ export class Front {
 
 	/** Serve every track from `from` from now on, once each copy proves compatible. */
 	serve(from: broadcast.Consumer, local = false): void {
-		if (this.#concluded) return;
-		// Served again by the same route: the table moved, the evidence a read stranded on it
-		// waits for, so ask it again. Mirrors the Rust front's `unstrand`.
-		const current = this.#source;
-		if (current?.from === from) {
-			for (const route of this.#routes.values()) route.unstrand(current);
-			return;
-		}
+		if (this.#concluded || this.#source?.from === from) return;
 		const source = new Source(from, local);
 		source.retain();
 		const previous = this.#source;
@@ -1990,6 +1983,16 @@ export class Front {
 		this.#retired();
 		for (const route of this.#routes.values()) this.#splice(route, source);
 		previous?.release();
+	}
+
+	/**
+	 * The table moved for the path, whichever route now wins: a read stranded on the source still
+	 * serving asks it again, the evidence it waited for. Mirrors the Rust front's `unstrand`.
+	 */
+	moved(): void {
+		const current = this.#source;
+		if (this.#concluded || !current) return;
+		for (const route of this.#routes.values()) route.unstrand(current);
 	}
 
 	/** Between routes: readers keep what they have and wait for the next one. */

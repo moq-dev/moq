@@ -262,6 +262,11 @@ interface RequestSlot {
 	readonly handles: Set<Once<Error | null>>;
 	/** Pending plain handles, each ending itself once synced discovery leaves it no route. */
 	readonly absent: Set<() => void>;
+	/**
+	 * Called each time the table moves for the path, after the slot re-resolves, even when the
+	 * same route still wins: the evidence a read stranded on that route waits for.
+	 */
+	readonly moved: Set<() => void>;
 	readonly route: Signal<Resolution | undefined>;
 	/** The front a detached slot took from the table, closed with its last handle. */
 	retired?: broadcast.Consumer;
@@ -864,6 +869,11 @@ class OriginState {
 	 * stops serving, it ends, except for an answer retained across an in-place Restart.
 	 */
 	reroute(path: Path.Valid, slot: RequestSlot): void {
+		this.#reroute(path, slot);
+		for (const moved of [...slot.moved]) moved();
+	}
+
+	#reroute(path: Path.Valid, slot: RequestSlot): void {
 		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
 		// A pinned slot follows its instance from the start, and a detached one once it resolved.
@@ -2351,6 +2361,7 @@ export class Consumer implements Reader {
 				blind: 0,
 				handles: new Set(),
 				absent: new Set(),
+				moved: new Set(),
 				route: new Signal<Resolution | undefined>(undefined),
 				pin,
 			};
@@ -2372,6 +2383,7 @@ export class Consumer implements Reader {
 				blind: 0,
 				handles: new Set(),
 				absent: new Set(),
+				moved: new Set(),
 				route: new Signal(this.#state.route(path, {})),
 			};
 			slot = created;
@@ -2459,6 +2471,13 @@ export class Consumer implements Reader {
 			release();
 		};
 		if (!announced) taken.absent.add(absent);
+		// The table moved while the same route may still win: a read stranded on it asks again.
+		// Queued behind the route's own flush, so a route that changed is served first.
+		const moved = () =>
+			queueMicrotask(() => {
+				if (!released) logical?.moved();
+			});
+		taken.moved.add(moved);
 
 		const unsubscribe = route.subscribe((resolution) => {
 			own(resolution);
@@ -2471,6 +2490,7 @@ export class Consumer implements Reader {
 			released = true;
 			unsubscribe();
 			taken.absent.delete(absent);
+			taken.moved.delete(moved);
 			logical?.conclude();
 			logical = undefined;
 			handle?.close();
