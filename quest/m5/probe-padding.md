@@ -14,6 +14,15 @@ probe to the larger of their send target and the peer's PROBE target.
 
 ## Plan
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ lite-07
+freezes without the Padding Stream (0x2) and Padding Datagram (0x1) types,
+removed by [the time-addressing rewrite](/quest/m2/time-addressing/lite07.md)
+(rejected: keep the receive-only types for this quest). Nothing sent either.
+If the rethink below still lands on padding, it adds its stream type in a
+later lite version or a SETUP extension: an unaware peer resets an unknown
+stream type and discards an unknown datagram type, so that costs no message
+a lite-07 peer parses.
+
 Moved to m5 2026-11-12 (maintainer, /quest-audit): parked for a rethink with no named consumer.
 
 Parked 2026-11-06 (maintainer, /quest-unblock): the maintainer doesn't think
@@ -60,7 +69,9 @@ Decided with the maintainer on 2026-10-17 (see the
   lite-05 and lite-06 the peer resets every padding stream, so the estimate
   can never rise. Those sessions have no sender: refuse to pad
   and keep `Report`. Update `drafts/draft-lcurley-moq-probe.md` if the sender changes
-  what it says, and run `just drafts check`.
+  what it says (or the lite draft's Probe section, if
+  [the drafts cleanup](/quest/m2/drafts-retire.md) deleted that draft), and
+  run `just drafts check`.
 - A browser sender can't see whether it is app-limited; settle how to judge
   it from what it sends against the estimate.
 - Decided 2026-11-06 (maintainer, /quest-unblock): ✅ keep `setTarget` on

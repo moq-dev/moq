@@ -24,6 +24,8 @@ because a downstream iGPU transcode trial needs it now.
 
 Decided 2026-11-13 (maintainer, /quest-run): stream-credit stays in m1 and
 no longer gates m2, since takeover, its only wire change, moved to m3.
+Its YIELDED continuations leave lite-07 again in m2
+([yield-defer](/quest/m2/yield-defer.md), 2026-11-16).
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
@@ -38,7 +40,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   a downstream application builds on them from `main` now. Superseded
   2026-11-13, below, and 2026-11-14 (maintainer): byte streams moved to Kixel,
   which builds its own on moq-net's public API, and sockets dropped their
-  `tcp` protocol.
+  `tcp` protocol. Socket endpoints followed on 2026-11-16 (maintainer,
+  /quest-plan of the pre-cut audit): [they leave moq](/quest/m2/sockets/README.md)
+  for Kixel before the cut.
 - ✅ Also moved here: the two reconnect fixes whose bugs came from PRs that
   are on `main` and not on `release`, so the cut would publish them; the Go
   module proxy, since the mirror repository nears 1 GB; and the ashpd bump.

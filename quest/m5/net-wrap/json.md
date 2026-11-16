@@ -24,7 +24,7 @@ types, so each publishes into and reads from a wrapped track unchanged.
   wrapper, as do demand-gated encoders.
 - Existing tests keep passing with the defaults. Add one round trip per crate
   through moq-net's shared pass-through test wrapper, and a moq-json snapshot
-  round trip through an encrypted track in moq-crypto's tests.
+  round trip through an encrypted track in moq-e2ee's tests.
 
 Public API: generic type parameters with moq-net defaults on moq-json,
 moq-stats, and hang. Wire: none.
@@ -32,4 +32,4 @@ moq-stats, and hang. Wire: none.
 ## Required
 
 - [moq-net traits](/quest/m5/net-wrap/traits.md) - the traits these take
-- [moq-crypto's e2ee implements the traits](/quest/m5/net-wrap/e2ee.md) - the encrypted track the snapshot round trip runs through
+- [moq-e2ee implements the traits](/quest/m5/net-wrap/e2ee.md) - the encrypted track the snapshot round trip runs through

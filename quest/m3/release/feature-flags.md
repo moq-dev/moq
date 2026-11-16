@@ -58,8 +58,11 @@ judged, so this pass reads only the difference:
     build); moq-cli's `s3`, `gcs`, and `azure`.
   - Large HTTP stacks a library embedder owns: moq-auth's `client`
     (reqwest) and `serve` (axum), moq-hls's and moq-webrtc's `server` (axum).
-  - moq-crypto's `sign`, `e2ee`, `cpu`, and `provider`: they keep moq-net out
-    of moq-quic's graph, a layering need rather than a trim.
+  - moq-crypto's `endpoint`, `cpu`, and `provider`: they keep moq-net out
+    of moq-quic's graph, a layering need rather than a trim. Corrected
+    2026-11-16: `sign` left in
+    [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855), and `e2ee`
+    leaves with [the crate move](/quest/m2/e2ee-crate.md).
   - `serde` in kio, moq-pattern, and moq-crypto: an optional dependency, by
     ecosystem convention.
   - moq-video's `capture`: device I/O the bindings deliberately leave to the

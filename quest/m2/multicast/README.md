@@ -168,6 +168,22 @@ flagged as costly, on
     standby wherever a second route exists, which about doubles a track's
     subscription state across the cluster).
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which
+judged the route layer at this plan's end state):
+
+13. ✅ **The plan stands as item 2 has it** (rejected: freezing lite-07 with
+    claims only and moving the route exchange behind a negotiated SETUP
+    parameter with a version of its own, so the cut stops waiting on the
+    router and the switch and a third-party client implements no route
+    layer; keeping the plan with a fallback written down now). The audit's
+    case was the schedule, three XL quests in series before the freeze on a
+    rule re-decided on six days, and that an endpoint must parse a protocol
+    only relays speak. What it leaves is in
+    [the switch](/quest/m2/multicast/switch.md): the public route API and
+    config that would freeze by omission, the half `js/net` implements, what
+    a non-forwarding endpoint must parse, and the moq-cluster draft, which
+    still specifies the warm discount item 5 forbids.
+
 The shape those decisions give, for the children to confirm or improve; each
 departure is a decision to list in its PR:
 
