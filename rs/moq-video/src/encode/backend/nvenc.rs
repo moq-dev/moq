@@ -191,7 +191,8 @@ impl Nvenc {
 		// a one-frame jitter buffer all pay for once per GOP as a visible hitch.
 		// `reconfigure` keeps the buffer the same number of frames as the peak
 		// moves.
-		let vbv = cap / config.framerate.rounded().max(1) * VBV_FRAMES;
+		let vbv = (u64::from(cap) * u64::from(VBV_FRAMES) / u64::from(config.framerate.rounded().max(1)))
+			.min(u64::from(u32::MAX)) as u32;
 		cfg.rcParams.vbvBufferSize = vbv;
 		cfg.rcParams.vbvInitialDelay = vbv;
 

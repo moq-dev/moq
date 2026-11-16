@@ -140,8 +140,11 @@ impl Config {
 /// The rate control mode that holds a stream to [`Config::bitrate`], picked at
 /// open for the driver.
 ///
-/// Either way the bitrate is the most the stream spends and the quantizer floor
-/// is its quality, so a calm scene falls below the bitrate. Neither driver's
+/// Either way the bitrate is the ceiling the driver's rate controller aims to
+/// hold the stream under, through the [`HRD_FRAMES`] buffer, and the quantizer
+/// floor is its quality, so a calm scene falls below the bitrate. It is a
+/// target, not a guarantee: a busy second can still overshoot it by a few
+/// percent (iHD's H.264 peaked at 4.36 Mbit/s in one second under 4 Mbit/s). Neither driver's
 /// `VA_RC_QVBR` gets there: on iHD it held a high-motion clip to 59% of the
 /// bitrate whatever the quality factor, and on radeonsi it scored 93.3 VMAF at
 /// the full bitrate where CBR and the floor scored 95.4 at 43% of it.

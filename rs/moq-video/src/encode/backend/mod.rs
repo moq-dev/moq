@@ -539,7 +539,8 @@ pub(crate) mod test_util {
 	/// frame) or a busy one (fresh noise every frame, which no quantizer below the
 	/// coarsest codes under any cap) and report what it spent, retuning the cap
 	/// to `retune` half a second in. `None` when the backend `config` names
-	/// cannot open on this machine.
+	/// cannot open on this machine; once it opens, any failure panics, so an
+	/// encoder that opens but cannot encode fails the test instead of skipping it.
 	pub(crate) fn spend(config: &crate::encode::Config, busy: bool, retune: Option<u64>) -> Option<Spent> {
 		let mut encoder = crate::encode::Encoder::new(config).ok()?;
 		let size = crate::Size::new(config.width, config.height);
@@ -548,7 +549,9 @@ pub(crate) mod test_util {
 		let mut noise = 0x2545_f491_4f6c_dd1du64;
 		for index in 0..3 * fps {
 			if let Some(bps) = retune.filter(|_| index == fps / 2) {
-				encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bps)).ok()?;
+				encoder
+					.set_bitrate(moq_net::bandwidth::Rate::from_bps(bps))
+					.expect("retune the cap");
 			}
 			let (w, h) = (size.width as usize, size.height as usize);
 			let mut rgba = vec![255u8; w * h * 4];
@@ -567,11 +570,12 @@ pub(crate) mod test_util {
 					rgba[i..i + 3].fill(value);
 				}
 			}
-			let surface = crate::Surface::rgba(&rgba, size).ok()?;
-			let timestamp = moq_net::Timestamp::from_micros(index as u64 * 1_000_000 / fps as u64).ok()?;
+			let surface = crate::Surface::rgba(&rgba, size).expect("wrap the frame");
+			let timestamp =
+				moq_net::Timestamp::from_micros(index as u64 * 1_000_000 / fps as u64).expect("frame timestamp");
 			let bytes: usize = encoder
 				.encode_all(&crate::Frame::new(surface, timestamp))
-				.ok()?
+				.expect("encode a frame")
 				.iter()
 				.map(|unit| unit.payload.len())
 				.sum();
