@@ -20,13 +20,14 @@ Its writes fail after closing or releasing the broadcast.
 Media timestamps are exact `Timestamp` records, `value` units at `scale` units per second, carried at the track's timescale
 (a write at another scale rounds down to it). On macOS 13+ and iOS, `try Timestamp(duration)` converts a `Duration` exactly,
 and `try timestamp.duration` rounds down to a whole attosecond.
-Publish JSON tracks with `TrackInfo(compression: .deflate)`; a `Json` consumer reads one with no option of its own.
+Publish JSON tracks with `TrackInfo(maxAge: 0, compression: Compression.deflate())`; a `Json` consumer reads one with no option of its own.
 Every write takes a timestamp, and the library never substitutes zero or now.
 `Json.SnapshotProducer.update`, `Json.StreamProducer.append`, and `Json.WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `Json` consumers yield `Json.Timed` (`value`, `timestamp`); a snapshot consumer yields each state in order,
 and `latest()` skips to the newest.
 A raw track with a `nil` timescale is untimed: each frame carries `Timestamp.unscaled(key)`, its group's key, whose `scale` is `nil`.
-`MoqTrackInfo.compression` set to `.deflate` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`TrackInfo` names `maxAge`, how long a superseded group stays fresh: `0` serves only the live edge, and `nil` sets no publisher limit, as `nil` does for `Delay.max`.
+`TrackInfo.compression` set to `Compression.deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -80,7 +81,7 @@ try audio.cut() // audio has no keyframes, so this is what gives it groups
 let video = try Video.Producer(
     catalog: Media.CatalogProducer(broadcast: broadcast),
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
-    output: VideoEncoderOutput(codec: .h264, kind: .auto),
+    output: VideoEncoderOutput(codec: VideoCodec.h264(), kind: .auto),
     track: "camera"
 )
 try video.write(VideoFrame(timestamp: pts, data: rgba))

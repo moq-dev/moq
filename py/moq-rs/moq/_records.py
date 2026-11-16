@@ -321,7 +321,6 @@ class TrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age=self.max_age,
-            max_age_unlimited=self.max_age is None,
             refresh=self.refresh,
             timescale=self.timescale,
             compression=self.compression,
@@ -331,7 +330,7 @@ class TrackInfo:
     def _from_ffi(info: MoqTrackInfo) -> TrackInfo:
         return TrackInfo(
             priority=info.priority,
-            max_age=None if info.max_age_unlimited else (info.max_age or timedelta(0)),
+            max_age=info.max_age,
             refresh=info.refresh,
             timescale=info.timescale,
             compression=info.compression,
@@ -539,30 +538,8 @@ class VideoDecodedFrame:
         """The picture converted to tightly packed CPU pixels in ``format``."""
         return self._inner.pixels(format)
 
-    def surface(self) -> VideoSurface | None:
-        """The decoder's platform surface, when the decoder output asked for one."""
-        return _surface(self._inner.surface())
-
-
-class VideoSurface:
-    """A decoded frame's platform surface; match it with a fallback arm, since new platforms add kinds."""
-
-
-@dataclass(frozen=True)
-class VideoSurfacePixelBuffer(VideoSurface):
-    """An Apple ``CVPixelBufferRef`` (IOSurface-backed NV12) address, valid while its frame lives."""
-
-    pointer: int
-
-
-@dataclass(frozen=True)
-class VideoSurfaceUnknown(VideoSurface):
-    """A surface kind this version of the package does not know yet."""
-
-
-def _surface(surface: MoqVideoSurface | None) -> VideoSurface | None:
-    if surface is None:
-        return None
-    if isinstance(surface, MoqVideoSurface.PIXEL_BUFFER):
-        return VideoSurfacePixelBuffer(surface.pointer)
-    return VideoSurfaceUnknown()
+    def surface(self) -> MoqVideoSurface | None:
+        """The decoder's platform surface, when the decoder output asked for one: a
+        ``VideoSurface.PIXEL_BUFFER`` on macOS and iOS, or ``VideoSurface.UNKNOWN`` for a kind
+        this version cannot name yet."""
+        return self._inner.surface()

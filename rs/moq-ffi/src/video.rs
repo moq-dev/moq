@@ -36,20 +36,30 @@ pub enum MoqVideoPixelFormat {
 ///
 /// Not every codec has a backend on every machine: H.265 is hardware-only, so
 /// publishing it fails where no hardware encoder is available.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqVideoCodec {
-	/// H.264 / AVC, published as an `avc3` track.
-	H264,
-	/// H.265 / HEVC, published as a `hev1` track.
-	H265,
+///
+/// An immutable object so adding a codec later does not break callers
+/// switching over a closed enum.
+#[derive(uniffi::Object)]
+pub struct MoqVideoCodec {
+	inner: moq_video::encode::Codec,
 }
 
-impl From<MoqVideoCodec> for moq_video::encode::Codec {
-	fn from(c: MoqVideoCodec) -> Self {
-		match c {
-			MoqVideoCodec::H264 => Self::H264,
-			MoqVideoCodec::H265 => Self::H265,
-		}
+#[uniffi::export]
+impl MoqVideoCodec {
+	/// H.264 / AVC, published as an `avc3` track.
+	#[uniffi::constructor]
+	pub fn h264() -> Arc<Self> {
+		Arc::new(Self {
+			inner: moq_video::encode::Codec::H264,
+		})
+	}
+
+	/// H.265 / HEVC, published as a `hev1` track.
+	#[uniffi::constructor]
+	pub fn h265() -> Arc<Self> {
+		Arc::new(Self {
+			inner: moq_video::encode::Codec::H265,
+		})
 	}
 }
 
@@ -127,7 +137,7 @@ pub struct MoqVideoEncoderInput {
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderOutput {
 	/// The codec used to encode this rendition.
-	pub codec: MoqVideoCodec,
+	pub codec: Arc<MoqVideoCodec>,
 	/// Target bitrate in bits per second. `None` derives one from the resolution
 	/// and framerate.
 	#[uniffi(default = None)]
@@ -206,7 +216,7 @@ fn video_encoder_config(
 ) -> Result<moq_video::encode::Config, MoqError> {
 	let framerate = input.framerate.try_into()?;
 	let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
-	config.codec = output.codec.into();
+	config.codec = output.codec.inner;
 	config.kind = output.kind.clone().into();
 	config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
 	if let Some(join) = output.join {
@@ -1122,14 +1132,15 @@ pub struct MoqVideoDecoderOutput {
 /// Keep the frame until every GPU command reading the surface has completed:
 /// the surface belongs to the decoder's pool, and releasing the frame is what
 /// lets the decoder reuse it.
-#[derive(Clone, Copy, uniffi::Enum)]
-#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqVideoSurface {
 	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
 	PixelBuffer {
 		/// The borrowed CVPixelBuffer address, valid while the frame is held.
 		pointer: u64,
 	},
+	/// A platform surface this version of the bindings cannot name yet.
+	Unknown,
 }
 
 /// One decoded video frame, owning the surface it was decoded into.
@@ -1186,11 +1197,13 @@ impl MoqVideoDecodedFrame {
 	/// Only a [`surface`](MoqVideoDecoderOutput::surface) decode produces one.
 	pub fn surface(&self) -> Option<MoqVideoSurface> {
 		match &self.frame.surface {
+			moq_video::Surface::I420(_) => None,
 			#[cfg(any(target_os = "macos", target_os = "ios"))]
 			moq_video::Surface::PixelBuffer(pixels) => Some(MoqVideoSurface::PixelBuffer {
 				pointer: std::ptr::from_ref(pixels.buffer()).addr() as u64,
 			}),
-			_ => None,
+			#[allow(unreachable_patterns, reason = "a platform whose every surface has a variant")]
+			_ => Some(MoqVideoSurface::Unknown),
 		}
 	}
 }
@@ -1441,7 +1454,7 @@ mod finish_tests {
 	#[test]
 	fn encoder_config_preserves_exact_rates_and_rejects_invalid_ratios() {
 		let output = MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+			codec: MoqVideoCodec::h264(),
 			bitrate: None,
 			join: None,
 			kind: MoqVideoEncoderKind::Software,
@@ -1495,7 +1508,7 @@ mod finish_tests {
 				},
 			},
 			MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: Some(500_000),
 				join: None,
 				kind: MoqVideoEncoderKind::Software,
@@ -1554,7 +1567,7 @@ mod finish_tests {
 			},
 		};
 		let output = MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+			codec: MoqVideoCodec::h264(),
 			bitrate: Some(4_000_000),
 			join: None,
 			kind: MoqVideoEncoderKind::Software,
@@ -1616,7 +1629,7 @@ mod finish_tests {
 			},
 		};
 		let output = MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+			codec: MoqVideoCodec::h264(),
 			bitrate: Some(1_000_000),
 			join: None,
 			kind: MoqVideoEncoderKind::Software,
@@ -1872,7 +1885,7 @@ mod rung_tests {
 
 	fn output(bitrate: u64) -> MoqVideoEncoderOutput {
 		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+			codec: MoqVideoCodec::h264(),
 			bitrate: Some(bitrate),
 			join: None,
 			kind: MoqVideoEncoderKind::Software,

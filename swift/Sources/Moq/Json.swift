@@ -10,12 +10,12 @@ import MoqFFI
 /// Foundation before the swift-foundation rewrite (iOS < 18 / macOS < 15), so encode an object
 /// or array there.
 ///
-/// Compression is the track's: publish JSON with `TrackInfo(compression: .deflate)`, and a consumer reads
-/// it with no option of its own.
+/// Compression is the track's: publish JSON with `TrackInfo(maxAge: 0, compression: Compression.deflate())`,
+/// and a consumer reads it with no option of its own.
 ///
 /// Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
 /// broadcast clock, the epoch every track in the broadcast shares: read it with
-/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(timescale: 1000)`); one
+/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(maxAge: 0, timescale: 1000)`); one
 /// without is refused.
 public enum Json {}
 

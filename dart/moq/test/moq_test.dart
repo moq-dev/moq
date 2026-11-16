@@ -6,7 +6,6 @@ import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
-import 'package:moq/src/surface.dart' show surfaceFrom;
 import 'package:moq/video.dart' as moq_video;
 import 'package:test/test.dart';
 
@@ -198,19 +197,20 @@ void main() {
     broadcast.close();
   });
 
-  test('an omitted max age is zero and the unlimited flag sets none', () {
+  test('an omitted max age is zero and a null one sets none', () {
     final broadcast = BroadcastProducer();
-    final omitted = broadcast
-        .publishTrack(name: 'omitted', info: null)
-        .consume(subscription: null)
-        .info();
-    expect(omitted.maxAge, Duration.zero);
+    for (final (i, info) in [null, TrackInfo()].indexed) {
+      final omitted = broadcast
+          .publishTrack(name: 'omitted$i', info: info)
+          .consume(subscription: null)
+          .info();
+      expect(omitted.maxAge, Duration.zero);
+    }
     final unlimited = broadcast
-        .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
+        .publishTrack(name: 'unlimited', info: TrackInfo(maxAge: null))
         .consume(subscription: null)
         .info();
     expect(unlimited.maxAge, isNull);
-    expect(unlimited.maxAgeUnlimited, isTrue);
     broadcast.close();
   });
 
@@ -244,7 +244,7 @@ void main() {
       final broadcast = BroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'backlog',
-        info: TrackInfo(maxAgeUnlimited: true, timescale: 1000000),
+        info: TrackInfo(maxAge: null, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup();
@@ -952,10 +952,7 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: MoqTrackInfo(
-          timescale: 1000000,
-          compression: MoqCompression.deflate,
-        ),
+        info: TrackInfo(timescale: 1000000, compression: Compression.deflate()),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -991,10 +988,7 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: MoqTrackInfo(
-          timescale: 1000000,
-          compression: MoqCompression.deflate,
-        ),
+        info: TrackInfo(timescale: 1000000, compression: Compression.deflate()),
       ),
       config: moq_json.WindowConfig(),
     );
@@ -1055,7 +1049,7 @@ void main() {
           framerate: moq_video.FrameRate(numerator: 30000, denominator: 1001),
         ),
         output: moq_video.EncoderOutput(
-          codec: moq_video.Codec.h264,
+          codec: moq_video.Codec.h264(),
 
           kind: moq_video.SoftwareEncoder(),
         ),
@@ -1118,14 +1112,6 @@ void main() {
     video.finish();
     catalogs.cancel();
     broadcast.close();
-  });
-
-  // A surface kind the package predates maps to the fallback arm instead of failing.
-  test('video surface maps an unknown kind', () {
-    expect(surfaceFrom(null), isNull);
-    final pixels = surfaceFrom(PixelBufferMoqVideoSurface(7));
-    expect((pixels as moq_video.PixelBuffer).pointer, 7);
-    expect(surfaceFrom(_FutureSurface()), isA<moq_video.UnknownSurface>());
   });
 
   // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
@@ -1225,16 +1211,4 @@ void main() {
     producer.finish();
     broadcast.close();
   });
-}
-
-/// Stands in for a generated surface variant this package predates.
-final class _FutureSurface extends MoqVideoSurface {
-  @override
-  RustBuffer lower() => throw UnimplementedError();
-
-  @override
-  int allocationSize() => throw UnimplementedError();
-
-  @override
-  int write(Uint8List buf) => throw UnimplementedError();
 }
