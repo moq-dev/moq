@@ -236,6 +236,9 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 		t.Fatal("a live session must report its negotiated version")
 	}
 
+	// Past the 1s healthy bar, so the drop redials rather than ending the sessions.
+	time.Sleep(time.Second)
+
 	// Drop every session and the listener, then bind a replacement on the same
 	// port: a deploy, with an origin the replacement has never seen.
 	current = current.restart(t, ctx)

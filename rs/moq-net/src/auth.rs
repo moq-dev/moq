@@ -620,33 +620,17 @@ impl Permit {
 		Some(crate::model::interest_prefixes(limit))
 	}
 
-	/// The one prefix the grant and the limit together confine this direction to, or
-	/// `None` when they confine it to several or to none. A request for it, rather than
-	/// one above it, is one the peer's floors can certify.
+	/// The prefixes the peer's grant confines this direction to, or `None` while it
+	/// grants everything: asking for one of them, rather than a prefix above it, is a
+	/// request the peer's floors can certify.
 	#[cfg(feature = "async")]
-	pub(crate) fn region(&self) -> Option<crate::Path> {
-		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
-		let regions = match (heads(&self.granted), heads(&self.limit)) {
-			(None, None) => return None,
-			(Some(regions), None) | (None, Some(regions)) => regions,
-			(Some(granted), Some(limit)) => {
-				let mut meet: Vec<crate::Path> = (granted.iter())
-					.flat_map(|a| limit.iter().map(move |b| (a, b)))
-					.filter_map(|(a, b)| match () {
-						_ if a.has_prefix(b) => Some(a.clone()),
-						_ if b.has_prefix(a) => Some(b.clone()),
-						_ => None,
-					})
-					.collect();
-				meet.sort();
-				meet.dedup();
-				meet
-			}
-		};
-		match regions.as_slice() {
-			[region] => Some(region.clone()),
-			_ => None,
+	pub(crate) fn granted_regions(&self) -> Option<Vec<crate::Path>> {
+		let granted = self.granted.as_ref()?;
+		let everything = moq_pattern::Pattern::subtree("").ok()?;
+		if granted.contains(&everything) {
+			return None;
 		}
+		Some(crate::model::interest_prefixes(granted))
 	}
 
 	/// The limit this side set on the peer, or `None` while unrestricted.
@@ -3102,22 +3086,27 @@ mod tests {
 		assert_eq!(everything.regions(), None, "a root grant confines nothing");
 	}
 
-	/// The region is where the grant and the limit meet, and only when that is one prefix.
+	/// What the peer granted confines the prefixes asked of it, whatever the limit is.
 	#[cfg(feature = "async")]
 	#[test]
-	fn the_region_is_where_grant_and_limit_meet() {
+	fn the_granted_regions_follow_the_grant_alone() {
 		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
 			granted: granted.map(patterns),
 			limit: limit.map(patterns),
 		};
 		let path = crate::Path::from_static;
-		assert_eq!(permit(None, None).region(), None);
-		assert_eq!(permit(Some(&["a"]), None).region(), Some(path("a")));
-		assert_eq!(permit(None, Some(&["a/b"])).region(), Some(path("a/b")));
-		assert_eq!(permit(Some(&["a"]), Some(&["a/b", "c"])).region(), Some(path("a/b")));
-		assert_eq!(permit(Some(&[""]), Some(&["a"])).region(), Some(path("a")));
-		assert_eq!(permit(Some(&["a", "b"]), None).region(), None, "two regions");
-		assert_eq!(permit(Some(&["a"]), Some(&["b"])).region(), None, "they never meet");
+		assert_eq!(permit(None, None).granted_regions(), None);
+		assert_eq!(permit(None, Some(&["a/b"])).granted_regions(), None);
+		assert_eq!(
+			permit(Some(&[""]), Some(&["a"])).granted_regions(),
+			None,
+			"a root grant"
+		);
+		assert_eq!(permit(Some(&["a"]), None).granted_regions(), Some(vec![path("a")]));
+		assert_eq!(
+			permit(Some(&["a", "b"]), Some(&["c"])).granted_regions(),
+			Some(vec![path("a"), path("b")])
+		);
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version

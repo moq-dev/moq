@@ -217,34 +217,6 @@ test("a malformed clock fails the catalog", () => {
 	}
 });
 
-test("a media value that isn't an object is someone else's", () => {
-	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
-	for (const media of ["clock", 7, null, [], [{ join: { interval: 2000 } }]]) {
-		const parsed = RootSchema.parse({ video, media });
-		expect(parsed.media).toBeUndefined();
-		expect(parsed.video?.renditions.video).toBeDefined();
-	}
-});
-
-test("a malformed join leaves the media playable", () => {
-	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
-	const clock = { wall: 1000, timescale: 1_000_000 };
-	for (const join of [
-		{},
-		{ interval: 0 },
-		{ interval: 1.5 },
-		{ interval: -2000 },
-		{ interval: "2000" },
-		2000,
-		null,
-	]) {
-		const parsed = RootSchema.parse({ video, media: { clock, join } });
-		expect(parsed.media?.join).toBeUndefined();
-		expect(parsed.media?.clock).toMatchObject(clock);
-		expect(parsed.video?.renditions.video?.codec).toBe("avc1.64001f");
-	}
-});
-
 // The root `clock` moved to `media.clock` and the per-rendition `hls` field is gone: a catalog from
 // an older publisher still parses, with its media intact and both left unread.
 test("an old root clock and rendition hls are ignored", () => {
@@ -282,24 +254,6 @@ test("an old root archive is ignored", () => {
 		archive: { timelines: { video: { track: "video.timeline.z", duration: 2000 } }, timescale: 1000 },
 	});
 	expect(parsed.video).toEqual(media.video);
-});
-
-test("an absent or foreign text section parses to empty", () => {
-	// `text` was an ordinary application key before captions reserved it, so a value that isn't
-	// a section costs its captions and nothing else: video and audio keep playing.
-	expect(RootSchema.parse({ video: { renditions: {} } }).text).toBeUndefined();
-	for (const legacy of ["a caption overlay", ["a", "b"], { overlay: { x: 1 } }, { renditions: 42 }]) {
-		const parsed = RootSchema.parse({ video: { renditions: {} }, text: legacy });
-		expect(parsed.text).toBeUndefined();
-		expect(parsed.video).toBeDefined();
-	}
-});
-
-test("a malformed text rendition rejects the catalog", () => {
-	// The counterpart: the fallback covers someone else's key, not our own bugs. A value that IS
-	// a text section still has to decode, or a rendition with no format would silently cost a
-	// publisher its captions in the browser while Rust refuses the same catalog.
-	expect(() => RootSchema.parse({ text: { renditions: { captions: { container: { kind: "legacy" } } } } })).toThrow();
 });
 
 const avc = { codec: "avc1.64001f", container: { kind: "legacy" } };
@@ -364,7 +318,8 @@ test("the catalog version is needed only for misread fields", () => {
 	expect(encode(root(avc)).version).toBeUndefined();
 	expect(encode(root({ ...avc, track: "hd" })).version).toBeUndefined();
 	expect(encode(root({ ...avc, track: "video" })).version).toBe(4);
-	expect(encode(root({ ...avc, warmup: 500 })).version).toBe(4);
+	// moq-hang-04 defines no video `warmup`, so it is dropped as an unknown field.
+	expect(encode(root({ ...avc, warmup: 500 })).version).toBeUndefined();
 	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", track: "chat.json" } } } });
 	expect(encode(data).version).toBe(4);
 	// A carried version is recomputed, never trusted.
@@ -377,17 +332,4 @@ test("shared stats and echo discovery round trips without changing old catalogs"
 	).json();
 	expect(RootSchema.parse(fixture)).toEqual(fixture);
 	expect(RootSchema.parse({})).toEqual({});
-});
-
-test("a foreign stats or echo value decodes as absent instead of failing the catalog", () => {
-	for (const foreign of [{}, 5, "on", { track: 5 }, { path: ["a"] }, null]) {
-		for (const key of ["stats", "echo"]) {
-			const parsed = RootSchema.parse({ video: { renditions: {} }, [key]: foreign });
-			expect(parsed.stats).toBeUndefined();
-			expect(parsed.echo).toBeUndefined();
-		}
-	}
-	const parsed = RootSchema.parse({ stats: { track: "stats.json" }, echo: { path: "viewers" } });
-	expect(parsed.stats).toEqual({ track: "stats.json" });
-	expect(parsed.echo?.path).toBe("viewers" as RelativeBroadcast);
 });

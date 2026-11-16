@@ -511,6 +511,8 @@ async fn a_killed_relay_s_clients_are_reset_by_the_one_it_replaced() {
 	let mut new = relay(dir.path(), &cert, &key, port, &notify_path);
 	ready(&notify).await;
 	let mut orphan = established(dial().init(quic).unwrap(), &url).await;
+	// Past the default healthy bar, so the reset reconnects rather than ending the loop.
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	new.kill().await.unwrap();
 	kio::clock::timeout(TIMEOUT, async {
