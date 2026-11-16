@@ -552,9 +552,9 @@ playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
 The replacement case is quarantined from the default run on every engine: under CPU
-load it intermittently leaves the audio stalled past the switch bound after a route
-switch or fallback (the viewer logs `skipping missing groups` on the audio track first),
-and Firefox also showed intermittent missing tone samples. Run it explicitly with
+load its audio intermittently goes silent, as each group the viewer skips restarts the
+decoder and trims its 80 ms warmup, and Firefox also showed intermittent missing tone
+samples. Run it explicitly with
 `just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
 its content, sync, switch, and fallback assertions remain active.
 
