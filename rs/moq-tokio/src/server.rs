@@ -1220,7 +1220,8 @@ pub(crate) struct Incoming {
 }
 
 impl Incoming {
-	/// A connection with no facts beyond its transport.
+	/// A connection with no facts beyond its transport, as a Unix socket accepts.
+	#[cfg(any(unix, test))]
 	pub(crate) fn new(
 		transport: Transport,
 		deadline: Option<kio::clock::Instant>,
