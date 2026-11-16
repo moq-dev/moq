@@ -36,8 +36,10 @@
 //! an endpoint or scoped neighbour is told the closest claim per broadcast within what it
 //! asks, a broader claim presented at the prefix it asks for. A request follows the most
 //! specific claim covering its path that a route reaches. Among the claims of one
-//! Instance at one path, the newest epoch wins whatever it costs, then the best rank, and
-//! a route or claim whose cost a link would carry past the metric is never used.
+//! Instance at one path, only the one shown closest to its own path, at the newest epoch
+//! among those, may serve, reachable or not, as `model::origin` ranks them; a route's rank
+//! chooses among those alone. A route whose cost a link would carry past the metric is
+//! never used, and a claim's cost saturates there.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,
 //! `epoch`, `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it
@@ -79,6 +81,10 @@ pub(crate) struct Hop {
 
 /// A route's rank, lower first: draining, then the lowest priority, then the cost.
 type Rank = (bool, Reverse<i8>, Metric);
+
+/// How claims of one precedence order, lower first: the rank of the route and the claim
+/// together, then the shorter chain, and the claimant.
+type ClaimOrder = (Rank, usize, NodeId);
 
 /// What a route says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +159,13 @@ impl<A: Item> Claim<A> {
 			..self.clone()
 		}
 	}
+}
+
+/// Which claims of one Instance at one path may serve it, lower first: the one closest to
+/// its own path, then the newest epoch. A route's rank chooses only among claims that tie
+/// here, so an older run never stands in for a newer one that lost its route.
+fn precedence<A: Item>(item: &A) -> (u64, Reverse<u64>) {
+	(item.above(), Reverse(item.epoch()))
 }
 
 /// A broadcast: a path, and the Instance a claim there serves.
@@ -1536,15 +1549,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for (broadcast, change) in changes {
 			self.visit();
 			let change = match change {
-				// A claim that already crossed this relay came round a ring of grants, and
-				// one the link would make dearer than the metric holds is never used.
-				Change::Live(claim)
-					if claim.chain.contains(&self.me.relay) || claim.cost.checked_add(cost).is_none() =>
-				{
-					Change::Lost
-				}
+				// A claim that already crossed this relay came round a ring of grants.
+				Change::Live(claim) if claim.chain.contains(&self.me.relay) => Change::Lost,
 				Change::Live(mut claim) => {
-					claim.cost += cost;
+					// Saturating, as `model::origin`'s claim cost does, so a claim's cost
+					// never decides whether it can serve.
+					claim.cost = claim.cost.saturating_add(cost);
 					claim.priority = claim.priority.min(priority);
 					if scoped {
 						claim.chain.push(self.me.relay);
@@ -1591,10 +1601,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				claim.draining |= self.peers.get(&peer).is_some_and(|peer| peer.draining);
 				(claim, peer)
 			})
-			// The newest epoch whatever it costs, as `closest` takes it.
+			// Every giver is reachable, so precedence first and then rank, as `closest`.
 			.min_by_key(|(claim, peer)| {
 				(
-					Reverse(claim.item.epoch()),
+					precedence(&claim.item),
 					claim.draining,
 					Reverse(claim.priority),
 					claim.cost,
@@ -1656,31 +1666,57 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
-	/// The claim of `broadcast` a request takes from here, with its claimant: the newest
-	/// epoch, then the best rank of the route and the claim together, a claim no link would
-	/// make dearer than the metric holds.
-	fn closest(&self, (path, instance): &Broadcast<I>) -> Option<(NodeId, &Claim<A>)> {
-		let origins = self.claimants.get(path)?.get(instance)?;
-		let broadcast = (path.clone(), instance.clone());
-		(origins.iter())
-			.filter_map(|&origin| {
-				self.visit();
-				let claim = self.known.get(&origin)?.items.get(&broadcast)?;
-				let rank = match origin == self.me {
-					true => claim.rank(),
-					false => {
-						let (draining, Reverse(priority), cost) = self.best.get(&origin)?.offer.rank();
-						(
-							draining || claim.draining,
-							Reverse(priority.min(claim.priority)),
-							cost.checked_add(claim.cost)?,
-						)
-					}
-				};
-				Some(((Reverse(claim.item.epoch()), rank, claim.chain.len(), origin), claim))
-			})
-			.min_by(|(a, _), (b, _)| a.cmp(b))
-			.map(|((_, _, _, origin), claim)| (origin, claim))
+	/// Every claim of `broadcast` this node knows, with its claimant, reachable or not.
+	fn claims_of<'a>(
+		&'a self,
+		broadcast: &Broadcast<I>,
+	) -> impl Iterator<Item = (NodeId, &'a Claim<A>)> + use<'a, N, I, A> {
+		let (path, instance) = broadcast;
+		let origins = self.claimants.get(path).and_then(|claims| claims.get(instance));
+		let broadcast = broadcast.clone();
+		(origins.into_iter().flatten()).filter_map(move |&origin| {
+			self.visit();
+			let claim = self.known.get(&origin)?.items.get(&broadcast)?;
+			Some((origin, claim))
+		})
+	}
+
+	/// The claim of `broadcast` a request takes from here, with its claimant: among the
+	/// claims of the best precedence, reachable or not, the best rank of the route and the
+	/// claim together that a route reaches.
+	fn closest(&self, broadcast: &Broadcast<I>) -> Option<(NodeId, &Claim<A>)> {
+		let mut top = None;
+		let mut pick: Option<(ClaimOrder, &Claim<A>)> = None;
+		for (origin, claim) in self.claims_of(broadcast) {
+			let precedence = precedence(&claim.item);
+			if top.is_some_and(|top| precedence > top) {
+				continue;
+			}
+			// A better precedence outranks whatever was picked, reachable or not.
+			if top != Some(precedence) {
+				top = Some(precedence);
+				pick = None;
+			}
+			let rank = match origin == self.me {
+				true => claim.rank(),
+				false => {
+					let Some(best) = self.best.get(&origin) else {
+						continue;
+					};
+					let (draining, Reverse(priority), cost) = best.offer.rank();
+					(
+						draining || claim.draining,
+						Reverse(priority.min(claim.priority)),
+						cost.saturating_add(claim.cost),
+					)
+				}
+			};
+			let key = (rank, claim.chain.len(), origin);
+			if pick.as_ref().is_none_or(|(best, _)| key < *best) {
+				pick = Some((key, claim));
+			}
+		}
+		pick.map(|((_, _, origin), claim)| (origin, claim))
 	}
 
 	// --- Readers, endpoints, and scoped neighbours ---
@@ -1694,16 +1730,16 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.visit();
 			let (path, instance) = broadcast;
 			let closest = self.closest(broadcast).map(|(_, claim)| claim.item.clone());
-			let claimed = (self.claimants.get(path).and_then(|claims| claims.get(instance)))
-				.map(|origins| origins.first().copied());
+			let claimed = (self.claimants.get(path)).is_some_and(|claims| claims.contains_key(instance));
 			let shown = match claimed {
-				Some(first) => {
+				true => {
 					self.unwait(broadcast);
 					let available = closest.is_some();
-					// Unreachable, it still shows what a claimant says.
+					// Unreachable, it still shows what the claim of the best precedence says.
 					let item = closest.or_else(|| {
-						let origin = first?;
-						Some(self.known.get(&origin)?.items.get(broadcast)?.item.clone())
+						(self.claims_of(broadcast))
+							.min_by_key(|(origin, claim)| (precedence(&claim.item), *origin))
+							.map(|(_, claim)| claim.item.clone())
 					});
 					Some(item.map(|item| Shown {
 						item,
@@ -1711,12 +1747,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						presented: false,
 					}))
 				}
-				None if self.ended.contains(broadcast) || mutated!(self, LostEnds) => {
+				false if self.ended.contains(broadcast) || mutated!(self, LostEnds) => {
 					self.unwait(broadcast);
 					Some(None)
 				}
 				// Lost: shown unavailable for the debounce, in case a claimant returns.
-				None => match self.reader.get(instance.clone(), path) {
+				false => match self.reader.get(instance.clone(), path) {
 					Some(_) if self.waiting.contains_key(broadcast) => None,
 					Some(_) if self.debounce.is_zero() => Some(None),
 					Some(was) => {
@@ -1845,7 +1881,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let route = &self.best[&origin].offer;
 		Some(Claim {
 			item: claim.item.clone(),
-			cost: claim.cost.checked_add(route.cost)?,
+			cost: claim.cost.saturating_add(route.cost),
 			priority: claim.priority.min(route.priority),
 			draining: claim.draining || route.draining,
 			chain: claim.chain.clone(),
@@ -2191,7 +2227,7 @@ mod tests {
 	}
 
 	/// A route from routing neighbour `via`, as `node(via)`, to forwarding node `origin`.
-	fn route(origin: Id, via: Id, cost: Metric) -> Msg<u64, Epoch> {
+	fn route(origin: Id, via: Id, cost: Metric) -> Msg<u64, Run> {
 		let path = vec![
 			Hop {
 				node: node(origin),
@@ -2214,23 +2250,39 @@ mod tests {
 		}
 	}
 
-	/// Attributes with an epoch, as a restarted publisher's claims carry.
-	#[derive(Clone, Debug, PartialEq, Eq)]
-	struct Epoch(u64);
+	/// Attributes with an epoch and a distance, as a restarted publisher's claims, or a
+	/// broader claim presented at a narrower path, carry.
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	struct Run {
+		epoch: u64,
+		above: u64,
+	}
 
-	impl Item for Epoch {
-		fn lowered(&self, _: u64) -> Self {
-			self.clone()
+	impl Item for Run {
+		fn lowered(&self, by: u64) -> Self {
+			Self {
+				above: self.above + by,
+				..*self
+			}
+		}
+
+		fn above(&self) -> u64 {
+			self.above
 		}
 
 		fn epoch(&self) -> u64 {
-			self.0
+			self.epoch
 		}
 	}
 
-	fn claim(epoch: u64, cost: Metric) -> Change<Epoch> {
+	/// A claim exactly at its path, at `epoch`.
+	fn run(epoch: u64) -> Run {
+		Run { epoch, above: 0 }
+	}
+
+	fn claim(item: Run, cost: Metric) -> Change<Run> {
 		Change::Live(Claim {
-			item: Epoch(epoch),
+			item,
 			cost,
 			priority: i8::MAX,
 			draining: false,
@@ -2262,61 +2314,95 @@ mod tests {
 		}
 	}
 
-	/// A claim at a newer epoch wins over an older one of the same Instance however much
-	/// cheaper the older is, among a node's endpoints and among forwarding nodes alike.
+	/// Among claims of one Instance at one path, one exactly there outranks a broader one
+	/// shown there, and among those a newer epoch outranks an older one however much
+	/// cheaper the older is, or whether a route reaches the newer: among a node's
+	/// endpoints and among forwarding nodes alike.
 	#[test]
-	fn a_newer_epoch_wins_whatever_it_costs() {
-		let mut router = Router::<usize, u64, Epoch>::new(node(1), debounce(HOP));
+	fn the_newest_run_of_the_closest_claim_serves() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
 		open(&mut router, 2, Role::Endpoint);
 		open(&mut router, 3, Role::Endpoint);
 		let broadcast = (p("live"), 7);
 		let announce = |change| Msg::Announce {
 			changes: vec![(broadcast.clone(), change)],
 		};
-		router.recv(2, announce(claim(1, 0))).unwrap();
-		router.recv(3, announce(claim(2, 9))).unwrap();
+		router.recv(2, announce(claim(run(1), 0))).unwrap();
+		router.recv(3, announce(claim(run(2), 9))).unwrap();
 		let me = router.me();
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
-		assert_eq!(router.own().1[&broadcast].item, Epoch(2));
-		assert_eq!(router.shown()[&(7, p("live"))].item, Epoch(2));
+		assert_eq!(
+			router.step(me, &broadcast),
+			Some(Next::Local(3)),
+			"a newer epoch, however dear"
+		);
+		assert_eq!(router.own().1[&broadcast].item, run(2));
+		router.recv(2, announce(claim(Run { epoch: 3, above: 1 }, 0))).unwrap();
+		assert_eq!(
+			router.step(me, &broadcast),
+			Some(Next::Local(3)),
+			"a broader claim, however new"
+		);
 		open(&mut router, 4, Role::Routing(node(4)));
 		router.recv(4, route(5, 4, 1)).unwrap();
-		let claims = |change, floor| Msg::Claims {
+		let claims = |item, floor| Msg::Claims {
 			origin: node(5),
-			changes: vec![(broadcast.clone(), change)],
+			changes: vec![(broadcast.clone(), claim(item, 0))],
 			floor,
 		};
-		router.recv(4, claims(claim(1, 0), 1)).unwrap();
+		router.recv(4, claims(run(1), 1)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(me), "an older claim, however close");
-		router.recv(4, claims(claim(3, 100), 2)).unwrap();
-		assert_eq!(router.pick(&broadcast), Some(node(5)), "a newer claim, however far");
-		assert_eq!(router.shown()[&(7, p("live"))].item, Epoch(3));
+		router.recv(4, claims(Run { epoch: 4, above: 1 }, 2)).unwrap();
+		assert_eq!(router.pick(&broadcast), Some(me), "a broader claim, however new");
+		router.recv(4, claims(run(3), 3)).unwrap();
+		assert_eq!(router.pick(&broadcast), Some(node(5)), "a newer claim");
+		// The newer claim's route goes while its claim stays known: the older run never
+		// stands in for it.
+		router.recv(4, route(5, 4, Metric::MAX)).unwrap();
+		assert_eq!(router.best(node(5)), None);
+		assert_eq!(router.pick(&broadcast), None);
+		let shown = &router.shown()[&(7, p("live"))];
+		assert_eq!((shown.item, shown.available), (run(3), false));
 	}
 
-	/// A route or claim whose cost a link would carry past the metric is never used, and
-	/// never wraps round to a cheap one.
+	/// A route whose cost a link would carry past the metric is never used, and never wraps
+	/// round to a cheap one. A claim's cost saturates there instead, so it never decides
+	/// whether the claim can serve.
 	#[test]
-	fn a_cost_past_the_metric_is_never_used() {
-		let mut router = Router::<usize, u64, Epoch>::new(node(1), debounce(HOP));
+	fn a_route_past_the_metric_is_never_used() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
 		open(&mut router, 2, Role::Routing(node(2)));
 		router.recv(2, route(5, 2, Metric::MAX)).unwrap();
 		assert_eq!(router.best(node(5)), None);
 		router.recv(2, route(5, 2, 1)).unwrap();
 		assert!(router.best(node(5)).is_some());
+		let far = (p("far"), 7);
 		let claims = Msg::Claims {
 			origin: node(5),
-			changes: vec![((p("far"), 7), claim(0, Metric::MAX - 1))],
+			changes: vec![(far.clone(), claim(run(0), Metric::MAX - 1))],
 			floor: 1,
 		};
 		router.recv(2, claims).unwrap();
-		assert!(!router.shown()[&(7, p("far"))].available, "shown, never reachable");
-		assert_eq!(router.pick(&(p("far"), 7)), None);
+		assert!(router.shown()[&(7, p("far"))].available);
+		assert_eq!(router.pick(&far), Some(node(5)));
 		open(&mut router, 3, Role::Endpoint);
+		router.drain();
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(3, edit).unwrap();
+		let told = router.drain().into_iter().any(|(to, msg)| {
+			to == 3
+				&& matches!(&msg, Msg::Announce { changes } if changes.iter().any(|(broadcast, change)| {
+					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == Metric::MAX)
+				}))
+		});
+		assert!(told, "told at the metric's ceiling");
 		let announce = Msg::Announce {
-			changes: vec![((p("near"), 7), claim(0, Metric::MAX))],
+			changes: vec![((p("near"), 7), claim(run(0), Metric::MAX))],
 		};
 		router.recv(3, announce).unwrap();
-		assert!(router.own().1.is_empty(), "an endpoint's claim past what its link adds");
+		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
 	}
 
 	/// The reader keeps nothing of claims that came and went, ended or lost.

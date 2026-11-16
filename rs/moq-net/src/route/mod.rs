@@ -48,9 +48,15 @@ pub(crate) trait Item: Clone + Eq + fmt::Debug {
 	/// outranks every broader one there. `lowered(0)` is the claim itself.
 	fn lowered(&self, by: u64) -> Self;
 
-	/// Which run of its Instance the publisher is on: a claim at a higher epoch supersedes
-	/// one of the same Instance at the same path whatever either's route costs, as
-	/// `model::origin` ranks them. 0 for attributes that carry none.
+	/// How many segments the claim's own prefix lacks of the path it is shown at, as
+	/// [`Self::lowered`] counts them: 0 for a claim exactly there, which outranks every
+	/// broader one whatever their epochs or routes.
+	fn above(&self) -> u64;
+
+	/// Which run of its Instance the publisher is on: among claims of one Instance at one
+	/// path and distance, a higher epoch supersedes a lower one whatever either's route
+	/// costs, or whether a route reaches it, as `model::origin` ranks them. 0 for
+	/// attributes that carry none.
 	fn epoch(&self) -> u64;
 }
 
@@ -61,6 +67,10 @@ macro_rules! opaque {
 		impl Item for $ty {
 			fn lowered(&self, _: u64) -> Self {
 				self.clone()
+			}
+
+			fn above(&self) -> u64 {
+				0
 			}
 
 			fn epoch(&self) -> u64 {

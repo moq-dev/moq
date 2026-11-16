@@ -113,6 +113,30 @@ for the wire:
   joined by two grants; the chain cost none. Keep that shape in the acceptance
   fixtures.
 
+Found 2026-11-16 by [the proof](https://github.com/moq-dev/moq/pull/8904)
+against the prototype, and moved here when
+[moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901) finished the
+router quest that listed them:
+
+- Order equal routes by the neighbour's Node ID, or give the proof's binding
+  the key the router orders them by: the proof orders them by the neighbour,
+  the prototype by its simulation's node index, and `route::relay::Router` by
+  its neighbour key.
+- Record the chain as the claim instance's path: the announcing relay first,
+  then each grant's exporter and adopter, so a node refuses a claim naming it
+  in the role it would take. The prototype and the router record only the
+  adopters, so they refuse fewer echoes than the proof assumes.
+- Move the binding to the router before this PR changes it: point
+  `route/tests/algebra.rs` and `route/tests/sticky.rs` at the router's own
+  functions for a node's own route, sending a route on, taking one in,
+  ordering candidates, and listing them, regenerate `Vectors.agda`, and run
+  `just test route-proof`. The claim instance first needs the router's
+  precedence as its leading keys: a claim exactly at its path before a
+  broader one shown there, then the newest epoch, decided over every claim
+  of the Instance at that path whether or not a route reaches it, and only
+  then the route joined with the claim's drain, priority, and cost. Neither
+  the mechanized instance nor its Rust vectors cover precedence yet.
+
 Delete with the old rule:
 
 - `rs/moq-net/src/route/proof.rs`, `js/net/src/lite/route_key.ts`,

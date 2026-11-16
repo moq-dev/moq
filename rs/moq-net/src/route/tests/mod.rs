@@ -120,6 +120,10 @@ impl crate::route::Item for Item {
 		*self
 	}
 
+	fn above(&self) -> u64 {
+		0
+	}
+
 	fn epoch(&self) -> u64 {
 		self.epoch.map_or(0, u64::from)
 	}

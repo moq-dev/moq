@@ -76,6 +76,10 @@ impl super::Item for Claim {
 		}
 	}
 
+	fn above(&self) -> u64 {
+		self.above
+	}
+
 	fn epoch(&self) -> u64 {
 		self.epoch
 	}
