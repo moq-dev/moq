@@ -1143,39 +1143,37 @@ export class Decoder {
 	#addDecodeBuffered(start: Duration, end: Duration): void {
 		if (start.gt(end)) return;
 
-		this.#decodeBuffered.mutate((current) => {
-			for (const range of current) {
-				// Extend range if new sample overlaps or is adjacent (1ms tolerance for float precision)
-				if (start.le(range.end.add(ADJACENT)) && end.ge(range.start)) {
-					range.start = range.start.min(start);
-					range.end = range.end.max(end);
-					return;
-				}
+		// A new array of new ranges, since the merged copy hands them to `buffered` by reference.
+		this.#decodeBuffered.update((current) => {
+			// Extend range if new sample overlaps or is adjacent (1ms tolerance for float precision)
+			const i = current.findIndex((range) => start.le(range.end.add(ADJACENT)) && end.ge(range.start));
+			if (i >= 0) {
+				const range = current[i];
+				return current.with(i, { start: range.start.min(start), end: range.end.max(end) });
 			}
-
-			current.push({ start, end });
-			current.sort((a, b) => a.start.cmp(b.start));
+			return [...current, { start, end }].sort((a, b) => a.start.cmp(b.start));
 		});
 	}
 
 	// Drop reported decode ranges at or after `timestamp`, mirroring a ring truncation.
 	#truncateDecodeBuffered(timestamp: Duration): void {
-		this.#decodeBuffered.mutate((current) => {
-			while (current.length > 0 && current[current.length - 1].start.ge(timestamp)) current.pop();
-			const last = current[current.length - 1];
-			if (last?.end.gt(timestamp)) last.end = timestamp;
+		this.#decodeBuffered.update((current) => {
+			let n = current.length;
+			while (n > 0 && current[n - 1].start.ge(timestamp)) n--;
+			const kept = current.slice(0, n);
+			const last = kept.at(-1);
+			if (last?.end.gt(timestamp)) kept[n - 1] = { start: last.start, end: timestamp };
+			return kept;
 		});
 	}
 
 	#trimDecodeBuffered(timestamp: Duration): void {
-		this.#decodeBuffered.mutate((current) => {
-			while (current.length > 0) {
-				if (current[0].end.ge(timestamp)) {
-					current[0].start = current[0].start.max(timestamp);
-					break;
-				}
-				current.shift();
-			}
+		this.#decodeBuffered.update((current) => {
+			// Drop the ranges that ended before `timestamp` and clip the first one left.
+			const i = current.findIndex((range) => range.end.ge(timestamp));
+			if (i < 0) return [];
+			const first = current[i];
+			return [{ start: first.start.max(timestamp), end: first.end }, ...current.slice(i + 1)];
 		});
 	}
 

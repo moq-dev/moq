@@ -414,6 +414,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		ended: () => decoder.out.ended.peek(),
 		stats: () => decoder.out.stats.peek(),
 		timestamp: () => decoder.out.timestamp.peek(),
+		buffered: decoder.out.buffered,
 		feedback: () => decoder.feedback(Moq.Path.from("watched")),
 		error: decoder.out.error,
 		play,
@@ -461,6 +462,26 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		},
 	};
 }
+
+// Signals compare a write against the value it replaced, so a range changed in place after delivery
+// is a change no subscriber hears about.
+it("never changes the buffered ranges it already reported", async () => {
+	const playback = await play(Duration.millis(100));
+	const show = (ranges: Container.BufferedRanges) =>
+		ranges.map((r) => `${r.start.asMicros()}-${r.end.asMicros()}`).join();
+	const seen: [Container.BufferedRanges, string][] = [];
+	const dispose = playback.buffered.subscribe((ranges) => seen.push([ranges, show(ranges)]));
+	try {
+		await playback.play(12);
+		expect(seen.length).toBeGreaterThan(1);
+		for (const [ranges, shown] of seen) expect(show(ranges)).toBe(shown);
+		expect(show(playback.buffered.peek())).toBe(seen.at(-1)?.[1] ?? "");
+	} finally {
+		dispose();
+		playback.close();
+		await microtasks();
+	}
+});
 
 for (const description of [undefined, "1190"]) {
 	it(`passes AAC to WebCodecs as ${description ? "raw" : "ADTS"}`, async () => {
