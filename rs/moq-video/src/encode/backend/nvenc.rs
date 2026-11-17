@@ -81,6 +81,24 @@ fn nvenc_preset(preset: Preset) -> (GUID, &'static str) {
 	}
 }
 
+/// The constant-quality level (NVENC's CQ, on the QP scale) for each codec: the
+/// coarsest that kept a 720p30 talking head at VMAF 95, the usual mark for
+/// transparent, on an RTX 3070 Ti. H.264 under a 4 Mbit/s cap: 95.5 at 1.4
+/// Mbit/s against CBR's 96.7 at 3.5, and 31 fell to 94.9. H.265 under 2.8 Mbit/s:
+/// 95.2 at 1.3 against CBR's 96.0 at 2.5, and 32 fell to 94.9.
+fn target_quality(codec: Codec) -> u8 {
+	match codec {
+		Codec::H264 => 30,
+		Codec::H265 => 31,
+	}
+}
+
+/// The VBV in frames at the peak. Two or fewer and NVENC drops the target
+/// quality for its single-frame low-delay rate control, spending the cap on a
+/// still picture as CBR does; three keeps the quality, held every second of a
+/// high-motion clip to the cap, and bounded a periodic IDR near three frames.
+const VBV_FRAMES: u32 = 3;
+
 pub(crate) struct Nvenc {
 	session: Session,
 	/// Where CUDA frames are scaled for encoding, created by the first one.
@@ -144,7 +162,7 @@ impl Nvenc {
 		// cudarc 0.19's DriverError is Debug-only (no Display), so format with `{e:?}`.
 		let codec_guid = codec_guid(config.codec);
 
-		let cuda = input_context(config.input)?;
+		let cuda = input_context(config.input, &config.device)?;
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
 			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC init: {e}")))?;
 
@@ -159,19 +177,22 @@ impl Nvenc {
 		let interval = config.keyframe_interval();
 		cfg.gopLength = interval;
 		cfg.frameIntervalP = 1; // no B-frames
-		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
-		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
-		cfg.rcParams.averageBitRate = bitrate;
-		// A single-frame VBV, NVIDIA's own low-latency recipe. The preset's default
-		// buffer is about a second of bitrate, and CBR spends it on every IDR: a
-		// 720p keyframe came out at 20+ frames' worth of bits (see
-		// `nvenc_h264_idr_burst_is_bounded`), which the wire, the decoder, and a
-		// one-frame jitter buffer all pay for once per GOP as a visible hitch. With
-		// the buffer sized to one frame the IDR is capped near
-		// `lowDelayKeyFrameScale` (2x) P-frame bits, and P-frames get the bits the
-		// keyframe no longer hoards. `reconfigure` keeps the buffer at one frame
-		// when the bitrate moves.
-		let vbv = bitrate / config.framerate.rounded().max(1);
+		// Constant quality under a peak: VBR with no average, so the target quality
+		// alone decides what a frame spends until the peak, the cap, binds. Every
+		// NVENC generation has VBR, so there is no CBR fallback to choose.
+		let cap = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
+		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_VBR;
+		cfg.rcParams.averageBitRate = 0;
+		cfg.rcParams.maxBitRate = cap;
+		cfg.rcParams.targetQuality = target_quality(config.codec);
+		// A VBV of a few frames, not the preset's second of bitrate: CBR spent
+		// that second on every IDR, a 720p keyframe at 20+ frames' worth of bits
+		// (see `nvenc_h264_idr_burst_is_bounded`), which the wire, the decoder, and
+		// a one-frame jitter buffer all pay for once per GOP as a visible hitch.
+		// `reconfigure` keeps the buffer the same number of frames as the peak
+		// moves.
+		let vbv = (u64::from(cap) * u64::from(VBV_FRAMES) / u64::from(config.framerate.rounded().max(1)))
+			.min(u64::from(u32::MAX)) as u32;
 		cfg.rcParams.vbvBufferSize = vbv;
 		cfg.rcParams.vbvInitialDelay = vbv;
 
@@ -270,7 +291,10 @@ impl Nvenc {
 			// Every control above is checked, so a session that started has them all.
 			applied: Applied::new(
 				config.preset,
-				format!("{label}, low-latency tuning, no B-frames, CBR, 1-frame VBV"),
+				format!(
+					"{label}, low-latency tuning, no B-frames, CQ {} under the cap, {VBV_FRAMES}-frame VBV",
+					target_quality(config.codec)
+				),
 			),
 			converter: config
 				.input
@@ -427,8 +451,8 @@ impl Backend for Nvenc {
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
-		// Retunes the running session in place: no IDR, no reset. The CBR rate
-		// control mode set at open still applies, only the target moves.
+		// Retunes the running session in place: no IDR, no reset. The quality set
+		// at open still applies; only the peak moves.
 		self.session
 			.reconfigure(bitrate.min(u32::MAX as u64) as u32)
 			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC set bitrate to {bitrate}: {e}")))
@@ -461,11 +485,22 @@ fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<(Vec<u8>, I, 
 		.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock output: {e}")))
 }
 
-/// Match the declared Vulkan device before allocating an NVENC session.
-fn input_context(input: Option<vulkan::Device>) -> Result<Arc<CudaContext>, Error> {
+/// The CUDA device NVENC opens: the declared Vulkan device's, the named render
+/// node's, or the first, refusing a render node that is not the Vulkan device.
+fn input_context(input: Option<vulkan::Device>, named: &crate::Device) -> Result<Arc<CudaContext>, Error> {
+	let ordinal = cuda::ordinal(named)?;
 	let Some(device) = input else {
-		return CudaContext::new(0).map_err(|e| Error::codec(anyhow::anyhow!("CUDA init: {e:?}")));
+		return CudaContext::new(ordinal.unwrap_or(0)).map_err(|e| Error::codec(anyhow::anyhow!("CUDA init: {e:?}")));
 	};
+	let input = vulkan_ordinal(device)?;
+	if ordinal.is_some_and(|ordinal| ordinal != input) {
+		return Err(Error::Unsupported(format!("{named} is not external Vulkan {device}")));
+	}
+	CudaContext::new(input).map_err(|e| Error::codec(anyhow::anyhow!("CUDA input device {input}: {e:?}")))
+}
+
+/// The CUDA ordinal of the declared Vulkan device, matched by UUID.
+fn vulkan_ordinal(device: vulkan::Device) -> Result<usize, Error> {
 	matching_driver(device)?;
 	let count = CudaContext::device_count().map_err(|e| Error::codec(anyhow::anyhow!("CUDA enumerate: {e:?}")))?;
 	for ordinal in 0..count {
@@ -474,8 +509,7 @@ fn input_context(input: Option<vulkan::Device>) -> Result<Arc<CudaContext>, Erro
 		let uuid = cudarc::driver::result::device::get_uuid(physical)
 			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA UUID: {e:?}")))?;
 		if uuid.bytes.map(|byte| u8::from_ne_bytes(byte.to_ne_bytes())) == device.device_uuid {
-			return CudaContext::new(ordinal as usize)
-				.map_err(|e| Error::codec(anyhow::anyhow!("CUDA input device {ordinal}: {e:?}")));
+			return Ok(ordinal as usize);
 		}
 	}
 	Err(Error::Unsupported(format!(
@@ -697,6 +731,48 @@ mod tests {
 		}
 	}
 
+	/// A calm scene spends well under a generous cap, held there by the target
+	/// quality; a busy one is held to its cap, and to a lower one once
+	/// `set_bitrate` moves the peak. One opening keyframe, so the seconds measured
+	/// are rate control's alone.
+	#[test]
+	fn nvenc_quality_under_a_cap() {
+		use super::super::test_util::spend;
+
+		for codec in [Codec::H264, Codec::H265] {
+			let mut config = crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+			config.kind = crate::encode::Kind::Named(NAME.into());
+			config.codec = codec;
+			config.join = std::time::Duration::from_secs(10);
+			let at = |bps: u64| crate::encode::Config {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(bps)),
+				..config.clone()
+			};
+
+			let Some(calm) = spend(&at(4_000_000), false, None) else {
+				return;
+			};
+			assert!(
+				calm.mean < 1_000_000,
+				"{codec:?}: a calm scene filled the cap: {calm:?}"
+			);
+
+			let busy = spend(&at(500_000), true, None).unwrap();
+			// H.265 settles a little under the cap on noise (85% on an RTX 3070 Ti).
+			assert!(
+				busy.mean > 400_000,
+				"{codec:?}: a busy scene fell short of the cap: {busy:?}"
+			);
+			assert!(busy.peak <= 525_000, "{codec:?}: a busy scene broke the cap: {busy:?}");
+
+			let moved = spend(&at(500_000), true, Some(250_000)).unwrap();
+			assert!(
+				(200_000..=262_500).contains(&moved.peak),
+				"{codec:?}: the peak did not follow set_bitrate: {moved:?}"
+			);
+		}
+	}
+
 	/// A refused retune leaves the session encoding at its last accepted rate,
 	/// and a later retune is accepted by the real driver. Same skip rule as the
 	/// H.264 test.
@@ -901,9 +977,9 @@ mod tests {
 	}
 
 	/// Encode `frames` of scrolling texture at 720p30 / 4 Mbit/s with a 30-frame
-	/// GOP and return the periodic IDR sizes with the mean P-frame size, so a
-	/// rate-control change can be judged by the burst it puts on the wire.
-	fn idr_burst(frames: u64) -> Option<(Vec<usize>, usize)> {
+	/// GOP and return the periodic IDR sizes, so a rate-control change can be
+	/// judged by the burst it puts on the wire.
+	fn idr_burst(frames: u64) -> Option<Vec<usize>> {
 		if !driver_available() {
 			return None;
 		}
@@ -915,7 +991,6 @@ mod tests {
 		let mut encoder = crate::encode::Encoder::new(&config).ok()?;
 
 		let mut idrs = Vec::new();
-		let (mut p_total, mut p_count) = (0usize, 0usize);
 		for i in 0..frames {
 			let rgba = textured_rgba(w, h, (i * 4) as usize);
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
@@ -927,32 +1002,26 @@ mod tests {
 				}
 				if h264_nal_types(&encoded.payload).contains(&5) {
 					idrs.push(encoded.payload.len());
-				} else {
-					p_total += encoded.payload.len();
-					p_count += 1;
 				}
 			}
 		}
-		Some((idrs, p_total / p_count.max(1)))
+		Some(idrs)
 	}
 
-	/// The single-frame VBV keeps a periodic IDR to a small multiple of a
-	/// P-frame. Without it the same stream produced 300+ KB keyframes against
-	/// 5 KB P-frames (a 60x burst); with it the ratio sits around 3-4x, so the
-	/// bounds here are loose enough not to flake on rate-control noise and still
-	/// an order of magnitude below the preset default. The absolute cap is what
-	/// a subscriber's one-frame jitter buffer has to absorb at the configured
-	/// 4 Mbit/s / 30 fps.
+	/// The short VBV keeps a periodic IDR to a few frames of bitrate. The
+	/// preset's second-long VBV produced 300+ KB keyframes on this stream; the
+	/// 3-frame one holds them near 46 KB, about 2.75 frames of the configured
+	/// 4 Mbit/s / 30 fps, which is what a subscriber's jitter buffer has to
+	/// absorb. Only that absolute bound is checked: in constant quality mode a
+	/// P-frame of this pure motion shrinks well below the frame budget while
+	/// the IDR does not (about 7.5x the mean P-frame on an RTX 3070 Ti), so a
+	/// ratio to it would measure the target quality, not the burst.
 	#[test]
 	fn nvenc_h264_idr_burst_is_bounded() {
-		let Some((idrs, p_mean)) = idr_burst(120) else { return };
+		let Some(idrs) = idr_burst(120) else { return };
 		assert_eq!(idrs.len(), 3, "expected one IDR per 30-frame GOP after the first");
 		let frame_budget = 4_000_000 / 8 / 30;
 		for idr in &idrs {
-			assert!(
-				*idr < 8 * p_mean,
-				"IDR {idr} bytes is more than 8x the mean P-frame ({p_mean})"
-			);
 			assert!(*idr < 5 * frame_budget, "IDR {idr} bytes exceeds 5 frames of bitrate");
 		}
 	}

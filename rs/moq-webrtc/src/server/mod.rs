@@ -20,7 +20,7 @@ use std::time::Duration;
 use axum::Router;
 #[cfg(feature = "server")]
 use axum::http::{HeaderValue, StatusCode, Uri};
-use tokio::sync::{OnceCell, oneshot};
+use tokio::sync::oneshot;
 
 use crate::Result;
 use mux::Mux;
@@ -129,34 +129,14 @@ pub(crate) fn session_location(uri: &Uri, resource_id: &str) -> Option<HeaderVal
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Public UDP socket addresses that should be advertised as ICE host
-	/// candidates. Each is sent as a separate `candidate` line in the SDP
-	/// answer so a remote peer can reach us.
+	/// Public UDP socket addresses advertised as ICE host candidates, each sent
+	/// as given in its own `candidate` line of the SDP answer. A port of 0 takes
+	/// the bound port, so a public IP can sit in front of an OS-picked port.
 	///
-	/// If empty, the mux advertises the bound address, substituting loopback
+	/// If empty, the server advertises the bound address, substituting loopback
 	/// when the socket is bound to an unspecified address. That works for
 	/// loopback testing but not behind NAT.
 	pub ice_candidates: Vec<SocketAddr>,
-
-	/// The shared WebRTC media socket. Every WHIP/WHEP session shares this one UDP port
-	/// (demuxed by ICE ufrag), so a deployment opens exactly one media port in its firewall.
-	/// Defaults to binding `0.0.0.0:0`, letting the OS pick a port, which is fine for
-	/// dev/loopback; production pins it.
-	pub socket: Socket,
-}
-
-/// Where the shared WebRTC media socket comes from.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum Socket {
-	/// Bind a UDP socket at this address on the first accept.
-	Bind(SocketAddr),
-}
-
-impl Default for Socket {
-	fn default() -> Self {
-		Self::Bind(SocketAddr::from(([0, 0, 0, 0], 0)))
-	}
 }
 
 /// Shared WebRTC media state: the UDP mux and live sessions behind [`whip::accept`] and [`whep::accept`].
@@ -166,10 +146,9 @@ pub struct Server {
 }
 
 struct Inner {
-	config: Config,
-	/// The shared media socket + demux, bound lazily on the first accept so
-	/// `Server::new` can stay synchronous (and an idle server binds no port).
-	mux: OnceCell<Mux>,
+	/// The shared media socket and its demux. Every WHIP/WHEP session shares
+	/// this one UDP port, demuxed by ICE ufrag.
+	mux: Mux,
 	/// Live sessions keyed by resource id, each holding a cancel sender the
 	/// session task selects on. Lets [`Server::terminate`] (and the bundled
 	/// `DELETE` route) end a session by its `Location` id.
@@ -177,25 +156,30 @@ struct Inner {
 }
 
 impl Server {
-	/// Build a server with shared ICE and media settings.
-	pub fn new(config: Config) -> Self {
-		Self {
+	/// Bind the shared media socket at `addr` and serve WHIP and WHEP sessions on it.
+	///
+	/// Every session shares this one UDP port, so a deployment opens exactly one
+	/// media port in its firewall; port 0 lets the OS pick one. Fails if the
+	/// socket cannot be bound, or an advertised candidate is invalid. Dropping
+	/// the last clone, and every session it accepted, releases the port.
+	pub async fn bind(addr: SocketAddr, config: Config) -> Result<Self> {
+		let mux = Mux::bind(addr, &config.ice_candidates).await?;
+		Ok(Self {
 			inner: Arc::new(Inner {
-				config,
-				mux: OnceCell::new(),
+				mux,
 				sessions: Mutex::new(HashMap::new()),
 			}),
-		}
+		})
 	}
 
-	/// The shared media mux, bound (and its demux task spawned) on first use.
-	pub(crate) async fn mux(&self) -> Result<&Mux> {
-		self.inner
-			.mux
-			.get_or_try_init(|| match self.inner.config.socket {
-				Socket::Bind(addr) => Mux::bind(addr, &self.inner.config.ice_candidates),
-			})
-			.await
+	/// The shared media mux.
+	pub(crate) fn mux(&self) -> &Mux {
+		&self.inner.mux
+	}
+
+	/// The address the shared media socket is bound to.
+	pub fn local_addr(&self) -> SocketAddr {
+		self.inner.mux.local_addr()
 	}
 
 	/// Router for `server publish` (WHIP), publishing each session as `ingest` says. Mount
@@ -267,27 +251,57 @@ pub(crate) fn delete(server: &Server, path: &str) -> StatusCode {
 mod tests {
 	use super::*;
 
-	fn server() -> Server {
-		Server::new(Config::default())
+	const LOOPBACK: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
+	async fn server() -> Server {
+		Server::bind(LOOPBACK, Config::default()).await.unwrap()
 	}
 
-	#[test]
-	fn terminate_unknown_session_is_false() {
-		assert!(!server().terminate("00000000-0000-0000-0000-000000000000"));
+	/// A port something else holds fails the constructor, before anything reports
+	/// the server ready, rather than the first WHIP or WHEP request.
+	#[tokio::test]
+	async fn bind_fails_on_a_taken_port() {
+		let taken = std::net::UdpSocket::bind(LOOPBACK).unwrap();
+		let err = Server::bind(taken.local_addr().unwrap(), Config::default())
+			.await
+			.err()
+			.expect("bound a taken port");
+		assert!(matches!(err, crate::Error::Io(_)), "{err}");
 	}
 
-	#[test]
-	fn terminate_registered_session_once() {
-		let server = server();
+	/// The last clone of a server that accepted nothing releases its port.
+	#[tokio::test]
+	async fn dropping_the_server_releases_its_port() {
+		let server = server().await;
+		let addr = server.local_addr();
+		let clone = server.clone();
+		drop(server);
+		std::net::UdpSocket::bind(addr).expect_err("a live clone keeps the port");
+
+		drop(clone);
+		// The abort only schedules the demux task to be dropped; yielding lets this
+		// current-thread runtime run it, which drops its socket handle.
+		tokio::task::yield_now().await;
+		std::net::UdpSocket::bind(addr).expect("the dropped server kept its port");
+	}
+
+	#[tokio::test]
+	async fn terminate_unknown_session_is_false() {
+		assert!(!server().await.terminate("00000000-0000-0000-0000-000000000000"));
+	}
+
+	#[tokio::test]
+	async fn terminate_registered_session_once() {
+		let server = server().await;
 		let id = "11111111-1111-1111-1111-111111111111";
 		let _cancel = server.register_session(id.to_string());
 		assert!(server.terminate(id), "first terminate finds the session");
 		assert!(!server.terminate(id), "second terminate is a no-op");
 	}
 
-	#[test]
-	fn unregister_drops_the_entry() {
-		let server = server();
+	#[tokio::test]
+	async fn unregister_drops_the_entry() {
+		let server = server().await;
 		let id = "22222222-2222-2222-2222-222222222222";
 		let _cancel = server.register_session(id.to_string());
 		server.unregister_session(id);

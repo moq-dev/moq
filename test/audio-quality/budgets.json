@@ -482,8 +482,8 @@
 			"stalled_share": 0,
 			"silence_share": 0,
 			"target_ms_p95": 80,
-			"av_lag_ms_p50": -0.3,
-			"av_lag_ms_p95": 9
+			"av_lag_ms_p50": 0.2,
+			"av_lag_ms_p95": 7.7
 		},
 		{
 			"runtime": "replay",
@@ -514,7 +514,7 @@
 			"stalled_share": 0.092,
 			"silence_share": 0.092,
 			"target_ms_p95": 80,
-			"av_lag_ms_p50": 1.7,
+			"av_lag_ms_p50": 2.3,
 			"av_lag_ms_p95": 32.1
 		}
 	]

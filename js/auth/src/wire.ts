@@ -1,17 +1,17 @@
 /**
- * The JSON encoding of the grants in claims, key scopes, and auth server grants.
+ * The JSON encoding of claims, key scopes, and auth server grants.
  *
- * Grants were once prefix lists named `put` and `get`, and every published `moq-token`
- * reader still expects them. A role with a bitrate cap is written as an object,
- * `{"path": [...], "rate": bps}`, which every older reader refuses rather than drop the
- * cap, so a capped role is never written as prefixes. Must stay in lockstep with
- * `wire.rs` in the Rust `moq-auth` crate.
+ * Grants are written as `publish` and `subscribe`. They were once prefix lists named
+ * `put` and `get`, which are still read. A role with a bitrate cap is written as an
+ * object, `{"path": [...], "rate": bps}`, which every older reader refuses rather than
+ * drop the cap. Must stay in lockstep with `wire.rs` in the Rust `moq-auth` crate.
  *
  * @module
  */
 
-import { Pattern, Patterns } from "@moq/pattern";
+import { Pattern } from "@moq/pattern";
 import * as z from "zod/mini";
+import type { Claims } from "./claims.ts";
 
 /** A list of pattern texts, each validated by `Pattern.parse`. */
 export const PatternListSchema = z.array(
@@ -44,27 +44,37 @@ const RateSchema = z.number().check(
 );
 
 /**
- * One role in a claims or grant document: a list of patterns, or exactly `path` and
- * `rate`, so a misspelled cap is refused rather than read as none. A key scope bounds
- * paths, never bitrate, so it takes only the list.
+ * What one role (publish or subscribe) reaches: a list of patterns, or exactly `path` and
+ * `rate` (bits per second) when capped, so a misspelled cap is refused rather than read as
+ * none. Every older reader refuses the capped form rather than drop the cap. A key scope
+ * bounds paths, never bitrate, so it takes only the list.
+ *
+ * Mirrors `moq_auth::Access` in the Rust crate.
  */
-export const WireRoleSchema = z.union([
+export const AccessSchema = z.union([
 	PatternListSchema,
-	z.strictObject({ path: PatternListSchema, rate: RateSchema }),
+	z.strictObject({
+		/** Patterns the role reaches, relative to the root. */
+		path: PatternListSchema,
+		/** The most the role may move, in bits per second. */
+		rate: RateSchema,
+	}),
 ]);
+/** A value parsed by {@link AccessSchema}. */
+export type Access = z.output<typeof AccessSchema>;
 
-/** One role as written. */
-type WireRole = z.output<typeof WireRoleSchema>;
-
-/** The decoded roles: pattern lists, each with an optional cap in bits per second. */
-type Roles = { publish?: string[]; publish_rate?: number; subscribe?: string[]; subscribe_rate?: number };
+/** The patterns `access` reaches, empty when the role is absent. */
+export function paths(access: Access | undefined): string[] {
+	if (access === undefined) return [];
+	return Array.isArray(access) ? access : access.path;
+}
 
 /** One grant in whichever encoding it arrived: legacy `put`/`get` prefix lists, or roles. */
 type WireGrants = {
 	put?: string | string[];
 	get?: string | string[];
-	publish?: WireRole;
-	subscribe?: WireRole;
+	publish?: Access;
+	subscribe?: Access;
 };
 
 /**
@@ -97,90 +107,40 @@ export function decodeGrants<T extends WireGrants>(wire: T, ctx: { issues: unkno
 	}
 }
 
-/** Split each capped role into its patterns and a `_rate` field beside them. */
-export function decodeRoles<T extends { publish?: WireRole; subscribe?: WireRole }>(
-	wire: T,
-): Omit<T, "publish" | "subscribe"> & {
-	// Spelled out rather than `Roles`, so the public `Claims` and `Grant` types document each field.
-	/** Patterns the holder may publish, relative to the root. */
-	publish?: string[];
-	/** The most the holder may publish, in bits per second, or no cap when absent. */
-	publish_rate?: number;
-	/** Patterns the holder may subscribe to, relative to the root. */
-	subscribe?: string[];
-	/** The most the holder may receive from its subscriptions, in bits per second, or no cap when absent. */
-	subscribe_rate?: number;
-} {
-	const { publish, subscribe, ...rest } = wire;
-	const split = (role: WireRole | undefined): { path?: string[]; rate?: number } =>
-		role === undefined || Array.isArray(role) ? { path: role } : role;
-	const pub = split(publish);
-	const sub = split(subscribe);
-	return {
-		...(pub.path && { publish: pub.path }),
-		...(pub.rate !== undefined && { publish_rate: pub.rate }),
-		...(sub.path && { subscribe: sub.path }),
-		...(sub.rate !== undefined && { subscribe_rate: sub.rate }),
-		...rest,
-	};
+/** Omit a role that grants nothing and carries no cap, as both libraries write it. */
+export function encodeGrants<T extends { publish?: Access; subscribe?: Access }>(
+	grants: T,
+): Omit<T, "publish" | "subscribe"> & { publish?: Access; subscribe?: Access } {
+	const { publish, subscribe, ...rest } = grants;
+	const kept = (access: Access | undefined) =>
+		access !== undefined && (!Array.isArray(access) || access.length > 0) ? access : undefined;
+	const pub = kept(publish);
+	const sub = kept(subscribe);
+	return { ...rest, ...(pub && { publish: pub }), ...(sub && { subscribe: sub }) };
 }
 
 /**
- * Nest each `_rate` field back into its role, so the decoded claims `Key.verify`
- * returns parse again. Throws on a role already in the capped form, so a cap has one
- * spelling, and on the legacy `put`/`get` form, which signing no longer accepts.
+ * A token's identifier, its `jti` claim, such as a UUID an issuer records to revoke it.
+ * One to 128 printable ASCII characters, so it logs safely and both libraries bound it by
+ * the same length. An issuer picks it; nothing here invents one.
+ *
+ * Mirrors `moq_auth::TokenId` in the Rust crate.
  */
-export function nestRates<
-	T extends { publish?: unknown; subscribe?: unknown; publish_rate?: number; subscribe_rate?: number },
->(claims: T) {
-	const { publish_rate, subscribe_rate, ...rest } = claims;
-	if ("put" in rest || "get" in rest) {
-		throw new Error("legacy put/get grants are refused; sign publish and subscribe instead");
-	}
-	for (const role of [rest.publish, rest.subscribe]) {
-		if (role !== undefined && !Array.isArray(role)) {
-			throw new Error("a role is a pattern list, capped by publish_rate or subscribe_rate");
-		}
-	}
+export const TokenIdSchema = z
+	.string()
+	.check(
+		z.minLength(1),
+		z.maxLength(128),
+		z.regex(/^[\x21-\x7e]*$/, { message: "Token ID must be printable ASCII without spaces" }),
+	);
+
+/** Write claims as a token's JSON payload. */
+export function encodeClaims({ expires, issued, notBefore, id, ...grants }: Claims) {
 	return {
-		...rest,
-		...(publish_rate !== undefined && { publish: { path: rest.publish ?? [], rate: publish_rate } }),
-		...(subscribe_rate !== undefined && { subscribe: { path: rest.subscribe ?? [], rate: subscribe_rate } }),
+		...encodeGrants(grants),
+		...(expires !== undefined && { exp: expires }),
+		...(issued !== undefined && { iat: issued }),
+		...(notBefore !== undefined && { nbf: notBefore }),
+		...(id !== undefined && { jti: id }),
 	};
-}
-
-/** Write each role as its patterns, or as the capped object when it has a rate; an empty uncapped role is omitted. */
-export function encodeRoles(roles: Roles): { publish?: WireRole; subscribe?: WireRole } {
-	const role = (path: string[] | undefined, rate: number | undefined): WireRole | undefined =>
-		rate !== undefined ? { path: path ?? [], rate } : path?.length ? path : undefined;
-	const publish = role(roles.publish, roles.publish_rate);
-	const subscribe = role(roles.subscribe, roles.subscribe_rate);
-	return { ...(publish && { publish }), ...(subscribe && { subscribe }) };
-}
-
-/**
- * Write grants the legacy way when every pattern is a subtree and no role is capped, so
- * every published `moq-token` reader agrees on what they grant. Anything a prefix can't
- * say is written as `publish`/`subscribe`, which an older reader refuses rather than misreads.
- */
-export function encodeGrants<T extends Roles>(grants: T): Omit<T, keyof Roles> & WireGrants {
-	const { publish, publish_rate, subscribe, subscribe_rate, ...rest } = grants;
-	const prefixes = (texts: string[] | undefined, rate: number | undefined) => {
-		// A cap has no prefix form, so one moves the whole document to patterns.
-		if (rate !== undefined) return undefined;
-		const out: string[] = [];
-		for (const pattern of new Patterns((texts ?? []).map((text) => Pattern.parse(text)))) {
-			const prefix = pattern.asPrefix();
-			if (prefix === undefined) return undefined;
-			out.push(prefix);
-		}
-		return out;
-	};
-
-	const put = prefixes(publish, publish_rate);
-	const get = prefixes(subscribe, subscribe_rate);
-	if (put === undefined || get === undefined) {
-		return { ...rest, ...encodeRoles({ publish, publish_rate, subscribe, subscribe_rate }) };
-	}
-	return { ...rest, ...(put.length && { put }), ...(get.length && { get }) };
 }

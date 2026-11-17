@@ -129,11 +129,13 @@ const native = values.publisher === "native";
 const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
 const requestedPublisher = values["publisher-engine"] ?? "chromium";
 const requestedPlayer = values["player-engine"] ?? "chromium";
+// Restored on Chromium only: on Firefox its fallback intermittently misses the switch bound.
+const quarantined = !native && values.cases === undefined && requestedPlayer !== "chromium";
 const selected = new Set<string>(
 	values.cases === undefined
 		? native
 			? NATIVE_CASES
-			: CASES.filter((name) => name !== "replacement")
+			: CASES.filter((name) => !quarantined || name !== "replacement")
 		: values.cases === "none"
 			? []
 			: values.cases.split(","),
@@ -161,9 +163,9 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && values.cases === undefined) {
+if (quarantined) {
 	console.error(
-		"QUARANTINE\treplacement\tintermittent audio stall after a route switch under CPU load; see quest/m0/interop-green/README.md",
+		"QUARANTINE\treplacement\tintermittent fallback past the switch bound off Chromium; see quest/m0/interop-green/replacement-audio.md",
 	);
 }
 
@@ -1070,11 +1072,11 @@ try {
 	if (!native) {
 		const interval = await player
 			.locator(SELECTORS.watch)
-			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.media?.join?.interval);
+			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.sync?.interval);
 		check(
 			interval === KEYFRAME_INTERVAL_MS,
 			"declared join interval",
-			() => `the catalog declares media.join.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
+			() => `the catalog declares sync.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
 		);
 	}
 

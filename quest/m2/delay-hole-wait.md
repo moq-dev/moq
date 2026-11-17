@@ -39,18 +39,31 @@ Facts found by the audit:
   reaches the group past it. The clock already trails live by the estimate,
   so it carries the moving value the wait was added for.
 
+- The Rust consumer has the clock too
+  (`moq_mux::container::Consumer::set_playhead`), and `moq play` gives it to
+  video only. Given to native audio it measured worse than the estimate wait
+  (`just test audio-quality --runtimes native --codecs opus --duration 40
+  --seed 7`): ending a hole at the clock cost `bursty` 155 underruns a minute
+  against 3, since a late burst's successor is already due when the missing
+  group lands a moment later; ending it at the clock plus the 200 ms stretch
+  held `bursty` and `mild` level, but over three runs each `congestion` ran
+  1714 to 1925 underruns a minute against 1307 to 1767 without it, and an A/V
+  lag p95 of 808 to 946 ms against 288 to 631 ms. The estimate wait gives
+  every hole the estimate from the arrival of the group past it, which a late
+  burst needs.
+
 For the PR, settle the home of native audio's live estimate first. Two ways:
 
-1. Recommended: the playhead is the home. Once
-   [native players skip a hole their clock passed](/quest/m2/audio-playout/rust-playhead-holes.md),
-   the clock ends a hole at the estimate, and the static rule (`min`, else
-   `max`) is only the fallback for a reader with no clock. Prove it by
-   deleting the `set_wait` call and running #8531's regression tests
+1. The playhead is the home: the clock ends a hole, and the static rule
+   (`min`, else `max`) is only the fallback for a reader with no clock. The
+   measurements above count against it for audio unless a variant beats the
+   estimate wait on `bursty` and `congestion`. Prove any variant by deleting
+   the `set_wait` call and running #8531's regression tests
    (`rs/moq-mux/src/container/consumer.rs:2161`, `:2308`, `:2369` and
-   moq-audio's reorder tests) with the playhead in place.
+   moq-audio's reorder tests) with the playhead in place, plus those rows.
 2. moq-audio writes its estimate into the subscription's `Delay::min` as it
    moves. `min` is Subscriber Min Age on the lite-07 wire, so each change is
-   a SUBSCRIBE_UPDATE, and since [a cold join reaches back by it](/quest/m2/min-age-join.md)
+   a SUBSCRIBE_UPDATE, and since a cold join reaches back by it
    it would also move where a join starts. Take this only with a coarse step
    and a measured update rate, and say why the playhead did not do.
 
@@ -63,11 +76,7 @@ knob: the maintainer rejected that end state.
 Public API: `moq-mux` loses `container::Consumer::set_wait`; `@moq/hang`
 loses `ConsumerProps.wait`. Wire: none.
 
-## Required
-
-- [Native players stop waiting on a hole their clock passed](/quest/m2/audio-playout/rust-playhead-holes.md) - gives the Rust consumer the clock that replaces the live wait
-
 ## Related
 
-- [A cold join reaches back by Min Age](/quest/m2/min-age-join.md) - gives `Delay::min` a reader on the wire, which rules out using it as a fast-moving estimate
 - [Native audio playout is a library](/quest/m3/audio-playout-library.md) - moves the placement this wait feeds into moq-audio
+- [Browser audio takes its holes from the ordered reader](/quest/m2/audio-playout/browser-audio-hole-skip.md) - moves the browser audio hole rule this settles into `@moq/net`'s ordered reader

@@ -60,9 +60,10 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default an established session redials
-  /// with backoff whenever the transport drops; a first dial that reaches no
-  /// session ends it with that error instead.
+  /// Set true for a one-shot dial. By default a session that stayed up past 1s
+  /// or was drained by a GOAWAY redials with backoff whenever the transport
+  /// drops; before then, a failed dial or a closed session, such as a refused
+  /// credential, ends it with that error instead.
   final bool once;
 
   /// Retry pacing for the automatic reconnect.
@@ -271,8 +272,7 @@ final class Moq {
   /// [Tokens.set_] replaces them, such as before the current ones expire: the
   /// next dial presents them, and a live session with in-band AUTH presents
   /// them at once, withdrawing each replaced token once its replacements are
-  /// answered, even when one is refused. After an authorization refusal the
-  /// session redials only if they changed. An empty token throws
+  /// answered, even when one is refused. An empty token throws
   /// `ConfigMoqException`. Await [Tokens.answered] for the relay's verdict.
   Tokens tokens() => session.tokens()!;
 

@@ -135,7 +135,7 @@ pub enum Error {
 
 	/// A client on a simulated host dials only QUIC, since every other transport opens a real
 	/// socket. The payload is the scheme.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	#[error("{0}:// can't be dialed from a simulated host; dial https://, moqt://, or moql:// instead")]
 	SimScheme(String),
 
@@ -152,9 +152,9 @@ pub enum Error {
 		websocket: Arc<Error>,
 	},
 
-	/// A client CA or pinned peers were configured on a server with no QUIC or `tls://` listener to verify them.
+	/// A client CA was configured on a server with no QUIC or `tls://` listener to verify it.
 	#[error(
-		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
+		"mTLS (--listen-tls-root) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 

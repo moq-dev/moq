@@ -45,8 +45,8 @@ fn corpus() -> Corpus {
 	serde_json::from_str(include_str!("../tests/corpus.json")).unwrap()
 }
 
-/// The claims as the corpus writes them: patterns reduced, absent roles empty, and
-/// rates and times only when present.
+/// The claims as the corpus writes them: patterns reduced, absent roles empty, a capped
+/// role as its wire object, and times and the token ID only when present.
 fn canonical(claims: &Claims) -> Value {
 	let seconds = |wall: Wall| wall.checked_duration_since(Wall::UNIX_EPOCH).unwrap().as_secs();
 	let mut out = json!({
@@ -55,8 +55,6 @@ fn canonical(claims: &Claims) -> Value {
 		"subscribe": claims.subscribe,
 	});
 	let fields = [
-		("publish_rate", claims.publish_rate.map(u64::from)),
-		("subscribe_rate", claims.subscribe_rate.map(u64::from)),
 		("exp", claims.expires.map(seconds)),
 		("iat", claims.issued.map(seconds)),
 		("nbf", claims.not_before.map(seconds)),
@@ -65,6 +63,9 @@ fn canonical(claims: &Claims) -> Value {
 		if let Some(value) = value {
 			out[field] = value.into();
 		}
+	}
+	if let Some(id) = &claims.id {
+		out["jti"] = id.encode().into();
 	}
 	out
 }

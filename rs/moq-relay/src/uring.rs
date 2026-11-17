@@ -145,7 +145,6 @@ impl Workers {
 			bind,
 			versions,
 			// With the versions and timeout, mapped onto the moq handshake by `listen.server()`.
-			extensions: _,
 			implementation: _,
 			timeout,
 			tls: listen_tls,
@@ -186,8 +185,7 @@ impl Workers {
 						&& listen_tls.key.is_empty()
 						&& listen_tls.generate.is_empty()
 						&& listen_tls.root.is_empty()
-						&& listen_tls.identity.is_none()
-						&& listen_tls.peers.is_none(),
+						&& listen_tls.identity.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
 				tls
@@ -1002,7 +1000,7 @@ mod tests {
 			&mut crate::handoff::Sockets::disabled(),
 		)
 		.expect_err("a QUIC-LB nonce without an id is refused");
-		assert!(err.to_string().contains("--listen-quic-lb-nonce"), "{err:#}");
+		assert!(err.to_string().contains("--listen-lb-nonce"), "{err:#}");
 	}
 
 	/// A window the operator set has to reach the worker. Refusing it, or

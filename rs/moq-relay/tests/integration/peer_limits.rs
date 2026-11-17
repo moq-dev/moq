@@ -128,7 +128,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 				.expect("admission");
 			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
 			let mut grant = moq_auth::Grant::new(all.clone(), all);
-			grant.peer = peer;
+			grant.link = peer.then_some(moq_auth::Link::Peer);
 			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 			leases.push(producer);
 			admission.grant(consumer);
