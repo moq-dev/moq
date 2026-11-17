@@ -1,7 +1,7 @@
 //! Audio encoder front end.
 //!
 //! [`Encoder`] checks [`Config`] against the codec, opens a
-//! [`Backend`](super::backend::Backend) for it, and owns what every backend of a
+//! [backend](super::backend::Backend) for it, and owns what every backend of a
 //! codec shares: framing, the terminal drain, and the catalog entry.
 
 use std::str::FromStr;
@@ -10,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::Encoded;
-use super::backend::{self, Backend};
+use super::backend;
 use crate::opus;
 use crate::pcm;
 use crate::{Error, Format, Layout};
@@ -74,12 +74,31 @@ impl FromStr for Codec {
 /// Encoder backend selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Kind {
+pub enum Backend {
 	/// Prefer a platform encoder, falling back to software.
 	#[default]
 	Auto,
 	/// Require a software backend.
 	Software,
+}
+
+/// What the audio carries, which tunes the codec for it.
+///
+/// Mirrors `@moq/publish`'s audio source `kind`. Only Opus uses it; PCM and AAC
+/// encode the same either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+	/// Speech, such as a microphone: Opus codes it as VoIP voice, and a
+	/// [`Producer`](super::Producer) sends nothing while the talker is silent.
+	///
+	/// libopus decides what is silence, through its discontinuous transmission.
+	/// The bare [`Encoder`] returns its packets as they are, a no-transmit packet
+	/// for most silent frames; the producer declares the end of speech at the
+	/// first one, as a mute does, drops the rest of the silence, and opens a new
+	/// group when speech resumes.
+	Voice,
+	/// Music or mixed content, such as a screen share: Opus codes it as music.
+	Music,
 }
 
 /// PCM supplied to [`Producer::write`](super::Producer::write).
@@ -132,8 +151,9 @@ pub struct Config {
 	/// bps at the default 20 ms, rises for shorter frames, and is 2400 bps for
 	/// frames of 10 ms and longer.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// Enable Opus discontinuous transmission during silence.
-	pub dtx: bool,
+	/// What the audio carries, or `None` when unknown, which leaves Opus at
+	/// libopus's defaults.
+	pub kind: Option<Kind>,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
 	/// PCM accepts any duration containing a whole number of samples. AAC frames
 	/// are 1024 samples, so it accepts the duration that rounds to that at
@@ -141,7 +161,7 @@ pub struct Config {
 	/// fills in.
 	pub frame_duration: Duration,
 	/// Which encoder implementation to use.
-	pub kind: Kind,
+	pub backend: Backend,
 }
 
 impl Config {
@@ -152,9 +172,9 @@ impl Config {
 			sample_rate,
 			layout,
 			bitrate: None,
-			dtx: false,
+			kind: None,
 			frame_duration: Duration::from_millis(20),
-			kind: Kind::Auto,
+			backend: Backend::Auto,
 		}
 	}
 
@@ -198,11 +218,6 @@ impl Config {
 						"pcm bitrate is fixed; leave Config::bitrate unset".into(),
 					));
 				}
-				if self.dtx {
-					return Err(Error::Unsupported(
-						"pcm does not support discontinuous transmission".into(),
-					));
-				}
 				if rate == 0 {
 					return Err(Error::Unsupported("pcm sample rate must be greater than zero".into()));
 				}
@@ -212,11 +227,6 @@ impl Config {
 				Ok(frame_size)
 			}
 			Codec::Aac => {
-				if self.dtx {
-					return Err(Error::Unsupported(
-						"aac does not support discontinuous transmission".into(),
-					));
-				}
 				aac_config(self)?;
 				let frames = (self.frame_duration.as_nanos() * u128::from(rate) + 500_000_000) / 1_000_000_000;
 				if frames != AAC_FRAME_SIZE as u128 {
@@ -292,7 +302,7 @@ fn aac_config(config: &Config) -> Result<moq_mux::codec::aac::Config, Error> {
 /// pipelines returns it from a later call, so the `n`th packet always starts
 /// `n` frames into the stream.
 pub struct Encoder {
-	backend: Box<dyn Backend>,
+	backend: Box<dyn backend::Backend>,
 	config: Config,
 	frame_size: usize,
 	/// The catalog description, synthesized from the config at construction so
@@ -917,16 +927,6 @@ mod tests {
 		assert!(matches!(err, Err(Error::Unsupported(_))));
 	}
 
-	#[test]
-	fn pcm_rejects_opus_only_settings() {
-		let config = Config {
-			codec: Codec::Pcm,
-			dtx: true,
-			..Config::default()
-		};
-		assert!(matches!(Encoder::new(&config), Err(Error::Unsupported(_))));
-	}
-
 	/// The catalog carries only a count, so a discrete layout comes back as the
 	/// count's default one, with the samples untouched.
 	#[test]
@@ -1039,15 +1039,6 @@ mod tests {
 		};
 		let err = stub(&config).err().expect("20 ms is 960 samples");
 		assert!(err.to_string().contains("1024"), "{err}");
-	}
-
-	#[test]
-	fn aac_refuses_dtx() {
-		let config = Config {
-			dtx: true,
-			..aac(Layout::Stereo)
-		};
-		assert!(matches!(stub(&config), Err(Error::Unsupported(_))));
 	}
 
 	/// A backend that can't retune keeps its opening rate.
