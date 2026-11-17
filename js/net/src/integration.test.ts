@@ -237,8 +237,8 @@ test("integration: lite subscription options and updates reach the publisher", a
 	server.abort();
 });
 
-// Both handshake paths: a SETUP-negotiated draft (16) and ALPN-selected ones (17+).
-test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age to the publisher", async (alpn) => {
+// moq-transport has no field for a subscriber budget, so the publisher's own policy bounds it.
+test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries no subscriber max age", async (alpn) => {
 	const pair = createMockTransportPair(alpn);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -256,12 +256,7 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({ delay: { max: Duration.millis(250) } });
 	const producer = await accepted;
-	// Without the negotiated parameter the publisher keeps its whole backlog instead.
-	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(250));
-
-	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Duration.millis(500) } });
-	expect((await updated)?.delay?.max).toEqual(Duration.millis(500));
+	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
 
 	subscriber.close();
 	remote.close();

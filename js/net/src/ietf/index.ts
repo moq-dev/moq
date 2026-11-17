@@ -3,7 +3,6 @@
 export * from "./active_count.ts";
 export * as Cluster from "./cluster.ts";
 export * from "./hidden.ts";
-export * from "./max_age.ts";
 export * from "./setup.ts";
 export * from "./setup_options.ts";
 export * from "./solicit.ts";

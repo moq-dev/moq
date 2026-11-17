@@ -28,7 +28,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries the
   smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
   group drops took simpler contracts.
-  [moq-transport time addressing](/quest/m2/ietf-time-addressing.md)
+  [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918)
   returned from m4, and the two moq-transport interop quests in m3 were
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
@@ -293,7 +293,7 @@ what would need a breaking release had it landed right after the cut:
   [media consumers](/quest/m2/time-addressing/consumers.md) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
-  [moq-transport time addressing](/quest/m2/ietf-time-addressing.md) to m4
+  [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4
   (low-priority compatibility, no named consumer), until it returned to m2
   on 2026-11-16; and the
   [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release

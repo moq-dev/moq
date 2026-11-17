@@ -123,7 +123,6 @@ async function head(requestId: bigint, payloads: string[], group = GROUP, versio
 			await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 				w,
 				{ group, object, first: object === 0 },
-				undefined,
 				version,
 			);
 		}
@@ -424,7 +423,6 @@ async function deltaHead(requestId: bigint, payloads: string[], delta: number) {
 				await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 					w,
 					{ group: GROUP, object, first: true },
-					undefined,
 					VERSION,
 				);
 				continue;
@@ -481,13 +479,11 @@ test("a joining FETCH spanning another group drops the head", async () => {
 		await new FetchFrame({ payload: text("h0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP, object: 0, first: true },
-			undefined,
 			VERSION,
 		);
 		await new FetchFrame({ payload: text("x0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP + 1n, object: 0, first: false, previousGroup: GROUP },
-			undefined,
 			VERSION,
 		);
 	});
@@ -577,20 +573,18 @@ test("fetch objects decode as FetchFrame wrote them", async () => {
 		await new FetchFrame({ payload: text("a"), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 0, first: true },
-			undefined,
 			VERSION,
 		);
 		await new FetchFrame({ payload: new Uint8Array(), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 1, first: false },
-			undefined,
 			VERSION,
 		);
 	});
 	const reader = new Reader(undefined, bytes, VERSION);
-	const first = await reader.decode((c) => decodeFetchObject(c, undefined));
+	const first = await reader.decode((c) => decodeFetchObject(c));
 	expect(first).toMatchObject({ kind: "object", group: 5n, object: 0, priority: 0, subgroup: "zero" });
-	const second = await reader.decode((c) => decodeFetchObject(c, undefined));
+	const second = await reader.decode((c) => decodeFetchObject(c));
 	expect(second).toMatchObject({ kind: "object", group: undefined, object: undefined, payload: new Uint8Array() });
 });
 
