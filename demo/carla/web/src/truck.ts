@@ -462,10 +462,10 @@ export class Truck {
 			this.#control = undefined;
 		});
 		// A closed publication drops every command, so letting go beats staying active on it.
-		if (effect.get(control.closed) !== undefined) {
-			this.#release();
-			return;
-		}
+		// Nested, so the closure releases the lease instead of rerunning this effect with a fresh id.
+		effect.run((inner) => {
+			if (inner.get(control.closed) !== undefined) this.#release();
+		});
 		// The claim, which the activation's own heartbeat sent before the track existed.
 		this.#heartbeat();
 	}
