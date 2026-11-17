@@ -229,11 +229,7 @@ impl Consumer {
 
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
-		let target = Target::new(
-			options.delay.min.unwrap_or_default(),
-			options.estimate,
-			catalog.jitter,
-		);
+		let target = Target::new(options.delay.min.unwrap_or_default(), options.estimate, catalog.jitter);
 		// The subscription states the playout delay as its min from the start, the estimate's cold
 		// start included: the container places an unfloored start and waits a missing group out
 		// by it (see `next`).
@@ -3035,7 +3031,11 @@ mod tests {
 		};
 
 		write(6);
-		assert!(kio::clock::timeout(Duration::from_millis(10), consumer.read()).await.is_err());
+		assert!(
+			kio::clock::timeout(Duration::from_millis(10), consumer.read())
+				.await
+				.is_err()
+		);
 		write(5);
 		let mut read = Vec::new();
 		for _ in 0..2 {
