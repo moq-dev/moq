@@ -81,7 +81,7 @@ impl Decoder {
 
 	/// Reset codec history and reapply startup delay for a new discontinuous epoch.
 	pub fn reset(&mut self) -> Result<(), Error> {
-		self.reset_prediction()?;
+		self.backend.reset()?;
 		self.reapply_delay();
 		Ok(())
 	}
@@ -89,11 +89,6 @@ impl Decoder {
 	/// Reapply catalog startup delay for a new playhead epoch without resetting codec prediction.
 	pub(super) fn reapply_delay(&mut self) {
 		self.delay_remaining = self.delay;
-	}
-
-	/// Reset codec prediction after packet loss without reapplying stream startup delay.
-	pub(super) fn reset_prediction(&mut self) -> Result<(), Error> {
-		self.backend.reset()
 	}
 
 	/// How much startup delay is still to be trimmed, in native-rate frames.

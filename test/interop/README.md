@@ -551,12 +551,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The replacement case is quarantined from the default run on every engine: under CPU
-load its audio intermittently goes silent, as each group the viewer skips restarts the
-decoder and trims its 80 ms warmup, and Firefox also showed intermittent missing tone
-samples. Run it explicitly with
-`just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run off Chromium: on Firefox its
+fallback intermittently misses the switch bound, as often with the audio fixes that
+restored it on Chromium as without them. Run it explicitly with
+`--media-cases replacement --media-engines firefox`; its content, sync, switch, and
+fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
