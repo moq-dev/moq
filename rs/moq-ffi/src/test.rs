@@ -1976,7 +1976,10 @@ async fn abort_unwanted_keeps_a_late_reader() {
 	demand.until_unwanted().await.unwrap();
 	assert!(track.abort_unwanted(7).unwrap());
 	assert!(matches!(track.abort_unwanted(7), Err(MoqError::Closed)));
-	assert!(matches!(track.append_group(MoqTimestamp::unscaled(1)), Err(MoqError::Closed)));
+	assert!(matches!(
+		track.append_group(MoqTimestamp::unscaled(1)),
+		Err(MoqError::Closed)
+	));
 
 	// The next reader asks the publisher again instead of finding the aborted track.
 	let next = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });

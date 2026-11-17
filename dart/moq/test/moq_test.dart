@@ -247,7 +247,9 @@ void main() {
         info: TrackInfo(maxAge: null, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
-        final group = track.appendGroup(start: Duration(milliseconds: ms).toTimestamp());
+        final group = track.appendGroup(
+          start: Duration(milliseconds: ms).toTimestamp(),
+        );
         group.writeFrame(
           frame: Frame(
             payload: utf8.encode('x'),

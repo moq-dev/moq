@@ -118,7 +118,8 @@ class FfiBench {
                     }
                 }
                 tracks.forEach { track ->
-                    track.appendGroup(Timestamp((n * case.frames).toULong(), 1_000_000uL)).use { group ->
+                    track.appendGroup(Timestamp((n * case.frames).toULong(), 1_000_000uL)).use {
+                        group ->
                         repeat(case.frames) { f ->
                             group.writeFrame(
                                 Frame(

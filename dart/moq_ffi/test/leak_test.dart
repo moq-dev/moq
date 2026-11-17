@@ -84,7 +84,9 @@ void main() {
         info: MoqTrackInfo(timescale: 1000000),
       );
       final consumer = track.consume(subscription: null);
-      final producer = track.appendGroup(start: MoqTimestamp(value: 0, scale: 1000000));
+      final producer = track.appendGroup(
+        start: MoqTimestamp(value: 0, scale: 1000000),
+      );
       producer.writeFrame(
         frame: MoqFrame(
           payload: payload,

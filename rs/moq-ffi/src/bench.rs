@@ -176,10 +176,12 @@ async fn ffi_round(
 		})
 		.collect();
 	for track in tracks {
-		let group = track.append_group(MoqTimestamp {
-			value: n * case.frames() as u64,
-			scale: Some(1_000_000),
-		}).unwrap();
+		let group = track
+			.append_group(MoqTimestamp {
+				value: n * case.frames() as u64,
+				scale: Some(1_000_000),
+			})
+			.unwrap();
 		for f in 0..case.frames() {
 			let frame = MoqFrame {
 				payload: payload.to_vec(),
@@ -283,7 +285,11 @@ async fn rust_ffi() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("calls".into(), None).unwrap();
-	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap().consume().unwrap();
+	let group = track
+		.append_group(MoqTimestamp::unscaled(0))
+		.unwrap()
+		.consume()
+		.unwrap();
 	report.call("start", || {
 		black_box(black_box(&group).start());
 	});

@@ -78,7 +78,9 @@ Future<void> throughput(
   Future<void> step(int n) async {
     final readers = [for (final consumer in consumers) read(consumer, n)];
     for (final track in tracks) {
-      final group = track.appendGroup(start: Timestamp(value: n * c.frames, scale: 1000000));
+      final group = track.appendGroup(
+        start: Timestamp(value: n * c.frames, scale: 1000000),
+      );
       try {
         for (var f = 0; f < c.frames; f++) {
           group.writeFrame(
