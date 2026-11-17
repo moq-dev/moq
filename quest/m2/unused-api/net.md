@@ -69,8 +69,6 @@ Not in this sweep, with their owners:
 - `origin::Producer::update_hold`, `with_proxy`, `Source`, `source()`,
   `Consumer::local()`, `origin::RouteKey`, and `Config::route_key` belong to
   [the route switch](/quest/m2/multicast/switch.md).
-- `setup::Extensions` belongs to
-  [the `ietf` extension](/quest/m2/ietf-records-per-track.md).
 
 Run `just api-diff rust` after the change and list
 every item it shows removed in the PR's Impact section.

@@ -1749,14 +1749,14 @@ impl GroupRecv {
 		let ietf: bool = header.0;
 		let hdr: lite::Group = header.1;
 		// Lite-07 on a track without object records: a YIELDED reset pauses the group.
-		let yields: bool = self.subscriber.version.has_yield()
-			&& !(ietf
-				&& self
-					.subscriber
-					.subscribes
-					.lock()
-					.get(&hdr.subscribe)
-					.is_some_and(|entry| entry.has_records()));
+		let records: bool = ietf
+			&& self
+				.subscriber
+				.subscribes
+				.lock()
+				.get(&hdr.subscribe)
+				.is_some_and(|entry| entry.has_records());
+		let yields: bool = self.subscriber.version.has_yield() && !records;
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -1861,7 +1861,7 @@ impl GroupRecv {
 		let group: crate::recv::Group = group;
 		let track: track::Producer = track;
 		let mut ingest: FrameIngest =
-			FrameIngest::new(framing, ietf, hdr.frame_start).yielding(yields, cut.map(|cut| *cut));
+			FrameIngest::new(framing, records, hdr.frame_start).yielding(yields, cut.map(|cut| *cut));
 		let reading: Reading = reading;
 
 		// Filling the group, bailing if the track or group dies first. The track or group
@@ -2015,12 +2015,13 @@ enum IngestPhase {
 }
 
 impl FrameIngest {
-	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
-	pub(crate) fn new(framing: lite::Framing, ietf: bool, frame_start: u64) -> Self {
+	/// `records` when the session negotiated the `ietf` extension and a moq-transport
+	/// publisher made the track, so the stream starts with a Group State.
+	pub(crate) fn new(framing: lite::Framing, records: bool, frame_start: u64) -> Self {
 		Self {
 			framing,
 			prev_ts: 0,
-			phase: match ietf {
+			phase: match records {
 				true => IngestPhase::State,
 				false => Self::first_field(framing),
 			},
@@ -2161,10 +2162,6 @@ impl FrameIngest {
 					let state = ready!(reader.poll_varint(waiter))?;
 					let wire = lite::ietf::decode_state(state, self.frame_start)?;
 					let relayed = wire.is_some();
-					// A track published over moq-lite has no moq-transport state.
-					if relayed && self.framing.ietf.is_none() {
-						return Poll::Ready(Err(Error::ProtocolViolation));
-					}
 					let extensions = wire.as_ref().is_some_and(|wire| wire.extensions);
 					if let Some(wire) = wire {
 						group.set_wire(wire)?;
@@ -5123,18 +5120,17 @@ mod tests {
 		}
 	}
 
-	/// A track published over moq-lite has no moq-transport state, so a relayed group on
-	/// one is refused, though its plain groups cross.
+	/// A track published over moq-lite has no moq-transport state, so its Group Streams
+	/// carry no Group State and no records, as on a session without the extension.
 	#[kio::test]
-	async fn ietf_records_need_a_moq_transport_track() {
-		let plain = [0, 0, 0, 1, u64::from(b'x')];
-		let relayed = [0x1, 0, 0, 1, u64::from(b'x')];
-		for (framing, ok) in [(draft18(None), true), (lite::Framing::default(), false)] {
-			let (res, ..) = receive_ietf(framing, &plain).await;
-			res.unwrap();
-			let (res, ..) = receive_ietf(framing, &relayed).await;
-			assert_eq!(res.is_ok(), ok, "{framing:?}: {res:?}");
-		}
+	async fn a_moq_lite_track_has_no_records() {
+		let (res, track, _) = receive_ietf(lite::Framing::default(), &[1, u64::from(b'x')]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(0).unwrap();
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, b"x"[..]);
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(group.wire().is_none());
 	}
 
 	/// A relayed group's records carry properties only when its Group State sets EXTENSIONS,
@@ -5557,9 +5553,9 @@ mod tests {
 			compressed: false,
 			length_first: true,
 		};
-		// The `ietf` extension's plain records: a Group State of 0 after the header, then a
-		// record before each frame, as a moq-lite track on a relay link carries them.
-		let header = |ietf: bool| {
+		// A moq-lite track carries no records, so a relay link that negotiated the `ietf`
+		// extension sends the same stream.
+		let header = || {
 			let mut script = Vec::new();
 			lite::Group {
 				subscribe: 7,
@@ -5568,18 +5564,11 @@ mod tests {
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
-			if ietf {
-				script.push(0);
-			}
 			script
 		};
 		// A lite-07 FRAME: the payload size plus one, the timestamp delta, then the first
 		// `sent` bytes of the payload.
-		let frame = |script: &mut Vec<u8>, ietf: bool, delta: i64, payload: &[u8], sent: usize| {
-			if ietf {
-				// The next Object ID, with no properties.
-				script.extend_from_slice(&[0, 0]);
-			}
+		let frame = |script: &mut Vec<u8>, delta: i64, payload: &[u8], sent: usize| {
 			let mut encoder = crate::coding::Encoder::new(&mut *script, version.into());
 			encoder.varint(payload.len() as u64 + 1).unwrap();
 			encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
@@ -5589,12 +5578,12 @@ mod tests {
 
 		for (overtakes, ietf) in [(false, false), (true, false), (false, true), (true, true)] {
 			// Frame 0 whole, then frame 1 cut after three bytes.
-			let mut cut = header(ietf);
-			frame(&mut cut, ietf, frames[0].0, frames[0].1, frames[0].1.len());
-			frame(&mut cut, ietf, frames[1].0, frames[1].1, 3);
-			let mut whole = header(ietf);
+			let mut cut = header();
+			frame(&mut cut, frames[0].0, frames[0].1, frames[0].1.len());
+			frame(&mut cut, frames[1].0, frames[1].1, 3);
+			let mut whole = header();
 			for (delta, payload) in frames {
-				frame(&mut whole, ietf, delta, payload, payload.len());
+				frame(&mut whole, delta, payload, payload.len());
 			}
 			let yielded = ScriptedSession::new(cut);
 			let continued = ScriptedSession::eof(whole);
@@ -14891,11 +14880,10 @@ impl kio::Task for FetchServeRun {
 						stream,
 						producer: Box::new(crate::recv::Group::new(producer)),
 						readers,
-						ingest: Box::new(FrameIngest::new(
-							lite::Framing::new(&info, self.serve.subscriber.version),
-							ietf,
-							frame_start,
-						)),
+						ingest: Box::new({
+							let framing = lite::Framing::new(&info, self.serve.subscriber.version);
+							FrameIngest::new(framing, ietf && framing.ietf.is_some(), frame_start)
+						}),
 					};
 				}
 				FetchRunState::Ingest {
