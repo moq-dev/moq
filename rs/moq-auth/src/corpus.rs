@@ -46,7 +46,7 @@ fn corpus() -> Corpus {
 }
 
 /// The claims as the corpus writes them: patterns reduced, absent roles empty, a capped
-/// role as its wire object, and times only when present.
+/// role as its wire object, and times and the token ID only when present.
 fn canonical(claims: &Claims) -> Value {
 	let seconds = |wall: Wall| wall.checked_duration_since(Wall::UNIX_EPOCH).unwrap().as_secs();
 	let mut out = json!({
@@ -63,6 +63,9 @@ fn canonical(claims: &Claims) -> Value {
 		if let Some(value) = value {
 			out[field] = value.into();
 		}
+	}
+	if let Some(id) = &claims.id {
+		out["jti"] = id.encode().into();
 	}
 	out
 }

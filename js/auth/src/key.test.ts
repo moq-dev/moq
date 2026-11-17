@@ -3,7 +3,7 @@ import { Wall, wall } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
-import { authorize, type Claims } from "./claims.ts";
+import { Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
 import { Key, KeyIdSchema } from "./key.ts";
 
@@ -26,8 +26,8 @@ const testClaims = {
 	root: "test-path",
 	publish: ["test-pub/**"],
 	subscribe: ["test-sub/**"],
-	exp: Math.floor(wall().asUnixMillis() / 1000 + 60), // 1 minute from now in seconds
-	iat: Math.floor(wall().asUnixMillis() / 1000), // now in seconds
+	expires: Math.floor(wall().asUnixMillis() / 1000 + 60), // 1 minute from now in seconds
+	issued: Math.floor(wall().asUnixMillis() / 1000), // now in seconds
 };
 
 type AsymmetricAlgorithm = Exclude<Algorithm, "HS256" | "HS384" | "HS512">;
@@ -284,7 +284,7 @@ test("verify - invalid token format", async () => {
 test("verify - expired token", async () => {
 	const expiredClaims = {
 		...testClaims,
-		exp: Math.floor(wall().asUnixMillis() / 1000 - 60), // 1 minute ago in seconds
+		expires: Math.floor(wall().asUnixMillis() / 1000 - 60), // 1 minute ago in seconds
 	};
 
 	const key = Key.parse(encodeJwk(testKey));
@@ -309,7 +309,7 @@ test("verify - token without exp field", async () => {
 
 	expect(claims.root).toBe("test-path");
 	expect(claims.publish).toEqual(["test-pub/**"]);
-	expect(claims.exp).toBe(undefined);
+	expect(claims.expires).toBe(undefined);
 });
 
 test("claims validation - must have pub or sub", async () => {
@@ -333,8 +333,9 @@ test("round-trip - sign and verify", async () => {
 		root: "test-path",
 		publish: ["test-pub/**"],
 		subscribe: ["test-sub/**"],
-		exp: Math.floor(wall().asUnixMillis() / 1000 + 60),
-		iat: Math.floor(wall().asUnixMillis() / 1000),
+		expires: Math.floor(wall().asUnixMillis() / 1000 + 60),
+		issued: Math.floor(wall().asUnixMillis() / 1000),
+		id: "round-trip",
 	};
 
 	const token = await Key.sign(key, originalClaims);
@@ -343,8 +344,9 @@ test("round-trip - sign and verify", async () => {
 	expect(verifiedClaims.root).toBe(originalClaims.root);
 	expect(verifiedClaims.publish).toEqual(originalClaims.publish);
 	expect(verifiedClaims.subscribe).toEqual(originalClaims.subscribe);
-	expect(verifiedClaims.exp).toBe(originalClaims.exp);
-	expect(verifiedClaims.iat).toBe(originalClaims.iat);
+	expect(verifiedClaims.expires).toBe(originalClaims.expires);
+	expect(verifiedClaims.issued).toBe(originalClaims.issued);
+	expect(verifiedClaims.id).toBe(originalClaims.id);
 });
 
 test("verify - ignores the path, which authorize() checks instead", async () => {
@@ -356,7 +358,7 @@ test("verify - ignores the path, which authorize() checks instead", async () => 
 	expect(claims.root).toBe(testClaims.root);
 
 	// ...and is rejected only once authorized against that path.
-	expect(() => authorize(claims, "different-path")).toThrow();
+	expect(() => Claims.authorize(claims, "different-path")).toThrow();
 });
 
 test("sign - invalid claims without pub or sub", async () => {
@@ -711,7 +713,7 @@ test("sign - no kid in header when not present", async () => {
 	expect(header.typ).toBe("JWT");
 });
 
-test("sign - writes iat only when the claims carry one", async () => {
+test("sign - writes iat and jti only when the claims carry them", async () => {
 	const key = Key.parse(encodeJwk(testKey));
 
 	const decodePayload = (token: string) => {
@@ -722,11 +724,23 @@ test("sign - writes iat only when the claims carry one", async () => {
 
 	// Unset stays off the wire, matching the Rust crate rather than stamping now().
 	const withoutIat = await Key.sign(key, { root: "test-path", publish: ["test-pub/**"] });
-	expect(decodePayload(withoutIat).iat).toBeUndefined();
+	expect(decodePayload(withoutIat)).toEqual({ root: "test-path", publish: ["test-pub/**"] });
 
-	// A caller-supplied iat is preserved exactly.
-	const withIat = await Key.sign(key, { root: "test-path", publish: ["test-pub/**"], iat: 1700000000 });
-	expect(decodePayload(withIat).iat).toBe(1700000000);
+	// A caller-supplied time and ID are written under their registered names.
+	const withIat = await Key.sign(key, { root: "test-path", publish: ["test-pub/**"], issued: 1700000000, id: "t-1" });
+	expect(decodePayload(withIat)).toEqual({
+		root: "test-path",
+		publish: ["test-pub/**"],
+		iat: 1700000000,
+		jti: "t-1",
+	});
+
+	// The wire names, and the legacy grants, are not claims to sign.
+	for (const field of [{ iat: 1700000000 }, { put: ["test-pub"] }, { jti: "t-1" }]) {
+		await expect(
+			Key.sign(key, { root: "test-path", publish: ["test-pub/**"], ...field } as Claims),
+		).rejects.toThrow();
+	}
 });
 
 test("verify - malformed token parts", async () => {
@@ -799,11 +813,11 @@ test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 	expect(claims.subscribe).toEqual(["**"]);
 });
 
-test("sign - subtree grants are written as legacy put/get", async () => {
+test("sign - subtree grants are written as patterns", async () => {
 	const key = Key.parse(encodeJwk(testKey));
 	const token = await Key.sign(key, { root: "test-path", publish: ["alice/**"], subscribe: ["**"] });
 	const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
-	expect(payload).toEqual({ root: "test-path", put: ["alice"], get: [""] });
+	expect(payload).toEqual({ root: "test-path", publish: ["alice/**"], subscribe: ["**"] });
 });
 
 test("sign - refuses the legacy put/get spelling, even within scope", async () => {
@@ -812,9 +826,9 @@ test("sign - refuses the legacy put/get spelling, even within scope", async () =
 		scope: { root: "demo", publish: ["inside/**"] },
 	};
 	const inside = { root: "demo", put: ["inside"] } as unknown as Claims;
-	await expect(Key.sign(scoped, inside)).rejects.toThrow("legacy put/get");
+	await expect(Key.sign(scoped, inside)).rejects.toThrow('"put"');
 	const outside = { root: "demo", put: ["outside"] } as unknown as Claims;
-	await expect(Key.sign(scoped, outside)).rejects.toThrow("legacy put/get");
+	await expect(Key.sign(scoped, outside)).rejects.toThrow('"put"');
 });
 
 test("key scope is enforced when signing and verifying", async () => {
@@ -884,6 +898,7 @@ test("verify - only registered claims", async () => {
 	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
 	const claims = await Key.verify(key, token);
 	expect(claims.root).toBe("room");
+	expect(claims.id).toBe("1");
 	expect(claims).not.toHaveProperty("iss");
 
 	for (const [claim, payload] of [
@@ -899,7 +914,7 @@ test("verify - only registered claims", async () => {
 test("verify - enforces not before", async () => {
 	const key = Key.parse(encodeJwk(testKey));
 	const now = Math.floor(wall().asUnixMillis() / 1000);
-	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
+	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).notBefore).toBe(now - 60);
 	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
 });
 

@@ -1,15 +1,11 @@
 //! The JSON encoding of the grants in [`Claims`](crate::Claims) and [`Scope`](crate::Scope).
 //!
-//! Grants were once prefix lists named `put` and `get`, and every published `moq-token`
-//! reader still expects them. A prefix `p` means exactly the pattern `p/**` (and `""`
-//! means `**`), so grants that are all subtrees are written the old way and every
-//! reader, old or new, agrees on what they grant. Anything a prefix can't say is written
-//! as `publish` and `subscribe`, which an old reader sees as granting nothing and
-//! refuses. Both encodings are read; one document never mixes them.
+//! Grants are written as `publish` and `subscribe` pattern lists. They were once prefix
+//! lists named `put` and `get`, which are still read: a prefix `p` means exactly the
+//! pattern `p/**` (and `""` means `**`). One document never mixes the two encodings.
 //!
 //! A role with a bitrate cap is written as an object, `{"path": [...], "rate": bps}`,
-//! which every older reader refuses rather than drop the cap, so a capped role is never
-//! written as prefixes.
+//! which every older reader refuses rather than drop the cap.
 
 use crate::{Access, Link};
 use moq_pattern::{Pattern, Patterns};
@@ -26,9 +22,10 @@ use std::time::Duration;
 pub(crate) struct Claims {
 	#[serde(skip_serializing_if = "String::is_empty")]
 	root: String,
-	#[serde(deserialize_with = "present")]
+	// The legacy grants, read and never written.
+	#[serde(deserialize_with = "present", skip_serializing)]
 	put: Option<Prefixes>,
-	#[serde(deserialize_with = "present")]
+	#[serde(deserialize_with = "present", skip_serializing)]
 	get: Option<Prefixes>,
 	#[serde(deserialize_with = "present")]
 	publish: Option<Access>,
@@ -44,6 +41,8 @@ pub(crate) struct Claims {
 		skip_serializing_if = "Option::is_none"
 	)]
 	nbf: Option<kio::clock::Wall>,
+	#[serde(deserialize_with = "present")]
+	jti: Option<crate::TokenId>,
 	// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
 	// Every other claim is refused, since an unknown one may narrow the grant, and a
 	// misspelled `root` would otherwise widen it to everything.
@@ -51,25 +50,22 @@ pub(crate) struct Claims {
 	iss: Option<serde::de::IgnoredAny>,
 	#[serde(skip_serializing)]
 	sub: Option<serde::de::IgnoredAny>,
-	#[serde(skip_serializing)]
-	jti: Option<serde::de::IgnoredAny>,
 }
 
 impl From<crate::Claims> for Claims {
 	fn from(claims: crate::Claims) -> Self {
-		let grants = Grants::encode(claims.publish, claims.subscribe);
 		Self {
 			root: claims.root,
-			put: grants.put.map(Prefixes::Many),
-			get: grants.get.map(Prefixes::Many),
-			publish: grants.publish,
-			subscribe: grants.subscribe,
+			put: None,
+			get: None,
+			publish: written(claims.publish),
+			subscribe: written(claims.subscribe),
 			exp: claims.expires,
 			iat: claims.issued,
 			nbf: claims.not_before,
+			jti: claims.id,
 			iss: None,
 			sub: None,
-			jti: None,
 		}
 	}
 }
@@ -92,6 +88,7 @@ impl TryFrom<Claims> for crate::Claims {
 			expires: wire.exp,
 			issued: wire.iat,
 			not_before: wire.nbf,
+			id: wire.jti,
 		})
 	}
 }
@@ -103,9 +100,10 @@ impl TryFrom<Claims> for crate::Claims {
 pub(crate) struct Scope {
 	#[serde(skip_serializing_if = "String::is_empty")]
 	root: String,
-	#[serde(deserialize_with = "present")]
+	// The legacy grants, read and never written.
+	#[serde(deserialize_with = "present", skip_serializing)]
 	put: Option<Vec<String>>,
-	#[serde(deserialize_with = "present")]
+	#[serde(deserialize_with = "present", skip_serializing)]
 	get: Option<Vec<String>>,
 	#[serde(deserialize_with = "present")]
 	publish: Option<Patterns>,
@@ -115,14 +113,13 @@ pub(crate) struct Scope {
 
 impl From<crate::Scope> for Scope {
 	fn from(scope: crate::Scope) -> Self {
-		let grants = Grants::encode(Access::new(scope.publish), Access::new(scope.subscribe));
-		let paths = |role: Option<Access>| role.map(|role| role.path);
+		let paths = |patterns: Patterns| (!patterns.is_empty()).then_some(patterns);
 		Self {
 			root: scope.root,
-			put: grants.put,
-			get: grants.get,
-			publish: paths(grants.publish),
-			subscribe: paths(grants.subscribe),
+			put: None,
+			get: None,
+			publish: paths(scope.publish),
+			subscribe: paths(scope.subscribe),
 		}
 	}
 }
@@ -148,7 +145,7 @@ impl TryFrom<Scope> for crate::Scope {
 }
 
 /// Legacy claims wrote a single prefix as a bare string.
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum Prefixes {
 	One(String),
@@ -257,6 +254,11 @@ mod seconds {
 	}
 }
 
+/// A role as written: omitted when it grants nothing and carries no cap.
+fn written(role: Access) -> Option<Access> {
+	(!role.is_unset()).then_some(role)
+}
+
 /// The grant fields shared by both documents, in whichever encoding they arrived.
 struct Grants {
 	put: Option<Vec<String>>,
@@ -266,35 +268,6 @@ struct Grants {
 }
 
 impl Grants {
-	fn encode(publish: Access, subscribe: Access) -> Self {
-		// A cap has no prefix form, so one moves the whole document to patterns.
-		let prefixes = |role: &Access| -> Option<Vec<String>> {
-			if role.rate.is_some() {
-				return None;
-			}
-			role.path
-				.iter()
-				.map(|pattern| pattern.as_prefix().map(str::to_string))
-				.collect()
-		};
-		let some = |role: Access| (!role.is_unset()).then_some(role);
-
-		match (prefixes(&publish), prefixes(&subscribe)) {
-			(Some(put), Some(get)) => Self {
-				put: (!put.is_empty()).then_some(put),
-				get: (!get.is_empty()).then_some(get),
-				publish: None,
-				subscribe: None,
-			},
-			_ => Self {
-				put: None,
-				get: None,
-				publish: some(publish),
-				subscribe: some(subscribe),
-			},
-		}
-	}
-
 	fn decode(self) -> Result<(Access, Access), String> {
 		let legacy = self.put.is_some() || self.get.is_some();
 		if !legacy {

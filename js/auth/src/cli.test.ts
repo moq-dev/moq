@@ -72,11 +72,15 @@ describe("sign", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	function exp(...args: string[]): number | undefined {
+	function payload(...args: string[]) {
 		const result = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "**", ...args]);
 		expect(result.exitCode).toBe(0);
-		const payload = result.stdout.toString().trim().split(".")[1];
-		return JSON.parse(Buffer.from(payload, "base64url").toString()).exp;
+		const encoded = result.stdout.toString().trim().split(".")[1];
+		return JSON.parse(Buffer.from(encoded, "base64url").toString());
+	}
+
+	function exp(...args: string[]): number | undefined {
+		return payload(...args).exp;
 	}
 
 	/** The `exp` `args` write, with the wall seconds bracketing the subprocess that wrote it. */
@@ -101,5 +105,12 @@ describe("sign", () => {
 		expect(exp("--unbounded")).toBeUndefined();
 		const conflict = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--unbounded", "--ttl", "1d"]);
 		expect(conflict.exitCode).not.toBe(0);
+	});
+
+	test("writes a jti only when --id gives one", () => {
+		expect(payload()).not.toHaveProperty("jti");
+		expect(payload("--id", "t-1").jti).toBe("t-1");
+		const invalid = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "**", "--id", "a b"]);
+		expect(invalid.exitCode).not.toBe(0);
 	});
 });

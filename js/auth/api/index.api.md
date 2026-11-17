@@ -59,14 +59,26 @@ export const BytesSchema: ZodMiniObject<{
 	sent: ZodMiniInt;
 }, $strip>;
 
-export type Claims = output<typeof ClaimsSchema>;
+export const Claims: {
+	authorize: (claims: Claims, path: string) => Permissions;
+};
+
+export interface Claims {
+	expires?: number;
+	id?: TokenId;
+	issued?: number;
+	notBefore?: number;
+	publish?: Access;
+	root: string;
+	subscribe?: Access;
+}
 
 export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 	exp: ZodMiniOptional<ZodMiniInt>;
 	get: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
 	iat: ZodMiniOptional<ZodMiniInt>;
 	iss: ZodMiniOptional<ZodMiniUnknown>;
-	jti: ZodMiniOptional<ZodMiniUnknown>;
+	jti: ZodMiniOptional<ZodMiniString<string>>;
 	nbf: ZodMiniOptional<ZodMiniInt>;
 	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
 		path: ZodMiniArray<ZodMiniString<string>>;
@@ -79,27 +91,12 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 		path: ZodMiniArray<ZodMiniString<string>>;
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
-}, $strict>, ZodMiniTransform<Omit<{
-	exp?: number | undefined;
-	get?: string | string[] | undefined;
-	iat?: number | undefined;
-	nbf?: number | undefined;
-	publish?: string[] | {
-		path: string[];
-		rate: number;
-	} | undefined;
-	put?: string | string[] | undefined;
-	root: string;
-	subscribe?: string[] | {
-		path: string[];
-		rate: number;
-	} | undefined;
-}, "get" | "put">, {
+}, $strict>, ZodMiniTransform<Claims, {
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
 	iss?: unknown;
-	jti?: unknown;
+	jti?: string | undefined;
 	nbf?: number | undefined;
 	publish?: string[] | {
 		path: string[];
@@ -171,8 +168,6 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>;
 	k: ZodMiniString<string>;
 	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-		decrypt: "decrypt";
-		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
@@ -217,8 +212,6 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	dq: ZodMiniOptional<ZodMiniString<string>>;
 	e: ZodMiniString<string>;
 	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-		decrypt: "decrypt";
-		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
@@ -269,8 +262,6 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>;
 	d: ZodMiniOptional<ZodMiniString<string>>;
 	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-		decrypt: "decrypt";
-		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
@@ -315,8 +306,6 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	crv: ZodMiniLiteral<"Ed25519">;
 	d: ZodMiniOptional<ZodMiniString<string>>;
 	key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-		decrypt: "decrypt";
-		encrypt: "encrypt";
 		sign: "sign";
 		verify: "verify";
 	}>>>;
@@ -372,8 +361,6 @@ export const KeySetSchema: ZodMiniObject<{
 		}>;
 		k: ZodMiniString<string>;
 		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-			decrypt: "decrypt";
-			encrypt: "encrypt";
 			sign: "sign";
 			verify: "verify";
 		}>>>;
@@ -418,8 +405,6 @@ export const KeySetSchema: ZodMiniObject<{
 		dq: ZodMiniOptional<ZodMiniString<string>>;
 		e: ZodMiniString<string>;
 		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-			decrypt: "decrypt";
-			encrypt: "encrypt";
 			sign: "sign";
 			verify: "verify";
 		}>>>;
@@ -470,8 +455,6 @@ export const KeySetSchema: ZodMiniObject<{
 		}>;
 		d: ZodMiniOptional<ZodMiniString<string>>;
 		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-			decrypt: "decrypt";
-			encrypt: "encrypt";
 			sign: "sign";
 			verify: "verify";
 		}>>>;
@@ -516,8 +499,6 @@ export const KeySetSchema: ZodMiniObject<{
 		crv: ZodMiniLiteral<"Ed25519">;
 		d: ZodMiniOptional<ZodMiniString<string>>;
 		key_ops: ZodMiniDefault<ZodMiniArray<ZodMiniEnum<{
-			decrypt: "decrypt";
-			encrypt: "encrypt";
 			sign: "sign";
 			verify: "verify";
 		}>>>;
@@ -556,8 +537,6 @@ export const LinkSchema: ZodMiniEnum<{
 export type Operation = infer<typeof OperationSchema>;
 
 export const OperationSchema: ZodMiniEnum<{
-	decrypt: "decrypt";
-	encrypt: "encrypt";
 	sign: "sign";
 	verify: "verify";
 }>;
@@ -783,6 +762,10 @@ export const RoleSchema: ZodMiniEnum<{
 	subscriber: "subscriber";
 }>;
 
+export const Scope: {
+	allows: (scope: Scope, claims: Claims) => boolean;
+};
+
 export type Scope = output<typeof ScopeSchema>;
 
 export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
@@ -815,6 +798,10 @@ export type SymmetricKey = Extract<Key, {
 
 export type Token = infer<typeof TokenSchema>;
 
+export type TokenId = output<typeof TokenIdSchema>;
+
+export const TokenIdSchema: ZodMiniString<string>;
+
 export const TokenSchema: ZodMiniObject<{
 	kind: ZodMiniInt;
 	value: ZodMiniString<string>;
@@ -835,11 +822,7 @@ export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<Zo
 	webtransport: "webtransport";
 }>>>;
 
-export function authorize(claims: Claims, path: string): Permissions;
-
 export { compareSpecificity } from "@moq/pattern";
 
 export function patterns(texts: readonly string[] | undefined): Patterns;
-
-export function scopeAllows(scope: Scope, claims: Claims): boolean;
 ```
