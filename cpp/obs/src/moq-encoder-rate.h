@@ -83,10 +83,11 @@ inline long long ConfiguredCapKbps(const std::string &id, obs_data_t *settings)
 // The options in `x264opts` that set a rate of their own: OBS applies them after its rate
 // parameters, so `vbv-maxrate` and `vbv-bufsize` replace the VBV (0 disables it), `bitrate`
 // replaces the rate mode, and `qp` or a `crf` of 0 (lossless) drops the VBV for constant QP.
-inline std::string StripX264RateOptions(const std::string &options, std::vector<std::string> *removed)
+// The plugin never rewrites the text, so these can override the cap.
+inline std::vector<std::string> X264RateOptions(const std::string &options)
 {
 	std::istringstream input(options);
-	std::string kept;
+	std::vector<std::string> found;
 	std::string option;
 	while (input >> option) {
 		std::string name = option.substr(0, option.find('='));
@@ -96,13 +97,10 @@ inline std::string StripX264RateOptions(const std::string &options, std::vector<
 		const size_t assign = option.find('=');
 		const bool lossless = name == "crf" && assign != std::string::npos &&
 				      std::atof(option.c_str() + assign + 1) <= 0;
-		if (name == "vbv-maxrate" || name == "vbv-bufsize" || name == "bitrate" || name == "qp" || lossless) {
-			removed->push_back(option);
-			continue;
-		}
-		kept += (kept.empty() ? "" : " ") + option;
+		if (name == "vbv-maxrate" || name == "vbv-bufsize" || name == "bitrate" || name == "qp" || lossless)
+			found.push_back(option);
 	}
-	return kept;
+	return found;
 }
 
 // What EnforceCap changed.
@@ -111,13 +109,16 @@ struct MoQCap {
 	bool changed = false;
 	// The user's rate settings it replaced, each described for a log line.
 	std::vector<std::string> replaced;
+	// The `x264opts` options that can override the cap, which it leaves as the user wrote them.
+	std::vector<std::string> overridden;
 };
 
 // Makes `id` hold `cap_kbps` as its hard peak, writing what differs from `read` into
 // `write` (the same settings, to rewrite them in place). The cap is the plugin's: it
 // replaces any rate the user set that would exceed it, and says which in `replaced`.
 //  - x264 keeps CBR and otherwise runs VBR (CRF under a VBV whose max rate and buffer are
-//    the bitrate), with `x264opts` stripped of the options that set a rate of their own.
+//    the bitrate). It writes only OBS's own settings: `x264opts` stays as the user wrote
+//    it, and the options in it that set a rate are reported in `overridden`.
 //  - NVENC keeps CBR and VBR, with `max_bitrate` at the cap and the average under it, and
 //    otherwise runs CQVBR (constant quality under `max_bitrate`).
 //  - Everything else runs CBR at the cap: its quality modes carry no hard peak, or depend
@@ -163,14 +164,7 @@ inline MoQCap EnforceCap(const std::string &id, obs_data_t *read, obs_data_t *wr
 			result.changed = true;
 			result.replaced.push_back("use_bufsize");
 		}
-		std::vector<std::string> removed;
-		const std::string kept = StripX264RateOptions(x264opts, &removed);
-		if (!removed.empty()) {
-			obs_data_set_string(write, "x264opts", kept.c_str());
-			result.changed = true;
-			for (const std::string &option : removed)
-				result.replaced.push_back("x264opts " + option);
-		}
+		result.overridden = X264RateOptions(x264opts);
 	} else if (IsNvenc(id)) {
 		set_mode(mode == "CBR" || mode == "VBR" ? mode.c_str() : "CQVBR");
 		// CBR's peak is its bitrate and constant quality ignores it; VBR averages under its peak.

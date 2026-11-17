@@ -53,9 +53,9 @@ int main()
 	assert(rate_control(x264) == "VBR" && obs_data_get_int(&x264, "bitrate") == 8000);
 	assert(EncoderPeak("obs_x264", &x264).kbps == 8000);
 
-	// x264 runs the user's CBR or VBR at the cap, and anything else as VBR. x264opts and
-	// a buffer of its own cannot replace the cap: the options that set a rate are dropped
-	// and the rest stay.
+	// x264 runs the user's CBR or VBR at the cap, and anything else as VBR. A buffer of
+	// its own is replaced. x264opts is never rewritten: the options in it that set a rate
+	// are reported as overriding the cap, and the rest are not.
 	struct Case {
 		const char *before;
 		const char *after;
@@ -79,18 +79,20 @@ int main()
 		// The bitrate is already the cap; the buffer and the options are not.
 		assert(!patch.values.count("bitrate"));
 		assert(!obs_data_get_bool(&patch, "use_bufsize"));
-		assert(std::string(obs_data_get_string(&patch, "x264opts")) == "tune=film crf=20");
-		// Five options and the buffer, plus the mode when it changed.
-		assert(cap.replaced.size() == 6 + (std::string(c.before) != c.after && *c.before ? 1 : 0));
+		assert(!patch.values.count("x264opts"));
+		assert((cap.overridden ==
+			std::vector<std::string>{"vbv-bufsize=0", "vbv_maxrate=0", "qp=20", "bitrate=1", "crf=0"}));
+		// The buffer, plus the mode when it changed.
+		assert(cap.replaced.size() == 1 + (std::string(c.before) != c.after && *c.before ? 1 : 0));
 	}
-	// A lossless CRF, in the setting or the options, is a constant QP with no VBV.
+	// A lossless CRF setting is a constant QP with no VBV.
 	obs_data_t lossless, lossless_patch;
 	obs_data_set_string(&lossless, "rate_control", "CRF");
 	obs_data_set_int(&lossless, "bitrate", 6000);
 	obs_data_set_int(&lossless, "crf", 0);
 	const MoQCap crf0 = EnforceCap("obs_x264", &lossless, &lossless_patch, 6000);
 	assert(crf0.changed && obs_data_get_int(&lossless_patch, "crf") == 23);
-	// CBR ignores the setting, and only a zero option is lossless.
+	// CBR ignores the setting, and only a zero option is lossless; x264opts is left alone.
 	obs_data_t cbr_crf, cbr_crf_patch;
 	obs_data_set_string(&cbr_crf, "rate_control", "CBR");
 	obs_data_set_int(&cbr_crf, "bitrate", 6000);
@@ -98,7 +100,8 @@ int main()
 	obs_data_set_string(&cbr_crf, "x264opts", "crf=0.0 crf=18");
 	EnforceCap("obs_x264", &cbr_crf, &cbr_crf_patch, 6000);
 	assert(!cbr_crf_patch.values.count("crf"));
-	assert(std::string(obs_data_get_string(&cbr_crf_patch, "x264opts")) == "crf=18");
+	assert(!cbr_crf_patch.values.count("x264opts"));
+	assert(X264RateOptions("crf=0.0 crf=18") == std::vector<std::string>{"crf=0.0"});
 
 	// A compliant encoder is not touched.
 	obs_data_t clean, nothing;
@@ -107,7 +110,8 @@ int main()
 	obs_data_set_int(&clean, "bitrate", 6000);
 	obs_data_set_string(&clean, "x264opts", "tune=film crf=20");
 	const MoQCap untouched = EnforceCap("obs_x264", &clean, &nothing, 6000);
-	assert(!untouched.changed && untouched.replaced.empty() && nothing.values.empty());
+	assert(!untouched.changed && untouched.replaced.empty() && untouched.overridden.empty() &&
+	       nothing.values.empty());
 
 	for (const char *id : {"obs_nvenc_h264_tex", "obs_nvenc_hevc_soft", "obs_nvenc_av1_tex"}) {
 		obs_data_t nvenc;

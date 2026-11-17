@@ -47,9 +47,11 @@ VBR or constant quality sets one). The plugin writes it into the encoder itself,
 it holds whatever else the settings say:
 
 - x264 keeps CBR and otherwise runs constant quality (VBR) under a VBV whose max
-  rate and buffer are the cap. `vbv-maxrate`, `vbv-bufsize`, `bitrate`, `qp`, and
-  a lossless `crf=0` in the x264 options, a CRF of 0, and a buffer size of your
-  own are replaced.
+  rate and buffer are the cap. A CRF of 0 and a buffer size of your own are
+  replaced. Your x264 options are never rewritten, so `vbv-maxrate`,
+  `vbv-bufsize`, `bitrate`, `qp`, or a lossless `crf=0` in them can override the
+  cap: the log warns, and the dock's Quality and Performance profiles hold it
+  without them.
 - NVENC keeps CBR and VBR, and otherwise runs constant quality (CQVBR), with
   `max_bitrate` at the cap and VBR's average under it.
 - Every other encoder runs CBR at the cap: Quick Sync's ICQ and AMF's QVBR have

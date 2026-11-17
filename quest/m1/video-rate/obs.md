@@ -16,7 +16,8 @@ decision on the PR). `EnforceCap` in `cpp/obs/src/moq-encoder-rate.h` writes it
 before OBS initializes the encoder, replaces any conflicting user rate option
 with a logged warning, and the catalog advertises exactly that cap: x264 keeps
 CBR and otherwise runs `VBR` (CRF under a VBV whose max rate and buffer are the
-bitrate, with `vbv-*`, `bitrate`, `qp`, and a lossless `crf=0` stripped from `x264opts`), NVENC keeps
+bitrate; `x264opts` is never rewritten, and a rate option in it logs a warning that
+recommends the dock profiles), NVENC keeps
 CBR and VBR and otherwise runs `CQVBR` with `max_bitrate`, and every other
 encoder runs CBR at the cap. The output prices and retunes that peak (NVENC
 under `max_bitrate`). Quick Sync (ICQ has no max rate) and AMF (QVBR sets no

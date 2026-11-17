@@ -124,6 +124,10 @@ void CapEncoders(obs_output_t *output)
 		for (const std::string &replaced : result.replaced)
 			LOG_WARNING("Video encoder %s: replacing %s to hold its %lld kbps cap", id, replaced.c_str(),
 				    cap);
+		for (const std::string &option : result.overridden)
+			LOG_WARNING("Video encoder %s: x264opts %s can override the %lld kbps cap. Use the MoQ "
+				    "dock's Quality or Performance profile, which hold it without x264opts.",
+				    id, option.c_str(), cap);
 		if (result.changed)
 			obs_encoder_update(encoder, patch);
 		LOG_INFO("Video encoder %s capped at %lld kbps", id, cap);
