@@ -7,8 +7,6 @@
 //! live QUIC subscriber, then stops the owner through its shutdown trigger
 //! and proves `run` returned with its sockets closed.
 
-#![cfg(feature = "_quic")]
-
 #[cfg(not(target_os = "linux"))]
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -282,12 +280,12 @@ async fn embed_and_stop(mut config: Config) {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let subscriber_origin = moq_tokio::origin::spawn();
@@ -422,10 +420,8 @@ async fn worker_tokio_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
-/// io_uring workers. Off the default feature set; the Linux gate's test build,
-/// `just rs uring`, and nightly `--all-features` compile it. Skips below the
-/// 6.12 floor unless CI_STRICT.
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+/// io_uring workers. Skips below the 6.12 floor unless CI_STRICT.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {

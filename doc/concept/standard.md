@@ -14,7 +14,7 @@ with it, while shipping a simpler profile you can use today.
 | [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 18, 20, and 22 negotiated by ALPN; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
 | [MSF](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) | The IETF catalog format | Read and written; broadcasts ending in `.msf` select it |
 | [LOC](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) | The IETF low-overhead container | Supported as a hang container kind |
-| [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), [e2ee](/draft/moq-e2ee), [sign](/draft/moq-sign), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
+| [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), [e2ee](/draft/moq-e2ee), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
 
 ## moq-transport
 
@@ -52,30 +52,31 @@ subset drops. What a peer actually observes against this implementation:
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is synced, and
-[probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
+before a `SUBSCRIBE_NAMESPACE` is synced.
+Both libraries always offer solicit.
+moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
+so the receiving session mints one per announcement.
+
+Bandwidth estimation is moq-lite only: moq-transport has no PROBE. On
+[moq-lite-07](/draft/moq-lite#probe), Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer or a `viewers()` viewer is held.
 The consumer reads the estimate, and a viewer reads its share of it; session
 statistics do not request PROBE. The viewers' ceilings, summed, are the PROBE target, sent only
 to a peer advertising `Increase`, which a native session over moq-quic with BBR3
 does and a browser session does not yet.
-Both libraries offer solicit unless a side's `extensions` setting declines it,
-which connects it as a peer that does not speak that extension. The pooled JavaScript `Connection` has no such setting yet.
-moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
-so the receiving session mints one per announcement; the
-[epoch draft](/draft/moq-epoch) remains an unimplemented proposal.
+
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this
 object state between relays. moq-lite-07 is still a work in progress
 (`moq-lite-07-wip`), negotiated only when both sides enable it, so a peer that
-does not offer it does not carry this state. Only Rust offers the extension, when
-`extensions.ietf` is set, and `moq-relay` always does on moq-lite-07.
-[moq-e2ee](/draft/moq-e2ee) is not a transport extension. It encrypts
+does not offer it does not carry this state. Only `moq-relay` offers the extension,
+always, on moq-lite-07. It costs a moq-lite track nothing: only a track a moq-transport
+publisher made carries the state, so the groups of any other cross the hop byte for
+byte as they would without the extension.
+[moq-e2ee](/draft/moq-e2ee), published and experimental, is not a transport extension. It encrypts
 application payloads, so relays still forward named tracks they cannot read.
-See [Encryption](/concept/hang#encryption). [moq-sign](/draft/moq-sign) is not
-one either: it appends an Ed25519 signature to each frame, so relays still
-forward and cache frames they cannot forge.
+See [Encryption](/concept/hang#encryption).
 
 ### Deliberate deviations
 

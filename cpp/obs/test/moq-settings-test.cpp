@@ -158,7 +158,8 @@ int main()
 		CHECK(settings.default_ints["quic_idle_timeout_ms"] == Ms(*library.quic.idle_timeout));
 		CHECK(!library.quic.keep_alive);
 		CHECK(settings.default_ints["quic_keep_alive_ms"] == 0);
-		CHECK(settings.default_ints["backoff_timeout_ms"] == Ms(*library.backoff.timeout));
+		CHECK(!library.backoff.timeout);
+		CHECK(settings.default_ints["backoff_timeout_ms"] == 0);
 		CHECK(settings.default_bools["websocket_enabled"] == *library.websocket.enabled);
 		CHECK(settings.default_strings["quic_gso"].empty());
 
@@ -191,7 +192,8 @@ int main()
 		CHECK(config.timeout == std::chrono::milliseconds(7000));
 		CHECK(config.race == std::chrono::milliseconds(80));
 		CHECK(config.tls.host_name == std::string("relay.example"));
-		CHECK(config.quic.congestion_control == moq::CongestionControl::kLoss);
+		CHECK(config.quic.congestion_control);
+		CHECK(config.quic.congestion_control->eq(moq::CongestionControl::loss()));
 		CHECK(config.quic.idle_timeout == std::chrono::milliseconds(9000));
 		CHECK(config.quic.keep_alive == std::chrono::nanoseconds::zero());
 		CHECK(config.quic.gso == false);

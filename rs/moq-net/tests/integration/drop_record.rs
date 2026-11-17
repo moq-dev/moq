@@ -41,7 +41,7 @@ fn write(source: &track::Producer, key: u64, millis: u64) {
 	group
 		.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// A publisher, a relay subscribing to it, and a viewer subscribing to the relay.
@@ -305,8 +305,9 @@ async fn drain(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 const LITE06: &str = "moq-lite-06";
 
 /// Through a lite-06 hop, a group the publisher reported dropped stays dropped for every
-/// reader, whatever budget it widens to, with no session error. Lite-07 end to end, the same
-/// stale report is reopened by the widening update instead. A shrink sends no drops: what an
+/// reader, whatever budget it widens to, with no session error. Lite-07 end to end, the stale
+/// report stays final on its subscription, but the widened reader still gets the group, which
+/// a request of the relay's own fetches from the publisher. A shrink sends no drops: what an
 /// update narrows away is still there for a later reader.
 #[kio::test]
 async fn a_lite06_hop_keeps_a_reported_group_dropped() {
@@ -316,10 +317,10 @@ async fn a_lite06_hop_keeps_a_reported_group_dropped() {
 }
 
 /// [`a_lite06_hop_keeps_a_reported_group_dropped`] with the lite-06 hop upstream of a lite-07
-/// one: a lite-06 drop is final for the relay's subscription, which no update re-offers, but
-/// it was judged under that subscription's budget. The relay forwards it as a stale one, the
-/// viewer's widening update reopens it, and the group is fetched from the publisher, which
-/// still holds it, as the relay drills' FETCH recovery requires.
+/// one: a lite-06 drop is final for the relay's subscription, but it was judged under that
+/// subscription's budget. The relay forwards it as a stale one, the widened viewer still wants
+/// it, and the group is fetched from the publisher, which still holds it, as the relay drills'
+/// FETCH recovery requires.
 #[kio::test]
 async fn a_lite06_upstream_drop_is_fetched_for_a_widened_lite07_viewer() {
 	reported_drop_through([LITE06, LITE07]).await;
@@ -345,8 +346,8 @@ async fn reported_drop_through(versions: [&str; 2]) {
 		write(&chain.source, 7, 7000);
 		assert_eq!(received(&mut first).await, BTreeSet::new(), "{name}");
 
-		// A lite-07 viewer hop leaves the stale report open to a widening update, which fills
-		// the group from upstream; over a lite-06 viewer hop the drop is final.
+		// Over a lite-07 viewer hop the widened reader still wants the stale group, which a
+		// request of its own fills from upstream; over a lite-06 viewer hop the drop is final.
 		let want: BTreeSet<u64> = match versions[1] == LITE06 {
 			true => (0..GROUPS).filter(|key| *key != 7).collect(),
 			false => (0..GROUPS).collect(),
@@ -404,8 +405,9 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 				true => expiring(EXPIRY),
 				false => cache::Pool::new(cache::Config::default().with_capacity(4 * PAYLOAD as u64)),
 			};
-			// One stream of credit: group 0's, held from the relay, so the rest queue.
-			let chain = Chain::with_credit([LITE07, LITE07], [pool, forever(), forever()], Some(1)).await;
+			// One stream of credit past the Announce Stream: group 0's, held from the
+			// relay, so the rest queue.
+			let chain = Chain::with_credit([LITE07, LITE07], [pool, forever(), forever()], Some(2)).await;
 			let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			chain.upstream.server_transport.hold_unis();
 			let write = |key: u64| {
@@ -413,7 +415,7 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 				group
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			};
 			for key in 0..4 {
 				write(key);
@@ -470,57 +472,69 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 	}
 }
 
-/// After a widening from max delay B1 to B2 for a group the publisher no longer holds, its
-/// stale drop under B1, still in flight when the relay sends the B2 update, settles no reader;
-/// the drop the publisher sends again under the B2 update settles the B2 reader, over lite-07.
+/// A group the publisher's origin reclaimed before it was sent reaches an ordered reader on
+/// the far side of a relay as a gap, so the groups it receives plus the spans it is told of
+/// cover every group written, with nothing held waiting for one that will not come.
 #[kio::test]
-async fn a_drop_under_a_superseded_budget_settles_no_reader() {
-	// Reaches groups 5 and up by media time.
-	const B1: Duration = Duration::from_millis(3500);
-	// Reaches every group, by media time and by the wall clock this test spends.
-	const B2: Duration = Duration::from_secs(60);
-	// The publisher reclaims an unread group well within one trip to the relay and back.
-	const EXPIRY: Duration = Duration::from_secs(2);
-	// One way between the publisher and the relay.
-	const LATENCY: Duration = Duration::from_secs(10);
-	kio::clock::timeout(TIMEOUT * 10, async {
-		let chain = Chain::new([LITE07, LITE07], [expiring(EXPIRY), forever(), forever()]).await;
-		for key in (0..GROUPS).filter(|key| *key != 7) {
-			write(&chain.source, key, key * 1000);
-		}
-		let mut reader = chain.subscribe(reading(B1, [Range::oldest()])).await;
-		assert_eq!(received(&mut reader).await, [5, 6, 8, 9].into());
+async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
+	const EXPIRY: Duration = Duration::from_secs(10);
+	const PAYLOAD: usize = 16 * 1024;
+	const WRITTEN: u64 = 4;
+	for versions in [[LITE06, LITE06], [LITE07, LITE07]] {
+		kio::clock::timeout(TIMEOUT * 10, async {
+			// One stream of credit past the Announce Stream that lite-07 holds: group 0's, held from the relay,
+			// so the rest queue.
+			let credit = if versions == [LITE07, LITE07] { 2 } else { 1 };
+			let chain = Chain::with_credit(versions, [expiring(EXPIRY), forever(), forever()], Some(credit)).await;
+			// A budget bounds the wait on a group a hop judged stale; none would fill it instead.
+			let mut reader = chain
+				.subscribe(reading(Duration::from_secs(3600), [support::keys(0..)]))
+				.await
+				.ordered();
+			chain.upstream.server_transport.hold_unis();
+			for key in 0..WRITTEN {
+				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
+				group
+					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
+					.unwrap();
+				group.finish().unwrap();
+			}
+			// Nobody reads the queued groups, so the origin reclaims all but the newest.
+			kio::clock::sleep(EXPIRY * 3).await;
+			chain.upstream.server_transport.release_unis();
+			let finished = chain.source.clone().finish().unwrap();
 
-		// Group 7 lands once its successor is older than B1 by the wall clock: the publisher
-		// drops it as stale under B1 at once, and reclaims it soon after, unread.
-		kio::clock::sleep(B1 + Duration::from_secs(1)).await;
-		chain.upstream.client_transport.set_latency(LATENCY);
-		let sent = kio::clock::now();
-		write(&chain.source, 7, 7000);
-		let _finished = chain.source.clone().finish().unwrap();
-
-		// The B2 update leaves the relay while the B1 drop is halfway there.
-		kio::clock::sleep(LATENCY / 2).await;
-		// Any request the relay opens upstream from now on never arrives, so only the
-		// subscription can settle group 7.
-		chain.upstream.client_transport.hold_bidis();
-		reader.update(reading(B2, [Range::oldest()])).unwrap();
-		let ended = kio::clock::timeout(LATENCY * 10, reader.recv_group())
-			.await
-			.expect("the reader never settled group 7")
-			.unwrap()
-			.map(|group| group.start);
-		assert_eq!(ended, None, "group 7 was reclaimed");
-		// The B1 drop reached the relay at one latency, the B2 update the publisher at one and
-		// a half, and its drop the relay at two and a half.
-		let elapsed = kio::clock::now() - sent;
-		assert!(
-			elapsed >= LATENCY * 5 / 2 && elapsed < LATENCY * 5 / 2 + Duration::from_secs(1),
-			"settled after {elapsed:?}"
-		);
-	})
-	.await
-	.expect("timed out");
+			let mut got = BTreeSet::new();
+			let mut told = BTreeSet::new();
+			while let Some(item) = kio::clock::timeout(TIMEOUT, reader.next_group())
+				.await
+				.expect("the reader stalled on a group that will not come")
+				.expect("the reader runs on")
+			{
+				match item {
+					track::Item::Group(group) => assert!(got.insert(group.start), "group {} twice", group.start),
+					track::Item::Gap { range, .. } => {
+						for key in range {
+							assert!(told.insert(key), "group {key} reported twice");
+						}
+					}
+				}
+			}
+			assert!(got.is_disjoint(&told), "{versions:?}: {got:?} also reported {told:?}");
+			assert!(
+				got.contains(&(WRITTEN - 1)),
+				"{versions:?}: the newest is delivered: {got:?}"
+			);
+			assert_eq!(
+				got.union(&told).copied().collect::<Vec<_>>(),
+				(0..WRITTEN).collect::<Vec<_>>(),
+				"{versions:?}: delivered {got:?} and reported {told:?}"
+			);
+			drop(finished);
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{versions:?}: timed out"));
+	}
 }
 
 /// A run dropped before the track's first group is settled through a relay for a later
@@ -543,12 +557,11 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 	assert_eq!(drain(&mut relayed).await, [2].into(), "on the relay");
 }
 
-/// Under pool pressure on the relay, a reader whose record holds only delivered runs and
-/// budget-independent drops folds them into its floor and reads on, while one holding lite-07
-/// stale reports within reach of the max age bound ends rather than forgo the re-offer: with
-/// `Lagged` on the relay itself, and `TooFarBehind` over the wire.
+/// Under pool pressure on the relay, a reader folds the runs its record holds into its floor
+/// and reads on, whether they are drops no budget changes or lite-07 stale reports: every
+/// report is final.
 #[kio::test]
-async fn relay_pool_pressure_folds_final_runs_and_ends_stale_reports() {
+async fn relay_pool_pressure_folds_every_reported_run() {
 	/// The relay's readers each record this many disjoint dropped runs.
 	const RUNS: u64 = 200;
 	/// The groups that land on the relay at once once its pool shrinks.
@@ -593,23 +606,14 @@ async fn relay_pool_pressure_folds_final_runs_and_ends_stale_reports() {
 					}
 				}
 			}
-			match stale {
-				false => {
-					assert!(ended.iter().all(Option::is_none), "the final runs fold: {ended:?}");
-					// Under this much pressure the relay may evict a burst group before serving it,
-					// so only the local reader's count is exact.
-					assert_eq!(read[0], BURST, "the local reader reads on");
-					assert!(read[1] > 0, "the remote reader reads on");
-				}
-				true => {
-					let [local, remote] = ended;
-					assert!(matches!(local, Some(moq_net::Error::Lagged)), "local: {local:?}");
-					assert!(
-						matches!(remote, Some(moq_net::Error::Stream(moq_net::StreamError::TooFarBehind))),
-						"remote: {remote:?}"
-					);
-				}
-			}
+			assert!(
+				ended.iter().all(Option::is_none),
+				"stale={stale}: the runs fold: {ended:?}"
+			);
+			// Under this much pressure the relay may evict a burst group before serving it, so
+			// only the local reader's count is exact.
+			assert_eq!(read[0], BURST, "stale={stale}: the local reader reads on");
+			assert!(read[1] > 0, "stale={stale}: the remote reader reads on");
 			chain.assert_open(&format!("stale={stale}"));
 		})
 		.await

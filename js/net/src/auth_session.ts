@@ -62,22 +62,15 @@ export class Duplicate extends Error {
 export const RETRY_INITIAL = Duration.millis(1000);
 const RETRY_MAX = Duration.millis(30_000);
 
-// Whether a refusal is the acceptor failing to decide rather than its verdict on the token,
-// such as an unreachable auth server or a full verification queue.
-function transient(err: Error | null): boolean {
-	return (
-		err instanceof SessionError &&
-		(err.code === SessionCode.Internal ||
-			err.code === SessionCode.TooManyRequests ||
-			err.code === SessionCode.Timeout)
-	);
+// Whether a token's stream ending with `result` is the peer's verdict on it: a final refusal,
+// Unsupported, or a clean close after a grant. Anything else left the token undecided.
+function isVerdict(refused: Refused | undefined, granted: boolean, result: Error | null): boolean {
+	return refused === "final" || result instanceof Unsupported || (result === null && granted);
 }
 
-// Whether a token's stream ending with `result` is the peer's verdict on it: a refusal that will
-// not pass, Unsupported, or a clean close after a grant. Anything else left the token undecided.
-function isVerdict(refused: boolean, granted: boolean, result: Error | null): boolean {
-	return (refused && !transient(result)) || result instanceof Unsupported || (result === null && granted);
-}
+// How the peer refused the last attempt with a reply: "undecided" when its code says the acceptor
+// failed to decide, so the token is presented again, or "final".
+type Refused = "final" | "undecided";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
@@ -86,8 +79,11 @@ export interface WireGrant {
 	expires?: number;
 }
 
-/** One reply read off a presented token's stream. @internal */
-export type WireReply = { grant: WireGrant } | { refused: Error };
+/**
+ * One reply read off a presented token's stream. A refusal is `undecided` when its code says the
+ * acceptor failed to decide, so the token is presented again after a backoff. @internal
+ */
+export type WireReply = { grant: WireGrant } | { refused: Error; undecided: boolean };
 
 /**
  * How one wire carries AUTH, AUTH_OK, and AUTH_ERROR, so moq-lite and moq-transport share
@@ -168,6 +164,8 @@ export interface Pending extends Credential {
 	readonly answered: Promise<void>;
 	/** Whether any session holds a grant for it now, a draining one included. */
 	readonly held: boolean;
+	/** Whether a peer granted it in band: false for a token only a request carries, which {@link answered} also resolves for. */
+	readonly inband: boolean;
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
@@ -179,6 +177,7 @@ class Token implements Pending {
 
 	isAnswered = false;
 	ended = false;
+	inband = false;
 
 	#state: HandleState;
 	#close!: (err: Error | null) => void;
@@ -233,6 +232,8 @@ class HandleState {
 	own = false;
 	/** Set once the handle ends. */
 	closed?: Error;
+	/** The handle's end, for a watcher that outlives its sessions. */
+	readonly end = new Signal<Error | undefined>(undefined);
 	/** Every token the application added that has not ended. */
 	readonly tokens = new Set<Token>();
 	/** Every open session built on this handle, oldest first. */
@@ -311,6 +312,7 @@ class HandleState {
 	abort(err: Error) {
 		if (this.closed) return;
 		this.closed = err;
+		this.end.set(err);
 		for (const token of [...this.tokens]) this.verdict(token, err);
 		if (this.acceptor instanceof RequestQueue) this.acceptor.close();
 	}
@@ -340,6 +342,15 @@ export function vacant(handle: Handle) {
  */
 export function ended(handle: Handle): Error | undefined {
 	return stateOf(handle).closed;
+}
+
+/**
+ * When `handle` ends, with why, for a watcher that outlives its sessions.
+ *
+ * @internal
+ */
+export function ending(handle: Handle): Getter<Error | undefined> {
+	return stateOf(handle).end;
 }
 
 /**
@@ -601,6 +612,11 @@ export interface AuthSessionProps {
 	handle?: Handle;
 	/** Whether the session is draining after a GOAWAY or a local close, which frees its handle for a successor. */
 	draining?: () => boolean;
+	/**
+	 * Whether the peer's SETUP, still to come, is what accepts the connection credential: a
+	 * session without AUTH that is live before its peer has checked the credential.
+	 */
+	awaiting?: boolean;
 }
 
 /**
@@ -635,6 +651,9 @@ export class AuthSession {
 	// #presented by #recount after every change to it or to an `isAnswered`.
 	#setupPending = new Signal(0);
 	#pending = new Signal(0);
+	// The peer's verdict on the connection credential this session presented: null once accepted,
+	// the refusal, or undefined while it has none.
+	#credential = new Signal<Error | null | undefined>(undefined);
 	#closed = false;
 
 	// Whoever answers the peer's tokens is decided once, after the task that established
@@ -643,7 +662,7 @@ export class AuthSession {
 	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
-	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {
+	constructor({ wire, requests, peerGrant, handle, draining, awaiting }: AuthSessionProps) {
 		this.handle = handle ?? ownHandle();
 		this.#state = stateOf(this.handle);
 		this.#wire = wire;
@@ -651,6 +670,8 @@ export class AuthSession {
 		this.#peerGrant = peerGrant;
 		this.#draining = draining ?? (() => false);
 		this.#state.attach(this);
+		// A session without AUTH has the peer's acceptance with its handshake, unless it awaits its SETUP.
+		if (!wire && !awaiting) this.#credential.set(null);
 
 		// Present the connection's own credential right away, so both sides learn their
 		// grant without waiting on the app.
@@ -661,6 +682,20 @@ export class AuthSession {
 	/** Whether the session still takes new work: open, neither closing nor past a GOAWAY. */
 	get active(): boolean {
 		return !this.#closed && !this.#draining();
+	}
+
+	/**
+	 * The peer's verdict on the connection credential this session presented: `null` once it
+	 * accepted it, its refusal, or undefined while it has none, which the session ending leaves
+	 * to the session's own close.
+	 */
+	get credential(): Getter<Error | null | undefined> {
+		return this.#credential;
+	}
+
+	/** The peer's SETUP arrived, so it accepted the connection credential a session without AUTH presented. */
+	accepted(): void {
+		if (!this.#wire) this.#credential.set(null);
 	}
 
 	/** The union of this session's grants, undefined until its peer first answers. */
@@ -875,14 +910,14 @@ export class AuthSession {
 		let result: Error | null = null;
 		let closed = false;
 		// The peer refused the last attempt with a reply, rather than losing its stream.
-		let refused = false;
+		let refused: Refused | undefined;
 		// The peer granted the token, so a clean close ends the grant. A retry clears it.
 		let granted = false;
 		// The peer replied to an earlier attempt, so it knows AUTH.
 		let replied = false;
 		let delay: Duration | undefined;
 		for (;;) {
-			refused = false;
+			refused = undefined;
 			// Whether the peer answered this token, so a close is not the peer predating AUTH:
 			// a grant on this stream, or a reply to an earlier one that this retry follows.
 			let answered = replied;
@@ -921,20 +956,18 @@ export class AuthSession {
 						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
+						if (presented.setup) this.#credential.set(null);
 						this.#answered(presented);
 						this.#recompute();
 						continue;
 					}
 					console.warn("auth token refused", reply.refused);
 					// A refused setup token leaves an empty union, not an unknown (unrestricted)
-					// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
-					const goingAway =
-						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
-					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
+					// one. A grant the acceptor could not tell is unknown, not empty.
+					if (!(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
 					replied = true;
-					// A peer going away judged nothing, so the successor presents the token instead.
-					refused = !goingAway;
+					refused = reply.undecided ? "undecided" : "final";
 					stream.close();
 					break;
 				}
@@ -970,7 +1003,7 @@ export class AuthSession {
 				presented.withdrawn ||
 				presented.ended ||
 				result instanceof ProtocolViolation ||
-				(!refused && this.#state.own)
+				(refused === undefined && this.#state.own)
 			)
 				break;
 			presented.grant = undefined;
@@ -984,13 +1017,13 @@ export class AuthSession {
 			await sleep(delay, { signal: presented.retry.signal }).catch(() => void 0);
 			presented.retry = undefined;
 			if (this.#closed || presented.withdrawn || presented.ended) {
-				refused = false;
+				refused = undefined;
 				result = null;
 				break;
 			}
 			// After a GOAWAY the peer must not see new streams: the successor presents it.
 			if (this.#draining()) {
-				refused = false;
+				refused = undefined;
 				result = new StreamError(StreamCode.GoingAway);
 				break;
 			}
@@ -998,6 +1031,13 @@ export class AuthSession {
 
 		// Already ended by the session's close.
 		if (presented.ended) return;
+		// The peer's verdict on the credential: Unsupported is the moq-transport SETUP that
+		// carried it accepting it before the peer declined AUTH. Anything else leaves it to the close.
+		if (presented.setup && !presented.withdrawn && isVerdict(refused, granted, result)) {
+			this.#credential.set(
+				result instanceof Unsupported ? null : (result ?? new Error("the peer ended the credential")),
+			);
+		}
 		presented.ended = true;
 		presented.grant = undefined;
 		// A token that ends unanswered counts as answered for enforcement: its refusal is
@@ -1031,6 +1071,7 @@ export class AuthSession {
 	/** The peer granted `presented`: it counts as answered, and so does the handle's token. */
 	#answered(presented: Presented) {
 		presented.isAnswered = true;
+		if (presented.owner) presented.owner.inband = true;
 		presented.owner?.answer();
 	}
 

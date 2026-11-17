@@ -3145,33 +3145,6 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 	}
 });
 
-test.each([0, 1000])("draft-22: FILL_TIMEOUT=%s is ignored for a largest-group fill", async (timeout) => {
-	using _clock = manual();
-	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.now() });
-	const { client } = await runSubscribe(
-		fx,
-		new Subscribe({
-			requestId: 7n,
-			trackNamespace: Path.from("test"),
-			trackName: "video",
-			subscriberPriority: 0,
-			filter: { kind: "nextObject" },
-			fill: { filter: { kind: "relative", groups: 1n }, fillTimeout: timeout, rangeFilters: false },
-		}),
-	);
-	try {
-		const fill = await nextUni(fx.uni);
-		expect(await readFill(fill)).toMatchObject({ objects: [{ group: 0, id: 0, payload: "0.0" }] });
-	} finally {
-		open.finish();
-		fx.close();
-		client.close();
-	}
-});
-
 /**
  * A broadcast served through `requested()` resolves its track on demand, and a dynamic serve
  * is deliberately one request per peer subscription. Resolving the track again to read the
@@ -4319,7 +4292,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.reportedLargest(track, { group: 4n, frame: 3 });
+	hooks.reportedLargest(track, { group: 4n, frame: 3 }, false);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({

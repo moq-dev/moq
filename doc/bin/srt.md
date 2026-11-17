@@ -26,8 +26,11 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 
 Each connection publishes under a fresh
 [instance](/concept/moq-lite#publisher-instances), so an encoder that reconnects
-while its stale connection is still open replaces it at once: viewers see the
-broadcast restart, and their next subscribe reaches the new feed. An
+while its stale connection is still open replaces it once the new feed has
+declared its tracks: viewers see the broadcast restart, and their next
+subscribe reaches the new feed. A source that steps onto another timeline
+republishes on the same connection, as [`import ts`](/bin/ts#programs-and-changes)
+does; under `--program all` it ends the ingest instead. An
 `export srt` stream ends with its broadcast; `--follow` and `--stitch` follow a
 return or a replacement on the same connection, as they do for
 [`export ts`](/bin/cli#retention-and-latency).

@@ -44,6 +44,38 @@ every line the first pass would ship as is ships as is, and its follow-ups
 carry the maintainer's picks; the VR catalog fields stay, since a VR demo
 ([moq-dev/moq#6373](https://github.com/moq-dev/moq/pull/6373)) reads them.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ the
+2026-11-14 pick is reopened. The maintainer asked for an exhaustive audit of
+the same window before the 0.22 announcement, with every addition judged for
+a long-term purpose and a caller, and the lite-07 draft audited for what it
+could lose. It covered `d0b086e71` to `6ac78b68ee` (about 3,800 commits):
+a digest of moq.pro's and Kixel's roadmaps, fifteen read-only reviewers, and
+a 15-round interview. Its decisions are m2 quests, listed in
+[m2's Plan](/quest/m2/README.md) under the same date. Of the lines the
+first pass would ship as is, some left (YIELDED continuations, socket
+endpoints, video `warmup`, the vendored WebRTC stack, the unused exports)
+and more were renamed or reshaped.
+
+The delta pass now starts from `6ac78b68ee`, and its second bullet below is
+done: the gateway lifecycles, CLI flags, JSON snapshots, the codec split,
+and moqsink were read in full by that audit.
+
+What the 2026-11-16 audit learned, beyond the first pass's list below:
+
+- Give every reviewer the downstream roadmaps as a digest, with what each
+  project stopped needing. "Nobody planned, anywhere" was the strongest
+  finding, and "a named consumer needs it" the strongest defence.
+- Ask what a feature costs when unused. Several of the largest findings
+  were costs everyone pays for a feature few use: a record before every
+  frame on a relay link, memory per connection, and a pause that depends on
+  a signal browsers drop.
+- A feature whose other half moved past the cut does not freeze alone:
+  defer both halves together (YIELDED continuations and takeover).
+- Check a PR's state when the question is asked, not when the inventory was
+  taken: the audit asked about a PR as open ten hours after it merged.
+- Reviewers' counts still need a re-run before they become quests: three
+  more fell (110 sites that were 108, 127 that were 3, 119 that were 185).
+
 The delta pass:
 
 - Inventory `git log --first-parent ce616b52c..origin/main` by area, and the

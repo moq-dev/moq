@@ -9,6 +9,14 @@ use crate::ffi::{Background, OneShot, Polled};
 use crate::origin::MoqOriginProducer;
 use crate::producer::{MoqTrackInfo, MoqTrackProducer};
 
+/// Whether `path` is a socket endpoint's broadcast, which only routes sessions and carries
+/// no media, so a worker that acts on every announced broadcast can skip it.
+#[uniffi::export]
+pub fn moq_socket_is_endpoint(path: String) -> Result<bool, MoqError> {
+	let path = moq_net::Path::new(&path).map_err(moq_net::Error::from)?;
+	Ok(moq_net::socket::is_endpoint(&path))
+}
+
 /// A socket endpoint: its first dial announces it as a client, and its first accept as a
 /// server.
 #[derive(uniffi::Object)]
@@ -197,7 +205,7 @@ mod tests {
 	fn frame(group: &MoqGroupProducer, payload: &[u8]) -> MoqFrame {
 		MoqFrame {
 			payload: payload.into(),
-			timestamp: MoqTimestamp::unscaled(group.sequence()),
+			timestamp: MoqTimestamp::unscaled(group.start()),
 		}
 	}
 
@@ -223,7 +231,7 @@ mod tests {
 		let reverse = server.producer();
 		let consumer = server.consumer();
 		drop(server);
-		assert!(consumer.info().max_age_unlimited);
+		assert_eq!(consumer.info().max_age, None);
 		// Create the later group first: the reliable ascending reader must wait for 0.
 		let later = producer.create_group(1).unwrap();
 		later.write_frame(frame(&later, b"later")).unwrap();

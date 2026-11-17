@@ -3,9 +3,10 @@
 //! Follows draft-ietf-ccwg-bbr section 4.1 and Linux `tcp_rate.c`: each sent packet snapshots the
 //! connection's delivery counters, and each ACK turns its most recently sent packet's snapshot
 //! into a rate sample.
-//! <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1>
+//! <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-4.1>
 
 use kio::clock::Instant;
+#[cfg(feature = "lab")]
 use std::num::NonZeroU16;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use crate::{Ack, Sent};
 /// Controller state for one sent packet, which the transport stores and hands back.
 ///
 /// Equivalent to the draft's per-packet `P` fields.
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.1.2>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-4.1.2.1.2>
 #[derive(Debug, Clone, Copy)]
 pub struct Packet {
     /// equivalent to P.delivered: C.delivered when the packet was sent.
@@ -34,6 +35,7 @@ pub struct Packet {
     /// The GCC probe cluster it was sent in, if any. Sixteen bits fit the padding after the
     /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
     /// far more than either starts in the two seconds a cluster is kept.
+    #[cfg(feature = "lab")]
     pub(crate) probe_cluster: Option<NonZeroU16>,
 }
 
@@ -47,13 +49,14 @@ impl Default for Packet {
             lost: 0,
             tx_in_flight: 0,
             is_app_limited: false,
+            #[cfg(feature = "lab")]
             probe_cluster: None,
         }
     }
 }
 
 /// A rate sample from one ACK, equivalent to the draft's `RS`.
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-2.3>
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sample {
     /// equivalent to RS.delivery_rate: bytes per second, or zero if the interval was too short to
@@ -108,7 +111,7 @@ pub(crate) struct Sampler {
 
 impl Sampler {
     /// equivalent to OnPacketSent: snapshots the counters for this packet.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.2>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-4.1.2.2>
     pub fn on_sent(&mut self, sent: Sent) -> Packet {
         if sent.in_flight <= u64::from(sent.bytes) {
             self.first_send_time = Some(sent.now);
@@ -121,6 +124,7 @@ impl Sampler {
             lost: self.lost,
             tx_in_flight: sent.in_flight.try_into().unwrap_or(u32::MAX),
             is_app_limited: self.app_limited != 0,
+            #[cfg(feature = "lab")]
             probe_cluster: None,
         }
     }
@@ -130,7 +134,7 @@ impl Sampler {
     /// Samples the most recently sent packet acked, if any. A sample whose interval is shorter
     /// than `min_rtt` (or this sample's own RTT, if lower) carries no rate, as the draft discards
     /// it, but still describes the ACK.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-4.1.2.3>
     pub fn on_ack(&mut self, ack: &Ack<'_>, min_rtt: Duration) -> Option<Sample> {
         for acked in ack.packets {
             self.delivered += u64::from(acked.bytes);
@@ -182,7 +186,7 @@ impl Sampler {
 
     /// equivalent to marking C.app_limited: packets sent until `in_flight` more bytes are
     /// delivered are application-limited.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-4.1.2.4>
     pub fn mark_app_limited(&mut self, in_flight: u64) {
         self.app_limited = Ord::max(self.delivered + in_flight, 1);
     }

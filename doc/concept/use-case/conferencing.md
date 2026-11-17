@@ -21,6 +21,6 @@ features first.
 
 ## Interop
 
-WebRTC clients still fit. The [WebRTC gateway](/bin/rtc) accepts WHIP
+WebRTC clients still fit. The [WebRTC gateway](/bin/webrtc) accepts WHIP
 publishers and serves WHEP players, bridging them into the same broadcasts the
 MoQ clients use.

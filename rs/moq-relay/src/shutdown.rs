@@ -373,7 +373,8 @@ impl Observer {
 	/// and no grace.
 	///
 	/// With no time left (a zero [`drain_timeout`](Self::drain_timeout), or a
-	/// session accepted after the deadline) the session is closed at once.
+	/// session accepted after the deadline) the GOAWAY's zero timeout closes the
+	/// session at once with `GoawayTimeout`, likely before the GOAWAY is written.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
 		self.drain(session, true).await;
 	}
@@ -386,21 +387,10 @@ impl Observer {
 		// first), so the count holds whichever way the session goes.
 		let _draining = counted.then(|| self.draining(deadline));
 
-		// No grace left, so there is nothing to drain. Close now rather than send a
-		// GOAWAY: the peer would have no time to act on it, and a zero timeout means
-		// "no deadline" on the wire, which is the opposite of what was asked for.
-		if remaining.is_zero() {
-			session.abort(moq_net::Error::GoingAway);
-			return;
-		}
-
 		// "Reconnect to me": the relay is restarting, not moving. An empty URI is
 		// legal from either side and this runs once per session, so neither error
 		// is reachable; the deadline closes the session regardless.
-		if let Err(err) = session
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(remaining))
-		{
+		if let Err(err) = session.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(remaining))) {
 			tracing::warn!(%err, "failed to drain session");
 		}
 
@@ -562,7 +552,6 @@ mod tests {
 	/// A WebSocket peer that upgrades and never sends SETUP ends at the drain
 	/// deadline even with the SETUP timeout disabled, so its task does not
 	/// outlive the relay.
-	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test]
 	async fn withheld_websocket_setup_ends_at_the_deadline() {
 		let window = Duration::from_secs(1);

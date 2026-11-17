@@ -74,6 +74,10 @@ interface Reported {
  * left. The routes a closed request carried go with it, and come back once the broader request
  * reports them.
  *
+ * A lite-07 claim serves only the paths the session's floors still certify beneath it, asked
+ * per request, and asked again for every open request when a floor moves that with no route
+ * changing.
+ *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
  * under it. A retraction removes the entry, and so does the session dying, which is what
@@ -301,9 +305,20 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		if (want && !covered && !blind) open(prefix);
 	});
 
+	// A floor can move what a claim covers while every route stays as it was, so the open
+	// requests beneath each claim are admitted anew: advertising a route as it stands reroutes them.
+	const uncovered = session.coverage?.subscribe(() => {
+		if (dead) return;
+		for (const { handle } of routes.values()) {
+			const wire = wireOf(handle);
+			if (wire.info?.node !== undefined) wire.update(wire.info);
+		}
+	});
+
 	void conn.closed.then(() => {
 		dead = true;
 		unsubscribe();
+		uncovered?.();
 		// End every request the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions land promptly.
 		for (const interest of interests.values()) interest.announced.close();

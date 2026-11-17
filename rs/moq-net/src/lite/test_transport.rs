@@ -324,9 +324,24 @@ impl SinkSend {
 impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 	type Group = SinkGroup;
-	type Offset = ();
+	type Offset = u64;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> u64 {
+		self.written
+	}
+
+	/// Unsupported until the test acknowledges a prefix with [`Log::ack`].
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+		let answer = |acked: Option<u64>| match acked {
+			None => Poll::Ready(poll::Acked::Unsupported),
+			Some(acked) if acked >= *offset => Poll::Ready(poll::Acked::Delivered),
+			Some(_) => Poll::Pending,
+		};
+		match self.log.acked.poll(waiter, |acked| answer(**acked).map(drop)) {
+			Poll::Ready(acked) => answer(*acked).map(Ok),
+			Poll::Pending => Poll::Pending,
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.log.writes_fail.load(Ordering::Relaxed) {
@@ -413,20 +428,6 @@ impl poll::SendStream for SinkSend {
 			// Nothing to acknowledge yet, so park like a peer that never answers.
 			false => Poll::Pending,
 		}
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.log.acked.read().map(|acked| acked.min(self.written))
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.log
-			.acked
-			.poll(waiter, |acked| match **acked {
-				Some(acked) if acked >= self.written => Poll::Ready(()),
-				_ => Poll::Pending,
-			})
-			.map(drop)
 	}
 }
 
@@ -1124,6 +1125,11 @@ impl ScriptedSession {
 		self
 	}
 
+	/// Have the peer open one more unidirectional stream, after those already scripted.
+	pub fn push_incoming_uni(&self, script: Vec<u8>) {
+		self.incoming_unis.lock().unwrap().push_back(script);
+	}
+
 	/// Have the peer open one bidirectional stream per script, then go quiet.
 	pub fn with_incoming_bidis(mut self, scripts: Vec<Vec<u8>>) -> Self {
 		self.incoming_bidis = Arc::new(Mutex::new(scripts.into_iter().collect()));
@@ -1173,6 +1179,16 @@ impl ScriptedSession {
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
+	/// A stream the peer sends the shared script on.
+	pub fn recv(&self) -> ScriptedRecv {
+		poll::Buffered::new(Script {
+			wake: self.wake.clone(),
+			script: self.script.clone(),
+			close: self.close.clone(),
+			log: self.log.clone(),
+		})
+	}
+
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
 		if let Some(wake) = &self.wake {

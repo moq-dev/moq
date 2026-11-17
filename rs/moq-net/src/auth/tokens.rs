@@ -576,9 +576,13 @@ mod tests {
 
 		/// The peer refuses or revokes the token presented as `id`, as the driver reports it.
 		fn refuse(&self, id: u64, code: SessionError) {
+			let reply = crate::lite::AuthError {
+				code: crate::lite::error::to_session_code(&code).into(),
+				reason: String::new(),
+			};
 			let err = Error::Session(code);
 			self.link.open(id);
-			self.link.refused(id);
+			self.link.refused(id, reply.undecided());
 			if self.link.retry(id, &err).is_none() {
 				self.link.ended(id, err);
 			}

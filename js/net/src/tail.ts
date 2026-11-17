@@ -1,16 +1,12 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
-import { READER_RUN_OVERHEAD, type Reader } from "./cache.ts";
 import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
-import { max, min } from "./util/sequence.ts";
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
 	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
 	grace?: () => Duration;
-	/** Bills the bytes the tail keeps to the subscription's copy's account, as a reader's record. */
-	bill?: Reader;
 }
 
 /** A group stream a {@link Tail} counts, from its header until it is read to its end. */
@@ -22,8 +18,6 @@ export interface Counted {
 	 * waits for it at most the grace. Idempotent.
 	 */
 	excuse(): void;
-	/** Hold the end again: the drop that excused it no longer stands, as an update reopens a stale one. */
-	restore(): void;
 }
 
 /**
@@ -50,74 +44,17 @@ export class Tail {
 	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration;
-	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
-	// update names one only if it was sent before the publisher served the group, so the group won
-	// over it, even once the cache evicted it.
-	#finished: Run[] = [];
-	// The span of the finished runs a fold under the pool's debt forgot since the last update. A
-	// stale drop there for a group the ledger already accounted may be one its stream overtook, so
-	// the next update owes none of it again.
-	#folded?: Run;
-	// Sequences a final drop named, so a stream whose header the drop overtook can be told from one
-	// whose gap the grace gave up on. Under the pool's debt they fold into one span, which excuses
-	// more streams for at most the grace rather than forget a drop and hold the end forever.
+	// Sequences a drop named, so a stream whose header the drop overtook can be told from one
+	// whose gap the grace gave up on.
 	#dropped: Run[] = [];
-	// What `#finished` and `#dropped` bill, `READER_RUN_OVERHEAD` per run, so a publisher fragmenting the
-	// streams it finishes between updates costs what the cache would hold.
-	#bill?: Reader;
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => GRACE);
-		this.#bill = options.bill;
 	}
 
-	// Bill what `#finished` and `#dropped` keep, and under the pool's debt fold them. Mirrors the Rust
-	// `Tail::rebill`, which keeps no `#dropped`.
-	#rebill(): void {
-		const bill = this.#bill;
-		if (!bill) return;
-		bill.set(this.#kept() * READER_RUN_OVERHEAD);
-		if (bill.debt <= 0) return;
-		const folded = this.fold();
-		if (this.#foldDropped() || folded) bill.set(this.#kept() * READER_RUN_OVERHEAD);
-	}
-
-	// Fold the dropped runs into the one span they reach, returning whether there was more than one.
-	#foldDropped(): boolean {
-		const dropped = this.#dropped;
-		if (dropped.length < 2) return false;
-		this.#dropped = [{ start: dropped[0].start, end: dropped[dropped.length - 1].end }];
-		return true;
-	}
-
-	#kept(): number {
-		return this.#finished.length + (this.#folded ? 1 : 0) + this.#dropped.length;
-	}
-
-	/**
-	 * Fold all but the newest finished run into the span a fold forgot, returning whether any was:
-	 * a stale drop under this update then stands as the publisher judged it, but the update owes
-	 * none of what it names that {@link overtaken} reports. The newest run stays, so streams
-	 * finishing in sequence grow nothing to charge again.
-	 */
-	fold(): boolean {
-		if (this.#finished.length < 2) return false;
-		const start = this.#finished[0].start;
-		const end = this.#finished[this.#finished.length - 2].end;
-		const folded = this.#folded;
-		this.#folded = folded ? { start: min(folded.start, start), end: max(folded.end, end) } : { start, end };
-		this.#finished = this.#finished.slice(-1);
-		return true;
-	}
-
-	/** Release what the tail bills, once its subscription ended. */
+	/** Release what the tail keeps beside its ledger, once its subscription ended. */
 	close(): void {
-		this.#finished = [];
-		this.#folded = undefined;
 		this.#dropped = [];
-		// A stream still in flight finishes after this: with no bill, it can never bill again.
-		this.#bill?.close();
-		this.#bill = undefined;
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */
@@ -146,13 +83,6 @@ export class Tail {
 				state = "excused";
 				this.#active -= 1;
 				this.#excused.add(token);
-				this.#bump();
-			},
-			restore: () => {
-				if (state !== "excused") return;
-				state = "held";
-				this.#excused.delete(token);
-				this.#active += 1;
 				this.#bump();
 			},
 		};
@@ -190,41 +120,6 @@ export class Tail {
 		};
 	}
 
-	/** Record that the group stream for `sequence` arrived whole. */
-	finish(sequence: bigint): void {
-		insertRun(this.#finished, sequence, sequence + 1n);
-		this.#rebill();
-	}
-
-	/** The parts of `[start, end)` whose stream did not finish since the last update was sent. */
-	unfinished(start: bigint, end: bigint): Run[] {
-		return runGaps(this.#finished, start, end);
-	}
-
-	/**
-	 * The parts of `[start, end)` inside the span a fold forgot that the ledger accounts for, asked
-	 * before a stale drop of them is accounted: the header of each arrived, or the grace gave up on
-	 * it, before the drop, so the drop may be one a finished stream overtook.
-	 */
-	overtaken(start: bigint, end: bigint): Run[] {
-		const folded = this.#folded;
-		if (!folded) return [];
-		const from = max(start, folded.start);
-		const to = min(end, folded.end);
-		if (from >= to) return [];
-		return runGaps(this.#ledger.gaps(from, to), from, to);
-	}
-
-	/**
-	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
-	 * no verdict, so none needs them.
-	 */
-	updated(): void {
-		this.#finished = [];
-		this.#folded = undefined;
-		this.#rebill();
-	}
-
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */
 	touch(): void {
 		this.#bump();
@@ -235,22 +130,16 @@ export class Tail {
 		this.#account(start, end);
 	}
 
-	/** Record `[start, end)` as given up by a final drop, accounting for it. */
+	/** Record `[start, end)` as given up by a drop, accounting for it. */
 	drop(start: bigint, end: bigint): void {
 		insertRun(this.#dropped, start, end);
-		this.#rebill();
 		this.#account(start, end);
 	}
 
-	/** Whether a final drop named `sequence`, or a fold under the pool's debt spans it. */
+	/** Whether a drop named `sequence`. */
 	dropped(sequence: bigint): boolean {
 		const run = this.#dropped[runsFrom(this.#dropped, sequence)];
 		return run !== undefined && run.start <= sequence;
-	}
-
-	/** Owe `[start, end)` again: a stale drop that accounted for it was reversed by a widening. */
-	unaccount(start: bigint, end: bigint): void {
-		this.#ledger.unaccount(start, end, now());
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */

@@ -50,9 +50,9 @@ pub struct MoqRouteOptions {
 	pub cost: u64,
 	/// A stable instance for the stream, or `None` to mint a fresh one.
 	///
-	/// Set one only for a publisher that continues its group sequences across restarts and
+	/// Set one only for a publisher that continues its group starts across restarts and
 	/// raises `epoch` on each, or to forward an observed route's stream as is: readers stitch
-	/// every route of one instance together, so restarting the sequences under an old instance
+	/// every route of one instance together, so restarting the starts under an old instance
 	/// splices unrelated groups into their tracks. Naming an instance grants nothing:
 	/// publishing still needs the path's grant.
 	#[uniffi(default = None)]
@@ -94,9 +94,6 @@ pub struct MoqRouteInfo {
 	pub instance: Arc<MoqInstance>,
 	/// Whether a usable path reaches the route's origin; requests may fail while it is not.
 	pub available: bool,
-	/// The round trip to the route's origin node over moq-lite-07, absent while any link
-	/// has no measurement. Informational; it never ranks a route.
-	pub rtt: Option<std::time::Duration>,
 }
 
 impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
@@ -105,7 +102,6 @@ impl From<moq_net::origin::RouteInfo> for MoqRouteInfo {
 			cost: route.cost().value(),
 			instance: MoqInstance::wrap(route.instance().clone()),
 			available: route.available(),
-			rtt: route.rtt(),
 		}
 	}
 }
@@ -716,7 +712,7 @@ impl MoqBroadcastRequest {
 
 	/// Serve a held broadcast under the claim's instance without announcing an exact route.
 	///
-	/// Every answer at this path must continue the same sequences and bytes. Start a new
+	/// Every answer at this path must continue the same group starts and bytes. Start a new
 	/// claim for different content, or route a job, whose end moves the claim to another
 	/// instance.
 	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {
@@ -944,7 +940,7 @@ mod supervision_tests {
 		let consumer = origin.consume().request("routed".into(), None).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();
-		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)
+		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer, std::time::Duration::ZERO)
 			.await
 			.unwrap();
 		drop(consumer);

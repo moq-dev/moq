@@ -122,8 +122,9 @@ GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
 broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
-marked N/A. A pinned moq-transport pass records the case as skipped until
-[`quest/m3/ietf-finish.md`](../../quest/m3/ietf-finish.md) makes it pass.
+marked N/A. A pinned moq-transport pass records the case as skipped:
+moq-transport is a compatibility layer, and a finished broadcast's late tail
+between our own clients is not planned work.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -137,9 +138,9 @@ released relays and clients, skip it.
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
-`Connection` counts the refused session as connected, so it must redial it
-like any other close and, once a short retry window runs out, publish the same
-session error. Chromium treats a
+`Connection` counts the refused session as connected, but it never stayed up
+past the healthy bar, so the handle must stop at it without redialing and
+publish the same session error. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
@@ -550,11 +551,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Firefox's replacement case is quarantined from the default run after intermittent
-audio-tone failures. Investigate the missing tone samples alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
-Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run off Chromium: on Firefox its
+fallback intermittently misses the switch bound, as often with the audio fixes that
+restored it on Chromium as without them. Run it explicitly with
+`--media-cases replacement --media-engines firefox`; its content, sync, switch, and
+fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
@@ -677,9 +678,10 @@ refusal retains its meaning and both bindings emit the same bytes.
 
 `lite_tracks_interop` checks moq-lite-07's Tracks Stream both ways: `tracks.ts`
 answers a Rust TRACKS request with js/net's publisher, whose listing (each
-TRACKS\_ADD with its TRACK\_INFO, SYNCED, a TRACKS\_REMOVE, then the FIN when
-the broadcast ends) Rust decodes, and it re-encodes Rust's listing events byte for
-byte.
+TRACKS\_ADD with its kind and info, a datagram track's DATAGRAMS\_INFO beside a
+track's TRACK\_INFO of the same name, SYNCED, a TRACKS\_REMOVE and a datagram
+track's TRACKS\_FINISH, then the FIN when the broadcast ends) Rust decodes, and it
+re-encodes Rust's listing events of both kinds byte for byte.
 
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
@@ -711,6 +713,6 @@ inflated size. The harness enables the relay's `[stats]` and `[internal]` listen
 The HLS grid lane has the Rust publisher (moq-mux) and each native JS runtime
 (`@moq/hang`) publish one fixed frame schedule, with GOPs on and off the 2 s grid, a
 discontinuity, and a finish, and the Rust reader prints each broadcast's declared
-`media.join.interval` and every rendition's groups with their first pts, the input an HLS
+`sync.interval` and every rendition's groups with their first pts, the input an HLS
 edge numbers segments from. The two readouts must be identical, so a browser-published
 broadcast exports as HLS like a native one.

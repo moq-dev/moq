@@ -26,6 +26,7 @@
 use crate::codec::aac::adts;
 mod damage;
 mod demux;
+mod error;
 mod export;
 mod follower;
 mod health;
@@ -35,6 +36,7 @@ pub mod passthrough;
 pub mod programs;
 mod psi;
 mod release;
+pub mod republish;
 mod schedule;
 mod si;
 mod step;
@@ -46,13 +48,16 @@ mod unclaimed;
 mod catalog;
 
 pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, PesPacket, Program, SiEntry, Track, Verbatim};
+pub use error::Error;
 pub use export::Export;
 pub use follower::Follower;
 pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
-pub use step::{Restart, Step};
+pub use republish::{Republish, Republished};
+use step::Restart;
+pub use step::Step;
 
 pub mod stats;
 

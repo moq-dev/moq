@@ -31,6 +31,7 @@ SMALLER = {
     "streams",
     "instructions",
     "messages",
+    "items",
 }
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -167,6 +168,9 @@ def measurement_unit(column):
         return "packets"
     if column.endswith("_messages"):
         return "messages"
+    # Changes carried in messages, counted apart from the messages.
+    if column.endswith("_items"):
+        return "items"
     for unit in ("ns", "us", "ms"):
         if re.search(f"(^|_){unit}($|_per_)", column):
             return unit

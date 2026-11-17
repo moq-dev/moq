@@ -63,22 +63,6 @@ The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
 
-A video rendition encoded with intra refresh has no keyframes, and its catalog
-`warmup` says how long a decoder takes to clean up after joining. The player
-decodes such a rendition twice: one decoder holds your delay and may show
-refresh stripes after a join or a skip, while a second starts one group earlier
-and tolerates `warmup` more lateness, so its picture is clean. The clean
-picture shows whenever it has caught up. Each decoder costs its own CPU and
-decoder memory, and both share one subscription. A rendition without `warmup`
-uses one decoder.
-
-An H.264 group of such a rendition opens on a recovery point that is not an
-IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
-an IDR or a recovery point that counts zero frames. So when a decoder opens on
-one, the player inserts a second recovery point with a zero count before its
-first slice. The slices are untouched; the stripes clear as the sweep
-completes.
-
 `el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
 It reads `connecting` until a session could have announced the broadcast: while the
 connection dials, redials, or was refused (`el.connection.error` says why), and until the

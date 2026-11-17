@@ -33,9 +33,18 @@ WHEP enforcement needs it and nobody owned it.
   its video send buffer (`rs/moq-webrtc/src/session.rs`), so charging needs a
   hook on that path. Decided 2026-10-30 (maintainer): add it to the vendored str0m
   ([WebRTC epic](/quest/m3/webrtc/README.md)) rather than upstream.
+  Changed 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
+  moq-webrtc [returns to upstream str0m](https://github.com/moq-dev/moq/pull/8963), so
+  there is no vendored copy to add the hook to. Start by finding out
+  whether str0m 0.25's public API can charge or withhold a resend (its RTP
+  mode, or turning off its own NACK handling and serving resends from a
+  buffer moq-webrtc keeps). If not, the hook is a change inside str0m:
+  write the report for [upstream reports](/quest/m4/upstream-reports.md).
+  If the cap cannot wait for upstream, bring the evidence to the maintainer,
+  who decides whether this fix is the one worth a fork.
 - Decided 2026-10-30 (maintainer): the pacer is moq-congestion's, made public and
   extended with payload credit here, so moq-quic and moq-webrtc share one
-  pacer; the vendored str0m's leaky pacer is deleted.
+  pacer. str0m's own leaky pacer stays unused, as it is today.
 - A per-session rate handle sets the cap and accepts live updates. The pacer
   counts media; the docs advise headroom for RTP overhead.
 - WHIP ingest follow-ups (2026-10-31, from
@@ -60,9 +69,11 @@ Public API: a rate handle on moq-webrtc's WHEP server. Decided 2026-10-30
 (maintainer): `whep::accept` takes the same shape as `whip::accept`, a
 `whep::Request` struct, rather than a fifth argument. That struct exists,
 `#[non_exhaustive]`, so this quest adds a `rate: Option<bandwidth::Limit>`
-field to it, as `whip::Request` has, never a
+field to it, never a
 `with_rate` setter (2026-11-07, maintainer, /quest-plan from the API sweep
-of open PRs and remaining quests). The handle
+of open PRs and remaining quests). `whip::Request` had the same field until
+the ingest cap moved onto `moq_mux::Ingest` (2026-11-16); the WHEP cap is
+per viewer, so it stays on the request. The handle
 is `moq_net::bandwidth::Limit`, which replaced moq-webrtc's own
 `rate::{Cap, Limit}` (2026-11-07, maintainer, /quest-plan from the API shape
 audit). Wire: none.

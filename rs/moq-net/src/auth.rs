@@ -156,20 +156,11 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 pub(crate) const RETRY_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
-/// Whether a refusal is the acceptor failing to decide rather than its verdict on the
-/// token, such as an unreachable auth server or a full verification queue.
-fn transient(err: &Error) -> bool {
-	matches!(
-		err,
-		Error::Session(SessionError::Internal | SessionError::TooManyRequests | SessionError::Timeout)
-	)
-}
-
-/// Whether a token's stream ending with `err` is the peer's verdict on it: a refusal that
-/// will not pass, [`Error::Unsupported`], or a clean close after a grant. Anything else
-/// left the token undecided.
+/// Whether a token's stream ending with `err` is the peer's verdict on it: a final refusal,
+/// [`Error::Unsupported`], or a clean close after a grant. Anything else left the token
+/// undecided.
 fn verdict(phase: &Phase, err: &Error) -> bool {
-	(matches!(phase, Phase::Refused { .. }) && !transient(err))
+	matches!(phase, Phase::Refused { undecided: false, .. })
 		|| matches!(err, Error::Unsupported)
 		// The peer ended the grant without revoking it.
 		|| (matches!(err, Error::Cancel) && matches!(phase, Phase::Granted(_)))
@@ -261,7 +252,9 @@ enum Phase {
 	/// The peer's latest reply on the open stream is this AUTH_OK.
 	Granted(Grant),
 	/// The peer refused the current attempt with an AUTH_ERROR; the driver retries or ends it.
-	Refused { backoff: Option<Duration> },
+	/// `undecided` when its code says the acceptor failed to decide, so the token is
+	/// presented again rather than ended.
+	Refused { backoff: Option<Duration>, undecided: bool },
 	/// The last [`Credential`] clone dropped while its stream was open: the driver closes the
 	/// stream, and any grant holds until then.
 	Withdrawn { grant: Option<Grant> },
@@ -627,33 +620,17 @@ impl Permit {
 		Some(crate::model::interest_prefixes(limit))
 	}
 
-	/// The one prefix the grant and the limit together confine this direction to, or
-	/// `None` when they confine it to several or to none. A request for it, rather than
-	/// one above it, is one the peer's floors can certify.
+	/// The prefixes the peer's grant confines this direction to, or `None` while it
+	/// grants everything: asking for one of them, rather than a prefix above it, is a
+	/// request the peer's floors can certify.
 	#[cfg(feature = "async")]
-	pub(crate) fn region(&self) -> Option<crate::Path> {
-		let heads = |patterns: &Option<Patterns>| patterns.as_ref().map(crate::model::interest_prefixes);
-		let regions = match (heads(&self.granted), heads(&self.limit)) {
-			(None, None) => return None,
-			(Some(regions), None) | (None, Some(regions)) => regions,
-			(Some(granted), Some(limit)) => {
-				let mut meet: Vec<crate::Path> = (granted.iter())
-					.flat_map(|a| limit.iter().map(move |b| (a, b)))
-					.filter_map(|(a, b)| match () {
-						_ if a.has_prefix(b) => Some(a.clone()),
-						_ if b.has_prefix(a) => Some(b.clone()),
-						_ => None,
-					})
-					.collect();
-				meet.sort();
-				meet.dedup();
-				meet
-			}
-		};
-		match regions.as_slice() {
-			[region] => Some(region.clone()),
-			_ => None,
+	pub(crate) fn granted_regions(&self) -> Option<Vec<crate::Path>> {
+		let granted = self.granted.as_ref()?;
+		let everything = moq_pattern::Pattern::subtree("").ok()?;
+		if granted.contains(&everything) {
+			return None;
 		}
+		Some(crate::model::interest_prefixes(granted))
 	}
 
 	/// The limit this side set on the peer, or `None` while unrestricted.
@@ -1172,17 +1149,22 @@ impl Link {
 
 	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
 	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
+	/// `undecided` is what its code says (see `lite::AuthError::undecided`): the acceptor
+	/// failed to decide, so the token is presented again rather than ended.
 	/// The driver then calls [`retry`](Self::retry), as on every end of the token's stream.
-	pub(crate) fn refused(&self, id: u64) {
+	pub(crate) fn refused(&self, id: u64, undecided: bool) {
 		self.with(|link| {
 			let Some(slot) = link.slots.get_mut(&id) else {
 				return;
 			};
 			link.replied = true;
 			slot.phase = match slot.phase {
-				Phase::Pending { backoff } | Phase::Refused { backoff } => Phase::Refused { backoff },
+				Phase::Pending { backoff } | Phase::Refused { backoff, .. } => Phase::Refused { backoff, undecided },
 				// A refusal after a grant revokes it.
-				Phase::Granted(_) => Phase::Refused { backoff: None },
+				Phase::Granted(_) => Phase::Refused {
+					backoff: None,
+					undecided,
+				},
 				_ => return,
 			};
 			link.recompute();
@@ -1192,8 +1174,8 @@ impl Link {
 	/// The delay before presenting a token again once its stream ended with `err`, or `None`
 	/// when the driver should end it instead.
 	///
-	/// A token still wanted on an active session is presented again when the peer refused it
-	/// for a reason that may pass, or, on a shared handle, when its stream was lost without a
+	/// A token still wanted on an active session is presented again when the peer's refusal
+	/// left it undecided, or, on a shared handle, when its stream was lost without a
 	/// verdict, so the session never runs on without it. A session's own handle ends a lost
 	/// token instead, which tells the application. Both back off from [`RETRY_INITIAL`],
 	/// doubling until a grant resets it.
@@ -1207,7 +1189,7 @@ impl Link {
 			let slot = link.slots.get_mut(&id)?;
 			// Only an open stream is presented again; a grant resets the backoff.
 			let backoff = match slot.phase {
-				Phase::Pending { backoff } | Phase::Refused { backoff } => backoff,
+				Phase::Pending { backoff } | Phase::Refused { backoff, .. } => backoff,
 				Phase::Granted(_) => None,
 				_ => return None,
 			};
@@ -1985,6 +1967,10 @@ impl Request {
 	}
 
 	/// Refuse the token with a session error code and a reason for the peer.
+	///
+	/// [`SessionError::Internal`], [`SessionError::TooManyRequests`], and
+	/// [`SessionError::Timeout`] say this side failed to decide, such as with its auth backend
+	/// down, so a moq-lite peer presents the token again after a backoff; any other code ends it.
 	pub fn reject(mut self, code: SessionError, reason: impl Into<String>) {
 		let issue = self.issue.take().expect("answered once");
 		refuse(&issue, code, reason.into());
@@ -2879,7 +2865,7 @@ mod tests {
 		let handle = Link::new(true);
 		let _token = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
 		let id = opened(&handle);
-		handle.refused(id);
+		handle.refused(id, true);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(handle.retry(id, &busy), Some(RETRY_INITIAL));
 
@@ -3100,22 +3086,27 @@ mod tests {
 		assert_eq!(everything.regions(), None, "a root grant confines nothing");
 	}
 
-	/// The region is where the grant and the limit meet, and only when that is one prefix.
+	/// What the peer granted confines the prefixes asked of it, whatever the limit is.
 	#[cfg(feature = "async")]
 	#[test]
-	fn the_region_is_where_grant_and_limit_meet() {
+	fn the_granted_regions_follow_the_grant_alone() {
 		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
 			granted: granted.map(patterns),
 			limit: limit.map(patterns),
 		};
 		let path = crate::Path::from_static;
-		assert_eq!(permit(None, None).region(), None);
-		assert_eq!(permit(Some(&["a"]), None).region(), Some(path("a")));
-		assert_eq!(permit(None, Some(&["a/b"])).region(), Some(path("a/b")));
-		assert_eq!(permit(Some(&["a"]), Some(&["a/b", "c"])).region(), Some(path("a/b")));
-		assert_eq!(permit(Some(&[""]), Some(&["a"])).region(), Some(path("a")));
-		assert_eq!(permit(Some(&["a", "b"]), None).region(), None, "two regions");
-		assert_eq!(permit(Some(&["a"]), Some(&["b"])).region(), None, "they never meet");
+		assert_eq!(permit(None, None).granted_regions(), None);
+		assert_eq!(permit(None, Some(&["a/b"])).granted_regions(), None);
+		assert_eq!(
+			permit(Some(&[""]), Some(&["a"])).granted_regions(),
+			None,
+			"a root grant"
+		);
+		assert_eq!(permit(Some(&["a"]), None).granted_regions(), Some(vec![path("a")]));
+		assert_eq!(
+			permit(Some(&["a", "b"]), Some(&["c"])).granted_regions(),
+			Some(vec![path("a"), path("b")])
+		);
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version
@@ -3284,7 +3275,7 @@ mod tests {
 
 		let second = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&second), id, "the next session presents it again");
-		second.refused(id);
+		second.refused(id, false);
 		let refused = Error::Session(SessionError::Unauthorized);
 		assert_eq!(second.retry(id, &refused), None);
 		second.ended(id, refused);
@@ -3341,7 +3332,7 @@ mod tests {
 		));
 
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		link.drain_with(std::sync::Arc::new(goaway));
 		assert!(matches!(
 			link.present(Bytes::from_static(b"late"), false),
@@ -3356,7 +3347,7 @@ mod tests {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, false, false).unwrap();
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 		let successor = Link::attach(&handle, true, false).unwrap();
 
@@ -3379,13 +3370,13 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&successor), id);
 		successor.grant(id, Grant::all());
-		draining.refused(id);
+		draining.refused(id, false);
 		draining.ended(id, Error::Session(SessionError::Unauthorized));
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 		assert_eq!(auth.grant().peek(), Some(Grant::all()));
@@ -3400,17 +3391,17 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
 		assert_eq!(opened(&successor), id);
 		successor.grant(id, Grant::all());
-		successor.refused(id);
+		successor.refused(id, true);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(successor.retry(id, &busy), Some(RETRY_INITIAL));
 
-		draining.refused(id);
+		draining.refused(id, false);
 		draining.ended(id, Error::Session(SessionError::Unauthorized));
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
 
@@ -3429,11 +3420,11 @@ mod tests {
 		link.drain_with(goaway.clone());
 		let auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
 		let id = opened(&link);
-		link.refused(id);
+		link.refused(id, true);
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		assert!(!link.active());
 		let err = link.reopen(id).unwrap_err();
 		assert!(matches!(err, Error::GoingAway), "{err:?}");
@@ -3490,11 +3481,11 @@ mod tests {
 		let _auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let busy = Error::Session(SessionError::TooManyRequests);
-		draining.refused(id);
+		draining.refused(id, true);
 		assert_eq!(draining.retry(id, &busy), None);
 		draining.ended(id, busy);
 		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
@@ -3511,11 +3502,11 @@ mod tests {
 		let id = opened(&link);
 		let busy = Error::Session(SessionError::TooManyRequests);
 
-		link.refused(id);
+		link.refused(id, true);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 		assert!(auth.poll_answer(&kio::Waiter::noop()).is_pending());
 		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
-		link.refused(id);
+		link.refused(id, true);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL * 2));
 		assert_eq!(link.retry(id, &busy), None, "only a refusal retries");
 

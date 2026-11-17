@@ -437,12 +437,6 @@ pub struct moq_video_config {
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
 	pub preference: i32,
 
-	/// Microseconds of media a decoder needs before its output is clean: after a join, decode
-	/// from the group start and present at the start plus this. The media consumers already
-	/// start this much earlier. Meaningless unless `has_warmup`.
-	pub warmup_us: u64,
-	/// Whether `warmup_us` is present; absent means none.
-	pub has_warmup: bool,
 	/// The broadcast holding the rendition's track, relative to the catalog's own broadcast
 	/// (`./source`), or NULL when it is the catalog's broadcast.
 	pub broadcast: *const c_char,
@@ -523,7 +517,9 @@ pub struct moq_audio_config {
 	pub jitter_us: u64,
 	/// Whether `jitter_us` is present; absent means frames flush at once.
 	pub has_jitter: bool,
-	/// As [moq_video_config]'s `warmup_us`.
+	/// Microseconds of media a decoder needs before its output is clean, such as Opus pre-roll:
+	/// after a join, decode from the group start and present at the start plus this. The media
+	/// consumers already start this much earlier. Meaningless unless `has_warmup`.
 	pub warmup_us: u64,
 	/// Whether `warmup_us` is present; absent means none.
 	pub has_warmup: bool,
@@ -928,7 +924,7 @@ pub enum moq_anchor_kind {
 pub enum moq_order {
 	/// Newest first, so congestion sheds the backlog rather than the live edge.
 	MOQ_ORDER_DESCENDING = 0,
-	/// Oldest first, draining a backlog in sequence order.
+	/// Oldest first, draining a backlog in start order.
 	MOQ_ORDER_ASCENDING = 1,
 }
 
@@ -1050,9 +1046,9 @@ pub struct moq_route_options {
 	///
 	/// A route keeps its instance for its lifetime, across [moq_route_withdraw] and
 	/// [moq_route_announce], so a new route is a new stream viewers restart onto. Set one only
-	/// for a publisher that continues its group sequences across restarts and raises `epoch`
+	/// for a publisher that continues its group starts across restarts and raises `epoch`
 	/// on each: readers stitch every route of one instance together, so restarting the
-	/// sequences under an old instance splices unrelated groups into their tracks.
+	/// starts under an old instance splices unrelated groups into their tracks.
 	pub instance: u32,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
 	/// or not. Ignored without one.
@@ -1468,16 +1464,6 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 	})
 }
 
-/// Whether this build can capture qlog traces.
-///
-/// Capture is compile-time optional. [moq_client_config]'s `quic_qlog` accepts a directory
-/// either way, but dialing fails when the support is absent, so a caller offering the
-/// knob should hide it rather than surface an option that cannot work.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_qlog_supported() -> bool {
-	moq_tokio::qlog_supported()
-}
-
 /// A [moq_subscription] with moq-net's defaults, whose zero `delay` starts at the newest
 /// group and skips a superseded one at once. A NULL subscription pointer or a zeroed struct
 /// means the same; start from this struct to change a field.
@@ -1599,11 +1585,13 @@ pub struct moq_client_config {
 	pub backoff_multiplier: u32,
 	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
-	/// The maximum reconnect delay in microseconds; zero leaves it uncapped.
+	/// The maximum reconnect delay in microseconds; zero retries at once. Absent caps it
+	/// at 5s, and `backoff_max_unlimited` lifts the cap.
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
-	/// How long reconnection keeps trying before giving up for good; zero retries forever.
+	/// How long reconnection keeps trying before giving up for good; zero gives up at the
+	/// first failure. Absent never gives up.
 	pub backoff_timeout_us: u64,
 	/// Whether `backoff_timeout_us` is present.
 	pub has_backoff_timeout: bool,
@@ -1631,13 +1619,12 @@ pub struct moq_client_config {
 	/// Whether `quic_mtu_discovery` is present.
 	pub has_quic_mtu_discovery: bool,
 
-	/// Congestion control family name (`loss`, `delay`, or `none`), or NULL for the backend's choice.
+	/// Congestion control family name (`loss` for CUBIC, `delay` for BBR v3, or `none`), or NULL for the backend's choice.
 	pub quic_congestion_control: *const c_char,
 	/// The length in bytes of `quic_congestion_control`.
 	pub quic_congestion_control_len: usize,
 
-	/// Directory to write qlog traces into, or NULL for none. Capture is
-	/// compile-time optional; see [moq_qlog_supported].
+	/// Directory, which must exist, to write qlog traces into, or NULL for none.
 	pub quic_qlog: *const c_char,
 	/// The length in bytes of `quic_qlog`.
 	pub quic_qlog_len: usize,
@@ -1664,6 +1651,10 @@ pub struct moq_client_config {
 	/// Dial once instead of redialing with backoff whenever the transport drops; the
 	/// transport's close then ends the session. False redials.
 	pub once: bool,
+
+	/// Lift the cap on the reconnect delay, which then grows without bound. Refused
+	/// with `has_backoff_max`.
+	pub backoff_max_unlimited: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1709,10 +1700,17 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max().unwrap_or_default());
-		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout().unwrap_or_default());
-		dst.has_backoff_timeout = true;
+		match config.connect.backoff.max() {
+			Some(max) => {
+				dst.backoff_max_us = micros(max);
+				dst.has_backoff_max = true;
+			}
+			None => dst.backoff_max_unlimited = true,
+		}
+		if let Some(timeout) = config.connect.backoff.timeout() {
+			dst.backoff_timeout_us = micros(timeout);
+			dst.has_backoff_timeout = true;
+		}
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
@@ -1792,9 +1790,10 @@ unsafe fn connect_session(
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// Once connected, the session reconnects automatically with exponential backoff if the
-/// connection drops. A first dial that reaches no session ends it instead, with that dial's
-/// error as the terminal snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
-/// since the origins outlive the underlying connection.
+/// connection drops. Until a session has stayed up past 1s or been drained by a GOAWAY, a
+/// failed dial or a closed session, such as a refused credential, ends it instead, with that error as the terminal
+/// snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on
+/// each reconnect, since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
 /// connect, drop, migration, and failed dial, carrying the phase with its data and the
@@ -1971,7 +1970,7 @@ pub struct moq_server_config {
 	pub quic_congestion_control: *const c_char,
 	/// The length in bytes of `quic_congestion_control`.
 	pub quic_congestion_control_len: usize,
-	/// A directory to write qlog traces into, or NULL for none; see [moq_qlog_supported].
+	/// A directory, which must exist, to write qlog traces into, or NULL for none.
 	pub quic_qlog: *const c_char,
 	/// The length in bytes of `quic_qlog`.
 	pub quic_qlog_len: usize,
@@ -2534,7 +2533,7 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 
 /// Serve a held consumer under the claim's instance without announcing an exact route.
 ///
-/// Every answer at this path must continue the same sequences and bytes. Start a new
+/// Every answer at this path must continue the same group starts and bytes. Start a new
 /// claim for different content, or route a job, whose end moves the claim to another
 /// instance.
 /// Consumes the request handle; the consumer remains owned by the caller.
@@ -3145,7 +3144,7 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 	})
 }
 
-/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
+/// Draw a group boundary and start the next group at `start`, in the track's timescale.
 ///
 /// [moq_publish_media_cut] keyed explicitly rather than at the next frame's time, which has to come
 /// after every group the track holds. Groups are keyed by their first frame's time, so two encoders
@@ -3153,10 +3152,10 @@ pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_media_seek(media: u32, start: u64) -> i32 {
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
-		State::lock().publish.media_seek(media, sequence)
+		State::lock().publish.media_seek(media, start)
 	})
 }
 
@@ -3206,6 +3205,23 @@ pub unsafe extern "C" fn moq_publish_media_demand(
 		let mut state = State::lock();
 		let demand = state.publish.media_demand(media)?;
 		state.publish.demand(demand, on_demand)
+	})
+}
+
+/// Abort a media track with an application error code, but only while nobody wants it.
+///
+/// This is how an on-demand publisher ends a track once its [moq_publish_media_demand] watcher
+/// reports `MOQ_DEMAND_UNWANTED`: releasing the track instead fails a reader that joined in
+/// between. Returns 1 once the track is closed, which releases the handle, and `0` when a reader
+/// wants it again, which leaves the handle serving: wait for `MOQ_DEMAND_UNWANTED` from a new
+/// watcher, since one that already reported it misses a reader that came and went. A container
+/// handle is refused, as for [moq_publish_media_demand]. A negative code is a failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_abort_unwanted(media: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		let closed = State::lock().publish.media_abort_unwanted(media, error_code)?;
+		Ok(i32::from(closed))
 	})
 }
 
@@ -3280,15 +3296,15 @@ pub extern "C" fn moq_publish_container_cut(container: u32) -> i32 {
 	})
 }
 
-/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+/// Start a new segment whose first group starts at `start`, in its track's timescale, after
 /// every group the track holds.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_container_seek(container: u32, start: u64) -> i32 {
 	ffi::enter(move || {
 		let container = ffi::parse_id(container)?;
-		State::lock().publish.container_seek(container, sequence)
+		State::lock().publish.container_seek(container, start)
 	})
 }
 
@@ -3426,9 +3442,6 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_width = (config.coded_width > 0).then_some(config.coded_width);
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
-		video.warmup = config
-			.has_warmup
-			.then(|| std::time::Duration::from_micros(config.warmup_us));
 		(video.broadcast, video.instance, video.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
@@ -3668,8 +3681,8 @@ unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track
 /// Append a new group to a raw track, returning a group producer.
 ///
 /// Groups are delivered independently and each may contain any number of frames
-/// written via [moq_publish_group_frame]. Sequence numbers auto-increment; read the
-/// group's with [moq_publish_group_sequence].
+/// written via [moq_publish_group_frame]. Each starts after the last group; read the
+/// group's with [moq_publish_group_start].
 ///
 /// Returns a non-zero handle to the group on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3680,14 +3693,14 @@ pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
 	})
 }
 
-/// Create a raw group with an explicit sequence number.
+/// Create a raw group with an explicit start.
 ///
 /// Returns a non-zero group handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_group_at(track: u32, sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_track_group_at(track: u32, start: u64) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_group_at(track, sequence)
+		State::lock().publish.track_group_at(track, start)
 	})
 }
 
@@ -3777,16 +3790,16 @@ pub extern "C" fn moq_publish_track_finish(track: u32) -> i32 {
 	})
 }
 
-/// Declare a raw track's exclusive final group sequence.
+/// Declare a raw track's exclusive final group start.
 ///
-/// Groups below `final_sequence` may still be created. Groups at or above it
+/// Groups below `final_start` may still be created. Groups at or above it
 /// are rejected. The track remains open for groups below the boundary. Call
 /// [moq_publish_track_finish] after producing the remaining groups.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_finish_at(track: u32, final_sequence: u64) -> i32 {
+pub extern "C" fn moq_publish_track_finish_at(track: u32, final_start: u64) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_finish_at(track, final_sequence)
+		State::lock().publish.track_finish_at(track, final_start)
 	})
 }
 
@@ -3824,6 +3837,23 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().publish.track_abort(track, error_code)
+	})
+}
+
+/// Abort a raw track with an application error code, but only while nobody wants it.
+///
+/// This is how an on-demand publisher ends a track once its [moq_publish_track_demand] watcher
+/// reports `MOQ_DEMAND_UNWANTED`: releasing the track instead fails a reader that joined in
+/// between, which reads a drop rather than the track. Returns 1 once the track is closed, which
+/// releases the handle, and `0` when a reader wants it again, which leaves the handle serving:
+/// wait for `MOQ_DEMAND_UNWANTED` from a new watcher, since one that already reported it misses
+/// a reader that came and went. A negative code is a failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_abort_unwanted(track: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let closed = State::lock().publish.track_abort_unwanted(track, error_code)?;
+		Ok(i32::from(closed))
 	})
 }
 
@@ -4036,14 +4066,14 @@ pub extern "C" fn moq_track_request_free(request: u32) -> i32 {
 	})
 }
 
-/// The group sequence a group request asks for.
+/// The group start a group request asks for.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - `dst` must point at a writable `uint64_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64) -> i32 {
+pub unsafe extern "C" fn moq_group_request_start(request: u32, dst: *mut u64) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -4152,7 +4182,7 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 	})
 }
 
-/// Read the sequence of a raw group, which names it within its track.
+/// Read the start of a raw group, which names it within its track.
 ///
 /// On a scale-less track this is the key every [moq_publish_group_frame] timestamp carries
 /// (unscaled, `has_scale` false), including for a group [moq_publish_track_group] numbered.
@@ -4162,11 +4192,11 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 /// # Safety
 /// - `dst` must be a valid pointer to a writable `uint64_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_group_sequence(group: u32, dst: *mut u64) -> i32 {
+pub unsafe extern "C" fn moq_publish_group_start(group: u32, dst: *mut u64) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		*dst = State::lock().publish.group_sequence(group)?;
+		*dst = State::lock().publish.group_start(group)?;
 		Ok(())
 	})
 }
@@ -4493,7 +4523,8 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 	})
 }
 
-/// Create a catalog consumer for a broadcast.
+/// Create a catalog consumer for a broadcast, for a reader playing `delay_us` microseconds
+/// behind the live edge.
 ///
 /// `on_catalog` is invoked with a positive catalog ID for each catalog update
 /// (usable to query video/audio track information), then exactly once more with
@@ -4502,6 +4533,12 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 /// touched again, so release `user_data` there. The terminal callback fires even
 /// after [moq_consume_catalog_cancel].
 ///
+/// Each update takes effect at its [moq_consume_catalog_timestamp]. A zero `delay_us` delivers
+/// only the newest catalog, for a reader that applies each on arrival. A reader that holds each
+/// update until its media reaches the update's timestamp passes its playout delay instead, and
+/// receives in order every update it may still need: one stays deliverable until it falls
+/// `delay_us` behind the live edge.
+///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4509,13 +4546,38 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
+	delay_us: u64,
 	on_catalog: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
+		let delay = std::time::Duration::from_micros(delay_us);
 		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog)? };
-		State::lock().consume.catalog(broadcast, on_catalog)
+		State::lock().consume.catalog(broadcast, delay, on_catalog)
+	})
+}
+
+/// Query the media timestamp a catalog snapshot takes effect at.
+///
+/// A reader holds a snapshot it receives before its media reaches this time, and applies one
+/// received late, or the first it receives, at once. On a scale-less catalog track `has_scale` is
+/// false and `value` is a group key with no time, so the snapshot applies on arrival.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_timestamp] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_catalog_timestamp(catalog: u32, dst: *mut moq_timestamp) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		let timestamp = State::lock().consume.catalog_timestamp(catalog)?;
+		unsafe { dst.write(timestamp) };
+		Ok(())
 	})
 }
 
@@ -4731,10 +4793,6 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
 ///
-/// The catalog rendition's `warmup` reaches that much further back for decoder history and
-/// increases the subscription's max delay by the same amount. The steady-state skip budget
-/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
-///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4895,7 +4953,7 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 ///
 /// This is the counterpart to [moq_publish_track]: no catalog lookup or
 /// container parsing. `on_frame` is called with a positive raw frame ID for each
-/// frame in sequence order, then exactly once more with a terminal code: `0`
+/// frame in start order, then exactly once more with a terminal code: `0`
 /// (closed cleanly) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_frame` is never called again and `user_data` is never touched again, so
 /// release `user_data` there. The terminal callback fires even after

@@ -374,7 +374,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		// Lite-07 retires the range and adds the lowered one, whose start SUBSCRIBE_STARTED reports.
 		const lowered = await update();
 		if (hasRanges(version)) {
-			expect([lowered.remove, lowered.ranges]).toEqual([[0n], [{ start: { absolute: 1n } }]]);
+			// A group key goes out as the time it starts at.
+			expect([lowered.remove, lowered.ranges]).toEqual([[0n], [{ start: { time: 1n } }]]);
 			await respond({ started: new SubscribeStarted(1n, 1n) });
 		}
 		await respond({ finish: new SubscribeFinish(4n) });
@@ -504,7 +505,7 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 
 test("draft-07's SUBSCRIBE_START says the largest before any group arrives", async () => {
 	const { reader, respond } = await subscribed(Version.DRAFT_07);
-	await respond({ start: new SubscribeStart([4n], { group: 4n, frame: 2 }) });
+	await respond({ start: new SubscribeStart([4n], { position: { group: 4n, frame: 2 }, ended: false }) });
 	expect(await reader.largest()).toEqual({ group: 4n, frame: 2 });
 	reader.close();
 });

@@ -10,8 +10,7 @@ use crate::catalog::VideoHint;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
 
-use super::{AudioFormat, VideoFormat};
-pub use super::{AudioInit, VideoInit};
+use super::{AudioFormat, AudioInit, VideoFormat, VideoInit};
 
 /// The caller's video fields, defaulting the codec from the format when the codec carries no extra
 /// parameters (VP8), so a hint with a codec can publish before the first frame.
@@ -431,24 +430,87 @@ impl Track {
 		Ok(())
 	}
 
-	/// Finish the importer, flushing any buffered data.
-	pub fn finish(&mut self) -> Result<()> {
+	/// Finish the importer, flushing any buffered data, and return the [`Finished`] track, which
+	/// keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(mut self) -> Result<Finished> {
 		// Each decode flushed its whole frame, so a splitter holds at most a picture its init
-		// carried. It is taken out to flush, so its input storage ends with the input. The import
-		// stays, keeping the finished track and its rendition published.
-		match &mut self.kind {
-			TrackKind::Avc3 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
-			TrackKind::Hev1 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
-			TrackKind::Av01 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
-			_ => {}
+		// carried.
+		let flushed = (|| match &mut self.kind {
+			TrackKind::Avc3 { split, import } => import.decode(split.flush(None)?),
+			TrackKind::Hev1 { split, import } => import.decode(split.flush(None)?),
+			TrackKind::Av01 { split, import } => import.decode(split.flush(None)?),
+			_ => Ok(()),
+		})();
+		if let Err(err) = flushed {
+			self.abort(err.reason());
+			return Err(err);
 		}
-		import!(&mut self.kind, import => import.finish())
+		let inner = match self.kind {
+			TrackKind::Avc3 { import, .. } | TrackKind::Avc1 { import, .. } => FinishedKind::Video(import.finish()?),
+			TrackKind::Hev1 { import, .. } | TrackKind::Hvc1 { import, .. } => FinishedKind::Video(import.finish()?),
+			TrackKind::Av01 { import, .. } => FinishedKind::Video(import.finish()?),
+			TrackKind::Vp8(import) => FinishedKind::Video(import.finish()?),
+			TrackKind::Vp9(import) => FinishedKind::Video(import.finish()?),
+			TrackKind::Aac(import) => FinishedKind::Audio(import.finish()?),
+			TrackKind::Opus(import) => FinishedKind::Audio(import.finish()?),
+			TrackKind::Mp3(import) => FinishedKind::Audio(import.finish()?),
+			TrackKind::Flac(import) => FinishedKind::Audio(import.finish()?),
+		};
+		Ok(Finished { inner })
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
 		import!(self.kind, import => import.abort(err))
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
+	/// unchanged when a reader does; see
+	/// [`Producer::abort_unwanted`](crate::container::Producer::abort_unwanted).
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the importer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let Self {
+			kind,
+			group_start,
+			warned,
+		} = self;
+		let kind = match kind {
+			TrackKind::Avc3 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackKind::Avc3 { split, import }),
+			TrackKind::Avc1 { length_size, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackKind::Avc1 { length_size, import }),
+			TrackKind::Hev1 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackKind::Hev1 { split, import }),
+			TrackKind::Hvc1 { length_size, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackKind::Hvc1 { length_size, import }),
+			TrackKind::Av01 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackKind::Av01 { split, import }),
+			TrackKind::Vp8(import) => import.abort_unwanted(err).map_err(TrackKind::Vp8),
+			TrackKind::Vp9(import) => import.abort_unwanted(err).map_err(TrackKind::Vp9),
+			TrackKind::Aac(import) => import.abort_unwanted(err).map_err(TrackKind::Aac),
+			TrackKind::Opus(import) => import.abort_unwanted(err).map_err(TrackKind::Opus),
+			TrackKind::Mp3(import) => import.abort_unwanted(err).map_err(TrackKind::Mp3),
+			TrackKind::Flac(import) => import.abort_unwanted(err).map_err(TrackKind::Flac),
+		};
+		kind.map_err(|kind| Self {
+			kind,
+			group_start,
+			warned,
+		})
 	}
 
 	/// Cut the current group at `end` without finishing the track.
@@ -744,14 +806,18 @@ impl TrackStream {
 		})
 	}
 
-	/// Finish the importer, flushing any buffered data.
-	pub fn finish(&mut self) -> Result<()> {
-		// The splitter is taken out to flush, so its input storage ends with the input. The import
-		// stays, keeping the finished track and its rendition published.
-		stream!(&mut self.kind, split, import => {
-			publish!(self.gate, import, std::mem::take(split).flush(None)?)?;
-			import.finish()
-		})
+	/// Finish the importer, publishing the access unit still waiting for a following start code,
+	/// and return the [`Finished`] track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(mut self) -> Result<Finished> {
+		let flushed = (|| stream!(&mut self.kind, split, import => publish!(self.gate, import, split.flush(None)?)))();
+		if let Err(err) = flushed {
+			self.abort(err.reason());
+			return Err(err);
+		}
+		let inner = stream!(self.kind, _, import => FinishedKind::Video(import.finish()?));
+		Ok(Finished { inner })
 	}
 
 	/// Stop or resume publishing this rendition, advertised as the catalog's
@@ -792,6 +858,28 @@ impl TrackStream {
 		stream!(self.kind, _, import => import.abort(err))
 	}
 
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
+	/// unchanged when a reader does; see [`Track::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the importer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let Self { kind, gate } = self;
+		let kind = match kind {
+			TrackStreamKind::Avc3 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackStreamKind::Avc3 { split, import }),
+			TrackStreamKind::Hev1 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackStreamKind::Hev1 { split, import }),
+			TrackStreamKind::Av01 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| TrackStreamKind::Av01 { split, import }),
+		};
+		kind.map_err(|kind| Self { kind, gate })
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		stream!(&mut self.kind, _, import => import.cut(end))
@@ -812,6 +900,46 @@ impl TrackStream {
 	/// The name of the track this importer publishes.
 	pub fn name(&self) -> String {
 		self.demand().name().to_string()
+	}
+}
+
+/// A [`Track`] or [`TrackStream`] that finished: every frame is published, and the track can
+/// still be aborted, but not written to.
+///
+/// Dropping it releases the track and its catalog rendition, as dropping the importer does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut track: moq_mux::import::track::Finished) {
+/// track.decode(b"", None).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it releases the track and its catalog rendition"]
+pub struct Finished {
+	inner: FinishedKind,
+}
+
+/// The finished track a [`Finished`] holds, by the catalog section its rendition is in.
+enum FinishedKind {
+	Video(crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>),
+	Audio(crate::container::Finished<crate::catalog::hang::Container, hang::catalog::AudioConfig>),
+}
+
+impl Finished {
+	/// The name of the track this importer published.
+	pub fn name(&self) -> &str {
+		match &self.inner {
+			FinishedKind::Video(track) => track.name(),
+			FinishedKind::Audio(track) => track.name(),
+		}
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it; see
+	/// [`moq_net::track::Finished::abort`].
+	pub fn abort(self, err: moq_net::Error) {
+		match self.inner {
+			FinishedKind::Video(track) => track.abort(err),
+			FinishedKind::Audio(track) => track.abort(err),
+		}
 	}
 }
 
@@ -873,7 +1001,47 @@ mod tests {
 		import
 			.decode(b"opus payload", Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
+	}
+
+	/// An idle abort leaves a track a reader joined, rendition and open group included, and once
+	/// that reader leaves it ends the track and retires the rendition.
+	#[tokio::test(start_paused = true)]
+	async fn abort_unwanted_keeps_a_wanted_track() {
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut import = Track::audio(
+			broadcast.reserve_track("audio").unwrap(),
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Opus, opus_head()),
+		)
+		.unwrap();
+		import
+			.decode(b"opus payload", Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+
+		let mut track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		let mut import = import
+			.abort_unwanted(moq_net::Error::App(7))
+			.expect_err("the reader keeps the track");
+		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
+		import
+			.decode(b"opus payload", Some(Timestamp::from_micros(21_000).unwrap()))
+			.unwrap();
+		let mut group = track.recv_group().await.unwrap().expect("the open group");
+		assert!(
+			group.read_frame().await.unwrap().is_some(),
+			"the write before the check"
+		);
+		assert!(group.read_frame().await.unwrap().is_some(), "the write after the check");
+
+		drop(group);
+		drop(track);
+		import
+			.abort_unwanted(moq_net::Error::App(7))
+			.ok()
+			.expect("nobody wants it");
+		assert!(!catalog.snapshot().audio.renditions.contains_key("audio"));
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -986,10 +1154,11 @@ mod tests {
 		import
 			.decode(b"opus payload", Some(Timestamp::from_micros(2_000).unwrap()))
 			.unwrap();
-		import.finish().unwrap();
+		let finished = import.finish().unwrap();
+		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
 
-		// Dropping the importer retires its rendition from the shared catalog.
-		drop(import);
+		// Dropping the finished importer retires its rendition from the shared catalog.
+		drop(finished);
 		assert!(!catalog.snapshot().audio.renditions.contains_key("0.opus"));
 	}
 
@@ -1013,7 +1182,7 @@ mod tests {
 		import
 			.decode(b"opus payload", Some(Timestamp::from_micros(20_000).unwrap()))
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1046,7 +1215,7 @@ mod tests {
 		assert_eq!(frame.payload, payload);
 		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	/// Count the frames in each group of a finished track.
@@ -1096,7 +1265,7 @@ mod tests {
 		for ts in [30_000, 40_000] {
 			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		assert_eq!(collect_groups(subscriber).await, vec![3, 2]);
 	}
@@ -1117,7 +1286,7 @@ mod tests {
 				.decode(b"b", Some(Timestamp::from_micros(pts * 1_000).unwrap()))
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		// The middle group is the established empty-payload discontinuity marker.
 		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 2]);
 	}
@@ -1134,7 +1303,7 @@ mod tests {
 			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
 			import.cut(None).unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		assert_eq!(collect_groups(subscriber).await, vec![1, 1, 1]);
 	}
@@ -1155,7 +1324,7 @@ mod tests {
 		import
 			.decode(b"c", Some(Timestamp::from_micros(20_000).unwrap()))
 			.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		assert_eq!(collect_groups(subscriber).await, vec![2, 1]);
 	}
@@ -1179,7 +1348,7 @@ mod tests {
 				.unwrap();
 		}
 		import.cut(Some(Timestamp::from_micros(1_000_000).unwrap())).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
 		assert!(
@@ -1412,7 +1581,7 @@ mod tests {
 		assert_eq!(frame.payload, au, "the payload must pass through verbatim");
 		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	const H264_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21];
@@ -1483,7 +1652,7 @@ mod tests {
 			}
 			let timestamp = Timestamp::from_micros(1_000).unwrap();
 			import.decode(&keyframe, Some(timestamp)).unwrap();
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 			let frame = first_frame(&consumer, "video").await;
 			assert!(frame.keyframe, "{format}, seek={seek}");
 			assert_eq!(frame.timestamp, timestamp, "{format}, seek={seek}");
@@ -1510,7 +1679,7 @@ mod tests {
 				stream.seek(7).unwrap();
 			}
 			stream.decode(&keyframe).unwrap();
-			stream.finish().unwrap();
+			let _finished = stream.finish().unwrap();
 			let frame = first_frame(&consumer, "video").await;
 			assert!(frame.keyframe, "{format}: streaming seek");
 			assert_eq!(
@@ -1525,16 +1694,44 @@ mod tests {
 	async fn init_picture_published_at_finish(format: VideoFormat, init: Vec<u8>) {
 		let (broadcast, catalog) = new_broadcast();
 		let consumer = broadcast.consume();
-		let mut import = Track::video(
+		let import = Track::video(
 			broadcast.reserve_track("video").unwrap(),
 			catalog.reserve(),
 			VideoInit::new(format, init.clone()),
 		)
 		.unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let frame = first_frame(&consumer, "video").await;
 		assert!(frame.keyframe, "{format}");
 		assert_eq!(frame.payload.as_ref(), init.as_slice(), "{format}");
+	}
+
+	/// A finish whose flushed access unit fails ends the track with that failure, so a reader
+	/// sees the publisher fail rather than the track dropped unfinished.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_finish_aborts_the_track() {
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut stream = TrackStream::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Avc3, h264_init()),
+		)
+		.unwrap();
+		let mut track = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+
+		// A delta slice with no keyframe before it, held by the splitter until the finish flushes it.
+		stream.decode(&annexb(&[&[0x61, 0xe0, 0x12, 0x34]])).unwrap();
+		assert!(stream.finish().is_err());
+
+		let read = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await;
+		let Err(err) = read.expect("the track carried on") else {
+			panic!("the track ended without a cause");
+		};
+		assert!(
+			matches!(err, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+			"{err:?}"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1646,7 +1843,7 @@ mod tests {
 				catalog.snapshot().video.renditions.contains_key("video"),
 				"{format}: no rendition"
 			);
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 	}
 
@@ -1682,7 +1879,7 @@ mod tests {
 				.decode(frame, Some(Timestamp::from_micros(i * 26_122).unwrap()))
 				.unwrap();
 		}
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		// Frames carrying audio per group, ignoring any empty end-of-group marker.
 		let mut groups = Vec::new();
@@ -1731,7 +1928,7 @@ mod tests {
 			for chunk in stream.chunks(3) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 
 			let frame = first_frame(&consumer, "video").await;
 			assert!(frame.keyframe, "{format}: the first frame opens a group");
@@ -1799,7 +1996,7 @@ mod tests {
 		assert!(!enabled(), "enabled before the keyframe that resumes it");
 		write(&mut import, &delta).await;
 		assert!(enabled());
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		// The first group loses the access units still in the splitter at the disable, the
 		// marker breaks the timeline, and the resumed group opens on the keyframe: three
@@ -1834,7 +2031,7 @@ mod tests {
 
 		// Finish flushes the last temporal unit, the keyframe that resumes.
 		import.set_enabled(true).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		assert!(catalog.snapshot().video.renditions["video"].enabled);
 		let frame = first_frame(&consumer, "video").await;

@@ -6,7 +6,6 @@
 //! On `MediaAdded`, it inspects the negotiated codec and instantiates the
 //! matching bridge; on each `MediaData`, it forwards into the bridge.
 
-use crate::vendor::str0m;
 use crate::{Error, Result, codec, session};
 
 pub struct IngestSink {
@@ -19,22 +18,24 @@ pub struct IngestSink {
 }
 
 impl IngestSink {
-	/// Fill `broadcast`, whose announcement the caller owns.
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, config: moq_mux::catalog::Config) -> Result<Self> {
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-		Ok(Self {
+	/// Fill `broadcast` and its `catalog`, whose announcement the caller owns.
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
+		Self {
 			broadcast,
 			catalog,
 			bridges: session::Bridges::new(),
 			_route: None,
-		})
+		}
 	}
 
-	/// Fill `route`'s broadcast, keeping the route for the session's life.
+	/// Fill `route`'s broadcast under a catalog minted from `config`, keeping the route for
+	/// the session's life.
 	pub fn routed(route: moq_net::origin::Route, config: moq_mux::catalog::Config) -> Result<Self> {
+		let mut broadcast = route.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		Ok(Self {
-			_route: Some(route.clone()),
-			..Self::new(route.broadcast().clone(), config)?
+			_route: Some(route),
+			..Self::new(broadcast, catalog)
 		})
 	}
 }
@@ -105,12 +106,10 @@ mod tests {
 	/// bridges mint, not just on the catalog producer it was set on.
 	#[tokio::test]
 	async fn tracks_inherit_the_configured_max_age() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut sink = IngestSink::new(
-			broadcast.clone(),
-			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3)),
-		)
-		.unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3));
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let mut sink = IngestSink::new(broadcast.clone(), catalog);
 
 		sink.on_track(
 			"0".into(),
@@ -128,9 +127,10 @@ mod tests {
 	/// included, so the held sink serves them to a late subscriber for the linger.
 	#[tokio::test]
 	async fn finish_keeps_every_track_for_the_linger() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut sink = IngestSink::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut sink = IngestSink::new(broadcast, catalog);
 		let audio = str0m::media::MediaKind::Audio;
 		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
 			.unwrap();

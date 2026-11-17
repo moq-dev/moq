@@ -1,10 +1,10 @@
 import Foundation
 import MoqFFI
 
-/// Read side of a raw track. Iterating yields groups in sequence order, skipping
+/// Read side of a raw track. Iterating yields groups in start order, skipping
 /// forward if the reader falls behind: `for try await group in track { ... }`.
 public final class TrackConsumer: AsyncSequence, Sendable {
-    /// The group emitted by this sequence, in sequence order.
+    /// The group emitted by this sequence, in start order.
     public typealias Element = GroupConsumer
 
     let ffi: MoqTrackConsumer
@@ -13,14 +13,14 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         self.ffi = ffi
     }
 
-    /// The next group in sequence order, skipping forward on fall-behind. `nil`
-    /// once the track ends. Shares the sequence cursor with `readFrame`: a group
+    /// The next group in start order, skipping forward on fall-behind. `nil`
+    /// once the track ends. Shares the ordered cursor with `readFrame`: a group
     /// one method has already taken is not returned by the other.
     public func nextGroup() async throws -> GroupConsumer? {
         (try await ffi.nextGroup()).map(GroupConsumer.init)
     }
 
-    /// The next group in arrival order, which may be out of sequence. `nil` once
+    /// The next group in arrival order, which may be out of start order. `nil` once
     /// the track ends.
     public func recvGroup() async throws -> GroupConsumer? {
         (try await ffi.recvGroup()).map(GroupConsumer.init)
@@ -50,8 +50,8 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
-    /// Groups in arrival order, including out-of-sequence deliveries. The default
-    /// `AsyncSequence` iteration uses sequence order instead.
+    /// Groups in arrival order, including out-of-order deliveries. The default
+    /// `AsyncSequence` iteration uses start order instead.
     public var groupsAsArrived: AsyncThrowingStream<GroupConsumer, Swift.Error> {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             (try await ffi.recvGroup()).map(GroupConsumer.init)
@@ -77,9 +77,9 @@ public final class GroupConsumer: AsyncSequence, Sendable {
         self.ffi = ffi
     }
 
-    /// The sequence number of this group within the track.
-    public var sequence: UInt64 {
-        ffi.sequence()
+    /// The start of this group within the track.
+    public var start: UInt64 {
+        ffi.start()
     }
 
     /// The next raw frame, or `nil` once the group ends.
@@ -124,6 +124,8 @@ public final class TrackDemand: Sendable {
     }
 
     /// Suspend until `wanted` changes and return it. The first call returns at once.
+    /// End a track nobody wants with `TrackProducer.abortUnwanted(errorCode:)`, which keeps it
+    /// for a reader that joined since.
     public func wantedChanged() async throws -> UInt64? {
         try await ffi.wantedChanged()
     }
@@ -158,9 +160,9 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.appendGroup())
     }
 
-    /// Create a group with an explicit sequence number.
-    public func createGroup(sequence: UInt64) throws -> GroupProducer {
-        GroupProducer(try ffi.createGroup(sequence: sequence))
+    /// Create a group with an explicit start.
+    public func createGroup(start: UInt64) throws -> GroupProducer {
+        GroupProducer(try ffi.createGroup(start: start))
     }
 
     /// Declare that groups `start` up to the exclusive `end` will never be produced.
@@ -185,15 +187,24 @@ public final class TrackProducer: Sendable {
         try ffi.abort(errorCode: errorCode)
     }
 
+    /// Abort the track with an application error code, but only while nobody wants it: call it
+    /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+    /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+    /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+    /// that came and went, and waits on.
+    public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+        try ffi.abortUnwanted(errorCode: errorCode)
+    }
+
     /// Finish the track. No more groups can be appended.
     public func finish() throws {
         try ffi.finish()
     }
 
-    /// Declare the exclusive final group sequence ahead of the live edge.
+    /// Declare the exclusive final group start ahead of the live edge.
     /// The producer remains open for groups below the boundary.
-    public func finish(at finalSequence: UInt64) throws {
-        try ffi.finishAt(finalSequence: finalSequence)
+    public func finish(at finalStart: UInt64) throws {
+        try ffi.finishAt(finalStart: finalStart)
     }
 }
 
@@ -205,9 +216,9 @@ public final class GroupProducer: Sendable {
         self.ffi = ffi
     }
 
-    /// The sequence number of this group within the track.
-    public var sequence: UInt64 {
-        ffi.sequence()
+    /// The start of this group within the track.
+    public var start: UInt64 {
+        ffi.start()
     }
 
     /// A read handle for this group's frames.
@@ -226,7 +237,7 @@ public final class GroupProducer: Sendable {
         try await ffi.ready(size: size)
     }
 
-    /// Write a frame with a presentation timestamp, or `Timestamp.unscaled(sequence)` on a
+    /// Write a frame with a presentation timestamp, or `Timestamp.unscaled(start)` on a
     /// scale-less track. Never blocks: without `ready`, a writer that outpaces its readers sheds
     /// the group's front instead.
     public func writeFrame(_ payload: Data, timestamp: Timestamp) throws {

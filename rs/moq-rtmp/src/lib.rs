@@ -39,7 +39,7 @@
 //!
 //! RTMPS (RTMP over TLS) is supported two ways:
 //!
-//! - **Let the gateway terminate TLS** (the default `tls` feature): call
+//! - **Let the gateway terminate TLS**: call
 //!   `Server::with_tls` with a `rustls::ServerConfig`, and the listener serves
 //!   `rtmps://` alongside `rtmp://` on the same port, telling them apart by the
 //!   client's first byte. Call [`Server::with_plaintext`] with `false` to refuse
@@ -73,6 +73,8 @@ mod server;
 /// Default FLV release delay and stalled-group budget.
 const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 
-pub use dial::{Client, Connect};
+pub use dial::{Client, Connect, Pull, Push};
 pub use error::{Error, Result};
-pub use server::{Conn, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
+pub use server::{
+	Conn, Export, Import, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket,
+};

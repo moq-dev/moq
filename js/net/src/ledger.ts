@@ -19,11 +19,6 @@ export function grace(maxDelay: Duration): Duration {
 	return maxDelay.isZero() ? GRACE : maxDelay;
 }
 
-// Bun 1.4's heap (bun:jsc `heapStats`) grows about 191 bytes per disjoint run of a ledger, its
-// age entry and timestamp included.
-/** Bookkeeping a track bills per run of its arrivals, so a peer fragmenting them costs what the cache would hold. */
-export const RUN_OVERHEAD = 192;
-
 // A run of accounted sequences `[start, end)`, and when the gap below it opened, which is
 // when its missing groups became late.
 type Run = { start: bigint; end: bigint; since: Instant };
@@ -110,31 +105,9 @@ export class Ledger {
 		}
 	}
 
-	/**
-	 * Fold the oldest gap into the runs around it however young, giving up on it early, and
-	 * return the sequences it held; undefined when no gap is left to fold.
-	 */
-	foldOldest(): { start: bigint; end: bigint } | undefined {
-		const run = this.#next;
-		if (!run) return undefined;
-		const below = this.#runs.lower(run.start);
-		if (!below) throw new Error("a folding gap must have a lower run");
-		const gap = { start: below.end, end: run.start };
-		below.end = run.end;
-		this.#remove(run);
-		if (this.#last === run) this.#last = below;
-		this.#nextExpiry();
-		return gap;
-	}
-
 	/** Whether a gap separates two runs, so {@link expire} has anything to fold. */
 	hasGaps(): boolean {
 		return this.#runs.size > 1;
-	}
-
-	/** How many runs it holds: one more than its gaps. */
-	get size(): number {
-		return this.#runs.size;
 	}
 
 	/** The lowest sequence accounted for. */
@@ -177,34 +150,6 @@ export class Ledger {
 		}
 		if (below < end) gaps.push({ start: below, end });
 		return gaps;
-	}
-
-	/**
-	 * Take `[start, end)` back out of what is accounted for, owed again from `at`: a verdict that
-	 * accounted for it was reversed. The gap it leaves opens at `at`, so it is waited for a fresh
-	 * grace, even where it joins an older gap. Mirrors the Rust `Ledger::unaccount`.
-	 */
-	unaccount(start: bigint, end: bigint, at: Instant): void {
-		if (start >= end) return;
-		const lower = this.#runs.floor(start);
-		const overlapping: Run[] = [];
-		for (const run of this.#runs.from(lower?.start ?? start)) {
-			if (run.start >= end) break;
-			if (run.end > start) overlapping.push(run);
-		}
-		if (overlapping.length === 0) return;
-		for (const run of overlapping) {
-			this.#remove(run);
-			if (this.#last === run) this.#last = undefined;
-			if (run.start < start) {
-				this.#insert({ start: run.start, end: start, since: run.since });
-			}
-			if (end < run.end) {
-				this.#insert({ start: end, end: run.end, since: at });
-			}
-		}
-		this.#last = this.#runs.last();
-		this.demand(start, end, at);
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */

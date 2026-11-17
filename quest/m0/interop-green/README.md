@@ -17,10 +17,10 @@ so it only needs to stay green.
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
-  so the pass now runs the datagram step; the `replacement` case stays
-  quarantined by default. Decided 2026-11-09 (maintainer, AFK, accepting the
+  so the pass now runs the datagram step; the `replacement` case runs by
+  default on Chromium, and its child quest restores it on Firefox. Decided 2026-11-09 (maintainer, AFK, accepting the
   recommendation): close this quest on a pass, which the maintainer set with
-  those cases skipped; the pass that closes it now runs them.
+  those cases skipped; the pass that closes it runs all but `replacement`.
   Release remeasure now updates stale planned-break pins after publication
   and requests landing through the main merge queue. Check its run and PR
   when a scheduled run reports stale pins.
@@ -221,9 +221,13 @@ Scheduled runs
   fallback plays` on `moq-lite-06` and `moq-transport-22` or the fallback audio
   tone, with no END_OF_TRACK violation in the log kept. Both failing logs show
   `skipping missing groups` on the audio track before the stall, so the audio
-  stalls past the 1039 ms bound after the route falls back. Still open:
-  root-cause that hole before the next scheduled run, or quarantine `replacement`
-  on Chromium again, as on Firefox, until it is.
+  stalls past the 1039 ms bound after the route falls back. Reproduced
+  at 1 of 8 and 2 of 12 loaded local runs (the audio ring still stalled 600 ms after the first
+  audio group of the returned incumbent). Decided 2026-11-15 (AFK, recommendation, for review):
+  `replacement` is quarantined by default on every engine again, and the child
+  [replacement audio](/quest/m0/interop-green/replacement-audio.md) root-causes and restores it.
+  Its first PR found the stall: the decode gate released the backlog behind the clock one window
+  per worklet report. Its second restored the case on Chromium; Firefox's quarantine is in the child.
 
 Public API: none. Wire: none.
 

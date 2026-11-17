@@ -22,20 +22,32 @@ path patterns under a root, and the session can only see that part of the tree.
 
 The relay POSTs one JSON body per session event (`connect`, `attach`, `revalidate`,
 `end`) to `--auth-url` and reads a grant back. The request carries everything
-the relay knows: a session id, its own `node` name, the transport, addresses,
-SNI and ALPN, the path and query exactly as dialed, a moq-transport SETUP
-token, the declared role and implementation, and the verified client
+the relay knows: a session id, its own `node` name, the `relay` software
+(`moq-relay/0.22.0`), the transport, addresses,
+SNI and ALPN, the path and query exactly as dialed, the SETUP
+`token` (or, on `attach`, the credential attached in band), the declared role and implementation, and the verified client
 certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter is a convention of
 `moq auth serve`, not of the relay. A path with a `.` or `..` segment is refused
 before the server is asked: a URL transport resolves those away, but a SETUP
 path arrives verbatim. The grant answers with `publish` and
-`subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
-`expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
-mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+`subscribe` pattern unions, each optionally [capped](#bitrate-caps), and optionally a `root` alias, read-only `mounts`,
+`expires`, a `revalidate` cadence, a stats `tier` and `label`, and a `link` (`peer` or
+`upstream`) to mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
 because it becomes a metrics label: a grant naming any other tier is an auth server error, and a refusal naming one reads as unattributed.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
+
+The relay reads a grant as strictly as a token's [claims](#claims): a field it
+does not know refuses the session, since a field added later may narrow the
+grant. A relay before 0.22 sends no `relay` and ignores a field it does not
+know, enforcing the grant without it, so a server branches on `relay` before
+sending a field newer than 0.22. Such a relay reads `peer: true` in place of
+`link` and knows no upstream: `moq_auth` writes `peer: true` beside every `link`, so that
+relay admits an upstream as a plain peer, which can carry traffic between two upstreams.
+Where that matters, refuse the session when the request has no `relay` (or one older than 0.22),
+and check that any auth proxy forwards `relay` to the backend that decides. Alone, `peer: true` reads as `link: "peer"`, and a
+grant naming a `link` beside `peer: false` is refused.
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
 over plaintext and for an IP-literal dial, and
@@ -58,10 +70,13 @@ Only name a root from a verified credential, including an expired token whose
 signature and key scope were verified. Never copy the unverified dialed path
 into `root`: that would let callers create unbounded stats entries.
 Anything else,
-including a timeout or an unparseable body, refuses and logs an error, so
+including a timeout, refuses and logs an error, so
 nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
-clock skew, so keep the auth server's clock in sync. WebSocket admission
+clock skew, so keep the auth server's clock in sync. A 2xx the relay cannot
+read or accept (an unknown field, a `revalidate` without `expires`, an invalid
+`tier` or `label`) is logged as the server's fault and refuses the session for
+good, as `Unauthorized`, since asking again gets the same answer. WebSocket admission
 happens after SETUP, just like QUIC, so auth never fails the upgrade: rejected
 credentials (401 or 403) close the session as `Unauthorized`, or as `Expired`
 or `MalformedAuthToken` for those reasons, which stops the client's reconnect
@@ -74,7 +89,7 @@ same way: what falls outside a narrower grant resets with `Unauthorized`, the
 broadcasts the session published outside it abort, and everything else keeps
 flowing. A wider grant brings those paths back within the admitted root and
 SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
-changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
+changed `root`, `mounts`, or `link`, a grant the relay cannot read or accept, or a 401 or 403, ends that
 credential's grant, which closes the session unless an
 [in-band](#in-band-renewal) credential still holds it. A changed `tier` or
 `label` keeps the session and moves its later stats. Any other failure retries with backoff and the session lives
@@ -97,7 +112,9 @@ only. HTTPS verifies the URL's hostname with system roots. For a private CA,
 set `auth.root` to PEM paths (or repeat `--auth-root`); these replace system
 trust for auth only and reload for new connections when rotated. Mesh roots,
 fingerprints, insecure mode, and hostname overrides never apply to auth.
-There is no shared secret. Redirects are not followed, since each request
+A server that requires a shared secret, as `moq auth serve --listen-secret`
+does, reads it from the URL's userinfo (see [Auth server](#auth-server)).
+Redirects are not followed, since each request
 carries a credential: point `url` at the final address.
 
 ```toml
@@ -190,10 +207,13 @@ removes that token's grant: streams that lose permission reset, and other grants
 keep the connection alive. A refused new token leaves existing grants alone.
 The grant reports its real expiry so the client can renew in time.
 
-The relay verifies a presented JWT through the same admission path, replacing
-`jwt` in the original query and preserving the connection's identity. The auth
-server sees `attach` for the same session id, with a fresh `auth` id
-that also names its revalidations and end. Attached grants revalidate and end
+The relay verifies a presented JWT through the same admission path, preserving
+the connection's identity. The auth server sees `attach` for the same session
+id, with a fresh `auth` id that also names its revalidations and end. The
+attached credential arrives in `token` (`kind` 0, any bytes) and `query` stays
+exactly as dialed, still holding the connection's first credential, so read an
+event with `auth` from `token` alone; `moq auth serve` does, and for now also reads the
+attached credential from the query's `jwt` when a previous-release relay sends no `token`. Attached grants revalidate and end
 independently. Each JWT counts against its own `--limit-token` cap while any
 credential using it remains on that connection. The initial credential remains
 responsible for the connection's stats tier.
@@ -312,7 +332,7 @@ so a session presenting one is refused rather than admitted on the public
 grant. The patterns are rooted at `/`, like a token with an empty root (see
 [Path matching](#path-matching)): `anon/**` admits a session dialed at `/`,
 `/anon`, or `/anon/room`, and refuses one dialed anywhere else. A pattern with
-no wildcard, such as `anon`, refuses to start; write `anon/**` for the subtree.
+no wildcard names one broadcast: `anon` is the broadcast `anon`, and `anon/**` is the subtree.
 `public = "**"` opens everything and is for development only. With
 `--auth-url` the anonymous rules live on the server instead
 (`moq auth serve --public-*`).
@@ -333,10 +353,10 @@ refuses `listen.tls.root`.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
-server granting its cluster CA everything with `peer: true`); see
+server granting its cluster CA everything with `link: "peer"`); see
 [Clustering](/bin/relay/cluster). `--mtls-link peer` marks every certificate as
-another relay; leave it off when certificates identify clients. Without
-`peer`, a certificate is a client's: it routes like one and sees
+another relay; leave it off when certificates identify clients. Without a
+link, a certificate is a client's: it routes like one and sees
 [hidden](/concept/moq-lite#hidden-broadcasts) routes only by asking.
 `--mtls-link upstream` also marks them
 [upstream](/bin/relay/cluster#upstream-links). Changing the link role ends each
@@ -367,8 +387,9 @@ chain in decides which rule applies.
 `moq auth serve` takes an optional TOML file holding every flag under its
 dotted key; a flag given on the command line wins. Only the file holds
 per-certificate rules, keyed by any hash in `tls.chain`. The rule naming the
-certificate nearest the leaf applies: it can set `publish`, `subscribe`, `link`
-(`peer`, `upstream`, or `none`), `tier`, `publish_rate`, and `subscribe_rate`,
+certificate nearest the leaf applies: it can set `publish` and `subscribe`
+(each a pattern list, or `{ path = [...], rate = bps }` with a
+[cap](#bitrate-caps)), `link` (`peer`, `upstream`, or `none`), and `tier`,
 and each field it omits takes the server-wide value. Its patterns replace the
 shared ones, so a rule with empty lists revokes. A certificate no rule names
 gets `--mtls-*`. The server watches the file: an edit takes effect at each
@@ -386,7 +407,7 @@ subscribe = ["**"]
 link = "peer"                  # cluster CA: every other certificate is a relay
 
 [mtls.certificates.3f2a...]    # an affiliate's intermediate CA: everything it issued
-publish = ["affiliate-a/**"]
+publish = { path = ["affiliate-a/**"], rate = 20000000 }
 subscribe = ["affiliate-a/**"]
 link = "none"
 tier = "affiliate-a"
@@ -398,10 +419,12 @@ subscribe = []
 
 ## Auth server
 
-Upgrade auth servers before relays when adopting the `webtransport` transport value.
+Upgrade auth servers before relays when adopting the `webtransport` or `tls` transport value.
 WebTransport sessions report `webtransport`; native QUIC sessions report `quic`.
-Older auth servers reject the new value. Updated Rust and JavaScript auth parsers
-map future transport names to `unknown`, which your policy should handle explicitly.
+`tls://` sessions report `tls`; plaintext `tcp://` sessions report `tcp`.
+An auth server built before `tls` existed does not fail to parse it: the Rust and JavaScript
+parsers read an unrecognized transport name as `unknown`, so admission then depends on how your
+policy treats `unknown`. Update any policy keyed on `tcp` for stream links to handle `tls` too.
 
 `moq auth serve` is the reference auth server, answering the contract above.
 
@@ -442,9 +465,9 @@ security boundary: approximate across relay crashes and server restarts, and
 they gate admission without revoking.
 
 `--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
-loopback address needs `--listen-public`, which needs `--listen-secret FILE`:
-every request must then carry the file's secret as its HTTP Basic password, so
-only relays can record sessions and fill the session limits. A relay sends it
+loopback address needs `--listen-secret FILE`: every request must then carry
+the file's secret as its HTTP Basic password, so only relays can record
+sessions and fill the session limits. A relay sends it
 from its URL, `--auth-url https://relay:<secret>@auth.example.com/` (percent-encode
 reserved characters), through the TLS proxy in front of the server. `--listen-secret`
 also guards a loopback listener. See `moq auth serve --help` for the rest.
@@ -496,8 +519,10 @@ so count sessions only on the others. See
 
 The plaintext TCP and Unix-socket listeners are admitted exactly like QUIC:
 the path and query ride the `SETUP` (`tcp://127.0.0.1:4444/room?jwt=...`) and
-reach the auth server with `transport` set to `tcp` or `unix`. A Unix socket
-can also require a specific uid, gid, or pid:
+reach the auth server with `transport` set to `tcp` or `unix`. A `tls://` link
+(below) reports `tls`, so a policy keyed on `transport == "tcp"` for cluster
+links over TLS now sees `"tls"`. A Unix socket can also require a specific uid,
+gid, or pid:
 
 ```toml
 [listen.unix]

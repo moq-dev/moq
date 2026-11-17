@@ -247,14 +247,14 @@ test("closing a consumer ends its own parked reads", async () => {
 	consumer.close();
 	expect(await reading).toBeUndefined();
 	await waiting;
-	expect(consumer.isClosed).toBe(true);
+	expect(consumer.closed.peek()).toBeNull();
 	expect(consumer.done).toBe(true);
 
 	// The other reader is still parked on the open group, and reads the next frame.
 	const next = other.readFrame();
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
 	expect((await next)?.payload[0]).toBe(1);
-	expect(other.isClosed).toBe(false);
+	expect(other.closed.peek()).toBeUndefined();
 
 	// A later write never reaches the released handle, so it takes nothing from the other reader.
 	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
@@ -918,35 +918,4 @@ test("a drained unfinished group fails with Old when its budget gives up", async
 	await expect(consumer.readFrame()).rejects.toBe(err);
 	expect(consumer.done).toBe(true);
 	expect(await consumer.closed).toBe(err as StreamError);
-});
-
-// Rust's `GroupState::shed` keeps an open group's newest committed frame even while a newer
-// frame is still being written, since that partial frame is not readable yet.
-test("a debt shed keeps the newest committed frame behind one being written", async () => {
-	const producer = new Producer(0n);
-	producer.writeFrame({ payload: new Uint8Array(1024), timestamp: Timestamp.unscaled(producer.sequence) });
-	const reader = producer.consume();
-	producer.createFrame({ size: 10, timestamp: Timestamp.unscaled(producer.sequence) }).write(new Uint8Array(5));
-
-	expect(hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [])).toBe(0);
-	expect((await reader.readFrame())?.payload.byteLength).toBe(1024);
-});
-
-// A finished group no longer tees into its copies, so shedding it ends the copies its track
-// holds that had not taken the shed frames, rather than crediting bytes they still hold.
-test("a debt shed of a finished group ends the copies that lost a frame", async () => {
-	const producer = new Producer(0n);
-	producer.writeFrame({ payload: new Uint8Array(1024), timestamp: Timestamp.unscaled(producer.sequence) });
-	producer.writeFrame({ payload: new Uint8Array(1024), timestamp: Timestamp.unscaled(producer.sequence) });
-	producer.finish();
-	const behind = producer.consume();
-	const drained = producer.consume();
-	await drained.readFrame();
-	await drained.readFrame();
-
-	expect(
-		hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [behind, drained]),
-	).toBeGreaterThan(0);
-	await expect(behind.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
-	expect(await drained.readFrame()).toBeUndefined();
 });

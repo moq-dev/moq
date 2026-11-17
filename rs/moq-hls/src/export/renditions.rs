@@ -121,7 +121,7 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
-	media: Option<hang::catalog::Media>,
+	sync: Option<hang::catalog::Timeline>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
@@ -293,7 +293,7 @@ impl Producer {
 	#[cfg(feature = "server")]
 	pub fn poll_get(&self, waiter: &kio::Waiter, kind: Kind, name: &str) -> Poll<Option<Arc<Rendition>>> {
 		match self.state.poll_ref(waiter, |state| {
-			if state.media.is_some() {
+			if state.sync.is_some() {
 				Poll::Ready(state.renditions.get(&(kind, name.to_string())).cloned())
 			} else {
 				Poll::Pending
@@ -514,12 +514,13 @@ impl Producer {
 			.map(|_| ())
 	}
 
-	/// Resolve once an enabled video rendition is [advertised](Rendition::is_advertised), or, while
-	/// none is left that listings do not refuse, once any enabled rendition is, so a master playlist
-	/// can list it.
+	/// Resolve once every enabled video rendition that listings do not refuse is
+	/// [advertised](Rendition::is_advertised), or, while none is left, once any enabled rendition
+	/// is, so a master playlist can list them.
 	///
-	/// A player keeps the variants of the first master it loads, and audio lists a segment before
-	/// video finishes its first GOP, so a master answered on audio alone would never play video.
+	/// A player keeps the variants of the first master it loads. Audio lists a segment before video
+	/// finishes its first GOP, and one rung of a ladder before another, so a master answered on
+	/// audio or one rung alone would never switch to the rest.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
@@ -536,7 +537,7 @@ impl Producer {
 					})
 					.peekable();
 				let ready = if video.peek().is_some() {
-					video.any(advertised)
+					video.all(advertised)
 				} else {
 					current.renditions.values().any(advertised)
 				};
@@ -550,7 +551,7 @@ impl Producer {
 	pub(crate) fn poll_catalogued(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll_ref(waiter, |current| {
-				if current.media.is_some() {
+				if current.sync.is_some() {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
@@ -669,7 +670,7 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate, jitter, or framerate moves.
 	///
-	/// Renditions join the set only once the catalog declares `media.join.interval`, which a
+	/// Renditions join the set only once the catalog declares `sync.interval`, which a
 	/// publisher measures over its first second or group when it knows no GOP: without that grid
 	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
 	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
@@ -722,13 +723,13 @@ impl Producer {
 	}
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
-		let clock = catalog.media.clock;
-		let interval = catalog.media.interval();
+		let clock = catalog.sync.clock;
+		let interval = catalog.sync.interval;
 
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
-		current.media = Some(catalog.media);
+		current.sync = Some(catalog.sync);
 
 		// Renditions the catalog dropped or reconfigured. Retire each as it goes so any cursor
 		// over it drains and ends, instead of parking on a window that never finishes -- the

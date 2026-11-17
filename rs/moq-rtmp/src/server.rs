@@ -7,10 +7,11 @@
 //! `play` command. The caller inspects the app and stream key, makes an
 //! authorization decision, and either:
 //!
-//! - **[`Request::Publish`]**: [`Publish::accept`] (ingest into an origin at a
-//!   path) or [`Publish::reject`]. This is the contribution path (OBS, ffmpeg).
-//! - **[`Request::Play`]**: [`Play::accept`] (serve a broadcast from an origin
-//!   down to the player) or [`Play::reject`]. This is the egress path: a player
+//! - **[`Request::Publish`]**: [`Publish::accept`] with an [`Import`] (ingest into
+//!   an origin at a path) or [`Publish::reject`]. This is the contribution path
+//!   (OBS, ffmpeg).
+//! - **[`Request::Play`]**: [`Play::accept`] with an [`Export`] (serve a broadcast
+//!   from an origin down to the player) or [`Play::reject`]. This is the egress path: a player
 //!   (VLC, ffplay, mpv) pulls `rtmp://host/<app>/<key>` and we stream it back.
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
@@ -185,7 +186,6 @@ pub enum Conn {
 	/// A TLS connection (`rtmps://`): terminated by [`Server::with_tls`], or dialed with
 	/// [`crate::Connect::with_tls`]. Boxed because a `TlsStream` is large relative to a
 	/// bare `TcpStream`.
-	#[cfg(feature = "tls")]
 	Tls(Box<tokio_rustls::TlsStream<TcpStream>>),
 }
 
@@ -193,7 +193,6 @@ impl AsyncRead for Conn {
 	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_read(cx, buf),
 		}
 	}
@@ -203,7 +202,6 @@ impl AsyncWrite for Conn {
 	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_write(cx, buf),
 		}
 	}
@@ -211,7 +209,6 @@ impl AsyncWrite for Conn {
 	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_flush(cx),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_flush(cx),
 		}
 	}
@@ -219,7 +216,6 @@ impl AsyncWrite for Conn {
 	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		match self.get_mut() {
 			Conn::Plain(s) => Pin::new(s).poll_shutdown(cx),
-			#[cfg(feature = "tls")]
 			Conn::Tls(s) => Pin::new(s).poll_shutdown(cx),
 		}
 	}
@@ -233,8 +229,8 @@ const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
-/// Build it with [`bind`](Self::bind), optionally enable RTMPS with `with_tls`
-/// (the `tls` feature), then loop on [`accept`](Self::accept). The
+/// Build it with [`bind`](Self::bind), optionally enable RTMPS with `with_tls`,
+/// then loop on [`accept`](Self::accept). The
 /// handshake and the connect exchange happen inside `accept`, so a [`Request`] is
 /// only produced once a client actually wants to publish or play.
 pub struct Server {
@@ -242,7 +238,6 @@ pub struct Server {
 
 	/// When set, each accepted connection that opens with a ClientHello is
 	/// TLS-terminated (RTMPS) before the RTMP handshake.
-	#[cfg(feature = "tls")]
 	tls: Option<tokio_rustls::TlsAcceptor>,
 
 	/// Whether a connection that is not TLS is served as plaintext RTMP.
@@ -273,7 +268,6 @@ impl Server {
 
 		Ok(Self {
 			listener,
-			#[cfg(feature = "tls")]
 			tls: None,
 			plaintext: true,
 			pending: FuturesUnordered::new(),
@@ -290,7 +284,6 @@ impl Server {
 	/// Pass a `rustls::ServerConfig` (e.g. from
 	/// `moq_tokio::tls::Listen::server_config` with an empty ALPN list), or
 	/// `None` to serve plaintext only.
-	#[cfg(feature = "tls")]
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ServerConfig>>>) -> Self {
 		self.tls = tls.into().map(tokio_rustls::TlsAcceptor::from);
 		self
@@ -308,12 +301,7 @@ impl Server {
 	/// Refuse a server that would accept no connection at all: plaintext turned off with
 	/// no TLS to serve instead.
 	pub(crate) fn check(&self) -> Result<()> {
-		#[cfg(feature = "tls")]
-		let tls = self.tls.is_some();
-		#[cfg(not(feature = "tls"))]
-		let tls = false;
-
-		if !self.plaintext && !tls {
+		if !self.plaintext && self.tls.is_none() {
 			return Err(crate::Error::Session(
 				"plaintext RTMP is refused but no TLS config is set, so no client could connect".to_string(),
 			));
@@ -363,7 +351,6 @@ impl Server {
 						// A connection got through, so whatever the last failure was has cleared.
 						self.accept_delay = ACCEPT_RETRY_MIN;
 						configure_socket(&stream, peer);
-						#[cfg(feature = "tls")]
 						let (tls, plaintext) = (self.tls.clone(), self.plaintext);
 						if self.pending_order.len() == MAX_PENDING_REQUESTS {
 							let (_, oldest) = self.pending_order.pop_first().unwrap();
@@ -378,7 +365,6 @@ impl Server {
 								// The TLS handshake (if any) and the RTMP handshake share one
 								// budget, so a client that stalls either is dropped.
 								let outcome = kio::clock::timeout(REQUEST_TIMEOUT, async move {
-									#[cfg(feature = "tls")]
 									let conn = match tls {
 										Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
 											kio::clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
@@ -393,8 +379,6 @@ impl Server {
 										}
 										_ => Conn::Plain(stream),
 									};
-									#[cfg(not(feature = "tls"))]
-									let conn = Conn::Plain(stream);
 									accept_until_request(conn, peer).await
 								})
 								.await;
@@ -434,11 +418,9 @@ impl Server {
 
 /// The first byte of a TLS record carrying a ClientHello. RTMP's C0 is `0x03` (or `0x06`
 /// for the legacy encrypted variant), so one byte tells the two apart.
-#[cfg(feature = "tls")]
 const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 
 /// Whether the client opened with a TLS ClientHello, peeked without consuming it.
-#[cfg(feature = "tls")]
 async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 	let mut first = [0u8; 1];
 	if kio::clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
@@ -605,10 +587,10 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// RTMP media into it, published as `ingest` says, until the client disconnects.
+	/// Accept the publish: announce the [`Import`]'s broadcast in its publisher and pump the
+	/// RTMP media into it, published as its ingest says, until the client disconnects.
 	///
-	/// `origin` is whatever the caller wants the media published into (e.g. a
+	/// The publisher is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
@@ -617,13 +599,12 @@ impl<S: Stream> Publish<S> {
 	/// stays up for the ingest's [linger](moq_mux::Ingest::linger), and the future resolves
 	/// after that. Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(
-		mut self,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(mut self, import: Import<'_>) -> Result<()> {
+		let Import {
+			publisher: origin,
+			broadcast: path,
+			ingest,
+		} = import;
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -732,9 +713,6 @@ pub struct Play<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_delay`](Self::with_delay).
-	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -764,22 +742,19 @@ impl<S: Stream> Play<S> {
 		self.peer
 	}
 
-	/// Set the FLV release delay and stalled-group budget.
-	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.delay = delay;
-		self
-	}
-
-	/// Accept the play: subscribe to the broadcast at `path` in `origin`, mux it
+	/// Accept the play: subscribe to the [`Export`]'s broadcast in its subscriber, mux it
 	/// to FLV, and stream the tags down to the player until either side ends.
 	///
 	/// Waits for the broadcast to be announced (so a player can connect slightly
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(mut self, export: Export<'_>) -> Result<()> {
+		let Export {
+			subscriber: origin,
+			broadcast: path,
+			delay,
+		} = export;
 		let Ok(mut following) = origin.follow(&path, None) else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
@@ -856,11 +831,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(
-				moq_net::track::Delay::default()
-					.with_min(self.delay)
-					.with_max(self.delay),
-			)
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -939,6 +910,51 @@ impl<S: Stream> Play<S> {
 		}
 		tracing::debug!(peer = %self.peer, %reason, "rtmp play rejected");
 		Ok(())
+	}
+}
+
+/// Where and how [`Publish::accept`] publishes an RTMP publish's media.
+#[non_exhaustive]
+pub struct Import<'a> {
+	/// The producer the media is published into.
+	pub publisher: &'a origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+}
+
+impl<'a> Import<'a> {
+	/// Publish into `publisher` under `broadcast` with the default [`Ingest`](moq_mux::Ingest).
+	pub fn new(publisher: &'a origin::Producer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			publisher,
+			broadcast: broadcast.into(),
+			ingest: moq_mux::Ingest::default(),
+		}
+	}
+}
+
+/// Where and how [`Play::accept`] reads the broadcast it serves to an RTMP player.
+#[non_exhaustive]
+pub struct Export<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a origin::Consumer,
+	/// The broadcast to serve, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// The FLV release delay and stalled-group budget. Defaults to 500 ms; zero releases
+	/// available frames immediately without deadline drops.
+	pub delay: Duration,
+}
+
+impl<'a> Export<'a> {
+	/// Serve `broadcast` from `subscriber` with the default delay.
+	pub fn new(subscriber: &'a origin::Consumer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			delay: crate::DEFAULT_DELAY,
+		}
 	}
 }
 
@@ -1189,7 +1205,6 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1833,7 +1848,11 @@ mod tests {
 		let mut ingest = moq_mux::Ingest::default();
 		ingest.linger = linger;
 		publish
-			.accept(&origin, moq_net::Path::from_static("live/cam0"), &ingest)
+			.accept(Import {
+				publisher: &origin,
+				broadcast: moq_net::Path::from_static("live/cam0"),
+				ingest,
+			})
 			.await
 			.unwrap();
 	}
@@ -2246,7 +2265,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2319,7 +2338,8 @@ mod tests {
 			let Some(Request::Play(play)) = server.accept().await else {
 				panic!("expected a play request");
 			};
-			play.accept(&play_origin, moq_net::Path::from_static("live/cam0")).await
+			play.accept(Export::new(&play_origin, moq_net::Path::from_static("live/cam0")))
+				.await
 		});
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
@@ -2390,7 +2410,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2668,7 +2688,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2726,7 +2746,7 @@ mod tests {
 
 		tokio::time::pause();
 		let server_task = tokio::spawn(async move {
-			play.accept(&consumer, moq_net::Path::from_static("live/missing"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/missing")))
 				.await
 				.unwrap();
 		});
@@ -2793,7 +2813,7 @@ mod tests {
 				let origin = origin.clone();
 				tokio::spawn(async move {
 					publish
-						.accept(&origin, moq_net::Path::from_static("live/cam0"), &Default::default())
+						.accept(Import::new(&origin, moq_net::Path::from_static("live/cam0")))
 						.await
 				});
 			}
@@ -2995,7 +3015,6 @@ mod tests {
 
 	/// A throwaway self-signed server config for `localhost` plus a client connector that
 	/// trusts anything. The cert is generated by the `moq-tokio` dev-dependency.
-	#[cfg(feature = "tls")]
 	fn tls_fixture() -> (std::sync::Arc<rustls::ServerConfig>, tokio_rustls::TlsConnector) {
 		use std::sync::Arc;
 
@@ -3060,7 +3079,6 @@ mod tests {
 
 	/// Publish over TLS: prove the server terminates RTMPS and yields an identical
 	/// [`Request`].
-	#[cfg(feature = "tls")]
 	async fn rtmps_publish(server: &mut Server, connector: tokio_rustls::TlsConnector) {
 		use rustls::pki_types::ServerName;
 
@@ -3088,8 +3106,7 @@ mod tests {
 	}
 
 	/// By default a server with TLS terminates RTMPS and still serves a plaintext client on the
-	/// same port. Gated on `tls` (RTMPS support).
-	#[cfg(feature = "tls")]
+	/// same port.
 	#[tokio::test]
 	async fn rtmps_and_rtmp_share_one_port() {
 		let (server_config, connector) = tls_fixture();
@@ -3119,7 +3136,6 @@ mod tests {
 
 	/// With plaintext turned off, a server refuses a plaintext client at its first byte,
 	/// without waiting for the request timeout, and keeps serving RTMPS afterwards.
-	#[cfg(feature = "tls")]
 	#[tokio::test]
 	async fn rtmps_required_refuses_plaintext() {
 		let (server_config, connector) = tls_fixture();

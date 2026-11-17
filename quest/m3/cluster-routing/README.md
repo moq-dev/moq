@@ -20,6 +20,14 @@ work, and no quest requires one in a later milestone, since a blocker ranks
 by its own milestone. ✅ m3 (rejected: m2, where the cut would wait on it;
 pulling the m2 blocker into m1). It ranks right after m2, when it can start.
 
+Reopened 2026-11-15 (maintainer, /quest-plan on the whole route layer):
+[cache-aware multicast](/quest/m2/multicast/README.md) replaces the route
+layer this Plan describes, and where the two differ it wins. A routing node
+is a node that forwards, not every publisher; a claim crosses a scoped grant
+by a chain, not a qualified identity under a route key; and holds, doubt,
+and the non-goal of cache-dependent route prices are gone. One model for CDN
+tiers, outbound local clusters, and meshes stands.
+
 Decided with the maintainer, 2026-10-13:
 
 - Keep per-origin ROUTEs and path-less ANNOUNCEs on the ordered announce
@@ -154,6 +162,7 @@ setup after the capabilities land.
 
 ## Required
 
+- [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer this builds on, replacing the path rule
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - shared routing contract and implementation
 
 ## Related

@@ -146,7 +146,7 @@ impl V4l2 {
 			return Err(Error::UnsupportedCodec(format!("{NAME} decodes H.264 only")));
 		}
 
-		let device = v4l2::open(&ROLE, config.v4l2.as_deref())?;
+		let device = v4l2::open(&ROLE, config.device.video())?;
 		// Before the first access unit, so the announcement of the stream's size
 		// cannot be missed.
 		device.subscribe_source_change()?;

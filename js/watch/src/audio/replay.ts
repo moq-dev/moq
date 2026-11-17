@@ -65,6 +65,12 @@ export interface Options {
 	lookahead?: number;
 	/** The configured stretch, in ms, as the element takes it (default: the element's). */
 	stretch?: number;
+	/**
+	 * The publisher's largest group as the subscription began, which the consumer learns as a wire
+	 * subscriber learns it from the publisher's answer. Omitted, the replay's track names its own: the
+	 * first group to land.
+	 */
+	largest?: number;
 	/** The rendition as the catalog described it: its advertised jitter, delay, and codec. */
 	config: Catalog.AudioConfig;
 	/**
@@ -178,6 +184,33 @@ const micros = (ms: number) => Math.round(ms * 1000);
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
+ * `track` answering `largest` the way a wire subscriber does once the publisher has answered: first
+ * the publisher's largest group as the subscription began, then each newer group as it lands.
+ * Everything else is the local subscriber's.
+ */
+export function answering(track: Track.Subscriber, largest: bigint): Track.Subscriber {
+	let answered = false;
+	return new Proxy(track, {
+		get(target, prop) {
+			if (prop !== "largest") {
+				const value = Reflect.get(target, prop, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			}
+			return async () => {
+				if (!answered) {
+					answered = true;
+					return { group: largest, frame: 0 };
+				}
+				for (;;) {
+					const next = await target.largest();
+					if (!next || next.group > largest) return next;
+				}
+			};
+		},
+	});
+}
+
+/**
  * Play `trace` in simulated real time, yielding every render quantum from the first arrival to the
  * end of the observation.
  *
@@ -218,11 +251,15 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const maxDelay = new Derived([sync.out.delay, sync.out.maxDelay], (delay, max) =>
 		audioMaxDelay({ delay, maxDelay: max }),
 	);
-	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
-		format: new Container.Legacy.Format("audio"),
-		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
-		wait: sync.out.maxDelay,
-	});
+	const subscriber = track.subscribe({ delay: { max: WIRE_MAX_DELAY } });
+	const consumer = new Container.Consumer(
+		options.largest === undefined ? subscriber : answering(subscriber, BigInt(options.largest)),
+		{
+			format: new Container.Legacy.Format("audio"),
+			delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
+			wait: sync.out.maxDelay,
+		},
+	);
 
 	// Match the decoder: a codec constant until a delivered packet states its own duration.
 	const signals = new Effect();
@@ -252,13 +289,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	await settle();
 
 	let delay = sync.out.delay.peek();
-	const terms = () => ({
-		bound: bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch }).asMillis(),
-	});
+	const skip = () => bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch });
+	const terms = () => ({ bound: skip().asMillis() });
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
-	const gate = new Backpressure(rate, buffered, delay);
+	const gate = new Backpressure(rate, buffered, delay, skip());
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor), ...terms() });
-	const observe = () => gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled);
+	// The ring's playhead is where the shared clock stands at the end of the quantum it read.
+	const observe = () =>
+		gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled, sync.now()?.asMicros());
 
 	// Arrived but not yet decoded media, read or still in the consumer, is what covers the part of the
 	// target held encoded before playback starts.
@@ -375,7 +413,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			if (!resolved.eq(delay)) {
 				delay = resolved;
 				observe();
-				gate.setLatency(delay);
+				gate.setLatency(delay, skip());
 				ring.setLatency(millis(rate, gate.floor), terms());
 			}
 

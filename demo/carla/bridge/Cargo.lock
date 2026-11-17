@@ -1291,7 +1291,6 @@ dependencies = [
 name = "moq-mux"
 version = "0.10.11"
 dependencies = [
- "anyhow",
  "base64",
  "bitstream-io",
  "bytes",
@@ -1376,7 +1375,9 @@ dependencies = [
  "h264-reader",
  "hang",
  "kio",
+ "libc",
  "libloading 0.9.0",
+ "linux-raw-sys",
  "moq-mux",
  "moq-net",
  "moq-nvenc",

@@ -164,7 +164,7 @@
 			"name": "capped_role",
 			"key": "hs256",
 			"payload": { "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] },
-			"claims": { "root": "", "publish": ["alice/**"], "publish_rate": 1000, "subscribe": ["**"] }
+			"claims": { "root": "", "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] }
 		},
 		{
 			"name": "misspelled_cap",
@@ -329,6 +329,101 @@
 				"d": ""
 			},
 			"valid": false
+		},
+		{
+			"name": "a_padded_field",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA="
+			},
+			"valid": true
+		},
+		{
+			"name": "nonzero_trailing_bits",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQB"
+			},
+			"valid": false
+		},
+		{
+			"name": "nonzero_trailing_bits_behind_padding",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQB="
+			},
+			"valid": false
+		},
+		{
+			"name": "a_field_with_whitespace",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": " jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA"
+			},
+			"valid": false
+		},
+		{
+			"name": "a_field_in_the_standard_alphabet",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B/SKkvhtObaiKg9n2vq/Iqdus+nVCVVYBWf0BQA"
+			},
+			"valid": false
+		},
+		{
+			"name": "a_repeated_member",
+			"jwk": "{\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\",\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_repeated_scope_member",
+			"jwk": "{\"scope\":{\"root\":\"a\",\"root\":\"b\",\"publish\":[\"**\"]},\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_repeated_unread_member",
+			"jwk": "{\"note\":1,\"note\":2,\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": true
+		},
+		{
+			"name": "base64url_encoded",
+			"jwk": "eyJrdHkiOiJvY3QiLCJhbGciOiJIUzI1NiIsImsiOiJqdlMyQl9TS2t2aHRPYmFpS2c5bjJ2cV9JcWR1cy1uVkNWVllCV2YwQlFBIn0",
+			"valid": true
+		},
+		{
+			"name": "base64url_encoded_with_padding",
+			"jwk": "eyJrdHkiOiJvY3QiLCJhbGciOiJIUzI1NiIsImsiOiJqdlMyQl9TS2t2aHRPYmFpS2c5bjJ2cV9JcWR1cy1uVkNWVllCV2YwQlFBIn0=",
+			"valid": false
+		},
+		{
+			"name": "a_byte_order_mark",
+			"jwk": "\ufeff{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_lone_surrogate",
+			"jwk": "{\"note\":\"\\ud800\",\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "nesting_at_the_recursion_limit",
+			"jwk": "{\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": true
+		},
+		{
+			"name": "nesting_past_the_recursion_limit",
+			"jwk": "{\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_number_out_of_range",
+			"jwk": "{\"note\":1e400,\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
 		}
 	],
 	"sets": [
@@ -406,6 +501,36 @@
 				]
 			},
 			"valid": false
+		},
+		{
+			"name": "a_repeated_keys_member",
+			"jwks": "{\"keys\":[],\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": false
+		},
+		{
+			"name": "a_repeated_unread_member",
+			"jwks": "{\"note\":1,\"note\":2,\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": true
+		},
+		{
+			"name": "an_unread_member_out_of_range",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":1e400}",
+			"valid": false
+		},
+		{
+			"name": "an_unread_member_with_a_lone_surrogate",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":\"\\ud800\"}",
+			"valid": false
+		},
+		{
+			"name": "an_unread_member_nested_too_deep",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+			"valid": false
+		},
+		{
+			"name": "leading_unicode_whitespace",
+			"jwks": "\u00a0{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": false
 		}
 	],
 	"grants": [
@@ -417,7 +542,33 @@
 		{ "name": "expires_past_the_clock", "grant": { "publish": ["**"], "expires": 18446744074 }, "valid": false },
 		{ "name": "revalidate_without_expires", "grant": { "publish": ["**"], "revalidate": 60 }, "valid": false },
 		{ "name": "grants_nothing", "grant": { "expires": 4102444800 }, "valid": false },
-		{ "name": "upstream_without_peer", "grant": { "publish": ["**"], "upstream": true }, "valid": false },
-		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false }
+		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false },
+		{ "name": "unknown_field", "grant": { "publish": ["**"], "future": true }, "valid": false },
+		{ "name": "flat_rate", "grant": { "publish": ["**"], "publish_rate": 8000 }, "valid": false },
+		{
+			"name": "legacy_upstream_flag",
+			"grant": { "publish": ["**"], "peer": true, "upstream": true },
+			"valid": false
+		},
+		{
+			"name": "capped_role",
+			"grant": { "publish": { "path": ["alice/**"], "rate": 8000 }, "subscribe": ["**"] },
+			"valid": true
+		},
+		{ "name": "cap_on_nothing", "grant": { "publish": { "path": [], "rate": 8000 } }, "valid": false },
+		{ "name": "misspelled_cap", "grant": { "publish": { "path": ["**"], "rat": 8000 } }, "valid": false },
+		{ "name": "link_peer", "grant": { "publish": ["**"], "link": "peer" }, "valid": true },
+		{ "name": "link_upstream", "grant": { "publish": ["**"], "link": "upstream", "peer": true }, "valid": true },
+		{ "name": "peer_alias", "grant": { "publish": ["**"], "peer": true }, "valid": true },
+		{ "name": "not_a_peer", "grant": { "publish": ["**"], "peer": false }, "valid": true },
+		{
+			"name": "link_disagrees_with_peer",
+			"grant": { "publish": ["**"], "link": "upstream", "peer": false },
+			"valid": false
+		},
+		{ "name": "unknown_link", "grant": { "publish": ["**"], "link": "downstream" }, "valid": false },
+		{ "name": "null_link", "grant": { "publish": ["**"], "link": null }, "valid": false },
+		{ "name": "positional", "grant": [["**"]], "valid": false },
+		{ "name": "null_grant", "grant": null, "valid": false }
 	]
 }

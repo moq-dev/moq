@@ -16,6 +16,12 @@ let
   authUrl = "http://127.0.0.1:${toString cfg.auth.port}/";
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [ "services" "moq-relay" "cluster" "rootUrl" ]
+      "Use services.moq-relay.cluster.connect, a list of full peer URLs such as [ \"https://peer.example.com:4443\" ]."
+    )
+  ];
+
   options.services.moq-relay = {
     enable = lib.mkEnableOption "moq-relay";
 
@@ -107,24 +113,14 @@ in
     };
 
     cluster = {
-      mode = lib.mkOption {
-        type = lib.types.enum [
-          "root"
-          "leaf"
-          "none"
-        ];
-        default = "none";
-        description = "Cluster mode";
-      };
-
-      rootUrl = lib.mkOption {
+      connect = lib.mkOption {
         type = lib.types.nullOr (lib.types.nonEmptyListOf lib.types.str);
         default = null;
         example = [
           "https://root-a.example.com:4443"
           "https://root-b.example.com:4443"
         ];
-        description = "Cluster peer URLs to connect to (for leaf mode); full URLs, since a bare `host:port` is refused";
+        description = "Cluster peer URLs this relay dials; full URLs, since a bare `host:port` is refused";
       };
 
       nodeUrl = lib.mkOption {
@@ -151,7 +147,7 @@ in
         default = null;
         example = "/run/secrets/moq-cluster.pem";
         description = ''
-          Client certificate chain (PEM) this node presents when it dials `rootUrl`, issued
+          Client certificate chain (PEM) this node presents when it dials `connect`, issued
           by the peers' `ca`. Reloaded when it changes. Needs `keyFile`.
         '';
       };
@@ -169,7 +165,7 @@ in
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          A JWT this node presents when it dials `rootUrl`, for peers whose auth server
+          A JWT this node presents when it dials `connect`, for peers whose auth server
           verifies tokens instead of certificates. Re-read on every dial. Prefer `certFile`.
         '';
       };
@@ -223,10 +219,6 @@ in
         message = "services.moq-relay: set auth.enable or auth.publicPath; a relay admits nobody without one";
       }
       {
-        assertion = cfg.cluster.mode != "leaf" || cfg.cluster.rootUrl != null;
-        message = "services.moq-relay: cluster.mode = \"leaf\" needs cluster.rootUrl; a leaf without one runs standalone";
-      }
-      {
         assertion = cfg.cluster.ca == [ ] || cfg.auth.enable;
         message = "services.moq-relay: cluster.ca needs auth.enable; public rules alone cannot grant a certificate";
       }
@@ -243,12 +235,12 @@ in
     warnings =
       lib.optional
         (
-          cfg.cluster.mode == "leaf"
+          cfg.cluster.connect != null
           && cfg.cluster.certFile == null
           && cfg.cluster.tokenFile == null
-          && lib.any (url: builtins.match ".*[?&]jwt=[^&#].*" url == null) (lib.toList cfg.cluster.rootUrl)
+          && lib.any (url: builtins.match ".*[?&]jwt=[^&#].*" url == null) (lib.toList cfg.cluster.connect)
         )
-        "services.moq-relay: this leaf dials cluster.rootUrl with no credential, so its root admits it at most as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
+        "services.moq-relay: this relay dials cluster.connect with no credential, so its peer refuses it or admits it only as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
 
     # Create user and group
     users.users.${cfg.user} = {
@@ -387,9 +379,9 @@ in
       // lib.optionalAttrs (!cfg.auth.enable) {
         MOQ_AUTH_PUBLIC = publicPattern;
       }
-      // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
+      // lib.optionalAttrs (cfg.cluster.connect != null) {
         # Cluster configuration
-        MOQ_CLUSTER_CONNECT = lib.concatStringsSep "," cfg.cluster.rootUrl;
+        MOQ_CLUSTER_CONNECT = lib.concatStringsSep "," cfg.cluster.connect;
       }
       // lib.optionalAttrs (cfg.cluster.ca != [ ]) {
         MOQ_LISTEN_TLS_ROOT = lib.concatMapStringsSep "," toString cfg.cluster.ca;

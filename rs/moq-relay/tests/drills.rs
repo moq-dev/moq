@@ -24,7 +24,6 @@
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
 //! drill fails when its recovery behavior is removed, and the fuzz targets
 //! covering the wire underneath.
-#![cfg(all(feature = "quic", feature = "websocket"))]
 
 use std::time::Duration;
 
@@ -347,12 +346,12 @@ fn dial() -> moq_tokio::connect::Config {
 /// Append one finished group carrying `payload`.
 fn write_group(track: &mut moq_net::track::Producer, payload: &[u8]) {
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 }
 
 /// Read the next group's first frame, failing the drill on a timeout, a clean
@@ -612,7 +611,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	// Nothing more is written, so what the reader is waiting for cannot arrive
 	// ahead of the kill and turn this into a race.
 	let mut open = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	open.write_frame(moq_net::Timestamp::from_millis(open.start).unwrap(), b"read".as_ref())
 		.expect("write frame");
@@ -664,7 +663,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 	// Resumed delivery through the same subscriber origin: the reconnected
 	// publisher re-announced, and a fresh subscribe rides the new session.
-	open.close().expect("finish the interrupted group");
+	open.finish().expect("finish the interrupted group");
 	write_group(&mut track, b"after");
 	let mut reader = subscribe(&subscribed, "live").await;
 	read_until(&mut reader, b"after", "after the restart").await;
@@ -1534,21 +1533,23 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	// 5.12Mb/s of media behind a 64kb/s link, for a second.
 	for sequence in 2..22 {
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 	let mut newest = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.unwrap();
 	newest
 		.write_frame(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")
 		.unwrap();
-	newest.close().unwrap();
+	newest.finish().unwrap();
 	// No successor means this snapshot must survive even after its budget elapsed.
 	kio::clock::sleep(Duration::from_millis(500)).await;
 	let sequence = kio::clock::timeout(TIMEOUT, async {

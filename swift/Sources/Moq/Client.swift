@@ -65,8 +65,8 @@ public final class Client: Sendable {
     }
 
     /// Start a connection and return its session without waiting for the native first dial to succeed.
-    /// If that first dial reaches no session, the session closes with its error rather than retrying;
-    /// only an established session reconnects.
+    /// Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+    /// session, such as a refused credential, closes the session with its error rather than retrying.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }
@@ -82,11 +82,6 @@ public final class Client: Sendable {
 /// `Client(versions:)` takes them.
 public func versions() -> [String] {
     moqVersions()
-}
-
-/// Whether this build can write qlog traces for `QuicConfig.qlog`.
-public func qlogSupported() -> Bool {
-    moqQlogSupported()
 }
 
 /// A MoQ session, including its initial native dial.

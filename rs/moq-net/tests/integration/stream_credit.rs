@@ -40,8 +40,8 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+		// One for groups, past the stream the session keeps open.
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -66,7 +66,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			for track in &tracks {
 				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 		}
 		for subscriber in &mut subscribers {
@@ -104,8 +104,8 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+		// One for groups, past the stream the session keeps open.
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -135,7 +135,7 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 
 		let mut newer = track.append_next().unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-		newer.close().unwrap();
+		newer.finish().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the newer group waits behind the older one"))
@@ -148,77 +148,83 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 
 /// On lite-07 a group whose stream a newer one reset to make room only pauses: once credit
 /// returns, a new stream continues it, and its reader receives every frame without an error.
+/// So does one on a relay link, where the `ietf` extension changes nothing for a moq-lite
+/// track, which carries no object records.
 #[kio::test]
 async fn a_reset_group_resumes_without_loss() {
-	let version: Version = "moq-lite-07-wip".parse().unwrap();
-	let publisher = origin(1);
-	let viewer = origin(2);
-	let broadcast = publisher
-		.route("live", moq_net::origin::RouteOptions::hidden())
-		.unwrap();
-	let info = track::Info::default()
-		.with_timescale(moq_net::Timescale::MILLI)
-		.with_max_age(None);
-	let track = broadcast.broadcast().create_track("0", info).unwrap();
-	broadcast.announce().unwrap();
+	for ietf in [false, true] {
+		let version: Version = "moq-lite-07-wip".parse().unwrap();
+		let publisher = origin(1);
+		let viewer = origin(2);
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let track = broadcast.broadcast().create_track("0", info).unwrap();
+		broadcast.announce().unwrap();
 
-	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
-	options.server_publish = Some(publisher.consume());
-	options.client_subscribe = Some(viewer.clone());
-	let _pair = connect_mock(options).await;
+		let mut options = MockConnectOptions::new(version);
+		options.client_extensions.ietf = ietf;
+		options.server_extensions.ietf = ietf;
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(viewer.clone());
+		let _pair = connect_mock(options).await;
 
-	let remote = viewer
-		.consume()
-		.follow("live", None)
-		.unwrap()
-		.available()
-		.await
-		.unwrap()
-		.unwrap();
-	let prefs = track::Subscription::default()
-		.with_order(track::Order::Descending)
-		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
-	let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = track::Subscription::default()
+			.with_order(track::Order::Descending)
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
-	// Unfinished, so its stream holds the only credit until the newer group resets it.
-	let mut older = track.append_next().unwrap();
-	older.write_frame(older.at_start(), b"a".as_slice()).unwrap();
-	let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
-		.await
-		.expect("the older group arrives")
-		.unwrap()
-		.unwrap();
-	assert_eq!(paused.start, 0);
-	let first = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
-		.await
-		.expect("its first frame arrives")
-		.unwrap();
-	assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
+		// Unfinished, so its stream holds the only credit until the newer group resets it.
+		let mut older = track.append_next().unwrap();
+		older.write_frame(older.at_start(), b"a".as_slice()).unwrap();
+		let mut paused = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("ietf: {ietf}: the older group arrives"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(paused.start, 0);
+		let first = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
+			.await
+			.expect("its first frame arrives")
+			.unwrap();
+		assert_eq!(first.map(|frame| frame.payload), Some(bytes::Bytes::from_static(b"a")));
 
-	let mut newer = track.append_next().unwrap();
-	newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-	newer.close().unwrap();
-	let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
-		.await
-		.expect("the newer group takes the older one's credit")
-		.unwrap()
-		.unwrap();
-	assert_eq!(group.start, 1);
+		let mut newer = track.append_next().unwrap();
+		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
+		newer.finish().unwrap();
+		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.expect("the newer group takes the older one's credit")
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.start, 1);
 
-	// Written after the reset: a continuation carries them, behind the frame already held.
-	older.write_frame(older.at_start(), b"b".as_slice()).unwrap();
-	older.write_frame(older.at_start(), b"c".as_slice()).unwrap();
-	older.close().unwrap();
-	let mut rest = Vec::new();
-	while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
-		.await
-		.expect("the paused group continues")
-		.expect("the paused group is not given up")
-	{
-		rest.push(frame.payload);
+		// Written after the reset: a continuation carries them, behind the frame already held.
+		older.write_frame(older.at_start(), b"b".as_slice()).unwrap();
+		older.write_frame(older.at_start(), b"c".as_slice()).unwrap();
+		older.finish().unwrap();
+		let mut rest = Vec::new();
+		while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
+			.await
+			.expect("the paused group continues")
+			.expect("the paused group is not given up")
+		{
+			rest.push(frame.payload);
+		}
+		assert_eq!(rest, [b"b".as_slice(), b"c".as_slice()]);
 	}
-	assert_eq!(rest, [b"b".as_slice(), b"c".as_slice()]);
 }
 
 /// On lite-07 a group paused while it waited for its next frame, which then finishes with no
@@ -239,7 +245,7 @@ async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
+	options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(viewer.clone());
 	let _pair = connect_mock(options).await;
@@ -272,7 +278,7 @@ async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
 
 	let mut newer = track.append_next().unwrap();
 	newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-	newer.close().unwrap();
+	newer.finish().unwrap();
 	let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 		.await
 		.expect("the newer group takes the older one's credit")
@@ -281,7 +287,7 @@ async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
 	assert_eq!(group.start, 1);
 
 	// No frame follows the reset: the group just ends.
-	older.close().unwrap();
+	older.finish().unwrap();
 	let end = kio::clock::timeout(Duration::from_secs(5), paused.read_frame())
 		.await
 		.expect("the paused group continues");
@@ -306,7 +312,7 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
+	options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(viewer.clone());
 	let _pair = connect_mock(options).await;
@@ -348,13 +354,13 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 	// The newest outranks group 1's stream, so it resets that one too.
 	let mut newest = track.append_next().unwrap();
 	newest.write_frame(newest.at_start(), b"new".as_slice()).unwrap();
-	newest.close().unwrap();
+	newest.finish().unwrap();
 	assert_eq!(next!().start, 2, "the newest group waits behind a continuation");
 
 	// The paused groups continue highest-ranked first: newest first in descending order.
 	for (mut group, mut reader) in groups.into_iter().zip(readers).rev() {
 		group.write_frame(group.at_start(), b"b".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut frames = Vec::new();
 		while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), reader.read_frame())
 			.await
@@ -371,10 +377,10 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 /// subscription past the publisher's credit is served once an earlier one leaves.
 #[kio::test]
 async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
-	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
+	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers.
 	// moq-transport needs 2: SUBSCRIBE_NAMESPACE and the first SUBSCRIBE. The second
 	// subscription waits for the first's credit.
-	for (version, credit) in [("moq-lite-07-wip", 4), ("moq-transport-22", 2)] {
+	for (version, credit) in [("moq-lite-07-wip", 3), ("moq-transport-22", 2)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
@@ -421,7 +427,7 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.unwrap_or_else(|err| panic!("{version}: the waiting subscription failed: {err}"));
 		let mut group = second.append_next().unwrap();
 		group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: no group after credit returned"))
@@ -434,8 +440,8 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 /// Abandoning setup returns credit without ending earlier publishers or their route.
 #[kio::test]
 async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
-	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
-	for (version, credit) in [("moq-lite-07-wip", 4)] {
+	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers.
+	for (version, credit) in [("moq-lite-07-wip", 3)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
@@ -484,7 +490,7 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.unwrap_or_else(|err| panic!("{version}: the waiting subscription failed: {err}"));
 		let mut group = third.append_next().unwrap();
 		group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: no group after credit returned"))
@@ -496,7 +502,7 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 		let mut resumed = remote.track("second").unwrap().subscribe(None).await.unwrap();
 		let mut group = second.append_next().unwrap();
 		group.write_frame(group.at_start(), b"still live".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let group = kio::clock::timeout(Duration::from_secs(5), resumed.recv_group())
 			.await
 			.unwrap()
@@ -527,7 +533,7 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -562,11 +568,11 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 		// Late and below the held stream: it waits for credit it cannot make room for.
 		let mut late = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
-		late.close().unwrap();
+		late.finish().unwrap();
 
 		let mut newer = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-		newer.close().unwrap();
+		newer.finish().unwrap();
 		assert_eq!(next!("the newer group waits behind the late one").start, 3, "{version}");
 		drop(held);
 	}
@@ -591,7 +597,7 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -627,12 +633,12 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 		for key in [1, 0] {
 			let mut late = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
-			late.close().unwrap();
+			late.finish().unwrap();
 		}
 
 		let mut newer = track.create_group(moq_net::group::Info { start: 4 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-		newer.close().unwrap();
+		newer.finish().unwrap();
 		assert_eq!(
 			next!("the newer group waits behind the late ones").start,
 			4,
@@ -661,7 +667,7 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -696,11 +702,11 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 		for _ in 0..3 {
 			let mut group = track.append_next().unwrap();
 			group.write_frame(group.at_start(), b"x".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		// Let the publisher take what it would before credit returns.
 		kio::clock::sleep(Duration::from_millis(100)).await;
-		held.close().unwrap();
+		held.finish().unwrap();
 
 		let mut received = Vec::new();
 		while received.len() < 3 {
@@ -728,7 +734,7 @@ async fn a_paused_group_given_up_while_it_waits_is_dropped() {
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
+	options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(viewer.clone());
 	let _pair = connect_mock(options).await;
@@ -798,7 +804,7 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(2);
+		options.transport.max_concurrent_uni_streams = Some(2 + crate::support::held_uni_streams(version));
 		options.latency = LATENCY;
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
@@ -820,7 +826,7 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 		// Group 7 finishes, so its stream waits for the acknowledgement; group 10 holds the other.
 		let mut closing = track.create_group(moq_net::group::Info { start: 7 }).unwrap();
 		closing.write_frame(closing.at_start(), b"closing".as_slice()).unwrap();
-		closing.close().unwrap();
+		closing.finish().unwrap();
 		let mut held = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
 		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
 		kio::clock::sleep(SETTLE).await;
@@ -828,12 +834,12 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 		// Ranked above group 7 but below group 10: it can only wait for group 7's credit.
 		let mut late = track.create_group(moq_net::group::Info { start: 8 }).unwrap();
 		late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
-		late.close().unwrap();
+		late.finish().unwrap();
 		kio::clock::sleep(SETTLE).await;
 
 		let mut newer = track.create_group(moq_net::group::Info { start: 11 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
-		newer.close().unwrap();
+		newer.finish().unwrap();
 
 		loop {
 			let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())

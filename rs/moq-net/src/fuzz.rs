@@ -163,7 +163,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
-	(broadcast, track, group.close().unwrap())
+	(broadcast, track, group.finish().unwrap())
 }
 
 /// A private frame batch for the model's batch read and write benchmarks.
@@ -316,20 +316,38 @@ where
 
 /// Assert the invariant every path holds once built: its spelling parses back to it under
 /// the strict constructor, and so does every run of its leading segments, which is what
-/// stats grouping and announce compression derive from it. Only a run ending at an
-/// escaped `/` has no head, since it would end in half an escape.
+/// stats grouping and announce compression derive from it.
 fn assert_strict(path: &Path) {
 	let reparsed = Path::new(path.as_str()).unwrap_or_else(|err| panic!("{path:?} is refused: {err}"));
 	assert_eq!(reparsed, *path, "{path:?} did not parse back to itself");
 	let count = path.parts().count();
 	for n in 0..=count {
 		let cut = path.parts().take(n).collect::<Vec<_>>().join("/");
-		match path.head(n) {
-			Some(head) => assert_eq!(Path::new(&cut), Ok(head), "{path:?} has a wrong head at {n}"),
-			None => assert!(cut.ends_with('\\'), "{path:?} has no head at {n}"),
-		}
+		assert_eq!(Path::new(&cut).ok(), path.head(n), "{path:?} has a wrong head at {n}");
 	}
 	assert!(path.head(count + 1).is_none(), "{path:?} has a head past its segments");
+}
+
+/// The segments of `s` by a byte-at-a-time reading of the escape, independent of
+/// [`Path::parts`]: a `\` takes the byte after it, and only a bare `/` separates.
+fn escaped_segments(s: &str) -> Vec<String> {
+	if s.is_empty() {
+		return Vec::new();
+	}
+	let mut out = vec![String::new()];
+	let mut chars = s.chars();
+	while let Some(c) = chars.next() {
+		let segment = out.last_mut().expect("never empty");
+		match c {
+			'\\' => {
+				segment.push(c);
+				segment.extend(chars.next());
+			}
+			'/' => out.push(String::new()),
+			c => segment.push(c),
+		}
+	}
+	out
 }
 
 /// Read the input as a moq-lite path, whatever its kind, and hold it to [`assert_strict`].
@@ -359,25 +377,14 @@ fn ietf_paths(data: &[u8], version: ietf::Version) {
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
-	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
-			continue;
-		};
-		any = true;
-		let Some(decoded) = decoded else {
-			continue;
-		};
-		let Ok(first) = decoded.encode_bytes(version) else {
-			continue;
-		};
-		let echo = lite::Datagram::decode(first, version, |_| timed)
-			.expect("could not decode our own encoding")
-			.expect("encoded datagram decoded as padding");
+	let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version) else {
+		return false;
+	};
+	if let Ok(first) = decoded.encode_bytes(version) {
+		let echo = lite::Datagram::decode(first, version).expect("could not decode our own encoding");
 		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
-	any
+	true
 }
 
 /// Decode one moq-lite wire object from arbitrary bytes.
@@ -486,12 +493,14 @@ impl AnnounceWriter {
 					suffix,
 					hops: hop_chain(hops.iter().copied()),
 					cost: Default::default(),
+					above: 0,
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
 				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
+				above: 0,
 			},
 			Announced::End(id) => {
 				self.encoder.end(*id);
@@ -587,7 +596,6 @@ fn route_offer(node: u64) -> crate::route::path::Offer {
 		priority: i8::MAX,
 		metric: 0,
 		down_only: false,
-		rtt: None,
 	}
 }
 
@@ -599,7 +607,7 @@ pub struct RouteNode {
 }
 
 impl RouteNode {
-	/// A node holding `claims` claims of its own under `live/`, answering one stream
+	/// A node holding `claims` claims of its own under `live/`, answering one session
 	/// per prefix in `streams`, each already sent its snapshot.
 	pub fn new(claims: usize, streams: &[&str]) -> Self {
 		let node = crate::route::Node::new(1, 1, route_clock());
@@ -611,7 +619,9 @@ impl RouteNode {
 			.map(|(i, prefix)| {
 				let link = crate::route::Link::default();
 				let peer = route_peer(i as u64 + 1, i as u64 + 2);
-				node.answer(peer, link, Path::new(prefix).unwrap()).unwrap()
+				let stream = node.connect(peer, link).unwrap();
+				stream.edit(route_ask(Path::new(prefix).unwrap())).unwrap();
+				stream
 			})
 			.collect();
 		let node = Self {
@@ -630,6 +640,7 @@ impl RouteNode {
 			cost: 0,
 			upstream: false,
 			learned: false,
+			above: 0,
 			chain: crate::Hops::new(),
 		}
 	}
@@ -676,7 +687,9 @@ impl RouteRelay {
 		let answer = (0..answers as u64)
 			.map(|i| {
 				let peer = route_peer(i + 1, i + 3);
-				node.answer(peer, crate::route::Link::default(), Path::empty()).unwrap()
+				let stream = node.connect(peer, crate::route::Link::default()).unwrap();
+				stream.edit(route_ask(Path::empty())).unwrap();
+				stream
 			})
 			.collect();
 		let instance = crate::Instance::random();
@@ -684,7 +697,9 @@ impl RouteRelay {
 		let receive = (0..streams as u64)
 			.map(|i| {
 				let peer = route_peer(answers as u64 + i + 1, Self::ORIGIN);
-				let receive = node.receive(peer, crate::route::Link::default()).unwrap();
+				let receive = node.connect(peer, crate::route::Link::default()).unwrap();
+				// The peer answered what the node asks it for.
+				receive.edited(Default::default());
 				let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
 				receive.route(Self::ORIGIN, Path::empty(), Some(reach));
 				let snapshot = (0..claims)
@@ -741,6 +756,7 @@ impl RouteRelay {
 			cost,
 			upstream: false,
 			learned: false,
+			above: 0,
 			chain: crate::Hops::new(),
 		}
 	}
@@ -845,11 +861,17 @@ impl RouteFollower {
 		follower
 	}
 
-	/// Open the stream for prefix `k`, which hears the origin's route and snapshot.
+	/// Open the session for prefix `k`, which hears the origin's route and snapshot.
 	fn follow(&self, k: usize) -> crate::route::node::Stream {
 		let prefix = Path::new(&format!("live/{k}")).unwrap();
-		let peer = route_peer(Self::TAG, Self::ORIGIN);
-		let stream = self.node.receive(peer, crate::route::Link::default()).unwrap();
+		let peer = route_peer(Self::TAG + k as u64, Self::ORIGIN);
+		let link = crate::route::Link {
+			interest: [prefix.clone()].into(),
+			..Default::default()
+		};
+		let stream = self.node.connect(peer, link).unwrap();
+		// The peer answered what the node asks it for.
+		stream.edited(Default::default());
 		let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
 		stream.route(Self::ORIGIN, prefix.clone(), Some(reach));
 		let claim = crate::route::node::Claim {
@@ -858,6 +880,7 @@ impl RouteFollower {
 			cost: 0,
 			upstream: false,
 			learned: false,
+			above: 0,
 			chain: crate::Hops::new(),
 		};
 		let snapshot = (0..self.claims)
@@ -867,7 +890,7 @@ impl RouteFollower {
 		stream
 	}
 
-	/// Close one prefix's stream and open it again, returning how many outputs the
+	/// Close one prefix's session and open it again, returning how many outputs the
 	/// node queued.
 	pub fn refollow(&mut self) -> usize {
 		let k = self.next % self.streams.len();
@@ -878,9 +901,8 @@ impl RouteFollower {
 		self.drain()
 	}
 
-	/// Close every stream at once, as a session ending does.
+	/// Close every session.
 	pub fn teardown(self) {
-		let _closing = self.node.closing(Self::TAG);
 		drop(self.streams);
 	}
 
@@ -888,6 +910,14 @@ impl RouteFollower {
 		(self.streams.iter().flatten())
 			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
 			.sum()
+	}
+}
+
+/// A peer's request for `prefix` alone.
+fn route_ask(prefix: Path) -> crate::route::path::Edit {
+	crate::route::path::Edit {
+		remove: Vec::new(),
+		add: vec![prefix],
 	}
 }
 
@@ -964,7 +994,6 @@ impl PathRouteRelay {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			})),
 		);
 		let snapshot = (0..claims)
@@ -1049,7 +1078,6 @@ impl PathRouteFollower {
 				priority: i8::MAX,
 				metric: 0,
 				down_only: false,
-				rtt: None,
 			})),
 		);
 		let changes = (0..self.claims)
@@ -1096,8 +1124,6 @@ impl PathRouteFollower {
 pub struct PathRouteDrain {
 	router: crate::route::path::Router<usize, ()>,
 	recipients: usize,
-	idle: usize,
-	rtt: u64,
 }
 
 impl PathRouteDrain {
@@ -1131,7 +1157,6 @@ impl PathRouteDrain {
 					priority: i8::MAX,
 					metric: 1,
 					down_only: false,
-					rtt: None,
 				})),
 			);
 			let claim = Path::new(&format!("live/{i}/x")).unwrap();
@@ -1153,14 +1178,7 @@ impl PathRouteDrain {
 				)
 				.unwrap();
 		}
-		let idle = sessions + recipients;
-		router.connect(idle, 9_000, crate::route::Link::default()).unwrap();
-		let mut node = Self {
-			router,
-			recipients,
-			idle,
-			rtt: 0,
-		};
+		let mut node = Self { router, recipients };
 		node.flush();
 		node
 	}
@@ -1189,11 +1207,83 @@ impl PathRouteDrain {
 		out.len()
 	}
 
-	/// An RTT change on a session with no routes, which changes nothing it was sent.
-	pub fn idle(&mut self) {
-		self.rtt = self.rtt % 8 + 1;
+	fn flush(&mut self) -> usize {
+		let sent = self.router.drain().len();
+		self.router.events();
+		self.router.changed();
+		sent
+	}
+}
+
+/// A path router hearing one publisher from a neighbour, under a prefix of its own with
+/// `claims` claims, and answering `streams` streams that each watch a prefix it does not
+/// claim under, for the routes bench.
+pub struct PathRouteChange {
+	router: crate::route::path::Router<usize, ()>,
+	far: u64,
+}
+
+impl PathRouteChange {
+	const UP: u64 = 1_000;
+
+	fn reach(id: u64, far: u64) -> crate::route::path::Reach {
+		use crate::route::path::{Hop, Offer, Reach};
+		let path = [
+			Hop { node: id, session: 0 },
+			Hop { node: far, session: 1 },
+			Hop {
+				node: Self::UP,
+				session: 1,
+			},
+		];
+		Reach::Finite(Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+		})
+	}
+
+	/// Hear one publisher with `claims` claims, and answer `streams` streams its route
+	/// misses.
+	pub fn new(claims: usize, streams: usize) -> Self {
+		let mut router = crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default());
+		router.connect(0, Self::UP, crate::route::Link::default()).unwrap();
+		router.edited(0);
+		let prefix = Path::new("o0").unwrap();
+		router.route(0, 1, prefix.clone(), Some(Self::reach(1, 500)));
+		let changes = (0..claims)
+			.map(|c| (Path::new(&format!("o0/{c}")).unwrap(), Some(())))
+			.collect();
+		router.batch(0, 1, prefix, changes, Some(1));
+		for s in 0..streams {
+			let peer = 1 + s;
+			router
+				.connect(peer, 5_000 + s as u64, crate::route::Link::default())
+				.unwrap();
+			let add = vec![Path::new(&format!("x{s}")).unwrap().to_owned()];
+			router
+				.edit(
+					peer,
+					crate::route::path::Edit {
+						remove: Vec::new(),
+						add,
+					},
+				)
+				.unwrap();
+		}
+		let mut node = Self { router, far: 500 };
+		node.flush();
+		node
+	}
+
+	/// The neighbour moves the publisher's route onto another path, which no stream
+	/// watches.
+	pub fn repath(&mut self) {
+		self.far = if self.far == 500 { 501 } else { 500 };
 		self.router
-			.rtt(self.idle, Some(std::time::Duration::from_millis(self.rtt)));
+			.route(0, 1, Path::new("o0").unwrap(), Some(Self::reach(1, self.far)));
 		assert_eq!(self.flush(), 0);
 	}
 
@@ -1408,6 +1498,7 @@ impl LiteSample {
 			Self::Group => lite::Group {
 				subscribe: 3,
 				key: 1_234,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1421,17 +1512,16 @@ impl LiteSample {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_delay: std::time::Duration::from_secs(10),
+				max_delay: Some(std::time::Duration::from_secs(10)),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
-				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
 			Self::Datagram => lite::Datagram {
 				subscribe: 3,
 				sequence: 1_234,
-				timestamp: Some(1_234_567_890),
+				timestamp: 1_234_567_890,
 				payload: bytes::Bytes::new(),
 			}
 			.encode(w, version)
@@ -1464,7 +1554,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version)
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
@@ -1622,26 +1712,24 @@ impl Default for Messages {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
-				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				// Lite-06, the bench's version, restates the ranges.
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
-				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1657,6 +1745,7 @@ impl Default for Messages {
 			lite_group: lite::Group {
 				subscribe: 7,
 				key: 123_456,
+				previous: None,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
@@ -1806,11 +1895,10 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			depth: 0,
 			track: track.into(),
 			priority: 0,
-			max_delay: std::time::Duration::ZERO,
+			max_delay: Some(std::time::Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
-			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),
@@ -1865,15 +1953,24 @@ pub fn path(data: &[u8]) -> bool {
 
 	let (target, base) = text.split_once('\n').unwrap_or((text, ""));
 
-	// A spelling is refused exactly when it is over the limit, has an empty segment, or has
-	// a `\` escaping anything but `\` or `/`, so each path has one spelling.
+	// A spelling is refused exactly when it is over the limit, has a `\` escaping anything but
+	// `\` or `/`, or has an empty segment, so each path has one spelling.
+	let paired = |segment: &str| {
+		let mut bytes = segment.bytes();
+		while let Some(b) = bytes.next() {
+			if b == b'\\' && !matches!(bytes.next(), Some(b'\\' | b'/')) {
+				return false;
+			}
+		}
+		true
+	};
 	for s in [target, base] {
 		let expected = if s.len() > Path::MAX_BYTES {
 			Err(crate::path::Error::TooLong)
-		} else if !s.is_empty() && s.split('/').any(str::is_empty) {
-			Err(crate::path::Error::EmptySegment)
-		} else if s.replace(r"\\", "").replace(r"\/", "").contains('\\') {
+		} else if escaped_segments(s).iter().any(|segment| !paired(segment)) {
 			Err(crate::path::Error::InvalidEscape)
+		} else if escaped_segments(s).iter().any(String::is_empty) {
+			Err(crate::path::Error::EmptySegment)
 		} else {
 			Ok(())
 		};
@@ -1887,6 +1984,26 @@ pub fn path(data: &[u8]) -> bool {
 	// through the wire would drift.
 	assert_strict(&target);
 	assert_eq!(target.parts().collect::<Vec<_>>().join("/"), target.as_str());
+
+	// The walk splits where the escape says, from either end, and each segment's content
+	// escapes back to the segment.
+	let segments = escaped_segments(target.as_str());
+	assert_eq!(target.parts().collect::<Vec<_>>(), segments, "{target:?} split wrongly");
+	assert!(
+		target.parts().rev().eq(segments.iter().rev()),
+		"{target:?} split wrongly from the back"
+	);
+	for segment in &segments {
+		let content = crate::path::unescape(segment);
+		assert_eq!(&content.replace('\\', r"\\").replace('/', r"\/"), segment);
+	}
+	assert_eq!(
+		target.is_hidden(),
+		segments
+			.iter()
+			.any(|segment| crate::path::unescape(segment).starts_with('.')),
+		"{target:?} hid wrongly"
+	);
 
 	// A prefix is a prefix whichever way you ask.
 	assert_eq!(
@@ -1926,15 +2043,10 @@ pub fn path(data: &[u8]) -> bool {
 	// Resolving arbitrary references must stay inside the clamped/unclamped contract:
 	// `try_resolve` only refuses by walking above the root, so whenever it answers, it
 	// answers the same as `resolve`.
-	match Relative::new(base.as_str()) {
-		Ok(rel) => {
-			if let Some(resolved) = target.try_resolve(&rel) {
-				assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
-			}
-		}
-		// Only dropping a `.` segment can make a valid path an invalid reference, by stranding
-		// the `\` of the escaped `/` before it.
-		Err(err) => assert_eq!(err, crate::path::Error::InvalidEscape, "{base:?} is no reference"),
+	// Dropping `.` segments leaves whole ones, so every valid path is a valid reference.
+	let rel = Relative::new(base.as_str()).unwrap_or_else(|err| panic!("{base:?} is no reference: {err}"));
+	if let Some(resolved) = target.try_resolve(&rel) {
+		assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
 	}
 
 	// The moq-transport namespace tuple is the same path back, so the mapping is symmetric.
@@ -2023,23 +2135,25 @@ pub fn pattern(data: &[u8]) -> bool {
 }
 
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
-/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message and
-/// both kinds of DEAD (the sweep sets ROUTE_START's type byte but fills its size byte
-/// with the body pattern, so none decodes whole), and a DATAGRAMS request, whose eight
-/// fields outgrow the sweep's longest body.
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message,
+/// both kinds of DEAD, and an ANNOUNCE_REQUEST and its ANNOUNCE_OK (the sweep sets
+/// ROUTE_START's type byte but fills its size byte with the body pattern, so none
+/// decodes whole), and a DATAGRAMS request, whose eight fields outgrow the sweep's
+/// longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
 	(30, &[8, 0, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 8, 1, 0, 1, 1, 0, 0, 0x80, 1]),
+	(5, &[6, 9, 1, 0, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[7, 7, 0, 1, 1, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
 	(5, &[9, 2, 0, 1]),
 	(5, &[11, 1, 0]),
-	(5, &[15, 7, 0, 1, 1, 2, 0, 0, 0]),
-	(5, &[15, 7, 0, 1, 1, 2, 0, 1, 0]),
-	(5, &[15, 15, 0, 1, 1, 2, 1, 0, 1, 0, 6, 1, 1, 1, 0, 0x80, 1]),
+	(5, &[15, 6, 0, 1, 1, 2, 0, 0]),
+	(5, &[15, 6, 0, 1, 1, 2, 1, 2]),
 	(5, &[15, 2, 1, 1]),
+	(5, &[16, 4, 0, 1, 0, 0]),
+	(5, &[17, 0]),
 ];
 
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,
@@ -2494,7 +2608,7 @@ impl FrameRecv {
 					res.unwrap();
 					let stream = slot.take().unwrap();
 					let group = stream.frame.finish().unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 					open -= 1;
 				}
 			}
@@ -2597,7 +2711,7 @@ impl GroupRecv {
 
 	/// Finish the group, which stays cached until dropped or aborted.
 	pub fn finish(mut self) -> crate::Result<group::Finished> {
-		self.group.take().ok_or(crate::Error::Closed)?.close()
+		self.group.take().ok_or(crate::Error::Closed)?.finish()
 	}
 }
 

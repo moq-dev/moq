@@ -4,62 +4,11 @@
 
 # @moq/crypto
 
-Content signing and end-to-end encryption for [Media over QUIC](https://moq.dev), mirroring the
-Rust `moq-crypto` crate. `Sign` signs every frame so relays cannot forge it, and `E2ee` encrypts
-groups, datagrams, and track names so relays cannot read them. Both wrap `@moq/net` and check each
-timestamp with `@moq/net`'s `Datagram.rescale(info, timestamp)` before signing or encrypting, so a frame either accepts is
-one `@moq/net` accepts.
-
-## Signing
-
-Per-frame Ed25519 signatures for [Media over QUIC](https://moq.dev) broadcasts. Profile
-`moq-sign-00` from [draft-lcurley-moq-sign](https://datatracker.ietf.org/doc/draft-lcurley-moq-sign/),
-interoperable with Rust's `moq_crypto::sign`.
-
-Relays forward and cache signed frames; they cannot forge, retime, or relocate them. Signatures
-authenticate content, not liveness: a relay that recorded an instance can replay it whole.
-
-### Shape
-
-An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed as 52 z-base-32
-characters (a DNS label). `SecretKey.generate()` keeps the private half a nonextractable `CryptoKey`.
-
-`Broadcast.Producer` wraps the `@moq/net` broadcast, mints a fresh instance, and signs each frame
-over the application path, instance, track, group, frame index, and timestamp (rounded down to the
-track's timescale, as the wire carries it). Announce the broadcast with that instance on its route:
-
-```ts
-import { Sign } from "@moq/crypto";
-import { Path, Time } from "@moq/net";
-
-const { Broadcast, SecretKey } = Sign;
-
-const key = await SecretKey.generate();
-const path = Path.from(`mesh/${key.public}/agent`);
-const route = origin.route(path, { hidden: true });
-// Signs under the route's instance, which readers verify against.
-const signed = new Broadcast.Producer(route.broadcast, key, { path, instance: route.instance });
-const messages = signed.createTrack("messages");
-route.announce();
-
-// A scale-less track, so each frame carries its group's key.
-const group = messages.appendGroup();
-await group.writeFrame(Time.Timestamp.unscaled(group.sequence), payload);
-group.finish();
-```
-
-A subscriber wraps the broadcast an origin resolved in a `Broadcast.Consumer` with the key it
-expects and the same application path; it takes the instance from the route. A frame reaches the
-application only after it verifies. A forged or relocated frame ends its group with `Failure`
-code `signature`, and the track keeps delivering other groups. Every hop must carry the instance and
-timestamps unchanged, which means moq-lite-07. A group's end is not signed: a relay may drop a
-group's tail, as MoQ already allows.
-
-### Processing
-
-WebCrypto Ed25519 is asynchronous, so writes return promises. Each track producer runs one serial
-pump: one signature in flight, net writes in call order, so a frame's index always matches its
-transport position. Await each write for backpressure.
+End-to-end encryption for [Media over QUIC](https://moq.dev), mirroring the Rust `moq-crypto`
+crate's `e2ee` module. `E2ee` encrypts groups, datagrams, and track names so relays cannot read
+them. It wraps `@moq/net` and checks each timestamp with `@moq/net`'s
+`Track.rescale(info, timestamp)` before encrypting, so a frame it accepts is one `@moq/net`
+accepts.
 
 ## Encryption
 

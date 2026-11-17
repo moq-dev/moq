@@ -938,10 +938,10 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 				let group = open[t].take().unwrap();
 				match (kept[t] == frames.len(), ends[t][g]) {
 					(true, Some(end)) => {
-						group.finish(end).unwrap();
+						group.finish_at(end).unwrap();
 					}
 					(true, None) => {
-						group.close().unwrap();
+						group.finish().unwrap();
 					}
 					(false, _) => group.abort(moq_net::Error::Old).unwrap(),
 				}

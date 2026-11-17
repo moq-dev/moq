@@ -93,10 +93,16 @@ export namespace Broadcast {
 		datagrams(name: string): Datagram.Consumer;
 		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
-		protected shareState(): never;
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
 	}
+	export type Listed = {
+		datagrams?: false;
+		info: Track.Info;
+	} | {
+		datagrams: true;
+		info: Datagram.Info;
+	};
 	export class Producer {
 		constructor();
 		close(): void;
@@ -113,15 +119,16 @@ export namespace Broadcast {
 		next(): Promise<Broadcast.TracksEvent | undefined>;
 	}
 	export type TracksEvent = {
-		info: Track.Info;
 		kind: "added";
 		name: string;
-	} | {
+	} & Broadcast.Listed | {
 		kind: "synced";
 	} | {
+		datagrams?: boolean;
 		kind: "removed";
 		name: string;
 	} | {
+		datagrams?: boolean;
 		kind: "finished";
 		name: string;
 	};
@@ -166,11 +173,11 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
-	export interface Drain {
+	export interface Goaway {
 		readonly timeout?: Clock.Duration;
 		readonly uri: string;
 	}
-	export interface Goaway {
+	export interface Handover {
 		handover?: Clock.Duration;
 		redirect?: Connection.Redirect;
 	}
@@ -182,7 +189,7 @@ export namespace Connection {
 		consume?: Origin.Producer;
 		delay?: Connection.Backoff;
 		enabled?: boolean | Signals.Signal<boolean>;
-		goaway?: Connection.Goaway;
+		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
 		share?: boolean;
 		signal?: never;
@@ -201,7 +208,7 @@ export namespace Connection {
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		closed: Promise<Error | null>;
-		readonly draining: Signals.GetPromise<Connection.Drain>;
+		readonly draining: Signals.GetPromise<Connection.Goaway>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;
@@ -221,7 +228,7 @@ export namespace Connection {
 		rtt?: Clock.Duration;
 	}
 	export type Status = "connecting" | "connected" | "disconnected";
-	export type Transport = "webtransport" | "websocket" | "webrtc";
+	export type Transport = "webtransport" | "websocket";
 	export interface WebSocketProps {
 		delay?: Clock.Duration;
 		enabled?: boolean;
@@ -241,6 +248,7 @@ export class Connection {
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	answered(): Promise<void>;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
 	static readonly checkVersions: (versions: readonly string[]) => string[];
@@ -292,12 +300,6 @@ export namespace Datagram {
 		readonly name: string;
 		get priority(): Signals.Getter<number | undefined>;
 	}
-	export function rescale(info: {
-		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp): Time.Timestamp;
-	export function rescaleIn(info: {
-		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Error {
@@ -391,8 +393,8 @@ export namespace Group {
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
+		get end(): bigint | undefined;
 		get frameCount(): number;
-		get isClosed(): boolean;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -427,7 +429,7 @@ export namespace Group {
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): Group.Finished;
-		get isClosed(): boolean;
+		finishAt(end: bigint): Group.Finished;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
@@ -530,7 +532,6 @@ export namespace Origin {
 		readonly available: boolean;
 		readonly cost: Origin.Cost;
 		readonly instance?: Instance.Valid;
-		readonly rtt?: Clock.Duration;
 	}
 	export interface RouteOptions {
 		auth?: Auth.Credential;
@@ -549,7 +550,6 @@ export namespace Origin {
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
-	export const MAX_PARTS: 32;
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
 	export type Relative = string & {
@@ -561,11 +561,11 @@ export namespace Path {
 		__brand: "Name";
 	};
 	export { compareSpecificity } from "@moq/pattern";
-	export function decode(raw: string): Path.Valid;
 	export function empty(): Path.Valid;
-	export function encode(path: Path.Valid): Path.Valid;
+	export { escape } from "@moq/pattern";
 	export function from(...paths: string[]): Path.Valid;
 	export function hasPrefix(prefix: Path.Valid, path: Path.Valid): boolean;
+	export function head(path: Path.Valid, n: number): Path.Valid | undefined;
 	export function join(path: Path.Valid, other: Path.Valid): Path.Valid;
 	export function normalizeRelative(rel: string): Path.Relative;
 	export function parts(path: Path.Valid): string[];
@@ -573,6 +573,7 @@ export namespace Path {
 	export function resolve(base: Path.Valid, rel: Path.Relative): Path.Valid;
 	export function stripPrefix(prefix: Path.Valid, path: Path.Valid): Path.Valid | null;
 	export function tryResolve(base: Path.Valid, rel: Path.Relative): Path.Valid | undefined;
+	export { unescape } from "@moq/pattern";
 }
 
 export const SessionCode: ((code: number) => SessionCode) & {
@@ -727,22 +728,32 @@ export namespace Track {
 		priority?: number;
 		signal?: AbortSignal;
 	}
-	export class Fill {
+	export type Fill = Track.FillGroups | Track.FillLookup;
+	export class FillGroups {
 		[Symbol.dispose](): void;
 		accept(sequence: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
 		isWanted(sequence: bigint): boolean;
+		readonly kind: "groups";
 		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
-		readonly time?: Time.Timestamp;
 		unwanted(sequence: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
+	}
+	export class FillLookup {
+		[Symbol.dispose](): void;
+		accept(sequence: bigint, info?: Track.Info): Group.Producer;
+		close(): void;
+		readonly kind: "lookup";
+		get maxDelay(): Clock.Duration | null;
+		get priority(): number;
+		readonly time: Time.Timestamp;
 	}
 	export interface Finished {
 		abort(error: Error): void;
@@ -804,8 +815,9 @@ export namespace Track {
 		get closed(): Signals.GetPromise<Error | null>;
 		createGroup(sequence: bigint): Group.Producer;
 		demand(): Track.Demand;
+		fail(error: Error): Track.Finished;
 		finish(): Track.Finished;
-		finishAt(end: Track.Position, error?: Error): void;
+		finishAt(end: Track.Position): void;
 		info(): Promise<Track.Info>;
 		largest(): Track.Position | undefined;
 		readonly name: string;
@@ -819,14 +831,6 @@ export namespace Track {
 	export interface Range {
 		end?: Track.Anchor;
 		start?: Track.Anchor;
-	}
-	export class Request {
-		accept(info?: Track.InfoInit): Track.Producer;
-		demand(): Track.Demand;
-		readonly name: string;
-		get priority(): number;
-		reject(err: Error): void;
-		get subscription(): Readonly<Track.Subscription>;
 	}
 	export class Requests {
 		[Symbol.dispose](): void;
@@ -847,7 +851,6 @@ export namespace Track {
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
-		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
@@ -860,20 +863,17 @@ export namespace Track {
 		priority?: number;
 		ranges?: Track.Range[];
 	}
+	export function rescale(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp): Time.Timestamp;
+	export function rescaleIn(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Varint {
-	export const MAX_U14: number;
-	export const MAX_U30: number;
-	export const MAX_U53: number;
-	export const MAX_U6: number;
 	export function decode(buf: Uint8Array): [number, Uint8Array];
 	export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array];
-	export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array];
 	export function encode(v: number | bigint): Uint8Array;
-	export function encodeLeadingOnes(v: number | bigint): Uint8Array;
-	export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
-	export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
-	export function size(v: number): number;
 }
 ```
