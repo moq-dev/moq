@@ -234,7 +234,7 @@ export function hasRouteCost(version: Version): boolean {
 	}
 }
 
-/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
+/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and FETCH carry frame indices alongside
  * their group sequences, so a subscription or fetch can start and end partway through a
  * group. Added in lite-06. Older versions only address whole groups, so a route change
  * has to wait for the next group before it can resume.
@@ -253,6 +253,12 @@ export function hasFrameBounds(version: Version): boolean {
 		default:
 			return true;
 	}
+}
+
+/** Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
+ * earlier versions have no frame bounds, and a lite-07 subscription reads whole groups. */
+export function hasGroupFrameStart(version: Version): boolean {
+	return version === Version.DRAFT_06;
 }
 
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`. Added in
@@ -779,24 +785,6 @@ export function hasLengthFirst(version: Version): boolean {
  * group with a bare FIN.
  */
 export function hasGroupEnd(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/**
- * Whether a Group Stream reset with YIELDED pauses its group, which a later stream continues.
- * Added in lite-07; an earlier publisher out of stream credit gives the reset group up.
- */
-export function hasYield(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

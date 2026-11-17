@@ -527,8 +527,6 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
-	/** See {@link hooks.continueGroup}, answered by the serving copy. */
-	continueGroup(sequence: bigint, from: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -803,12 +801,6 @@ export const hooks: {
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
-	/**
-	 * A fresh read from frame `from` of group `sequence`, if a subscriber's track still caches it from
-	 * there, its range still admits it, and its current budget does not judge it stale, expiring
-	 * against that budget: a lite-07 continuation of a group whose stream yielded.
-	 */
-	continueGroup: (subscriber: Subscriber, sequence: bigint, from: number) => GroupConsumer | undefined;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -1134,9 +1126,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {
-		throw new Error("track.ts not loaded");
-	},
-	continueGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {

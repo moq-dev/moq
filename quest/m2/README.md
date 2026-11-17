@@ -20,8 +20,8 @@ judged "ship as is". Everything below is breaking by this milestone's rule: a
 removal, a rename, or a wire, catalog, or format change that is free until
 0.22 publishes it.
 
-- **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
-  for lite-08; the ietf extension
+- **lite-07 wire.** YIELDED continuations left for lite-08
+  ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)); the ietf extension
   costs nothing on a moq-lite track; the path escape
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and

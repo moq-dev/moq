@@ -957,16 +957,17 @@ for (const [alpn, version] of [
 	});
 }
 
-// A transport tail keeps its absolute frame numbers and the session open. A group past
-// the declared end still ends the session, so a hostile peer cannot repeat that violation.
+// A lite-06 transport tail keeps its absolute frame numbers and the session open (lite-07 has no
+// Frame Start). A group past the declared end still ends the session, so a hostile peer cannot
+// repeat that violation.
 for (const violation of ["a partial group", "a group past the declared end"] as const) {
 	test(
 		violation === "a partial group"
 			? "a partial group keeps its indices and the session open"
 			: "a group past the declared end closes the session with PROTOCOL_VIOLATION",
 		async () => {
-			const version = Version.DRAFT_07;
-			const pair = createMockTransportPair(ALPN_07_WIP);
+			const version = violation === "a partial group" ? Version.DRAFT_06 : Version.DRAFT_07;
+			const pair = createMockTransportPair(violation === "a partial group" ? ALPN_06 : ALPN_07_WIP);
 			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
 			try {
 				const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
@@ -1005,8 +1006,8 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 				await group.encode(writer, version);
 
 				if (violation === "a partial group") {
-					await writer.u53(2); // a one-byte payload's size plus one
 					await writer.u62(2000n); // timestamp 1000, zigzag delta from 0
+					await writer.u53(1); // a one-byte payload
 					await writer.write(new Uint8Array([7]));
 					writer.close();
 					const received = await track.recvGroup();

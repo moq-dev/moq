@@ -744,16 +744,6 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
-	/**
-	 * A fresh read from frame `from` of group `sequence`, if the serving copy still caches it and
-	 * judges it fresh, handed out as any group of that copy is.
-	 */
-	continueGroup(sequence: bigint, from: number): GroupConsumer | undefined {
-		const serving = this.#serving();
-		const group = serving && hooks.continueGroup(serving.sub, sequence, from);
-		return group && this.#handOut(serving, group);
-	}
-
 	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
