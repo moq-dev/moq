@@ -23,11 +23,31 @@ use std::{ops::Bound, time::Duration};
 
 use super::{Connection, SentPacket, StreamsState, sent_packets::SentPackets};
 use crate::{
-	Instant,
+	Instant, congestion,
 	frame::{self, FrameStruct},
 	packet::SpaceId,
 	transport,
 };
+
+/// Whether `controller` paces its own probe cluster, which only a `lab` candidate (GoogCC) does
+fn paces_probe(controller: &dyn congestion::Controller) -> bool {
+	#[cfg(feature = "lab")]
+	return controller.paces_probe();
+	#[cfg(not(feature = "lab"))]
+	{
+		let _ = controller;
+		false
+	}
+}
+
+/// Report the session's probe target to `controller`, which only a `lab` candidate (GoogCC) aims
+/// its probes at
+pub(super) fn report_target(controller: &mut dyn congestion::Controller, bytes_per_second: u64) {
+	#[cfg(feature = "lab")]
+	controller.on_probe_target(bytes_per_second);
+	#[cfg(not(feature = "lab"))]
+	let _ = (controller, bytes_per_second);
+}
 
 /// How long the probe sits out after its first miss in a row, doubling with each further miss:
 /// the longest BBR3 waits between its own probes
@@ -46,8 +66,7 @@ pub(super) struct BandwidthProbe {
 	/// Until when the probe sits out after a miss
 	resume: Option<Instant>,
 	/// Holds everything sent while probing to `target`, which the controller's probing gain
-	/// alone may reach past, unless the controller paces its own probe
-	/// ([`Controller::paces_probe`](crate::congestion::Controller::paces_probe))
+	/// alone may reach past, unless the controller paces its own probe ([`paces_probe`])
 	pacing: Bucket,
 	/// The packet number to resume taking in-flight data from, so the duplicates spread over the
 	/// whole flight, oldest first
@@ -242,7 +261,7 @@ impl Connection {
 		// A controller that paces its own probe cluster reads it at the rate it was sent, so the
 		// target would cap the reading; the cluster's size bounds the duplicates instead
 		let mtu = self.path.current_mtu();
-		if !self.path.congestion.paces_probe()
+		if !paces_probe(&*self.path.congestion)
 			&& let Some(at) = self.bandwidth_probe.pacing.delay(target, untracked + segment, mtu, now)
 		{
 			return Ready::Blocked(Some(at));

@@ -339,7 +339,7 @@ class SmokeTest {
                         0uL,
                         FetchGroupOptions(priority = 3),
                     )
-            assertEquals(0uL, fetched.sequence())
+            assertEquals(0uL, fetched.start())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
         }
@@ -378,8 +378,8 @@ class SmokeTest {
                         order = Order.ASCENDING,
                     )
                 )
-            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
-            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
+            val starts = List(3) { checkNotNull(consumer.recvGroup()).start() }
+            assertEquals(listOf(0uL, 1uL, 2uL), starts)
         }
     }
 
@@ -532,7 +532,7 @@ class SmokeTest {
                     consumer,
                     dev.moq.media.GroupConfig(
                         rendition = dev.moq.media.AudioRendition(name, audio),
-                        sequence = 5_000_000uL,
+                        start = 5_000_000uL,
                         options = FetchGroupOptions(priority = 3),
                     ),
                 )
@@ -541,7 +541,7 @@ class SmokeTest {
             media.finish()
 
             fetched.use {
-                assertEquals(5_000_000uL, it.sequence())
+                assertEquals(5_000_000uL, it.start())
                 val frames = it.frames().toList()
                 assertEquals(1, frames.size)
                 val frame = frames.single()

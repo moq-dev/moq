@@ -102,7 +102,12 @@ Settled:
    on evidence ([requests](https://github.com/moq-dev/moq/pull/8881),
    [route health](/quest/m3/route-health/README.md)). What a hold protected,
    a claim flickering while routes settle, becomes a reader's local debounce
-   from unavailable to offline, never on the wire. This reverses items 19 and
+   from unavailable to offline, never on the wire (narrowed 2026-11-16 by the
+   coordinator and confirmed by the maintainer's merge pick of
+   [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901): the route
+   exchange between routing nodes keeps no timer, and an endpoint or scoped
+   neighbour is told what the reader shows, so it hears a lost claim
+   unavailable until the debounce runs out). This reverses items 19 and
    27's doubt (rejected: keeping holds and doubt with the doubt tied to the
    idle timeout; a doubt lifted by an epoch the surviving node floods).
 5. ✅ **Three ways to find a warm copy are measured before one is picked**

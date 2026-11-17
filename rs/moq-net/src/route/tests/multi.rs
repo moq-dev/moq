@@ -1314,6 +1314,9 @@ pub(super) struct Seen {
 	pub life: u64,
 	/// Whether a publisher with an open session claimed it.
 	pub live: bool,
+	/// How many times the node had let go of a forwarding node's claims before, after
+	/// which a stale copy may start a claim it saw end. The prototype does not count.
+	pub forgot: u32,
 }
 
 /// A network of [`Router`]s and endpoints, with [`Sim`]'s queues.
@@ -1616,6 +1619,7 @@ impl MultiSim {
 					life: self.lives.get(&event.broadcast).copied().unwrap_or(0),
 					broadcast: event.broadcast,
 					kind: event.kind,
+					forgot: 0,
 				};
 				self.events.push(seen);
 			}
