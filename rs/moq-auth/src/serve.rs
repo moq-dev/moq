@@ -1388,9 +1388,9 @@ mod tests {
 		attach.auth = Some("attachment".into());
 		attach.event = Event::Attach;
 		let grant = server.answer(&attach).await.unwrap().unwrap();
-		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert_eq!(grant.subscribe.path, patterns(&["**"]));
 		assert!(
-			grant.publish.is_empty(),
+			grant.publish.path.is_empty(),
 			"the dialed query's grant leaked into the attachment"
 		);
 
@@ -1428,8 +1428,8 @@ mod tests {
 		for event in [Event::Attach, Event::Revalidate] {
 			attach.event = event;
 			let grant = server.answer(&attach).await.unwrap().unwrap();
-			assert_eq!(grant.subscribe, patterns(&["**"]));
-			assert!(grant.publish.is_empty());
+			assert_eq!(grant.subscribe.path, patterns(&["**"]));
+			assert!(grant.publish.path.is_empty());
 		}
 	}
 
