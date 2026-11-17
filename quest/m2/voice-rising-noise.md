@@ -24,20 +24,14 @@ lets its tonality analysis (`src/analysis.c`, a small MLP over spectral
 features) override SILK's decision, and on the same input DTXes the fan that
 SILK alone keeps sending.
 
-Recommended: port the analysis's activity probability, matched against
-libopus on the same inputs, so the browser gate decides as libopus does at the
-complexity the Rust publisher's DTX gate runs.
-
-## Waiting
-
-- Maintainer: pick the detector. (a) Port libopus's tonality analysis activity
-  (recommended: it is what libopus itself does at complexity 7+, so both
-  publishers suppress alike; about 1,100 lines of C plus its weights and an FFT, checked
-  against libopus as the SILK port was). (b) Speed up the SILK floor's rise
-  after 20 s (small, but the gate stops matching any libopus and must be tuned
-  against speech loss by hand). (c) Leave it: a quiet room is already 92 to 100%
-  suppressed and rising noise only costs bytes, never speech.
-
-## Related
-
-- [Rust and JS share an optional audio kind](/quest/m2/audio-kind.md) - the Rust publisher's DTX gate, whose libopus already runs the analysis
+Decided 2026-11-17 (maintainer, on
+[moq-dev/moq#8998](https://github.com/moq-dev/moq/pull/8998#issuecomment-6947837677)):
+that PR ships with this gap, and this quest ✅ ports libopus's analysis
+activity probability (`src/analysis.c`, about 1,100 lines of C plus its MLP
+weights and an FFT), so the browser gate decides as libopus does at the
+complexity the Rust publisher's DTX gate
+(`rs/moq-audio/src/encode/backend/libopus.rs`) runs, and both publishers suppress
+noise that starts mid-call alike. Check it against libopus on the same inputs,
+as the SILK port was. Rejected: (b) speeding up the SILK floor's rise after
+20 s, which matches no libopus and must be tuned against speech loss by hand;
+(c) leaving it.
