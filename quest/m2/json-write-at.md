@@ -56,8 +56,8 @@ For the PR:
   subscribes itself, while stream and window take a `track::Subscriber`
   ([moq-dev/moq#7736](https://github.com/moq-dev/moq/pull/7736), on
   purpose). Document the difference on the three constructors.
-- [The catalog at its timestamp](/quest/m2/catalog-at-timestamp.md) reads
-  `Timed.at` from the catalog consumer; it is a read and is untouched.
+- `hang`'s catalog consumer returns `Timed.at` with each catalog; it is a
+  read and is untouched.
 
 Tests: the existing producer tests, rewritten to the new calls; no
 behaviour changes.

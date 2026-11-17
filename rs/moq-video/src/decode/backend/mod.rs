@@ -25,6 +25,7 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::decoder::{Config, Kind};
+use crate::device::Drives;
 use crate::{Error, Frame, Size};
 
 #[cfg(feature = "openh264")]
@@ -208,6 +209,8 @@ struct Candidate {
 	name: &'static str,
 	supports: fn(Codec) -> bool,
 	open: Open,
+	/// The kind of [`Device`](crate::Device) it opens, which a named one steers selection by.
+	drives: Drives,
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
@@ -218,30 +221,35 @@ const HARDWARE: &[Candidate] = &[
 		name: videotoolbox::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: videotoolbox::VideoToolbox::open,
+		drives: Drives::Own,
 	},
 	#[cfg(target_os = "windows")]
 	Candidate {
 		name: mediafoundation::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: mediafoundation::MediaFoundation::open,
+		drives: Drives::Own,
 	},
 	#[cfg(all(target_os = "android", feature = "mediacodec"))]
 	Candidate {
 		name: mediacodec::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Av1),
 		open: mediacodec::MediaCodec::open,
+		drives: Drives::Own,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvdec::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Av1),
 		open: nvdec::Nvdec::open,
+		drives: Drives::Nvidia,
 	},
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: vaapi::Vaapi::open,
+		drives: Drives::Render,
 	},
 	// Last of the Linux hardware decoders, for the same reason as its encode
 	// counterpart: the SoC blocks it drives are the only hardware on a board that
@@ -251,6 +259,7 @@ const HARDWARE: &[Candidate] = &[
 		name: v4l2::NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: v4l2::V4l2::open,
+		drives: Drives::Video,
 	},
 ];
 
@@ -260,12 +269,14 @@ const SOFTWARE: &[Candidate] = &[
 		name: openh264::NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: openh264::Openh264::open,
+		drives: Drives::Own,
 	},
 	#[cfg(feature = "vpx")]
 	Candidate {
 		name: vpx::NAME,
 		supports: |c| matches!(c, Codec::Vp8 | Codec::Vp9),
 		open: vpx::Vpx::open,
+		drives: Drives::Own,
 	},
 ];
 
@@ -278,42 +289,50 @@ const NAMED_ONLY: &[Candidate] = &[
 		name: probe::NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Probe::open,
+		drives: Drives::Own,
 	},
 	Candidate {
 		name: probe::BUFFERED_NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Vp9),
 		open: probe::Buffered::open,
+		drives: Drives::Own,
 	},
 	Candidate {
 		name: probe::REORDER_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Reorder::open,
+		drives: Drives::Own,
 	},
 	Candidate {
 		name: probe::HOLDING_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Reorder::open_holding,
+		drives: Drives::Own,
 	},
 	Candidate {
 		name: probe::IMMEDIATE_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Immediate::open,
+		drives: Drives::Own,
 	},
 	Candidate {
 		name: probe::NATIVE_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Native::open,
+		drives: Drives::Own,
 	},
 	Candidate {
 		name: probe::REFUSING_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Refusing::open,
+		drives: Drives::Own,
 	},
 	#[cfg(not(apple))]
 	Candidate {
 		name: probe::BLOCKING_FLUSH_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::BlockingFlush::open,
+		drives: Drives::Own,
 	},
 ];
 
@@ -384,6 +403,9 @@ fn select(stream: &Stream, attempts: Vec<Attempt>, config: &Config) -> Result<Bo
 	// machine has none, which is the question being asked.
 	let mut tried: Vec<String> = Vec::new();
 	let mut skipped = Vec::new();
+	// Passed over unopened for driving another device than the named one, which
+	// says nothing about the stream, so neither a refusal nor a fault.
+	let mut passed = Vec::new();
 	let mut faulted = false;
 
 	for attempt in attempts {
@@ -392,6 +414,24 @@ fn select(stream: &Stream, attempts: Vec<Attempt>, config: &Config) -> Result<Bo
 		}
 
 		let name = attempt.candidate.name;
+		match config.device.takes(attempt.candidate.drives) {
+			Ok(true) => {}
+			Ok(false) => {
+				passed.push(format!("{name}: does not open {}", config.device));
+				continue;
+			}
+			// Telling whether this backend drives the named node failed, which
+			// counts against this candidate alone, as a failed open would.
+			Err(e) => {
+				tracing::debug!(decoder = name, error = %e, "decoder unavailable, trying next");
+				faulted = true;
+				tried.push(format!("{name}: {e}"));
+				if attempt.hardware {
+					skipped.push(format!("{name}: {e}"));
+				}
+				continue;
+			}
+		}
 
 		match (attempt.candidate.open)(stream, config) {
 			Ok(backend) => {
@@ -428,6 +468,10 @@ fn select(stream: &Stream, attempts: Vec<Attempt>, config: &Config) -> Result<Bo
 	// typo, a feature that is off, or a backend that does not decode this
 	// codec. Naming what is here is most of the answer. Otherwise this build
 	// cannot decode the codec at all, which is known before opening anything.
+	if tried.is_empty() && !passed.is_empty() {
+		return Err(Error::NoDecoder(passed.join(", ")));
+	}
+	tried.append(&mut passed);
 	if tried.is_empty() {
 		let available = available_names(codec);
 		return match &config.kind {
@@ -503,6 +547,7 @@ mod tests {
 		name: "stub",
 		supports: |c| matches!(c, Codec::H264),
 		open: Stub::open,
+		drives: Drives::Own,
 	};
 
 	/// Compiled in but faulting at runtime, the way NVDEC does on a host whose
@@ -511,6 +556,7 @@ mod tests {
 		name: "driverless",
 		supports: |c| matches!(c, Codec::H264),
 		open: |_, _| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
+		drives: Drives::Own,
 	};
 
 	#[tracing_test::traced_test]
@@ -542,11 +588,98 @@ mod tests {
 			name: "driverless",
 			supports: |c| matches!(c, Codec::H265),
 			open: |_, _| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
+			drives: Drives::Own,
 		};
 
 		let attempts = vec![Attempt::hardware(&H265_ONLY), Attempt::software(&WORKING)];
 		select(&Codec::H264.into(), attempts, &Config::new()).unwrap();
 		assert!(!logs_contain("no hardware decoder available"));
+	}
+
+	/// A driver check that cannot read the named node counts against the NVIDIA
+	/// candidate alone: selection goes on to the next, and with none left the
+	/// failure is a fault that names the node, not a refusal of the stream.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_failed_driver_check_moves_on() {
+		const NVIDIA: Candidate = Candidate {
+			name: "nvidia",
+			supports: |c| matches!(c, Codec::H264),
+			open: |_, _| panic!("opened NVIDIA for an unreadable node"),
+			drives: Drives::Nvidia,
+		};
+		const RENDER: Candidate = Candidate {
+			drives: Drives::Render,
+			..WORKING
+		};
+
+		let mut config = Config::new();
+		config.device = crate::Device::Render("/dev/dri/renderD199-absent".into());
+		let attempts = vec![Attempt::hardware(&NVIDIA), Attempt::hardware(&RENDER)];
+		assert_eq!(select(&Codec::H264.into(), attempts, &config).unwrap().name(), "stub");
+
+		match select(&Codec::H264.into(), vec![Attempt::hardware(&NVIDIA)], &config) {
+			Err(Error::NoDecoder(reason)) => assert!(
+				reason.contains("nvidia: ") && reason.contains("renderD199-absent"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoDecoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
+		}
+	}
+
+	/// A named node passes over the backends that drive another kind of device
+	/// without opening them, and opens the one that drives it.
+	#[test]
+	fn a_named_device_steers_selection_to_its_backend() {
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			supports: |c| matches!(c, Codec::H264),
+			open: |_, _| panic!("opened a render backend for a codec node"),
+			drives: Drives::Render,
+		};
+		const VIDEO: Candidate = Candidate {
+			drives: Drives::Video,
+			..WORKING
+		};
+
+		let mut config = Config::new();
+		config.device = crate::Device::Video("/dev/video10".into());
+		let attempts = vec![Attempt::hardware(&RENDER), Attempt::hardware(&VIDEO)];
+		assert_eq!(select(&Codec::H264.into(), attempts, &config).unwrap().name(), "stub");
+
+		// Passed over is not a refusal of the stream: with no backend left for
+		// the device, the error is a missing decoder that names the device.
+		let attempts = vec![Attempt::hardware(&RENDER)];
+		match select(&Codec::H264.into(), attempts, &config) {
+			Err(Error::NoDecoder(reason)) => assert!(reason.contains("/dev/video10"), "{reason}"),
+			Err(other) => panic!("expected NoDecoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoDecoder, opened {}", backend.name()),
+		}
+	}
+
+	/// The backend that drives the named device refusing the stream is a refusal,
+	/// even beside backends passed over for driving another device.
+	#[test]
+	fn the_named_devices_refusal_is_the_streams() {
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			supports: |c| matches!(c, Codec::H264),
+			open: |_, _| Err(Error::UnsupportedCodec("too large".into())),
+			drives: Drives::Render,
+		};
+		const VIDEO: Candidate = Candidate {
+			drives: Drives::Video,
+			..WORKING
+		};
+
+		let mut config = Config::new();
+		config.device = crate::Device::Render("/dev/dri/renderD129".into());
+		let attempts = vec![Attempt::hardware(&VIDEO), Attempt::hardware(&RENDER)];
+		assert!(matches!(
+			select(&Codec::H264.into(), attempts, &config),
+			Err(Error::UnsupportedCodec(_))
+		));
 	}
 
 	/// A name no candidate answers to has to say so, and say what it could have

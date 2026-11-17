@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	canvasPresentationTransform,
 	type Presentation,
-	rotateVideoDimensions,
+	rotateDimensions,
 	texturePresentationTransform,
 } from "./presentation";
 
@@ -31,7 +31,7 @@ function video(rotation: number, flip = false): Presentation {
 describe("video presentation", () => {
 	it.each(rotations)("rotates %i degrees clockwise", (rotation, matrix, source) => {
 		expect(canvasPresentationTransform(output, video(rotation))).toEqual({ matrix, source });
-		expect(rotateVideoDimensions(output, rotation)).toEqual(source);
+		expect(rotateDimensions(output, rotation)).toEqual(source);
 	});
 
 	it.each(flips)("flips the %i degree presentation horizontally", (rotation, matrix) => {

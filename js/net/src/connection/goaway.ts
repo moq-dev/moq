@@ -1,6 +1,6 @@
 /**
  * GOAWAY handling for the reconnect loop: the peer's drain signal and the policy for the
- * redirect it may name. Mirrors `Goaway` and `Redirect` in `moq_tokio::connection`.
+ * redirect it may name. Mirrors `Handover` and `Redirect` in `moq_net::reconnect`.
  *
  * @module
  */
@@ -11,7 +11,7 @@ import { type Endpoint, isLocal, parse, sameHost } from "./endpoint.ts";
 import type { Transport } from "./transport.ts";
 
 /** A peer's GOAWAY as a session received it. */
-export interface Drain {
+export interface Goaway {
 	/** Where to reconnect, including any credentials it needs. Empty means the same endpoint. */
 	readonly uri: string;
 	/** When the peer force-closes the session. Undefined when the wire carried none. */
@@ -32,8 +32,8 @@ export interface Drain {
  */
 export type Redirect = "follow" | "same-host" | "ignore";
 
-/** How a reconnecting connection reacts to a peer's GOAWAY. */
-export interface GoawayProps {
+/** How a reconnecting connection hands over to a new session after a peer's GOAWAY. */
+export interface Handover {
 	/** What to do with the URI the peer names (default: `same-host`). */
 	redirect?: Redirect;
 

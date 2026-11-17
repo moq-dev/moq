@@ -119,19 +119,19 @@ async fn spawn_proxy(upstream: SocketAddr) -> (SocketAddr, Arc<Mutex<HashSet<Soc
 #[test]
 fn a_dropped_flow_recovers_on_a_fresh_port() {
 	let budget = Duration::from_secs(1);
-	run_cluster_test(dropped_flow_recovers(budget, budget));
+	run_cluster_test(dropped_flow_recovers(Some(budget), budget));
 }
 
-/// A zero budget would retry the dropped flow forever, so a mesh dial takes
+/// An unbounded budget would retry the dropped flow forever, so a mesh dial takes
 /// moq-tokio's 10s default instead.
 #[test]
 fn an_unbounded_budget_still_leaves_the_dropped_port() {
-	run_cluster_test(dropped_flow_recovers(Duration::ZERO, Duration::from_secs(10)));
+	run_cluster_test(dropped_flow_recovers(None, Duration::from_secs(10)));
 }
 
 /// Dial through a proxy that drops the first flow, with `budget` as the
 /// configured backoff timeout and `effective` as the one a mesh dial runs.
-async fn dropped_flow_recovers(budget: Duration, effective: Duration) {
+async fn dropped_flow_recovers(budget: Option<Duration>, effective: Duration) {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let peer = spawn_peer().await;

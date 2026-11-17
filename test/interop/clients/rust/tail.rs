@@ -41,9 +41,9 @@ fn frames(sequence: u64, mode: Option<&str>) -> Vec<Vec<u8>> {
 /// Publish every group, cutting group 1 for `drop`.
 fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Result<()> {
 	// Declare the end before the final group's payload is even available.
-	track.finish_at(moq_net::track::Position::group(GROUPS), None)?;
+	track.finish_at(moq_net::track::Position::group(GROUPS))?;
 	for sequence in 0..GROUPS {
-		let mut group = track.append_group(sequence)?;
+		let mut group = track.append_group(at(sequence))?;
 		if mode == Some("drop") && sequence == 1 {
 			group.abort(moq_net::Error::App(1))?;
 			continue;
@@ -51,7 +51,7 @@ fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Re
 		for frame in frames(sequence, mode) {
 			group.write_frame(at(sequence), frame)?;
 		}
-		group.close()?;
+		group.finish()?;
 	}
 	Ok(())
 }
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
 				}
 				let mut head = None;
 				if late {
-					let mut group = track.append_group(0)?;
+					let mut group = track.append_group(at(0))?;
 					for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
 						group.write_frame(at(0), frame)?;
 					}
@@ -183,13 +183,13 @@ async fn main() -> anyhow::Result<()> {
 					for frame in frames(0, mode).into_iter().skip(LATE_HEAD) {
 						group.write_frame(at(0), frame)?;
 					}
-					group.close()?;
+					group.finish()?;
 					for sequence in 1..LATE_GROUPS {
-						let mut group = track.append_group(sequence)?;
+						let mut group = track.append_group(at(sequence))?;
 						for frame in frames(sequence, mode) {
 							group.write_frame(at(sequence), frame)?;
 						}
-						group.close()?;
+						group.finish()?;
 					}
 					_finished = Some(track.finish()?);
 				} else if !cached {
