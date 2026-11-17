@@ -63,7 +63,9 @@ impl Arm {
 		epoch: false,
 	});
 	/// [`Self::LEAN`], with the floor kept per pair of relays: what the bake-off recommends.
-	pub const KEPT: Self = Self::Multi(Tune {
+	pub const KEPT: Self = Self::Multi(Self::TUNE);
+	/// The prototype's settings under [`Self::KEPT`]: floor, epoch, batch, drain, and claimed.
+	pub const TUNE: Tune = Tune {
 		suspect: Suspect::Never,
 		quiet: false,
 		floor: true,
@@ -72,7 +74,7 @@ impl Arm {
 		drain: true,
 		claimed: true,
 		epoch: true,
-	});
+	};
 
 	/// The production router as it ships.
 	pub const RELAY: Self = Self::Relay(relay::debounce(HOP));

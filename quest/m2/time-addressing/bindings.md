@@ -48,4 +48,13 @@ JS half renames a frame's `sequence` to `index`
 ([JS](/quest/m2/time-addressing/js.md)); a frame's position in the bindings
 takes the same name if any binding exposes one.
 
+Found 2026-11-16 ([moq-dev/moq#8961](https://github.com/moq-dev/moq/pull/8961)):
+Rust's `track::Producer::append_group` now takes a required `Timestamp`
+start, with no implicit "one past the previous start". moq-ffi's
+`MoqTrackProducer::append_group()` and moq-c's `track_group` still take no
+start and compute one past the newest start in the track's timescale (their
+private `next_start`). Recommended: give both a required timestamp start,
+the `{value, scale}` record the bindings already pass, in this rename's
+breaking release, and drop `next_start`.
+
 Public API: breaking in every binding. Wire: none.

@@ -139,7 +139,7 @@ async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), b"head".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
@@ -167,7 +167,7 @@ async fn withdrawn_broadcast_keeps_the_source_error() {
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), b"head".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")

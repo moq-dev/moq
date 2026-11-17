@@ -102,7 +102,7 @@ for the wire:
 - Among routes of equal rank a node takes one with no upstream-marked link on
   its path before staying on its next hop, or a neighbour behind its own
   upstream link is reachable by arrival order (decided by the coordinator on
-  2026-11-16, pending the maintainer, in
+  2026-11-16 and confirmed by the maintainer's merge pick of
   [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
 - A claim carries an unavailable bit beside its draining bit. An endpoint or
   scoped neighbour is told what the node's own reader shows: the closest claim
@@ -114,8 +114,8 @@ for the wire:
   again. The debounce runs from when a reader first showed the claim
   unavailable, so the domain past a grant lets the claim go about when the
   near one does, not a debounce later. The route exchange between routing
-  nodes keeps no timer (decided by the coordinator on 2026-11-16, pending the
-  maintainer, in [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
+  nodes keeps no timer (decided by the coordinator on 2026-11-16 and confirmed by the maintainer's merge pick of
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
 - The unavailable bit counts only as a change to a run the receiver already
   holds from that sender, a run being the claim's distance and epoch. A sender
   still tells a new asker what its reader shows, the bit included, but a
@@ -126,12 +126,12 @@ for the wire:
   claim is unavailable therefore announces nothing and starts no route, a
   claim that comes back unavailable across a second grant starts none either,
   and an unreachable newer run never fences an older one another neighbour
-  still serves (decided by the coordinator on 2026-11-16, pending the
-  maintainer, in [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901);
+  still serves (decided by the coordinator on 2026-11-16 and confirmed by the maintainer's merge pick of
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901);
   per run rather than per claim by the implementer, on review).
 - A message names each claim once, and a receiver refuses one that names a
   claim twice, so no order within a message decides what it says (decided by
-  the implementer on 2026-11-16, pending the maintainer, in
+  the implementer on 2026-11-16 and confirmed by the maintainer's merge pick of
   [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
 - A node offers a route to itself only once it announces a claim, so a relay
   that has never announced a claim and only forwards or only serves viewers
@@ -191,8 +191,10 @@ Delete with the old rule:
   discount that formed pull cycles here, and lets a link cost 0 (line 88),
   which `route::Error::ZeroCost` refuses. The code implements neither, and
   item 10 of the epic makes a moq-transport session an endpoint, which has
-  no path to carry. `cluster.max_hops` then bounds lite-03 to lite-06 only
-  ([config names](/quest/m2/relay-config-names.md)).
+  no path to carry. `cluster.max_hops` then bounds lite-03 to lite-06 only:
+  drop the MoQ Cluster extension from its docs (`cluster::Config::max_hops`,
+  `origin::Config::max_hops`, `doc/bin/relay/cluster.md`, and
+  `doc/bin/relay/config.md`).
 - `rs/moq-net/verify/route/` and the `verify-route` skill, or rewrite the
   skill for the exhaustive search.
 - [Firefox tabs prove their route key](/quest/m5/routes-browser-proof.md),
@@ -268,7 +270,3 @@ Public API: breaking. `origin::RouteKey`, `Config::route_key`, and
 `Consumer::local()` leave the public API. Config and CLI: `cluster.route_key`
 is removed (never released). Wire: lite-07-wip only; the moq-cluster
 extension on moq-transport is no longer sent or read.
-
-## Required
-
-- [The route stream](/quest/m2/cluster-routes/route-stream.md) - one announce stream per side, which this builds on

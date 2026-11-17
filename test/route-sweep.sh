@@ -20,3 +20,5 @@ MOQ_ROUTE_CASES=3000 just rs test -P sweep -p moq-net --release --run-ignored on
 MOQ_BAKEOFF_RELAYS=12 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::bakeoff::(sweep|benchmark)_/)'
 # The multicast router: every failure on every shape at 32 relays, every delivery order the gate's searches leave out, what one event costs it, and how its floors grow.
 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::multicast(_search|_cost)?::/)'
+# Warmth: path joins, asking, and advertising over fixed shapes, 400 churned meshes per arm on three kinds of mesh, and growth over cores, edges per core, drones, and up to 4096 broadcasts, about 10 minutes.
+just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::warmth::benchmark_/)'

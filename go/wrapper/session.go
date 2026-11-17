@@ -222,8 +222,7 @@ type Tokens struct {
 // its own ?jwt=; each other one widens the grant over in-band AUTH. The next
 // dial presents them, and a live session with in-band AUTH presents them at
 // once, withdrawing each replaced token once its replacements are answered,
-// even when one is refused. After an authorization refusal the session redials
-// only if they changed. An empty token is refused.
+// even when one is refused. An empty token is refused.
 func (t *Tokens) Set(tokens ...string) error {
 	return t.inner.Set(append([]string(nil), tokens...))
 }

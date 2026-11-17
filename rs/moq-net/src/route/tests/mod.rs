@@ -8,6 +8,7 @@
 //! means a wildcard; every lite-07 claim already covers the paths below it, so
 //! the slash is dropped.
 
+mod algebra;
 mod bakeoff;
 mod cache;
 mod compare;
@@ -24,6 +25,9 @@ mod residual;
 mod routing;
 mod scope;
 mod search;
+mod sticky;
+mod warm;
+mod warmth;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
@@ -756,7 +760,7 @@ impl Sim {
 					(to, Msg::Dead(dead))
 				}
 				path::Out::Ask { to, edit } => (to, Msg::Ask(edit)),
-				path::Out::Edited { to } => (to, Msg::Edited),
+				path::Out::Edited { to, .. } => (to, Msg::Edited),
 				path::Out::Synced { to, prefix } => (to, Msg::Synced { prefix }),
 			};
 			self.queues.entry((node, to)).or_default().push_back(msg);

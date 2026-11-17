@@ -1075,7 +1075,7 @@ mod tests {
 			// together.
 			let settle = kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
 			assert!(settle.await.is_err(), "nothing is written yet");
-			let mut group = track.append_group(0).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 			let held = match failure {
 				"malformed" => {
 					// An empty Legacy audio frame is malformed.
@@ -1256,7 +1256,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let mut read = async || {
 			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
@@ -1304,14 +1304,15 @@ mod tests {
 
 		for relay in [false, true] {
 			let (publisher, subscriber) = (origin(1), origin(3));
-			// SETUP takes the first uni stream; the second is the backlog's oldest group.
+			// SETUP and the Announce Stream take the first two uni streams; the third is
+			// the backlog's oldest group.
 			let (held, _downstream) = match relay {
 				true => {
 					let middle = origin(2);
-					let held = Link::held(&publisher, &middle, 2).await;
+					let held = Link::held(&publisher, &middle, 3).await;
 					(held, Some(Link::new(&middle, &subscriber).await))
 				}
-				false => (Link::held(&publisher, &subscriber, 2).await, None),
+				false => (Link::held(&publisher, &subscriber, 3).await, None),
 			};
 
 			let broadcast = publisher
@@ -1339,7 +1340,7 @@ mod tests {
 					let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 					wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
 						.unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 			};
 			// About two seconds of it, so the budget's backlog reaches back about 450 ms.
@@ -1482,10 +1483,10 @@ mod tests {
 			group
 		};
 		// Group 1 is missing whole; group 3 is cut short after its first frame.
-		group(0, 0).close().unwrap();
-		group(2, 40_000).close().unwrap();
+		group(0, 0).finish().unwrap();
+		group(2, 40_000).finish().unwrap();
 		let cut = group(3, 60_000);
-		group(4, 80_000).close().unwrap();
+		group(4, 80_000).finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let waiter = kio::Waiter::noop();
@@ -1512,7 +1513,7 @@ mod tests {
 		for (sequence, timestamp, payload) in [(0, 0, b"audio".as_slice()), (2, 1_000_000, b"".as_slice())] {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &[raw_frame(timestamp, payload, true)]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1563,7 +1564,7 @@ mod tests {
 		] {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &frames).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();

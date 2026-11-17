@@ -45,14 +45,16 @@
 //! SYNCED for each. At the marker both sides rekey the stream's routes alike
 //! ([`rekey`]): a route inside a prefix both sets cover stays, a route at a
 //! removed prefix that an added one widens moves to the wider prefix with its
-//! claims, and a wider route carries its claims and floor to each added prefix
-//! inside it. So a swap re-sends nothing both sets cover.
+//! claims, unless its sender marked it as lying at its own prefix, and a wider
+//! route carries its claims and floor to each added prefix inside it. So a swap
+//! re-sends nothing both sets cover.
+//!
+//! A node sends a neighbour one edit at a time: the next waits for the marker
+//! answering the last, so neither side holds more than one edit in flight.
 //!
 //! `rs/moq-net/verify/route/RouteHandoff.tla` model-checks the rule. Every lite-07
-//! session drives it through [`super::node::Node`]. Lite-07 opens one announce
-//! stream per prefix, so the node files each stream under a key of its own whose
-//! one edit is the prefix it opened with, in effect from the start; edits on one
-//! stream wait for the route stream (`quest/m2/cluster-routes/route-stream.md`).
+//! session drives it through [`super::node::Node`], as one neighbour for both
+//! directions of its one stream each way.
 
 use std::{
 	cmp::Reverse,
@@ -66,7 +68,7 @@ use kio::clock::Instant;
 use crate::Path;
 
 use super::reader::Reader;
-use super::view::{ancestors, below, covering, within_any, within_set};
+use super::view::{ancestors, below, covering, heads, within_any, within_set};
 use super::{Error, Event, GENERATED, Id, Item, Key, Link, MAX, MAX_HOPS, Metric, QUALIFIED, Rev, Shown, View, within};
 
 /// One node on a route's path, and the session it learned the route on. A
@@ -107,7 +109,7 @@ impl Offer {
 	/// and strictly raises the cost, so every relay ranks it no better than the
 	/// relay it came from did, and selection converges. Ranking a relay's own drain
 	/// or link priority alone lets two relays prefer each other's paths forever.
-	fn rank(&self) -> (bool, Reverse<i8>, Metric) {
+	pub(crate) fn rank(&self) -> (bool, Reverse<i8>, Metric) {
 		(self.draining, Reverse(self.priority), self.metric)
 	}
 }
@@ -179,15 +181,29 @@ pub(crate) enum Out<N, A> {
 		edit: Edit,
 	},
 	/// The marker where the neighbour's oldest unanswered edit takes effect on this
-	/// node's stream to it, for both sides.
+	/// node's stream to it, for both sides, with every route the neighbour then holds
+	/// as [`rekey`] left it.
 	Edited {
 		to: N,
+		routes: Vec<Carried<A>>,
 	},
 	/// The stream sent the initial set of `prefix`, which the neighbour added.
 	Synced {
 		to: N,
 		prefix: Path,
 	},
+}
+
+/// A route a neighbour holds once an edit took effect: what it was last sent, moved to
+/// the key the edit left it at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Carried<A> {
+	pub id: Id,
+	pub prefix: Path,
+	pub offer: Offer,
+	pub held: bool,
+	pub claims: BTreeMap<Path, A>,
+	pub floor: Option<Rev>,
 }
 
 /// An edit of the prefixes a node asks a neighbour for: the live ones it removes,
@@ -350,7 +366,8 @@ enum SentState<A> {
 struct SentOffer<A> {
 	offer: Offer,
 	/// The prefix of the view its claims were presented from, or `None` once an edit
-	/// rekeyed it: the next batch is diffed against all it holds.
+	/// rekeyed it or it was held or kept, missing batches: the next batch is diffed
+	/// against all it holds.
 	from: Option<Path>,
 	view: View<A>,
 }
@@ -377,6 +394,14 @@ impl<A> Sent<A> {
 				unreachable!()
 			};
 			self.state = SentState::Held(sent);
+		}
+		self.behind();
+	}
+
+	/// It is sent nothing for now, so its next batch is diffed against all it holds.
+	fn behind(&mut self) {
+		if let SentState::Live(sent) | SentState::Held(sent) = &mut self.state {
+			sent.from = None;
 		}
 	}
 
@@ -479,6 +504,9 @@ struct Session<N> {
 	listen: Option<N>,
 	/// The routes it offered, so closing it costs what it held.
 	heard: BTreeSet<RouteId>,
+	/// The routes it offered under a link since replaced, until it files them again or
+	/// [`Router::relinked`] forgets them.
+	stale: BTreeSet<RouteId>,
 }
 
 impl<N> Session<N> {
@@ -655,6 +683,78 @@ pub(super) fn meet(a: &Path, b: &Path) -> Option<Path> {
 	}
 }
 
+/// The bytes the prefixes a node asks one neighbour for may take: a peer holds the
+/// whole set as the Adds of one ANNOUNCE_REQUEST.
+pub(crate) const ASK_BYTES: usize = 65_535;
+
+/// An upper bound on the bytes `set` takes as the Adds of one ANNOUNCE_REQUEST: each
+/// prefix as it follows the session's `root`, with its length and its flag, behind the
+/// two counts.
+pub(crate) fn ask_bytes(set: &BTreeSet<Path>, root: &Path) -> usize {
+	let sent = |prefix: &Path| {
+		prefix
+			.strip_prefix(root)
+			.map_or(prefix.as_str().len(), |sent| sent.as_str().len())
+	};
+	set.iter().map(|prefix| sent(prefix) + 5).sum::<usize>() + 8
+}
+
+/// The prefixes of `set` that lie inside no other.
+fn widest(set: &BTreeSet<Path>) -> BTreeSet<Path> {
+	set.iter()
+		.filter(|prefix| !ancestors(prefix).any(|above| above != **prefix && set.contains(&above)))
+		.cloned()
+		.collect()
+}
+
+/// `set`, asked for more coarsely until it takes no more than [`ASK_BYTES`]: the
+/// prefixes inside one of the scope's `regions`, or all of them without a scope, give
+/// way to the longest prefix they share, the largest such group first, and then a
+/// prefix alone in its region gives way to the region. Either lies inside the region,
+/// so the node asks for more than it wants and never for more than the scope allows.
+/// Regions that are too many on their own lose the last of them.
+fn coarsen(mut set: BTreeSet<Path>, regions: &[Path], root: &Path) -> BTreeSet<Path> {
+	// Looked up by each prefix's heads, so filing a prefix costs its depth, not the scope's
+	// size.
+	let regions: BTreeSet<Path> = regions.iter().cloned().collect();
+	while ask_bytes(&set, root) > ASK_BYTES {
+		// Each prefix files under the widest region holding it, its first head that is one.
+		let mut groups: BTreeMap<Option<&Path>, Vec<&Path>> = BTreeMap::new();
+		for prefix in &set {
+			let region = heads(prefix).find_map(|head| regions.get(head));
+			groups.entry(region).or_default().push(prefix);
+		}
+		let bytes = |group: &[&Path]| group.iter().map(|prefix| prefix.as_str().len()).sum::<usize>();
+		let shared = (groups.values())
+			.filter(|group| group.len() > 1)
+			.max_by_key(|group| bytes(group))
+			.map(|group| {
+				(ancestors(group[0]).rev())
+					.find(|above| group.iter().all(|prefix| within(prefix, above)))
+					.unwrap_or_default()
+			});
+		let region = || {
+			(groups.iter())
+				.filter_map(|(region, group)| Some(((*region)?, group)))
+				.filter(|(region, group)| group[0] != *region)
+				.max_by_key(|(_, group)| bytes(group))
+				.map(|(region, _)| region.clone())
+		};
+		match shared.or_else(region) {
+			Some(wider) => {
+				set.insert(wider);
+				set = widest(&set);
+			}
+			None => {
+				// Nothing is left to widen: the scope's regions alone pass one request.
+				let dropped = set.pop_last();
+				tracing::warn!(?dropped, "a scope too wide for one ANNOUNCE_REQUEST goes unasked");
+			}
+		}
+	}
+	set
+}
+
 /// Whether a prefix of `set` lies inside another.
 #[cfg(test)]
 fn nested(set: &BTreeSet<Path>) -> bool {
@@ -663,7 +763,7 @@ fn nested(set: &BTreeSet<Path>) -> bool {
 }
 
 /// What a stream carries for a route, as [`rekey`] moves it.
-trait Carried<A>: Clone {
+trait Carries<A>: Clone {
 	/// The offer it carries, unless it was ended.
 	fn offered(&self) -> Option<&Offer>;
 	/// Whether it is held: both sides agree, as both change it on the same messages.
@@ -675,7 +775,7 @@ trait Carried<A>: Clone {
 	fn widened(&mut self) {}
 }
 
-impl<A: Clone> Carried<A> for Heard<A> {
+impl<A: Clone> Carries<A> for Heard<A> {
 	fn offered(&self) -> Option<&Offer> {
 		Some(&self.offer)
 	}
@@ -693,7 +793,7 @@ impl<A: Clone> Carried<A> for Heard<A> {
 	}
 }
 
-impl<A: Clone> Carried<A> for Sent<A> {
+impl<A: Clone> Carries<A> for Sent<A> {
 	fn offered(&self) -> Option<&Offer> {
 		self.offer()
 	}
@@ -728,7 +828,7 @@ struct Rekeyed<T> {
 /// key, as [`Router::src`] picks: a live one first, then one not naming the
 /// receiver, then the better rank. Equals keep `b`. Both sides see the same
 /// offers and holds, so both agree.
-fn preferred<A, T: Carried<A>>(a: &T, b: &T, receiver: Id) -> bool {
+fn preferred<A, T: Carries<A>>(a: &T, b: &T, receiver: Id) -> bool {
 	let key = |route: &T| {
 		let offer = route.offered().expect("an offered route");
 		(route.held(), names(&offer.path, receiver), offer.rank())
@@ -741,8 +841,9 @@ fn preferred<A, T: Carried<A>>(a: &T, b: &T, receiver: Id) -> bool {
 /// was heard, so they stay in step and nothing both sets cover is sent again.
 /// `receiver` names the stream's receiving node.
 ///
-/// A route inside a prefix the new set covers stays. A route at a removed prefix
-/// that an added prefix widens moves to the wider prefix, with the claim presented
+/// A route inside a prefix the new set covers stays, and so does one at a removed
+/// prefix that is its own (`exact`), as its ROUTE_START said. A route at a removed
+/// prefix that an added prefix widens moves to the wider prefix, with the claim presented
 /// at the removed prefix and every floor gone, since that claim may stand for a
 /// broader one and the floors certified only the narrower prefix. A route at a
 /// removed prefix is carried, as presented there, to each added prefix inside it,
@@ -753,11 +854,12 @@ fn preferred<A, T: Carried<A>>(a: &T, b: &T, receiver: Id) -> bool {
 /// among equals, and the claims of every route that widened into it. Keeping
 /// another could leave the receiver no usable route until the sender's next offer
 /// for the key, and its claims offline in between.
-fn rekey<A: Item, T: Carried<A>>(
+fn rekey<A: Item, T: Carries<A>>(
 	old: &BTreeSet<Path>,
 	new: &BTreeSet<Path>,
 	routes: BTreeMap<RouteId, T>,
 	receiver: Id,
+	exact: &BTreeSet<RouteId>,
 ) -> Rekeyed<T> {
 	let mut kept: BTreeMap<RouteId, T> = BTreeMap::new();
 	let mut gone = Vec::new();
@@ -769,7 +871,7 @@ fn rekey<A: Item, T: Carried<A>>(
 			gone.push(key.clone());
 			continue;
 		};
-		if within_any(prefix, new) && (new.contains(&region) || *prefix != region) {
+		if within_any(prefix, new) && (new.contains(&region) || *prefix != region || exact.contains(key)) {
 			kept.insert(key.clone(), route.clone());
 			continue;
 		}
@@ -930,6 +1032,7 @@ impl<N: Key, A: Item> Router<N, A> {
 			edits: VecDeque::new(),
 			listen: None,
 			heard: BTreeSet::new(),
+			stale: BTreeSet::new(),
 		};
 		self.sessions.insert(neighbor, session);
 		// It asks at once; nothing is answered until the neighbour asks.
@@ -944,6 +1047,17 @@ impl<N: Key, A: Item> Router<N, A> {
 		if let Some(entry) = self.sessions.get_mut(&answer) {
 			entry.listen = (answer != session).then_some(session);
 		}
+	}
+
+	/// How many neighbours are connected.
+	#[cfg(test)]
+	pub fn neighbors(&self) -> usize {
+		self.sessions.len()
+	}
+
+	/// The link to `neighbor`.
+	pub fn link(&self, neighbor: N) -> Option<Link> {
+		self.sessions.get(&neighbor).map(|session| session.link.clone())
 	}
 
 	/// How `neighbor` names itself in a path: as it declared, else as the stream its
@@ -1003,9 +1117,18 @@ impl<N: Key, A: Item> Router<N, A> {
 	/// goes, and each names its hop to the others.
 	pub fn disconnect(&mut self, neighbors: impl IntoIterator<Item = N>, now: Instant) {
 		self.clock(now);
+		// A mount speaks for the session it answers, so it closes under that session's
+		// scope, read before any of them go.
+		let neighbors: Vec<(N, bool)> = (neighbors.into_iter())
+			.map(|neighbor| {
+				let scoped =
+					(self.sessions.get(&self.listen(neighbor))).is_some_and(|session| session.link.scope.is_some());
+				(neighbor, scoped)
+			})
+			.collect();
 		let mut ids = BTreeSet::new();
 		let mut hops = Vec::new();
-		for neighbor in neighbors {
+		for (neighbor, scoped) in neighbors {
 			let Some(session) = self.sessions.remove(&neighbor) else {
 				continue;
 			};
@@ -1030,7 +1153,7 @@ impl<N: Key, A: Item> Router<N, A> {
 			ids.extend(self.fail(hop, session.hop, None, Vec::new(), false, now));
 			// A scoped peer names itself as it likes, so its close neither doubts that node
 			// nor names it to the neighbours: the routes it sent end one by one instead.
-			if session.link.scope.is_none() {
+			if !scoped {
 				ids.extend(self.suspect(session.hop, now));
 				hops.push(Report::Closed(hop));
 			}
@@ -1060,7 +1183,11 @@ impl<N: Key, A: Item> Router<N, A> {
 			}
 			new.insert(prefix);
 		}
-		self.out.push(Out::Edited { to: neighbor });
+		let marker = self.out.len();
+		self.out.push(Out::Edited {
+			to: neighbor,
+			routes: Vec::new(),
+		});
 		if let Some(answer) = self.answering.get_mut(&neighbor) {
 			let tx = std::mem::take(&mut answer.tx);
 			for (key, sent) in &tx {
@@ -1069,7 +1196,9 @@ impl<N: Key, A: Item> Router<N, A> {
 				}
 				self.unreflect(neighbor, key, &sent.src);
 			}
-			let rekeyed = rekey(&old, &new, tx.clone(), self.hop_of(neighbor));
+			// This node marks no route it sends exact: its own edits move a route at a
+			// removed prefix up, whatever prefix it is filed at.
+			let rekeyed = rekey(&old, &new, tx.clone(), self.hop_of(neighbor), &BTreeSet::new());
 			// A child that learned a route this stream no longer carries under its key
 			// may still owe an answer to the route it reflected.
 			let rx = self.listen(neighbor);
@@ -1085,6 +1214,22 @@ impl<N: Key, A: Item> Router<N, A> {
 					self.index_sent(neighbor, key, &offer.path);
 				}
 				self.reflect(neighbor, key, &sent.src);
+			}
+			let carried = (tx.iter())
+				.filter_map(|(key, sent)| {
+					let active = sent.active()?;
+					Some(Carried {
+						id: key.0,
+						prefix: key.1.clone(),
+						offer: active.offer.clone(),
+						held: sent.held(),
+						claims: active.view.items.clone(),
+						floor: active.view.floors.get(&key.1).copied(),
+					})
+				})
+				.collect();
+			if let Out::Edited { routes, .. } = &mut self.out[marker] {
+				*routes = carried;
 			}
 			self.answering.get_mut(&neighbor).expect("answering").tx = tx;
 		}
@@ -1111,35 +1256,86 @@ impl<N: Key, A: Item> Router<N, A> {
 		Ok(())
 	}
 
-	/// The prefixes this node asks `neighbor` for: its interest met with the regions
-	/// of the neighbour's scope, keeping the wider of two nested ones.
-	fn asks(&self, neighbor: N) -> BTreeSet<Path> {
-		let Some(scope) = &self.sessions[&neighbor].link.scope else {
-			return self.watch.clone();
+	/// The prefixes this node asks `neighbor` for: its interest met with what the
+	/// session's link wants of it and with the regions of the neighbour's scope,
+	/// keeping the wider of two nested ones. A set past [`ASK_BYTES`] is asked for
+	/// more coarsely (see [`coarsen`]).
+	pub fn asks(&self, neighbor: N) -> BTreeSet<Path> {
+		let Some(session) = self.sessions.get(&neighbor) else {
+			return BTreeSet::new();
 		};
-		let met: BTreeSet<Path> = (self.watch.iter())
-			.flat_map(|watch| scope.regions.iter().filter_map(|region| meet(watch, region)))
-			.collect();
-		met.iter()
-			.filter(|prefix| !ancestors(prefix).any(|above| above != **prefix && met.contains(&above)))
-			.cloned()
-			.collect()
+		let link = &session.link;
+		let meets = |a: &BTreeSet<Path>, b: &mut dyn Iterator<Item = &Path>| -> BTreeSet<Path> {
+			let b: Vec<&Path> = b.collect();
+			(a.iter())
+				.flat_map(|a| b.iter().filter_map(move |b| meet(a, b)))
+				.collect()
+		};
+		let mut met = meets(&self.watch, &mut link.interest.iter());
+		if let Some(scope) = &link.scope {
+			met = meets(&met, &mut scope.regions.iter());
+		}
+		let regions = link.scope.as_ref().map(|scope| scope.regions.as_slice());
+		coarsen(widest(&met), regions.unwrap_or_default(), &link.root)
 	}
 
-	/// Send `neighbor` an edit bringing what this node asks it for to [`Self::asks`].
+	/// Send `neighbor` an edit bringing what this node asks it for to [`Self::asks`],
+	/// once its last edit was answered: [`Self::edited`] asks again.
 	fn ask(&mut self, neighbor: N) {
+		if !self.sessions[&neighbor].edits.is_empty() {
+			return;
+		}
 		let want = self.asks(neighbor);
 		let session = self.sessions.get_mut(&neighbor).expect("a session");
 		let requested = session.requested();
 		if want == requested {
 			return;
 		}
+		// However large, the edit goes whole: the session splits it into as many
+		// ANNOUNCE_REQUESTs as it takes, which the peer applies together.
 		let edit = Edit {
 			remove: requested.difference(&want).cloned().collect(),
 			add: want.difference(&requested).cloned().collect(),
 		};
 		session.edits.push_back(want);
 		self.out.push(Out::Ask { to: neighbor, edit });
+	}
+
+	/// Replace the link to `neighbor`: what this node asks it for follows the new
+	/// interest and scope. With `refile`, the scope files the neighbour's routes
+	/// differently, so the caller sends each again ([`Self::route`], [`Self::batch`])
+	/// and then calls [`Self::relinked`], which forgets what it did not: a route filed
+	/// alike is updated in place, and one filed under another identity stays until then.
+	pub fn relink(&mut self, neighbor: N, link: Link, refile: bool) -> Result<(), Error> {
+		if link.cost == 0 {
+			return Err(Error::ZeroCost);
+		}
+		let session = self.sessions.get_mut(&neighbor).ok_or(Error::UnknownNeighbor)?;
+		session.link = link;
+		if refile {
+			session.stale = session.heard.clone();
+		}
+		self.ask(neighbor);
+		// The link's cost, priority, and marks rank and export every route through it.
+		let ids = self.ids();
+		self.update(ids, Vec::new(), None);
+		Ok(())
+	}
+
+	/// The caller filed `neighbor`'s routes again after [`Self::relink`]: forget each
+	/// it heard before and did not hear since.
+	pub fn relinked(&mut self, neighbor: N) {
+		let Some(session) = self.sessions.get_mut(&neighbor) else {
+			return;
+		};
+		let stale = std::mem::take(&mut session.stale);
+		let mut ids = BTreeSet::new();
+		for route in &stale {
+			ids.insert(route.0);
+			self.forget_heard(route, neighbor);
+			self.unwait(neighbor, route);
+		}
+		self.update(ids, Vec::new(), None);
 	}
 
 	/// `neighbor` sent GOAWAY at `now`. Every path through it ranks below every path
@@ -1327,12 +1523,13 @@ impl<N: Key, A: Item> Router<N, A> {
 	/// A route `from` sent for `named` under `prefix`: ROUTE_START or ROUTE_UPDATE,
 	/// ROUTE_HOLD, or ROUTE_END for `None`, filed as [`Self::admit`] says.
 	pub fn route(&mut self, from: N, named: Id, prefix: Path, reach: Option<Reach>) {
-		let Some((id, prefixes)) = self.admit(from, named, &prefix) else {
+		let Some(id) = self.admit(from, named, &prefix) else {
 			return;
 		};
-		for prefix in prefixes {
-			self.route_at(from, (named, id), prefix, reach.clone());
+		if let Some(session) = self.sessions.get_mut(&from) {
+			session.stale.remove(&(id, prefix.clone()));
 		}
+		self.route_at(from, (named, id), prefix, reach);
 	}
 
 	/// [`Router::route`] for the route filed as `id` at `prefix`.
@@ -1386,22 +1583,10 @@ impl<N: Key, A: Item> Router<N, A> {
 	/// A batch of claim changes for the route `from` sent for `named` under `prefix`,
 	/// closed by its floor.
 	pub fn batch(&mut self, from: N, named: Id, prefix: Path, changes: Vec<(Path, Option<A>)>, floor: Option<Rev>) {
-		let Some((id, prefixes)) = self.admit(from, named, &prefix) else {
+		let Some(id) = self.admit(from, named, &prefix) else {
 			return;
 		};
-		if let [only] = prefixes.as_slice()
-			&& *only == prefix
-		{
-			return self.batch_at(from, id, prefix, changes, floor);
-		}
-		// Narrowed to regions: each sees only the changes within it.
-		for prefix in prefixes {
-			let changes = (changes.iter())
-				.filter(|(claim, _)| within(claim, &prefix))
-				.cloned()
-				.collect();
-			self.batch_at(from, id, prefix, changes, floor);
-		}
+		self.batch_at(from, id, prefix, changes, floor);
 	}
 
 	/// [`Router::batch`] for the route filed as `id` at `prefix`.
@@ -1491,8 +1676,8 @@ impl<N: Key, A: Item> Router<N, A> {
 		}
 		let mut filed = Vec::new();
 		for moved in moved {
-			if let Some((id, prefixes)) = self.admit(from, moved.id, &moved.prefix) {
-				filed.extend(prefixes.into_iter().map(|prefix| ((id, prefix), moved.offer.clone())));
+			if let Some(id) = self.admit(from, moved.id, &moved.prefix) {
+				filed.push(((id, moved.prefix), moved.offer));
 			}
 		}
 		if scoped {
@@ -1508,7 +1693,15 @@ impl<N: Key, A: Item> Router<N, A> {
 	/// `from` sent the marker for this node's oldest edit in flight: the edit takes
 	/// effect, and the routes `from` sent are rekeyed as it rekeyed them ([`rekey`]).
 	/// A marker with no edit in flight is ignored.
+	#[cfg(any(test, feature = "fuzz"))]
 	pub fn edited(&mut self, from: N) {
+		self.edited_exact(from, &BTreeSet::new());
+	}
+
+	/// [`Self::edited`], where each route in `exact`, by the Node ID `from` names and
+	/// its prefix, lies at its own prefix as its ROUTE_START said, so it stays there
+	/// when the edit widens the prefix it was requested under.
+	pub fn edited_exact(&mut self, from: N, exact: &BTreeSet<RouteId>) {
 		let Some(session) = self.sessions.get_mut(&from) else {
 			return;
 		};
@@ -1531,10 +1724,18 @@ impl<N: Key, A: Item> Router<N, A> {
 			.iter()
 			.map(|key| (key.clone(), self.rx[key][&from].clone()))
 			.collect();
+		// Filed under this node's names for them.
+		let exact: BTreeSet<RouteId> = (keys.iter())
+			.filter(|(id, prefix)| {
+				let named = self.filed.get(&(*id, from)).copied().unwrap_or(*id);
+				exact.contains(&(named, prefix.clone()))
+			})
+			.cloned()
+			.collect();
 		for key in &keys {
 			self.forget_heard(key, from);
 		}
-		let rekeyed = rekey(&old, &new, heard, self.hop);
+		let rekeyed = rekey(&old, &new, heard, self.hop, &exact);
 		for (key, heard) in rekeyed.routes {
 			self.hear(key, from, heard);
 		}
@@ -1568,6 +1769,8 @@ impl<N: Key, A: Item> Router<N, A> {
 		}
 		// A carried route may already have changed what the reader sees.
 		self.refresh(ids);
+		// What this node wants may have moved on while the edit was in flight.
+		self.ask(from);
 	}
 
 	/// `from` sent the initial set of `prefix`, which this node asks it for.
@@ -1696,7 +1899,6 @@ impl<N: Key, A: Item> Router<N, A> {
 	}
 
 	/// The prefixes `neighbor` asks this node for.
-	#[cfg(test)]
 	pub fn answers(&self, neighbor: N) -> BTreeSet<Path> {
 		(self.answering.get(&neighbor)).map_or_else(BTreeSet::new, |answer| answer.prefixes.clone())
 	}
@@ -1909,42 +2111,24 @@ impl<N: Key, A: Item> Router<N, A> {
 	// --- Internals: what is heard ---
 
 	/// The key this node files `named` under when `from` sends it a route covering
-	/// `prefix`, and the prefixes it files the route at, or `None` when refused: a scoped
-	/// neighbour's identities are all qualified, one already qualified is refused, and
-	/// its route counts only within its regions, so one covering a region is filed at
-	/// that region and one outside them all is refused. One outside what this node asked
-	/// `from` for, as of the last marker, is refused too. A node also ignores routes to
-	/// its own identities.
-	fn admit(&self, from: N, named: Id, prefix: &Path) -> Option<(Id, Vec<Path>)> {
+	/// `prefix`, or `None` when refused: a scoped neighbour's identities are all
+	/// qualified, one already qualified is refused, and so is a route outside its
+	/// regions. One outside what this node asked `from` for, as of the last marker, is
+	/// refused too: this node asks a scoped neighbour for one prefix per region, so the
+	/// neighbour answers at the region. A node also ignores routes to its own identities.
+	fn admit(&self, from: N, named: Id, prefix: &Path) -> Option<Id> {
 		let session = self.sessions.get(&from)?;
-		let (id, prefixes) = match &session.link.scope {
+		let id = match &session.link.scope {
 			Some(scope) => {
-				if named & QUALIFIED != 0 {
+				if named & QUALIFIED != 0 || !scope.regions.iter().any(|region| within(prefix, region)) {
 					return None;
 				}
-				let prefixes: Vec<Path> = match scope.regions.iter().any(|region| within(prefix, region)) {
-					true => vec![prefix.clone()],
-					false => {
-						let inside: BTreeSet<&Path> =
-							(scope.regions.iter()).filter(|region| within(region, prefix)).collect();
-						// A region inside another is already covered by it.
-						(inside.iter())
-							.filter(|region| !inside.iter().any(|above| above != *region && within(region, above)))
-							.map(|region| (*region).clone())
-							.collect()
-					}
-				};
-				if prefixes.is_empty() {
-					return None;
-				}
-				((scope.qualify)(named) | QUALIFIED, prefixes)
+				(scope.qualify)(named) | QUALIFIED
 			}
-			None => (named, vec![prefix.clone()]),
+			None => named,
 		};
-		let prefixes: Vec<Path> = (prefixes.into_iter())
-			.filter(|prefix| ancestors(prefix).any(|above| session.asked.contains_key(&above)))
-			.collect();
-		(!prefixes.is_empty() && !self.origins.contains_key(&id)).then_some((id, prefixes))
+		let asked = ancestors(prefix).any(|above| session.asked.contains_key(&above));
+		(asked && !self.origins.contains_key(&id)).then_some(id)
 	}
 
 	/// Whether `path` holds a hop this node knows is dead.
@@ -3009,7 +3193,11 @@ impl<N: Key, A: Item> Router<N, A> {
 			let sent = self.answering[&peer].tx.get(&key);
 			let on = sent.is_some_and(|sent| sent.offer().is_some());
 			match want {
-				Want::Keep => {}
+				Want::Keep => {
+					if let Some(sent) = self.answering.get_mut(&peer).expect("answering").tx.get_mut(&key) {
+						sent.behind();
+					}
+				}
 				Want::Hold => {
 					if on && !sent.expect("sent").held() {
 						self.answering
@@ -3144,16 +3332,7 @@ impl<N: Key, A: Item> Router<N, A> {
 		let changes: Vec<(Path, Option<A>)> = match (sent, dirty.all || fresh) {
 			(Some(sent), false) => {
 				let old = &sent.active().expect("offered").view;
-				let mut claims: BTreeSet<&Path> = dirty.claims.iter().collect();
-				// A held stream may have missed withdrawals the local reader already
-				// consumed. When its region changes, include its own previous claims.
-				for region in &dirty.regions {
-					if let Some(region) = meet(prefix, region) {
-						claims.extend(below(&old.items, &region).map(|(claim, _)| claim));
-					}
-				}
-				let mut changes: Vec<(&Path, Option<A>)> = claims
-					.into_iter()
+				let mut changes: Vec<(&Path, Option<A>)> = (dirty.claims.iter())
 					.filter(|claim| within(claim, prefix) && *claim != prefix)
 					.map(|claim| (claim, view.items.get(claim).cloned()))
 					.collect();

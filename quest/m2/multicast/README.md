@@ -103,7 +103,7 @@ Settled:
    [route health](/quest/m3/route-health/README.md)). What a hold protected,
    a claim flickering while routes settle, becomes a reader's local debounce
    from unavailable to offline, never on the wire (narrowed 2026-11-16 by the
-   coordinator, pending the maintainer, in
+   coordinator and confirmed by the maintainer's merge pick of
    [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901): the route
    exchange between routing nodes keeps no timer, and an endpoint or scoped
    neighbour is told what the reader shows, so it hears a lost claim
@@ -111,7 +111,7 @@ Settled:
    27's doubt (rejected: keeping holds and doubt with the doubt tied to the
    idle timeout; a doubt lifted by an epoch the surviving node floods).
 5. ✅ **Three ways to find a warm copy are measured before one is picked**
-   ([warmth](/quest/m2/multicast/warmth.md)): joins that stop at the first
+   ([warmth](https://github.com/moq-dev/moq/pull/8903)): joins that stop at the first
    node carrying the Instance and nothing more; that plus a neighbour saying
    on each SUBSCRIBE answer whether it carries the Instance and at what cost;
    and carrying nodes advertising it. One constraint binds all three: a warm
@@ -124,7 +124,7 @@ Settled:
    sends only what the node originates, which ends a LAN peer publishing
    through a neighbour whose uplink survived; both switches).
 7. ✅ **The proof is mechanized, with TLA+ and sweeps beside it**
-   ([proof](/quest/m2/multicast/proof.md); rejected: a written proof with
+   ([proof](/rs/moq-net/verify/route-algebra/README.md); rejected: a written proof with
    property tests, the kind of argument that passed review here and failed
    for the echo, the deferred echo, and belief by distance; TLA+ and sweeps
    alone, which say nothing about an arbitrary topology).
@@ -151,7 +151,7 @@ flagged as costly, on
    uplink each, "the warm cost to a drone beats the cold cost to the CDN"
    and one uplink carries the broadcast (rejected: narrowing 8 to joins that
    stop at a carrier already on the path, which delivers neither case).
-   [Warmth](/quest/m2/multicast/warmth.md) measures both.
+   [Warmth](https://github.com/moq-dev/moq/pull/8903) measured both.
 10. ✅ **A moq-transport session is an endpoint, never transit.** Its wire
     has no path, chain, or Instance, so a moq-transport relay announcing
     back a name it learned from us cannot be told from a nearer publisher.
@@ -214,6 +214,22 @@ publishers, in route messages, unless noted):
       move). The route stands after the last claim leaves (rejected:
       withdrawing it, which races the claim's own end and would show a
       reader offline where the publisher ended cleanly).
+    - Order at equal rank, decided by the coordinator on 2026-11-16 while
+      the maintainer was away and confirmed that day by their merge pick of
+      [moq-dev/moq#8904](https://github.com/moq-dev/moq/pull/8904): a route with no
+      marked link on its path beats a marked one, then the next hop in use,
+      the shorter path, and the neighbour. A relay holding two routes of
+      equal rank, one learned over a marked link, had kept whichever came
+      first, so a neighbour behind its own marked link was reachable or not
+      by arrival order, and under a fixed order by the neighbours' keys
+      ([proof](/rs/moq-net/verify/route-algebra/README.md)). The mark only turns on along
+      a path, so extending a route still never improves it. A strictly
+      cheaper marked route still wins; an operator who wants the unmarked
+      side preferred raises its priority. On the bake-off it moved no
+      settled result, only failure transients on peered tiers: 220 to 225
+      for a home dying on 15 relays, 954 to 924 on 32 (rejected: leaving it
+      to arrival order; dropping the next hop in use, which moves a
+      subscription for an equal route; ranking the mark ahead of cost).
 14. ✅ **A silent death is left to keep-alives and the opt-in metadata
     standby** ([route health](/quest/m3/route-health/README.md)). No arm
     fixed it: readers behind a relay that dies unnoticed for 3 s stay unfed
@@ -250,7 +266,9 @@ a further departure is a decision to list in its PR:
   whose path names it, sends none to a neighbour already on the path, and
   refuses one at or below a session floor. Rank is not draining, then the
   lowest priority on the path, then the summed cost, each link adding at
-  least 1, so extending a route never improves it. A closed session and a
+  least 1, so extending a route never improves it. At equal rank a route
+  with no marked link beats a marked one, then the next hop in use, the
+  shorter path, and the neighbour (item 13). A closed session and a
   draining node are each named once per neighbour, and a closed session's
   message ends every route its sender offered through it. A node advertises
   once per burst of input.

@@ -68,10 +68,8 @@ Decided with the maintainer on 2026-10-17 (see the
   PADDING. Pad only on lite-07 and, on moq-transport, from draft-18 on. On
   lite-05 and lite-06 the peer resets every padding stream, so the estimate
   can never rise. Those sessions have no sender: refuse to pad
-  and keep `Report`. Update `drafts/draft-lcurley-moq-probe.md` if the sender changes
-  what it says (or the lite draft's Probe section, if
-  [the drafts cleanup](/quest/m2/drafts-retire.md) deleted that draft), and
-  run `just drafts check`.
+  and keep `Report`. Update the lite draft's Probe section if the sender changes
+  what it says, and run `just drafts check`.
 - A browser sender can't see whether it is app-limited; settle how to judge
   it from what it sends against the estimate.
 - Decided 2026-11-06 (maintainer, /quest-unblock): ✅ keep `setTarget` on
