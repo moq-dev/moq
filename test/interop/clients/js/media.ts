@@ -1070,11 +1070,11 @@ try {
 	if (!native) {
 		const interval = await player
 			.locator(SELECTORS.watch)
-			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.media?.join?.interval);
+			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.sync?.interval);
 		check(
 			interval === KEYFRAME_INTERVAL_MS,
 			"declared join interval",
-			() => `the catalog declares media.join.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
+			() => `the catalog declares sync.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
 		);
 	}
 

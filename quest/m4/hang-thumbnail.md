@@ -44,7 +44,7 @@ Recommendations for the PR:
 
 - A group's identity is its start timestamp, and the same identity must never
   carry different content. So each still is stamped with the time it was
-  sampled, on the root's `media.clock`, strictly after the previous still's
+  sampled, on the root's `sync.clock`, strictly after the previous still's
   (one tick later when two samplings collide), and never with the source
   frame's own timestamp: a static screen would give two refreshes the same
   frame and so the same start. The still shows the newest frame at that

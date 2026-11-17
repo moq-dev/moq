@@ -1495,7 +1495,7 @@ mod tests {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
 		let log = transport.log.clone();
 		let mut server = raw_session(transport.clone(), Version::Lite07, false, None);
-		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		server.goaway.send(crate::goaway::Goaway::new()).unwrap();
 		let _ = server.driver.poll(&kio::Waiter::noop());
 		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
 		transport.grant_credit();
@@ -1513,7 +1513,6 @@ mod tests {
 				matches!(
 					client
 						.goaway
-						.producer()
 						.send(crate::goaway::Goaway::redirect("https://other.example/")),
 					Err(Error::ProtocolViolation)
 				),
@@ -1523,7 +1522,6 @@ mod tests {
 			assert!(
 				server
 					.goaway
-					.producer()
 					.send(crate::goaway::Goaway::redirect("https://other.example/"))
 					.is_ok(),
 				"{version}"

@@ -135,9 +135,8 @@ types, and the vectors regenerate once):
   `broadcast::Consumer::track(name)` then `.subscribe(..)` in place of
   `subscribe`; rename `track::Consumer` to `track::Subscriber`; `name()` is
   the semantic name everywhere, with the physical one under another name;
-  `Frame.plaintext` becomes `payload`; group `close()` follows
-  [moq-net's group API](/quest/m2/group-api.md) to `finish()`. JS takes the
-  same names in the same PR. Error conversion into `moq_net::Error` stays
+  `Frame.plaintext` becomes `payload`. JS takes the same names in the same
+  PR. Error conversion into `moq_net::Error` stays
   with [the trait quest](/quest/m5/net-wrap/e2ee.md).
 - Profile: `Config.profile` is a `#[non_exhaustive]` enum with one variant,
   and a credential naming another profile is refused. Delete the draft's

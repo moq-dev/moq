@@ -240,8 +240,11 @@ pub(crate) fn within_any(path: &Path, regions: &BTreeSet<Path>) -> bool {
 /// map is looked up by.
 pub(crate) fn heads(path: &Path) -> impl Iterator<Item = &str> {
 	let s = path.as_str();
-	let ends = s.match_indices('/').map(|(end, _)| end);
-	(std::iter::once(0).chain(ends).chain((!s.is_empty()).then_some(s.len()))).map(move |end| &s[..end])
+	let ends = path.parts().scan(0, |end, part| {
+		*end += part.len() + usize::from(*end > 0);
+		Some(*end)
+	});
+	std::iter::once(0).chain(ends).map(move |end| &s[..end])
 }
 
 #[cfg(test)]

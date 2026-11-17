@@ -531,7 +531,7 @@ mod test {
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");
 		let mut media = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut listing = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();

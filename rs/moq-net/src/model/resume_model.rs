@@ -525,7 +525,7 @@ impl Model {
 				part.written += 1;
 			}
 			if part.written == frames(group) {
-				part.writer.take().unwrap().close().unwrap();
+				part.writer.take().unwrap().finish().unwrap();
 				publisher.complete.insert(group);
 			}
 			let most = publisher.written.entry(group).or_default();
@@ -541,7 +541,7 @@ impl Model {
 			for slot in 0..SLOTS {
 				while let Some(Poll::Ready(Ok(fill))) = self.instances[instance].routes[slot]
 					.as_ref()
-					.map(|copy| copy.fills.poll_requested_fill(&kio::Waiter::noop()))
+					.map(|copy| copy.fills.poll_requested_groups(&kio::Waiter::noop()))
 				{
 					filled = true;
 					let (start, end) = (fill.start().group, fill.end());

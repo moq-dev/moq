@@ -76,6 +76,14 @@ impl super::Item for Claim {
 			..self.clone()
 		}
 	}
+
+	fn above(&self) -> u64 {
+		self.above
+	}
+
+	fn epoch(&self) -> u64 {
+		self.epoch
+	}
 }
 
 /// A shown claim as the origin serves it through one live route.
@@ -1247,7 +1255,8 @@ impl Stream {
 			tag,
 			node: state.router.hop_of(self.key),
 		};
-		// A mount hears nothing, so it asks for nothing and files nothing.
+		// A mount hears nothing, so it asks for nothing and files nothing; it closes under
+		// its session's scope (`Router::disconnect`), which a permit may change.
 		let link = Link {
 			scope: None,
 			interest: BTreeSet::new(),

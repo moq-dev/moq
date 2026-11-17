@@ -38,7 +38,7 @@ typedef Frame = MoqVideoFrame;
 /// One encoded access unit from an [Encoder].
 typedef Packet = MoqVideoPacket;
 
-/// H.264 or H.265.
+/// Selects the video encoder codec. Build one with `Codec.h264()` or `Codec.h265()`.
 typedef Codec = MoqVideoCodec;
 
 /// A CPU pixel layout (I420 or RGBA).
@@ -162,7 +162,7 @@ final class DecodedFrame {
       _inner.pixels(format: format);
 
   /// The decoder's platform surface, or null when the frame is in CPU memory.
-  Surface? surface() => surfaceFrom(_inner.surface());
+  Surface? surface() => _inner.surface();
 
   /// Release the frame's surface back to the decoder.
   void dispose() => _inner.dispose();

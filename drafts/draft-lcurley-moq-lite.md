@@ -133,8 +133,9 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 ## Broadcast
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
-A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with `/` or contains two in a row; the empty path has no segments and prefixes every path.
+A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with a separator or contains two in a row; the empty path has no segments and prefixes every path.
 A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION, or in a claim refused (see [Refused Content](#refused-content)).
+A segment is the text between two `/` that no `\` escapes, so `a\/b` is one segment, one namespace field holding a `/`; every rule that counts, matches, or compares segments reads them this way, and a prefix never ends inside an escape.
 A continuous stream is named by an Instance, carried on its claims (see [ANNOUNCE_START](#announce-start)): a path and an Instance name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
 Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
 A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
@@ -1718,8 +1719,8 @@ See the [Expiration](#expiration) section for more information.
 **Subscriber Min Age**:
 The subscriber's target latency behind the live edge, in milliseconds plus one: the playout or jitter-buffer delay it holds.
 A value of `0` means the subscriber did not state one, which is distinct from a stated zero (`1`).
-It is a hint that asks for nothing: a publisher MAY use it, for example to start a cold join that far back, and MAY ignore it.
-A relay forwarding an aggregate of several subscriptions SHOULD carry the smallest stated value, and not stated when none is, so a subscription that did not state one never pulls the aggregate to zero.
+It decides where a Range joining at the live edge starts (see below).
+A relay forwarding an aggregate of several subscriptions SHOULD carry the largest stated value, and not stated when none is, so its own copy starts far enough back for the subscription that buffers most.
 
 **Range Count**:
 The number of Ranges that follow.
@@ -1746,12 +1747,16 @@ A Range resolves once: an update that leaves it live does not resolve it again.
 The number of the subscription's terms this message sets: 0 on SUBSCRIBE, and on each SUBSCRIBE_UPDATE a larger value than the one before it.
 A [SUBSCRIBE_DROP](#subscribe-drop) echoes the number in effect when its groups were given up, so the subscriber can tell a stale verdict on its current terms from one an update has since replaced.
 
-A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
+A `Start` is a floor, not a request; `Subscriber Max Age` and `Subscriber Min Age` are the only things that ask for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
 A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
 A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
+
+A Range joining at the live edge, with a `Start` of Relative 0 and an `End` of None, starts by a nonzero `Subscriber Min Age` instead: the publisher SHOULD start it at the newest group it holds that starts at or before the live edge minus the Min Age, at the oldest group it holds when none does, and never at a group Expiration has expired.
+The live edge is the newest frame timestamp the publisher holds; on a Track without a timescale, the Min Age is measured by when each group arrived at the publisher instead.
+The publisher starts from what it holds and never fetches to reach further back, so a subscriber is handed the buffer it will play, and no more, without waiting for it to fill.
 
 A Range covers whole Groups; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
 
@@ -2318,7 +2323,7 @@ A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCO
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
 ### Path Pattern {#path-pattern}
-A pattern is a set of broadcast paths, written as `/`-separated segments.
+A pattern is a set of broadcast paths, written as `/`-separated segments split as a path's are, so a literal names a segment holding a `/` by escaping it.
 Each segment is one of:
 
 - a literal, matching that segment exactly;
@@ -2473,7 +2478,7 @@ An application-specific payload.
 
 - Limited a broadcast path to 32 segments and 4,096 bytes.
 - A path never has an empty segment, so a leading, trailing, or doubled `/` is a PROTOCOL_VIOLATION rather than a second spelling of the same path.
-- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field.
+- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field. An escaped `/` never splits a segment, so one namespace field is one segment wherever segments are counted or matched.
 - Hid claims with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Replaced ANNOUNCE_OK Active Count with an ordered SYNCED event (0x4), marking the initial set of the prefix it names without retaining claims that end before delivery.
 - Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
@@ -2518,7 +2523,7 @@ An application-specific payload.
 
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, an absolute Group (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
-- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A relay forwards the smallest stated value.
+- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range joining at the latest group starts that far behind the live edge, from the groups the publisher holds. A relay forwards the largest stated value.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups: a read starting partway through a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.

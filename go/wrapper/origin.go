@@ -44,9 +44,9 @@ type RouteOptions struct {
 	// Cost is the static production cost: lower wins among routes covering the same prefix.
 	Cost uint64
 	// Instance is a stable stream to serve, or nil to mint a fresh one. Set it only for a
-	// publisher that continues its group sequences across restarts and raises Epoch on each,
+	// publisher that continues its group starts across restarts and raises Epoch on each,
 	// or to forward an announced route's stream as is: readers stitch every route of one
-	// instance together, so restarting the sequences under an old instance splices unrelated
+	// instance together, so restarting the starts under an old instance splices unrelated
 	// groups into their tracks.
 	Instance *Instance
 	// Epoch is which run of a stable Instance this is: only the highest is eligible. Ignored without one.
@@ -256,7 +256,7 @@ func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
 	return newRoute(inner), nil
 }
 
-// Serve answers with held content under the claim's continuous sequence space,
+// Serve answers with held content under the claim's continuous group starts,
 // without announcing an exact route. The broadcast remains the caller's to release.
 func (r *BroadcastRequest) Serve(broadcast *BroadcastConsumer) error {
 	return r.inner.Serve(broadcast.inner)
