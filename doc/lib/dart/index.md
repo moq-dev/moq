@@ -5,6 +5,8 @@ description: Futures and streams for Flutter via the moq package
 
 # Dart and Flutter
 
+**Experimental:** the API may change in any release, and nobody has run it on iOS or in a Flutter application yet.
+
 [![pub.dev](https://img.shields.io/pub/v/moq)](https://pub.dev/packages/moq)
 
 The [`moq`](https://pub.dev/packages/moq) package on pub.dev wraps the
@@ -166,7 +168,7 @@ shows which module holds each.
 - **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast: b, delay: Duration.zero)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `UnsupportedConfigMoqException` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `Subscription()`, passing no subscription, and `defaultSubscription()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. `Delay` defaults both bounds to zero: pass `max: null` for no subscriber limit, or `min: null` to leave the target latency unstated. Decoders take the same `Delay`.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call the producer's `abortUnwanted(errorCode:)` once `wantedChanged()` returns null rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `abortUnwanted(errorCode:)` on its producer (raw, media, audio, video, or JSON) once `wantedChanged()` returns null rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next null on a fresh `demand()`, since one that already returned null misses a subscriber that came and went.
 
 ## Runtime
 

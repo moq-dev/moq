@@ -4,6 +4,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
+use moq_net::Timestamp;
+
 use crate::e2ee::error::Result;
 use crate::e2ee::generation::Domain;
 use crate::e2ee::group;
@@ -31,18 +33,21 @@ impl Producer {
 		self.inner.name()
 	}
 
-	/// Start the next group at `start`, in the track's timescale, as
-	/// [`moq_net::track::Producer::append_group`] does. `start` must be above every start this
-	/// name allocated under the generation.
+	/// Start the next group at `start`, as [`moq_net::track::Producer::append_group`] does:
+	/// converted into the track's timescale, or [`Timestamp::unscaled`] at the group's key
+	/// on a scale-less track. The key must be above every start this name allocated under
+	/// the generation.
 	///
 	/// # Errors
 	///
 	/// [`Error::Reuse`](crate::e2ee::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::e2ee::Error::Identity) if
 	/// it exceeds `2^53-1`, or a net error.
-	pub fn append_group(&mut self, start: u64) -> Result<group::Producer> {
+	pub fn append_group(&mut self, start: Timestamp) -> Result<group::Producer> {
+		// Rescaled before allocating, so a refused start allocates nothing.
+		let start = self.inner.info().rescale(start)?;
 		let (_, inner) = self
 			.claim
-			.allocate(Some(start), |start| Ok(self.inner.append_group(start)?))?;
+			.allocate(Some(start.value()), |_| Ok(self.inner.append_group(start)?))?;
 		Ok(self.group(inner))
 	}
 

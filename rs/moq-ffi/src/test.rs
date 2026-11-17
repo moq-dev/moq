@@ -1997,6 +1997,221 @@ async fn abort_unwanted_keeps_a_late_reader() {
 	assert!(finished.abort_unwanted(7).unwrap());
 }
 
+/// Every typed producer ends an idle track with `abort_unwanted`, but keeps it for a reader that
+/// joined since, which reads what is written next; once that reader leaves the abort commits and
+/// the handle is closed.
+///
+/// The reader leaves before the publisher's watcher sees it arrive, so that watcher, still on
+/// null, never wakes: the publisher waits for the next null on a fresh `demand()` instead.
+async fn typed_abort_unwanted(
+	broadcast: &MoqBroadcastProducer,
+	demand: impl Fn() -> Arc<crate::demand::MoqTrackDemand>,
+	abort: impl Fn() -> Result<bool, MoqError>,
+	write: impl FnOnce(),
+) {
+	let watcher = demand();
+	let name = watcher.name();
+	kio::clock::timeout(TIMEOUT, watcher.until_unwanted())
+		.await
+		.expect("timed out waiting for the track to start unwanted")
+		.unwrap();
+
+	// A reader joins after the publisher saw nobody wanted the track.
+	let late = subscribe(broadcast, &name).await;
+	assert!(!abort().unwrap(), "{name} aborted under a reader");
+	write();
+	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {name}'s group"))
+		.unwrap();
+	assert!(group.is_some(), "{name} ended under a reader");
+
+	// The reader leaves before the publisher's watcher looks again.
+	drop(group);
+	late.cancel();
+	let fresh = demand();
+	kio::clock::timeout(TIMEOUT, fresh.until_unwanted())
+		.await
+		.expect("timed out waiting for the reader to leave")
+		.unwrap();
+	let stale = std::pin::pin!(watcher.wanted_changed());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(
+		stale.poll(&mut cx).is_pending(),
+		"{name}'s old watcher saw the reader come and go"
+	);
+	assert!(abort().unwrap(), "{name} kept with nobody reading");
+	assert!(matches!(abort(), Err(MoqError::Closed)), "{name} still open");
+}
+
+#[tokio::test]
+async fn typed_abort_unwanted_keeps_a_late_reader() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		named("media"),
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| media.demand().unwrap(),
+		|| media.abort_unwanted(7),
+		|| {
+			media
+				.write_frame(MoqFrame {
+					payload: b"opus frame".to_vec(),
+					timestamp: us(0),
+				})
+				.unwrap()
+		},
+	)
+	.await;
+	assert!(matches!(
+		media.write_frame(MoqFrame {
+			payload: b"opus frame".to_vec(),
+			timestamp: us(20_000)
+		}),
+		Err(MoqError::Closed)
+	));
+
+	let stream = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("stream"),
+		video_init(MoqVideoFormat::Avc3, Vec::new()),
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| stream.demand().unwrap(),
+		|| stream.abort_unwanted(7),
+		|| {
+			// A second keyframe delimits the first access unit.
+			let mut keyframe = h264_init();
+			keyframe.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+			stream.write(keyframe.repeat(2)).unwrap();
+		},
+	)
+	.await;
+
+	let audio = crate::audio::MoqAudioProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::audio::MoqAudioProducerOptions {
+			input: crate::audio::MoqAudioEncoderInput {
+				format: crate::audio::MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			},
+			output: crate::audio::MoqAudioEncoderOutput {
+				codec: crate::audio::MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration: Some(Duration::from_millis(20)),
+			},
+			track: Some("microphone".into()),
+			bandwidth: None,
+		},
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| audio.demand().unwrap(),
+		|| audio.abort_unwanted(7),
+		|| {
+			audio
+				.write(crate::audio::MoqAudioFrame {
+					timestamp: us(0),
+					data: vec![0; 960 * std::mem::size_of::<f32>()],
+				})
+				.unwrap()
+		},
+	)
+	.await;
+
+	let video = crate::video::MoqVideoProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::video::MoqVideoProducerOptions {
+			input: crate::video::MoqVideoEncoderInput {
+				format: crate::video::MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: crate::video::MoqVideoEncoderOutput {
+				codec: crate::video::MoqVideoCodec::h264(),
+				bitrate: None,
+				join: None,
+				kind: crate::video::MoqVideoEncoderKind::Software,
+			},
+			track: Some("camera".into()),
+			bandwidth: None,
+			lower: None,
+		},
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| video.demand().unwrap(),
+		|| video.abort_unwanted(7),
+		|| {
+			// A backend that pipelines readies an earlier frame's output.
+			for i in 0..5u64 {
+				video
+					.write(crate::video::MoqVideoFrame {
+						timestamp: us(i * 1_000_000 / 30),
+						data: vec![0x80; 320 * 240 * 4],
+					})
+					.unwrap();
+			}
+		},
+	)
+	.await;
+
+	let track = broadcast.publish_track("snapshot".into(), Some(timed_info())).unwrap();
+	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: true }).unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| snapshot.demand().unwrap(),
+		|| snapshot.abort_unwanted(7),
+		|| snapshot.update("1".into(), us(0)).unwrap(),
+	)
+	.await;
+
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
+	let log = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| log.demand().unwrap(),
+		|| log.abort_unwanted(7),
+		|| log.append("1".into(), us(0)).unwrap(),
+	)
+	.await;
+
+	let track = broadcast.publish_track("window".into(), Some(timed_info())).unwrap();
+	let window = MoqJsonWindowProducer::new(
+		&track,
+		MoqJsonWindowConfig {
+			checkpoint_records: None,
+		},
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| window.demand().unwrap(),
+		|| window.abort_unwanted(7),
+		|| window.push("1".into(), us(0)).unwrap(),
+	)
+	.await;
+}
+
 /// A datagram handler keeps its broadcast alive independently of the stream handler.
 #[tokio::test]
 async fn requested_datagrams_outlive_the_broadcast_handle() {
@@ -2605,7 +2820,7 @@ async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFram
 async fn media_group_decodes_arrival_order_groups() {
 	let (_broadcast, track, consumer) = legacy_track().await;
 
-	let mut first = track.append_group(0).unwrap();
+	let mut first = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut first, 1, 1_000_000, b"a");
 	let first_media = recv_media_group(&consumer).await;
 	assert_eq!(first_media.sequence(), 0);
@@ -2615,7 +2830,7 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert!(frame.keyframe);
 
 	// A newer group lands while the first is stalled mid-way.
-	let mut second = track.append_group(1).unwrap();
+	let mut second = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut second, 2, 1_040_000, b"c");
 	let second_media = recv_media_group(&consumer).await;
 	assert_eq!(second_media.sequence(), 1);
@@ -2633,8 +2848,8 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert_eq!(micros(frame.timestamp), 1_020_000);
 	assert!(!frame.keyframe);
 
-	first.close().unwrap();
-	second.close().unwrap();
+	first.finish().unwrap();
+	second.finish().unwrap();
 	assert!(next_media(&first_media).await.unwrap().is_none());
 	assert!(next_media(&second_media).await.unwrap().is_none());
 }
@@ -2644,10 +2859,10 @@ async fn media_group_decodes_arrival_order_groups() {
 #[tokio::test]
 async fn media_group_takes_over_an_unread_group() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut group, 1, 1_000_000, b"a");
 	write_legacy(&mut group, 2, 1_020_000, b"b");
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let raw = recv_raw_group(&consumer).await;
 	assert!(raw.read_frame().await.unwrap().is_some());
@@ -2660,7 +2875,7 @@ async fn media_group_takes_over_an_unread_group() {
 		"the refusal kept the raw handle"
 	);
 
-	let mut group = track.append_group(1).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut group, 3, 1_040_000, b"c");
 	let raw = recv_raw_group(&consumer).await;
 	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
@@ -2676,7 +2891,7 @@ async fn media_group_takes_over_an_unread_group() {
 #[tokio::test]
 async fn media_group_fails_loudly_on_bad_containers() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	// A truncated varint timestamp: the 2-byte form with only its first byte.
 	write_raw(&mut group, 1, bytes::Bytes::from_static(&[0x40]));
 
@@ -5517,13 +5732,13 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 		.unwrap();
 	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
 
-	let expired = track.append_group(0).unwrap();
+	let expired = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.
 	let read = spawn_parked(async move { consumer.read_frame().await }).await;
 	expired
 		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
 		.unwrap();
-	let mut later = track.append_group(1).unwrap();
+	let mut later = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 	later
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
 		.unwrap();

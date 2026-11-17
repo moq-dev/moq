@@ -106,6 +106,16 @@ class SnapshotProducer:
         """
         self._inner.update(json.dumps(value), timestamp._ffi())
 
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
+
     def finish(self) -> None:
         """Finish the track, closing any open group."""
         self._inner.finish()
@@ -128,6 +138,16 @@ class StreamProducer:
     def append(self, value: Any, timestamp: Timestamp) -> None:
         """Append one record to the log at ``timestamp`` on the broadcast clock."""
         self._inner.append(json.dumps(value), timestamp._ffi())
+
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish the track, closing the group."""
@@ -231,6 +251,16 @@ class WindowProducer:
         so every edit so far sits in a group no later frame extends.
         """
         self._inner.cut()
+
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""

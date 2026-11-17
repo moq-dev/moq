@@ -326,11 +326,14 @@ mod tests {
 		let mut alice = Viewer::new(&origin, "alice");
 		kio::clock::sleep(Duration::from_millis(100)).await;
 
-		let mut group = broken.track.append_group(1).unwrap();
+		let mut group = broken
+			.track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"not json".to_vec())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let Command::Left { viewer } = recv(&mut rx).await else {
 			panic!("the broken viewer did not leave");
 		};
@@ -354,7 +357,10 @@ mod tests {
 		kio::clock::sleep(Duration::from_millis(100)).await;
 
 		// The reader parks on this group's first frame, which never arrives.
-		let _stalled = viewer.track.append_group(1).unwrap();
+		let _stalled = viewer
+			.track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
+			.unwrap();
 		tokio::task::yield_now().await;
 		viewer.at = 1;
 		viewer.send(r#"{"type":"buttons","buttons":["a"]}"#);

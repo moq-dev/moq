@@ -5,21 +5,21 @@ description: WHIP and WHEP gateway between WebRTC and MoQ
 
 # WebRTC
 
-`moq import rtc` and `moq export rtc` bridge WebRTC using
+`moq import webrtc` and `moq export webrtc` bridge WebRTC using
 [WHIP](https://datatracker.ietf.org/doc/html/rfc9725) (publish) and WHEP
 (play) in either HTTP role, so existing WebRTC clients and services plug into
 MoQ broadcasts.
 
 | Command | Role | Media flow |
 | --- | --- | --- |
-| `import rtc --listen` | WHIP server | Browsers publish to you |
-| `import rtc --connect <url>` | WHEP client | Pull from a remote WebRTC source (a camera, an SFU) |
-| `export rtc --listen` | WHEP server | Serve a broadcast to WebRTC players |
-| `export rtc --connect <url>` | WHIP client | Push a broadcast to a remote WHIP endpoint |
+| `import webrtc --listen` | WHIP server | Browsers publish to you |
+| `import webrtc --connect <url>` | WHEP client | Pull from a remote WebRTC source (a camera, an SFU) |
+| `export webrtc --listen` | WHEP server | Serve a broadcast to WebRTC players |
+| `export webrtc --connect <url>` | WHIP client | Push a broadcast to a remote WHIP endpoint |
 
 ```bash
-moq --connect https://relay.example.com/anon --broadcast cam.hang import rtc --listen '[::]:8080'
-moq --connect https://relay.example.com/anon --broadcast cam.hang export rtc --listen '[::]:8080'
+moq --connect https://relay.example.com/anon --broadcast cam.hang import webrtc --listen '[::]:8080'
+moq --connect https://relay.example.com/anon --broadcast cam.hang export webrtc --listen '[::]:8080'
 ```
 
 Peers reach the broadcast at `http://host:8080/<broadcast>`. Opus, H.264,
@@ -40,7 +40,7 @@ reconnects while its stale session lingers replaces it at once.
 An export stays on the publisher it started with. A replacement publisher never
 reaches its session, so timestamps and codec state never reset mid-session.
 Once the original publisher leaves, the session ends with an error, and the
-player or `export rtc --connect` must reconnect to reach the replacement.
+player or `export webrtc --connect` must reconnect to reach the replacement.
 `--connect` runs until its session ends.
 
 Built on [str0m](https://github.com/algesten/str0m), with DTLS and SRTP on [rind](https://github.com/kixel-ai/rind); the library is

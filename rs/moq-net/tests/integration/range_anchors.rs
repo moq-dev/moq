@@ -63,7 +63,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	for key in (0..5).map(|second| second * 1000) {
 		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	let subscriber = produce_origin(2);
@@ -202,7 +202,7 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"x"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 
@@ -233,7 +233,7 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 	newest
 		.write_frame(moq_net::Timestamp::unscaled(newest.start), &b"x"[..])
 		.unwrap();
-	newest.close().unwrap();
+	newest.finish().unwrap();
 	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
 		.await
 		.expect("group timeout")

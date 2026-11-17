@@ -64,7 +64,7 @@ fn publish(node: &origin::Producer, path: &str, tag: &'static str) -> (origin::R
 		.unwrap();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	route.announce().unwrap();
 	(route, track)
 }

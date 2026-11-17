@@ -519,9 +519,8 @@ impl MeasurementClock {
 /// Append the next group on a [`timed`] track, one millisecond past its largest start or at
 /// 0 on an empty track, so groups keep the key order a counter would give them.
 fn append_next(track: &track::Producer) -> group::Producer {
-	track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
-		.unwrap()
+	let key = track.largest().map_or(0, |largest| largest.group + 1);
+	track.append_group(Timestamp::from_millis(key).unwrap()).unwrap()
 }
 
 /// Where a group on a [`timed`] track starts, as its frames' timestamp.
@@ -543,7 +542,7 @@ fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 	for _ in 0..frames {
 		group.write_frame(timestamp, payload.clone()).unwrap();
 	}
-	let group = group.close().unwrap();
+	let group = group.finish().unwrap();
 	group.start
 }
 
@@ -1192,7 +1191,7 @@ impl<B: Backend> Room<B> {
 			let group = writing.get_or_insert_with(|| append_next(&self.cluster.tracks[broadcast]));
 			group.write_frame(at(group), self.payload.clone()).unwrap();
 			if last {
-				writing.take().expect("written above").close().unwrap();
+				writing.take().expect("written above").finish().unwrap();
 			}
 		}
 		if last {
@@ -1485,13 +1484,12 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
 							for key in 0..shape.history as u64 {
-								let mut group = track.append_group(key).unwrap();
+								let start = Timestamp::from_millis(key).unwrap();
+								let mut group = track.append_group(start).unwrap();
 								for _ in 0..shape.group_frames {
-									group
-										.write_frame(Timestamp::from_millis(key).unwrap(), payload.clone())
-										.unwrap();
+									group.write_frame(start, payload.clone()).unwrap();
 								}
-								group.close().unwrap();
+								group.finish().unwrap();
 							}
 						}
 						cluster

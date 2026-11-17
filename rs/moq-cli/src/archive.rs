@@ -413,7 +413,7 @@ mod tests {
 			let track = broadcast.broadcast().create_track("video", info.clone()).unwrap();
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			broadcast.announce().unwrap();
 			instances.push(broadcast.instance());
 			broadcasts.push((broadcast, track));
@@ -502,7 +502,7 @@ mod tests {
 			let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _video = video.finish().unwrap();
 		let recording =

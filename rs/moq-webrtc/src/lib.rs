@@ -7,7 +7,7 @@
 //! | | RTP-in (ingest into MoQ) | RTP-out (egress from MoQ) |
 //! |---|---|---|
 //! | HTTP server | [`Server::publish_router`] (WHIP server) | [`Server::subscribe_router`] (WHEP server) |
-//! | HTTP client | [`Client::subscribe`] (WHEP client) | [`Client::publish`] (WHIP client) |
+//! | HTTP client | [`Client::pull`] (WHEP client) | [`Client::publish`] (WHIP client) |
 //!
 //! The two HTTP-client paths and the two HTTP-server paths share a single
 //! internal session driver and the same per-codec adapters; the per-direction
@@ -224,7 +224,7 @@ mod tests {
 		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
 		let fill = output.broadcast().clone();
-		let viewer = tokio::spawn(async move { client.subscribe(url, fill, Default::default()).await });
+		let viewer = tokio::spawn(async move { client.pull(url, fill, Default::default()).await });
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -334,7 +334,7 @@ mod tests {
 				async move {
 					let mut request =
 						server::whip::Request::new(&origin, moq_net::Path::from_static("ingested"), &offer);
-					request.rate = Some(rate);
+					request.ingest.rate = Some(rate);
 					let response = server::whip::accept(&server, request).await.unwrap();
 					let answer = response.answer.clone();
 					sessions.send(tokio::spawn(response.run())).await.unwrap();
@@ -547,7 +547,7 @@ mod tests {
 			.parse()
 			.expect("WHEP URL");
 		let fill = output.broadcast().clone();
-		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill, Default::default()).await });
+		let whep_client = tokio::spawn(async move { client.pull(whep, fill, Default::default()).await });
 		let (whep_id, whep_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")
