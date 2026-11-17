@@ -1136,12 +1136,7 @@ mod tests {
 				))
 				.unwrap();
 		}
-		let track = consumer
-			.track("audio")
-			.unwrap()
-			.subscribe(subscription)
-			.await
-			.unwrap();
+		let track = consumer.track("audio").unwrap().subscribe(subscription).await.unwrap();
 		let mut reader =
 			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
 		// One replay turn, read at once as a network subscriber is served: the group it wrote is
