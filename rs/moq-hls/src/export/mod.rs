@@ -2,7 +2,7 @@
 //!
 //! A [`Broadcaster`] subscribes to one broadcast's catalog and each rendition's media track,
 //! reading only each group's first frame timestamp, which the transport carries. Playlists and
-//! manifests are a pure function of those timestamps and the catalog's `media.join.interval`,
+//! manifests are a pure function of those timestamps and the catalog's `sync.interval`,
 //! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
 //! groups that segment holds from the relay cache and transmuxes them to CMAF. The media
 //! subscriptions that index each group count toward no stats session, so a source whose origin
@@ -265,10 +265,10 @@ impl Broadcaster {
 		self.renditions.poll_ready(waiter)
 	}
 
-	/// Ready once the [master playlist](Self::master_playlist) lists a video rendition, or at least
-	/// one rendition while no video rendition could still be listed. A player keeps the variants of
-	/// the first master it loads, so answer a master only once this is ready, or after a bounded
-	/// wait: how long is the caller's policy.
+	/// Ready once the [master playlist](Self::master_playlist) lists every video rendition that
+	/// could be listed, or at least one rendition while no video rendition could still be listed. A
+	/// player keeps the variants of the first master it loads, so answer a master only once this is
+	/// ready, or after a bounded wait: how long is the caller's policy.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let own = self.renditions.poll_advertised(waiter);
@@ -529,8 +529,8 @@ enum Role {
 	/// A root broadcast, following its catalog's includes when an HTTP server serves it.
 	Root(Option<Box<include::Producer>>),
 	/// A broadcast included in a root broadcast. Its renditions take the root catalog's
-	/// `media`, so they share the root's timeline and grid whatever the include declares.
-	Include(kio::Consumer<hang::catalog::Media>),
+	/// `sync`, so they share the root's timeline and grid whatever the include declares.
+	Include(kio::Consumer<hang::catalog::Timeline>),
 }
 
 /// Follows a broadcast's catalog into its rendition set, as a driver task.
@@ -602,7 +602,7 @@ impl WatchCatalog {
 			}));
 		}
 		if let (Role::Include(root), Some(catalog)) = (&self.role, &latest)
-			&& let Poll::Ready(Ok(())) = root.poll(waiter, |media| match **media != catalog.media {
+			&& let Poll::Ready(Ok(())) = root.poll(waiter, |sync| match **sync != catalog.sync {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}) {
@@ -616,7 +616,7 @@ impl WatchCatalog {
 		match &self.role {
 			Role::Root(Some(include)) => include.sync(&self.source, &catalog),
 			Role::Root(None) => {}
-			Role::Include(root) => catalog.media = *root.read(),
+			Role::Include(root) => catalog.sync = *root.read(),
 		}
 		self.renditions.sync(&self.source, &catalog);
 		if let (Role::Include(_), Watch::Reading { latest, .. }) = (&self.role, &mut self.state) {
@@ -730,7 +730,7 @@ mod tests {
 	/// An empty catalog declaring a two-second join interval.
 	fn joined() -> moq_mux::catalog::hang::Catalog {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.sync.interval = Some(INTERVAL);
 		catalog
 	}
 
@@ -975,13 +975,13 @@ mod tests {
 		let renditions = renditions::Producer::spawned(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		let mut catalog = catalog_with_both();
-		catalog.media.join = None;
+		catalog.sync.interval = None;
 		renditions.sync(&upstream, &catalog);
 		assert!(renditions.get(Kind::Video, "video0").is_none());
 		assert!(renditions.get(Kind::Audio, "audio0").is_none());
 		assert!(next_event(&mut cursor).await.is_none(), "nothing is announced early");
 
-		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.sync.interval = Some(INTERVAL);
 		renditions.sync(&upstream, &catalog);
 		let mut added = 0;
 		while let Some(event) = next_event(&mut cursor).await {
@@ -1273,7 +1273,7 @@ mod tests {
 		let all: Vec<_> = refused.into_iter().chain([(Kind::Video, "video0")]).collect();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for &(kind, name) in &all {
 					match kind {
 						Kind::Video => {
@@ -1375,20 +1375,23 @@ mod tests {
 		drop((media, catalog, broadcast));
 	}
 
-	/// Audio lists a segment before video closes its first GOP. A player keeps the variants of the
-	/// first master it loads, so the master waits for video instead of answering audio alone.
+	/// Audio lists a segment before video closes its first GOP, and one rung of a ladder lists
+	/// before another. A player keeps the variants of the first master it loads, so the master
+	/// waits for every video rendition instead of answering audio, or one rung, alone.
 	#[tokio::test(start_paused = true)]
-	async fn the_master_waits_for_video_while_audio_lists_first() {
+	async fn the_master_waits_for_every_video_rendition() {
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut video = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut video0 = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		let mut video1 = video(&catalog, broadcast.broadcast(), "video1", video_config());
 		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
-		// Video's first GOP is still open, while audio has cut segments 0 and 1.
-		video.write(vp8_frame(0, true)).unwrap();
+		// Video's first GOPs are still open, while audio has cut segments 0 and 1.
+		video0.write(vp8_frame(0, true)).unwrap();
+		video1.write(vp8_frame(0, true)).unwrap();
 		for micros in [0, 2_000_000, 4_000_000] {
 			let keyframe = audio.needs_keyframe();
 			audio.write(frame(micros, keyframe)).unwrap();
@@ -1410,16 +1413,31 @@ mod tests {
 			"video can still be listed, so audio alone does not answer"
 		);
 
-		video.write(vp8_frame(2_000_000, true)).unwrap();
+		video0.write(vp8_frame(2_000_000, true)).unwrap();
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !broadcaster.rendition(Kind::Video, "video0").unwrap().is_advertised() {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("video0 lists a segment");
+		kio::clock::sleep(Duration::from_millis(10)).await;
+		assert!(
+			!waiting.is_finished(),
+			"video1 can still be listed, so one rung alone does not answer"
+		);
+
+		video1.write(vp8_frame(2_000_000, true)).unwrap();
 		kio::clock::timeout(Duration::from_secs(5), waiting)
 			.await
-			.expect("video listing a segment wakes the master")
+			.expect("the last rung listing a segment wakes the master")
 			.unwrap();
 		let master = broadcaster.master_playlist(None);
 		assert!(master.contains("/video/video0/media.m3u8"), "{master}");
+		assert!(master.contains("/video/video1/media.m3u8"), "{master}");
 		assert!(master.contains("/audio/audio0/media.m3u8"), "{master}");
 
-		drop((video, audio, catalog, broadcast));
+		drop((video0, video1, audio, catalog, broadcast));
 	}
 
 	/// Publish a VP8 rendition with three GOPs, 2s apart, so segments 0 and 1 are listable.
@@ -1490,7 +1508,7 @@ mod tests {
 		for group in 2..5 {
 			let mut writing = media.create_group(group.into()).unwrap();
 			write_keyframe(&mut writing, group);
-			writing.close().unwrap();
+			writing.finish().unwrap();
 		}
 		until_listed(&rendition, 4).await;
 		let segment = rendition
@@ -1525,7 +1543,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for name in ["video0", "video1"] {
 					let config = if name == inline { inline_vp8() } else { video_config() };
 					catalog.video.renditions.insert(name.into(), config);
@@ -1566,7 +1584,7 @@ mod tests {
 		write_keyframe(&mut open, sequence);
 		let mut next = media.create_group((sequence + 1).into()).unwrap();
 		write_keyframe(&mut next, sequence + 1);
-		next.close().unwrap();
+		next.finish().unwrap();
 		(media, open)
 	}
 
@@ -1615,7 +1633,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
@@ -1650,7 +1668,7 @@ mod tests {
 		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
 	}
@@ -1666,7 +1684,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for name in ["video0", "video1"] {
 					let config = if name == "video1" { inline_vp8() } else { video_config() };
 					catalog.video.renditions.insert(name.into(), config);
@@ -1690,7 +1708,7 @@ mod tests {
 		failed(&broken).await;
 		assert!(broadcaster.manifest(None).unwrap().is_none());
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(manifest) = broadcaster.manifest(None).unwrap() {
@@ -1798,7 +1816,7 @@ mod tests {
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 		assert!(!manifest.contains("type=\"static\""), "{manifest}");
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("type=\"static\""), "{manifest}");
 	}
@@ -1826,7 +1844,7 @@ mod tests {
 				.is_err(),
 			"resolved without a listable video"
 		);
-		open.close().unwrap();
+		open.finish().unwrap();
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("video0 is listable once its init is built");
@@ -1854,7 +1872,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
@@ -1872,7 +1890,7 @@ mod tests {
 		for sequence in 0..4 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
@@ -2524,7 +2542,7 @@ mod tests {
 		);
 
 		import.decode(&fragments).unwrap();
-		let anchored = catalog.snapshot().media.clock.expect("the catalog advertises a clock");
+		let anchored = catalog.snapshot().sync.clock.expect("the catalog advertises a clock");
 
 		kio::clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
@@ -3625,7 +3643,7 @@ mod tests {
 				.write_to(&mut group)
 				.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		/// Write group `sequence` at `pts_ms` with a single keyframe.
@@ -3649,7 +3667,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		/// Write group `sequence` at `2 * sequence` seconds: one GOP per grid line.
@@ -3708,7 +3726,7 @@ mod tests {
 		/// [`with`](Self::with), on a join interval of `interval`.
 		fn joined(video: &[&str], audio: &[&str], interval: Duration) -> Self {
 			let mut catalog = joined();
-			catalog.media.join = hang::catalog::Join::new(interval);
+			catalog.sync.interval = Some(interval);
 			for name in video {
 				let config = video_config();
 				catalog.video.renditions.insert(name.to_string(), config);
@@ -3923,7 +3941,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for name in ["video0", "video1"] {
 					catalog.video.renditions.insert(name.into(), video_config());
 				}
@@ -3994,6 +4012,71 @@ mod tests {
 		test.broadcast.close();
 		test.failed("video0").await;
 		assert!(test.drain_failed("video0").await.is_empty());
+	}
+
+	// A live segment lists once a frame of the group after it passes the next line, not once the
+	// group after that starts: off the grid, that is a whole GOP sooner.
+	#[tokio::test(start_paused = true)]
+	async fn a_segment_lists_once_the_next_group_passes_its_line() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut video0 = test.publish("video0");
+		let frame = |group: &mut moq_net::group::Producer, pts_ms: u64| {
+			let frame = vp8_frame(pts_ms * 1_000, false);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(group)
+			.unwrap();
+		};
+		// Group 0 holds line 2s, so it is segment 1; group 1 may still end before line 4s.
+		video0.at(0, 500);
+		let mut next = video0.open(1, 2_500);
+		frame(&mut next, 3_900);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			test.rendition("video0").snapshot().segments.is_empty(),
+			"group 1 may still end before 4s and join segment 1"
+		);
+
+		frame(&mut next, 4_100);
+		let snapshot = test.listed("video0", 1).await;
+		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
+		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
+		drop(next);
+
+		// A CMAF group carried whole in one fragment passes the line in its first frame.
+		let muxer = moq_mux::container::fmp4::Muxer::video(&video_config()).unwrap();
+		let mut config = video_config();
+		config.container = hang::catalog::Container::Cmaf {
+			init: muxer.init().unwrap().expect("a VP8 init from the coded size"),
+		};
+		let mut catalog = joined();
+		catalog.sync.interval = Some(INTERVAL);
+		catalog.video.renditions.insert("video0".to_string(), config);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let test = Groups {
+			renditions: Groups::export(&broadcast, &catalog),
+			broadcast,
+			catalog,
+		};
+		let track = test.broadcast.create_track("video0", timed()).unwrap();
+		// Samples 100ms apart from `pts_ms` up to `last_ms`, in one fragment.
+		let fragment = |sequence: u64, pts_ms: u64, last_ms: u64| {
+			let frames: Vec<_> = (pts_ms..=last_ms)
+				.step_by(100)
+				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
+				.collect();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
+			group.write_frame(frames[0].timestamp, bytes).unwrap();
+			group.finish().unwrap();
+		};
+		fragment(0, 500, 2_400);
+		fragment(1, 2_500, 4_400);
+		let snapshot = test.listed("video0", 1).await;
+		let listed: Vec<_> = snapshot.segments.iter().map(|s| (s.segment, s.duration)).collect();
+		assert_eq!(listed, [(1, Duration::from_millis(2_000))], "group 2 never started");
 	}
 
 	// A recording refuses a listed segment whose media is gone, but reports a grid slot the
@@ -4571,7 +4654,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		media.at(cap + 1, 2_000);
 		media.at(cap + 2, 4_000);
@@ -4705,7 +4788,7 @@ mod tests {
 		// The interval is fixed for a broadcast instance; should it change anyway, every rendition
 		// is rebuilt on the new grid, keeping its playlist URI's target.
 		let original = test.rendition("video0");
-		test.catalog.media.join = hang::catalog::Join::new(Duration::from_secs(3));
+		test.catalog.sync.interval = Some(Duration::from_secs(3));
 		test.sync();
 		let replacement = test.rendition("video0");
 		assert!(!Arc::ptr_eq(&original, &replacement), "a new interval rebuilds");

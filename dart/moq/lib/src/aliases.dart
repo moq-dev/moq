@@ -3,11 +3,12 @@ import 'package:moq_ffi/moq_ffi.dart';
 // Re-export the UniFFI types without their `Moq` prefix, so consumers spell
 // them the way the Rust API does. These are type aliases, not wrappers: the
 // values are the exact same objects, so every generated method applies
-// unchanged and the prefixed names stay valid. `Delay`, `Subscription`, and
-// `Timestamp` are extension types instead, which are the same objects too but
-// add constructors: an omitted delay bound is the zero moq-net defaults to,
-// where the generated record leaves it null, and a timestamp is built either
-// scaled or [Timestamp.unscaled], as in Rust.
+// unchanged and the prefixed names stay valid. `Delay`, `Subscription`,
+// `TrackInfo`, and `Timestamp` are extension types instead, which are the same
+// objects too but add constructors: an omitted delay bound or max age is the
+// zero moq-net defaults to, where the generated record leaves it null (no
+// limit), and a timestamp is built either scaled or [Timestamp.unscaled], as in
+// Rust.
 //
 // Four types are deliberately not aliased, because the unprefixed name is
 // already taken where this package is used:
@@ -38,7 +39,9 @@ typedef Request = MoqRequest;
 /// The network transport carrying an incoming session.
 typedef Transport = MoqTransport;
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control family for a QUIC connection. Build one with
+/// `CongestionControl.delay()`, `.loss()`, or `.none()`; a new algorithm joins as
+/// a new constructor.
 typedef CongestionControl = MoqCongestionControl;
 
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
@@ -74,7 +77,7 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 typedef Following = MoqFollowing;
 
 /// The read-only facts on a received route: a static cost, the stream's instance, and
-/// its informational `rtt` to the origin node.
+/// whether a usable path reaches it.
 typedef RouteInfo = MoqRouteInfo;
 
 /// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.
@@ -133,7 +136,7 @@ typedef TrackRequests = MoqTrackRequests;
 /// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
 typedef TrackDemand = MoqTrackDemand;
 
-/// The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
+/// The read side of a raw track: yields groups in start order, skipping ahead if it falls behind.
 typedef TrackConsumer = MoqTrackConsumer;
 
 /// A run of groups readers miss: accept each group you have and drop the rest.
@@ -208,14 +211,36 @@ typedef Anchor = MoqAnchor;
 /// Which pending group the publisher sends first.
 typedef Order = MoqOrder;
 
-/// A location within a track: a group sequence and a frame index in it.
+/// A location within a track: a group start and a frame index in it.
 typedef Position = MoqPosition;
 
-/// Options for fetching one past group by sequence.
+/// Options for fetching one past group by start.
 typedef FetchGroupOptions = MoqFetchGroupOptions;
 
+/// How a track's frames are compressed on the wire: `Compression.deflate()`, or null in
+/// [TrackInfo] for none. Compare a received one by `name()`.
+typedef Compression = MoqCompression;
+
 /// Delivery settings for a raw track: priority, ordering, latency budget, and timescale.
-typedef TrackInfo = MoqTrackInfo;
+extension type TrackInfo._(MoqTrackInfo _info) implements MoqTrackInfo {
+  /// `maxAge` is how long a superseded group stays fresh, defaulting to zero, moq-net's
+  /// default, which serves only the live edge. An explicit null sets no publisher limit.
+  TrackInfo({
+    int priority = 0,
+    Duration? maxAge = Duration.zero,
+    int? refresh,
+    int? timescale,
+    MoqCompression? compression,
+  }) : this._(
+         MoqTrackInfo(
+           priority: priority,
+           maxAge: maxAge,
+           refresh: refresh,
+           timescale: timescale,
+           compression: compression,
+         ),
+       );
+}
 
 /// Divides one connection's send estimate among the tracks sharing it.
 typedef Allocator = MoqAllocator;
@@ -273,8 +298,11 @@ typedef ConnectionPhaseClosed = ClosedMoqConnectionPhase;
 typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
-/// It applies only once a session has been established: a first dial that
-/// reaches no session ends the connection with its error rather than retrying.
+/// A null field keeps its default, zero means zero (retry at once, or give up
+/// at the first failure), and `maxUnlimited` lifts the ceiling. Until a session
+/// has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// session, such as a refused credential, ends the connection with its error
+/// rather than retrying.
 typedef Backoff = MoqBackoff;
 
 /// Whether a protocol code is from the session or stream registry.

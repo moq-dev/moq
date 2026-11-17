@@ -9,7 +9,6 @@ import { Parameters } from "./ietf/parameters.ts";
 import { PublishDone } from "./ietf/publish.ts";
 import { RequestError } from "./ietf/request.ts";
 import { Version } from "./ietf/version.ts";
-import { Datagram } from "./lite/datagram.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { frameDecoder, Group as LiteGroup } from "./lite/group.ts";
 import * as LiteMessage from "./lite/message.ts";
@@ -120,18 +119,13 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 			}),
 		);
 		await expect(RequestError.decode(new Reader(undefined, retry, version), version)).rejects.toThrow(RangeError);
-		const params = await Parameters.decode(
-			new Reader(undefined, fields(version, 1, 0x0a, UNSAFE), version),
-			version,
-		);
-		expect(() => params.fillTimeout).toThrow(RangeError);
-		expect(() => Filter.decodeFill(fields(version, 1, 0x0a, UNSAFE), version)).toThrow(RangeError);
-		const safe = new Parameters();
-		safe.fillTimeout = Number.MAX_SAFE_INTEGER;
-		const bytes = await Writer.collect(version, (w) => safe.encode(w, version));
-		expect((await Parameters.decode(new Reader(undefined, bytes, version), version)).fillTimeout).toBe(
-			Number.MAX_SAFE_INTEGER,
-		);
+	});
+
+	// FILL_TIMEOUT is ignored, so the largest varint is as welcome as any other.
+	test(`${version}: FILL_TIMEOUT is accepted and ignored at the varint maximum`, async () => {
+		const max = (1n << 62n) - 1n;
+		await Parameters.decode(new Reader(undefined, fields(version, 1, 0x0a, max), version), version);
+		expect(Filter.decodeFill(fields(version, 1, 0x0a, max), version)).toEqual({ rangeFilters: false });
 	});
 
 	test(`${version}: object indices, timestamps, lengths and statuses refuse unsafe numbers`, () => {
@@ -154,9 +148,9 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				await Writer.collect(version, (w) => LiteMessage.encode(w, (w) => w.write(body))),
 				version,
 			);
-		await expect(LiteGroup.decode(await framed(fields(version, 0, 0, UNSAFE)), version)).rejects.toThrow(
-			RangeError,
-		);
+		// Lite-07 carries the Previous Start ahead of the Frame Start.
+		const group = version === Lite.DRAFT_07 ? fields(version, 0, 0, 0, UNSAFE) : fields(version, 0, 0, UNSAFE);
+		await expect(LiteGroup.decode(await framed(group), version)).rejects.toThrow(RangeError);
 		if (version === Lite.DRAFT_07)
 			await expect(SubscribeStart.decode(await framed(fields(version, 1, UNSAFE)), version)).rejects.toThrow(
 				RangeError,
@@ -187,8 +181,6 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 		);
 		const decode = frameDecoder({ scale: Timescale.NANO });
 		expect(() => decode(new Cursor(fields(version, UNSAFE << 1n, 0), version))).toThrow(RangeError);
-		const datagram = fields(version, ...(version === Lite.DRAFT_07 ? [0] : []), 0, 0, UNSAFE);
-		await expect(Datagram.decode(datagram, version, () => ({ timed: true }))).rejects.toThrow(RangeError);
 	});
 }
 
@@ -201,5 +193,5 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 test("time anchors convert at the declared scale without losing an aligned unit", () => {
 	expect(
 		toWireRanges([{ start: { time: new Timestamp(4611686021000000, Timescale.NANO) } }], Timescale.MILLI),
-	).toEqual([{ start: { time: 4611686021 } }]);
+	).toEqual([{ start: { time: 4611686021n } }]);
 });

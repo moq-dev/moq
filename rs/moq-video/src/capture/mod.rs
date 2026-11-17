@@ -200,6 +200,7 @@ impl Camera {
 
 /// A capture mode a source reports: one frame size and its exact frame rates.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Mode {
 	/// Frame width in pixels.
 	pub width: u32,
@@ -300,9 +301,9 @@ pub struct Config {
 	pub height: Option<u32>,
 	/// Preferred exact frame rate.
 	pub framerate: Option<FrameRate>,
-	/// Draw the mouse cursor into captured frames. Screen/window/app sources
-	/// only; ignored by cameras. Defaults to `true`.
-	pub cursor: bool,
+	/// What happens to the mouse cursor. Screen/window/app sources only;
+	/// ignored by cameras. Defaults to [`Cursor::Drawn`].
+	pub cursor: Cursor,
 	/// Where captured pixels live. Defaults to [`Output::Native`]: whatever the
 	/// platform captures into, a GPU surface or CPU pixels.
 	pub output: Output,
@@ -315,8 +316,29 @@ impl Default for Config {
 			width: None,
 			height: None,
 			framerate: None,
-			cursor: true,
+			cursor: Cursor::default(),
 			output: Output::Native,
+		}
+	}
+}
+
+/// What a screen, window, or app capture does with the mouse cursor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Cursor {
+	/// Drawn into each frame where it sits.
+	#[default]
+	Drawn,
+	/// Left out of the frames.
+	Hidden,
+}
+
+impl Cursor {
+	/// Whether the platform should draw the cursor into the frame.
+	pub(crate) fn drawn(self) -> bool {
+		match self {
+			Self::Drawn => true,
+			Self::Hidden => false,
 		}
 	}
 }

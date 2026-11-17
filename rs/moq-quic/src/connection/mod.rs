@@ -57,7 +57,6 @@ use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
 mod mtud;
-#[cfg(feature = "mux")]
 pub mod mux;
 
 mod packet_builder;
@@ -1647,9 +1646,9 @@ impl Connection {
 	/// fills the inflight it allows
 	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
-	/// measures the path. A controller that paces its own probe cluster
-	/// ([`Controller::paces_probe`]) gets it filled at its pace instead, and may aim its probes at
-	/// the target ([`Controller::on_probe_target`]). Duplicates count against congestion control,
+	/// measures the path. A controller that paces its own probe cluster, which only the `lab`
+	/// feature's GoogCC does, gets it filled at its pace instead, and may aim its probes at the
+	/// target. Duplicates count against congestion control,
 	/// as [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
 	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
 	/// target is retried at once. A controller that never probes ([`Controller::probes`])
@@ -1659,9 +1658,9 @@ impl Connection {
 			return;
 		}
 		self.bandwidth_probe.set_target(bytes_per_second);
-		self.path.congestion.on_probe_target(bytes_per_second);
+		bandwidth_probe::report_target(&mut *self.path.congestion, bytes_per_second);
 		if let Some((_, prev)) = &mut self.prev_path {
-			prev.congestion.on_probe_target(bytes_per_second);
+			bandwidth_probe::report_target(&mut *prev.congestion, bytes_per_second);
 		}
 	}
 
@@ -1678,7 +1677,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
 		self.path.reset(now, self.rng.random(), &self.config);
-		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *self.path.congestion, self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
 			for info in self.spaces[space].sent_packets.values_mut() {
@@ -1869,7 +1868,11 @@ impl Connection {
 			}
 		}
 
-		// After the RTT update, as RFC 9002's OnAckReceived orders it.
+		// Must be called before crypto/pto_count are clobbered. The losses this ACK reveals reach
+		// the controller before the ACK itself, as RFC 9002's OnAckReceived orders them.
+		self.detect_lost_packets(now, space, true);
+
+		// After the RTT update and loss detection, as RFC 9002's OnAckReceived orders it.
 		self.path.congestion.on_ack(congestion::Ack {
 			now,
 			packets: &acked,
@@ -1878,9 +1881,6 @@ impl Connection {
 			rtt: self.path.rtt.get(),
 		});
 		self.acked = acked;
-
-		// Must be called before crypto/pto_count are clobbered
-		self.detect_lost_packets(now, space, true);
 
 		if self.peer_completed_address_validation() {
 			self.pto_count = 0;
@@ -2083,7 +2083,7 @@ impl Connection {
 	fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
 		let mut lost_packets = Vec::<u64>::new();
 		let mut lost_mtu_probe = None;
-		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe();
+		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe(pn_space);
 		let rtt = self.path.rtt.conservative();
 		let loss_delay = cmp::max(rtt.mul_f32(self.config.time_threshold), TIMER_GRANULARITY);
 
@@ -2166,14 +2166,10 @@ impl Connection {
 					.congestion
 					.filter(|_| info.path_generation == self.path.generation())
 				{
-					let new_burst = packet
-						.checked_sub(1)
-						.is_none_or(|prev| self.spaces[pn_space].lost_packets.get(prev).is_none());
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
 						packet: state,
-						new_burst,
 					});
 				}
 				self.qlog
@@ -2187,7 +2183,7 @@ impl Connection {
 					}
 				}
 				self.spaces[pn_space].pending |= info.retransmits;
-				self.path.mtud.on_non_probe_lost(packet, info.size);
+				self.path.mtud.on_non_probe_lost(pn_space, packet, info.size);
 
 				self.spaces[pn_space].lost_packets.insert(
 					packet,
@@ -3312,10 +3308,15 @@ impl Connection {
 						}
 					};
 
-					if self.side.is_server() && self.rem_cids.active_seq() == 0 {
-						// We're a server still using the initial remote CID for the client, so
-						// let's switch immediately to enable clientside stateless resets.
-						self.update_rem_cid();
+					// A server still on the client's initial CID switches at once, to enable
+					// client-side stateless resets, but only to sequence 1: jumping to a later
+					// one would retire the CIDs before it, still in flight, without using them.
+					if self.side.is_server()
+						&& self.rem_cids.active_seq() == 0
+						&& let Some((reset_token, retired)) = self.rem_cids.next_in_order()
+					{
+						self.spaces[SpaceId::Data].pending.retire_cids.extend(retired);
+						self.set_reset_token(reset_token);
 					}
 				}
 				Frame::NewToken(NewToken { token }) => {
@@ -3453,7 +3454,7 @@ impl Connection {
 				&self.config,
 			)
 		};
-		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *new_path.congestion, self.bandwidth_probe.target());
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 

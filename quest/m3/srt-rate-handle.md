@@ -52,11 +52,14 @@ enforcement needs it and nobody owned it.
   included, stays under the cap is untouched; under the cap nothing changes.
 
 Public API: a rate handle and a rate-limit close reason on moq-srt's server.
-The handle is `moq_net::bandwidth::Limit`, the one WHIP takes in
-`whip::Request.rate` (2026-11-07, maintainer, /quest-plan from the API shape
-audit), not a moq-srt copy. It reaches a server ingest as a field on
-`moq_mux::Ingest` or a new `#[non_exhaustive]` request, and a dial-out push
-as a field on `moq_srt::dial::Publish`, never as a `with_*` setter. Wire: none.
+The handle is `moq_net::bandwidth::Limit`, the one WHIP enforces
+(2026-11-07, maintainer, /quest-plan from the API shape audit), not a
+moq-srt copy. It reaches an ingest, `Publish::accept` or `Client::pull`, as
+the `rate` field of `moq_mux::Ingest`, which WHIP already reads (2026-11-16,
+maintainer, /quest-plan of the pre-cut audit), so this quest enforces a
+field that already exists. The egress cap is a field on `moq_srt::Export`,
+which both `Play::accept` and a dial-out `Client::publish` take, never a
+`with_*` setter. Wire: none.
 
 ## Required
 

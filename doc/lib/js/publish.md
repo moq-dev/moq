@@ -32,7 +32,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Stop sending audio, or stop publishing video. A muted rendition stays in the catalog and its listeners stay subscribed, so the next word reaches them at once, as push-to-talk needs; they play the pause as comfort noise. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
-| `capture` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
+| `idle` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -62,7 +62,7 @@ busy, and the target bitrate. Its `transport` carries only the PROBE round-trip
 time, since browsers report no usable WebTransport statistics. The encoders'
 `out.stats` and the stats panel read the same counters, and a custom producer
 reports through its rendition's `stats` signal. The `Broadcast` takes the same
-options as `stats`, `probe`, and `echo` inputs.
+options as `stats`, `probe`, and `echoPath` inputs.
 
 `echo-path` only asks for feedback: a `<moq-watch echo="alice">` that reads the
 catalog publishes `room/viewers/alice.echo`, and `moq export echo` or a dashboard
@@ -103,7 +103,7 @@ who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
 so `join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts.
 The broadcast declares the longest group among its renditions as the catalog's
-`media.join.interval` when it first lists one, which an HLS or DASH export cuts
+`sync.interval` when it first lists one, which an HLS or DASH export cuts
 its segments on. It stays fixed for the network broadcast, so raising
 `join` later overruns that grid. Size,
 bitrate, and framerate change in place, while a codec or audio format change
@@ -119,7 +119,7 @@ relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
 
 Timestamps are `@moq/clock`'s `now()` since its origin, a `Duration`, so every
-source shares one timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
+source shares one timeline. The catalog's `sync.clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks

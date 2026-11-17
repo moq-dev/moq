@@ -13,11 +13,11 @@ use moq_tokio::quic::driver::sim::{Link, Network, Path};
 
 use crate::memory;
 
-const PORT: u16 = 443;
+pub(crate) const PORT: u16 = 443;
 /// Where each client binds, on its own host
 const CLIENT_PORT: u16 = 4433;
-const PUBLISHER: IpAddr = ip(2);
-const SUBSCRIBER: IpAddr = ip(3);
+pub(crate) const PUBLISHER: IpAddr = ip(2);
+pub(crate) const SUBSCRIBER: IpAddr = ip(3);
 
 /// The groups the publisher writes, one every [`INTERVAL`]
 const GROUPS: u64 = 20;
@@ -27,7 +27,7 @@ const FRAME: usize = 4_000;
 /// How long a run may take before it counts as stalled, in simulated time
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-const fn ip(last: u8) -> IpAddr {
+pub(crate) const fn ip(last: u8) -> IpAddr {
 	IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
 }
 
@@ -92,14 +92,14 @@ fn two_relays() {
 }
 
 /// A relay serving on a simulated host
-struct Relay {
-	addr: SocketAddr,
-	fingerprints: Vec<String>,
+pub(crate) struct Relay {
+	pub(crate) addr: SocketAddr,
+	pub(crate) fingerprints: Vec<String>,
 }
 
 /// Serve `cluster` on `addr` through `auth`: each session the server accepts runs a relay
 /// [`Connection`] on its own simulator task.
-async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
+pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
 	serve_versions(network, addr, cluster, auth, Vec::new()).await
 }
 
@@ -162,7 +162,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = moq_net::Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
 		let _source = source.finish().unwrap();
@@ -268,7 +268,7 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 		let (dialed, accepted) = (dialed.expect("dial"), accepted.expect("accept"));
 
 		let write = async {
-			let mut group = accepted.producer.append_group(0).unwrap();
+			let mut group = accepted.producer.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 			let info = moq_net::frame::Info {
 				size: CHUNK as u64,
 				timestamp: moq_net::Timestamp::unscaled(0),
@@ -279,11 +279,16 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 					.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; CHUNK])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let read = async {
 			let mut ordered = dialed.consumer.ordered();
-			let mut group = ordered.next_group().await.unwrap().expect("a group");
+			let mut group = ordered
+				.next_group()
+				.await
+				.unwrap()
+				.and_then(moq_net::track::Item::group)
+				.expect("a group");
 			let mut read = 0;
 			while let Some(frame) = group
 				.read_frame()

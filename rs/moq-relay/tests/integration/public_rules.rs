@@ -7,8 +7,6 @@
 //! the dialed path, `anon/**` at `/anon` meant `anon/anon/**`, and at `/rooms/123`
 //! it let an anonymous client into `rooms/123/anon/**`.
 
-#![cfg(feature = "websocket")]
-
 use std::time::Duration;
 
 use moq_relay::{auth, cluster, web};
@@ -69,7 +67,7 @@ async fn publish(url: url::Url, name: &str) -> Box<dyn std::any::Any> {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())

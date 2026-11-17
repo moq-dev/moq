@@ -94,9 +94,9 @@ pub(super) struct Misses {
 	/// The last key of the highest received stale run above the newest group that this
 	/// reader cannot trust, as of [`Self::unknown_at`]; see [`Self::unknown`].
 	unknown: Option<u64>,
-	/// The drops revision, judged revision, budget, and coverage [`Self::unknown`] was found
-	/// under: while the terms hold, only the runs changed since are looked at.
-	unknown_at: Option<(u64, u64, Duration, super::Coverage)>,
+	/// The drops revision, budget, and coverage [`Self::unknown`] was found under: while the
+	/// terms hold, only the runs changed since are looked at.
+	unknown_at: Option<(u64, Duration, super::Coverage)>,
 	/// The [`Forgotten`] revision this reader judged again up to.
 	forgotten: u64,
 }
@@ -603,7 +603,7 @@ impl Misses {
 					}
 					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
 					// Stale under the budget it was asked with, which this reader's is no wider
-					// than: a stale verdict an update reopens, never a refusal spent for good.
+					// than: a stale verdict a wider budget asks again, never a refusal spent for good.
 					Err((Error::Old, Some(asked))) => self.give_up_stale(groups, asked, given_up),
 					// A drop the track recorded is named by the drop cursor already.
 					Err(_) => self.settle(&state, groups, given_up),
@@ -640,14 +640,12 @@ impl Misses {
 	/// changed since are looked at, so a drop costs each reader the runs it touches.
 	fn unknown(&mut self, state: &TrackState, drift: &Drift) -> Option<u64> {
 		let above = |run: &ops::Range<u64>| state.newest_produced.is_none_or(|newest| run.end - 1 > newest);
-		let unsettled = |run: &ops::Range<u64>, hole| above(run) && !drift.settles(state, run.start, hole);
+		let unsettled = |run: &ops::Range<u64>, hole| above(run) && !drift.settles(run.start, hole);
 		let revision = state.drops_changes.revision();
 		let since = self
 			.unknown_at
 			.as_ref()
-			.filter(|(_, judged, budget, coverage)| {
-				*judged == state.judged_revision && *budget == drift.budget && *coverage == drift.coverage
-			})
+			.filter(|(_, budget, coverage)| *budget == drift.budget && *coverage == drift.coverage)
 			.map(|(seen, ..)| *seen)
 			// The newest group only rises, so the run found stays the highest unless it fell
 			// below it or changed.
@@ -676,10 +674,10 @@ impl Misses {
 				.iter()
 				.rev()
 				.take_while(|(run, _)| above(run))
-				.find(|(run, hole)| !drift.settles(state, run.start, hole))
+				.find(|(run, hole)| !drift.settles(run.start, hole))
 				.map(|(run, _)| run.end - 1),
 		};
-		self.unknown_at = Some((revision, state.judged_revision, drift.budget, drift.coverage.clone()));
+		self.unknown_at = Some((revision, drift.budget, drift.coverage.clone()));
 		self.unknown
 	}
 
@@ -715,8 +713,8 @@ impl Misses {
 			return asks;
 		}
 		// A received stale run this reader cannot trust is still asked for, though nothing above
-		// it arrived: only an update brings it back otherwise, and a reader narrower than the
-		// upstream's terms changes none. See `TrackState::unfed`. Only runs above the newest
+		// it arrived: the subscription that dropped it never delivers it, and a reader narrower
+		// than the upstream's budget changes none. See `TrackState::unfed`. Only runs above the newest
 		// group need a look.
 		let unknown = self.unknown(state, drift);
 		let Some(newest) = state.newest_produced.max(bound).max(unknown) else {
@@ -1318,11 +1316,11 @@ impl Misses {
 		for run in runs {
 			let ask = Ask {
 				start: Position::group(run.start),
-				byte: 0,
 				end: run.end,
 				frame_end: None,
 				asking: *asking,
 				time: None,
+				fetch: false,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
 			self.wanted.insert(run.clone());
@@ -1341,7 +1339,7 @@ impl Misses {
 		left.insert(hole.clone());
 		// Only what overlaps the hole, so judging every run costs each one the same.
 		for (run, gone) in state.drops.overlapping(&hole) {
-			if drift.settles(state, run.start.max(hole.start), gone) {
+			if drift.settles(run.start.max(hole.start), gone) {
 				left.remove(run.clone());
 			}
 		}
@@ -1374,15 +1372,6 @@ impl Misses {
 					.insert(run.clone(), state.arrivals.folds_at(run.start, state.miss_grace()));
 			}
 		}
-	}
-
-	/// Judge `groups` again: an update reopened the stale verdict they were given up with.
-	/// They are no longer judged, and the next probe judges its whole span afresh, so it
-	/// asks a fill for them or gives them up again.
-	pub(super) fn retry(&mut self, groups: ops::Range<u64>) {
-		self.given_up.remove(groups.clone());
-		self.judged.remove(groups);
-		self.at = None;
 	}
 
 	pub(super) fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
@@ -1536,7 +1525,7 @@ impl TrackState {
 				folds => awaited.push((groups, folds)),
 			};
 		// The upstream accounted for a received stale run, so the feed brings none of it unless
-		// an update supersedes the run.
+		// a new upstream subscription supersedes the run.
 		let mut fed = RangeSet::new();
 		fed.insert(hole.clone());
 		for (run, given) in self.drops.overlapping(&hole) {
@@ -1669,7 +1658,7 @@ mod tests {
 				track
 					.create_group(crate::group::Info { start: key })
 					.unwrap()
-					.close()
+					.finish()
 					.unwrap();
 			}
 			let requests = handled.then(|| track.requests());
@@ -1730,7 +1719,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		track.start_at(3).unwrap();
@@ -1804,7 +1793,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 2 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let state = track.state.read();
 		assert!(state.drops.is_empty(), "recreation removed the last drop run");
@@ -1875,7 +1864,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		track.start_at(3).unwrap();
@@ -1952,7 +1941,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		let mut misses = Misses::default();
@@ -2003,7 +1992,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let state = track.state.read();
 		assert!(
@@ -2046,31 +2035,6 @@ mod tests {
 			"judged stale under the reader's budget"
 		);
 		assert!(misses.deferred.runs.is_empty());
-
-		// An update reopens the verdict: retried, the gap is judged afresh, and a wider budget
-		// asks a fill for it.
-		misses.retry(3..4);
-		let wider = Drift {
-			budget: Duration::from_secs(3600),
-			bounded: false,
-			edge: state.drift_edge(&Servable::ALL),
-			coverage: None,
-		};
-		given_up.clear();
-		let asks = misses.judge(
-			&state,
-			(0, 0, None),
-			None,
-			None,
-			None,
-			|span| [span].into_iter().collect(),
-			&Delivered::default(),
-			&wider,
-			&mut given_up,
-			&waiter,
-		);
-		assert!(asks.contains(&3), "a retried gap is asked again");
-		assert!(given_up.is_empty());
 	}
 
 	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
@@ -2089,7 +2053,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		let mut misses = Misses::default();
@@ -2147,7 +2111,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 4 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let state = track.state.read();
 		let opened = state.cache.pool().now_wall();
@@ -2353,7 +2317,7 @@ mod tests {
 				track
 					.create_group(crate::group::Info { start: key })
 					.unwrap()
-					.close()
+					.finish()
 					.unwrap();
 			}
 			if next(2) == 0 {
@@ -2456,7 +2420,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		// Four groups below where the feed starts, 1, 3, 5, and 7, each a fill of its own.
@@ -2483,7 +2447,7 @@ mod tests {
 		);
 
 		// One fill answers: only its join is looked at again, and the later task wakes.
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let woken = second.0.load(Ordering::Relaxed);
@@ -2532,7 +2496,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 8 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let track = track.finish().unwrap();
 		// Group 0 lies below where the feed starts: only a fill may deliver it.
@@ -2560,7 +2524,7 @@ mod tests {
 			"a no-op poll leaves the real registrations in place"
 		);
 
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let (read_woken, drops_woken) = (read.0.load(Ordering::Relaxed), drops.0.load(Ordering::Relaxed));

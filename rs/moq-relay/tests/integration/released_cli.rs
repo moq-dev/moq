@@ -54,11 +54,14 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("client-version", Some("MOQ_CLIENT_VERSION")),
 	("cluster-connect", Some("MOQ_CLUSTER_CONNECT")),
 	("cluster-connect-api", Some("MOQ_CLUSTER_CONNECT_API")),
+	("cluster-connect-api-tls-root", Some("MOQ_CLUSTER_CONNECT_API_TLS_ROOT")),
 	("cluster-node", Some("MOQ_CLUSTER_NODE")),
 	("cluster-tier", Some("MOQ_CLUSTER_TIER")),
 	("cluster-token", Some("MOQ_CLUSTER_TOKEN")),
 	("internal-listen", Some("MOQ_INTERNAL_LISTEN")),
 	("listen", Some("MOQ_SERVER_BIND")),
+	("listen-quic-lb-id", Some("MOQ_LISTEN_QUIC_LB_ID")),
+	("listen-quic-lb-nonce", Some("MOQ_LISTEN_QUIC_LB_NONCE")),
 	("log-level", Some("MOQ_LOG_LEVEL")),
 	("server-bind", Some("MOQ_SERVER_BIND")),
 	("server-max-streams", Some("MOQ_SERVER_QUIC_MAX_STREAMS")),
@@ -78,13 +81,13 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("server-quic-qlog", Some("MOQ_SERVER_QUIC_QLOG")),
 	("server-tcp-bind", Some("MOQ_SERVER_TCP_BIND")),
 	("server-tls-root", Some("MOQ_SERVER_TLS_ROOT")),
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	("server-unix-allow-gid", Some("MOQ_SERVER_UNIX_ALLOW_GID")),
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	("server-unix-allow-pid", Some("MOQ_SERVER_UNIX_ALLOW_PID")),
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	("server-unix-allow-uid", Some("MOQ_SERVER_UNIX_ALLOW_UID")),
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	("server-unix-bind", Some("MOQ_SERVER_UNIX_BIND")),
 	("server-version", Some("MOQ_SERVER_VERSION")),
 	("stats-depth", Some("MOQ_STATS_DEPTH")),
@@ -105,9 +108,7 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("web-https-listen", Some("MOQ_WEB_HTTPS_LISTEN")),
 	("web-https-root", Some("MOQ_WEB_HTTPS_ROOT")),
 	("web-ws", Some("MOQ_WEB_WS")),
-	#[cfg(feature = "websocket")]
 	("websocket-delay", Some("MOQ_CLIENT_WEBSOCKET_DELAY")),
-	#[cfg(feature = "websocket")]
 	("websocket-enabled", Some("MOQ_CLIENT_WEBSOCKET_ENABLED")),
 ];
 

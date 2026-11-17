@@ -581,7 +581,10 @@ export class Broadcast {
 				accepted =
 					catalog &&
 					Catalog.checkResolvable(Catalog.checkRenditions(Catalog.RootSchema.parse(catalog)), name);
-				if (accepted) status = "live";
+				if (accepted) {
+					status = "live";
+					warnSkipped(name, accepted);
+				}
 			} catch (err) {
 				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
 				console.error("rejecting catalog", name, err);
@@ -650,6 +653,7 @@ export class Broadcast {
 
 					this.#raw.set(Catalog.checkResolvable(Catalog.checkRenditions(update), name), true);
 					this.#progress.set("live");
+					warnSkipped(name, update);
 				}
 			} catch (err) {
 				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
@@ -808,4 +812,10 @@ export class Broadcast {
 		for (const { owner } of this.#children.values()) owner.close();
 		this.#children.clear();
 	}
+}
+
+// The rest of the catalog plays; an entry a newer draft defines only costs the viewer that entry.
+function warnSkipped(name: Moq.Path.Valid, root: Catalog.Root) {
+	const skipped = Catalog.skipped(root);
+	if (skipped) console.warn("catalog entries need moq-hang draft", skipped.version, "to read", name, skipped);
 }

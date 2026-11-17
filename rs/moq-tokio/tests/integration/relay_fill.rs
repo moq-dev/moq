@@ -169,7 +169,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 			Timestamp::from_millis(sequence * 1000)?,
 			format!("group {sequence}").into_bytes(),
 		)?;
-		group.close()?;
+		group.finish()?;
 	}
 	broadcast.announce()?;
 	let (upstream, upstream_serve) = listen(version, true, move || publisher.clone()).await?;

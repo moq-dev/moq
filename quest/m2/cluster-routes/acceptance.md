@@ -1,14 +1,11 @@
-# [L] Route layer acceptance
+# [M] Route layer acceptance
 
 ## Goal
 
-The route layer is proven on the implementation, not the model: the
-forwarding and first-hop selection fixtures run against the router and the
-session, and the reference model in
-`rs/moq-net/tests/integration/routing_contracts/` is deleted. The incident
-fixtures, tiered-cluster and partition end-to-end checks, failover
-measurements, and benchmarks below pass in CI, and the mitigations they
-replace are retired.
+The route layer is proven on the implementation, and the mitigations its
+fixtures replace are retired: [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
+retraction quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
+same-clock queue dedup, and the 300 ms update hold (`origin::Config::update_hold`).
 
 ## Plan
 
@@ -19,100 +16,56 @@ tier and partition tests run before the cut (rejected: moving it to m3 and
 fixing late routing flaws in lite-08). A flaw found here is fixed on
 lite-07-wip before it freezes.
 
-Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
-Babel): acceptance is of the path rule
-([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the
-sessions [the switch](https://github.com/moq-dev/moq/pull/8731) left.
-The seqno request fixtures are replaced below, since the rule has no seqno
-and no request.
+The fixtures landed in [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832),
+and the reference model is deleted: forwarding on the router
+(`rs/moq-net/src/route/tests/forward.rs`), and on real sessions with time mocked
+the topology and prior-art fixtures (`tests/integration/route_acceptance.rs`),
+failover liveness and the live-graph tests of
+[moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644) (`route_failover.rs`),
+the tiered cluster, partition, and scoped-interest checks (`route_cluster.rs`),
+mount continuity (`mount.rs`), and operation-count regressions
+(`route/tests/cost.rs`, `route/node/tests.rs`). They found the flaws the
+quests under Required fix; the tests that pin each flaw say so in their docs.
 
-- Port the forwarding fixtures (`Forward`, `Aggregate`, pool ties, and the
-  sweeps over them) to the implementation, then delete the model.
-- The earlier simulator persisted seqnos across restart, and the path rule
-  has none. Re-run with a fresh routing identity per restart and the
-  stale-state rules; do not carry the old assumption into acceptance.
-- Retire [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
-  quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
-  dedup, and the 300 ms hold only once the fixtures below demonstrate their
-  replacement (see the epic's hold-down note).
-- Add a session-level fixture for routes scoped to interested origins
-  (Plan item 15 of the epic, implemented on the router): a client watching
-  one prefix holds routes only to the origins whose claims meet it, a
-  request for a path outside its interest still resolves through the relay
-  (Node ID 0), and an origin leaving the interest ends its route after the
-  batch withdrawing its last claim there, closed by its floor: one that
-  certifies the withdrawal where the relay certifies the request, and one
-  certifying nothing where it knows only part of it.
+Reordered 2026-11-15 (maintainer, /quest-plan on
+[cache-aware multicast](/quest/m2/multicast/README.md)): the retirement below
+waits for [the switch](/quest/m2/multicast/switch.md), which rewrites these
+fixtures' assertions for the new rule and deletes the Required quests it
+makes moot.
 
-The counterexamples from #4349 (closed; this epic still owns the fix) are the `residual_*` tests in
-`rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
-a stale path outlasting the 300 ms hold, a revival the quarantine misses,
-and 179 hunting relays (3 reviving) over 200 seeded meshes. Turn each into a
-single retraction everywhere, and keep `cross_node_close_retracts_once`
-passing. On `main` an epochless switch to a stale path is a Restart, which a
-lite-06 client sees as a retraction and an announcement; the release sent an
-in-place update.
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
+switch makes `origin::Config::update_hold` crate-private, since nothing
+outside moq-net sets it, and puts whatever of the three mitigations survives
+here under one named lite-06 marker. So retiring them below changes no
+public API, and one that a lite-06 mesh keeps is already marked temporary.
 
-Publishing toggles too, decided 2026-10-13: a longer path arrives first and
-the better route then replaces it. `late_better_path_updates_in_place` pins
-the lite-07 mesh, where the move keeps the instance and a lite-06 or lite-07
-client sees an update. `residual_late_better_path_restarts_on_lite06` pins the
-lite-06 mesh, where each relay mints its own instance and the client sees
-`Start, End, Start` while the broadcast stays live; turn it into an update.
+What remains:
 
-Tests, time mocked: the handoff fixtures and sweeps, already on the router;
-[moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644)'s live-graph withdrawal and failover tests (the PR closed and
-its branch is gone; fetch `refs/pull/4644/head`) as acceptance, run on the wip version; a
-link flap with many broadcasts behind one origin costs one ROUTE change per
-link; a ring of three where a stale neighbour cannot revive an ended
-broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
-an island reached through the CDN after a partition; an unknown Route ID
-refused; a five-node ring whose preferred origin link fails moves to its
-longer backup, at once where the backup's path avoids the far end of the
-closed link and once the doubt lifts where it runs through it, while that
-backup never loses its session; a relay with several neighbours that dies
-is named in one withdrawal per session, and no relay moves onto a route
-through it before the doubt lifts; two relays whose only routes run through
-each other both let go, neither holding for the other; and a relay that
-holds lets go once the neighbours behind it have answered, including one
-whose session closes without an answer. Failover is measured
-on broadcast liveness while the next hop changes, including a new next hop
-whose ROUTE arrives before its ANNOUNCE set, and reports per-path
-retractions and re-announcements beside the ROUTE budget; eventual route
-recovery alone does not show it is seamless.
+- Retire the quarantine, the dedup, and the hold once the Required quests
+  turn their pinned fixtures into the contract's behaviour. The quarantine
+  is what turns the flaws into a 2 s gap: a relay that shows a held claim
+  offline announces it again only after `RETRACT_QUARANTINE`. The hold and
+  the quarantine sit on the announce cursor, which every version shares, so
+  check what a lite-06 mesh loses without them
+  (`mesh_withdraw::cross_node_close_without_hold_reannounces` is its
+  positive control) before deleting them; if a lite-06 mesh still needs
+  them, retire them for lite-07 routes only.
+- `mesh_withdraw::residual_late_better_path_restarts_on_lite06` pins a
+  lite-06 mesh where each relay mints its own instance, so a client sees
+  `Start, End, Start` while the broadcast stays live. Turn it into an update,
+  or record why a lite-06 mesh keeps it.
+- A request naming Node ID 0 on a lite-07 session: Rust clients always name
+  a node, so only publisher unit tests cover a relay answering 0. Cover it
+  where `js/net` sends it, in `just test interop`.
 
-Tiered-cluster and partition/healing end-to-end checks belong here,
-not after lite-07 can be finalized: two regions with redundant cores, publish,
-claim withdrawal, core loss, and matching-epoch failover reaching a far edge;
-a two-uplink mesh reached through CDN during partition. Include overlapping
-wildcards, a hidden exportable alternative under one selection, epochless Restart, and a
-grant union crossing the scoped boundary each way (a `**` token added, then expiring). Fixtures are
-public and time-mocked, wired into CI alongside Rust/JS interop.
+## Required
 
-Mounts get the same continuity checks (`rs/moq-net/tests/integration/mount.rs`):
-a claim whose predecessor covers a mount's target arrives beneath the mount
-point exactly as it does unmounted, on lite-06 and lite-07. This replaces
-the deleted mount-takeover quest, whose `Takeover` event
-[moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) removes in
-favor of the claim's instance; if #8063 closes unmerged, restore that quest.
-
-Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
-and announce cursors independently. A route update must not expand back into
-per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,
-wakes/select calls, CPU, replay work, and retained state. One broadcast per
-origin is an explicit case. Coordinate with Route wakes and Announce replay;
-benchmark smoke alone does not enforce complexity, so add operation-count
-regressions. Bound held routes, doubts, and remembered dead hops under
-same-clock churn.
-
-Decided 2026-11-12 (maintainer, /quest-audit; epic Plan item 30): three
-fixtures from routing prior art, as tests before any design change. A
-relay vanishes and its neighbours notice up to the 3 s keep-alive apart,
-which shows whether the doubt timer must follow the keep-alive or relay
-keep-alives must shorten. Three relays whose local priorities form a dispute
-wheel settle, or the test pins how they fail (RFC 4264). A primary route
-fails and returns, and every relay ends back on it.
+- [The switch](/quest/m2/multicast/switch.md) - the rule whose fixtures replace the mitigations, once the new route layer is on the wire
+- [Held after close](/quest/m2/cluster-routes/held-after-close.md) - a relay whose own session closed shows its held claims unavailable, not offline
+- [Doubt holds](/quest/m2/cluster-routes/doubt-holds.md) - a relay keeps holding while doubt alone keeps it off its routes
+- [Route fan-out](/quest/m2/cluster-routes/route-fanout.md) - a route change costs only the streams and broadcasts it touches
 
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - the contract and its fixtures
+- [Doubt and keep-alive](/quest/m2/cluster-routes/doubt-keepalive.md) - whether the doubt timer follows the keep-alive

@@ -5,7 +5,7 @@
 //! side is [`crate::client`].
 
 use std::net;
-#[cfg(any(test, all(feature = "uds", unix)))]
+#[cfg(any(test, unix))]
 use std::path::PathBuf;
 
 use crate::{Error, Transport};
@@ -14,11 +14,8 @@ use url::Url;
 
 // Only the transports that finish their handshake in a spawned future need `.boxed()`;
 // the stream listeners hand back an already-built `Request`.
-#[cfg(any(feature = "quic", feature = "websocket"))]
 use futures::FutureExt;
-// The pending handshakes of the transports `Server` accepts itself; a session
-// handed to `accept_with` is established by the caller, so a `qmux`-only build has none.
-#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+// The pending handshakes of the transports `Server` accepts itself.
 use futures::{
 	future::BoxFuture,
 	stream::{FuturesUnordered, StreamExt},
@@ -68,8 +65,15 @@ impl crate::listen::Config {
 	pub fn server(&self) -> moq_net::Server {
 		let mut server = moq_net::Server::new()
 			.with_timeout(self.resolved_timeout())
-			.with_versions(self.versions())
-			.with_extensions(self.extensions);
+			.with_versions(self.versions());
+		#[cfg(feature = "relay")]
+		{
+			server = server.with_ietf(self.ietf);
+		}
+		#[cfg(feature = "test-support")]
+		{
+			server = server.with_solicit(!self.decline_solicit);
+		}
 		if let Some(implementation) = &self.implementation {
 			server = server.with_implementation(implementation);
 		}
@@ -91,23 +95,16 @@ impl crate::listen::Config {
 	///
 	/// When true and [`bind`](Self::bind) is unset, the server runs stream-only
 	/// (no default QUIC listener).
-	#[allow(unused_mut, reason = "only the stream listener features set it")]
 	fn has_stream_listener(&self) -> bool {
-		let mut has = false;
-		#[cfg(feature = "tcp")]
-		{
-			has |= self.tcp.bind.is_some();
+		#[cfg(unix)]
+		if self.unix.bind.is_some() {
+			return true;
 		}
-		#[cfg(all(feature = "uds", unix))]
-		{
-			has |= self.unix.bind.is_some();
-		}
-		has
+		self.tcp.bind.is_some()
 	}
 }
 
 /// Default bind address used when [`crate::listen::Config::bind`] is not set.
-#[cfg(feature = "quic")]
 pub const DEFAULT_BIND: net::SocketAddr =
 	net::SocketAddr::V6(net::SocketAddrV6::new(net::Ipv6Addr::UNSPECIFIED, 443, 0, 0));
 
@@ -130,7 +127,6 @@ pub(crate) enum Parts {
 	/// The QUIC listener only, as one member of a `SO_REUSEPORT` group. Folding
 	/// the member in here is what stops a group member and a stream-only server
 	/// from being asked for at once.
-	#[cfg_attr(not(feature = "quic"), expect(dead_code, reason = "no QUIC backend is compiled in"))]
 	Member(crate::listen::Socket),
 }
 
@@ -141,17 +137,12 @@ impl Parts {
 	}
 
 	/// Whether the `tcp`/`unix` listeners should be opened.
-	#[cfg_attr(
-		not(any(feature = "tcp", all(feature = "uds", unix))),
-		expect(dead_code, reason = "no stream listener is compiled in")
-	)]
 	fn streams(&self) -> bool {
 		matches!(self, Self::All | Self::Streams)
 	}
 
 	/// This server's socket in a complete group, when it is a member of one.
 	/// Consuming, because only one backend may own the serving handle.
-	#[cfg_attr(not(feature = "quic"), expect(dead_code, reason = "no QUIC backend is compiled in"))]
 	fn member(self) -> Option<crate::listen::Socket> {
 		match self {
 			Self::Member(member) => Some(member),
@@ -173,7 +164,6 @@ impl Parts {
 #[non_exhaustive]
 pub struct Config {
 	/// Shared served identity; `listen.tls` must be empty when this is set.
-	#[cfg(feature = "_certs")]
 	pub tls: Option<crate::tls::Serve>,
 
 	/// Tracks accepted transports through their handshake and session lifetime.
@@ -185,7 +175,6 @@ pub struct Config {
 	pub quic: crate::quic::Config,
 
 	/// A standalone WebSocket listener on a separate TCP port.
-	#[cfg(feature = "websocket")]
 	pub websocket: Option<crate::websocket::Listener>,
 
 	/// The origin published to every accepted session.
@@ -199,17 +188,15 @@ pub struct Config {
 
 	/// What the QUIC socket diverts from the shared port and drops; keep a clone to
 	/// take its [`webrtc`](crate::quic::demux::Demux::webrtc) feed or read its counters.
-	#[cfg(feature = "quic")]
 	pub demux: crate::quic::demux::Demux,
 
 	/// Stream listeners the caller already holds, served in place of binding the
 	/// configured addresses.
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	pub streams: Streams,
 
 	/// The simulated host the QUIC endpoint binds on, at the configured bind port, in place of
 	/// a UDP socket. For tests on `kio::clock::sim`; see [`crate::quic::driver::sim`].
-	#[cfg(all(feature = "sim", feature = "quic"))]
+	#[cfg(feature = "test-support")]
 	pub sim: Option<crate::quic::driver::sim::Host>,
 }
 
@@ -221,15 +208,13 @@ pub struct Config {
 /// `listen.unix.bind`), which says how to serve it; the socket replaces only the
 /// bind. A Unix socket's path belongs to whoever bound it, so a listener served
 /// from one never unlinks it.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct Streams {
 	/// Served for `listen.tcp.bind`. Must be listening.
-	#[cfg(feature = "tcp")]
 	pub tcp: Option<std::net::TcpListener>,
 	/// Served for `listen.unix.bind`. Must be listening.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	pub unix: Option<std::os::unix::net::UnixListener>,
 }
 
@@ -245,23 +230,19 @@ impl Config {
 	}
 
 	/// Copy the settings one QUIC worker owns.
-	#[cfg(feature = "quic")]
 	pub(crate) fn worker(&self) -> Self {
 		Self {
 			listen: self.listen.clone(),
-			#[cfg(feature = "_certs")]
 			tls: self.tls.clone(),
 			quic: self.quic.clone(),
-			#[cfg(feature = "websocket")]
 			websocket: None,
 			publisher: self.publisher.clone(),
 			subscriber: self.subscriber.clone(),
 			stats: self.stats.clone(),
 			admission: self.admission.clone(),
 			demux: self.demux.clone(),
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			streams: Streams::default(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: self.sim.clone(),
 		}
 	}
@@ -275,21 +256,15 @@ impl Config {
 pub struct Server {
 	admission: moq_net::server::Admission,
 	moq: moq_net::Server,
-	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	versions: moq_net::Versions,
-	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	/// Pending handshakes, each isolated: one panicking (`None`) must not end the listener.
 	/// Each is boxed before `isolate` wraps it, so a debug build never holds a
 	/// handshake's large state twice on the accept loop's stack.
 	accept: FuturesUnordered<BoxFuture<'static, Option<crate::Result<Request>>>>,
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
 	/// The `tls://` config another listener can serve, when a listen identity is loaded.
-	#[cfg(all(feature = "tcp", feature = "_certs"))]
 	tls_stream: Option<TcpTls>,
-	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Server>,
-	#[cfg(feature = "websocket")]
 	websocket: Option<crate::websocket::Listener>,
 }
 
@@ -308,18 +283,14 @@ impl Server {
 			admission,
 			listen: config,
 			quic,
-			#[cfg(feature = "_certs")]
 			tls,
-			#[cfg(feature = "websocket")]
 			websocket,
 			publisher,
 			subscriber,
 			stats,
-			#[cfg(feature = "quic")]
 			demux,
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-				streams: prebound,
-			#[cfg(all(feature = "sim", feature = "quic"))]
+			streams: prebound,
+			#[cfg(feature = "test-support")]
 			sim,
 		} = config;
 
@@ -335,7 +306,6 @@ impl Server {
 		// gets the released spellings folded in too.
 		config.validate()?;
 
-		#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 		let versions = config.versions();
 
 		// Build a QUIC backend when `--listen` is set, or when nothing else
@@ -346,7 +316,6 @@ impl Server {
 		// a qmux session starts at it already.
 		let window = std::num::NonZeroU64::new(quic.resolve().receive_window);
 		// Every qmux session this server accepts starts at the same `[quic]` windows.
-		#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 		let resolved = quic.resolve();
 
 		let build_quic = parts.quic() && config.serves_quic();
@@ -356,45 +325,23 @@ impl Server {
 			config.validate_stream_only()?;
 		}
 		// Read before the member is taken out below, which consumes `parts`.
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let build_streams = parts.streams();
-		// `parts.quic()` and not `build_quic`: a caller that asked for streams only
-		// is not asking for a backend, while leaving everything else configured is
-		// still the error it always was.
-		#[cfg(not(feature = "quic"))]
-		if config.bind.is_some() && parts.quic() {
-			return Err(Error::NoBackend("--listen requires the quic feature"));
-		}
-		#[cfg(not(feature = "quic"))]
-		if config.reset.secret.is_some() && parts.quic() {
-			return Err(Error::NoBackend("--listen-reset-secret requires the quic feature"));
-		}
 
 		// The QUIC backend and a `tls://` listener verify client certificates; the
 		// other qmux listeners (plaintext tcp/unix/websocket) never ask for one, so a
-		// server with neither would ignore the CA or pinned peers. A caller opening
+		// server with neither would ignore the CA. A caller opening
 		// only the streams owns QUIC elsewhere.
-		#[cfg(feature = "tcp")]
 		let tcp_tls = build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
-		#[cfg(not(feature = "tcp"))]
-		let tcp_tls = false;
-		let client_auth = !config.tls.root.is_empty() || config.tls.peers.is_some();
+		let client_auth = !config.tls.root.is_empty();
 		if parts.quic() && !build_quic && !tcp_tls && client_auth {
 			return Err(Error::MtlsUnsupported);
 		}
-		if parts.quic() && !tcp_tls && !config.tls.root.is_empty() {
-			#[cfg(not(feature = "quic"))]
-			return Err(Error::NoBackend("--listen-tls-root requires the quic feature"));
-		}
 
-		#[cfg(feature = "_certs")]
 		let tls = {
 			if tls.is_some() && config.tls.configured() {
 				return Err(crate::tls::Error::ConflictingServe.into());
 			}
-			#[allow(unused_mut, reason = "only the stream listener features set it")]
-			let mut needed = cfg!(feature = "quic") && build_quic;
-			needed |= tcp_tls;
+			let needed = build_quic || tcp_tls;
 			match (tls, needed) {
 				// Mirrors `validate_stream_only`: an identity no listener serves is refused.
 				// A streams-only caller owns QUIC elsewhere, which serves it.
@@ -408,17 +355,14 @@ impl Server {
 				(None, false) => None,
 			}
 		};
-		#[cfg(feature = "_certs")]
 		if parts.quic() && !build_quic && !tcp_tls && tls.as_ref().is_some_and(crate::tls::Serve::client_auth) {
 			return Err(Error::MtlsUnsupported);
 		}
 
 		// The member is a serving handle released by a complete reuseport group,
 		// so the backend may take it only once.
-		#[cfg(feature = "quic")]
 		let member = parts.member();
 
-		#[cfg(feature = "quic")]
 		let quic = build_quic
 			.then(|| {
 				crate::quic::Server::new(crate::quic::Options {
@@ -427,62 +371,54 @@ impl Server {
 					member,
 					tls: tls.clone().expect("QUIC needs TLS"),
 					demux: demux.clone(),
-					#[cfg(feature = "sim")]
+					#[cfg(feature = "test-support")]
 					sim: sim.clone(),
 				})
 			})
 			.transpose()?;
 
 		// Collect the configured stream listeners (at most one TCP, one Unix).
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let mut stream_binds = Vec::new();
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let Streams {
-			#[cfg(feature = "tcp")]
-				tcp: mut prebound_tcp,
-			#[cfg(all(feature = "uds", unix))]
+			tcp: mut prebound_tcp,
+			#[cfg(unix)]
 				unix: mut prebound_unix,
 		} = prebound;
-		#[cfg(feature = "tcp")]
 		if prebound_tcp.is_some() && !(build_streams && config.tcp.bind.is_some()) {
 			return Err(Error::NoBackend("server::Config::streams.tcp needs --listen-tcp-bind"));
 		}
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		if prebound_unix.is_some() && !(build_streams && config.unix.bind.is_some()) {
 			return Err(Error::NoBackend(
 				"server::Config::streams.unix needs --listen-unix-bind",
 			));
 		}
-		#[cfg(feature = "tcp")]
 		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {
 			let tls = match config.tcp.tls == Some(true) {
 				true => Some(TcpTls::new(
 					&config,
 					&versions,
-					#[cfg(feature = "_certs")]
 					tls.clone().expect("TLS stream needs an identity"),
 				)?),
 				false => None,
 			};
 			stream_binds.push(StreamBind::Tcp(addr, tls, prebound_tcp.take()));
 		}
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		if let Some(path) = config.unix.bind.clone().filter(|_| build_streams) {
 			stream_binds.push(StreamBind::Unix(path, prebound_unix.take()));
 		}
 		// `None` (or an all-empty allowlist) means the listener enforces nothing.
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		let unix_allow = (!config.unix.allow.is_empty()).then(|| config.unix.allow.clone());
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let streams = StreamListeners::new(
 			stream_binds,
 			stream_versions(&versions),
 			resolved.clone(),
-			#[cfg(all(feature = "uds", unix))]
+			#[cfg(unix)]
 			unix_allow,
 		);
 
-		#[cfg(all(feature = "tcp", feature = "_certs"))]
 		let tls_stream = tls.map(|tls| TcpTls::new(&config, &versions, tls)).transpose()?;
 
 		let mut moq = config.server().with_stats(stats);
@@ -498,18 +434,12 @@ impl Server {
 
 		Ok(Server {
 			admission,
-			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 			accept: Default::default(),
 			moq,
-			#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 			versions,
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			streams,
-			#[cfg(all(feature = "tcp", feature = "_certs"))]
 			tls_stream,
-			#[cfg(feature = "quic")]
 			quic,
-			#[cfg(feature = "websocket")]
 			websocket: websocket.map(|websocket| websocket.with_quic(&resolved)),
 		})
 	}
@@ -552,7 +482,6 @@ impl Server {
 	///
 	/// `None` when this server loaded no listen TLS identity, as a stream-only
 	/// server without `--listen-tcp-tls` does not.
-	#[cfg(all(feature = "tcp", feature = "_certs"))]
 	pub fn tls_acceptor(&self) -> Option<crate::tcp::TlsAcceptor> {
 		let tls = self.tls_stream.as_ref()?;
 		let server = self.moq.clone().with_versions(self.streams.versions.clone());
@@ -574,19 +503,11 @@ impl Server {
 	///
 	/// Empty when no TLS-bearing backend is configured (e.g. a stream-only server).
 	pub fn certificates(&self) -> crate::tls::Certificates {
-		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			return quic.certificates();
 		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`): no certificates.
 		crate::tls::Certificates::empty()
-	}
-
-	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix))))]
-	/// Fails, since no compiled transport is one this server listens on (a session
-	/// established elsewhere arrives through `Listener::accept_with`).
-	async fn accept_next(&mut self) -> crate::Result<Request> {
-		Err(Error::NoBackend("no listener to accept from"))
 	}
 
 	/// The accept-loop health of every listener this server owns that performs a real
@@ -601,11 +522,7 @@ impl Server {
 	/// Available before [`listen`](Self::listen), so an owner can register these with
 	/// a metrics endpoint at startup even though the sockets bind there.
 	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
-		#[allow(unused_mut, reason = "only the stream listener features extend it")]
-		let mut health = Vec::new();
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		health.extend(self.streams.health.iter().cloned());
-		#[cfg(feature = "websocket")]
+		let mut health = self.streams.health.clone();
 		health.extend(self.websocket.as_ref().map(|ws| ws.accept_health()));
 		health
 	}
@@ -623,13 +540,8 @@ impl Server {
 	/// leaves nothing bound: the partially built `Listener` drops here, closing
 	/// whatever it opened. Build a fresh `Server` from the (cloneable) config to try
 	/// again.
-	#[allow(
-		unused_mut,
-		reason = "`mut` is only needed to bind the stream listeners, which a QUIC-only build has none of"
-	)]
 	pub async fn bind(mut self) -> crate::Result<Listener> {
 		crate::runtime::scope(async move {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			self.streams.bind().await?;
 			Ok(Listener { server: self })
 		})
@@ -651,90 +563,63 @@ impl Server {
 	/// whatever it opened. Build a fresh `Server` from the (cloneable) config to try
 	/// again.
 	pub async fn listen(self) -> crate::Result<Listener> {
-		#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
-		{
-			self.bind().await
-		}
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		{
-			let mut listener = self.bind().await?;
-			// Accept immediately, so a dial can finish its handshake before the
-			// caller polls `accept`. `bind` leaves that until the first accept.
-			let server = listener
-				.server
-				.moq
-				.clone()
-				.with_versions(listener.server.streams.versions.clone());
-			listener.server.streams.serve(&server, &listener.server.admission);
-			Ok(listener)
-		}
+		let mut listener = self.bind().await?;
+		// Accept immediately, so a dial can finish its handshake before the
+		// caller polls `accept`. `bind` leaves that until the first accept.
+		let server = listener
+			.server
+			.moq
+			.clone()
+			.with_versions(listener.server.streams.versions.clone());
+		listener.server.streams.serve(&server, &listener.server.admission);
+		Ok(listener)
 	}
 
 	/// The body of [`Listener::accept`]. Stream accept loops start here if
 	/// [`Server::bind`] left them stopped; [`Server::listen`] already started them.
-	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 	async fn accept_next(&mut self) -> crate::Result<Request> {
 		// A `bind` (rather than `listen`) leaves the stream loops stopped so an
 		// embedder can read the port before it is willing to take sessions.
 		// Starting them here, on the first accept, is that moment.
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		{
-			let server = self.moq.clone().with_versions(self.streams.versions.clone());
-			self.streams.serve(&server, &self.admission);
-		}
+		let server = self.moq.clone().with_versions(self.streams.versions.clone());
+		self.streams.serve(&server, &self.admission);
 		loop {
 			// The QUIC endpoint address, reported as a QUIC session's local side.
-			#[cfg(feature = "quic")]
 			let local = self.local_addr().ok();
-			#[cfg(feature = "quic")]
 			let quic_tls = self.quic.as_ref().map(|quic| quic.tls.clone());
 
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			// `Some(None)` once a configured endpoint stops, which only losing its
 			// driver does while we accept.
-			#[cfg(feature = "quic")]
 			let quic_accept = async {
-				#[cfg(feature = "quic")]
 				if let Some(quic) = self.quic.as_mut() {
 					return Some(quic.accept().await);
 				}
 				None
 			};
-			#[cfg(not(feature = "quic"))]
-			let quic_accept = async { None::<()> };
 
-			#[cfg(feature = "websocket")]
 			let ws_ref = self.websocket.as_ref();
-			#[cfg(feature = "websocket")]
 			let ws_accept = async {
 				match ws_ref {
 					Some(ws) => Some(ws.accept_pending().await),
 					None => None,
 				}
 			};
-			#[cfg(not(feature = "websocket"))]
-			let ws_accept = std::future::ready(None::<()>);
 
-			#[allow(unused_variables, reason = "a build without a transport feature never reads it")]
 			let setup = Setup {
 				admission: self.admission.clone(),
 				server: self.moq.clone(),
 			};
-			#[allow(unused_variables, reason = "a build without a transport feature never reads it")]
 			let versions = self.versions.clone();
 
 			// An absent transport resolves `None` rather than parking, so its arm is
 			// disabled instead of holding the `select!` open. That is what lets `else`
 			// mean "nothing is left that could accept" instead of "the one transport
 			// nobody configured is still notionally pending".
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			let stream_accept = self.streams.recv();
-			#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
-			let stream_accept = std::future::ready(None::<std::result::Result<Request, tokio::task::JoinError>>);
 
 			tokio::select! {
 				Some(request) = stream_accept => {
-					#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 					match request {
 						Ok(request) => return Ok(request),
 						// The process would keep its other listeners and silently drop
@@ -747,60 +632,52 @@ impl Server {
 							return Err(Error::Stopped);
 						}
 					}
-					#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
-					let _ = request;
 				}
-				Some(_conn) = quic_accept => {
-					#[cfg(feature = "quic")]
-					{
-						// The process would keep its other listeners and silently drop
-						// QUIC, so stop accepting at all and let the owner fail loudly.
-						let Some(_conn) = _conn else {
-							self.shutdown().await;
-							return Err(Error::Accept(Transport::Quic));
-						};
-						let alpns = versions.alpns();
-						let tls = quic_tls.expect("an accepting QUIC endpoint has its TLS");
-						let deadline = setup.deadline();
-						// Closed for drain: refuse so the peer redials elsewhere at once.
-						let Some(active) = setup.admission.enter() else {
-							_conn.refuse();
-							continue;
-						};
-						self.accept.push(crate::panic::isolate(async move {
-							// Accept the transport (capturing url + mTLS identity) and exchange the
-							// MoQ SETUP up front, so path/role are known before the caller authorizes
-							// (like the stream bindings).
-							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns, tls)).await?;
-							link.local = local;
-							let under = Under::Quic(session.connection().clone());
-							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
-							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							let incoming = Incoming { transport, url, link, authority, identity, deadline, active };
-							Request::accept(&setup.server, session, under, incoming).await
-						}.boxed()).boxed());
-					}
+				Some(conn) = quic_accept => {
+					// The process would keep its other listeners and silently drop
+					// QUIC, so stop accepting at all and let the owner fail loudly.
+					let Some(conn) = conn else {
+						self.shutdown().await;
+						return Err(Error::Accept(Transport::Quic));
+					};
+					let alpns = versions.alpns();
+					let tls = quic_tls.expect("an accepting QUIC endpoint has its TLS");
+					let deadline = setup.deadline();
+					// Closed for drain: refuse so the peer redials elsewhere at once.
+					let Some(active) = setup.admission.enter() else {
+						conn.refuse();
+						continue;
+					};
+					self.accept.push(crate::panic::isolate(async move {
+						// Accept the transport (capturing url + mTLS identity) and exchange the
+						// MoQ SETUP up front, so path/role are known before the caller authorizes
+						// (like the stream bindings).
+						let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(conn, alpns, tls)).await?;
+						link.local = local;
+						let under = Under::Quic(session.connection().clone());
+						// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
+						let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
+						let incoming = Incoming { transport, url, link, authority, identity, deadline, active };
+						Request::accept(&setup.server, session, under, incoming).await
+					}.boxed()).boxed());
 				}
-				Some(_pending) = ws_accept => {
-					#[cfg(feature = "websocket")]
-					{
-						// Upgrade and read the SETUP before handing the session over, so a slow
-						// peer doesn't stall the accept loop (spawned like the others). A failed
-						// `accept(2)` never reaches here, having been classified, counted, and
-						// warned about by the listener itself.
-						let local = self.websocket_local_addr();
-						let deadline = setup.deadline();
-						// Dropping the pending upgrade closes its socket.
-						let Some(active) = setup.admission.enter() else {
-							continue;
-						};
-						self.accept.push(crate::panic::isolate(async move {
-							let (session, url, accepted) = within(deadline, _pending).await?;
-							let mut options = crate::websocket::Options::new(url, setup.server, active);
-							options.link = Link { remote: Some(accepted.remote), local, alpn: Some(accepted.protocol), ..Default::default() };
-							accept_websocket(session, options, deadline).await
-						}.boxed()).boxed());
-					}
+				Some(pending) = ws_accept => {
+					// Upgrade and read the SETUP before handing the session over, so a slow
+					// peer doesn't stall the accept loop (spawned like the others). A failed
+					// `accept(2)` never reaches here, having been classified, counted, and
+					// warned about by the listener itself.
+					let local = self.websocket_local_addr();
+					let deadline = setup.deadline();
+					// Dropping the pending upgrade closes its socket.
+					let Some(active) = setup.admission.enter() else {
+						continue;
+					};
+					self.accept.push(crate::panic::isolate(async move {
+						let (session, url, accepted) = within(deadline, pending).await?;
+						let mut options = crate::websocket::Options::new(url, setup.server, active);
+						options.link = Link { remote: Some(accepted.remote), local, alpn: Some(accepted.protocol), ..Default::default() };
+						accept_websocket(session, options, deadline).await
+					}.boxed()).boxed());
 				}
 				Some(res) = self.accept.next() => {
 					match res {
@@ -825,7 +702,6 @@ impl Server {
 	/// Errors with [`Error::NoBackend`] on a stream-only server, which has no
 	/// QUIC listener.
 	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
-		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			return Ok(quic.local_addr());
 		}
@@ -834,35 +710,27 @@ impl Server {
 	}
 
 	/// Closes the QUIC connections once this server has been handed away.
-	#[cfg(feature = "quic")]
 	pub(crate) fn quic_closer(&self) -> Option<crate::quic::Closer> {
 		self.quic.as_ref().map(crate::quic::Server::closer)
 	}
 
 	/// The address the WebSocket listener from [`Config::websocket`] bound to, if one was set.
-	#[cfg(feature = "websocket")]
 	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
 		self.websocket.as_ref().and_then(|ws| ws.local_addr().ok())
 	}
 
 	/// The body of [`Listener::close`].
 	async fn shutdown(&mut self) {
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		self.streams.shutdown().await;
 
-		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.take() {
 			quic.shutdown().await;
 		}
-		#[cfg(feature = "websocket")]
-		{
-			let _ = self.websocket.take();
-		}
+		let _ = self.websocket.take();
 	}
 
 	/// Close the QUIC connections without waiting for the socket, as a drop must.
 	fn close(&mut self) {
-		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			quic.close();
 		}
@@ -896,37 +764,6 @@ impl Listener {
 		crate::runtime::scope(self.server.accept_next()).await
 	}
 
-	/// Read the MoQ SETUP on a qmux session established outside this listener, such as
-	/// over a WebRTC data channel, leaving admission to the returned [`Request`].
-	///
-	/// `transport` and `link` are what the request reports about the connection. The
-	/// accept deadline counts from this call and bounds SETUP, admission, and the reply;
-	/// establishing the session is the caller's to bound. Returns [`Error::Stopped`] once
-	/// the listener is closing.
-	///
-	/// To have a drain wait for a session still being established, hold a guard from
-	/// [`Self::admission`] until this call returns.
-	#[cfg(feature = "qmux")]
-	pub async fn accept_with(
-		&self,
-		transport: Transport,
-		session: qmux::Session,
-		link: Link,
-	) -> crate::Result<Request> {
-		let server = &self.server;
-		let active = server.admission.enter().ok_or(Error::Stopped)?;
-		let mut incoming = Incoming::new(transport, server.moq.deadline(kio::clock::now()), active);
-		incoming.link = link;
-		crate::runtime::scope(Request::accept_qmux(&server.moq, session, incoming)).await
-	}
-
-	/// The accepted connections a drain waits for, including any session a guard from it
-	/// holds while it is established for [`Self::accept_with`].
-	#[cfg(feature = "qmux")]
-	pub fn admission(&self) -> &moq_net::server::Admission {
-		&self.server.admission
-	}
-
 	/// Close every listener and connection, once each QUIC peer has been sent the
 	/// close.
 	///
@@ -944,7 +781,6 @@ impl Listener {
 	/// sockets: what is queued on them is the successor's to accept. A handshake
 	/// still in flight is dropped, and its client dials again. Later
 	/// [`accept`](Self::accept) calls see no stream listener.
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	pub async fn close_streams(&mut self) {
 		crate::runtime::scope(self.server.streams.shutdown()).await;
 	}
@@ -959,13 +795,11 @@ impl Listener {
 	}
 
 	/// The address the WebSocket listener from [`Config::websocket`] bound to, if one was set.
-	#[cfg(feature = "websocket")]
 	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
 		self.server.websocket_local_addr()
 	}
 
 	/// The address the TCP (qmux) listener bound to, if one was configured.
-	#[cfg(feature = "tcp")]
 	pub fn tcp_local_addr(&self) -> Option<net::SocketAddr> {
 		self.server.streams.tcp_local_addr
 	}
@@ -998,14 +832,12 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 }
 
 /// The MoQ server an accepted connection handshakes against.
-#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 #[derive(Clone)]
 struct Setup {
 	admission: moq_net::server::Admission,
 	server: moq_net::Server,
 }
 
-#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 impl Setup {
 	/// When a connection accepted now must finish accepting; see [`moq_net::Server::deadline`].
 	fn deadline(&self) -> Option<kio::clock::Instant> {
@@ -1013,7 +845,6 @@ impl Setup {
 	}
 }
 
-#[cfg(feature = "websocket")]
 pub(crate) async fn accept_websocket(
 	session: qmux::Session,
 	options: crate::websocket::Options,
@@ -1036,7 +867,6 @@ pub(crate) async fn accept_websocket(
 ///
 /// Nothing is established yet that could carry a close code, so an expired
 /// handshake is dropped, which closes its connection.
-#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 pub(crate) async fn within<T, E>(
 	deadline: Option<kio::clock::Instant>,
 	handshake: impl Future<Output = Result<T, E>>,
@@ -1058,7 +888,6 @@ where
 /// A URL-less transport carries the request path in the moq-lite-05+ SETUP, so
 /// lite-05 is offered on top of the configured versions even when a custom set
 /// omits it. Older versions still work for clients that need no path.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 	let mut versions: Vec<moq_net::Version> = base.iter().copied().collect();
 	if let Ok(lite05) = "moq-lite-05".parse::<moq_net::Version>()
@@ -1070,29 +899,25 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 }
 
 /// A configured stream listener (`--listen-tcp-bind` / `--listen-unix-bind`).
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum StreamBind {
 	/// With its TLS when the listener serves `tls://`, and the socket to serve
 	/// when the caller bound it.
-	#[cfg(feature = "tcp")]
 	Tcp(net::SocketAddr, Option<TcpTls>, Option<std::net::TcpListener>),
 	/// With the socket to serve when the caller bound it.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	Unix(PathBuf, Option<std::os::unix::net::UnixListener>),
 }
 
 /// The TLS a `--listen-tcp-tls` listener serves, reloading its certificate
 /// while this lives.
-#[cfg(feature = "tcp")]
 struct TcpTls {
 	config: std::sync::Arc<rustls::ServerConfig>,
 	serve: crate::tls::Serve,
 }
 
-#[cfg(all(feature = "tcp", feature = "_certs"))]
 impl TcpTls {
 	// The same certificate resolver and client-certificate policy as the QUIC
-	// listeners, so CA roots and pinned peers mean the same on `tls://`.
+	// listeners, so CA roots mean the same on `tls://`.
 	fn new(
 		_config: &crate::listen::Config,
 		versions: &moq_net::Versions,
@@ -1110,31 +935,19 @@ impl TcpTls {
 	}
 }
 
-#[cfg(all(feature = "tcp", not(feature = "_certs")))]
-impl TcpTls {
-	/// Without a crypto provider there is no certificate to serve.
-	fn new(_config: &crate::listen::Config, _versions: &moq_net::Versions) -> crate::Result<Self> {
-		Err(Error::NoBackend("--listen-tcp-tls requires a crypto provider feature"))
-	}
-}
-
 /// A bound stream listener, before its accept loop is spawned.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum BoundListener {
-	#[cfg(feature = "tcp")]
 	Tcp(crate::tcp::Listener),
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	Unix(crate::unix::Listener),
 }
 
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 impl StreamBind {
 	/// The name this listener reports its accept health under.
 	fn name(&self) -> &'static str {
 		match self {
-			#[cfg(feature = "tcp")]
 			Self::Tcp(..) => "tcp",
-			#[cfg(all(feature = "uds", unix))]
+			#[cfg(unix)]
 			Self::Unix(..) => "unix",
 		}
 	}
@@ -1147,10 +960,8 @@ impl StreamBind {
 /// [`Listener::accept`] instead. Each loop feeds completed [`Request`]s back over
 /// a channel. The tasks own their listeners and in-flight handshakes, and are
 /// stopped when the [`Listener`] closes or drops, so no socket lingers.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	/// Keeps the TCP listener's TLS certificate reloading while it serves.
-	#[cfg(feature = "tcp")]
 	_tcp_tls: Option<TcpTls>,
 	binds: Vec<StreamBind>,
 	/// One per entry in `binds`, in the same order, and created up front rather than
@@ -1160,41 +971,37 @@ struct StreamListeners {
 	versions: moq_net::Versions,
 	/// The `[quic]` section each accepted session starts with.
 	quic: crate::quic::Resolved,
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	unix_allow: Option<crate::unix::Allow>,
 	/// Bound sockets whose accept loops have not started. Empty once [`Self::serve`]
 	/// runs, and when nothing was configured.
 	pending: Vec<BoundListener>,
 	/// The address the TCP listener bound, once [`Self::bind`] has run.
-	#[cfg(feature = "tcp")]
 	tcp_local_addr: Option<net::SocketAddr>,
 	rx: Option<tokio::sync::mpsc::Receiver<Request>>,
 	tasks: Vec<tokio::task::JoinHandle<std::convert::Infallible>>,
 }
 
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 impl StreamListeners {
 	fn new(
 		binds: Vec<StreamBind>,
 		versions: moq_net::Versions,
 		quic: crate::quic::Resolved,
-		#[cfg(all(feature = "uds", unix))] unix_allow: Option<crate::unix::Allow>,
+		#[cfg(unix)] unix_allow: Option<crate::unix::Allow>,
 	) -> Self {
 		let health = binds
 			.iter()
 			.map(|bind| crate::accept::Health::new(bind.name()))
 			.collect();
 		Self {
-			#[cfg(feature = "tcp")]
 			_tcp_tls: None,
 			binds,
 			health,
 			versions,
 			quic,
-			#[cfg(all(feature = "uds", unix))]
+			#[cfg(unix)]
 			unix_allow,
 			pending: Vec::new(),
-			#[cfg(feature = "tcp")]
 			tcp_local_addr: None,
 			rx: None,
 			tasks: Vec::new(),
@@ -1215,7 +1022,6 @@ impl StreamListeners {
 		for (bind, health) in self.binds.drain(..).zip(self.health.iter().cloned()) {
 			let alpns = self.versions.alpns();
 			match bind {
-				#[cfg(feature = "tcp")]
 				StreamBind::Tcp(addr, tls, prebound) => {
 					if tls.is_none() && !addr.ip().is_loopback() {
 						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
@@ -1238,7 +1044,7 @@ impl StreamListeners {
 					self.tcp_local_addr = Some(local);
 					pending.push(BoundListener::Tcp(listener));
 				}
-				#[cfg(all(feature = "uds", unix))]
+				#[cfg(unix)]
 				StreamBind::Unix(path, prebound) => {
 					let listener = match prebound {
 						Some(listener) => crate::unix::Listener::from_std(listener, &path)?,
@@ -1277,9 +1083,8 @@ impl StreamListeners {
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
 		for listener in self.pending.drain(..) {
 			let task = match listener {
-				#[cfg(feature = "tcp")]
 				BoundListener::Tcp(listener) => spawn_tcp_loop(listener, setup.clone(), tx.clone()),
-				#[cfg(all(feature = "uds", unix))]
+				#[cfg(unix)]
 				BoundListener::Unix(listener) => spawn_unix_loop(listener, setup.clone(), self.unix_allow.clone(), tx.clone()),
 			};
 			self.tasks.push(task);
@@ -1324,7 +1129,6 @@ impl StreamListeners {
 	}
 }
 
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 impl Drop for StreamListeners {
 	fn drop(&mut self) {
 		// Stop the accept loops so their listeners (and bound sockets) are freed.
@@ -1334,7 +1138,6 @@ impl Drop for StreamListeners {
 	}
 }
 
-#[cfg(feature = "tcp")]
 fn spawn_tcp_loop(
 	listener: crate::tcp::Listener,
 	setup: Setup,
@@ -1374,7 +1177,7 @@ fn spawn_tcp_loop(
 	})
 }
 
-#[cfg(all(feature = "uds", unix))]
+#[cfg(unix)]
 fn spawn_unix_loop(
 	listener: crate::unix::Listener,
 	setup: Setup,
@@ -1411,7 +1214,6 @@ fn spawn_unix_loop(
 
 /// What a transport learned while accepting a connection, before moq-net reads its SETUP:
 /// everything a [`Request`] reports besides the handshake itself.
-#[cfg(feature = "_transport")]
 pub(crate) struct Incoming {
 	pub transport: Transport,
 	/// The request URL, on the transports that carry one (WebTransport, WebSocket).
@@ -1424,9 +1226,9 @@ pub(crate) struct Incoming {
 	pub active: moq_net::server::Admitted,
 }
 
-#[cfg(any(test, feature = "qmux"))]
 impl Incoming {
-	/// A connection with no facts beyond its transport.
+	/// A connection with no facts beyond its transport, as a Unix socket accepts.
+	#[cfg(any(unix, test))]
 	pub(crate) fn new(
 		transport: Transport,
 		deadline: Option<kio::clock::Instant>,
@@ -1445,21 +1247,16 @@ impl Incoming {
 }
 
 /// The connection [`Request::ok`] applies [`Request::with_quic_limits`] to.
-#[cfg(feature = "_transport")]
 pub(crate) enum Under {
 	/// A transport moq-tokio cannot widen beyond what moq-net's `set_limits` reaches.
-	#[cfg(all(test, feature = "websocket"))]
+	#[cfg(test)]
 	Opaque,
 	/// A raw QUIC or WebTransport connection.
-	#[cfg(feature = "quic")]
 	Quic(crate::quic::driver::connection::Connection),
-	/// A qmux session: WebSocket, `tcp://`, `tls://`, `unix://`, or one handed over with
-	/// [`Listener::accept_with`].
-	#[cfg(feature = "qmux")]
+	/// A qmux session: WebSocket, `tcp://`, `tls://`, or `unix://`.
 	Qmux(qmux::Session),
 }
 
-#[cfg(feature = "tcp")]
 impl Incoming {
 	/// A TCP session's facts. On `tls://` these are the SNI, and the client
 	/// certificate the verifier of `tls` already accepted.
@@ -1476,7 +1273,7 @@ impl Incoming {
 			.zip(session.peer_certificates())
 			.map(|(tls, chain)| tls.peer(chain.to_vec()));
 		Self {
-			transport: Transport::Tcp,
+			transport: if tls.is_some() { Transport::Tls } else { Transport::Tcp },
 			url: None,
 			link: Link {
 				remote,
@@ -1493,7 +1290,6 @@ impl Incoming {
 	}
 
 	/// Report the ALPN the connection's TLS handshake negotiated.
-	#[cfg(feature = "_certs")]
 	pub(crate) fn with_alpn(mut self, alpn: Option<String>) -> Self {
 		self.link.alpn = alpn;
 		self
@@ -1501,7 +1297,6 @@ impl Incoming {
 }
 
 /// Read SETUP in the connection task and forward the resulting request.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 async fn stream_request(
 	session: qmux::Session,
 	setup: &Setup,
@@ -1519,7 +1314,6 @@ async fn stream_request(
 /// The transport-level facts a backend captures while accepting a connection, before the
 /// MoQ SETUP. Grouped so the shared accept loop builds a [`Request`] from named fields
 /// rather than a wide tuple.
-#[cfg(feature = "quic")]
 pub(crate) struct Accepted<S> {
 	pub session: S,
 	pub url: Option<Url>,
@@ -1547,11 +1341,9 @@ pub struct Link {
 
 /// Changes one accepted QUIC connection's limits while its session runs, from
 /// [`Request::quic_limits`]. Cloning shares the connection.
-#[cfg(feature = "quic")]
 #[derive(Clone)]
 pub struct QuicLimits(crate::quic::driver::connection::Connection);
 
-#[cfg(feature = "quic")]
 impl QuicLimits {
 	/// Update the connection's limits, as [`Request::with_quic_limits`] does before SETUP.
 	///
@@ -1561,7 +1353,6 @@ impl QuicLimits {
 	}
 }
 
-#[cfg(feature = "quic")]
 impl std::fmt::Debug for QuicLimits {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("QuicLimits").finish_non_exhaustive()
@@ -1634,7 +1425,6 @@ impl Request {
 	}
 
 	/// [`Self::accept`] over a qmux session.
-	#[cfg(feature = "qmux")]
 	pub(crate) async fn accept_qmux(
 		server: &moq_net::Server,
 		session: qmux::Session,
@@ -1686,11 +1476,9 @@ impl Request {
 	/// A handle that changes this connection's QUIC limits while the session runs, such as
 	/// bitrate caps that change after acceptance. `None` on a transport moq-quic does not
 	/// drive (qmux streams).
-	#[cfg(feature = "quic")]
 	pub fn quic_limits(&self) -> Option<QuicLimits> {
 		match &self.under {
 			Under::Quic(quic) => Some(QuicLimits(quic.clone())),
-			#[allow(unreachable_patterns, reason = "a QUIC-only build has no other connection")]
 			_ => None,
 		}
 	}
@@ -1702,8 +1490,7 @@ impl Request {
 	/// `ok` applies the other limits first, then has moq-net open `receive_window`, or
 	/// `[quic] receive_window` when it is unset, so a `receive_rate` set here paces the opened
 	/// window. A qmux session starts at the `[quic]` windows and takes the windows and stream
-	/// count set here, except a WebRTC session's receive window, which its data channel fixes;
-	/// it never paces, so `ok` refuses a rate cap on one.
+	/// count set here; it never paces, so `ok` refuses a rate cap on one.
 	pub fn with_quic_limits(mut self, limits: moq_quic::Limits) -> Result<Self, moq_quic::LimitsError> {
 		limits.validate()?;
 		self.quic_limits = limits;
@@ -1725,9 +1512,8 @@ impl Request {
 	}
 
 	/// The receive window of the qmux session under this request.
-	#[cfg(all(test, any(feature = "websocket", feature = "tcp")))]
+	#[cfg(test)]
 	pub(crate) fn qmux_window(&self) -> moq_net::transport::ReceiveWindow {
-		#[allow(irrefutable_let_patterns, reason = "a qmux-only build has no other connection")]
 		let Under::Qmux(qmux) = &self.under else {
 			panic!("a qmux session");
 		};
@@ -1745,11 +1531,9 @@ impl Request {
 		let mut limits = self.quic_limits;
 		let window = limits.receive_window.take();
 		match &self.under {
-			#[cfg(all(test, feature = "websocket"))]
+			#[cfg(test)]
 			Under::Opaque => {}
-			#[cfg(feature = "quic")]
 			Under::Quic(quic) => quic.set_limits(limits).expect("validated by with_quic_limits"),
-			#[cfg(feature = "qmux")]
 			Under::Qmux(qmux) => {
 				if let Err(err) = qmux.set_limits(limits) {
 					self.handshake.close(moq_net::SessionError::Internal.into());
@@ -1915,14 +1699,13 @@ mod tests {
 
 	/// A dead loop's channel closes before its handle resolves; that close must not
 	/// read as a clean stop, or `accept` would disable the stream arm and hang.
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	#[tokio::test]
 	async fn a_closed_channel_still_reports_the_dead_loop() {
 		let mut streams = StreamListeners::new(
 			Vec::new(),
 			Default::default(),
 			Default::default(),
-			#[cfg(all(feature = "uds", unix))]
+			#[cfg(unix)]
 			None,
 		);
 		let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -1935,14 +1718,7 @@ mod tests {
 		assert!(matches!(died, Some(Err(err)) if err.is_panic()));
 	}
 
-	#[cfg(all(not(feature = "quic"), feature = "_certs"))]
-	#[test]
-	fn no_quic_backend_needs_no_served_identity() {
-		Server::new(Config::default()).expect("an absent QUIC backend must not load a TLS identity");
-	}
-
 	/// A shared identity on a plaintext-only server would be dropped silently.
-	#[cfg(all(feature = "tcp", feature = "_certs"))]
 	#[tokio::test]
 	async fn a_shared_identity_needs_a_tls_listener() {
 		let tls = crate::tls::Listen {
@@ -1958,7 +1734,6 @@ mod tests {
 	}
 
 	/// The windows `[quic]` configures, smaller than its defaults.
-	#[cfg(any(feature = "quic", feature = "tcp"))]
 	fn small_quic() -> crate::quic::Config {
 		crate::quic::Config {
 			receive_window: Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2),
@@ -1969,7 +1744,6 @@ mod tests {
 
 	/// A `tcp://` session starts at the server's `[quic]` windows rather than the defaults,
 	/// before anything admits it.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn an_accepted_qmux_session_starts_at_the_configured_windows() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -2005,7 +1779,7 @@ mod tests {
 	/// predecessor, are served in place of binding: a session dialed before the server
 	/// existed is accepted off the queue. Closing the streams then leaves the caller's
 	/// sockets listening and the Unix path in place, for whoever serves them next.
-	#[cfg(all(feature = "tcp", feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn held_stream_sockets_are_served_and_left_to_their_holder() {
 		kio::clock::host_time(); // real sockets
@@ -2059,7 +1833,6 @@ mod tests {
 	}
 
 	/// A held socket with no listener configured for it would be served by nothing.
-	#[cfg(feature = "tcp")]
 	#[test]
 	fn a_held_stream_socket_needs_its_listener() {
 		let mut config = Config::default();
@@ -2068,13 +1841,13 @@ mod tests {
 	}
 
 	/// A millisecond track: the frames written here carry timestamps.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	/// The next route and whether it is active.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		loop {
 			return match announced.next().await? {
@@ -2090,7 +1863,6 @@ mod tests {
 	/// The second handshake must finish while the first peer is still stalled.
 	/// Reading the first server bytes proves it reached the handshake before we
 	/// connect the second peer; EOF would mean its handshake already failed.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn tcp_stalled_handshake_does_not_block_accept() {
 		use futures::FutureExt;
@@ -2131,7 +1903,6 @@ mod tests {
 
 	/// A drain that closed admission refuses at accept instead of starting a
 	/// handshake it would then cut off.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn tcp_closed_activity_refuses_at_accept() {
 		let admission = moq_net::server::Admission::default();
@@ -2163,7 +1934,7 @@ mod tests {
 
 	/// A refused peer must be closed without exchanging even the qmux preface.
 	/// Use our real kernel credentials and change only the configured allowlist.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn unix_allowlist_precedes_negotiation() {
 		use tokio::io::AsyncReadExt;
@@ -2220,7 +1991,7 @@ mod tests {
 		}
 	}
 
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn unix_stalled_handshake_does_not_block_accept() {
 		use futures::FutureExt;
@@ -2266,7 +2037,6 @@ mod tests {
 	/// all gone. Time pauses only once the socket I/O is done (a paused runtime
 	/// waiting on the kernel would skip ahead to qmux's own handshake timeout), so
 	/// a leaked task leaves the runtime idle and fires the 1s timeout first.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn tcp_stop_aborts_stalled_handshake() {
 		use tokio::io::AsyncReadExt;
@@ -2293,7 +2063,7 @@ mod tests {
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn unix_stop_aborts_stalled_handshake() {
 		use tokio::io::AsyncReadExt;
@@ -2324,7 +2094,6 @@ mod tests {
 
 	/// A qmux session pair over an in-memory WebSocket, so a handshake can run on a
 	/// paused clock.
-	#[cfg(feature = "websocket")]
 	async fn session_pair() -> (qmux::Session, qmux::Session) {
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let (client, server) = tokio::io::duplex(64 * 1024);
@@ -2336,7 +2105,6 @@ mod tests {
 	}
 
 	/// HTTP connection facts and the admission guard survive the upgraded-socket handoff.
-	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_preserves_request_metadata() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
@@ -2351,7 +2119,7 @@ mod tests {
 			alpn: Some("qmux-01.moq-lite-06".into()),
 		};
 		options.identity = Some(crate::tls::PeerIdentity::from_chain(Vec::new()));
-		let accept = tokio::spawn(crate::websocket::accept(server, options));
+		let accept = tokio::spawn(crate::websocket::accept_request(server, options));
 		let client = crate::spawn_qmux(
 			qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
 				.connect()
@@ -2379,7 +2147,6 @@ mod tests {
 	/// An embedder may poll the deadline from outside any tokio runtime. A SETUP that is
 	/// already buffered resolves the handshake before its timer starts, so the timer
 	/// first starts here and still needs a runtime.
-	#[cfg(feature = "websocket")]
 	#[test]
 	fn expired_polls_outside_a_runtime() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
@@ -2419,7 +2186,6 @@ mod tests {
 		assert!(request.poll_expired(&kio::Waiter::noop()).is_pending());
 	}
 
-	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_refuses_setup_path_presence() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
@@ -2433,7 +2199,7 @@ mod tests {
 					admission.enter().unwrap(),
 				);
 				options.link.alpn = Some(protocol.into());
-				let accept = tokio::spawn(crate::websocket::accept(server, options));
+				let accept = tokio::spawn(crate::websocket::accept_request(server, options));
 				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().await.unwrap());
 				// A single Path parameter, including the empty value: lite uses a
 				// counted parameter bag; IETF uses a u16-sized SETUP option block.
@@ -2461,7 +2227,6 @@ mod tests {
 	/// With `setup` it is a moq-transport peer whose bidi SETUP stream delivers those
 	/// bytes and then never grants credit for the reply. Without it, it never opens
 	/// anything, while a bidi stream it opens itself records what is written.
-	#[cfg(feature = "websocket")]
 	#[derive(Clone)]
 	struct Scripted {
 		alpn: &'static str,
@@ -2470,7 +2235,6 @@ mod tests {
 		closed: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 	}
 
-	#[cfg(feature = "websocket")]
 	impl Scripted {
 		fn new(alpn: &'static str) -> Self {
 			Self {
@@ -2483,12 +2247,10 @@ mod tests {
 	}
 
 	/// The scripted peer never fails, only parks, so its error is never built.
-	#[cfg(feature = "websocket")]
 	#[derive(Debug, Clone, thiserror::Error)]
 	#[error("scripted peer error")]
 	struct ScriptedError;
 
-	#[cfg(feature = "websocket")]
 	impl moq_net::transport::Error for ScriptedError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			None
@@ -2496,12 +2258,10 @@ mod tests {
 	}
 
 	/// Records every write, or accepts none when stalled.
-	#[cfg(feature = "websocket")]
 	struct ScriptedSend {
 		written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 		stalled: bool,
 	}
-	#[cfg(feature = "websocket")]
 	impl moq_net::transport::poll::SendStream for ScriptedSend {
 		type Error = ScriptedError;
 		type Group = moq_net::transport::poll::Ungrouped;
@@ -2529,11 +2289,9 @@ mod tests {
 	}
 
 	/// Delivers data once, then parks.
-	#[cfg(feature = "websocket")]
 	struct ScriptedRecv {
 		data: Option<bytes::Bytes>,
 	}
-	#[cfg(feature = "websocket")]
 	impl moq_net::transport::poll::Chunks for ScriptedRecv {
 		type Error = ScriptedError;
 		fn poll_read_chunk(
@@ -2553,7 +2311,6 @@ mod tests {
 		fn stop(&mut self, _: u32) {}
 	}
 
-	#[cfg(feature = "websocket")]
 	impl moq_net::transport::poll::Session for Scripted {
 		type SendStream = ScriptedSend;
 		type RecvStream = moq_net::transport::poll::Buffered<ScriptedRecv>;
@@ -2627,7 +2384,6 @@ mod tests {
 	}
 
 	/// A timeout past the clock's range waits forever instead of panicking on accept.
-	#[cfg(feature = "websocket")]
 	#[tokio::test]
 	async fn unreachable_timeout_has_no_deadline() {
 		let setup = Setup {
@@ -2638,7 +2394,6 @@ mod tests {
 	}
 
 	/// A peer that never sends SETUP is refused at the deadline, and told why.
-	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn stalled_setup_is_closed_at_the_deadline() {
 		let peer = Scripted::new("moq-lite-06");
@@ -2663,7 +2418,6 @@ mod tests {
 	/// Answering SETUP is part of the handshake: a peer that sends its SETUP but
 	/// never grants credit for the reply is refused at the same
 	/// deadline, rather than held open by keep-alives, and the session counts it.
-	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn stalled_setup_reply_is_closed_at_the_deadline() {
 		// Record a real CLIENT_SETUP offering only lite-02, whose reply waits for
@@ -2719,7 +2473,6 @@ mod tests {
 
 	/// The deadline bounds only the handshake: a session that finished in time
 	/// stays open past it.
-	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn completed_setup_outlives_the_deadline() {
 		use moq_net::transport::poll::Session as _;
@@ -2759,7 +2512,6 @@ mod tests {
 
 	/// A WebSocket peer that never sends its upgrade request holds up only itself.
 	/// Real sockets, so this runs on the wall clock.
-	#[cfg(feature = "websocket")]
 	#[tokio::test]
 	async fn websocket_stalled_upgrade_does_not_block_accept() {
 		let ws = crate::websocket::Listener::bind("127.0.0.1:0".parse().unwrap())
@@ -2819,7 +2571,6 @@ mod tests {
 	/// startup, which is exactly when a metrics endpoint is assembled. A stream-only
 	/// node would then publish no accept counters for the only sockets on it that can
 	/// fail.
-	#[cfg(feature = "tcp")]
 	#[test]
 	fn accept_health_covers_stream_listeners_before_they_bind() {
 		let mut config = crate::listen::Config::default();
@@ -2842,7 +2593,7 @@ mod tests {
 	/// stays held by a server that never serves. Binding everything before spawning
 	/// anything is what makes that release immediate rather than whenever an aborted
 	/// task happens to be dropped.
-	#[cfg(all(feature = "tcp", feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn a_failed_listen_binds_nothing() {
 		// A path that cannot be a socket, so the unix bind fails after the tcp one
@@ -2889,7 +2640,7 @@ mod tests {
 	/// [`moq_net::Server`]. [`Server::serve_publish`] sets the publisher there
 	/// rather than on the request, so a session that handshakes against any other
 	/// server accepts and then serves nothing.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn unix_listener_serves_the_configured_publisher() {
 		kio::clock::host_time(); // a real Unix socket
@@ -2909,12 +2660,14 @@ mod tests {
 			.create_track("video", timed())
 			.expect("create track");
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut config = crate::listen::Config::default();
 		config.unix.bind = Some(path.clone());
@@ -2985,7 +2738,6 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 	}
 
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_panicked_accept_loop_ends_its_listener() {
 		let mut config = crate::listen::Config::default();
@@ -3018,7 +2770,6 @@ mod tests {
 	/// Closing a listener must release its TCP socket before returning. Reusing it
 	/// afterwards is unrepresentable: `listen` consumes the `Server` and `close`
 	/// consumes the `Listener`.
-	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn close_releases_stream_listener_socket() {
 		let mut config = crate::listen::Config::default();
@@ -3042,7 +2793,6 @@ mod tests {
 	/// Closing a listener must release its UDP socket before returning, even while
 	/// an accepted session still holds its QUIC connection, so a restart can rebind
 	/// the port at once.
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn close_releases_quic_socket() {
 		let config = crate::listen::Config {
@@ -3074,7 +2824,6 @@ mod tests {
 
 	/// A QUIC connection holds back its receive window until the request is admitted, and
 	/// `ok` opens the `[quic]` window, or the one the request names, before SETUP OK.
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn admission_opens_the_held_back_quic_window() {
 		let wider = std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 4).unwrap();
@@ -3123,7 +2872,6 @@ mod tests {
 
 	/// A QUIC endpoint that stops under a live listener fails `accept` and the
 	/// `serve_*` loop built on it, instead of reading as a clean stop.
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn a_stopped_quic_endpoint_fails_accept() {
 		let config = crate::listen::Config {
@@ -3162,10 +2910,8 @@ mod tests {
 		assert!(matches!(err, Error::NoBackend(_)), "{err}");
 	}
 
-	/// A client CA or pinned peers on a stream-only server are refused unless a
-	/// `tls://` listener verifies them: the plaintext stream listeners never ask
-	/// for a client certificate.
-	#[cfg(feature = "tcp")]
+	/// A client CA on a stream-only server is refused unless a `tls://` listener
+	/// verifies it: the plaintext stream listeners never ask for a client certificate.
 	#[tokio::test]
 	async fn client_auth_without_a_tls_listener_is_rejected() {
 		let dir = tempfile::tempdir().unwrap();
@@ -3181,109 +2927,40 @@ mod tests {
 		.cert;
 		std::fs::write(&ca, cert.pem()).unwrap();
 
-		type Set = Box<dyn Fn(&mut crate::listen::Config)>;
-		let cases: [Set; 2] = [
-			Box::new(move |c| c.tls.root = vec![ca.clone()]),
-			Box::new(|c| c.tls.peers = Some(crate::tls::Peers::new())),
-		];
-		for set in cases {
-			let mut config = crate::listen::Config::default();
-			config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-			set(&mut config);
-
-			assert!(matches!(
-				config.clone().init(Default::default()),
-				Err(Error::MtlsUnsupported)
-			));
-			// A worker group owning QUIC verifies it, so the streams alone accept it.
-			config.clone().init_streams().expect("streams beside worker-owned QUIC");
-
-			// A `tls://` listener verifies it.
-			config.tcp.tls = Some(true);
-			config.tls.generate = vec!["localhost".into()];
-			#[cfg(feature = "_certs")]
-			config
-				.init(Default::default())
-				.expect("tls:// verifies client certificates");
-			#[cfg(not(feature = "_certs"))]
-			assert!(matches!(config.init(Default::default()), Err(Error::NoBackend(_))));
-		}
-	}
-
-	/// An explicit QUIC bind cannot be honored without a QUIC backend.
-	#[cfg(not(feature = "quic"))]
-	#[test]
-	fn quic_bind_without_a_quic_backend_is_rejected() {
-		let config = crate::listen::Config {
-			bind: Some("127.0.0.1:0".parse().unwrap()),
-			..Default::default()
-		};
-
-		assert!(matches!(
-			Config {
-				listen: config,
-				..Default::default()
-			}
-			.init(),
-			Err(Error::NoBackend(_))
-		));
-	}
-
-	/// A reset secret on the default QUIC listener would never be read without a
-	/// QUIC backend.
-	#[cfg(not(feature = "quic"))]
-	#[test]
-	fn reset_secret_without_a_quic_backend_is_rejected() {
 		let mut config = crate::listen::Config::default();
-		config.reset.secret = Some("reset.key".into());
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tls.root = vec![ca];
 
 		assert!(matches!(
-			Config {
-				listen: config,
-				..Default::default()
-			}
-			.init(),
-			Err(Error::NoBackend(reason)) if reason.starts_with("--listen-reset-secret")
+			config.clone().init(Default::default()),
+			Err(Error::MtlsUnsupported)
 		));
+		// A worker group owning QUIC verifies it, so the streams alone accept it.
+		config.clone().init_streams().expect("streams beside worker-owned QUIC");
+
+		// A `tls://` listener verifies it.
+		config.tcp.tls = Some(true);
+		config.tls.generate = vec!["localhost".into()];
+		config
+			.init(Default::default())
+			.expect("tls:// verifies client certificates");
 	}
 
-	/// A client CA on the default QUIC listener names the missing backend, not a
-	/// stream-only server the caller never configured.
-	#[cfg(not(feature = "quic"))]
-	#[test]
-	fn client_ca_without_a_quic_backend_is_rejected() {
-		let config = crate::listen::Config {
-			tls: crate::tls::Listen {
-				root: vec!["ca.pem".into()],
-				..Default::default()
-			},
+	/// A server with no stream listener reports nothing. QUIC multiplexes over one UDP
+	/// socket and never calls `accept`, so a zero counter would be a watch that cannot fire.
+	#[tokio::test]
+	async fn accept_health_is_empty_without_a_stream_listener() {
+		let mut config = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
 			..Default::default()
 		};
-
-		assert!(matches!(
-			Config {
-				listen: config,
-				..Default::default()
-			}
-			.init(),
-			Err(Error::NoBackend(_))
-		));
-	}
-
-	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and
-	/// never calls `accept`, so a zero counter would be a watch that cannot fire.
-	#[cfg(all(feature = "quic", not(feature = "tcp")))]
-	#[test]
-	fn accept_health_is_empty_without_a_stream_listener() {
-		let server = crate::listen::Config::default()
-			.init(Default::default())
-			.expect("quic server");
+		config.tls.generate = vec!["localhost".into()];
+		let server = config.init(Default::default()).expect("quic server");
 		assert!(server.accept_health().is_empty());
 	}
 
 	/// `certificates()` must stay readable with no runtime entered (no guard
 	/// escapes to the caller).
-	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn certificates_expose_generated_fingerprints() {
 		let mut config = crate::listen::Config {
@@ -3302,7 +2979,7 @@ mod tests {
 
 	/// A stream-only server has no TLS backend, so there's nothing to pin. This
 	/// must report empty rather than panic.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[tokio::test]
 	async fn certificates_are_empty_without_a_tls_backend() {
 		let dir = tempfile::tempdir().unwrap();
@@ -3361,7 +3038,7 @@ mod tests {
 		);
 	}
 
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[test]
 	fn stream_listener_config_parses() {
 		let config: crate::listen::Config = toml::from_str(
@@ -3386,7 +3063,7 @@ uid = [1001, 1002]
 		assert!(config.has_explicit_bind());
 	}
 
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[test]
 	fn stream_only_config_has_no_quic() {
 		// A unix listener with no `--listen` is stream-only.

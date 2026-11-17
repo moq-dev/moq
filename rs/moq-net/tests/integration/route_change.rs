@@ -230,7 +230,7 @@ pub(super) fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delive
 }
 
 /// Wait for the next frame the reader reports, failing on an error or a hang.
-async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
+pub(super) async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
 	let (group, _, payload) = next_timed(rx).await;
 	(group, payload)
 }
@@ -261,7 +261,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 		expected.push((0, payload(0, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Group 1: half through `A`, then the route changes. Between groups, the change
 	// lands before the group starts at all.
@@ -281,7 +281,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 		expected.push((1, payload(1, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Group 2 entirely through the replacement.
 	let mut group = topology.track.append_next().unwrap();
@@ -290,7 +290,7 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 		expected.push((2, payload(2, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let render = |frames: &[(u64, Vec<u8>)]| {
 		frames
@@ -332,7 +332,7 @@ async fn route_flaps(version: &str) {
 		expected.push((0, payload(0, frame)));
 		seen.push(next(&mut rx).await);
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	assert_eq!(seen, expected, "{version}");
 	settle().await;
@@ -353,7 +353,7 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 		group.write_frame(group.at_start(), payload(0, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	topology.trigger(trigger).await;
 	let mut group = topology.track.append_next().unwrap();
@@ -380,7 +380,7 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
 	group.write_frame(group.at_start(), payload(1, 1)).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload(2, 0)).unwrap();
 	while next(&mut rx).await != (2, payload(2, 0)) {}
@@ -439,7 +439,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 
 	let mut group = track_a.append_next().unwrap();
 	group.write_frame(group.at_start(), tagged("A", 0, 0)).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("A", 0, 0)), "{version}");
 
 	match trigger {
@@ -508,7 +508,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	let mut rx = read(sub);
 	let mut group = track_b.append_next().unwrap();
 	group.write_frame(group.at_start(), tagged("B", 0, 0)).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, tagged("B", 0, 0)), "{version} {trigger:?}");
 }
 
@@ -552,7 +552,7 @@ async fn better_route_restarts(version: &str) {
 	assert!(!replaced.is_clone(&incumbent), "{version}: joined the replaced front");
 	let sub = replaced.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut fresh = read(sub);
-	group.close().unwrap();
+	group.finish().unwrap();
 	let mut group = topology.track.append_next().unwrap();
 	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
 	while next(&mut fresh).await != (1, payload(1, 0)) {}
@@ -561,41 +561,6 @@ async fn better_route_restarts(version: &str) {
 		(1, payload(1, 0)),
 		"{version}: the incumbent stays"
 	);
-}
-
-/// A route through the far end of a closed link waits out the doubt. `A` loses its
-/// session to `P`, the far end, and `B`'s route names `P` too: `R` cannot tell `P` from a
-/// dead relay whose news is still on its way, so it holds the claim and moves to `B` only
-/// once the doubt lifts. The subscription through `A` ends meanwhile; a new one reads on
-/// through `B`.
-async fn waits_out_the_doubt(version: &str) {
-	let version: Version = version.parse().unwrap();
-	let (mut topology, sub) = Topology::new(version).await;
-	let mut rx = read(sub);
-	topology.standby().await;
-
-	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
-	group.close().unwrap();
-	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
-
-	topology.trigger(Trigger::Unannounce).await;
-	kio::clock::sleep(Duration::from_secs(1)).await;
-	let mut group = topology.track.append_next().unwrap();
-	group.write_frame(group.at_start(), payload(1, 0)).unwrap();
-	group.close().unwrap();
-	let remote = topology.subscriber.consume().request("live", None).await.unwrap();
-	let mut fresh = read(remote.track("video").unwrap().subscribe(None).await.unwrap());
-	assert_eq!(next(&mut fresh).await, (1, payload(1, 0)), "{version}: through B");
-	match kio::clock::timeout(Duration::from_secs(10), rx.next())
-		.await
-		.expect("the subscription through A hung")
-	{
-		Some((_, Err(_))) => {}
-		None => panic!("{version}: the subscription through A ended cleanly"),
-		Some((group, Ok(_))) => panic!("{version}: the subscription through A read group {group}"),
-	}
-	assert!(rx.try_recv().is_err(), "{version}: a delivery after the error");
 }
 
 macro_rules! route_change_tests {
@@ -634,11 +599,16 @@ macro_rules! route_change_tests {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
+				/// `B`'s route begins at `P`, the far end of the closed link, so doubt about
+				/// `P` does not keep `R` off it: the subscription moves at once.
 				#[kio::test]
-				async fn unannounce_waits_out_the_doubt() {
-					kio::clock::timeout(TEST_TIMEOUT, waits_out_the_doubt($version))
-						.await
-						.expect("timed out");
+				async fn unannounce_between_groups() {
+					run(Trigger::Unannounce, Position::BetweenGroups).await;
+				}
+
+				#[kio::test]
+				async fn unannounce_mid_group() {
+					run(Trigger::Unannounce, Position::MidGroup).await;
 				}
 
 				#[kio::test]
@@ -772,7 +742,7 @@ async fn lagging_route_dies(version: Version) {
 	for frame in 0..4 {
 		write(&mut group, 0, frame);
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 	for frame in 0..4 {
 		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
 	}
@@ -785,12 +755,12 @@ async fn lagging_route_dies(version: Version) {
 	// P moves on while A is still behind.
 	write(&mut group, 1, 2);
 	write(&mut group, 1, 3);
-	group.close().unwrap();
+	group.finish().unwrap();
 	let mut group = track.append_next().unwrap();
 	for frame in 0..FRAMES {
 		write(&mut group, 2, frame);
 	}
-	let group = group.close().unwrap();
+	let group = group.finish().unwrap();
 
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
@@ -867,7 +837,9 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 	let mut after = BTreeMap::<u64, Vec<String>>::new();
 	for key in 0..=E_NOTICES + 3 {
 		// Each group starts at its first frame, a second after the last.
-		let mut group = track.append_group(key * 1_000).unwrap();
+		let mut group = track
+			.append_group(Timestamp::from_millis(key * 1_000).unwrap())
+			.unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(key * 1_000 + frame * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(key, frame)).unwrap();
@@ -881,7 +853,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 			}
 			kio::clock::sleep(STEP).await;
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		if key == O_NOTICES {
 			o_m1.server.abort(Error::Cancel);
 			o_m1.client.abort(Error::Cancel);
@@ -1015,7 +987,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 					tagged(replica.name, key, 0),
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	};
 	write(&mut replicas, 0);
@@ -1153,7 +1125,7 @@ async fn replaced_behind_a_relay(version: &str) {
 			}
 		}
 		for replica in &mut replicas {
-			replica.group.take().unwrap().close().unwrap();
+			replica.group.take().unwrap().finish().unwrap();
 		}
 	}
 	settle().await;
@@ -1257,7 +1229,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 				let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 				group.write_frame(timestamp, tagged(replica.name, key, frame)).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		if compress || dead.is_none() {
 			for frame in 0..FRAMES {
@@ -1344,7 +1316,7 @@ async fn producer_replaced(version: &str) {
 			group.write_frame(group.at_start(), payload(key, frame)).unwrap();
 			assert_eq!(next(&mut rx).await, (key, payload(key, frame)), "{version}");
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
@@ -1361,7 +1333,7 @@ async fn producer_replaced(version: &str) {
 		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	settle().await;
 	assert!(

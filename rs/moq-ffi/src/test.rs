@@ -18,7 +18,7 @@ use crate::json::{
 use crate::media::*;
 use crate::session::{
 	MoqBackoff, MoqCongestionControl, MoqConnectionPhase, MoqQuicConfig, MoqWebSocketConfig, moq_client_defaults,
-	moq_qlog_supported, moq_versions,
+	moq_versions,
 };
 
 use std::future::Future;
@@ -49,8 +49,7 @@ fn timed() -> moq_net::track::Info {
 fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
-		max_age: None,
-		max_age_unlimited: false,
+		max_age: Some(Duration::ZERO),
 		refresh: None,
 		timescale: Some(1_000_000),
 		compression: None,
@@ -60,7 +59,7 @@ fn timed_info() -> MoqTrackInfo {
 /// [`timed_info`] with no publisher age limit, for a test that reads superseded groups.
 fn unlimited_info() -> MoqTrackInfo {
 	MoqTrackInfo {
-		max_age_unlimited: true,
+		max_age: None,
 		..timed_info()
 	}
 }
@@ -131,7 +130,8 @@ fn fast_backoff() -> MoqBackoff {
 		initial: Some(Duration::from_millis(50)),
 		multiplier: Some(2),
 		max: Some(Duration::from_millis(200)),
-		timeout: Some(Duration::ZERO),
+		max_unlimited: false,
+		timeout: None,
 	}
 }
 
@@ -317,7 +317,6 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 			enabled: true,
 			framerate: None,
 			container,
-			warmup: None,
 		},
 	}
 }
@@ -334,7 +333,6 @@ fn referencing(reference: Option<&str>, instance: Option<&str>) -> MoqRendition 
 }
 
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
-#[cfg(feature = "audio")]
 fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	use crate::media::{MoqAudio, MoqContainer};
 
@@ -355,7 +353,6 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	}
 }
 
-#[cfg(feature = "audio")]
 fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 	use crate::audio::{MoqAudioDecoderOutput, MoqAudioSampleFormat};
 	MoqAudioDecoderOutput {
@@ -563,7 +560,6 @@ async fn raw_track_activity() {
 		.unwrap();
 }
 
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_activity() {
 	use crate::audio::*;
@@ -577,7 +573,9 @@ async fn raw_audio_activity() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::audio::MoqAudioProducerOptions {
@@ -680,7 +678,6 @@ async fn raw_audio_activity() {
 }
 
 /// Distinct channel tones, continuous across calls from different producer threads.
-#[cfg(feature = "audio")]
 fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
 	(start..start + frames)
 		.flat_map(|sample| {
@@ -692,7 +689,6 @@ fn audio_tone(start: usize, frames: usize, channels: usize) -> Vec<u8> {
 		.collect()
 }
 
-#[cfg(feature = "audio")]
 fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 	let coefficient = 2.0 * (std::f64::consts::TAU * frequency / 48_000.0).cos();
 	let (mut previous, mut older) = (0.0, 0.0);
@@ -705,13 +701,14 @@ fn tone_power(samples: &[f32], frequency: f64) -> f64 {
 }
 
 /// PCM written and finished from separate host threads survives the binding's locking and drain.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_raw_publish_from_many_threads() {
 	use crate::audio::*;
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let output = MoqAudioEncoderOutput {
 		codec: MoqAudioCodec::opus(),
@@ -804,7 +801,6 @@ async fn audio_raw_publish_from_many_threads() {
 }
 
 /// Reject incomplete PCM channel frames before feeding the codec.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_raw_publish_rejects_bad_frames() {
 	use crate::audio::*;
@@ -846,7 +842,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 
 /// The decoder's playout delay is configurable and stays observable while a read waits:
 /// the decoder sits behind the read's lock, so the getter must not need it.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_decode_delay() {
 	use crate::audio::*;
@@ -858,7 +853,9 @@ async fn raw_audio_decode_delay() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::audio::MoqAudioProducerOptions {
@@ -951,7 +948,6 @@ async fn raw_audio_decode_delay() {
 
 /// Each encoder the publisher stops, by a reanchor or a finish, reaches the caller as an
 /// end in microseconds rather than vanishing between frames.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_decode_reports_encoder_ends() {
 	use crate::audio::*;
@@ -962,7 +958,9 @@ async fn raw_audio_decode_reports_encoder_ends() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let audio = MoqAudioProducer::new(
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		MoqAudioProducerOptions {
@@ -1043,7 +1041,6 @@ async fn raw_audio_decode_reports_encoder_ends() {
 
 /// Opus' 2.5 ms frame survives the trip to the encoder, and a duration Opus can't frame is
 /// refused.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_frame_durations() {
 	use crate::audio::*;
@@ -1101,7 +1098,6 @@ async fn raw_audio_frame_durations() {
 
 /// An absent frame duration takes the codec's own frame, and AAC, which encodes only
 /// through a platform encoder, is refused where there is none.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_codec_default_frame() {
 	use crate::audio::*;
@@ -1206,10 +1202,9 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
-		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
-		compression: Some(crate::producer::MoqCompression::Deflate),
+		compression: Some(MoqCompression::deflate()),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -1217,10 +1212,9 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
-	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
-	assert_eq!(got.compression, Some(crate::producer::MoqCompression::Deflate));
+	assert_eq!(got.compression.unwrap().name(), "deflate");
 }
 
 #[tokio::test]
@@ -1291,8 +1285,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 				"data".into(),
 				Some(MoqTrackInfo {
 					priority: 0,
-					max_age: None,
-					max_age_unlimited: false,
+					max_age: Some(Duration::ZERO),
 					refresh: None,
 					timescale: timestamp.scale,
 					compression: None,
@@ -1358,7 +1351,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let clock = broadcast
-		.with_state(|state| Ok(state.catalog.snapshot().media.clock))
+		.with_state(|state| Ok(state.catalog.snapshot().sync.clock))
 		.unwrap();
 	// Withhold publication so only the explicit clock read can fix it before the first frame.
 	let reserved = broadcast.with_state(|state| Ok(state.catalog.reserve())).unwrap();
@@ -1378,7 +1371,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 		.unwrap();
 	assert_eq!(
 		broadcast
-			.with_state(|state| Ok(state.catalog.snapshot().media.clock))
+			.with_state(|state| Ok(state.catalog.snapshot().sync.clock))
 			.unwrap(),
 		clock
 	);
@@ -1395,11 +1388,10 @@ async fn json_snapshot_roundtrip() {
 	let config = MoqJsonSnapshotConfig { deltas: true };
 	let info = MoqTrackInfo {
 		priority: 0,
-		max_age: None,
-		max_age_unlimited: false,
+		max_age: Some(Duration::ZERO),
 		timescale: Some(1_000_000),
 		refresh: None,
-		compression: Some(crate::producer::MoqCompression::Deflate),
+		compression: Some(MoqCompression::deflate()),
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
@@ -1407,7 +1399,7 @@ async fn json_snapshot_roundtrip() {
 		matches!(track.demand(), Err(MoqError::Closed)),
 		"the producer takes over the track"
 	);
-	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
+	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), None).unwrap();
 
 	for n in 1..=4 {
 		producer.update(format!(r#"{{"a":{n}}}"#), us(n * 1000)).unwrap();
@@ -1469,8 +1461,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			"meta".into(),
 			Some(MoqTrackInfo {
 				priority: 127,
-				max_age: None,
-				max_age_unlimited: false,
+				max_age: Some(Duration::ZERO),
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compression: None,
@@ -1489,15 +1480,15 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	let refreshed = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let group = joiner.recv_group().await.unwrap().expect("expected a group");
-			if group.sequence() > 0 {
+			if group.start() > 0 {
 				return group;
 			}
 		}
 	})
 	.await
 	.expect("timed out waiting for the refresh");
-	assert_eq!(refreshed.sequence(), 3000, "the restatement starts at the value's time");
-	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), 0).unwrap();
+	assert_eq!(refreshed.start(), 3000, "the restatement starts at the value's time");
+	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), None).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for the restated value")
@@ -1526,7 +1517,7 @@ async fn json_demand() {
 	assert_eq!(stream_demand.name(), "events");
 	assert!(!snapshot_demand.wanted().is_some());
 
-	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "status".into(), 0).unwrap();
+	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "status".into(), None).unwrap();
 	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
 
 	kio::clock::timeout(TIMEOUT, snapshot_demand.until_wanted())
@@ -1660,7 +1651,7 @@ async fn json_window_cut_restates_the_window() {
 	let group = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let group = raw.recv_group().await.unwrap().expect("expected a group");
-			if group.sequence() > 0 {
+			if group.start() > 0 {
 				return group;
 			}
 		}
@@ -1668,7 +1659,7 @@ async fn json_window_cut_restates_the_window() {
 	.await
 	.expect("timed out waiting for the cut's group");
 	assert_eq!(
-		group.sequence(),
+		group.start(),
 		4000,
 		"a repeated cut opens no extra group: the next starts at the next push"
 	);
@@ -1701,8 +1692,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			"log".into(),
 			Some(MoqTrackInfo {
 				priority: 127,
-				max_age: None,
-				max_age_unlimited: false,
+				max_age: Some(Duration::ZERO),
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compression: None,
@@ -1720,7 +1710,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 	// The join crosses the ratio, so the producer restates the window without another edit.
 	let joiner = subscribe(&broadcast, "log").await;
 	kio::clock::timeout(TIMEOUT, async {
-		while joiner.recv_group().await.unwrap().expect("expected a group").sequence() == 0 {}
+		while joiner.recv_group().await.unwrap().expect("expected a group").start() == 0 {}
 	})
 	.await
 	.expect("timed out waiting for the refresh");
@@ -1942,17 +1932,284 @@ async fn track_request_demand_survives_accept() {
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
 	demand.until_unwanted().await.unwrap();
-	// Released unfinished, the track aborts, and its watcher keeps the cause.
+	// Released unfinished, the track ends dropped, which its watcher reports as `Closed`, as a
+	// track released without an abort.
 	drop(track);
 	broadcast.close().unwrap();
 	let Err(err) = demand.until_wanted().await else {
 		panic!("the watcher outlived its track");
 	};
-	assert_protocol(
-		&err,
-		crate::error::MoqErrorScope::Stream,
-		crate::error::MoqProtocolKind::Unroutable,
+	assert!(matches!(err, MoqError::Closed), "{err:?}");
+}
+
+/// An on-demand track ends once unwanted, but a reader that joined first keeps it, and a later
+/// reader requests it afresh.
+#[tokio::test]
+async fn abort_unwanted_keeps_a_late_reader() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let first = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
+	};
+	let track = dynamic.requested_track().await.unwrap().accept(None).unwrap();
+	let demand = track.demand().unwrap();
+	first.await.unwrap().unwrap().cancel();
+	demand.until_unwanted().await.unwrap();
+
+	// A reader joins after the publisher saw nobody wanted the track.
+	let late = consumer.subscribe_track("events".into(), None).await.unwrap();
+	assert!(!track.abort_unwanted(7).unwrap());
+	track.append_group().unwrap().finish().unwrap();
+	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
+		.await
+		.expect("timed out waiting for the late reader's group")
+		.unwrap();
+	assert!(group.is_some());
+
+	// The publisher's demand loop sees the reader come and go; then the same teardown
+	// commits, and later calls find the handle closed.
+	demand.until_wanted().await.unwrap();
+	drop(group);
+	late.cancel();
+	demand.until_unwanted().await.unwrap();
+	assert!(track.abort_unwanted(7).unwrap());
+	assert!(matches!(track.abort_unwanted(7), Err(MoqError::Closed)));
+	assert!(matches!(track.append_group(), Err(MoqError::Closed)));
+
+	// The next reader asks the publisher again instead of finding the aborted track.
+	let next = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the track to be requested again")
+		.unwrap();
+	assert_eq!(request.name().unwrap(), "events");
+	request.reject(404).unwrap();
+	assert!(next.await.unwrap().is_err());
+
+	// A finished track is kept for its readers the same way.
+	let finished = broadcast.publish_track("status".into(), None).unwrap();
+	let reader = finished.consume(None).unwrap();
+	finished.finish().unwrap();
+	assert!(!finished.abort_unwanted(7).unwrap());
+	reader.cancel();
+	assert!(finished.abort_unwanted(7).unwrap());
+}
+
+/// Every typed producer ends an idle track with `abort_unwanted`, but keeps it for a reader that
+/// joined since, which reads what is written next; once that reader leaves the abort commits and
+/// the handle is closed.
+///
+/// The reader leaves before the publisher's watcher sees it arrive, so that watcher, still on
+/// null, never wakes: the publisher waits for the next null on a fresh `demand()` instead.
+async fn typed_abort_unwanted(
+	broadcast: &MoqBroadcastProducer,
+	demand: impl Fn() -> Arc<crate::demand::MoqTrackDemand>,
+	abort: impl Fn() -> Result<bool, MoqError>,
+	write: impl FnOnce(),
+) {
+	let watcher = demand();
+	let name = watcher.name();
+	kio::clock::timeout(TIMEOUT, watcher.until_unwanted())
+		.await
+		.expect("timed out waiting for the track to start unwanted")
+		.unwrap();
+
+	// A reader joins after the publisher saw nobody wanted the track.
+	let late = subscribe(broadcast, &name).await;
+	assert!(!abort().unwrap(), "{name} aborted under a reader");
+	write();
+	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {name}'s group"))
+		.unwrap();
+	assert!(group.is_some(), "{name} ended under a reader");
+
+	// The reader leaves before the publisher's watcher looks again.
+	drop(group);
+	late.cancel();
+	let fresh = demand();
+	kio::clock::timeout(TIMEOUT, fresh.until_unwanted())
+		.await
+		.expect("timed out waiting for the reader to leave")
+		.unwrap();
+	let stale = std::pin::pin!(watcher.wanted_changed());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(
+		stale.poll(&mut cx).is_pending(),
+		"{name}'s old watcher saw the reader come and go"
 	);
+	assert!(abort().unwrap(), "{name} kept with nobody reading");
+	assert!(matches!(abort(), Err(MoqError::Closed)), "{name} still open");
+}
+
+#[tokio::test]
+async fn typed_abort_unwanted_keeps_a_late_reader() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		named("media"),
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| media.demand().unwrap(),
+		|| media.abort_unwanted(7),
+		|| {
+			media
+				.write_frame(MoqFrame {
+					payload: b"opus frame".to_vec(),
+					timestamp: us(0),
+				})
+				.unwrap()
+		},
+	)
+	.await;
+	assert!(matches!(
+		media.write_frame(MoqFrame {
+			payload: b"opus frame".to_vec(),
+			timestamp: us(20_000)
+		}),
+		Err(MoqError::Closed)
+	));
+
+	let stream = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("stream"),
+		video_init(MoqVideoFormat::Avc3, Vec::new()),
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| stream.demand().unwrap(),
+		|| stream.abort_unwanted(7),
+		|| {
+			// A second keyframe delimits the first access unit.
+			let mut keyframe = h264_init();
+			keyframe.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+			stream.write(keyframe.repeat(2)).unwrap();
+		},
+	)
+	.await;
+
+	let audio = crate::audio::MoqAudioProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::audio::MoqAudioProducerOptions {
+			input: crate::audio::MoqAudioEncoderInput {
+				format: crate::audio::MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			},
+			output: crate::audio::MoqAudioEncoderOutput {
+				codec: crate::audio::MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration: Some(Duration::from_millis(20)),
+			},
+			track: Some("microphone".into()),
+			bandwidth: None,
+		},
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| audio.demand().unwrap(),
+		|| audio.abort_unwanted(7),
+		|| {
+			audio
+				.write(crate::audio::MoqAudioFrame {
+					timestamp: us(0),
+					data: vec![0; 960 * std::mem::size_of::<f32>()],
+				})
+				.unwrap()
+		},
+	)
+	.await;
+
+	let video = crate::video::MoqVideoProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::video::MoqVideoProducerOptions {
+			input: crate::video::MoqVideoEncoderInput {
+				format: crate::video::MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: crate::video::MoqVideoEncoderOutput {
+				codec: crate::video::MoqVideoCodec::h264(),
+				bitrate: None,
+				join: None,
+				kind: crate::video::MoqVideoEncoderKind::Software,
+			},
+			track: Some("camera".into()),
+			bandwidth: None,
+			lower: None,
+		},
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| video.demand().unwrap(),
+		|| video.abort_unwanted(7),
+		|| {
+			// A backend that pipelines readies an earlier frame's output.
+			for i in 0..5u64 {
+				video
+					.write(crate::video::MoqVideoFrame {
+						timestamp: us(i * 1_000_000 / 30),
+						data: vec![0x80; 320 * 240 * 4],
+					})
+					.unwrap();
+			}
+		},
+	)
+	.await;
+
+	let track = broadcast.publish_track("snapshot".into(), Some(timed_info())).unwrap();
+	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: true }).unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| snapshot.demand().unwrap(),
+		|| snapshot.abort_unwanted(7),
+		|| snapshot.update("1".into(), us(0)).unwrap(),
+	)
+	.await;
+
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
+	let log = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| log.demand().unwrap(),
+		|| log.abort_unwanted(7),
+		|| log.append("1".into(), us(0)).unwrap(),
+	)
+	.await;
+
+	let track = broadcast.publish_track("window".into(), Some(timed_info())).unwrap();
+	let window = MoqJsonWindowProducer::new(
+		&track,
+		MoqJsonWindowConfig {
+			checkpoint_records: None,
+		},
+	)
+	.unwrap();
+	typed_abort_unwanted(
+		&broadcast,
+		|| window.demand().unwrap(),
+		|| window.abort_unwanted(7),
+		|| window.push("1".into(), us(0)).unwrap(),
+	)
+	.await;
 }
 
 /// A datagram handler keeps its broadcast alive independently of the stream handler.
@@ -2049,7 +2306,7 @@ async fn raw_untimed_frames_roundtrip() {
 	assert_eq!(frame.payload, b"frame");
 	assert_eq!(frame.timestamp, MoqTimestamp::unscaled(5));
 	let group = track.append_group().unwrap();
-	assert_eq!(group.sequence(), 6);
+	assert_eq!(group.start(), 6);
 	let reader = group.consume().unwrap();
 	let mismatched = group.write_frame(MoqFrame {
 		payload: b"group".to_vec(),
@@ -2208,7 +2465,7 @@ fn raw_track_supports_sparse_groups_and_known_end() {
 	let track = broadcast.publish_track("sparse".into(), None).unwrap();
 
 	let group = track.create_group(2).unwrap();
-	assert_eq!(group.sequence(), 2);
+	assert_eq!(group.start(), 2);
 	group.finish().unwrap();
 
 	track.finish_at(5).unwrap();
@@ -2339,7 +2596,7 @@ async fn fetches_cached_group_without_subscribing() {
 		.await
 		.unwrap();
 
-	assert_eq!(fetched.sequence(), 0);
+	assert_eq!(fetched.start(), 0);
 	let frame = fetched.read_frame().await.unwrap().expect("expected first frame");
 	assert_eq!(frame.payload, b"first".to_vec());
 	assert_eq!(micros(frame.timestamp), 0);
@@ -2382,7 +2639,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 		MoqMediaGroupConfig {
 			rendition: rendition("media", crate::media::MoqContainer::Legacy),
 			// The group starts at its first frame, a second in, in the track's milliseconds.
-			sequence: 1000,
+			start: 1000,
 			options: Some(MoqFetchGroupOptions {
 				priority: 7,
 				max_delay: None,
@@ -2392,7 +2649,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	.await
 	.unwrap();
 
-	assert_eq!(fetched.sequence(), 1000);
+	assert_eq!(fetched.start(), 1000);
 	let frame = fetched.next().await.unwrap().expect("expected keyframe");
 	assert_eq!(frame.payload, b"keyframe");
 	assert_eq!(micros(frame.timestamp), 1_000_000);
@@ -2414,7 +2671,7 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 		&consumer,
 		MoqMediaGroupConfig {
 			rendition: rendition("media", crate::media::MoqContainer::Cmaf { init: Vec::new() }),
-			sequence: 0,
+			start: 0,
 			options: None,
 		},
 	)
@@ -2465,7 +2722,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 			MoqMediaGroupConfig {
 				rendition: rendition("video", crate::media::MoqContainer::Cmaf { init: init.to_vec() }),
 				// The group starts at its first sample, in the init's ticks.
-				sequence: moq_net::Timestamp::from_micros(2_000_000)
+				start: moq_net::Timestamp::from_micros(2_000_000)
 					.unwrap()
 					.convert(muxer.timescale())
 					.unwrap()
@@ -2563,20 +2820,20 @@ async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFram
 async fn media_group_decodes_arrival_order_groups() {
 	let (_broadcast, track, consumer) = legacy_track().await;
 
-	let mut first = track.append_group(0).unwrap();
+	let mut first = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut first, 1, 1_000_000, b"a");
 	let first_media = recv_media_group(&consumer).await;
-	assert_eq!(first_media.sequence(), 0);
+	assert_eq!(first_media.start(), 0);
 	let frame = next_media(&first_media).await.unwrap().expect("expected a frame");
 	assert_eq!(frame.payload, b"a");
 	assert_eq!(micros(frame.timestamp), 1_000_000);
 	assert!(frame.keyframe);
 
 	// A newer group lands while the first is stalled mid-way.
-	let mut second = track.append_group(1).unwrap();
+	let mut second = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut second, 2, 1_040_000, b"c");
 	let second_media = recv_media_group(&consumer).await;
-	assert_eq!(second_media.sequence(), 1);
+	assert_eq!(second_media.start(), 1);
 	let frame = next_media(&second_media).await.unwrap().expect("expected a frame");
 	assert_eq!(frame.payload, b"c");
 	assert_eq!(micros(frame.timestamp), 1_040_000);
@@ -2591,8 +2848,8 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert_eq!(micros(frame.timestamp), 1_020_000);
 	assert!(!frame.keyframe);
 
-	first.close().unwrap();
-	second.close().unwrap();
+	first.finish().unwrap();
+	second.finish().unwrap();
 	assert!(next_media(&first_media).await.unwrap().is_none());
 	assert!(next_media(&second_media).await.unwrap().is_none());
 }
@@ -2602,10 +2859,10 @@ async fn media_group_decodes_arrival_order_groups() {
 #[tokio::test]
 async fn media_group_takes_over_an_unread_group() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut group, 1, 1_000_000, b"a");
 	write_legacy(&mut group, 2, 1_020_000, b"b");
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let raw = recv_raw_group(&consumer).await;
 	assert!(raw.read_frame().await.unwrap().is_some());
@@ -2618,7 +2875,7 @@ async fn media_group_takes_over_an_unread_group() {
 		"the refusal kept the raw handle"
 	);
 
-	let mut group = track.append_group(1).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut group, 3, 1_040_000, b"c");
 	let raw = recv_raw_group(&consumer).await;
 	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
@@ -2634,7 +2891,7 @@ async fn media_group_takes_over_an_unread_group() {
 #[tokio::test]
 async fn media_group_fails_loudly_on_bad_containers() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	// A truncated varint timestamp: the 2-byte form with only its first byte.
 	write_raw(&mut group, 1, bytes::Bytes::from_static(&[0x40]));
 
@@ -2690,7 +2947,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.expect("timed out waiting for fetch")
 		.expect("fetch task panicked")
 		.unwrap();
-	assert_eq!(fetched.sequence(), 5);
+	assert_eq!(fetched.start(), 5);
 	let frame = fetched.read_frame().await.unwrap().expect("expected fetched frame");
 	assert_eq!(frame.payload, b"fetched".to_vec());
 	assert_eq!(micros(frame.timestamp), 100_000);
@@ -2845,7 +3102,9 @@ async fn requested_track_dynamic_survives_accept() {
 async fn video_publish_named_track() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let init = || video_init(MoqVideoFormat::Avc3, h264_init());
 	let hd = MoqMediaTrackProducer::video(
@@ -2896,7 +3155,9 @@ async fn video_publish_named_track() {
 async fn video_rung_sits_below_its_lower_and_disables() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
@@ -2944,7 +3205,9 @@ async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
 	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
@@ -3173,7 +3436,9 @@ async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	// Importing onto the request accepts it (at the media timescale), which is what
 	// unblocks the media subscribe, so it runs on a concurrent task until then.
@@ -3260,7 +3525,9 @@ async fn media_track_activity_and_name() {
 	assert_eq!(track_name, "0.opus");
 
 	let broadcast_consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -3294,7 +3561,9 @@ async fn publish_media_aac_populates_description() {
 	.unwrap();
 
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -3405,7 +3674,6 @@ async fn follow_keeps_the_requested_path() {
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
 /// there, not on the broadcast the catalog came from. Dropping the reference either fails to
 /// find the track or silently decodes a same-named local one with mismatched metadata.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -3523,7 +3791,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 			&broadcast,
 			MoqMediaGroupConfig {
 				rendition,
-				sequence: 0,
+				start: 0,
 				options: None,
 			},
 		),
@@ -3934,7 +4202,9 @@ async fn local_publish_consume_audio() {
 	assert_eq!(announcement.prefix, "live");
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -4000,7 +4270,9 @@ async fn video_publish_consume() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -4056,7 +4328,6 @@ async fn video_publish_consume() {
 /// The raw-video publish path: hand mid-gray RGBA to `MoqVideoProducer` and check
 /// that the encoder's own output reaches a subscriber, described by a catalog
 /// rendition the importer built from the encoded keyframe.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_consume() {
 	use crate::video::*;
@@ -4077,7 +4348,7 @@ async fn video_raw_publish_consume() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				// Software so the test is deterministic everywhere: `Auto` would
@@ -4121,7 +4392,9 @@ async fn video_raw_publish_consume() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4182,7 +4455,6 @@ async fn video_raw_publish_consume() {
 /// readable after its consumer is cancelled and dropped and the track is gone.
 /// A surface decode keeps the decoder's pixel buffer and still downloads on
 /// demand, where the platform has one (macOS) and is refused where it has none.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_frame_ownership() {
 	use crate::video::*;
@@ -4203,7 +4475,7 @@ async fn video_decode_frame_ownership() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				// Software so the encode is deterministic everywhere.
@@ -4230,7 +4502,9 @@ async fn video_decode_frame_ownership() {
 
 	let consumer = origin.consume();
 	let broadcast_consumer = await_announced(&consumer, "video-decode-frame").await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4333,7 +4607,6 @@ async fn video_decode_frame_ownership() {
 
 /// The default start decodes a cached track from its oldest group, while
 /// `Latest` skips that backlog and joins at the newest group.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_start() {
 	use crate::media::MoqDecodeStart;
@@ -4354,7 +4627,7 @@ async fn video_decode_start() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				kind: MoqVideoEncoderKind::Software,
@@ -4390,10 +4663,12 @@ async fn video_decode_start() {
 		.expect("timed out")
 		.unwrap()
 		.expect("the track ended early")
-		.sequence()
+		.start()
 		== 0
 	{}
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4454,7 +4729,6 @@ async fn video_decode_start() {
 /// whichever thread dropped the object. The confinement itself is asserted in
 /// moq-video (`encode::sink`); this pins that the binding supports the usage
 /// end to end, including the drain on `finish`.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_from_many_threads() {
 	use crate::video::*;
@@ -4475,7 +4749,7 @@ async fn video_raw_publish_from_many_threads() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				// An explicit ceiling so the retunes below stay under the rate the
 				// encoder opened at, which openh264 requires.
 				bitrate: Some(1_000_000),
@@ -4516,10 +4790,12 @@ async fn video_raw_publish_from_many_threads() {
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = next_announced(&announced).await;
-	let catalog_consumer =
-		MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
-			.await
-			.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(
+		await_announced(&consumer, &announcement.prefix).await.as_ref(),
+		Duration::ZERO,
+	)
+	.await
+	.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -4537,7 +4813,6 @@ async fn video_raw_publish_from_many_threads() {
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it, and rejects any write
 /// after `finish`.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_rejects_bad_frames() {
 	use crate::video::*;
@@ -4555,7 +4830,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 		},
 	};
 	let output = || MoqVideoEncoderOutput {
-		codec: MoqVideoCodec::H264,
+		codec: MoqVideoCodec::h264(),
 		bitrate: None,
 		join: None,
 		kind: MoqVideoEncoderKind::Software,
@@ -4652,7 +4927,9 @@ async fn multiple_frames_ordering() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
@@ -4713,7 +4990,9 @@ async fn catalog_update_on_new_track() {
 	let announcement = next_announced(&announced).await;
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
+		.await
+		.unwrap();
 
 	let catalog1 = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -4853,6 +5132,18 @@ async fn assert_left<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
 	}
 }
 
+/// Each reader ends without a cause, as a handle released before its finish or abort leaves it:
+/// `Dropped`, which keeps `Unroutable` for a route losing the content.
+async fn assert_released<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
+	for reader in readers {
+		let read = kio::clock::timeout(TIMEOUT, reader.read_frame()).await;
+		let Err(err) = read.expect("the track carried on") else {
+			panic!("the track ended cleanly");
+		};
+		assert!(matches!(err, MoqError::Internal { .. }), "{err:?}");
+	}
+}
+
 /// Closing a broadcast ends every track handle still open on it the way a publisher leaving
 /// does, and the handles refuse later calls.
 #[tokio::test(start_paused = true)]
@@ -4872,14 +5163,14 @@ async fn closing_a_broadcast_ends_its_open_tracks() {
 	assert!(matches!(media.finish(), Err(MoqError::Closed)));
 }
 
-/// A track handle released without a finish, as a garbage collector does, ends its track as a
-/// publisher leaving rather than a cause-less drop.
+/// A track handle released without a finish, as a garbage collector does, ends its track as
+/// dropped: its broadcast stays, so no route was lost.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_track_handle_ends_it() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (raw, media, readers) = children(&broadcast).await;
 	drop((raw, media));
-	assert_left(readers).await;
+	assert_released(readers).await;
 	broadcast.close().unwrap();
 }
 
@@ -4949,13 +5240,13 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 	assert!(matches!(json_window.push("1".into(), us(0)), Err(MoqError::Closed)));
 }
 
-/// A data writer released without a finish ends its track as a publisher leaving.
+/// A data writer released without a finish ends its track as dropped.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_data_writer_ends_it() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (writers, readers) = data_children(&broadcast).await;
 	drop(writers);
-	assert_left(readers).await;
+	assert_released(readers).await;
 	broadcast.close().unwrap();
 }
 
@@ -5043,9 +5334,12 @@ async fn follow() {
 	let announcement = next_announced(&announced).await;
 
 	assert_eq!(announcement.prefix, "test/broadcast");
-	let _catalog = MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
-		.await
-		.unwrap();
+	let _catalog = MoqMediaCatalogConsumer::subscribe(
+		await_announced(&consumer, &announcement.prefix).await.as_ref(),
+		Duration::ZERO,
+	)
+	.await
+	.unwrap();
 	// Finish so consumers observe a deliberate end (the canonical end for a
 	// publisher; dropping without finish reads as a failure).
 	_broadcast.close().unwrap();
@@ -5212,7 +5506,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	}
 }
 
-/// The sequence cursor commits on first use, so every later read has to reach the same
+/// The ordered cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.
 #[tokio::test]
@@ -5251,11 +5545,11 @@ async fn raw_track_next_group_is_repeatable() {
 		assert_eq!(frame.payload, payload);
 	}
 
-	// The arrival cursor is gone once the track committed to sequence order.
+	// The arrival cursor is gone once the track committed to start order.
 	assert!(matches!(consumer.recv_group().await, Err(MoqError::AlreadyCommitted)));
 }
 
-/// The first group read commits the cursor either way: mixing arrival and sequence
+/// The first group read commits the cursor either way: mixing arrival and start
 /// reads on one track is refused rather than silently interleaving two cursors.
 #[tokio::test]
 async fn raw_track_group_order_commits_on_first_read() {
@@ -5281,7 +5575,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("timed out waiting for a group")
 		.unwrap()
 		.expect("expected a group");
-	assert_eq!(group.sequence(), 0);
+	assert_eq!(group.start(), 0);
 	assert!(matches!(consumer.next_group().await, Err(MoqError::AlreadyCommitted)));
 	assert!(matches!(consumer.read_frame().await, Err(MoqError::AlreadyCommitted)));
 
@@ -5297,7 +5591,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("timed out waiting for a group")
 		.unwrap()
 		.expect("expected a group");
-	assert_eq!(group.sequence(), 1);
+	assert_eq!(group.start(), 1);
 }
 
 fn raw_track() -> (
@@ -5438,13 +5732,13 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 		.unwrap();
 	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
 
-	let expired = track.append_group(0).unwrap();
+	let expired = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.
 	let read = spawn_parked(async move { consumer.read_frame().await }).await;
 	expired
 		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
 		.unwrap();
-	let mut later = track.append_group(1).unwrap();
+	let mut later = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 	later
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
 		.unwrap();
@@ -5867,7 +6161,7 @@ async fn server_client_run_end(version: &str) {
 			.payload,
 		b"still live"
 	);
-	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc, Duration::ZERO).await.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -5976,7 +6270,9 @@ async fn server_client_run_end(version: &str) {
 
 /// Subscribe to the first audio rendition in `broadcast`'s catalog.
 async fn subscribe_audio(broadcast: &MoqBroadcastConsumer) -> Arc<MoqMediaTrackConsumer> {
-	let catalogs = MoqMediaCatalogConsumer::subscribe(broadcast).await.unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(broadcast, Duration::ZERO)
+		.await
+		.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalogs.next())
 		.await
 		.expect("timed out waiting for the catalog")
@@ -6627,20 +6923,6 @@ async fn server_new_validates_the_config() {
 		..Default::default()
 	});
 	assert!(matches!(version, Err(MoqError::Config { .. })));
-
-	// A build that cannot write qlog refuses the directory here, not later as a bind error.
-	let qlog = MoqServer::new(MoqServerConfig {
-		quic: MoqQuicConfig {
-			qlog: Some(std::env::temp_dir().display().to_string()),
-			..Default::default()
-		},
-		..Default::default()
-	});
-	if moq_qlog_supported() {
-		assert!(qlog.is_ok());
-	} else {
-		assert!(matches!(qlog, Err(MoqError::Config { .. })));
-	}
 }
 
 /// The defaults convert back to moq-net's own, so they mean the same as no subscription.
@@ -6671,8 +6953,15 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.websocket.enabled, Some(true));
 	let backoff = moq_tokio::connection::Backoff::default();
 	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
-	assert_eq!(defaults.backoff.max, Some(backoff.max().unwrap_or_default()));
-	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout().unwrap_or_default()));
+	assert_eq!(defaults.backoff.max, backoff.max());
+	assert!(!defaults.backoff.max_unlimited);
+	assert_eq!(defaults.backoff.timeout, backoff.timeout());
+	let mut reapplied = moq_tokio::connection::Backoff::default();
+	defaults.backoff.clone().apply(&mut reapplied).unwrap();
+	assert_eq!(
+		(reapplied.initial(), reapplied.max(), reapplied.timeout()),
+		(backoff.initial(), backoff.max(), backoff.timeout())
+	);
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -6683,6 +6972,54 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.quic.keylog, None);
 
 	assert!(MoqClient::new(defaults).is_ok());
+}
+
+/// `max` and `timeout` each read unset as the default, off as no bound, and zero as zero,
+/// resolving to what moq-tokio's flags `none` and `0s` do.
+#[test]
+fn a_backoff_bound_is_unset_off_zero_or_a_value() {
+	let resolve = |backoff: MoqBackoff| {
+		let mut out = moq_tokio::connection::Backoff::default();
+		backoff.apply(&mut out).map(|()| (out.max(), out.timeout()))
+	};
+	let defaults = moq_tokio::connection::Backoff::default();
+	let three = Duration::from_secs(3);
+	for (backoff, expected) in [
+		(MoqBackoff::default(), (defaults.max(), defaults.timeout())),
+		(
+			MoqBackoff {
+				max_unlimited: true,
+				..Default::default()
+			},
+			(None, None),
+		),
+		(
+			MoqBackoff {
+				max: Some(Duration::ZERO),
+				timeout: Some(Duration::ZERO),
+				..Default::default()
+			},
+			(Some(Duration::ZERO), Some(Duration::ZERO)),
+		),
+		(
+			MoqBackoff {
+				max: Some(three),
+				timeout: Some(three),
+				..Default::default()
+			},
+			(Some(three), Some(three)),
+		),
+	] {
+		assert_eq!(resolve(backoff.clone()).unwrap(), expected, "{backoff:?}");
+	}
+	assert!(defaults.timeout().is_none(), "unset is already off");
+
+	let both = MoqBackoff {
+		max: Some(three),
+		max_unlimited: true,
+		..Default::default()
+	};
+	assert!(matches!(resolve(both), Err(MoqError::Config { .. })));
 }
 
 /// Every listed version is one `versions` accepts.
@@ -6716,12 +7053,11 @@ async fn client_new_validates_the_connection_knobs() {
 		Err(MoqError::Config { .. })
 	));
 
-	// A build that cannot write qlog refuses the directory rather than dropping it.
 	let qlog = MoqQuicConfig {
 		qlog: Some(std::env::temp_dir().display().to_string()),
 		..Default::default()
 	};
-	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
+	assert!(client(MoqClientTls::default(), qlog).is_ok());
 }
 
 /// A client with `quic.keylog` on, dialing `localhost` pinned to `fingerprints`.
@@ -6849,7 +7185,7 @@ async fn client_connects_with_every_knob_set() {
 			keep_alive: Some(Duration::ZERO),
 			gso: Some(false),
 			mtu_discovery: Some(true),
-			congestion_control: Some(MoqCongestionControl::Loss),
+			congestion_control: Some(MoqCongestionControl::loss()),
 			qlog: None,
 			keylog: Some(false),
 		},
@@ -7350,8 +7686,10 @@ async fn session_state_names_a_failing_first_dial() {
 	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
-	session.cancel(0);
-	session.closed().await.unwrap();
+	// The server ended the client's first session before it was healthy, which ends the
+	// client's session too rather than redialing.
+	let closed = kio::clock::timeout(TIMEOUT, session.closed()).await.unwrap();
+	assert!(closed.is_err(), "the refused first session closed cleanly");
 	assert!(matches!(session.state().phase, MoqConnectionPhase::Closed { .. }));
 	accepted.cancel(0);
 	server.cancel();
@@ -7441,6 +7779,8 @@ async fn client_reconnects_and_resumes_announcements() {
 		.await
 		.expect("first session timed out")
 		.expect("accept task gone");
+	// Past the 1s healthy bar, so the drop redials rather than ending the session.
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	first.cancel(0);
 
 	let status = kio::clock::timeout(
@@ -7691,7 +8031,9 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		Ok(status) => panic!("no transition was pending, got {status:?}"),
 	}
 
-	// The transition the abandoned call would have eaten.
+	// The transition the abandoned call would have eaten, once past the 1s healthy bar so
+	// the session redials rather than ends.
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	server_session.cancel(0);
 
 	let status = kio::clock::timeout(TIMEOUT, cs.state_changed(status.revision))
@@ -7705,7 +8047,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 }
 
 /// The built-in encoder's applied bitrate follows a shrinking grant.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
 	use crate::bandwidth::MoqAllocator;
@@ -7730,7 +8071,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 				},
 			},
 			output: MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
+				codec: MoqVideoCodec::h264(),
 				bitrate: Some(4_000_000),
 				join: None,
 				kind: MoqVideoEncoderKind::Software,
@@ -7765,7 +8106,6 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	broadcast.close().unwrap();
 }
 
-#[cfg(feature = "video")]
 fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::video::MoqVideoEncoderOutput) {
 	use crate::video::*;
 	(
@@ -7779,7 +8119,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 			},
 		},
 		MoqVideoEncoderOutput {
-			codec: MoqVideoCodec::H264,
+			codec: MoqVideoCodec::h264(),
 			bitrate: Some(bitrate),
 			join: None,
 			kind: MoqVideoEncoderKind::Software,
@@ -7789,7 +8129,6 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 
 /// Dropping a producer parked in `changed()` must stop the follow thread, not
 /// leak it until the session allocator dies.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn dropping_a_video_producer_stops_the_rate_follower() {
 	use crate::bandwidth::MoqAllocator;
@@ -7819,7 +8158,6 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 }
 
 /// `set_bitrate` is the manual ceiling: a later grant cannot retune above it.
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	use crate::bandwidth::MoqAllocator;
@@ -8706,16 +9044,16 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	);
 
 	let consumer = track.consume(Some(subscription)).unwrap();
-	let mut sequences = Vec::new();
+	let mut starts = Vec::new();
 	for _ in 0..3 {
 		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
 			.expect("expected a group");
-		sequences.push(group.sequence());
+		starts.push(group.start());
 	}
-	assert_eq!(sequences, vec![0, 1, 2]);
+	assert_eq!(starts, vec![0, 1, 2]);
 }
 
 /// Wait until `session` grants `want`, following its changes.
@@ -8890,7 +9228,7 @@ async fn token_server(
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -9124,16 +9462,16 @@ async fn time_anchors_start_at_the_containing_group() {
 		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
 	));
 	let consumer = track.consume(Some(since(1_500))).unwrap();
-	let mut sequences = Vec::new();
+	let mut starts = Vec::new();
 	for _ in 0..2 {
 		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
 			.expect("expected a group");
-		sequences.push(group.sequence());
+		starts.push(group.start());
 	}
-	assert_eq!(sequences, vec![1_000, 2_000]);
+	assert_eq!(starts, vec![1_000, 2_000]);
 
 	let untimed = broadcast
 		.publish_track(
@@ -9352,7 +9690,7 @@ async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 		.expect("next_group timed out")
 		.unwrap()
 		.expect("expected the open group");
-	assert_eq!(taken.sequence(), 0);
+	assert_eq!(taken.start(), 0);
 
 	let frame = kio::clock::timeout(TIMEOUT, read)
 		.await
@@ -9418,7 +9756,7 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 		.expect("next_group timed out")
 		.unwrap()
 		.expect("expected the open group");
-	assert_eq!(taken.sequence(), 0);
+	assert_eq!(taken.start(), 0);
 	assert_eq!(
 		inline.polls.load(std::sync::atomic::Ordering::SeqCst),
 		2,
@@ -9447,7 +9785,7 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 		}))
 		.unwrap();
 
-	// Each reader returns the group sequences it took: a frame's payload names its group.
+	// Each reader returns the group starts it took: a frame's payload names its group.
 	let frames = |consumer: Arc<MoqTrackConsumer>| {
 		tokio::spawn(async move {
 			let mut taken = Vec::new();
@@ -9461,7 +9799,7 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 		tokio::spawn(async move {
 			let mut taken = Vec::new();
 			while let Some(group) = consumer.next_group().await.unwrap() {
-				taken.push(group.sequence());
+				taken.push(group.start());
 			}
 			taken
 		})
@@ -9474,16 +9812,16 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 	];
 	ffi_caught_up().await;
 
-	for sequence in 0..GROUPS {
-		let group = track.create_group(sequence).unwrap();
+	for start in 0..GROUPS {
+		let group = track.create_group(start).unwrap();
 		group
 			.write_frame(MoqFrame {
-				payload: sequence.to_be_bytes().to_vec(),
-				timestamp: us(sequence),
+				payload: start.to_be_bytes().to_vec(),
+				timestamp: us(start),
 			})
 			.unwrap();
 		group.finish().unwrap();
-		if sequence % 8 == 0 {
+		if start % 8 == 0 {
 			tokio::task::yield_now().await;
 		}
 	}
@@ -9596,7 +9934,6 @@ async fn demand_cancelled_before_free_leaves_the_change() {
 }
 
 /// Setup, rather than the first packet, decides whether a rendition is usable.
-#[cfg(feature = "audio")]
 #[tokio::test]
 async fn audio_subscribe_configuration_boundary() {
 	use crate::audio::MoqAudioConsumer;
@@ -9665,7 +10002,6 @@ async fn audio_subscribe_configuration_boundary() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				max_age: Some(Duration::from_millis(10)),
-				max_age_unlimited: false,
 				refresh: None,
 				timescale: None,
 				compression: None,
@@ -9689,7 +10025,6 @@ async fn audio_subscribe_configuration_boundary() {
 	broadcast.close().unwrap();
 }
 
-#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_subscribe_configuration_boundary() {
 	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};
@@ -9720,7 +10055,6 @@ async fn video_subscribe_configuration_boundary() {
 			display_aspect: None,
 			bitrate: None,
 			framerate: None,
-			warmup: None,
 		};
 		let result = MoqVideoConsumer::subscribe(
 			&consumer,
@@ -9813,7 +10147,7 @@ async fn write_ahead_of_a_slow_reader(
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
 	let group = track.append_group().unwrap();
 	let reader = group.consume().unwrap();
-	let key = MoqTimestamp::unscaled(group.sequence());
+	let key = MoqTimestamp::unscaled(group.start());
 	let frame = move || MoqFrame {
 		payload: vec![7; MIB],
 		timestamp: key,
@@ -9920,7 +10254,7 @@ async fn concurrent_ready_calls_all_wake() {
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
 	let group = track.append_group().unwrap();
 	let reader = group.consume().unwrap();
-	let key = MoqTimestamp::unscaled(group.sequence());
+	let key = MoqTimestamp::unscaled(group.start());
 	let frame = move || MoqFrame {
 		payload: vec![7; MIB],
 		timestamp: key,
@@ -10042,4 +10376,14 @@ async fn group_calls_wake_ready_after_unlocking() {
 	group.abort(1).unwrap();
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
+}
+
+/// An endpoint's broadcast is told apart from media by path, and a malformed path fails.
+#[test]
+fn socket_is_endpoint() {
+	use crate::socket::moq_socket_is_endpoint;
+	assert!(moq_socket_is_endpoint("room/.server/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room/.client/a".into()).unwrap());
+	assert!(!moq_socket_is_endpoint("room/a".into()).unwrap());
+	assert!(moq_socket_is_endpoint("room//a".into()).is_err());
 }

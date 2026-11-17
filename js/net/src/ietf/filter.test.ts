@@ -192,9 +192,7 @@ test("fill round trips", () => {
 		// An omitted filter inherits the subscription's, which is a different request from an
 		// explicit unfiltered one.
 		{ filter: undefined, rangeFilters: false },
-		{ fillTimeout: 0, filter: undefined, rangeFilters: false },
 		{
-			fillTimeout: 250,
 			filter: { kind: "relative", groups: 1n },
 			groupOrder: "ascending",
 			rangeFilters: false,
@@ -208,17 +206,13 @@ test("fill round trips", () => {
 	}
 });
 
-// FILL_TIMEOUT sorts first, so the parameters after it are deltas from its id.
-test("fill encodes its FILL_TIMEOUT first", () => {
-	const fill: Filter.Fill = {
-		fillTimeout: 100,
-		filter: { kind: "relative", groups: 1n },
-		rangeFilters: false,
-	};
+// FILL_TIMEOUT sorts first, so the parameters after it are deltas from its id. It is read past
+// and dropped, never encoded.
+test("fill ignores its FILL_TIMEOUT", () => {
 	// count=2, 0x0A=100, delta 0x17 -> 0x21 Relative Start, StartGroup=1
-	const encoded = Filter.encodeFill(fill, NEW);
-	expect([...encoded]).toEqual([0x02, 0x0a, 0x64, 0x17, 0x01, 0x01]);
-	expect(Filter.decodeFill(encoded, NEW)).toEqual(fill);
+	const wire = new Uint8Array([0x02, 0x0a, 0x64, 0x17, 0x01, 0x01]);
+	const fill: Filter.Fill = { filter: { kind: "relative", groups: 1n }, rangeFilters: false };
+	expect(Filter.decodeFill(wire, NEW)).toEqual(fill);
 });
 
 // A parameter the draft does not allow inside the scope is a violation, not something to

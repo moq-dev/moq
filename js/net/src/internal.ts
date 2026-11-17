@@ -8,7 +8,7 @@
 import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Reader as CacheReader, Charge, Pool } from "./cache.ts";
+import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -37,7 +37,7 @@ import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** What a null {@link Delay.max} goes out as, in milliseconds: the largest value every peer can read, as Rust sends for `None`. */
+/** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
@@ -50,6 +50,12 @@ export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
 	const max = subscription.delay?.max;
 	if (max === null) return NO_MAX_DELAY;
 	return max?.asMillis() ?? 0;
+}
+
+/** A subscription's {@link Delay.max} in milliseconds as SUBSCRIBE carries it: null for no limit. */
+export function wireMaxDelay(subscription: Pick<Subscription, "delay">): number | null {
+	const max = maxDelayOf(subscription);
+	return max < NO_MAX_DELAY ? max : null;
 }
 
 /** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated, omitted for zero. */
@@ -77,20 +83,11 @@ export function groupBounds(groups: Groups = {}): { start: bigint; end?: bigint 
 
 /**
  * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
- * The peer echoes every suffix beneath it, and the caller filters what arrives.
- *
- * A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
- * falls back to its parent.
+ * The peer echoes every suffix beneath it, and the caller filters what arrives. A pattern's
+ * literal segments are spelled like a path's, so its head is always a path.
  */
 export function scopeHead(scope: Path.Pattern): Path.Valid {
-	let head = scope.head;
-	for (;;) {
-		try {
-			return Path.from(head);
-		} catch {
-			head = head.slice(0, Math.max(head.lastIndexOf("/"), 0));
-		}
-	}
+	return Path.from(scope.head);
 }
 
 /**
@@ -111,6 +108,8 @@ export function presented(
 	prefix: Path.Valid,
 	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
+	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
+	keepAbove = false,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
@@ -126,7 +125,13 @@ export function presented(
 			);
 			if (!snap) continue;
 			rootLen = covered.length;
-			out.set(Path.empty(), snap);
+			const above = BigInt(Path.parts(prefix).length - Path.parts(covered).length);
+			out.set(
+				Path.empty(),
+				keepAbove && above > 0n
+					? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
+					: snap,
+			);
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
@@ -509,6 +514,8 @@ export interface ResumeSource {
 	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Position; ended: boolean };
+	/** Whether `position` is the serving copy's largest and its group ended there. */
+	largestFinished(position: Position): boolean;
 	/**
 	 * The serving copy's largest location once within the reader's cursor and newer than `seen`,
 	 * or undefined once the logical track ends.
@@ -518,18 +525,8 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
-	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
-	reofferGroups(start: bigint, end: bigint, from?: number): { groups: GroupConsumer[]; givenUp: Run[] };
-	/**
-	 * See {@link hooks.reofferStale}: the stale runs queued here, those this reader reported, which a
-	 * route change keeps, and those the serving copy reported.
-	 */
-	reofferStale(): Run[];
-	/**
-	 * The bill for the reader's record on the serving copy's account: `current` while it bills that
-	 * account, or else a new one. `current` without a serving copy.
-	 */
-	bill(current: CacheReader | undefined): CacheReader | undefined;
+	/** See {@link hooks.continueGroup}, answered by the serving copy. */
+	continueGroup(sequence: bigint, from: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -586,6 +583,8 @@ export const hooks: {
 	datagramRequest: (producer: datagram.Producer, pending: Set<datagram.Request>) => datagram.Request;
 	/** End a received datagram track if its last consumer left. */
 	closeUnusedDatagrams: (producer: datagram.Producer) => boolean;
+	/** A datagram track's properties, once accepted. */
+	datagramInfo: (producer: datagram.Producer) => datagram.Info | undefined;
 	/** Follow this consumer's subscriber priority for transport scheduling. */
 	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
 	/** Forward data carried by an existing stream without contributing another subscription's demand. */
@@ -613,8 +612,6 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
-	/** How many runs a track's arrivals hold, for tests. Assigned by `track.ts`. */
-	arrivalRuns: (producer: Producer) => number;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -638,12 +635,10 @@ export const hooks: {
 	 */
 	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
 	/**
-	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
-	 * were replaced, so they are unknown again. `judged` is every group the new terms' ranges name,
-	 * undefined when unknown. Returns the runs forgotten: a group that arrived since its stale drop
-	 * replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
+	 * Forget every run a received copy holds as stale: a new upstream subscription opened, whose
+	 * terms are new, so those groups are unknown again. Mirrors the Rust `supersede_stale`.
 	 */
-	supersedeStale: (producer: Producer, judged: readonly Run[] | undefined) => Run[];
+	supersedeStale: (producer: Producer) => void;
 	/**
 	 * Mark a track as fed by a wire subscription, which owes missing groups, until
 	 * {@link cacheTrack} ends it. `starts` says how that wire's start bounds the fills its readers
@@ -704,8 +699,11 @@ export const hooks: {
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
-	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
-	reportedLargest: (producer: Producer, largest: Position | undefined) => void;
+	/**
+	 * Seed a received track from the publisher's reported edge, and whether its group ended there;
+	 * assigned by `track.ts`.
+	 */
+	reportedLargest: (producer: Producer, largest: Position | undefined, finished: boolean) => void;
 	/**
 	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
 	 * so it names no object; assigned by `track.ts`.
@@ -798,54 +796,38 @@ export const hooks: {
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
-	 * Open a bill against a track's cache account for what a session keeps for it beside the
-	 * cache, such as its tail's record of finished streams, billed as a reader's record is, so
-	 * the pool can hand it debt. Mirrors the Rust crate-private `track::Producer::bill`.
+	 * A fresh read from frame `from` of group `sequence`, if a subscriber's track still caches it from
+	 * there, its range still admits it, and its current budget does not judge it stale, expiring
+	 * against that budget: a lite-07 continuation of a group whose stream yielded.
 	 */
-	billTrack: (producer: Producer) => CacheReader;
-	/**
-	 * The bill on the account of the track `subscriber` reads: `current` while it bills that account,
-	 * or else a new one; undefined while it has none.
-	 */
-	billSubscriber: (subscriber: Subscriber, current: CacheReader | undefined) => CacheReader | undefined;
-	/**
-	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
-	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
-	 * taken back, which are owed again. Mirrors the Rust crate-private
-	 * `track::Subscriber::reoffer_stale`.
-	 */
-	reofferStale: (subscriber: Subscriber) => Run[];
-	/**
-	 * Fresh reads of the groups in `[start, end)` a subscriber's track still caches, its range still
-	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
-	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
-	 * stale, or a lite-07 continuation of a group whose stream yielded. Each read starts at frame
-	 * `from`, so a group whose cache holds only frames past it is given up. Mirrors the Rust
-	 * crate-private `track::Subscriber::reoffer_groups`.
-	 */
-	reofferGroups: (
-		subscriber: Subscriber,
-		start: bigint,
-		end: bigint,
-		from?: number,
-	) => { groups: GroupConsumer[]; givenUp: Run[] };
+	continueGroup: (subscriber: Subscriber, sequence: bigint, from: number) => GroupConsumer | undefined;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, sequence: bigint, from?: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
+	/**
+	 * The start of the group before `start` on the subscriber's track, as a lite-07 GROUP's
+	 * Previous Start names it: just below the run of starts declared skipped directly under
+	 * `start`, else `start - 1` when a group starts there, else undefined. Mirrors the Rust
+	 * crate-private `track::Subscriber::previous_start`.
+	 */
+	previousStart: (subscriber: Subscriber, start: bigint) => bigint | undefined;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
-	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.
+	 * a new upstream subscription superseded is gone. Mirrors the Rust crate-private
+	 * `track::Subscriber::stale_held`.
 	 */
 	staleHeld: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };
+	/** Whether `position` is a subscriber's largest and its group ended there, so no frame follows it. */
+	largestFinished: (subscriber: Subscriber, position: Position) => boolean;
 	/** Wake once a subscriber's largest location or its end may have changed; fires at most once. */
 	largestChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** A subscriber that reads its routes' copies through `source` instead of a buffer of its own. */
@@ -891,13 +873,8 @@ export const hooks: {
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
-	/** Bill a cached group's bytes to `charge` from now on, or stop billing them with undefined. */
+	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
 	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
-	/**
-	 * Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most,
-	 * and end the `readers` its track holds that lost a shed frame; returns the bytes freed.
-	 */
-	shedGroup: (group: GroupProducer, debt: number, cap: number, readers: Iterable<GroupConsumer>) => number;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
@@ -951,6 +928,11 @@ export const hooks: {
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
 	/**
+	 * Whether the subscription's budget gave the group up, rather than its copy failing or the
+	 * cache evicting it. Mirrors the Rust crate-private `group::Consumer::is_expired`.
+	 */
+	groupExpired: (group: GroupConsumer) => boolean;
+	/**
 	 * Carry a group across its logical track's route changes. Attached before the group is handed
 	 * out, so its `closed` never settles on a failure the recovery continues past.
 	 */
@@ -962,10 +944,9 @@ export const hooks: {
 	holdGroup: (group: GroupProducer) => () => void;
 	/**
 	 * Hand `next` the readers `failed` kept open while held, teeing each from the frame it reached.
-	 * Fails those `next` cannot serve. Returns the bytes of `failed`'s frames they still hold.
-	 * Assigned by `group.ts`.
+	 * Fails those `next` cannot serve. Assigned by `group.ts`.
 	 */
-	succeedGroup: (next: GroupProducer, failed: GroupProducer) => number;
+	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
@@ -1012,6 +993,9 @@ export const hooks: {
 	closeUnusedDatagrams: () => {
 		throw new Error("datagram module not loaded");
 	},
+	datagramInfo: () => {
+		throw new Error("datagram module not loaded");
+	},
 	observeDatagrams: () => {
 		throw new Error("datagram module not loaded");
 	},
@@ -1034,9 +1018,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
-	arrivalRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1141,19 +1122,10 @@ export const hooks: {
 	wire: () => {
 		throw new Error("track.ts not loaded");
 	},
-	billTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
-	billSubscriber: () => {
-		throw new Error("track.ts not loaded");
-	},
 	supersedeStale: () => {
 		throw new Error("track.ts not loaded");
 	},
-	reofferStale: () => {
-		throw new Error("track.ts not loaded");
-	},
-	reofferGroups: () => {
+	continueGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {
@@ -1186,6 +1158,9 @@ export const hooks: {
 	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	previousStart: () => {
+		throw new Error("track.ts not loaded");
+	},
 	staleHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1196,6 +1171,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	peekLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	largestFinished: () => {
 		throw new Error("track.ts not loaded");
 	},
 	largestChanged: () => {
@@ -1267,9 +1245,6 @@ export const hooks: {
 	chargeGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
-	shedGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
 	groupFrameCount: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1331,6 +1306,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupFailed: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
@@ -1457,13 +1435,41 @@ export function bestCandidate<T>(
 	return best;
 }
 
+/**
+ * What `pick` finds at the most specific claim covering `path`: it picks at each covering prefix,
+ * deepest first, and a claim shown above its own prefix counts for the shallower prefix it is
+ * really at. Of claims as specific as each other the deepest prefix wins. Mirrors
+ * `RouteTable::best_route` in rs/moq-net.
+ */
+export function mostSpecific<T>(
+	path: Path.Valid,
+	pick: (prefix: Path.Valid) => T | undefined,
+	route: (found: T) => WireRoute,
+): T | undefined {
+	let best: T | undefined;
+	let bestSpecificity = -1;
+	let depth = Path.parts(path).length;
+	for (const prefix of coveringPrefixes(path)) {
+		const found = pick(prefix);
+		const specificity = found === undefined ? 0 : depth - Number(route(found).above ?? 0n);
+		if (found !== undefined && specificity > bestSpecificity) {
+			best = found;
+			bestSpecificity = specificity;
+		}
+		depth--;
+	}
+	return best;
+}
+
 /** Covering prefixes, most specific first, including the empty root. */
 export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
-	for (;;) {
-		yield path;
-		if (path === "") return;
-		const slash = path.lastIndexOf("/");
-		path = (slash < 0 ? "" : path.slice(0, slash)) as Path.Valid;
+	const segments = Path.parts(path);
+	let end = path.length;
+	for (let i = segments.length; ; i--) {
+		yield path.slice(0, end) as Path.Valid;
+		if (i === 0) return;
+		// Drop the last segment and the `/` before it, if any.
+		end = Math.max(end - segments[i - 1].length - 1, 0);
 	}
 }
 
@@ -1477,25 +1483,33 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
 }
 
 /**
- * The highest epoch each instance reaches among a set of routes, built in one pass so ranking
- * N routes stays linear. Only epochs above 0 are kept, since nothing is below 0: the common
- * case, where every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net.
+ * The highest epoch each instance reaches among a set of routes, per claim: a claim is its prefix
+ * and how far above it was shown, so a broader claim shown at a prefix is another claim than the
+ * one made there, and its epoch supersedes nothing of it. Built in one pass so ranking N routes
+ * stays linear. Only epochs above 0 are kept, since nothing is below 0: the common case, where
+ * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
+ * are all of one prefix here.
  */
 export class Epochs {
-	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
+	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
 
 	constructor(routes: Iterable<WireRoute>) {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			const highest = this.#highest.get(route.instance);
-			if (highest === undefined || epoch > highest) this.#highest.set(route.instance, epoch);
+			let above = this.#highest.get(route.instance);
+			if (!above) {
+				above = new Map();
+				this.#highest.set(route.instance, above);
+			}
+			const highest = above.get(route.above ?? 0n);
+			if (highest === undefined || epoch > highest) above.set(route.above ?? 0n, epoch);
 		}
 	}
 
-	/** Whether a route carries `route`'s instance at a higher epoch. */
+	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance);
+		const highest = this.#highest.get(route.instance)?.get(route.above ?? 0n);
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
@@ -1525,7 +1539,9 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
  * get from a cluster peer, which is every route here.
  */
 export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	const order = compareRoutes(a, b) || routeHops(a) - routeHops(b);
+	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
+	const above = (a.above ?? 0n) - (b.above ?? 0n);
+	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
 	if (order !== 0 || path === prefix) return order;
 	const [a1, a2] = routeKey(path, a);
 	const [b1, b2] = routeKey(path, b);

@@ -113,12 +113,14 @@ pub struct Config {
 
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
-	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
-	/// moq-transport. A forwarded path counts this origin's own hop too, including
+	/// Legacy: applies to moq-lite-03 through 06 and the negotiated MoQ Cluster extension
+	/// on moq-transport, and leaves with moq-lite-06. A moq-lite-07 route's own hops stop
+	/// at 32 whatever this is, but a route that crossed into moq-lite-07 from moq-lite-06
+	/// still carries that chain: with its publisher's hop appended it must fit this
+	/// bound, or the route is dropped (logged at debug). A forwarded path counts this origin's own hop too, including
 	/// when the receiving peer reconstructs that hop from the announce handshake.
 	/// Protocols without a hop path cannot reveal or bound the depth they hide. No wire
-	/// carries a path longer than 32, so a larger value acts as 32, and a moq-lite-07
-	/// route's own hops stop there whatever this is.
+	/// carries a path longer than 32, so a larger value acts as 32.
 	pub max_hops: NonZeroUsize,
 
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
@@ -519,10 +521,6 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
-
-	/// The round trip to the route's origin node; see [`Self::rtt`]. Never forwarded:
-	/// each node measures its own link.
-	pub(crate) rtt: Option<Duration>,
 }
 
 impl RouteInfo {
@@ -541,14 +539,14 @@ impl RouteInfo {
 			lane: Lane::default(),
 			draining: false,
 			available: true,
-			rtt: None,
 		}
 	}
 }
 
 /// Which of the lite-07 route layer's routes to a publisher a route follows: one per
 /// prefix covering the claim. Only the narrowest live one is primary, which a reader
-/// here follows; a request a peer forwards follows the one it names.
+/// here follows, falling back on a wider one only while none is; a request a peer
+/// forwards follows the one it names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Lane {
 	/// How many segments the route's prefix has, absolute.
@@ -563,6 +561,11 @@ pub(crate) struct Lane {
 	/// The lowest priority of a link on the route's path, which ranks the route where a
 	/// session's preference does, or `None` for a route the route layer did not select.
 	pub priority: Option<i8>,
+	/// How many segments the claim's own prefix lacks of the path it entered at, which a
+	/// stream presenting a broader claim at a narrower request reports: 0 for a claim
+	/// exactly there. The longer prefix wins, so a claim at 0 outranks every broader one.
+	/// A path has at most 32 segments, so a byte holds it, and the route entry stays small.
+	pub above: u8,
 }
 
 impl Default for Lane {
@@ -573,6 +576,7 @@ impl Default for Lane {
 			selected: true,
 			path: std::sync::Arc::new([]),
 			priority: None,
+			above: 0,
 		}
 	}
 }
@@ -608,17 +612,6 @@ impl RouteInfo {
 	/// and finally the most recently announced route. See [`Cost`].
 	pub fn cost(&self) -> Cost {
 		self.cost
-	}
-
-	/// The round trip to the route's origin node over moq-lite-07, informational: it
-	/// never ranks or selects a route.
-	///
-	/// Each link on the path adds its min RTT, the lowest smoothed RTT it measured over
-	/// the last 30 seconds, this session's own link included. `None` on any other wire,
-	/// on a route this origin serves itself, and while any link on the path has no
-	/// measurement.
-	pub fn rtt(&self) -> Option<Duration> {
-		self.rtt
 	}
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
@@ -694,13 +687,6 @@ impl RouteInfo {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_available(mut self, available: bool) -> Self {
 		self.available = available;
-		self
-	}
-
-	/// Set the round trip to the route's origin node; see [`Self::rtt`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn with_rtt(mut self, rtt: Option<Duration>) -> Self {
-		self.rtt = rtt;
 		self
 	}
 
@@ -831,36 +817,44 @@ fn chain_key(path: &str, hops: &Hops) -> u64 {
 	fnv_key(path, hops.iter().flat_map(|hop| hop.id().to_le_bytes()))
 }
 
-/// The highest epoch each instance reaches among a set of candidates, per prefix: an older
+/// The highest epoch each instance reaches among a set of candidates, per claim: an older
 /// incarnation of an instance is never eligible, however cheap, since its publisher was
-/// replaced. Built in one pass, so ranking N candidates stays linear. Only epochs above 0
-/// are kept, since nothing is below 0: the common case, where every instance announces
-/// epoch 0, allocates nothing.
-struct Epochs<'a>(HashMap<(&'a Path, &'a Instance), u64>);
+/// replaced. A claim is its prefix and how far above it was shown ([`Lane::above`]), so a
+/// broader claim shown at a prefix is another claim than the one made there, and its epoch
+/// supersedes nothing of it. Built in one pass, so ranking N candidates stays linear. Only
+/// epochs above 0 are kept, since nothing is below 0: the common case, where every instance
+/// announces epoch 0, allocates nothing.
+struct Epochs<'a>(HashMap<(&'a Path, &'a Instance, u8), u64>);
 
 impl<'a> Epochs<'a> {
 	fn of(candidates: impl Iterator<Item = &'a RouteEntry>) -> Self {
 		let mut highest = HashMap::new();
 		for entry in candidates.filter(|entry| entry.epoch > 0) {
-			let epoch = highest.entry((&entry.prefix, &entry.instance)).or_insert(0);
+			let epoch = highest
+				.entry((&entry.prefix, &entry.instance, entry.lane.above))
+				.or_insert(0);
 			*epoch = (*epoch).max(entry.epoch);
 		}
 		Self(highest)
 	}
 
-	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same prefix.
+	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same claim.
 	fn superseded(&self, entry: &RouteEntry) -> bool {
 		self.0
-			.get(&(&entry.prefix, &entry.instance))
+			.get(&(&entry.prefix, &entry.instance, entry.lane.above))
 			.is_some_and(|&highest| highest > entry.epoch)
 	}
 }
 
 /// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
-/// Lower wins: first a route that is neither draining (see [`RouteInfo::draining`]) nor
-/// unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
-/// route ranks below every other eligible route and serves only as a last resort. Then the higher link [`Preference`], so metrics from different operators
-/// are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// Lower wins: first the route layer's narrowest route covering the claim, so a wider
+/// lite-07 route ranks below every narrowest one, even a draining or unavailable one, and
+/// serves only while a closing session leaves no narrowest route. Then a route that is
+/// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
+/// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
+/// every other eligible route and serves only as a last resort. Then the route layer's
+/// selected route ahead of its alternates. Then the higher link [`Preference`], so
+/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
@@ -885,6 +879,14 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		None => (entry.is_anonymous(), entry.hops.len()),
 	};
 	(
+		// The most specific claim wins outright, however far its route's cost or state
+		// ranks below a broader one: a stream presents a broader claim at the request,
+		// where it ties an exact claim for the path.
+		entry.lane.above,
+		// The route layer's narrowest route ahead of a wider one covering the claim. The
+		// wider one serves only between a closing session taking the narrowest away and the
+		// node promoting the next, so a reader fails over then rather than seeing an end.
+		!entry.lane.primary,
 		entry.draining || !entry.available,
 		// The route layer's selected route ahead of its alternates.
 		!entry.lane.selected,
@@ -912,6 +914,8 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (
+	u8,
+	bool,
 	bool,
 	bool,
 	Reverse<Preference>,
@@ -923,7 +927,7 @@ type RouteOrder = (
 	Reverse<u64>,
 );
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available, rtt)` metadata
+/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata
 /// an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
@@ -934,7 +938,6 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<u64>,
 	bool,
-	Option<Duration>,
 );
 
 /// The earlier of two optional deadlines.
@@ -1340,7 +1343,6 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
-				rtt: meta.8,
 				lane: Lane::default(),
 			},
 		};
@@ -1386,8 +1388,6 @@ struct RouteEntry {
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
-	/// The round trip to the route's origin node; see [`RouteInfo::rtt`].
-	rtt: Option<Duration>,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Claim`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -1423,6 +1423,13 @@ struct RouteEntry {
 }
 
 impl RouteEntry {
+	/// How many segments the claim's own prefix has: the entry's, less how far above it the
+	/// claim was shown. The most specific claim covering a path wins, however deep the entry
+	/// that shows it is filed.
+	fn specificity(&self) -> usize {
+		(self.prefix.parts().count()).saturating_sub(usize::from(self.lane.above))
+	}
+
 	/// Whether the announcing producer may serve the absolute `path`.
 	fn authorizes(&self, path: &Path) -> bool {
 		self.scope.matches(path.as_str()) && !self.excluded.iter().any(|excluded| path.has_prefix(excluded))
@@ -1456,13 +1463,12 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
-			self.rtt,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available, rtt) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1471,7 +1477,6 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
-			&& *rtt == self.rtt
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1520,7 +1525,7 @@ fn reach(scope: &Patterns, claim: &Pattern) -> Vec<Pattern> {
 
 /// The paths a prefix can cover, using an exact pattern at the path depth limit.
 fn prefix_claim(prefix: &Path) -> Result<Pattern, InvalidPattern> {
-	if prefix.parts().count() == Path::MAX_PARTS {
+	if prefix.depth() == Path::MAX_PARTS {
 		Pattern::literal(prefix.as_str())
 	} else {
 		Pattern::subtree(prefix.as_str())
@@ -1588,7 +1593,8 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route, of the route layer's only the primary ones (see [`Lane`]).
+	/// Every route. Of the route layer's, the primary ones rank first (see [`Lane`]), so
+	/// a wider covering route serves only while no narrower one does.
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
@@ -1605,7 +1611,7 @@ pub(crate) enum NodeFilter {
 impl NodeFilter {
 	fn admits(self, node: Option<u64>, lane: &Lane) -> bool {
 		match self {
-			Self::Any => node.is_none() || lane.primary,
+			Self::Any => true,
 			Self::Own => node.is_none(),
 			Self::Route { node: id, depth } => node == Some(id) && lane.depth == depth,
 		}
@@ -1870,15 +1876,21 @@ impl TableCursor {
 		}
 	}
 
-	/// The visible entry among `candidates` that presents here: the longest prefix,
-	/// then the first eligible one in [`route_order`].
+	/// The visible entry among `candidates` that presents here: the most specific claim,
+	/// the deepest where claims tie, then the first eligible one in [`route_order`].
 	fn best<'a>(&self, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
 		let visible = candidates.filter(|entry| self.visible(entry));
 		let epochs = Epochs::of(visible.clone());
 		visible
 			.clone()
 			.filter(|entry| !epochs.superseded(entry))
-			.min_by_key(|entry| (Reverse(entry.prefix.len()), route_order(&entry.prefix, entry)))
+			.min_by_key(|entry| {
+				(
+					Reverse(entry.specificity()),
+					Reverse(entry.prefix.len()),
+					route_order(&entry.prefix, entry),
+				)
+			})
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -1903,7 +1915,7 @@ struct OriginScope {
 
 /// A subtree a handle reads from elsewhere on the origin: `at/rest` resolves at
 /// `target/rest`. Both absolute.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Mount {
 	at: Path,
 	target: Path,
@@ -1911,7 +1923,7 @@ struct Mount {
 
 /// A mount as a reader of a prefix sees it through a handle: where the origin holds
 /// what it presents, and how the handle names that.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Mounted {
 	mount: Mount,
@@ -1932,6 +1944,18 @@ impl Mounted {
 	pub fn holds(&self, path: &Path) -> bool {
 		path.has_prefix(&self.mount.at)
 	}
+
+	/// The absolute, handle-side mount point.
+	pub fn at(&self) -> &Path {
+		&self.mount.at
+	}
+
+	/// How many segments the handle-side `path` lies beneath the mount point: the most a
+	/// claim read through the mount can be above it. A claim covering the whole target, which
+	/// is broader than the mount point as the handle sees it, covers no more than that.
+	pub fn beneath(&self, path: &Path) -> u64 {
+		path.parts().count().saturating_sub(self.mount.at.parts().count()) as u64
+	}
 }
 
 impl Mount {
@@ -1939,7 +1963,7 @@ impl Mount {
 	/// and the result fits the wire limits.
 	fn resolve(&self, path: &Path) -> Option<Path> {
 		let resolved = self.target.join(&path.strip_prefix(&self.at)?).ok()?;
-		(resolved.parts().count() <= Path::MAX_PARTS).then_some(resolved)
+		(resolved.depth() <= Path::MAX_PARTS).then_some(resolved)
 	}
 
 	/// Where the origin-side absolute `path` shows on the handle, when it is at or
@@ -1952,7 +1976,7 @@ impl Mount {
 	/// wire limits, so a reader could ask for it. A route covering the target always does.
 	fn names(&self, path: &Path) -> bool {
 		path.strip_prefix(&self.target).is_none_or(|rest| {
-			self.at.parts().count() + rest.parts().count() <= Path::MAX_PARTS
+			self.at.depth() + rest.depth() <= Path::MAX_PARTS
 				&& self.at.len() + usize::from(!self.at.is_empty() && !rest.is_empty()) + rest.len() <= Path::MAX_BYTES
 		})
 	}
@@ -2079,27 +2103,19 @@ impl Default for OriginScope {
 
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
+///
+/// A pattern's literal segments are spelled like a path's, so a head fails only when it
+/// is too long for a path, and then it asks for nothing.
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<Path> {
-	let mut heads: Vec<Path> = allowed.iter().filter_map(|pattern| covering(pattern.head())).collect();
+	let mut heads: Vec<Path> = allowed
+		.iter()
+		.filter_map(|pattern| Path::new(pattern.head()).ok())
+		.collect();
 	heads.sort();
 	heads.dedup();
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
-}
-
-/// The nearest path at or above a pattern head.
-///
-/// A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
-/// falls back to its parent. A head too long for a path covers none, so it asks for nothing.
-fn covering(mut head: &str) -> Option<Path> {
-	loop {
-		match Path::new(head) {
-			Ok(path) => return Some(path),
-			Err(crate::path::Error::InvalidEscape) => head = head.rsplit_once('/').map_or("", |(parent, _)| parent),
-			Err(_) => return None,
-		}
-	}
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.
@@ -2408,13 +2424,6 @@ impl Producer {
 		self.consume().route_node()
 	}
 
-	/// See [`Consumer::route_closing`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
-	}
-
 	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
 	/// session created the route node: a relay translating this node's claims for a
 	/// lite-06 peer starts their chain with it. It is this origin's own hop until the
@@ -2543,7 +2552,7 @@ impl Producer {
 		// A decoded prefix and suffix are each within the wire limit, but their
 		// join might not be. Enforcing here bounds the table depth and guarantees the
 		// path can be re-encoded when forwarded.
-		if full.parts().count() > Path::MAX_PARTS {
+		if full.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
 		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
@@ -2902,7 +2911,7 @@ impl Producer {
 	) -> Result<Producer, Error> {
 		let at = self.root.join(&path::convert(at)?)?;
 		let target = self.root.join(&path::convert(target)?)?;
-		if at.parts().count() > Path::MAX_PARTS || target.parts().count() > Path::MAX_PARTS {
+		if at.depth() > Path::MAX_PARTS || target.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
 		// A mount point no pattern can spell could never be announced or authorized.
@@ -2998,7 +3007,7 @@ impl Announcing {
 	fn new(producer: &Producer, prefix: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
 		let requested = producer.root.join(&path::convert(prefix)?)?;
 		publish_path(&requested)?;
-		if requested.parts().count() > Path::MAX_PARTS {
+		if requested.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
 		let claim = prefix_claim(&requested)?;
@@ -3069,7 +3078,6 @@ impl Announcing {
 				lane: route.lane.clone(),
 				draining: route.draining,
 				available: route.available,
-				rtt: route.rtt,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3695,7 +3703,6 @@ impl AnnounceProducer {
 			entry.lane = route.lane.clone();
 			entry.draining = route.draining;
 			entry.available = route.available;
-			entry.rtt = route.rtt;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3758,7 +3765,6 @@ impl AnnounceProducer {
 			lane: entry.lane.clone(),
 			draining: entry.draining,
 			available: entry.available,
-			rtt: entry.rtt,
 		})
 	}
 
@@ -3996,6 +4002,7 @@ impl OwnClaims {
 			upstream: false,
 			// Only a route published here has crossed no node.
 			learned: !route.hops.is_empty(),
+			above: 0,
 			// Kept, so the claim that crossed into lite-07 here is still recognized
 			// wherever it leaves for lite-06 again.
 			chain: route.hops,
@@ -4360,12 +4367,12 @@ struct FrontListing {
 	/// The source being read.
 	source: Option<u64>,
 	reader: Option<broadcast::Tracks>,
-	/// Every name the front lists.
-	listed: HashSet<Arc<str>>,
-	/// Names an earlier source listed that the current one has yet to list. A source of the
+	/// Every track the front lists, by kind and name.
+	listed: HashSet<(broadcast::Kind, Arc<str>)>,
+	/// Tracks an earlier source listed that the current one has yet to list. A source of the
 	/// same instance lists the same tracks, so its readers see no churn: what it still lacks
 	/// at its SYNCED is gone.
-	stale: HashSet<Arc<str>>,
+	stale: HashSet<(broadcast::Kind, Arc<str>)>,
 }
 
 /// A track the ended front left in flight, held until its last reader leaves. It
@@ -4830,8 +4837,9 @@ impl FrontServe {
 						}
 					}
 					// An awaited copy follows the readers, or it may never send the group
-					// they now want.
-					if asked.info.is_some() {
+					// they now want. The readers of an ended track stay on the copy it ended
+					// on, so one rerouted for its group reads subscribes nothing.
+					if asked.info.is_some() && !matches!(io.logical, Logical::Ended) {
 						follow_demand(
 							&mut asked.sub,
 							Some(&asked.copy),
@@ -4843,12 +4851,15 @@ impl FrontServe {
 					}
 					// While another copy may still deliver, a matching replacement answers only
 					// once it delivers or ends: one failing first refuses, and that copy keeps
-					// serving. Different metadata is refused at once.
+					// serving. Different metadata is refused at once. An ended track's readers
+					// stay on its last copy, so a copy rerouted for its group reads answers with
+					// its info alone: it may never deliver anything unasked.
 					if let Some(info) = &asked.info
-						&& (io
-							.copy
-							.as_ref()
-							.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
+						&& (matches!(io.logical, Logical::Ended)
+							|| io
+								.copy
+								.as_ref()
+								.is_none_or(|(_, copy, _)| copy.poll_complete(waiter).is_ready())
 							|| matches!(&io.logical, Logical::Accepted(accepted) if accepted.info() != info)
 							|| asked.copy.poll_grouped(waiter).is_ready()
 							|| asked.copy.poll_complete(waiter).is_ready())
@@ -5111,6 +5122,50 @@ impl kio::Task for FrontServe {
 								None => {}
 							}
 						}
+						Action::Reroute { track: name, source } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							// Nothing reads it any more, so nothing would continue on the copy.
+							if !io.weak.is_held() {
+								continue;
+							}
+							io.ready.wake_by_ref();
+							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
+							let lookup = match self.sources.get(&source).map(|s| s.track(&name)) {
+								Some(Ok(lookup)) => lookup,
+								// Refused before any lookup, as a query would be: the front judges
+								// it the same way, so a held fetch is not left waiting on it.
+								Some(Err(err)) => {
+									self.events.push_back(Event::TrackInfo {
+										track: name,
+										source,
+										closing,
+										result: Err(err),
+										retry: None,
+									});
+									continue;
+								}
+								None => continue,
+							};
+							// No subscription: the track is over, and a read that continues on the
+							// copy asks it for what it needs.
+							let query = lookup.info().into_inner();
+							let copy = query.track();
+							io.query = Some(Asked {
+								source,
+								staged: io.routes.stage(copy.clone()),
+								copy,
+								query,
+								info: None,
+								sub: None,
+							});
+						}
+						Action::Conclude { track: name } => {
+							let Some(io) = self.tracks.get_mut(&name) else { continue };
+							io.ready.wake_by_ref();
+							io.routes.conclude();
+							io.query = None;
+							io.staged = None;
+						}
 						Action::Splice { track: name, source } => {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };
 							let Some(asked) = io.staged.take() else {
@@ -5370,10 +5425,11 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
-					// Staged only while the track has a reader: without one the machine
-					// will not splice, and a held copy would keep the source subscribed.
+					// Staged only while the track has a reader, or a read holds the finished
+					// track: without one the machine will not splice, and a held copy would
+					// keep the source subscribed.
 					if let Ok(info) = &result
-						&& io.wanted
+						&& (io.wanted || io.routes.ended())
 					{
 						io.staged = Some(Asked {
 							info: Some(info.clone()),
@@ -5393,6 +5449,13 @@ impl kio::Task for FrontServe {
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					io.copy = None;
 					io.held = None;
+					// A copy that failed may have failed with its route, which the table can
+					// already have replaced: the front takes that change first, so it fails over
+					// to the replacement rather than giving up on the route that died.
+					if result.is_err() && self.watch.poll_changed(&kio::Waiter::noop(), self.seen).is_ready() {
+						let selected = self.select();
+						self.events.push_back(selected);
+					}
 					Event::TrackEnded {
 						track: name,
 						source,
@@ -5409,9 +5472,11 @@ impl kio::Task for FrontServe {
 						continue;
 					}
 					io.wanted = !io.wanted;
-					if !io.wanted {
-						// Nothing will be spliced now: let go of the copies a query
-						// holds, or the source stays subscribed with nobody reading.
+					// Nothing will be spliced now: let go of the copies a query holds, or the
+					// source stays subscribed with nobody reading. An ended track's query is a
+					// reroute for the reads still holding it, which subscribes nothing: finishing
+					// is what closes the track, so its edge may come only after the reroute.
+					if !io.wanted && !io.routes.ended() {
 						io.query = None;
 						io.staged = None;
 					}
@@ -5478,27 +5543,30 @@ impl kio::Task for FrontServe {
 					// The lister refuses only once the broadcast ended, which ends the front too.
 					match result {
 						Ok(Some(broadcast::TracksEvent::Added { name, info })) => {
-							if !state.stale.remove(&name) && state.listed.insert(name.clone()) {
-								let _ = self.lister.add(name, info);
+							let key = (info.kind(), name);
+							if !state.stale.remove(&key) && state.listed.insert(key.clone()) {
+								let _ = self.lister.add(key.1, info);
 							}
 						}
 						// Forwarded as the source reported it, finished or not.
-						Ok(Some(broadcast::TracksEvent::Removed { name })) => {
-							state.stale.remove(&name);
-							if state.listed.remove(&name) {
-								let _ = self.lister.remove(&name);
+						Ok(Some(broadcast::TracksEvent::Removed { kind, name })) => {
+							let key = (kind, name);
+							state.stale.remove(&key);
+							if state.listed.remove(&key) {
+								let _ = self.lister.remove(kind, key.1);
 							}
 						}
-						Ok(Some(broadcast::TracksEvent::Finished { name })) => {
-							state.stale.remove(&name);
-							if state.listed.remove(&name) {
-								let _ = self.lister.finish(&name);
+						Ok(Some(broadcast::TracksEvent::Finished { kind, name })) => {
+							let key = (kind, name);
+							state.stale.remove(&key);
+							if state.listed.remove(&key) {
+								let _ = self.lister.finish(kind, key.1);
 							}
 						}
 						Ok(Some(broadcast::TracksEvent::Synced)) => {
-							for name in state.stale.drain() {
-								state.listed.remove(&name);
-								let _ = self.lister.remove(&name);
+							for (kind, name) in state.stale.drain() {
+								state.listed.remove(&(kind, name.clone()));
+								let _ = self.lister.remove(kind, name);
 							}
 							self.lister.synced();
 						}
@@ -6053,10 +6121,15 @@ impl RouteTable {
 	) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
-		// node decides.
+		// node decides. A claim shown above its own prefix is filed deeper than it
+		// is, so a node whose best claim is less specific than the one decided above
+		// it does not take over.
 		let (above, at) = self.split(path);
-		let mut best = None;
-		for node in above.into_iter().chain(at) {
+		let mut best: Option<(usize, Option<&RouteEntry>)> = None;
+		for (depth, node) in above.into_iter().chain(at).enumerate() {
+			// How specific a claim filed at this node is: the node's depth less how far above
+			// it the claim was shown.
+			let specific = |entry: &RouteEntry| depth.saturating_sub(usize::from(entry.lane.above));
 			let mut candidates = node
 				.entries
 				.iter()
@@ -6067,15 +6140,22 @@ impl RouteTable {
 				.filter(|entry| only(entry))
 				.peekable();
 			if candidates.peek().is_some() {
-				let epochs = Epochs::of(candidates.clone());
-				best = candidates
-					.clone()
+				// The node's most specific candidates are the whole answer, serving or not:
+				// one that refuses the path still shadows what is broader.
+				let specificity = candidates.clone().map(specific).max().unwrap_or_default();
+				if best.is_some_and(|(decided, _)| specificity < decided) {
+					continue;
+				}
+				let tier = candidates.filter(|entry| specific(entry) == specificity);
+				let epochs = Epochs::of(tier.clone());
+				let found = tier
 					.filter(|entry| entry.serves(path))
 					.filter(|entry| !epochs.superseded(entry))
 					.min_by_key(|entry| route_order(path, entry));
+				best = Some((specificity, found));
 			}
 		}
-		best
+		best.and_then(|(_, found)| found)
 	}
 
 	/// The nodes above `path` and the node at it, as far as the table has them.
@@ -7488,16 +7568,6 @@ impl Consumer {
 		id.and_then(NonZeroU64::new)
 	}
 
-	/// Hold back the disconnect of every route stream of the session `tag` dropped until
-	/// the guard is released, so the session closing costs the route layer one recompute
-	/// and reports its hops dead; `None` while no session created the route node, which
-	/// then has no streams.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_closing(&self, tag: u64) -> Option<crate::route::node::Closing> {
-		let node = self.shared.lock().route_node.clone();
-		node.map(|(node, _)| node.closing(tag))
-	}
-
 	/// The route layer node every lite-07 session on this origin shares, created on
 	/// first use along with the task that feeds it the routes this node serves
 	/// itself: everything in the table the route layer did not select. It is caught up
@@ -8638,7 +8708,9 @@ impl Routes {
 	/// queued before then. A prefix not announced by then is not announced, rather
 	/// than not heard yet. A session joining the scope later, such as a reconnect,
 	/// takes this back until it syncs too; routes published on this origin
-	/// itself never wait.
+	/// itself never wait. On moq-lite-07 a session syncs only once this origin
+	/// shows every route its peer sent, so a redial waits out the doubt a closed
+	/// session left on that peer.
 	///
 	/// Synced is relative to the session's peer, never global: a relay answers with
 	/// what it holds without waiting on its own upstreams. Versions that cannot mark
@@ -8998,7 +9070,7 @@ mod tests {
 		let track = track.accept(track::Info::timed());
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"history".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		track.abort(Error::App(7)).unwrap();
 		driver.poll(now, &waiter).unwrap();
 		let Poll::Ready(Ok(mut subscriber)) = subscribing.poll_ok(&waiter) else {
@@ -9027,7 +9099,7 @@ mod tests {
 			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(group.key_time(), b"snapshot".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let source = source.finish().unwrap();
 
 			let routes = crate::model::resume::Producer::new();
@@ -9792,7 +9864,7 @@ mod tests {
 		let mut metered = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"frame".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut read = unmetered.recv_group().await.unwrap().expect("a group");
 		assert_eq!(
@@ -9839,10 +9911,10 @@ mod tests {
 
 		let mut subscriber = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let bill = subscriber.bill();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"dropped".as_ref()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"sent".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut read = subscriber.recv_group().await.unwrap().expect("a group");
 		let mut chunked = read.clone();
@@ -9895,7 +9967,7 @@ mod tests {
 		let mut live = track.create_group(crate::group::Info { start: 1 }).unwrap();
 		live.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 			.unwrap();
-		live.close().unwrap();
+		live.finish().unwrap();
 		assert_eq!(ingress(), 4);
 
 		let fetch = track.consume().fetch_group(0, None);
@@ -9904,7 +9976,7 @@ mod tests {
 		fetched
 			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
 			.unwrap();
-		fetched.close().unwrap();
+		fetched.finish().unwrap();
 		fetch.await.unwrap();
 		assert_eq!(ingress(), 4 + 7, "the fetched group counts as well");
 
@@ -10660,6 +10732,120 @@ mod tests {
 		);
 	}
 
+	/// The most specific claim wins whichever prefix shows it: a claim for `src` shown at
+	/// `src/a/b` is deeper in the table than one for `src/a` shown at its own prefix, yet
+	/// broader, so it must not take the request the more specific claim's publisher serves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn request_prefers_the_more_specific_claim_whichever_prefix_shows_it() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let route = |node, above, cost| {
+			RouteInfo::new()
+				.with_hops(hops(&[node]))
+				.with_node(Some(node))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+				.with_cost(cost)
+		};
+
+		let broad = producer.forward("src/a/b", route(10, 2, 1)).unwrap();
+		let exact = producer.forward("src/a", route(11, 0, 5)).unwrap();
+
+		let _pending = consumer.request("src/a/b/c", None);
+		let request = queued(&exact).await;
+		assert_eq!(request.path().as_str(), "src/a/b/c");
+		assert!(
+			broad.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"the broader claim must not serve what a more specific one covers"
+		);
+	}
+
+	/// A broadcast published here shadows what is beneath it, and so does it against a broader
+	/// claim shown at the same prefix: the broadcast refuses the request, and the request goes
+	/// no further than that refusal.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_broadcast_here_shadows_a_broader_claim_shown_at_its_prefix() {
+		let producer = origin(1).produce();
+		let _broad = producer
+			.forward(
+				"src/a",
+				RouteInfo::new()
+					.with_hops(hops(&[10]))
+					.with_node(Some(10))
+					.with_lane(Lane {
+						above: 1,
+						..Lane::default()
+					}),
+			)
+			.unwrap();
+		let exact = producer.route("src/a", RouteOptions::default()).unwrap();
+		exact.announce().unwrap();
+
+		let table = producer.shared.read();
+		let best =
+			|path: &str| table.best_route(&Path::new(path).unwrap(), Horizon::default(), &HashSet::new(), |_| true);
+		assert!(
+			best("src/a/b").is_none(),
+			"the broadcast at the prefix refuses what is beneath it"
+		);
+		assert!(best("src/a").is_some_and(|entry| entry.source.is_some()));
+	}
+
+	/// A broader claim shown at a prefix never supersedes the claim of that prefix: an instance's
+	/// higher epoch on a claim above the prefix is another claim's, so the announce stream
+	/// advertises what a request resolves to, the broadcast here.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_broader_claim_at_a_higher_epoch_does_not_supersede_the_exact_one() {
+		// Updates are delivered at once: the hold is not what this checks.
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let mut announced = producer.consume().routes();
+		let instance = crate::Instance::random();
+		let _exact = producer
+			.route("src/a", RouteOptions::default().with_instance(instance.clone(), 0))
+			.unwrap();
+		let first = announced.expect_next_active("src/a").await;
+		assert_eq!(first.epoch, 0);
+
+		let _broad = producer
+			.forward(
+				"src/a",
+				RouteInfo::new()
+					.with_instance(instance.clone(), 1)
+					.with_hops(hops(&[10]))
+					.with_node(Some(10))
+					.with_lane(Lane {
+						above: 1,
+						..Lane::default()
+					}),
+			)
+			.unwrap();
+
+		let table = producer.shared.read();
+		let best = table
+			.best_route(
+				&Path::new("src/a").unwrap(),
+				Horizon::default(),
+				&HashSet::new(),
+				|_| true,
+			)
+			.expect("the exact claim serves its own prefix");
+		assert_eq!((best.epoch, best.lane.above), (0, 0));
+		drop(table);
+		assert!(
+			announced.try_next().is_none(),
+			"the broader claim at a higher epoch must not replace the exact one in the announcement"
+		);
+	}
+
 	/// A draining route ranks below every other eligible one, even on a preferred link
 	/// against a demoted one, whatever the costs say.
 	#[kio::test]
@@ -10703,6 +10889,8 @@ mod tests {
 		announced.expect_next_active("room").await;
 		dynamic.update(dynamic.route().unwrap().with_draining(true)).unwrap();
 		// Past the hold a best-route change would wait out.
+		// An update is held back from the poll that first sees it, so poll on both sides of the hold.
+		announced.assert_next_wait();
 		kio::clock::sleep(Config::default().update_hold * 2).await;
 		announced.assert_next_wait();
 		let route = dynamic.route().unwrap();
@@ -11011,12 +11199,17 @@ mod tests {
 		assert!(first.is_clone(&second), "the newcomer joins the front");
 	}
 
+	/// The next event, a datagram track's name prefixed `d:`.
 	#[cfg(feature = "async")]
 	async fn listed(tracks: &mut broadcast::Tracks) -> String {
+		let named = |kind: broadcast::Kind, name: Arc<str>| match kind {
+			broadcast::Kind::Track => name.to_string(),
+			broadcast::Kind::Datagrams => format!("d:{name}"),
+		};
 		match tracks.next().await {
-			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
-			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
-			Ok(Some(broadcast::TracksEvent::Finished { name })) => format!("~{name}"),
+			Ok(Some(broadcast::TracksEvent::Added { name, info })) => format!("+{}", named(info.kind(), name)),
+			Ok(Some(broadcast::TracksEvent::Removed { kind, name })) => format!("-{}", named(kind, name)),
+			Ok(Some(broadcast::TracksEvent::Finished { kind, name })) => format!("~{}", named(kind, name)),
 			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
 			Ok(None) => "end".into(),
 			Err(err) => format!("error: {err}"),
@@ -11039,8 +11232,15 @@ mod tests {
 
 		let _audio = source.broadcast().create_track("audio", None).unwrap();
 		assert_eq!(listed(&mut tracks).await, "+audio");
+		let datagrams = source
+			.broadcast()
+			.create_datagrams("video", Default::default())
+			.unwrap();
+		assert_eq!(listed(&mut tracks).await, "+d:video");
 		drop(video);
 		assert_eq!(listed(&mut tracks).await, "-video");
+		datagrams.finish();
+		assert_eq!(listed(&mut tracks).await, "~d:video");
 
 		drop(source);
 		assert_eq!(listed(&mut tracks).await, "end");
@@ -11230,7 +11430,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			matches!(
-				stream.try_output(),
+				stream.try_wire(),
 				Some(crate::route::node::Output::Route { reach: Some(_), .. })
 			),
 			"the new stream is sent the route to the announced claim"
@@ -11438,7 +11638,7 @@ mod tests {
 				let source = request.accept(crate::track::Info::timed());
 				let mut group = source.append_next().unwrap();
 				group.write_frame(group.key_time(), b"late".as_ref()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				let source = source.finish().unwrap();
 
 				let mut subscription = subscribing.await.expect("subscribe survives the retraction");
@@ -11484,7 +11684,7 @@ mod tests {
 		let source = request.request_start(None).accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(group.key_time(), b"snapshot".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let source = source.finish().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		assert_eq!(
@@ -11973,7 +12173,7 @@ mod tests {
 		if let Some((_, group)) = &mut joined {
 			assert_eq!(read(group).await, b"d");
 		}
-		next_group.close().unwrap();
+		next_group.finish().unwrap();
 		drop((
 			joined,
 			reading,
@@ -12007,7 +12207,7 @@ mod tests {
 		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.append_next().unwrap();
 		group.write_frame(group.key_time(), b"cached".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		subscription.recv_group().await.unwrap().expect("the cached group");
 		drop(subscription);
@@ -12033,7 +12233,7 @@ mod tests {
 		let source = request.accept(crate::track::Info::timed());
 		let mut group = source.create_group(1u64.into()).unwrap();
 		group.write_frame(group.key_time(), b"late".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _source = source.finish().unwrap();
 
 		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
@@ -13714,7 +13914,7 @@ mod tests {
 			let track = source.create_track(name, crate::track::Info::timed()).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(group.key_time(), name.as_bytes()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			// The producer stays alive: the track is open, like a live SI track.
 			std::mem::forget(track);
 		}
@@ -14047,7 +14247,7 @@ mod tests {
 			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			request.serve(&source);
 
 			let resolved = pending.await.expect("resolves");
@@ -14102,12 +14302,12 @@ mod tests {
 		// so the track resumes at group 1.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		request.serve(&replacement);
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"resumed".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut group = rig
 			.subscription
@@ -14239,7 +14439,7 @@ mod tests {
 	async fn deliver(track: &track::Producer, subscription: &mut track::Subscriber, payload: &'static [u8]) {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), payload).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(subscription).await.unwrap().expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], payload);
 	}
@@ -14633,7 +14833,7 @@ mod tests {
 			let track = successor.create_track("video", replacement).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			request.serve(&successor);
 			rig.incumbent_track.clone().abort(Error::Dropped).unwrap();
 
@@ -14682,7 +14882,7 @@ mod tests {
 			.create_group(crate::group::Info { start: 5 })
 			.unwrap();
 		group.write_frame(group.key_time(), b"five".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().start, 5);
 		let standby = rig.standby(&[10, 20]);
 		drop(incumbent);
@@ -14713,7 +14913,7 @@ mod tests {
 
 			let mut group = rig.incumbent_track.append_next().unwrap();
 			group.write_frame(group.key_time(), b"after".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let mut group = next_group(&mut rig.subscription)
 				.await
 				.expect("the subscription survives the update")
@@ -14762,7 +14962,7 @@ mod tests {
 			let track = source.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.append_next().unwrap();
 			group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			request.serve(&source);
 
 			let resolved = pending.await.expect("resolves through the incumbent");
@@ -14790,11 +14990,11 @@ mod tests {
 					let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
 					let mut group = track.append_next().unwrap();
 					group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 					request.serve(&replacement);
 					let mut group = track.append_next().unwrap();
 					group.write_frame(group.key_time(), b"resumed".as_ref()).unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 
 					let mut group = next_group(&mut subscription).await.unwrap().expect("resumed group");
 					assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"resumed");
@@ -14828,7 +15028,7 @@ mod tests {
 		let track_a = source_a.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_a.append_next().unwrap();
 		group.write_frame(group.key_time(), b"from-a".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		request.serve(&source_a);
 
 		let resolved_a = pending.await.expect("resolves");
@@ -14880,7 +15080,7 @@ mod tests {
 		let track_b = source_b.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track_b.append_next().unwrap();
 		group.write_frame(group.key_time(), b"from-b".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		request.serve(&source_b);
 
 		let resolved_b = pending.await.expect("B's front is served immediately");
@@ -14920,7 +15120,7 @@ mod tests {
 		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"steady".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut audio = rig
 			.resolved
@@ -15071,7 +15271,7 @@ mod tests {
 		// A textbook clean end, innermost first: the group, the track, the broadcast.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"tail".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let track = track.finish().unwrap();
 		drop(track);
 		broadcast.broadcast().close();
@@ -15125,7 +15325,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"tail".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let track = track.finish().unwrap();
 		drop(track);
 
@@ -15181,7 +15381,7 @@ mod tests {
 			.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"cached".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let mut subscription = resolved
@@ -15224,7 +15424,7 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = kio::clock::timeout(Duration::from_secs(1), again.recv_group())
 			.await
 			.expect("groups past the cached edge come from the re-splice")
@@ -15258,7 +15458,7 @@ mod tests {
 		drop(subscription);
 		kio::clock::sleep(Duration::from_millis(10)).await;
 		writing.write_frame(writing.key_time(), b"tail".as_ref()).unwrap();
-		writing.close().unwrap();
+		writing.finish().unwrap();
 
 		let tail = kio::clock::timeout(Duration::from_secs(1), reading.read_frame())
 			.await
@@ -15301,7 +15501,7 @@ mod tests {
 		// The track carries on.
 		let mut next = track.append_next().unwrap();
 		next.write_frame(next.key_time(), b"next".as_ref()).unwrap();
-		next.close().unwrap();
+		next.finish().unwrap();
 		let mut group = kio::clock::timeout(Duration::from_secs(1), subscription.recv_group())
 			.await
 			.expect("the next group")
@@ -15326,7 +15526,7 @@ mod tests {
 			.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"cached".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		// The leaf's front view, which the next front serves from.
 		let leaf_front = leaf_consumer.request("room/alice", None).await.expect("resolves");
@@ -15374,7 +15574,7 @@ mod tests {
 			.expect("source open");
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 		drop(group);
@@ -15392,7 +15592,7 @@ mod tests {
 		// each hop to reach the leaf.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"fetched".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
@@ -15432,7 +15632,7 @@ mod tests {
 			.expect("subscribe");
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15451,7 +15651,7 @@ mod tests {
 		// Still spliced to the incumbent, still delivering.
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
 
@@ -15480,7 +15680,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		(producer, server, upstream, old, subscription)
@@ -15511,6 +15711,63 @@ mod tests {
 			.expect("open");
 	}
 
+	/// A fetch holds a finished track whose group its route lost, and the replacement neither
+	/// has the track nor takes requests: refused at the lookup itself, that concludes the
+	/// track as a refused query would, so the fetch fails rather than wait out its budget.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_finished_tracks_fetch_fails_when_the_replacement_lacks_the_track() {
+		let producer = origin(1).produce();
+		let server = producer
+			.forward(
+				"room",
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10])),
+			)
+			.unwrap();
+		let pending = producer.consume().request("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let old = upstream.create_track("video", crate::track::Info::timed()).unwrap();
+		let fills = old.requests();
+		queued(&server).await.serve(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let video = resolved.track("video").unwrap();
+		let mut open = old.append_next().unwrap();
+		open.write_frame(open.key_time(), b"a".as_ref()).unwrap();
+		let finished = old.finish().unwrap();
+		let mut fetched = video.fetch_group(0, None).await.unwrap();
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+		// The route loses the rest of the group and refuses to fill it.
+		open.abort(Error::Cancel).unwrap();
+		assert!(fetched.read_frame().now_or_never().is_none());
+		let request = kio::clock::timeout(Duration::from_secs(1), fills.requested_fill_group())
+			.await
+			.expect("the fetch asked the route to fill the group")
+			.expect("request");
+		request.reject(Error::Cancel);
+		drop((fills, finished));
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(
+			fetched.read_frame().now_or_never().is_none(),
+			"the fetch waits for another route"
+		);
+
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let _other = newcomer
+			.broadcast()
+			.create_track("audio", crate::track::Info::timed())
+			.unwrap();
+		newcomer.announce().unwrap();
+		let res = kio::clock::timeout(Duration::from_secs(1), fetched.read_frame())
+			.await
+			.expect("the fetch fails once the replacement refused the track");
+		assert!(res.is_err(), "{res:?}");
+	}
+
 	/// The newcomer answers "video" with matching metadata but aborts before delivering a
 	/// group, all before the front polls the answer: that is a refusal, so the incumbent
 	/// keeps serving rather than the track ending on the newcomer's error.
@@ -15538,7 +15795,7 @@ mod tests {
 
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15581,7 +15838,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -15604,7 +15861,7 @@ mod tests {
 
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15646,7 +15903,7 @@ mod tests {
 
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(&mut subscription)
 			.await
 			.expect("the incumbent keeps serving")
@@ -15680,7 +15937,7 @@ mod tests {
 		}
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _old = old.finish().unwrap();
 		replacement.abort(Error::App(7)).unwrap();
 
@@ -15703,7 +15960,7 @@ mod tests {
 		let video = resolved.track("video").unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"last".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
@@ -15876,7 +16133,7 @@ mod tests {
 		}
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"draining".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = next_group(&mut subscription).await.unwrap().expect("draining group");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"draining");
 		drop(group);
@@ -15897,7 +16154,7 @@ mod tests {
 		let mut again = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_next().unwrap();
 		group.write_frame(group.key_time(), b"after".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let outcome = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				match again.recv_group().await {
@@ -15945,7 +16202,7 @@ mod tests {
 			(&mut fetching).now_or_never().is_none(),
 			"an open group needs the route"
 		);
-		open.close().unwrap();
+		open.finish().unwrap();
 		let mut group = fetching.await.unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"open");
 	}
@@ -16000,7 +16257,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
@@ -16044,7 +16301,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
@@ -16066,11 +16323,11 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		for payload in [b"wrong0".as_ref(), b"wrong1".as_ref()] {
 			let mut group = incompatible.append_next().unwrap();
 			group.write_frame(group.key_time(), payload).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let mut group = next_group(&mut subscription)
@@ -16104,7 +16361,7 @@ mod tests {
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"before".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
@@ -16125,7 +16382,7 @@ mod tests {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"still".as_ref()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		request.reject(Error::NotFound);
 
 		let mut group = next_group(&mut subscription)
@@ -16266,7 +16523,7 @@ mod tests {
 		drop(alice);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
-		let output = stream.try_output();
+		let output = stream.try_wire();
 		assert!(
 			matches!(
 				&output,
@@ -16819,7 +17076,7 @@ mod tests {
 			.unwrap();
 		let mut written = track.append_next().unwrap();
 		written.write_frame(written.key_time(), b"frame".as_ref()).unwrap();
-		written.close().unwrap();
+		written.finish().unwrap();
 		let _track = track.finish().unwrap();
 		let mut reader = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = reader.recv_group().await.unwrap().unwrap();

@@ -36,7 +36,7 @@ fn next_frame(cb: &Callback) -> Vec<u8> {
 /// Write `payload` into a raw group of a scale-less track, stamped with the group's key.
 fn write_unscaled(group: u32, payload: &[u8]) -> i32 {
 	let mut key = 0;
-	assert_eq!(unsafe { moq_publish_group_sequence(group, &mut key) }, 0);
+	assert_eq!(unsafe { moq_publish_group_start(group, &mut key) }, 0);
 	unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &moq_timestamp::unscaled(key)) }
 }
 
@@ -679,4 +679,13 @@ fn native_surfaces_are_unsupported_off_apple() {
 		unsafe { moq_decode_video(1, 0, &odd, Some(ignore_callback), std::ptr::null_mut()) },
 		MOQ_ERROR_UNSUPPORTED
 	);
+}
+
+#[test]
+fn socket_is_endpoint() {
+	let is_endpoint = |path: &str| unsafe { moq_socket_is_endpoint(path.as_ptr().cast(), path.len()) };
+	assert_eq!(is_endpoint("room/.server/a"), 1);
+	assert_eq!(is_endpoint("room/.client/a"), 1);
+	assert_eq!(is_endpoint("room/a"), 0);
+	assert!(is_endpoint("room//a") < 0);
 }

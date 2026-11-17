@@ -27,10 +27,6 @@ and the late FETCH gets a loud refusal (accepted by its quest's Plan).
 - Test: finish then drop the producer, then a late joining FETCH on draft
   18 still gets the head.
 - Rerun the draft-18 interop `tail` and `finish` cells with the Rust
-  publisher, as [IETF finish](/quest/m3/ietf-finish.md) asks.
+  publisher.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [IETF finish](/quest/m3/ietf-finish.md) - owns the interop cells

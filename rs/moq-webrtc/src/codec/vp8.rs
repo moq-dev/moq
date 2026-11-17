@@ -25,7 +25,7 @@ impl codec::Bridge for Bridge {
 		self.import.decode(frame.payload, pts)
 	}
 
-	fn finish(&mut self) -> Result<()> {
+	fn finish(self: Box<Self>) -> Result<codec::Finished> {
 		self.import.finish()
 	}
 

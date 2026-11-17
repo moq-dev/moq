@@ -9,8 +9,9 @@
 //! unavailable, until the neighbours that learned the route from it answer, or for
 //! [`HOLD`] at most.
 
-use crate::route_change::{link, produce_origin};
+use crate::route_change::{link, next, payload, produce_origin, read, timed};
 use crate::support;
+use support::{AppendNext, AtStart};
 
 use std::time::Duration;
 
@@ -20,44 +21,48 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_wi
 
 /// How long a relay holds a route no neighbour answers for, and lets an announce
 /// stream stall before closing its session.
-const HOLD: Duration = Duration::from_secs(10);
+pub(super) const HOLD: Duration = Duration::from_secs(10);
 
 /// How long a closed session's far end is doubted.
-const DOUBT: Duration = Duration::from_secs(1);
+pub(super) const DOUBT: Duration = Duration::from_secs(1);
 
-fn lite07() -> Version {
+/// The wip version the path rule runs on.
+pub(super) fn lite07() -> Version {
 	"moq-lite-07-wip".parse().unwrap()
 }
 
 /// One change a node showed at a path: how long after the cut, its kind, and whether a
 /// usable route reached the publisher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Seen {
-	at: Duration,
-	kind: support::Kind,
-	available: bool,
+pub(super) struct Seen {
+	pub at: Duration,
+	pub kind: support::Kind,
+	pub available: bool,
+	/// The cost of the route shown, which tells its path apart.
+	pub cost: u64,
 }
 
 /// The changes a node shows at a path.
-struct Watch {
-	rx: mpsc::UnboundedReceiver<(kio::clock::Instant, support::Kind, bool)>,
+pub(super) struct Watch {
+	rx: mpsc::UnboundedReceiver<(kio::clock::Instant, support::Kind, bool, u64)>,
 }
 
 impl Watch {
 	/// What the node showed since the last call, timed from `start`.
-	fn seen(&mut self, start: kio::clock::Instant) -> Vec<Seen> {
+	pub(super) fn seen(&mut self, start: kio::clock::Instant) -> Vec<Seen> {
 		std::iter::from_fn(|| self.rx.try_recv().ok())
-			.map(|(at, kind, available)| Seen {
+			.map(|(at, kind, available, cost)| Seen {
 				at: at.saturating_duration_since(start),
 				kind,
 				available,
+				cost,
 			})
 			.collect()
 	}
 }
 
 /// Watch every change `node` shows at `path`, past what it shows now.
-async fn record(node: &origin::Producer, path: &'static str) -> Watch {
+pub(super) async fn record(node: &origin::Producer, path: &'static str) -> Watch {
 	let mut routes = node.consume().routes();
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
@@ -72,7 +77,8 @@ async fn record(node: &origin::Producer, path: &'static str) -> Watch {
 				origin::RouteKind::End => support::Kind::End,
 				origin::RouteKind::Offline => support::Kind::Offline,
 			};
-			let seen = (kio::clock::now(), kind, event.announce.route.available());
+			let route = &event.announce.route;
+			let seen = (kio::clock::now(), kind, route.available(), route.cost().value());
 			if tx.unbounded_send(seen).is_err() {
 				break;
 			}
@@ -84,30 +90,31 @@ async fn record(node: &origin::Producer, path: &'static str) -> Watch {
 	watch
 }
 
-fn withdrawn(seen: &Seen) -> bool {
+/// Whether the node let go of the path, ended or offline.
+pub(super) fn withdrawn(seen: &Seen) -> bool {
 	matches!(seen.kind, support::Kind::End | support::Kind::Offline)
 }
 
 /// Close a session at both ends, as a dropped connection does.
-fn cut(pair: &MockPair) {
+pub(super) fn cut(pair: &MockPair) {
 	pair.server.abort(Error::Cancel);
 	pair.client.abort(Error::Cancel);
 }
 
 /// Publish `path` on `node`.
-fn publish(node: &origin::Producer, path: &str) -> origin::Route {
+pub(super) fn publish(node: &origin::Producer, path: &str) -> origin::Route {
 	let route = node.route(path, origin::RouteOptions::hidden()).unwrap();
 	route.announce().unwrap();
 	route
 }
 
 /// Wait long enough for every message in flight to land, without reaching the doubt.
-async fn land() {
+pub(super) async fn land() {
 	kio::clock::sleep(Duration::from_millis(100)).await;
 }
 
 /// Let the network settle, doubts and holds included.
-async fn quiesce() {
+pub(super) async fn quiesce() {
 	kio::clock::sleep(HOLD + DOUBT).await;
 }
 
@@ -166,6 +173,48 @@ async fn a_detour_through_the_far_end_waits_out_the_doubt() {
 		.find(|seen| seen.available)
 		.expect("B's route serves in the end");
 	assert!(usable.at >= held.at + DOUBT, "not before the doubt lifts: {seen:?}");
+}
+
+/// `P` is on `A` and `B`, which peer with each other, and `W` is behind both. `P`'s session
+/// to `A` closes and reopens every half doubt. Doubt about `P` keeps no relay off `B`'s
+/// route, which begins at `P`, so `W` shows the claim available throughout and its
+/// subscriber reads each group at once. The reopened session waits out the doubt.
+#[kio::test]
+async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
+	let version = lite07();
+	let [p, a, b, w] = [1, 2, 3, 4].map(produce_origin);
+	let live = publish(&p, "live");
+	let track = live.broadcast().create_track("video", timed()).unwrap();
+	let mut p_a = peer(version, &p, &a).await;
+	let _p_b = peer(version, &p, &b).await;
+	let _a_b = peer(version, &a, &b).await;
+	let _a_w = peer(version, &a, &w).await;
+	let _b_w = peer(version, &b, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let broadcast = w.consume().request("live", None).await.unwrap();
+	let mut rx = read(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
+	let start = kio::clock::now();
+	for flap in 0..8 {
+		match flap % 2 {
+			0 => cut(&p_a),
+			_ => p_a = peer(version, &p, &a).await,
+		}
+		let sent = kio::clock::now();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), payload(flap, 0)).unwrap();
+		group.finish().unwrap();
+		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");
+		let late = kio::clock::now().saturating_duration_since(sent);
+		assert!(late < DOUBT / 2, "flap {flap}: read {late:?} after it was written");
+		kio::clock::sleep(DOUBT / 2).await;
+	}
+	let seen = watch.seen(start);
+	assert!(
+		seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"available throughout: {seen:?}"
+	);
 }
 
 /// `X` is `P`'s only way out and neighbours `R1`, `R2` and `R3`, which mesh with each other.

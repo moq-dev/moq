@@ -224,9 +224,8 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	// Native codec errors, behind the optional `audio`/`video` features.
+	// Native codec errors.
 	/// An audio codec operation failed.
-	#[cfg(feature = "audio")]
 	#[error("{reason}")]
 	Audio {
 		/// A diagnostic message describing the failure.
@@ -234,7 +233,6 @@ pub enum MoqError {
 	},
 
 	/// A video codec operation failed.
-	#[cfg(feature = "video")]
 	#[error("{reason}")]
 	Video {
 		/// A diagnostic message describing the failure.
@@ -347,7 +345,7 @@ pub enum MoqError {
 
 	/// This track or group already committed to another way of reading it.
 	///
-	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// A track is read in arrival order, in start order, or by a typed reader such as a
 	/// JSON consumer, never two of them, and the first group read picks the order. A group is
 	/// read raw or by a media group consumer, and the first frame read picks raw. Reaching
 	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works
@@ -502,7 +500,6 @@ impl From<moq_json::Error> for MoqError {
 	}
 }
 
-#[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
 		match err {
@@ -514,7 +511,6 @@ impl From<moq_audio::Error> for MoqError {
 	}
 }
 
-#[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
 		match err {

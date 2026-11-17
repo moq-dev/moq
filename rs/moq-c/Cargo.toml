@@ -24,14 +24,14 @@ openh264 = ["moq-video/openh264"]
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
-hang = { workspace = true }
+hang = { workspace = true, features = ["async"] }
 kio = { workspace = true, features = ["async"] }
 # Codecs only: OBS and the other C consumers do their own device I/O.
-moq-audio = { workspace = true, features = ["aac"] }
+moq-audio = { workspace = true }
 moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, features = ["quic", "websocket", "tcp", "uds"] }
+moq-tokio = { workspace = true }
 # Select the NVIDIA and VAAPI hardware codecs explicitly because workspace
 # defaults are off. The hardware backends dlopen their driver, so neither needs
 # anything on the build host. The software fallback is `openh264`.
@@ -51,6 +51,8 @@ cbindgen = "0.29"
 [dev-dependencies]
 kio = { path = "../kio", features = ["runtime"] }
 moq-loc = { path = "../moq-loc" }
+# A peer without MoQ Solicit.
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["test-support"] }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
 # turn it on without the `openh264` feature.
 moq-video = { path = "../moq-video", features = ["openh264"] }

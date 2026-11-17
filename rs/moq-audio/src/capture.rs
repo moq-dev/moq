@@ -92,8 +92,8 @@ pub struct Config {
 	/// but only one live microphone can attach to it; another open returns
 	/// [`Error::Busy`].
 	///
-	/// Requires the `aec` feature.
-	#[cfg(feature = "aec")]
+	/// Requires the `playback` feature.
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub aec: Option<crate::aec::Control>,
 }
 
@@ -414,7 +414,7 @@ impl Microphone {
 		// first callback arrives, so the buffers it needs are allocated off the
 		// audio thread. The attachment moves into the callback writer and releases
 		// automatically when this stream tears down.
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		let aec = config
 			.aec
 			.as_ref()
@@ -424,7 +424,7 @@ impl Microphone {
 		let (mut writer, rx) = buffer::channel(
 			channels as usize,
 			sample_rate,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			aec,
 		);
 		let error_tx = kio::Producer::new(None);
@@ -869,7 +869,7 @@ mod tests {
 		let (tx, rx) = buffer::channel(
 			1,
 			48_000,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			None,
 		);
 		let failures = kio::Producer::new(None);

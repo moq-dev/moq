@@ -68,7 +68,7 @@ fn endpoint_path(prefix: &Path, role: Role, id: &str) -> Result<Path, Error> {
 /// Whether `path` is an endpoint's broadcast, which only routes sessions and carries no
 /// media, so a worker that acts on every announced broadcast can skip it.
 pub fn is_endpoint(path: &Path) -> bool {
-	let parent = path.as_str().rsplit('/').nth(1);
+	let parent = path.parts().nth_back(1);
 	[Role::Server, Role::Client]
 		.into_iter()
 		.any(|role| parent == Some(role.segment()))
@@ -194,8 +194,7 @@ impl TrackStream {
 /// The client broadcast has none, so it answers a request for a session it does not hold
 /// with [`Error::NotFound`] at once.
 enum Handler {
-	/// Not made yet, until the first accept makes the server broadcast with it, or no
-	/// longer, once the endpoint ended.
+	/// Not made yet, until the first accept makes the server broadcast with it.
 	None,
 	/// Waiting for a poller.
 	Idle(super::broadcast::Requests),
@@ -204,8 +203,25 @@ enum Handler {
 	Taken(kio::WaiterList),
 }
 
-/// What the endpoint's pollers share.
-struct State {
+/// An endpoint's lifecycle.
+enum State {
+	Open(Box<Open>),
+	/// Ended, by [`Endpoint::close`] or one of its broadcasts ending, with why.
+	Closed(Error),
+}
+
+impl State {
+	/// The open endpoint, or why it ended.
+	fn open(&mut self) -> Result<&mut Open, Error> {
+		match self {
+			Self::Open(open) => Ok(open),
+			Self::Closed(err) => Err(err.clone()),
+		}
+	}
+}
+
+/// What an open endpoint's pollers share.
+struct Open {
 	/// The route of the broadcast this endpoint dials from, from its first dial on.
 	client: Option<origin::Route>,
 	/// The route of the broadcast peers dial, from its first accept on.
@@ -216,14 +232,23 @@ struct State {
 	dials: VecDeque<track::Request>,
 	/// The accepts waiting for a dial.
 	waiting: kio::WaiterList,
-	/// This side's half of every session handed out, aborted when the endpoint closes.
+	/// This side's half of every session handed out, aborted when the endpoint ends.
 	streams: Vec<track::TrackWeak>,
-	/// Why the endpoint stopped, once it did.
-	end: Option<Error>,
 }
 
-impl State {
-	/// Keep `producer`'s track, so the endpoint closing ends it.
+impl Open {
+	fn new() -> Self {
+		Self {
+			client: None,
+			server: None,
+			handler: Handler::None,
+			dials: VecDeque::new(),
+			waiting: kio::WaiterList::new(),
+			streams: Vec::new(),
+		}
+	}
+
+	/// Keep `producer`'s track, so the endpoint ending ends it.
 	fn hold(&mut self, producer: &track::Producer) {
 		self.streams.retain(|stream| !stream.is_closed());
 		self.streams.push(producer.weak());
@@ -242,24 +267,16 @@ impl Shared {
 	/// Made outside the lock, since announcing wakes local consumers, and announced only
 	/// once it is the endpoint's, so a racing dial's spare is never seen.
 	fn client(&self) -> Result<origin::Route, Error> {
-		{
-			let state = self.state.lock();
-			if let Some(err) = &state.end {
-				return Err(err.clone());
-			}
-			if let Some(route) = &state.client {
-				return Ok(route.clone());
-			}
+		if let Some(route) = &self.state.lock().open()?.client {
+			return Ok(route.clone());
 		}
 		let route = self.create(Role::Client)?;
 		let mut state = self.state.lock();
-		if let Some(err) = &state.end {
-			return Err(err.clone());
-		}
-		if let Some(route) = &state.client {
+		let open = state.open()?;
+		if let Some(route) = &open.client {
 			return Ok(route.clone());
 		}
-		state.client = Some(route.clone());
+		open.client = Some(route.clone());
 		drop(state);
 		route.announce()?;
 		Ok(route)
@@ -272,18 +289,13 @@ impl Shared {
 		let route = self.create(Role::Server)?;
 		// Before announcing, so the first dial finds it.
 		let requests = route.broadcast().requests();
-		let mut state = self.state.lock();
-		if let Some(err) = &state.end {
-			return Err(err.clone());
-		}
-		state.server = Some(route.clone());
-		drop(state);
+		self.state.lock().open()?.server = Some(route.clone());
 		route.announce()?;
 		Ok(requests)
 	}
 
 	/// Queue every dial on hand and take the next, registering `waiter` for more, and fail
-	/// with the endpoint's end once it stopped. The first call announces the
+	/// with the endpoint's end once it ended. The first call announces the
 	/// server broadcast, and fails as [`origin::Producer::route`] does when the origin may
 	/// not publish it.
 	///
@@ -298,13 +310,12 @@ impl Shared {
 	fn poll_dial(&self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
 		let taken = {
 			let mut state = self.state.lock();
-			if state.end.is_some() {
-				None
-			} else if let Handler::Taken(waiting) = &mut state.handler {
+			let open = state.open()?;
+			if let Handler::Taken(waiting) = &mut open.handler {
 				waiting.register(waiter);
 				None
 			} else {
-				match std::mem::replace(&mut state.handler, Handler::Taken(kio::WaiterList::new())) {
+				match std::mem::replace(&mut open.handler, Handler::Taken(kio::WaiterList::new())) {
 					Handler::Idle(requests) => Some(Some(requests)),
 					// No server broadcast yet: this poller makes it.
 					Handler::None => Some(None),
@@ -317,15 +328,15 @@ impl Shared {
 				Ok(requests) => Some(requests),
 				Err(err) => {
 					// Given back for the next accept to try, waking those that found it taken,
-					// unless the endpoint closed meanwhile and took it.
+					// unless the endpoint ended meanwhile and took it.
 					let mut state = self.state.lock();
-					let waiting = match &mut state.handler {
-						Handler::Taken(waiting) => Some(waiting.take()),
+					let waiting = match state.open().map(|open| &mut open.handler) {
+						Ok(handler @ Handler::Taken(_)) => match std::mem::replace(handler, Handler::None) {
+							Handler::Taken(waiting) => Some(waiting),
+							_ => unreachable!("matched above"),
+						},
 						_ => None,
 					};
-					if waiting.is_some() {
-						state.handler = Handler::None;
-					}
 					drop(state);
 					if let Some(mut waiting) = waiting {
 						waiting.wake();
@@ -350,34 +361,47 @@ impl Shared {
 			}
 		}
 
+		// The server broadcast ended: so does the endpoint, which wakes the pollers that
+		// found the handler taken. Dropped after, since `end` closes the server broadcast
+		// first: dropping the last handler rejects the dials still queued with `Dropped`,
+		// rather than the close's `Unroutable`.
+		if let Some(err) = ended {
+			let err = self.end(err);
+			drop(requests);
+			for request in taken {
+				request.reject(Error::Cancel);
+			}
+			return Poll::Ready(Err(err));
+		}
+
 		let mut resets = Vec::new();
 		let mut wakes = Vec::new();
-		let mut retired = None;
 		let mut state = self.state.lock();
-		if let Some(err) = ended {
-			state.end.get_or_insert(err);
-		}
-		// Put the handler back, unless the endpoint ended meanwhile: then it is dropped
-		// after the lock is released, with the server broadcast if `close` hasn't taken it.
-		if let Some(handler) = requests.take() {
-			let next = match state.end {
-				None => Handler::Idle(handler),
-				Some(_) => {
-					retired = Some((handler, state.server.take()));
-					Handler::None
+		let open = match state.open() {
+			Ok(open) => open,
+			// Ended meanwhile, which took the server broadcast and closed it or will: drop the
+			// handler, and reset the dials it took like the ones the end found queued.
+			Err(err) => {
+				drop(state);
+				drop(requests);
+				for request in taken {
+					request.reject(Error::Cancel);
 				}
-			};
-			if let Handler::Taken(mut waiting) = std::mem::replace(&mut state.handler, next) {
-				wakes.push(waiting.take());
+				return Poll::Ready(Err(err));
 			}
+		};
+		if let Some(handler) = requests.take()
+			&& let Handler::Taken(mut waiting) = std::mem::replace(&mut open.handler, Handler::Idle(handler))
+		{
+			wakes.push(waiting.take());
 		}
 		// Dials whose dialer gave up leave the queue before an accept takes one, so it holds
 		// no more than the dials still open, and an accept gets a live one.
-		if state.dials.iter().any(|request| !request.demand().is_wanted()) {
-			let (open, abandoned): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut state.dials)
+		if open.dials.iter().any(|request| !request.demand().is_wanted()) {
+			let (live, abandoned): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut open.dials)
 				.into_iter()
 				.partition(|request| request.demand().is_wanted());
-			state.dials = open;
+			open.dials = live;
 			resets.extend(abandoned.into_iter().map(|request| (request, Error::Cancel)));
 		}
 		for request in taken {
@@ -388,35 +412,22 @@ impl Shared {
 				_ => None,
 			};
 			match target {
-				// Taken while the endpoint closed: reset like the dials it queued.
-				_ if state.end.is_some() => resets.push((request, Error::Cancel)),
 				Some(true) => {
-					state.dials.push_back(request);
-					wakes.push(state.waiting.take());
+					open.dials.push_back(request);
+					wakes.push(open.waiting.take());
 				}
 				Some(false) => resets.push((request, Error::Unsupported)),
 				None => resets.push((request, Error::NotFound)),
 			}
 		}
-		let next = match &state.end {
-			Some(err) => Poll::Ready(Err(err.clone())),
-			None => match state.dials.pop_front() {
-				Some(request) => Poll::Ready(Ok(request)),
-				None => {
-					state.waiting.register(waiter);
-					Poll::Pending
-				}
-			},
+		let next = match open.dials.pop_front() {
+			Some(request) => Poll::Ready(Ok(request)),
+			None => {
+				open.waiting.register(waiter);
+				Poll::Pending
+			}
 		};
 		drop(state);
-		if let Some((handler, server)) = retired {
-			// Closed first, as `close` may not have yet: dropping the last handler rejects
-			// the dials still queued with `Dropped`, rather than the close's `Unroutable`.
-			if let Some(server) = &server {
-				server.broadcast().close();
-			}
-			drop(handler);
-		}
 		for mut wake in wakes {
 			wake.wake();
 		}
@@ -438,59 +449,65 @@ impl Shared {
 		}
 	}
 
-	/// Poll for the endpoint's end, registering `waiter` for it.
+	/// Poll for the endpoint's end, registering `waiter` for it. Either broadcast ending
+	/// ends the endpoint.
 	fn poll_end(&self, waiter: &kio::Waiter) -> Result<(), Error> {
 		let routes = {
-			let state = self.state.lock();
-			if let Some(err) = &state.end {
-				return Err(err.clone());
-			}
-			[state.client.clone(), state.server.clone()]
+			let mut state = self.state.lock();
+			let open = state.open()?;
+			[open.client.clone(), open.server.clone()]
 		};
 		for route in routes.iter().flatten() {
 			if route.broadcast().poll_closed(waiter).is_ready() {
-				return Err(Error::Closed);
+				return Err(self.end(Error::Closed));
 			}
 		}
 		Ok(())
 	}
 
-	fn close(&self) {
-		let mut guard = self.state.lock();
-		let state = &mut *guard;
-		state.end.get_or_insert(Error::Closed);
-		let mut wakes = Vec::new();
-		// A poller holding the handler drops it once it sees the end.
-		let requests = match std::mem::replace(&mut state.handler, Handler::None) {
-			Handler::Idle(requests) => Some(requests),
-			Handler::Taken(mut waiting) => {
-				wakes.push(waiting.take());
-				None
+	/// End the endpoint with `err`, unless it ended already, and return why it ended.
+	///
+	/// Retracts its broadcasts, resets the dials waiting to be accepted, and resets this
+	/// side's half of every session it handed out, all outside the lock.
+	fn end(&self, err: Error) -> Error {
+		let open = {
+			let mut state = self.state.lock();
+			match &*state {
+				State::Closed(err) => return err.clone(),
+				State::Open(_) => match std::mem::replace(&mut *state, State::Closed(err.clone())) {
+					State::Open(open) => *open,
+					State::Closed(_) => unreachable!("matched above"),
+				},
 			}
-			Handler::None => None,
 		};
-		let queued = std::mem::take(&mut state.dials);
-		wakes.push(state.waiting.take());
-		let streams = std::mem::take(&mut state.streams);
-		let routes = [state.client.take(), state.server.take()];
-		drop(guard);
+		let Open {
+			client,
+			server,
+			handler,
+			dials,
+			mut waiting,
+			streams,
+		} = open;
 
-		// Reset outside the lock, as the session closing, and before retracting the
-		// broadcasts: a peer reading through a retracted route sees `Unroutable` instead.
+		// Reset as the session closing, and before retracting the broadcasts: a peer reading
+		// through a retracted route sees `Unroutable` instead.
 		for stream in streams {
 			stream.abort(Error::Stream(StreamError::Session(SessionError::Cancel)));
 		}
+		let routes = [client, server];
 		for route in routes.iter().flatten() {
 			route.broadcast().close();
 		}
-		for request in queued {
+		for request in dials {
 			request.reject(Error::Cancel);
 		}
-		for mut wake in wakes {
-			wake.wake();
+		waiting.wake();
+		// A poller holding the handler drops it once it sees the end.
+		if let Handler::Taken(mut waiting) = handler {
+			waiting.wake();
 		}
-		drop(requests);
 		drop(routes);
+		err
 	}
 }
 
@@ -505,8 +522,9 @@ impl Shared {
 /// accepted. Until then it has no server broadcast, so a dial to it waits as for a peer
 /// not online yet.
 ///
-/// Dropping it, or [`Self::close`], retracts its broadcasts, resets the dials waiting to be
-/// accepted, and resets this side's half of every session it handed out. The peer's half
+/// Dropping it, [`Self::close`], or either of its broadcasts ending, retracts its broadcasts,
+/// resets the dials waiting to be accepted, and resets this side's half of every session it
+/// handed out. The peer's half
 /// of a [`TrackStream`] is read through
 /// its [`TrackStream::consumer`], which the application owns: drop the streams too, which
 /// releases the subscriptions.
@@ -545,15 +563,7 @@ impl Endpoint {
 				publisher: origin.clone(),
 				withheld: consumer.hidden_withheld(),
 				origin: consumer,
-				state: kio::Lock::new(State {
-					client: None,
-					server: None,
-					handler: Handler::None,
-					dials: VecDeque::new(),
-					waiting: kio::WaiterList::new(),
-					streams: Vec::new(),
-					end: None,
-				}),
+				state: kio::Lock::new(State::Open(Box::new(Open::new()))),
 			}),
 		})
 	}
@@ -630,13 +640,13 @@ impl Endpoint {
 
 	/// Close the endpoint; see [`Endpoint`].
 	pub fn close(&self) {
-		self.shared.close();
+		self.shared.end(Error::Closed);
 	}
 }
 
 impl Drop for Endpoint {
 	fn drop(&mut self) {
-		self.shared.close();
+		self.shared.end(Error::Closed);
 	}
 }
 
@@ -764,14 +774,11 @@ fn open(
 	peer: &Arc<str>,
 	session: &Arc<str>,
 ) -> Result<TrackStream, Error> {
-	let mut state = shared.state.lock();
-	if let Some(err) = state.end.clone() {
-		drop(state);
+	let held = shared.state.lock().open().map(|open| open.hold(&producer));
+	if let Err(err) = held {
 		let _ = producer.abort(err.clone());
 		return Err(err);
 	}
-	state.hold(&producer);
-	drop(state);
 	Ok(TrackStream {
 		producer,
 		consumer: step.take_subscriber(),
@@ -1027,7 +1034,7 @@ mod tests {
 				// The handler is out being polled, so this waits for it.
 				let accept = self.shared.poll_dial(&kio::Waiter::noop());
 				assert!(accept.is_pending());
-				self.shared.close();
+				self.shared.end(Error::Closed);
 				self.woken.store(true, Ordering::SeqCst);
 			}
 		}
@@ -1040,7 +1047,7 @@ mod tests {
 			// Listening, so the dial queues for the handler.
 			assert!(endpoint.poll_accept_track(&noop).is_pending());
 
-			let server = endpoint.shared.state.lock().server.clone().unwrap();
+			let server = endpoint.shared.state.lock().open().unwrap().server.clone().unwrap();
 			let broadcast = server.broadcast().consume();
 			let dial = broadcast
 				.track("track/alice/bob/0123456789abcdef0123456789abcdef")
@@ -1079,9 +1086,9 @@ mod tests {
 		let noop = kio::Waiter::noop();
 		assert!(endpoint.poll_accept_track(&noop).is_pending());
 
-		let server = endpoint.shared.state.lock().server.clone().unwrap();
+		let server = endpoint.shared.state.lock().open().unwrap().server.clone().unwrap();
 		let broadcast = server.broadcast().consume();
-		let queued = || endpoint.shared.state.lock().dials.len();
+		let queued = || endpoint.shared.state.lock().open().unwrap().dials.len();
 		let dial = |session: u32| {
 			let dial = broadcast
 				.track(&format!("track/alice/bob/{session:032x}"))
@@ -1108,6 +1115,30 @@ mod tests {
 			assert_eq!(accept(), format!("{session:032x}"));
 		}
 		assert_eq!(queued(), 1);
+	}
+
+	/// Either broadcast ending ends the endpoint as closing it does: the sessions it handed
+	/// out are reset, and it dials and accepts no more.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_broadcast_ending_ends_the_endpoint() {
+		let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
+		let _driver = kio::clock::sim::spawn(crate::time::run(driver));
+		let alice = Endpoint::new(&origin, "room", "alice").unwrap();
+		let bob = Endpoint::new(&origin, "room", "bob").unwrap();
+		let accept = async { bob.accept_track().await.unwrap().accept(None).await.unwrap() };
+		let (dialed, accepted) =
+			futures::join!(async { alice.dial_track("bob", None).unwrap().await.unwrap() }, accept);
+
+		let server = bob.shared.state.lock().open().unwrap().server.clone().unwrap();
+		server.broadcast().close();
+		assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
+		assert!(
+			accepted.producer.append_group(crate::Timestamp::unscaled(0)).is_err(),
+			"a handed-out half outlived the end"
+		);
+		assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));
+		drop(dialed);
 	}
 
 	#[test]

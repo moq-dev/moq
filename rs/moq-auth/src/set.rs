@@ -35,6 +35,11 @@ impl<'de> Deserialize<'de> for KeySet {
 		#[derive(Deserialize)]
 		struct RawKeySet {
 			keys: Vec<Key>,
+			// Without a catch-all, serde_json skips an unread member checking only its syntax,
+			// so `1e400`, a lone surrogate, or nesting past the recursion limit got through.
+			// Flattening buffers every member, refusing those as a key's own members are.
+			#[serde(flatten)]
+			_unread: std::collections::HashMap<String, serde::de::IgnoredAny>,
 		}
 
 		let raw = RawKeySet::deserialize(deserializer)?;
@@ -157,11 +162,9 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,

@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { bestCandidate, coveringPrefixes } from "./internal.ts";
+import { bestCandidate, coveringPrefixes, mostSpecific } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -69,6 +69,8 @@ export class BroadcastCache {
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
 	readonly #covering?: Covering;
+	// What to re-check once a batch is applied: the prefixes it changed, or `all` of them.
+	#deferred?: { prefixes: Set<Path.Valid>; all: boolean };
 
 	constructor(covering?: Covering) {
 		this.#covering = covering;
@@ -102,8 +104,32 @@ export class BroadcastCache {
 		this.#update(path);
 	}
 
+	/**
+	 * Apply the changes `apply` makes as one: each consume re-checks its selection once, after all
+	 * of them, so none switches to a route only the middle of the change preferred.
+	 */
+	batch(apply: () => void): void {
+		if (this.#deferred) {
+			apply();
+			return;
+		}
+		const deferred = { prefixes: new Set<Path.Valid>(), all: false };
+		this.#deferred = deferred;
+		try {
+			apply();
+		} finally {
+			this.#deferred = undefined;
+			if (deferred.all) this.revalidate();
+			else for (const prefix of deferred.prefixes) this.#update(prefix);
+		}
+	}
+
 	/** Re-check every consume's selection, once what covers a path changed without an announcement. */
 	revalidate(): void {
+		if (this.#deferred) {
+			this.#deferred.all = true;
+			return;
+		}
 		for (const path of this.#cache.keys()) this.#check(path);
 	}
 
@@ -117,21 +143,23 @@ export class BroadcastCache {
 
 	/** Resolve the same most-specific-prefix and route preference as the origin. */
 	instance(path: Path.Valid): Selection {
-		for (const prefix of coveringPrefixes(path)) {
-			const best = bestCandidate(path, prefix, this.#eligible(path, prefix), (entry) => entry.route);
-			if (best) {
-				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
-				// A minted instance names the announcement, not the publisher's stream, so a
-				// request for it can only name the path: it holds while this route is selected.
-				const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
-				return {
-					...best,
-					validity: !named
-						? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
-							new Validity())
-						: undefined,
-				};
-			}
+		const best = mostSpecific(
+			path,
+			(prefix) => bestCandidate(path, prefix, this.#eligible(path, prefix), (entry) => entry.route),
+			(entry) => entry.route,
+		);
+		if (best) {
+			const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
+			// A minted instance names the announcement, not the publisher's stream, so a
+			// request for it can only name the path: it holds while this route is selected.
+			const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
+			return {
+				...best,
+				validity: !named
+					? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
+						new Validity())
+					: undefined,
+			};
 		}
 		return this.#blind.get(path) ?? new Blind();
 	}
@@ -142,12 +170,15 @@ export class BroadcastCache {
 	 * resolves or refuses.
 	 */
 	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
-		for (const prefix of coveringPrefixes(path)) {
-			const entries = this.#eligible(path, prefix).filter((entry) => entry.route.instance === instance);
-			const best = bestCandidate(path, prefix, entries, (entry) => entry.route);
-			if (best) return best;
-		}
-		return { identity: {}, route: { instance } };
+		const best = mostSpecific(
+			path,
+			(prefix) => {
+				const entries = this.#eligible(path, prefix).filter((entry) => entry.route.instance === instance);
+				return bestCandidate(path, prefix, entries, (entry) => entry.route);
+			},
+			(entry) => entry.route,
+		);
+		return best ?? { identity: {}, route: { instance } };
 	}
 
 	/**
@@ -243,6 +274,10 @@ export class BroadcastCache {
 	}
 
 	#update(prefix: Path.Valid): void {
+		if (this.#deferred) {
+			this.#deferred.prefixes.add(prefix);
+			return;
+		}
 		for (const path of this.#paths.get(prefix) ?? []) this.#check(path);
 	}
 

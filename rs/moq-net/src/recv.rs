@@ -31,28 +31,36 @@ impl Group {
 		self.handle.compressed()
 	}
 
+	/// The relay state of the group, readable while a frame holds the writer.
+	#[cfg(feature = "async")]
+	pub fn wire(&self) -> Option<group::Wire> {
+		self.handle.wire()
+	}
+
+	/// Set the relay state, as [`group::Handle::set_wire`], while a frame may hold the writer.
+	#[cfg(feature = "async")]
+	pub fn set_wire(&self, wire: group::Wire) -> Result<(), Error> {
+		self.handle.set_wire(wire)
+	}
+
+	/// Mark a gap, as [`group::Handle::mark_gap`], while a frame may hold the writer.
+	#[cfg(feature = "async")]
+	pub fn mark_gap(&self, id: u64, gap: Option<u64>) -> Result<(), Error> {
+		self.handle.mark_gap(id, gap)
+	}
+
+	/// Set the END_OF_GROUP object, as [`group::Handle::set_end_object`], while a frame may hold the writer.
+	#[cfg(feature = "async")]
+	pub fn set_end_object(&self, fields: crate::model::object::Fields) -> Result<(), Error> {
+		self.handle.set_end_object(fields)
+	}
+
 	/// Move the writer and cancellation cleanup into its next frame.
 	pub fn create_object(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
 		self.writer
 			.take()
 			.expect("group writer is available between frames")
 			.create_object(frame)
-			.map(frame::Producer::cancel_on_drop)
-	}
-
-	/// The byte the copy starts frame `index` at, if it holds only the rest of that frame
-	/// (see [`group::Producer::create_lead`]).
-	pub fn lead_at(&self, index: u64) -> Option<u64> {
-		self.handle.lead_at(index)
-	}
-
-	/// Move the writer and cancellation cleanup into the rest of the frame the copy starts
-	/// partway into.
-	pub fn create_lead(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
-		self.writer
-			.take()
-			.expect("group writer is available between frames")
-			.create_lead(frame)
 			.map(frame::Producer::cancel_on_drop)
 	}
 
@@ -89,11 +97,37 @@ impl Group {
 		self.writer.take().expect("group owned until consumed")
 	}
 
-	/// Finish receiving without running cancellation cleanup.
+	/// Finish receiving a group ended without saying where it ends, as a bare FIN does,
+	/// without running cancellation cleanup.
 	pub fn finish(mut self) -> Result<(), Error> {
-		self.writer.take().expect("group owned until consumed").close()?;
+		self.writer.take().expect("group owned until consumed").finish()?;
 		self.armed = false;
 		Ok(())
+	}
+
+	/// Finish receiving a whole group that ends at `end`, as GROUP_END says, without running
+	/// cancellation cleanup. An `end` the group refuses (see [`group::Producer::finish_at`]) is
+	/// [`Error::MalformedTrack`], which aborts the group; one already aborted stays so.
+	pub fn finish_at(mut self, end: u64) -> Result<(), Error> {
+		if self.check_end(end).is_err() {
+			let _ = self.abort(Error::MalformedTrack);
+			return Err(Error::MalformedTrack);
+		}
+		let _ = self.writer.take().expect("group owned until consumed").finish_at(end);
+		self.armed = false;
+		Ok(())
+	}
+
+	/// Finish receiving as the stream ended: whole at a GROUP_END's `end`, else without one.
+	/// Only an `end` the group refuses fails (see [`Self::finish_at`]).
+	pub fn end(self, end: Option<u64>) -> Result<(), Error> {
+		match end {
+			Some(end) => self.finish_at(end),
+			None => {
+				let _ = self.finish();
+				Ok(())
+			}
+		}
 	}
 
 	/// Abort with the receive error instead of cancellation.

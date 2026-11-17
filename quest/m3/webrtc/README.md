@@ -1,23 +1,62 @@
-# We own our WebRTC stack
+# moq-webrtc is a gateway on upstream str0m
 
 ## Goal
 
-All of MoQ's WebRTC lives in one published crate, `moq-webrtc`, holding the WHIP/WHEP gateway, the ICE driver, and vendored copies of str0m, dimpl, and `is`. Fixes to the stack land in normal MoQ PRs instead of waiting on upstream, and code MoQ doesn't use is gone.
+`moq-webrtc` is one published crate holding the WHIP and WHEP gateway and
+its ICE driver, on crates.io str0m and its DTLS with rind as the crypto
+provider. The places str0m does not fit are handled at moq-webrtc's
+boundary or fixed upstream, and each is written down: the DTLS handshake
+racing ICE, the DTLS timeout's type, one `b=` line per media section, and
+retransmits that cannot be charged to a rate cap.
 
-Non-goals: TURN; DTLS 1.3; data channels; replacing a vendored layer before there's a reason to.
+Non-goals: TURN; DTLS 1.3 as a requirement; data channels; a fork or a
+vendored copy before a fix has been shown to need one.
 
 ## Plan
 
-Decided 2026-10-30 with the maintainer (planning interview), after the str0m workarounds piled up: one `b=` line per SDP media section ([moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373)), DTLS retransmits running out before ICE connects ([moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379)), no hook to charge or serve NACK resends ([rtc-pacing](/quest/m3/rtc-pacing.md)), and `std::time::Instant` in a `kio::clock` workspace. No upstream reports were approved; vendoring replaces them.
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅
+return to upstream str0m (rejected: keep the vendored stack and gate the cut
+on a browser test; keep as is). This reverses the 2026-10-30 decision below,
+and [the switch](https://github.com/moq-dev/moq/pull/8963) lands before the cut. What
+changed: none of the four fixes that motivated vendoring had landed by the
+audit, peer-to-peer and data channels left on 2026-11-14
+([moq-dev/moq#8771](https://github.com/moq-dev/moq/pull/8771)), upstream
+0.25 has the pluggable crypto provider, and a vendored copy of about 98,600
+lines gets no upstream fix unless someone ports it.
 
-- **Vendor, then replace.** Copy the upstream crates in, trim them, and fix them in-tree. Replacing a layer with our own (SDP, RTP/RTCP, SRTP) is a later child once a concrete need appears; none is planned yet.
-- **One crate.** The ICE driver (once `moq-ice`) lives in `moq-webrtc`, which depends on moq-tokio rather than the reverse, so moq-tokio needs no ICE. The vendored crates become private modules, not separate published crates, keeping their MIT/Apache-2.0 notices (str0m's `packet/` carries webrtc-rs's Apache notice).
-- **What goes** (from the 2026-10-30 inventory: we use frame mode, full ICE, and DTLS 1.2, and never enable str0m's BWE, pacer, or stats): GCC bandwidth estimation (8k lines; GCC is ported into `moq-congestion` as `moq_congestion::gcc`), the leaky pacer (replaced by moq-congestion's pacer, made public by [rtc-pacing](/quest/m3/rtc-pacing.md)), H.266, RED, DTMF, G.7xx and comfort noise, VLA and simulcast layers, RTCP app feedback, stats, internal test exports, and dimpl's DTLS 1.3 and version auto-selection. RTCP XR stays: its RRTR/DLRR blocks are the receive side's only RTT measurement, which sets NACK retries and the video recovery deadline. Roughly 17k of str0m's 72k lines and 11k of dimpl's 33k.
-- **DTLS 1.2 only.** Every browser negotiates 1.2 today, and the vendored rind crypto provider offers 1.2 only to match.
-- **No SCTP.** Decided 2026-11-14 (maintainer): peer-to-peer routing, the only data-channel consumer, left the repository, so sctp-proto and str0m's data channels are cut and an offered `m=application` line is answered rejected.
-- **Upstream fixes:** after vendoring, nobody merges upstream automatically. The vendored upstream commits are recorded in `rs/moq-webrtc/src/vendor/mod.rs`'s `Upstream` section; the [vendor sync](/quest/m3/vendor-sync/webrtc-stack.md) checks the upstream changes once per release cycle for security fixes (malformed SRTP/RTCP input, for example) and ports them.
-- Docs a change makes stale (crate names, `doc/lib/rs`, `doc/setup/upgrade.md`, other quests naming a crate or module) change in the PR that makes them stale.
+History: decided 2026-10-30 (maintainer, planning interview) to vendor
+str0m, dimpl, and `is` into private modules, after the workarounds piled
+up: one `b=` line per SDP media section
+([moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373)), DTLS
+retransmits running out before ICE connects
+([moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379)), no hook to
+charge or serve NACK resends ([rtc-pacing](/quest/m3/rtc-pacing.md)), and
+`std::time::Instant` in a `kio::clock` workspace. Vendoring landed on
+2026-11-07 ([moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163))
+with a trim of what MoQ did not use.
+
+What still holds from that plan:
+
+- **One crate.** The ICE driver lives in `moq-webrtc`, which depends on
+  moq-tokio rather than the reverse, so moq-tokio needs no ICE.
+- **No SCTP.** Decided 2026-11-14 (maintainer): an offered `m=application`
+  line is answered rejected. str0m 0.25 has no setting for it, so
+  moq-webrtc's `sdp.rs` takes the section out of the offer and puts it back
+  rejected in the answer; str0m still compiles sctp-proto in.
+- **DTLS 1.2** is what every browser negotiates today; moq-webrtc pins it
+  in `session::rtc_config`, str0m 0.25's default.
+
+What changes for the four fixes: each is first tried through str0m's public
+API. One that needs a change inside str0m becomes an upstream report, filed
+only once the maintainer approves it
+([upstream reports](/quest/m4/upstream-reports.md)), and its workaround
+stays until upstream ships. Vendoring again is the maintainer's call, made
+on evidence that a needed fix cannot land any other way.
+
+Docs a change makes stale (crate names, `doc/lib/rs`,
+`doc/setup/upgrade.md`, other quests naming a crate or module) change in the
+PR that makes them stale.
 
 ## Related
 
-- [moq-webrtc paces WHEP viewers](/quest/m3/rtc-pacing.md) - adds the NACK hook and the shared pacer on the vendored stack
+- [moq-webrtc paces WHEP viewers](/quest/m3/rtc-pacing.md) - needs retransmits charged to the cap, which upstream has no hook for

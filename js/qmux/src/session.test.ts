@@ -628,7 +628,7 @@ describe("Session integration (scripted peer)", () => {
 		// The peer may open any index under its credit, implicitly opening every
 		// lower one. Tracking each skipped index would let one tiny frame make us
 		// allocate (and loop) once per stream below it.
-		const { session, peer } = connect({ maxStreamsUni: 1n << 40n });
+		const { session, peer } = connect({ maxStreams: 1n << 40n });
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
 
@@ -922,8 +922,10 @@ describe("Session integration (scripted peer)", () => {
 			{ receiveWindow: null },
 			{ receiveWindow: "64" },
 			{ streamReceiveWindow: 64 },
-			{ maxStreamsBidi: null },
-			{ maxStreamsUni: 1 },
+			{ maxStreams: null },
+			{ maxStreams: 1 },
+			{ maxStreamsBidi: 1n },
+			{ maxStreamsUni: 1n },
 			{ maxRecordSize: null },
 			{ maxDatagramFrameSize: 64 },
 			{ maxData: 64n },
@@ -957,6 +959,20 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
+	test("one maxStreams is advertised for both directions", async () => {
+		const { session, peer } = connect({ maxStreams: 7n });
+		await started(peer);
+		await waitFor(() => peer.has("transport_parameters"));
+		const frame = peer
+			.received()
+			.find(
+				(frame): frame is Frame.TransportParameters => frame.type === "transport_parameters",
+			) as Frame.TransportParameters;
+		expect(frame.params.initialMaxStreamsBidi).toBe(7n);
+		expect(frame.params.initialMaxStreamsUni).toBe(7n);
+		session.close();
+	});
+
 	test("disabled config uses null and invalid durations fail before opening", () => {
 		// A plain number is the old millisecond config, refused rather than misread.
 		for (const value of [
@@ -979,7 +995,7 @@ describe("Session integration (scripted peer)", () => {
 	test("config values that don't fit a varint are refused up front", () => {
 		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
 		expect(() => new Session("https://example/test", { config: { receiveWindow: -1n } })).toThrow("VarInt");
-		expect(() => new Session("https://example/test", { config: { maxStreamsBidi: VarInt.MAX + 1n } })).toThrow(
+		expect(() => new Session("https://example/test", { config: { maxStreams: VarInt.MAX + 1n } })).toThrow(
 			"VarInt",
 		);
 	});
@@ -1853,7 +1869,7 @@ describe("Session integration (scripted peer)", () => {
 		// immediately observable. This is the reproduction from issue #299: the peer
 		// sends a full stream plus FIN while the application never reads the acceptor.
 		const { session, peer } = connect({
-			maxStreamsUni: 1n,
+			maxStreams: 1n,
 			receiveWindow: 100n,
 			streamReceiveWindow: 100n,
 		});
@@ -1891,7 +1907,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("accepted active streams do not recycle stream-count credit", async () => {
-		const { session, peer } = connect({ maxStreamsUni: 1n });
+		const { session, peer } = connect({ maxStreams: 1n });
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
 
@@ -1916,7 +1932,7 @@ describe("Session integration (scripted peer)", () => {
 		const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
 
 		async function accept() {
-			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			const { session, peer } = connect({ maxStreams: 1n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 			peer.send({ type: "stream", id, data: new Uint8Array([1]), fin: false });
@@ -2028,7 +2044,7 @@ describe("Session integration (scripted peer)", () => {
 	// slot returns as soon as both halves are done on the wire.
 	describe("a refused peer stream returns its stream-count credit", () => {
 		test("uni, once the peer finishes it", async () => {
-			const { session, peer } = connect({ maxStreamsUni: 1n });
+			const { session, peer } = connect({ maxStreams: 1n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 			await session.incomingUnidirectionalStreams.cancel();
@@ -2040,7 +2056,7 @@ describe("Session integration (scripted peer)", () => {
 		});
 
 		test("bidi, resetting our send half, once the peer finishes its own", async () => {
-			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			const { session, peer } = connect({ maxStreams: 1n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 			await session.incomingBidirectionalStreams.cancel();

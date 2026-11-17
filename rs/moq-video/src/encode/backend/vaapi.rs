@@ -11,7 +11,7 @@
 //! driver), makes `Encoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
 //! The render node is the one the decoder and the GPU resize share, unless that
-//! one cannot encode H.265, and `Config::vaapi` can name it; see
+//! one cannot encode H.265, and `Config::device` can name it; see
 //! `frame::vaapi::device`.
 //!
 //! A [`Surface::DmaBuf`] is encoded without touching the CPU. An NV12 buffer at
@@ -44,7 +44,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use bytes::Bytes;
-use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
+use moq_vaapi::encode::{Config as VaapiConfig, Encoder, HRD_FRAMES, RateControl};
 
 use super::super::encoder::{Applied, Codec, Config, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
@@ -93,7 +93,7 @@ impl Vaapi {
 			Codec::H265 => moq_vaapi::Codec::H265,
 		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device(codec, config.vaapi.as_deref()),
+			device: vaapi::device(codec, config.device.render()),
 			color: vaapi::color(color)?,
 			codec,
 			..VaapiConfig::new(
@@ -223,7 +223,14 @@ impl Backend for Vaapi {
 	fn applied(&self) -> Applied {
 		// moq-vaapi codes IDR and P pictures one frame at a time and exposes no
 		// effort control, so every preset gets the same controls.
-		Applied::new(Preset::LowLatency, "IDR/P only, one frame in flight, CBR")
+		let rate = match self.encoder.rate_control() {
+			RateControl::Variable => "VBR",
+			RateControl::Constant => "CBR",
+		};
+		Applied::new(
+			Preset::LowLatency,
+			format!("IDR/P only, one frame in flight, {rate} with a QP floor, {HRD_FRAMES}-frame HRD"),
+		)
 	}
 }
 
@@ -561,6 +568,51 @@ mod tests {
 			assert!(!backend.encode_all(frame, index == 0).expect("encode").is_empty());
 		}
 		assert_eq!(backend.encoder.config().bitrate, 250_000);
+	}
+
+	/// A calm scene spends well under a generous bitrate, held there by the
+	/// quantizer floor; a busy one is held to its bitrate, and to a lower one once
+	/// `set_bitrate` moves it. One opening keyframe, so the seconds measured are
+	/// rate control's alone. The busy rates leave room above what noise costs at
+	/// the coarsest quantizer, which on VCN 4 is about 350 kbit/s in H.265 at this
+	/// size. iHD's H.264 rate control lets single seconds of noise run a fifth over
+	/// the bitrate (a seventh in CBR), so the peak bound is loose; radeonsi held
+	/// these within 2%. Measured on Arrow Lake (iHD 26.1.2), an RX 9070 (Mesa
+	/// 26.0.8, whose VCN 5 encodes no H.265 this narrow), and a Raphael iGPU
+	/// (Mesa 26.3), whose H.264 spent 1.9 Mbit/s on the calm scene.
+	#[test]
+	fn quality_under_the_bitrate() {
+		use super::super::test_util::spend;
+
+		for codec in [Codec::H264, Codec::H265] {
+			let at = |bps: u64| Config {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(bps)),
+				codec,
+				join: std::time::Duration::from_secs(10),
+				..config()
+			};
+			let Some(calm) = spend(&at(8_000_000), false, None) else {
+				eprintln!("skipping: no VA-API {codec:?} encoder");
+				continue;
+			};
+			assert!(
+				calm.mean < 8_000_000 / 3,
+				"{codec:?}: a calm scene filled the bitrate: {calm:?}"
+			);
+
+			let busy = spend(&at(2_000_000), true, None).unwrap();
+			assert!(busy.mean > 1_600_000, "{codec:?}: a busy scene fell short: {busy:?}");
+			assert!(
+				busy.peak <= 2_600_000,
+				"{codec:?}: a busy scene broke the bitrate: {busy:?}"
+			);
+
+			let moved = spend(&at(2_000_000), true, Some(1_000_000)).unwrap();
+			assert!(
+				(800_000..=1_300_000).contains(&moved.peak),
+				"{codec:?}: the bitrate did not follow set_bitrate: {moved:?}"
+			);
+		}
 	}
 
 	/// A buffer the driver cannot import is encoded through the CPU, and its

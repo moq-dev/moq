@@ -204,8 +204,17 @@ module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
     tools='bun uv kramdown-rfc xml2rfc' lane=bun
 module markdown '' \
     tools='bun uv' lane=bun fix
+# Workflow lints and repository-wide policy, such as every opt-in test having a
+# caller, so they gate every diff.
 module gh '' \
-    tools='actionlint zizmor bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo' lane=bun
+# `just gh test`, the repository tooling tests, follow what they run and read,
+# including the selectors under sh/, the release-plz configuration, the nfpm
+# configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
+# that pins their tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
+# runs in `gh check` instead. Nightly's full gate runs them whatever changed.
+module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/(bench/|package\.json$)|package\.json$|bun\.lock$|flake\.(nix|lock)$)|(^|/)justfile$' \
+    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -404,7 +413,7 @@ files() {
 }
 
 # One phase of one module, run through `run`. The bindings run their tests in
-# their check; rs, js, py, and gh test right after it, in the same lane.
+# their check; rs, js, and py test right after it, in the same lane.
 step() {
     local listed=$logs/$2.files
     case "$1:$2" in
@@ -417,9 +426,10 @@ step() {
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py
-            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench
             ;;
         check:quest) run bash sh/quest.sh check ;;
+        check:tooling) run just gh test ;;
         check:audio_quality) run just test audio-quality --replays --enforce ;;
         check:drill) run just test drill-sensitivity --apply-only ;;
         check:obs_compile) run just obs compile ;;
@@ -481,7 +491,6 @@ step() {
         test:rs) run just rs test-changed "$rs_list" ;;
         test:js) run just js test-changed "$js_list" ;;
         test:py) run just py test ;;
-        test:gh) run just gh test ;;
         fix:rs) run just rs fix-changed "$rs_list" ;;
         fix:carla_bridge) run just carla bridge-fix ;;
         fix:cargo_nix) run just rs cargo-nix ;;
@@ -562,11 +571,9 @@ run_lane() {
     trap 'stop; cancelled; exit 143' TERM
     for module in "$@"; do
         phases=("$verb")
-        # gh's tooling tests run on every diff: path selection would let a
-        # broken selector skip the very tests that catch it.
         if [[ "$verb" == check ]]; then
             case "$module" in
-                rs | js | py | gh) phases+=(test) ;;
+                rs | js | py) phases+=(test) ;;
             esac
         fi
         for phase in "${phases[@]}"; do

@@ -88,8 +88,7 @@ internal constructor(
      *
      * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
      * them, and a live session with in-band AUTH presents them at once, withdrawing each replaced
-     * token once its replacements are answered, even when one is refused. After an authorization
-     * refusal the session redials only if they changed. An empty token throws
+     * token once its replacements are answered, even when one is refused. An empty token throws
      * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
      */
     fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }

@@ -75,7 +75,6 @@ interop *args:
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
-        sign_interop \
         tracks_interop \
         varint_interop \
         --run-ignored all
@@ -315,6 +314,10 @@ resume-model:
 # Model-check every TLA+ config under the given paths (default: all): open findings must still break.
 tla *paths:
     bash ../sh/tla.sh {{ paths }}
+
+# Type-check the route rule's convergence proof (rs/moq-net/verify/route-algebra) with its own pinned Agda.
+route-proof:
+    nix build ..#route-proof --no-link --print-build-logs
 
 # Prove the route key model, and that each variant breaks the lemmas it names.
 route-key-model:

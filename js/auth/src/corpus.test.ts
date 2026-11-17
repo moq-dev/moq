@@ -2,7 +2,7 @@
 // parsers cannot disagree on a token, key, key set, or grant without both failing.
 import { describe, expect, test } from "bun:test";
 import * as jose from "jose";
-import { type Claims, patterns } from "./claims.ts";
+import { type Access, type Claims, patterns } from "./claims.ts";
 import { GrantSchema } from "./contract.ts";
 import { Key } from "./key.ts";
 import { KeySet } from "./set.ts";
@@ -17,15 +17,17 @@ const corpus = (await Bun.file(new URL("../../../rs/moq-auth/tests/corpus.json",
 	grants: Case[];
 };
 
-// The claims as the corpus writes them: patterns reduced, absent roles empty, and rates
-// and times only when present.
+// The claims as the corpus writes them: patterns reduced, absent roles empty, a capped role
+// as its wire object, and times only when present.
 function canonical(claims: Claims): unknown {
+	const role = (access: Access | undefined) =>
+		access === undefined || Array.isArray(access)
+			? patterns(access).toJSON()
+			: { path: patterns(access.path).toJSON(), rate: access.rate };
 	return {
 		root: claims.root,
-		publish: patterns(claims.publish).toJSON(),
-		subscribe: patterns(claims.subscribe).toJSON(),
-		...(claims.publish_rate !== undefined && { publish_rate: claims.publish_rate }),
-		...(claims.subscribe_rate !== undefined && { subscribe_rate: claims.subscribe_rate }),
+		publish: role(claims.publish),
+		subscribe: role(claims.subscribe),
 		...(claims.exp !== undefined && { exp: claims.exp }),
 		...(claims.iat !== undefined && { iat: claims.iat }),
 		...(claims.nbf !== undefined && { nbf: claims.nbf }),
@@ -54,9 +56,13 @@ describe("tokens", () => {
 	}
 });
 
+// A key or set given as a string is its raw text, for what a JSON value cannot spell,
+// such as a repeated member.
+const text = (document: unknown) => (typeof document === "string" ? document : JSON.stringify(document));
+
 const sections: [string, Case[], (input: unknown) => unknown][] = [
-	["jwk", corpus.jwk, (jwk) => Key.parse(JSON.stringify(jwk))],
-	["sets", corpus.sets, (jwks) => KeySet.parse(JSON.stringify(jwks))],
+	["jwk", corpus.jwk, (jwk) => Key.parse(text(jwk))],
+	["sets", corpus.sets, (jwks) => KeySet.parse(text(jwks))],
 	["grants", corpus.grants, (grant) => GrantSchema.parse(grant)],
 ];
 for (const [section, cases, parse] of sections) {

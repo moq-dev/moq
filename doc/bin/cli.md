@@ -26,13 +26,13 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 | `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Follow a remote live HLS playlist. |
-| `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `rtmp`, `srt`, `webrtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `mp4 --output <file>` | Record a regular MP4 that stays playable if the recording is cut short. |
 | `export` | `hls --hls-listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
-| `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
+| `export` | `rtmp`, `srt`, `webrtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
@@ -69,7 +69,7 @@ none and are closed the same way. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward. Admission is part of
-the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+the handshake, so `--listen-timeout` (default `30s`) bounds it too; `0s` leaves admission without
 a deadline.
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
@@ -227,7 +227,7 @@ Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
+cargo install moq-cli --no-default-features --features play,openh264
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -438,7 +438,8 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
+so it needs no `--connect`. `--connect-token` goes only to `--connect`, never to
+a cluster peer: give those `--cluster-token`. WAN cluster dials (`--cluster-connect`,
 `--cluster-api-url`) bind `--connect-bind`'s address. On port 0, each cluster
 session takes its own ephemeral port, so a redial leaves from a fresh one. A
 fixed port pins every WAN cluster dial to it, while LAN dials still take
@@ -486,7 +487,7 @@ broadcast at once. A reconnect publishes a new
 [instance](/concept/moq-lite#publisher-instances) at the same path, which takes over
 the path while the old broadcast finishes its linger. `import rtsp` redials
 after every session, so it closes each run at once and refuses `--linger`, as
-do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
+do `import archive`, `import capture`, and a WHEP pull (`import webrtc --connect`).
 
 `export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast

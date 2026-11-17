@@ -46,7 +46,7 @@ which covers only NVIDIA.
 - Added 2026-11-06 (maintainer, /quest-unblock) from
   [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013)'s follow-ups:
   - The VA-API tests open the first suitable render node, so a second GPU
-    is covered only when `Config::vaapi` names it, which moq-video no longer
+    is covered only when `Config::device` names it, which moq-video no longer
     reads from the environment. `just rs gpu` runs the VA-API tests once for
     each AMD or Intel render node, passing it to the tests through a test-only
     knob ([env-knobs](/quest/m4/env-knobs.md) owns its name); a node of either vendor without its VA-API

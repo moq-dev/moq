@@ -203,9 +203,6 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
-        # The relay's io_uring listener, Linux-only. A moq-uring change selects
-        # the relay too, as its dependent.
-        if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
         # Cargo skips a target whose `required-features` are off without a word,
         # and a crate alone in the selection (a bench-only change, or moq-boy,
         # whose one target is its binary) has no dependent to turn them on. Turn

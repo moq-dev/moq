@@ -74,12 +74,12 @@ pub struct Config {
 }
 
 /// The flag that runs a stand-in, which its relay must not see again.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 const SUPERVISE_FLAG: &str = "--handoff-supervise";
 
 /// The arguments a stand-in starts its relay with: its own, but for the flag that
 /// made it a stand-in.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 fn relay_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
 	let mut positional = false;
 	args.into_iter()
@@ -177,7 +177,10 @@ struct Group {
 }
 
 /// What a serving [`Handoff`] tells the rest of the relay.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+	not(target_os = "linux"),
+	expect(dead_code, reason = "off Linux no Handoff exists to read them")
+)]
 pub(crate) struct Events {
 	/// Set once a successor took over: stop accepting and drain.
 	pub handed: tokio::sync::watch::Sender<bool>,
@@ -324,7 +327,6 @@ mod imp {
 
 		/// The QUIC port's reuseport group on `addr`: the predecessor's, or a fresh one
 		/// of `count` members with room for a successor.
-		#[cfg(any(feature = "_quic", feature = "_uring"))]
 		pub(crate) fn group(&mut self, addr: SocketAddr, count: u16) -> anyhow::Result<Option<shard::Bound>> {
 			if !self.enabled() {
 				return Ok(None);
@@ -394,7 +396,6 @@ mod imp {
 
 		/// The tokio QUIC workers: on the predecessor's group, or a fresh one with room
 		/// for a successor when handoff is on.
-		#[cfg(feature = "_quic")]
 		pub(crate) fn workers(
 			&mut self,
 			server: moq_tokio::server::Config,
@@ -924,7 +925,6 @@ mod imp {
 			false
 		}
 
-		#[cfg(feature = "_quic")]
 		pub(crate) fn workers(
 			&mut self,
 			server: moq_tokio::server::Config,
@@ -941,7 +941,7 @@ mod imp {
 			Ok(None)
 		}
 
-		#[cfg(all(feature = "uds", unix))]
+		#[cfg(unix)]
 		pub(crate) fn unix(
 			&mut self,
 			_role: Role,

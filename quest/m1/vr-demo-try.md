@@ -2,8 +2,8 @@
 
 ## Goal
 
-The maintainer has played `demo/vr` in a WebXR headset, and once it plays
-well there, it is hosted beside the web demo at moq.dev with a looping VR180
+Someone has played `demo/vr` in a WebXR headset, and once it plays well
+there, it is hosted beside the web demo at moq.dev with a looping VR180
 broadcast to watch.
 
 ## Plan
@@ -22,6 +22,10 @@ headset's localhost, and make the relay reachable too: `localhost:4443` on the
 headset is the headset itself, so forward that port as well or point the page
 at the relay with `?url=`.
 
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ ask the contributor who
+started the demo in [moq-dev/moq#6373](https://github.com/moq-dev/moq/pull/6373)
+to try it in a headset, rather than the maintainer.
+
 ## Waiting
 
-- Maintainer: try it in a headset (an agent has none) and say whether it plays well enough to host. Check by this quest's Plan recording the result.
+- nuts-rice: try `demo/vr` in a WebXR headset (an agent has none) and say whether the per-eye render, recentring, and ambisonic audio play well enough to host, as asked in [moq-dev/moq#8781](https://github.com/moq-dev/moq/pull/8781#issuecomment-6901206041) on 2026-11-15. Check by reading that thread for a reply; this quest's Plan records the headset result.

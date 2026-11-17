@@ -207,6 +207,9 @@ export class Decoder {
 
 	// The subscription's max delay: the shared budget, raised to the delay plus the estimator's ceiling.
 	#subscribeMaxDelay = new Signal<Duration>(Duration.ZERO);
+	// The subscription's min delay: the playout delay plus the warmup, where the publisher starts a
+	// live join.
+	#subscribeMinDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
 	#delay = new Signal<Moq.Track.Delay>({});
@@ -370,6 +373,7 @@ export class Decoder {
 		const max = maxDelay(budget);
 		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0).min(DELAY_MAX);
 		this.#delay.set({ min: delay, max });
+		this.#subscribeMinDelay.set(delay.add(warmup));
 		this.#subscribeMaxDelay.set(max.add(warmup));
 	}
 
@@ -642,7 +646,7 @@ export class Decoder {
 				broadcast: active,
 				track: Catalog.track(track, identity),
 				priority: Catalog.PRIORITY.audio,
-				delay: new Derived([this.sync.out.delay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
+				delay: new Derived([this.#subscribeMinDelay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub) {
 				this.#retire();
@@ -682,8 +686,7 @@ export class Decoder {
 			let written: number | undefined;
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					this.#count(key, { decoded: 1 });
-					const landed = this.#emit(data);
+					const landed = this.#emit(data, key);
 					if (landed !== undefined) written = Math.max(written ?? landed, landed);
 				},
 				error: (error) => failure.set(error),
@@ -721,9 +724,7 @@ export class Decoder {
 						await this.#onFinish(effect, decoder, () => written);
 						break;
 					}
-					if (this.#onRead(next)) {
-						this.#reprime(decoder, decoderConfig, order);
-					}
+					if (!(await this.#apply(effect, decoder, decoderConfig, order, next))) return;
 					continue;
 				}
 				const { frame } = next;
@@ -779,8 +780,7 @@ export class Decoder {
 			let written: number | undefined;
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					this.#count(key, { decoded: 1 });
-					const landed = this.#emit(data);
+					const landed = this.#emit(data, key);
 					if (landed !== undefined) written = Math.max(written ?? landed, landed);
 				},
 				error: (error) => failure.set(error),
@@ -815,9 +815,7 @@ export class Decoder {
 						await this.#onFinish(effect, decoder, () => written);
 						break;
 					}
-					if (this.#onRead(next)) {
-						this.#reprime(decoder, decoderConfig, order);
-					}
+					if (!(await this.#apply(effect, decoder, decoderConfig, order, next))) return;
 					continue;
 				}
 				const { frame } = next;
@@ -850,12 +848,31 @@ export class Decoder {
 		reads: FrameRead[],
 	): Promise<boolean> {
 		for (const read of reads) {
-			if (this.#onRead(read)) {
-				this.#reprime(decoder, config, order);
-			}
+			if (!(await this.#apply(effect, decoder, config, order, read))) return false;
 			if (!order.admit(read)) continue;
-			if (!(await this.#decode(effect, decoder, read.frame))) return false;
+			// A frame stating no duration, such as AAC's, runs the codec's frame length, as queuedRanges
+			// counts it.
+			const duration = packetDuration(config.codec, read.frame) ?? frameDuration(config);
+			if (!(await this.#decode(effect, decoder, read.frame, duration))) return false;
 		}
+		return true;
+	}
+
+	// Apply an ordered read, restarting the codec when it ends an epoch, and report whether to keep
+	// going. The decoder first hands over what it holds, mapped on the epoch it was decoded in: a reset
+	// would drop it, and a starved decoder skipping groups can hold everything since the last skip.
+	async #apply(
+		effect: Effect,
+		decoder: AudioDecoder,
+		config: AudioDecoderConfig,
+		order: Order<FrameRead>,
+		read: Container.Read,
+	): Promise<boolean> {
+		if (this.#terminal.ends(read) && decoder.state === "configured") {
+			await decoder.flush();
+			if (effect.abort.aborted) return false;
+		}
+		if (this.#onRead(read)) this.#reprime(decoder, config, order);
 		return true;
 	}
 
@@ -867,8 +884,14 @@ export class Decoder {
 		order.reset();
 	}
 
-	// Decode one frame once backpressure admits it, reporting whether to keep going.
-	async #decode(effect: Effect, decoder: AudioDecoder, frame: Container.ReceivedFrame): Promise<boolean> {
+	// Decode one frame once backpressure admits it, behind any pre-roll a gap left, reporting whether
+	// to keep going.
+	async #decode(
+		effect: Effect,
+		decoder: AudioDecoder,
+		frame: Container.ReceivedFrame,
+		duration: Duration | undefined,
+	): Promise<boolean> {
 		const ring = await this.#ready(effect);
 		if (!ring) return false;
 
@@ -881,6 +904,9 @@ export class Decoder {
 		// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
 		// of the loop. Stop instead: the error callback already reported the real failure.
 		if (decoder.state === "closed") return false;
+		for (const preroll of this.#terminal.preroll()) {
+			decoder.decode(new EncodedAudioChunk({ type: "key", data: preroll.payload, timestamp: preroll.timestamp }));
+		}
 		decoder.decode(
 			new EncodedAudioChunk({
 				// WebCodecs audio chunks are key even inside a MoQ group.
@@ -889,6 +915,7 @@ export class Decoder {
 				timestamp: frame.timestamp.asMicros(),
 			}),
 		);
+		this.#terminal.decoded(frame, duration);
 		return true;
 	}
 
@@ -921,6 +948,7 @@ export class Decoder {
 			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
+			playhead: this.sync,
 		});
 		effect.cleanup(() => consumer.close());
 		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });
@@ -1023,17 +1051,21 @@ export class Decoder {
 		this.#handover.declared(end);
 	}
 
-	// Place decoded audio, returning where the PCM written ends, in microseconds.
-	#emit(sample: AudioData): number | undefined {
+	// Count and place decoded audio, returning where the PCM written ends, in microseconds.
+	#emit(sample: AudioData, key: Key | undefined): number | undefined {
 		// Whatever becomes of it, the output answers the frames it was decoded from, so the gate counts
 		// only what still decodes. Reported after any insert, so the gate always counts the frame as
 		// either decoding or in the ring.
+		// Pre-roll output answers no frame: it only primes the decoder, and the warmup trims it. It is
+		// not counted as decoded either, since the frames it came from already were.
+		const preroll = this.#terminal.primes(sample);
+		if (!preroll) this.#count(key, { decoded: 1 });
 		const decoded = sample.timestamp + (sample.numberOfFrames / sample.sampleRate) * 1_000_000;
 		let landed: number | undefined;
 		try {
 			landed = this.#place(sample);
 		} finally {
-			this.#ring.peek()?.decoded(decoded, landed);
+			if (!preroll) this.#ring.peek()?.decoded(decoded, landed);
 		}
 		return landed;
 	}

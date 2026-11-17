@@ -11,6 +11,7 @@ fn claim(instance: &Instance, cost: u64) -> Claim {
 		cost,
 		upstream: false,
 		learned: false,
+		above: 0,
 		chain: crate::Hops::new(),
 	}
 }
@@ -24,7 +25,7 @@ fn peer(tag: u64, node: Id) -> Peer {
 }
 
 fn outputs(stream: &Stream) -> Vec<Output> {
-	std::iter::from_fn(|| stream.try_output()).collect()
+	std::iter::from_fn(|| stream.try_wire()).collect()
 }
 
 /// Deliver everything `from` would send on the wire to the stream receiving it,
@@ -66,7 +67,6 @@ fn served_at(claim: Claim, metric: Metric, primary: bool) -> Served {
 	Served {
 		claim,
 		metric,
-		rtt: None,
 		available: true,
 		draining: false,
 		priority: 0,
@@ -139,6 +139,72 @@ fn the_narrowest_live_route_is_primary() {
 	assert_eq!(origin.forward(1, 1, &p("live/x"), &Path::empty()), Some(Via::Here));
 }
 
+/// A scoped neighbour is asked for one prefix per region, so it answers at each region
+/// and no route wider than a region is filed onto another's key. A region inside both a
+/// broad and a narrow route of one node stays online through whichever still lives, and
+/// goes offline only once both ended.
+#[test]
+fn a_region_inside_two_routes_stays_online_through_either() {
+	let instance = Instance::random();
+	let (origin, relay, leaf) = (
+		Node::new(1, 1, clock()),
+		Node::new(2, 2, clock()),
+		Node::new(3, 3, clock()),
+	);
+	let wide = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
+	let narrow = origin.answer(peer(2, 2), Link::default(), p("live")).unwrap();
+	let via_wide = relay.receive(peer(1, 1), Link::default()).unwrap();
+	let via_narrow = relay.receive(peer(2, 1), Link::default()).unwrap();
+	origin.own(p("live/a/x"), Some(claim(&instance, 0)));
+	// The relay serves what it hears, and so forwards it.
+	let hear = || {
+		pump(&wide, &via_wide);
+		pump(&narrow, &via_narrow);
+		serve_all(&via_wide);
+		serve_all(&via_narrow);
+	};
+	hear();
+
+	// The leaf confines the relay to two regions, and asks it for each.
+	let regions = vec![p("live/a"), p("live/b")];
+	let scope = crate::route::Scope {
+		regions: regions.clone(),
+		qualify: crate::route::qualifier([7; 32]),
+	};
+	let link = Link {
+		scope: Some(scope),
+		..Default::default()
+	};
+	let up = leaf.connect(peer(3, 2), link).unwrap();
+	let asked = std::iter::from_fn(|| up.try_output())
+		.find_map(|output| match output {
+			Output::Ask(edit) => Some(edit),
+			_ => None,
+		})
+		.expect("the leaf asks the relay");
+	assert_eq!(asked.add, regions);
+	let answering = Link {
+		interest: Default::default(),
+		..Default::default()
+	};
+	let down = relay.connect(peer(3, 3), answering).unwrap();
+	down.edit(asked).unwrap();
+	up.edited(Default::default());
+	pump(&down, &up);
+	let online = || (leaf.shown().iter()).any(|((_, path), (_, available))| *path == p("live/a/x") && *available);
+	assert!(online(), "{:?}", leaf.shown());
+
+	// The origin ends the narrow route: the broad one still covers the region.
+	via_narrow.route(1, p("live"), None);
+	serve_all(&via_wide);
+	pump(&down, &up);
+	assert!(online(), "the broad route still reaches the region: {:?}", leaf.shown());
+
+	via_wide.route(1, Path::empty(), None);
+	pump(&down, &up);
+	assert!(!online(), "{:?}", leaf.shown());
+}
+
 /// A request a peer sends follows the route this node offered it under the prefix it names.
 #[test]
 fn a_forwarded_request_follows_the_route_it_names() {
@@ -169,8 +235,9 @@ fn a_forwarded_request_follows_the_route_it_names() {
 	);
 }
 
-/// A stream that ends while its session stays up ends its routes quietly; one that ends
-/// with its session reports the hop dead to every neighbour sent a route through it.
+/// A session's key lives as long as the session, so dropping it is the session
+/// closing: the hop is reported dead to every neighbour sent a route through it. A
+/// mount's key dropped while its session stays up ends its routes quietly.
 #[test]
 fn only_a_closed_session_reports_its_hop_dead() {
 	for closed in [false, true] {
@@ -201,9 +268,12 @@ fn only_a_closed_session_reports_its_hop_dead() {
 		pump(&down, &up);
 		outputs(&up);
 
-		let guard = closed.then(|| relay.closing(1));
-		drop(receive);
-		drop(guard);
+		// A mount of the session answers the leaf nothing new, and goes quietly.
+		let mount = down.mount(p("elsewhere")).unwrap();
+		match closed {
+			true => drop(receive),
+			false => drop(mount),
+		}
 		let sent = wire(outputs(&down));
 		let dead = sent
 			.iter()
@@ -266,7 +336,6 @@ fn nothing_moves_across_a_dead() {
 		priority: 0,
 		metric,
 		down_only: false,
-		rtt: None,
 	};
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
@@ -296,7 +365,6 @@ fn a_reader_behind_repeated_failures_overruns() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let dead = |session, gone| Dead::Closed {
 		hop: Hop { node: 2, session },
@@ -361,6 +429,31 @@ fn a_reader_behind_repeated_failures_overruns() {
 	assert!(outbox.sealing.is_empty());
 }
 
+/// An edit adding many prefixes queues a SYNCED for each, which a momentarily slow
+/// reader holds unread: none of it, nor this side's own edit, counts toward an overrun.
+#[test]
+fn an_edit_of_many_prefixes_never_overruns() {
+	use super::super::path::Hop;
+	let mut outbox = Outbox::default();
+	let mut waiting = Waiting::default();
+	let offer = Offer {
+		path: [Hop { node: 1, session: 0 }].into(),
+		draining: false,
+		priority: 0,
+		metric: 1,
+		down_only: false,
+	};
+	outbox.route(7, (1, Path::empty()), Some(Reach::Finite(offer)), &mut waiting);
+	let prefixes = 100 * MAX_HOPS;
+	for i in 0..prefixes {
+		outbox.seal(Barrier::Synced(Path::new(&format!("p/{i}")).unwrap()));
+	}
+	outbox.seal(Barrier::Ask(Default::default()));
+	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
+	assert_eq!(outbox.sealed, 0);
+	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), prefixes + 2);
+}
+
 /// A claim started and withdrawn before the reader read it leaves nothing queued, so a
 /// route whose claims churn at fresh paths keeps only its live ones however slowly the
 /// peer reads. A withdrawal of a claim the reader holds still goes, and so does one of a
@@ -373,7 +466,6 @@ fn a_claim_started_and_withdrawn_unread_leaves_nothing() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -427,7 +519,6 @@ fn a_read_route_ends_alone() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let mut outbox = Outbox::default();
 	let mut waiting = Waiting::default();
@@ -498,9 +589,7 @@ fn the_doubt_timer_fires_on_the_origins_clock() {
 	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
 	origin.own(p("live/x"), Some(claim(&instance, 0)));
 	pump(&answer, &receive);
-	let guard = relay.closing(1);
 	drop(receive);
-	drop(guard);
 	let waiter = kio::Waiter::noop();
 	let Poll::Ready(Some(at)) = relay.poll_deadline(None, &waiter) else {
 		panic!("a doubt is timed");
@@ -537,7 +626,6 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 			priority: i8::MAX,
 			metric: 1,
 			down_only: false,
-			rtt: None,
 		};
 		from_a.route(100, Path::empty(), Some(Reach::Finite(offer)));
 		// A route goes on the wire only with a claim it shows, once that is served.
@@ -560,8 +648,10 @@ fn a_route_at_the_hop_limit_is_not_forwarded() {
 		);
 		for offer in sent {
 			let start = crate::lite::AnnounceBroadcast::RouteStart {
+				prefix: 0,
 				node: 100,
 				suffix: Path::empty(),
+				exact: false,
 				offer,
 			};
 			crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();
@@ -637,7 +727,6 @@ fn a_goaway_moves_the_forwarded_route_to_another_stream() {
 			priority: i8::MAX,
 			metric,
 			down_only: false,
-			rtt: None,
 		};
 		let live = claim(&instance, 0);
 		stream.route(5, Path::empty(), Some(Reach::Finite(offer)));
@@ -662,34 +751,58 @@ fn a_goaway_moves_the_forwarded_route_to_another_stream() {
 	assert_eq!(paths(&edge), [vec![5, 20, 2]]);
 }
 
-/// Streams dropped while a session's streams close disconnect together, once the
-/// last guard held over them goes.
+/// A session's mounts go with it: dropping its key disconnects them together, and a
+/// mount dropped after that has nothing left to retire.
 #[test]
-fn dropped_streams_disconnect_once_the_last_closing_guard_goes() {
+fn a_closed_session_takes_its_mounts() {
 	let instance = Instance::random();
 	let relay = Node::new(2, 2, clock());
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let offer = Offer {
-		path: [Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: i8::MAX,
-		metric: 0,
-		down_only: false,
-		rtt: None,
-	};
-	receive.route(1, Path::empty(), Some(Reach::Finite(offer)));
-	receive.batch(
-		1,
-		Path::empty(),
-		vec![(p("live/x"), Some(claim(&instance, 0)))],
-		Some(1),
+	relay.own(p("live/x"), Some(claim(&instance, 0)));
+	let session = relay.answer(peer(1, 3), Link::default(), p("other")).unwrap();
+	let mount = session.mount(p("live")).unwrap();
+	assert!(
+		wire(outputs(&mount))
+			.iter()
+			.any(|output| matches!(output, Output::Batch { .. })),
+		"the mount is sent what its target holds"
 	);
-	let (outer, inner) = (relay.closing(1), relay.closing(1));
-	drop(receive);
-	drop(inner);
-	assert!(relay.shown().contains_key(&(1, p("live/x"))), "another guard is held");
-	drop(outer);
-	assert!(relay.shown().is_empty());
+	drop(session);
+	assert_eq!(
+		relay.lock().router.neighbors(),
+		0,
+		"the mount's key went with the session"
+	);
+	drop(mount);
+	assert_eq!(relay.lock().router.neighbors(), 0);
+}
+
+/// A scoped session's close doubts no node, since a scoped peer names itself as it likes,
+/// and an unscoped one doubts the Node ID it declared, whether or not a mount of it is
+/// open. A mount closes under the scope its session holds then, here one set after the
+/// mount opened.
+#[test]
+fn a_session_closing_with_its_mounts_doubts_only_if_unscoped() {
+	for scoped in [false, true] {
+		for mounted in [false, true] {
+			let relay = Node::new(2, 2, clock());
+			let session = relay.answer(peer(1, 10), Link::default(), p("other")).unwrap();
+			let mount = mounted.then(|| session.mount(p("live")).unwrap());
+			let scope = scoped.then(|| crate::route::Scope {
+				regions: vec![p("live")],
+				qualify: crate::route::qualifier([7; 32]),
+			});
+			let link = Link {
+				scope,
+				interest: Default::default(),
+				..Default::default()
+			};
+			session.relink(link, false).unwrap();
+			drop(session);
+			drop(mount);
+			let doubt = relay.lock().router.retained().doubt;
+			assert_eq!(doubt, usize::from(!scoped), "scoped {scoped}, mounted {mounted}");
+		}
+	}
 }
 
 /// The origin declares its hop id, without the qualified marker, or a random
@@ -726,7 +839,6 @@ fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -772,7 +884,6 @@ fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
 		priority: 0,
 		metric: 1,
 		down_only: false,
-		rtt: None,
 	};
 	let instance = Instance::random();
 	let mut outbox = Outbox::default();
@@ -805,4 +916,110 @@ fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
 		_ => None,
 	});
 	assert_eq!(last, Some((vec![p("live/y")], Some(6))));
+}
+
+/// What one repath makes a relay do, behind an origin with `claims` claims beside another
+/// origin with `others`: the serve commands its session applies to the origin, and the
+/// ROUTE and other messages a stream watching the root is sent.
+fn reserved(claims: usize, others: usize) -> (usize, usize, usize) {
+	let instance = Instance::random();
+	let relay = Node::new(2, 2, clock());
+	let edge = relay.answer(peer(3, 3), Link::default(), Path::empty()).unwrap();
+	let up = relay.receive(peer(1, 10), Link::default()).unwrap();
+	let offer = |id: Id, far: Id| {
+		let path = [
+			Hop { node: id, session: 0 },
+			Hop { node: far, session: 1 },
+			Hop { node: 10, session: 1 },
+		];
+		let offer = Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+		};
+		Some(Reach::Finite(offer))
+	};
+	let live = claim(&instance, 0);
+	for (id, count) in [(5, claims), (6, others)] {
+		let prefix = Path::new(&format!("o{id}")).unwrap();
+		up.route(id, prefix.clone(), offer(id, 500));
+		let changes = (0..count)
+			.map(|i| (Path::new(&format!("o{id}/{i}")).unwrap(), Some(live.clone())))
+			.collect();
+		up.batch(id, prefix, changes, Some(1));
+	}
+	serve_all(&up);
+	outputs(&edge);
+	up.route(5, p("o5"), offer(5, 501));
+	let repath = served(outputs(&up)).len();
+	let sent = wire(outputs(&edge));
+	let routes = (sent.iter()).filter(|out| matches!(out, Output::Route { .. })).count();
+	(repath, routes, sent.len() - routes)
+}
+
+/// A route update re-serves every claim behind it: the session rewrites the origin's
+/// route table once per broadcast, each a `sync_route` that wakes the fronts and cursors
+/// below it, though no claim changed. The wire stays flat: a stream watching the route
+/// is sent one ROUTE per update and no claim, and a repath leaves other origins alone.
+/// This should be one write per route, which its broadcasts refer to.
+#[test]
+fn residual_a_route_update_reserves_every_claim() {
+	for claims in [1, 8, 64] {
+		for others in [0, 64] {
+			let (repath, routes, other) = reserved(claims, others);
+			assert_eq!(repath, claims, "{claims} claims, {others} beside");
+			assert_eq!((routes, other), (1, 0), "one ROUTE, and no claim");
+		}
+	}
+}
+
+/// Each closed session is remembered until the doubt timer, even one that sent this node
+/// no route, as a viewer's does: a dead hop for its session, and a doubt on its node when
+/// it declared one. Viewer churn grows both by the sessions closed inside one timer. A
+/// session no route was learned on has no hop any path can name, so it need not be
+/// remembered.
+#[test]
+fn residual_each_closed_session_is_remembered_until_the_doubt_timer() {
+	const CLOSED: u64 = 64;
+	for declared in [false, true] {
+		let instance = Instance::random();
+		let clock = clock();
+		let relay = Node::new(2, 2, clock.clone());
+		let up = relay.receive(peer(1, 10), Link::default()).unwrap();
+		let offer = Offer {
+			path: [Hop { node: 5, session: 0 }, Hop { node: 10, session: 1 }].into(),
+			draining: false,
+			priority: i8::MAX,
+			metric: 1,
+			down_only: false,
+		};
+		up.route(5, Path::empty(), Some(Reach::Finite(offer)));
+		up.batch(
+			5,
+			Path::empty(),
+			vec![(p("live/x"), Some(claim(&instance, 0)))],
+			Some(1),
+		);
+		serve_all(&up);
+		for viewer in 0..CLOSED {
+			let node = if declared { 1000 + viewer } else { 0 };
+			let stream = (relay.answer(peer(100 + viewer, node), Link::default(), Path::empty())).unwrap();
+			outputs(&stream);
+			// The session's only stream: dropping it closes the session.
+			drop(stream);
+		}
+		let kept = relay.lock().router.retained();
+		let doubts = if declared { CLOSED as usize } else { 1 };
+		assert_eq!(
+			(kept.dead, kept.doubt),
+			(CLOSED as usize, doubts),
+			"declared {declared}"
+		);
+		clock.advance(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
+		relay.timeout();
+		let kept = relay.lock().router.retained();
+		assert_eq!((kept.dead, kept.doubt), (0, 0), "declared {declared}");
+	}
 }

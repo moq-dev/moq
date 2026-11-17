@@ -83,7 +83,13 @@ export interface Request {
 	 * what enforce the grant, and revoking before `expires` is the acceptor's job.
 	 */
 	accept(grant: Grant): Issued;
-	/** Refuse the token with a session code and a reason for the peer. */
+	/**
+	 * Refuse the token with a session code and a reason for the peer.
+	 *
+	 * `Internal`, `TooManyRequests`, and `Timeout` say this side failed to decide, such as with its
+	 * auth backend down, so a moq-lite peer presents the token again after a backoff; any other
+	 * code ends it.
+	 */
 	reject(code: SessionCode, reason: string): void;
 }
 

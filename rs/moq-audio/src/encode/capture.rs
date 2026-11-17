@@ -495,7 +495,7 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 	Ok(Frame::new(bytes.into(), moq_net::Timestamp::from_micros(timestamp_us)?))
 }
 
-#[cfg(all(test, feature = "bus"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::bus::{Bus, Config as BusConfig, Strip};
@@ -663,7 +663,7 @@ mod tests {
 					frame += 1;
 				}
 				assert!(
-					catalog.snapshot().media.join.is_some(),
+					catalog.snapshot().sync.interval.is_some(),
 					"the capture declared its interval"
 				);
 

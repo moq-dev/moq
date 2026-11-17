@@ -58,26 +58,44 @@ The [feature review](/quest/m3/release/feature-review.md)'s first pass
 later removed; judge each here. Recommended: drop each unless a consumer turns
 up.
 
-- moq-ffi's `MoqTrackProducer::largest` and `MoqBroadcastConsumer::closed`,
-  added for browser parity ([moq-dev/moq#7304](https://github.com/moq-dev/moq/pull/7304))
-  just before WASM support was removed
-  ([moq-dev/moq#7475](https://github.com/moq-dev/moq/pull/7475)); only
-  wrappers and tests call them.
-- The byte-stream rung of `MoqMediaProducer`'s simulcast ladder
-  ([moq-dev/moq#7699](https://github.com/moq-dev/moq/pull/7699)), raised by
-  an automated reviewer; nothing passes a stream producer as `lower`, and it
-  changed `lower`'s type in every binding. Recommended: keep, since reverting
-  is another break.
-- `moq_mux` container consumer's `set_wait`, a third delay knob beside
-  `Delay { min, max }`; native audio sets it to the `min` it already passes.
-- `moq_transcode`'s `active::Rendition::applied()` and
-  `moq_video::encode::Applied`, with no caller outside their crates.
-- moq-sock's ICMP error queue, `qmux::Config::fixed_receive_window` (used only
-  by the unconsumed p2p module), moq-webrtc's `p2p` feature, and moq-relay's
-  `stun` feature, none of which a shipped build uses.
-- `moq_tokio`'s `TcpTls::new` under `cfg(all(feature = "tcp", not(feature =
-  "_certs")))`, a cfg that can never hold (`tcp` enables `_certs`) and whose
-  arity no longer matches its caller: delete it.
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ every
+unused public item is removed or hidden before the cut, in
+[one sweep per area](/quest/m2/unused-api/README.md), each re-checked for a
+downstream caller first (rejected: judging them after m2 lands). That audit
+re-read this list, so it is settled:
+
+- moq-ffi's `MoqTrackProducer::largest` and `MoqBroadcastConsumer::closed`
+  stay: both have callers (the first pass's claim fell on a re-read).
+- The byte-stream rung of `MoqMediaProducer`'s simulcast ladder stays:
+  removing it changes `lower`'s type in every binding again.
+- `moq_mux`'s `set_wait` folds into `Delay`
+  ([the hole wait](/quest/m2/delay-hole-wait.md)). The first pass was wrong
+  that native audio sets it to the `min` it already passes: it passes its
+  live estimate, which that quest gives a home.
+- `Rendition::applied()` and `moq_video::encode::Applied` go in
+  [the media sweep](/quest/m2/unused-api/media.md); moq-sock's ICMP error
+  queue and `qmux::Config::fixed_receive_window` went in the transport sweep,
+  [moq-dev/moq#8957](https://github.com/moq-dev/moq/pull/8957).
+- Already gone: `TcpTls::new`
+  ([moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)), and the
+  `p2p` and `stun` features
+  ([moq-dev/moq#8771](https://github.com/moq-dev/moq/pull/8771)).
+
+What that audit learned, for the run after m2 and the next cut's:
+
+- `just api-diff` lists breaks only for Rust, and nothing for a surface it
+  marks `new`. Most of what the audit changed was in surfaces never
+  published, whose whole API is free to change: diff their source by hand.
+- Ask of each export who calls it outside its crate and tests, with the
+  grep in the finding: the sweep's four children list what had none. Kixel
+  and moq.pro pin `main` and call API nothing here does, so check them too.
+- Shapes that recurred: a sentinel inside a value (a huge number for "no
+  limit", a null that means zero in one record and unlimited in another),
+  a closed enum the bindings switch over exhaustively, two names for one
+  thing across Rust and JS, and a config key the code reads in two places.
+- Judge what is absent as well: a missing piece that would break the shape
+  when added later (a listing with no kind, a catalog with one version for
+  every entry) is cheaper now than a removal is later.
 
 ## Required
 

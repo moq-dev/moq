@@ -44,14 +44,19 @@ Recommendations for the PR:
 
 - A group's identity is its start timestamp, and the same identity must never
   carry different content. So each still is stamped with the time it was
-  sampled, on the root's `media.clock`, strictly after the previous still's
+  sampled, on the root's `sync.clock`, strictly after the previous still's
   (one tick later when two samplings collide), and never with the source
   frame's own timestamp: a static screen would give two refreshes the same
   frame and so the same start. The still shows the newest frame at that
   time, so it lines up with the video at its timestamp.
 - Each still is encoded after the request that asks for it, from the newest
   frame the capture has delivered by then, and never reuses an earlier
-  encode, so it meets the `refresh()` request barrier. A capture that
+  encode, so at the publisher a still always follows the request that
+  made it. Across relays `refresh()` promises only a group newer than the
+  newest the asking node held (decided 2026-11-16 on
+  [refresh](/quest/m2/refresh-interval.md): no request counter and no tag
+  on groups), so a remote caller that needs "after my action" reads until
+  the still's timestamp passes the time of its action. A capture that
   delivers frames only on change (PipeWire does) has its last frame as the
   current screen, so the producer must not wait for a newer one. A caller
   that needs the result of an action calls `refresh()` once the action has

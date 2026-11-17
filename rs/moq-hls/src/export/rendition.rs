@@ -381,7 +381,7 @@ pub struct Rendition {
 	config: Config,
 	/// The container its media track carries, to decode a group's first frame.
 	container: Arc<moq_mux::catalog::hang::Container>,
-	/// The catalog's `media.join.interval`, which fixes [`segment`](Self::segment).
+	/// The catalog's `sync.interval`, which fixes [`segment`](Self::segment).
 	interval: Duration,
 	/// The segment length the grid numbers this rendition's segments on (see
 	/// [`grid::segment_length`]).
@@ -395,7 +395,7 @@ pub struct Rendition {
 	target_duration: u64,
 	/// Segments listed past the target duration, counted to rate-limit their warning.
 	overruns: AtomicU64,
-	/// The catalog's `media.clock`: the wall anchor segment times map through. Absent when the
+	/// The catalog's `sync.clock`: the wall anchor segment times map through. Absent when the
 	/// publisher exposes none.
 	clock: Option<Clock>,
 	/// This rendition's window over its segments.
@@ -590,7 +590,7 @@ impl Rendition {
 		&self.media.track
 	}
 
-	/// The catalog's `media.join.interval`, which fixes the [segment length](Self::segment_length).
+	/// The catalog's `sync.interval`, which fixes the [segment length](Self::segment_length).
 	pub(super) fn interval(&self) -> Duration {
 		self.interval
 	}
@@ -647,7 +647,7 @@ impl Rendition {
 	}
 
 	/// Build a video rendition numbering its media track's groups on a grid of `interval`, timed
-	/// by the catalog's `media.clock`.
+	/// by the catalog's `sync.clock`.
 	///
 	/// Fails when the config's `broadcast` reference escapes above the origin root, so it names no
 	/// broadcast, or its container is unknown or malformed, so its media can't be read: either way
@@ -2048,7 +2048,8 @@ fn poll_retired(claim: &kio::Consumer<Claim>, waiter: &kio::Waiter) -> Poll<()> 
 /// track ends or fails.
 ///
 /// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, or once
-/// the track ends. A watcher joining mid-segment can't know the groups before its first, so it
+/// the track ends. A later one starts with the group after it, as soon as a frame of that group
+/// passes the next line, so the newest group's frames are read as they arrive. A watcher joining mid-segment can't know the groups before its first, so it
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 struct WatchMedia {
@@ -2078,7 +2079,7 @@ enum Step {
 		_track: moq_net::track::Consumer,
 		subscribing: moq_net::track::Subscribing,
 	},
-	/// Waiting for the next group.
+	/// Waiting for the next group, reading the newest one's frames as they arrive.
 	Next,
 	/// Reading a group's first frame, which places it.
 	First(moq_net::group::Consumer),
@@ -2107,6 +2108,9 @@ struct Follow {
 	spacing: Option<Duration>,
 	/// Nothing is listed before the first segment this watcher saw start.
 	whole: bool,
+	/// Whether the newest group's frames are still read as they arrive, which may place it before
+	/// its successor starts.
+	reading: bool,
 }
 
 impl Follow {
@@ -2122,6 +2126,7 @@ impl Follow {
 			latest: None,
 			spacing: None,
 			whole: false,
+			reading: false,
 		}
 	}
 
@@ -2143,6 +2148,7 @@ impl Follow {
 			// grid numbers what resumes by its own timestamps, as every edge does.
 			First::Marker(at) => {
 				self.latest = None;
+				self.reading = false;
 				(self.grid.stop(at), (group.start, None), None)
 			}
 			First::Media(pts, reach, declared) => {
@@ -2150,8 +2156,14 @@ impl Follow {
 				if let Some((_, previous, _)) = &self.latest {
 					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
+				let mut slots = self.grid.group(sequence, pts);
+				// A fragment carrying the whole group may already pass the next line.
+				if let Some(newest) = reach.newest() {
+					slots.extend(self.grid.reach(newest));
+				}
 				self.latest = Some((group, pts, reach));
-				(self.grid.group(sequence, pts), (sequence, Some(pts)), declared)
+				self.reading = true;
+				(slots, (sequence, Some(pts)), declared)
 			}
 		};
 		self.list(rendition, slots, Some(read), size, false)
@@ -2374,9 +2386,39 @@ impl WatchMedia {
 					if retired() {
 						return Poll::Ready(Ok(()));
 					}
+					// The newest group's frames that are in may place it before its successor starts.
+					while follow.reading && follow.grid.pending() {
+						let Some((group, _, reach)) = follow.latest.as_mut() else {
+							break;
+						};
+						match group.poll_read_frame(waiter) {
+							Poll::Pending => break,
+							Poll::Ready(Ok(Some(frame))) => {
+								// The container says what a frame holds, as `Step::End` reads it.
+								if let Ok(decoded) = moq_mux::container::Container::decode(&*follow.container, frame) {
+									reach.add(decoded);
+								}
+							}
+							// Ended or failed: its successor places it, and an ended track reads it
+							// again for its end, failing there if it failed.
+							Poll::Ready(Ok(None) | Err(_)) => {
+								follow.reading = false;
+								break;
+							}
+						}
+						let Some(newest) = reach.newest() else {
+							continue;
+						};
+						let slots = follow.grid.reach(newest);
+						if let Some(done) = follow.list(&self.rendition, slots, None, None, false) {
+							return Poll::Ready(done);
+						}
+					}
 					let groups = self.groups.as_mut().expect("subscribed above");
 					match ready!(groups.poll_next_group(waiter))? {
-						Some(group) => self.step = Step::First(group),
+						Some(moq_net::track::Item::Group(group)) => self.step = Step::First(group),
+						// A segment is listed from the groups that arrive, so one given up on is read past.
+						Some(moq_net::track::Item::Gap { .. }) => {}
 						None => match follow.latest.take() {
 							Some((group, _, reach)) => self.step = Step::End(group, Some(reach)),
 							None => {
@@ -2462,8 +2504,10 @@ impl kio::Task for WatchMedia {
 /// discontinuity marker, read as they are decoded.
 #[derive(Default)]
 struct Reach {
-	/// Each sample's pts, in nanoseconds.
+	/// The newest samples' pts, in nanoseconds, at most twice [`Reach::KEEP`].
 	stamps: Vec<u128>,
+	/// The shortest spacing between the samples folded out of `stamps`.
+	step: Option<u128>,
 	/// The latest end a sample states with its own duration, in nanoseconds.
 	ends: Option<u128>,
 	/// A frame with no payload: where the publisher says the content stops.
@@ -2471,6 +2515,10 @@ struct Reach {
 }
 
 impl Reach {
+	/// The newest distinct stamps kept when folding, well past any reordering a codec does, so a
+	/// group read as its frames arrive costs bounded memory however long it runs.
+	const KEEP: usize = 64;
+
 	/// Count every sample `frames` decodes to.
 	fn add(&mut self, frames: Vec<moq_mux::container::Frame>) {
 		for frame in frames {
@@ -2487,6 +2535,28 @@ impl Reach {
 				self.ends = self.ends.max(Some(pts + duration));
 			}
 		}
+		if self.stamps.len() > 2 * Self::KEEP {
+			self.fold();
+		}
+	}
+
+	/// Fold all but the newest [`Reach::KEEP`] distinct stamps into the shortest spacing.
+	fn fold(&mut self) {
+		self.stamps.sort_unstable();
+		self.stamps.dedup();
+		let older = self.stamps.len().saturating_sub(Self::KEEP);
+		let step = self.stamps[..(older + 1).min(self.stamps.len())]
+			.windows(2)
+			.map(|pair| pair[1] - pair[0])
+			.min();
+		self.step = self.step.into_iter().chain(step).min();
+		self.stamps.drain(..older);
+	}
+
+	/// The newest sample's pts, which places a pending group once it passes the next line.
+	fn newest(&self) -> Option<moq_net::Timestamp> {
+		let newest = self.stamps.iter().max()?;
+		moq_net::Timestamp::from_nanos(u64::try_from(*newest).ok()?).ok()
 	}
 
 	/// Where the last sample starts, which places the group on the grid, and where the content
@@ -2513,6 +2583,7 @@ impl Reach {
 			.stamps
 			.windows(2)
 			.map(|pair| pair[1] - pair[0])
+			.chain(self.step)
 			.min()
 			.or_else(|| spacing.map(|spacing| spacing.min(interval).as_nanos()));
 		let end = self
@@ -2957,11 +3028,11 @@ mod tests {
 					return;
 				};
 				let track = request.accept(moq_net::track::Info::default());
-				let mut group = track.append_group(0).unwrap();
+				let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 				group
 					.write_frame(moq_net::Timestamp::unscaled(0), Bytes::from_static(b"retained"))
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
 			}
@@ -3130,6 +3201,26 @@ mod tests {
 		assert_eq!(
 			millis(reach.finish(None, Duration::from_secs(2))),
 			(Some(500), Some(500))
+		);
+
+		// A long group read as it arrives keeps a bounded tail, yet times its end as if whole,
+		// however its samples are reordered or repeated.
+		let mut reach = Reach::default();
+		for ms in (0..10_000u64).step_by(40) {
+			let reordered = if ms % 120 == 40 {
+				ms + 40
+			} else if ms % 120 == 80 {
+				ms - 40
+			} else {
+				ms
+			};
+			reach.add(vec![sample(reordered, None, b"x"), sample(reordered, None, b"x")]);
+			assert!(reach.stamps.len() <= 2 * Reach::KEEP + 2);
+		}
+		assert_eq!(reach.newest().map(|t| t.as_millis().unwrap()), Some(9_960));
+		assert_eq!(
+			millis(reach.finish(None, Duration::from_secs(2))),
+			(Some(9_960), Some(10_000))
 		);
 	}
 

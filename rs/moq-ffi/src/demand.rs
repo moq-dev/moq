@@ -35,13 +35,16 @@ impl MoqTrackDemand {
 	}
 
 	/// The group subscribers want next: null while nobody consumes the track, otherwise the
-	/// sequence the next group should have at least. A value past the newest group asks for a
+	/// start the next group should have at least. A value past the newest group asks for a
 	/// new group now, typically a keyframe.
 	pub fn wanted(&self) -> Option<u64> {
 		self.inner.wanted()
 	}
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
+	///
+	/// End a track nobody wants with its producer's `abort_unwanted`, which keeps it for a reader
+	/// that joined since.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
 		self.changes
 			.wait(|changes, waiter| changes.poll_wanted_changed(waiter).map(gone))

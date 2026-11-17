@@ -181,18 +181,17 @@ print((root / "jobs").read_text())
     def test_native_and_cross_builds_stage_the_selected_artifacts(self):
         # A native request must share host units, even when --target was
         # explicitly passed to the packager. A cross request must keep its
-        # triple and linker. Minimal builds must never overwrite the default.
-        for host, target, minimal, configured in [
-            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, False),
-            ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False, False),
-            ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False, False),
-            ("x86_64-unknown-linux-gnu", "aarch64-linux-android", False, False),
-            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True, False),
-            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, True),
-            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False, "wrong"),
+        # triple and linker.
+        for host, target, configured in [
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", False),
+            ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False),
+            ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", False),
+            ("x86_64-unknown-linux-gnu", "aarch64-linux-android", False),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "wrong"),
         ]:
-            with self.subTest(host=host, target=target, minimal=minimal):
-                payload = f"{host}:{target}:{minimal}".encode()
+            with self.subTest(host=host, target=target):
+                payload = f"{host}:{target}".encode()
                 self.env["BUILD_ID"] = payload.decode()
                 self.env["CONFIGURED_TARGET"] = (
                     "aarch64-unknown-linux-gnu" if configured == "wrong" else host if configured else ""
@@ -201,11 +200,6 @@ print((root / "jobs").read_text())
                     default_library = self.root / "target/release/libmoq_ffi.so"
                     default_library.parent.mkdir(parents=True, exist_ok=True)
                     default_library.write_bytes(b"stale default")
-                default_library = self.root / "target/release/libmoq_ffi.so"
-                if minimal:
-                    default_library.parent.mkdir(parents=True, exist_ok=True)
-                    default_bytes = b"default library sentinel"
-                    default_library.write_bytes(default_bytes)
                 # Packaging the native host also generates bindings. Only the
                 # library lookup matters here; no generator needs to execute.
                 self.tool("rustc", f'print("host: {host}")\n')
@@ -254,8 +248,6 @@ else: raise AssertionError(args)
                     "--output",
                     str(self.root / "dist"),
                 ]
-                if minimal:
-                    args.append("--no-default-features")
                 result = subprocess.run(args, env=self.env, cwd=self.root, capture_output=True, text=True)
                 if configured == "wrong":
                     self.assertNotEqual(result.returncode, 0)
@@ -268,17 +260,11 @@ else: raise AssertionError(args)
                     built["linker"],
                     "aarch64-linux-gnu-gcc" if target == "aarch64-unknown-linux-gnu" and target != host else None,
                 )
-                self.assertEqual("--no-default-features" in built["args"], minimal)
-                self.assertEqual(
-                    built["args"][built["args"].index("--target-dir") + 1],
-                    str(self.root / "target" / "minimal" if minimal else self.root / "target"),
-                )
+                self.assertEqual(built["args"][built["args"].index("--target-dir") + 1], str(self.root / "target"))
                 staged = self.root / f"dist/moq-ffi-1.2.3-{target}/lib"
                 if not target.endswith("-android"):
                     self.assertEqual((staged / "libmoq_ffi.a").read_bytes(), payload)
                 self.assertEqual((staged / "libmoq_ffi.so").read_bytes(), payload)
-                if minimal:
-                    self.assertEqual(default_library.read_bytes(), default_bytes)
 
     def test_bindings_from_existing_library_never_build_moq_ffi(self):
         library = self.root / "libmoq_ffi.so"

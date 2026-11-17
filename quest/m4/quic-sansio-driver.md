@@ -38,7 +38,8 @@ Open, for whoever starts it:
 - Where it lives: a module in moq-quic, which doesn't depend on moq-net today, or a crate
   of its own.
 - Whether it ships with WebTransport over HTTP/3, sharing
-  the drivers' supported `quic::web` API, or with raw
+  the drivers' `quic::web` API (moq-tokio's is public only under
+  `test-support` since [moq-dev/moq#8957](https://github.com/moq-dev/moq/pull/8957)), or with raw
   QUIC's moq ALPN first.
 - How it builds its TLS configs (identity, roots, fingerprint pinning) without
   moq-tokio's `tls` module.

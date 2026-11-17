@@ -168,8 +168,9 @@ nix develop --command just bench origin/release "quic ws wss tcp"
 ```
 
 Beside relay CPU in cores, each case
-reports CPU microseconds per delivered frame and cores per delivered Gbps; base
-comparisons pair those too.
+reports CPU microseconds per delivered frame, cores per delivered Gbps, and the
+relay's peak RSS over the window; base comparisons pair those too. Only `chat`,
+with 2,001 connections, shows a per-connection memory change.
 
 The qmux micro-bench isolates the transport from the relay. It connects
 client/server pairs over loopback TCP, each echoing one message at a time on one
@@ -425,7 +426,7 @@ hides steps of a few percent. `just bench-fanout` counts the chat fan-out
 without a relay process or sockets, so the counts are the code's alone:
 
 ```bash
-nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout origin/main
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
@@ -435,7 +436,8 @@ run by default:
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
   bench does. It builds against every revision since
-  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+  [moq-dev/moq#8961](https://github.com/moq-dev/moq/pull/8961) started groups at a
+  timestamp; an older revision reports it unsupported.
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no
@@ -848,7 +850,7 @@ The table includes these measurements:
   `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`. A test with no runnable
   path prints only `# benchmark skipped: REASON`; the report omits that capability
   skip while rejecting an empty table or missing measurements.
-- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+- Shipping sizes, in bytes: the release artifacts and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
 - The merge gate's own cost (`bench-gate-cost`), described below.
@@ -924,9 +926,14 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 ### Paired comparison
 
 Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
-`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
-own, on the same runner, so night-to-night runner variance drops out. Each
-built target runs once per side in the trend's quick mode, alternating which
+`rust-extra` and `rust-uring`) also run the previous scheduled Nightly's commit beside their
+own, on the same runner, so night-to-night runner variance drops out. That
+night kept its bench executables as an artifact, which serve as the base
+instead of a rebuild: the Rust cache cannot hold a linked executable, and
+relinking `rust-bench`'s 32 fat-LTO targets took seven of its sixty minutes.
+When that night kept no executable for some target, or one cannot load on
+this runner, as after a library bump, the base is built. Each
+target runs once per side in the trend's quick mode, alternating which
 side goes first; the current side is the trend point. A target whose base
 executable is byte-identical to the current one is not compared: it is listed
 as the same build, since only noise could tell them apart. A case more than 10%

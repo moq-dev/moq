@@ -30,6 +30,19 @@ the lag rule, and no declared-silence or stretch handling.
 - Move `media.rs`'s audio tests with the code; then bump studio so
   `moq-scene` adopts the type and deletes its copy.
 
+Added 2026-11-16 by the pre-cut audit (/quest-plan): native video has no
+delay estimator. In the browser each video track measures its own target
+from its arrivals, and the shared delay is the largest target of any track
+(`js/watch/src/video/decoder.ts`, `js/watch/src/sync.ts`). In `moq play`
+the delay follows audio's estimate alone and is a constant 100 ms with no
+audio (`rs/moq-cli/src/play/args.rs:14-19`, `:137`), though the
+[audio playout](/quest/m2/audio-playout/README.md) epic promises one
+written algorithm both players implement. Recommended: the library gives a
+video reader the same arrival estimator audio has
+(`moq_audio::decode::Options::estimate`), fed through the shared clock, so
+`auto` means the same in both players; if it stays out of scope, say so in
+`doc/concept/audio-jitter.md`. Behaviour only, so it can land after the cut.
+
 It waits so the epic's remaining children land first and this
 breaks nothing in the cut.
 

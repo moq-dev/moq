@@ -150,7 +150,7 @@ test("parse - a field with non-base64 characters is refused, whatever its length
 	expect(() => Key.parse(encodeJwk(invalidKey))).toThrow();
 });
 
-test("parse - accepts a JWK in standard padded base64", () => {
+test("parse - refuses a JWK in standard padded base64, as moq-auth does", () => {
 	// The note survives as "+" and "/" in standard base64, and the kid length forces padding.
 	const json = JSON.stringify({ ...testKey, kid: "key-1", note: "~~~???" });
 	const encoded = Buffer.from(json).toString("base64");
@@ -158,9 +158,9 @@ test("parse - accepts a JWK in standard padded base64", () => {
 	expect(encoded).toMatch(/\//);
 	expect(encoded).toMatch(/=$/);
 
-	const key = Key.parse(encoded);
-	expect(key.kid).toBe("key-1");
-	expect((key as { k?: string }).k).toBe(testKey.k);
+	expect(() => Key.parse(encoded)).toThrow(/invalid base64url/);
+	expect(() => Key.parse(encoded.replace(/=+$/, ""))).toThrow(/invalid base64url/);
+	expect(Key.parse(Buffer.from(json).toString("base64url")).kid).toBe("key-1");
 });
 
 test("generate - an HMAC secret is unpadded base64url that round-trips", async () => {
@@ -837,28 +837,23 @@ test("key scope is enforced when signing and verifying", async () => {
 
 test("caps survive signing, and a key scope bounds only their paths", async () => {
 	const key: Key = { ...Key.parse(encodeJwk(testKey)), scope: { root: "room", publish: ["**"], subscribe: ["**"] } };
-	const token = await Key.sign(key, {
+	const capped = {
 		root: "room",
-		publish: ["alice/**"],
-		publish_rate: 8000,
-		subscribe: ["bob/**"],
-		subscribe_rate: 16000,
-	});
-	const claims = await Key.verify(key, token);
-	expect(claims).toMatchObject({
-		publish: ["alice/**"],
-		publish_rate: 8000,
-		subscribe: ["bob/**"],
-		subscribe_rate: 16000,
-	});
+		publish: { path: ["alice/**"], rate: 8000 },
+		subscribe: { path: ["bob/**"], rate: 16000 },
+	};
+	const claims = await Key.verify(key, await Key.sign(key, capped));
+	expect(claims).toMatchObject(capped);
 
 	// The decoded claims sign again with their caps.
 	const resigned = await Key.verify(key, await Key.sign(key, claims));
-	expect(resigned).toMatchObject({ publish_rate: 8000, subscribe_rate: 16000 });
-	await expect(Key.sign(key, { ...claims, publish_rate: 0 })).rejects.toThrow(/rate must be a positive integer/);
-	// The wire form is not a second spelling.
-	const wire = { root: "room", publish: { path: ["alice/**"], rate: 8000 } } as unknown as Claims;
-	await expect(Key.sign(key, wire)).rejects.toThrow(/pattern list/);
+	expect(resigned).toMatchObject(capped);
+	await expect(Key.sign(key, { ...claims, publish: { path: ["alice/**"], rate: 0 } })).rejects.toThrow(
+		/rate must be a positive integer/,
+	);
+	// A flat cap beside the role is not a spelling; it is refused, never dropped.
+	const flat = { root: "room", publish: ["alice/**"], publish_rate: 8000 } as unknown as Claims;
+	await expect(Key.sign(key, flat)).rejects.toThrow();
 });
 
 test("key scope treats absolute and rooted grants alike", async () => {

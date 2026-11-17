@@ -11,7 +11,7 @@ from . import audio as audio
 from . import json as json
 from . import socket as socket
 from . import video as video
-from .client import Client, CongestionControl, connect, qlog_supported, versions
+from .client import Client, CongestionControl, connect, versions
 from .datagram import DatagramConsumer, DatagramProducer, DatagramRequest, DatagramRequests
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -96,8 +96,6 @@ from .types import (
     VideoEncoderOutput,
     VideoPixelFormat,
     VideoSurface,
-    VideoSurfacePixelBuffer,
-    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
@@ -180,8 +178,6 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoSurface",
-    "VideoSurfacePixelBuffer",
-    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "Viewer",
     "Viewers",
@@ -191,7 +187,6 @@ __all__ = [
     "is_shutdown",
     "log_level",
     "protocol_error",
-    "qlog_supported",
     "versions",
 ]
 

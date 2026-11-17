@@ -409,6 +409,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		)?;
 	}
 
+	let route_publish = publisher.route_publish();
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -428,7 +429,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		ended: None,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early, client),
+		subscriber: SubscriberDriver::new(subscriber, early, client, route_publish),
 		session,
 		withholding,
 	};
@@ -779,7 +780,7 @@ impl PresentToken {
 							};
 							tracing::warn!(%err, reason = %refused.reason, "auth token refused");
 							if !matches!(err, Error::Unsupported) {
-								self.handle.refused(self.id);
+								self.handle.refused(self.id, refused.undecided());
 							}
 							*answered = true;
 							return Poll::Ready(err);
@@ -1494,7 +1495,7 @@ mod tests {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
 		let log = transport.log.clone();
 		let mut server = raw_session(transport.clone(), Version::Lite07, false, None);
-		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		server.goaway.send(crate::goaway::Goaway::new()).unwrap();
 		let _ = server.driver.poll(&kio::Waiter::noop());
 		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
 		transport.grant_credit();
@@ -1512,7 +1513,6 @@ mod tests {
 				matches!(
 					client
 						.goaway
-						.producer()
 						.send(crate::goaway::Goaway::redirect("https://other.example/")),
 					Err(Error::ProtocolViolation)
 				),
@@ -1522,7 +1522,6 @@ mod tests {
 			assert!(
 				server
 					.goaway
-					.producer()
 					.send(crate::goaway::Goaway::redirect("https://other.example/"))
 					.is_ok(),
 				"{version}"
