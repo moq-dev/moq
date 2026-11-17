@@ -10,11 +10,12 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { acceptBudget, Stream, Writer } from "../stream.ts";
+import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
+import { AuthMessage, AuthOk } from "./auth.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -1053,8 +1054,30 @@ for (const [name, violate] of [
 	[
 		"a reset Announce Stream",
 		async (pair) => {
+			// The client answers once its peer grants its credential.
+			const auth = await Stream.accept(pair.server, Version.DRAFT_07);
+			if (!auth || (await auth.reader.u53()) !== StreamId.Auth)
+				throw new Error("the peer never presented a credential");
+			await AuthMessage.decode(auth.reader, Version.DRAFT_07);
+			const all = new Path.Patterns([Path.Pattern.all()]);
+			await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
 			const { writer, send } = await announceStream(pair);
 			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			// A reset discards what the peer has not read, and a stream whose type byte is lost
+			// is not known to be an Announce Stream, so it cannot break the session. Reset only
+			// once the ANNOUNCE_OK answering the request shows the stream was identified.
+			const readers = new Readers(pair.server, Version.DRAFT_07);
+			try {
+				for (;;) {
+					const stream = await readers.next();
+					if (!stream) throw new Error("the peer never answered");
+					if ((await stream.u53()) !== DataType.Announce) continue;
+					expect(await decodeAnnounceBroadcast(stream, Version.DRAFT_07)).toEqual({ status: "ok" });
+					break;
+				}
+			} finally {
+				readers.close();
+			}
 			writer.reset(new Error("gone"));
 		},
 	],
