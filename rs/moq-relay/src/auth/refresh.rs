@@ -84,10 +84,10 @@ impl Credential {
 	fn wire(&self, role: Option<Role>) -> auth::Grant {
 		let mut grant = auth::Grant::default();
 		if role != Some(Role::Subscriber) {
-			grant.publish = self.grant.publish.clone();
+			grant.publish = self.grant.publish.path.clone();
 		}
 		if role != Some(Role::Publisher) {
-			grant.subscribe = self.grant.subscribe.clone();
+			grant.subscribe = self.grant.subscribe.path.clone();
 		}
 		grant.expires = self.expires;
 		grant
@@ -169,13 +169,12 @@ impl Refresh {
 			&& super::still_valid(grant).is_ok()
 			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
-			&& fresh.peer == self.admitted.peer
-			&& fresh.upstream == self.admitted.upstream
+			&& fresh.link == self.admitted.link
 			&& match self.role {
-				Some(Role::Publisher) => !grant.publish.is_empty(),
-				Some(Role::Subscriber) => !grant.subscribe.is_empty(),
+				Some(Role::Publisher) => !grant.publish.path.is_empty(),
+				Some(Role::Subscriber) => !grant.subscribe.path.is_empty(),
 				Some(_) => false,
-				None => !grant.publish.is_empty() || !grant.subscribe.is_empty(),
+				None => !grant.publish.path.is_empty() || !grant.subscribe.path.is_empty(),
 			}
 	}
 
@@ -737,21 +736,17 @@ mod tests {
 		let mut label = grant("a/**", 3000);
 		label.label = Some("project/*".into());
 		admissions.next().await.unwrap().grant(lease::Consumer::fixed(label));
-		// Refused as an auth server fault, which may pass, so the client presents it again.
-		let retried = admissions.next().await.unwrap();
-		assert_eq!(presented(&retried), b"invalid");
+		// A grant the relay cannot use is the decider's fault, and asking again gets the
+		// same answer, so the token is refused for good rather than as an outage.
+		let refused = invalid.await.unwrap();
 		assert!(
-			!invalid.is_finished(),
-			"the invalid label was accepted or ended the token"
+			matches!(refused, Err(moq_net::Error::Session(SessionError::Unauthorized))),
+			"{refused:?}"
 		);
 		assert!(
 			!supervising.is_finished(),
 			"a refused attachment ended the initial grant"
 		);
-		// Withdrawn, the retried token leaves the queue.
-		invalid.abort();
-		let _ = invalid.await;
-		drop(retried);
 		let auth = client.auth();
 		let (result, ()) = tokio::join!(added(&auth, "valid"), async {
 			let admission = admissions.next().await.unwrap();
@@ -782,8 +777,8 @@ mod tests {
 
 	fn capped(prefix: &str, publish: Option<u64>, subscribe: Option<u64>) -> Grant {
 		let mut grant = grant(prefix, 3000);
-		grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
-		grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 		grant
 	}
 
@@ -1210,7 +1205,7 @@ mod tests {
 		let (client, supervising) = sessions(lease).await;
 		let auth = client.auth();
 		let mut wider = grant("b/**", 30);
-		wider.subscribe = ["**".parse().unwrap()].into_iter().collect();
+		wider.subscribe.path = ["**".parse().unwrap()].into_iter().collect();
 		let (producer, consumer) = lease::Producer::new(wider);
 		let (token, ()) = tokio::join!(added(&auth, "replacement"), async {
 			admissions.next().await.unwrap().grant(consumer);

@@ -31,6 +31,11 @@ pub struct Request {
 	/// The operator's name for the relay asking.
 	pub node: String,
 
+	/// The relay software asking, as `name/version` product tokens (`moq-relay/0.22.0`),
+	/// so a server can tell which grant fields it reads before answering. Absent from a
+	/// relay older than 0.22, which also ignores a grant field it does not know.
+	pub relay: Option<String>,
+
 	/// How the session reached the relay.
 	pub transport: Transport,
 
@@ -82,6 +87,7 @@ impl std::fmt::Debug for Request {
 			.field("id", &self.id)
 			.field("event", &self.event)
 			.field("node", &self.node)
+			.field("relay", &self.relay)
 			.field("transport", &self.transport)
 			.field("remote", &self.remote)
 			.field("local", &self.local)
@@ -113,6 +119,7 @@ impl Request {
 			auth: None,
 			event: Event::Connect,
 			node: node.into(),
+			relay: None,
 			transport,
 			remote: None,
 			local: None,
@@ -155,9 +162,13 @@ impl Token {
 }
 
 /// The lifecycle moment a [`Request`] reports.
+///
+/// A server refuses an event it does not know: the grant answers the question the
+/// event asks, and a server that guesses answers a question nobody asked.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Event {
 	/// A session was accepted and asks to be admitted.
 	Connect,
@@ -233,6 +244,7 @@ impl std::fmt::Display for Transport {
 /// The single direction a client declared at SETUP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Role {
 	/// The client will publish; the relay consumes.
 	Publisher,
@@ -369,6 +381,7 @@ mod tests {
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.query = Some("jwt=abc".into());
 		request.implementation = Some("moq-net-js/0.4.2".into());
+		request.relay = Some("moq-relay/0.22.0".into());
 		request.event = Event::End {
 			reason: Reason::Expired,
 			duration: Duration::from_millis(1500),
@@ -376,7 +389,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
+			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","relay":"moq-relay/0.22.0","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 
 		request.event = Event::End {
@@ -386,7 +399,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
+			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","relay":"moq-relay/0.22.0","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 	}
 
