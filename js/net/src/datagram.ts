@@ -107,6 +107,7 @@ export class Producer {
 
 	static {
 		hooks.observeDatagrams = (producer) => consume(producer.name, producer.#state, undefined, null);
+		hooks.datagramInfo = (producer) => producer.#state.info.peek();
 		hooks.closeUnusedDatagrams = (producer) => {
 			if (producer.#state.consumers.size > 0) return false;
 			producer.abort(new StreamError(StreamCode.Cancel));

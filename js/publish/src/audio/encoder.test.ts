@@ -96,6 +96,13 @@ describe("toEncoderConfig", () => {
 		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
 		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
 	});
+
+	test("tunes music, and leaves a kindless source to the browser", () => {
+		const music = toEncoderConfig(resolve(captured, "opus"), "music", {});
+		expect(music.opus).toEqual({ application: "audio", signal: "music", frameDuration: 20_000 } as never);
+		const unknown = toEncoderConfig(resolve(captured, "opus"), undefined, {});
+		expect(unknown.opus).toEqual({ frameDuration: 20_000 } as never);
+	});
 });
 
 // Like Chrome's Opus encoder, it emits one chunk per input and stamps each from the first input's

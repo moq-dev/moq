@@ -96,6 +96,13 @@ export namespace Broadcast {
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
 	}
+	export type Listed = {
+		datagrams?: false;
+		info: Track.Info;
+	} | {
+		datagrams: true;
+		info: Datagram.Info;
+	};
 	export class Producer {
 		constructor();
 		close(): void;
@@ -112,15 +119,16 @@ export namespace Broadcast {
 		next(): Promise<Broadcast.TracksEvent | undefined>;
 	}
 	export type TracksEvent = {
-		info: Track.Info;
 		kind: "added";
 		name: string;
-	} | {
+	} & Broadcast.Listed | {
 		kind: "synced";
 	} | {
+		datagrams?: boolean;
 		kind: "removed";
 		name: string;
 	} | {
+		datagrams?: boolean;
 		kind: "finished";
 		name: string;
 	};
@@ -385,6 +393,7 @@ export namespace Group {
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
+		get end(): bigint | undefined;
 		get frameCount(): number;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
@@ -420,6 +429,7 @@ export namespace Group {
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): Group.Finished;
+		finishAt(end: bigint): Group.Finished;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}

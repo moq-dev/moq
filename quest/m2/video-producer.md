@@ -51,8 +51,8 @@ For the PR:
   (`publish_capture`'s `Driver`), which then runs on it, so the capture path
   and a caller's own frames share one encode loop and one grant follower.
   Shape it after audio: an `Options` with `bandwidth`, `write(&Frame)`, and
-  `finish(self) -> Result<Finished, Error>` from the start (the
-  [finish sweep](/quest/m2/finish-sweep.md) converts the renamed type).
+  `finish(self) -> Result<Finished, Error>`, as the encoded publisher
+  being renamed already has.
 - Move moq-boy, moq-ffi, and moq-c onto it and delete their copies of the
   grant follower. A binding option the lifted type cannot express (moq-ffi's
   `lower` rendition for the simulcast ladder, `rs/moq-ffi/src/video.rs:370`)
@@ -69,5 +69,4 @@ publisher is renamed). moq-ffi and moq-c keep their names. Wire: none.
 
 ## Related
 
-- [Terminal operations consume](/quest/m2/finish-sweep.md) - gives the renamed type `finish(self)`; whichever lands second rebases
 - [A published capture exposes its grant](/quest/m3/video-publish-grant.md) - adds a getter to the capture handle this runs on

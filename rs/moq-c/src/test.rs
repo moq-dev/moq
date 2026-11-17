@@ -741,7 +741,7 @@ fn publish_media_labels_config_without_naming_track() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id1 = id(catalog_cb.recv());
 
 	let mut audio_cfg = moq_audio_config {
@@ -1118,7 +1118,7 @@ fn audio_enabled_follows_each_snapshot() {
 	));
 	let consume = request_broadcast(origin, path);
 	let catalogs = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalogs.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalogs.ptr) });
 	let initial = id(catalogs.recv());
 	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
@@ -1332,7 +1332,7 @@ fn publish_catalog_roundtrip() {
 	// Consume the broadcast to verify the catalog round-trips.
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	// The video rendition we authored comes back through the consume API.
@@ -1516,7 +1516,7 @@ fn a_half_specified_coded_size_round_trips() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog = id(catalog_cb.recv());
 
 	let mut read = moq_video_config {
@@ -1555,7 +1555,7 @@ fn a_half_specified_coded_size_round_trips() {
 
 	let forwarded = request_broadcast(origin, b"half-coded-size-forwarded");
 	let forwarded_cb = Callback::new();
-	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, Some(channel_callback), forwarded_cb.ptr) });
+	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, 0, Some(channel_callback), forwarded_cb.ptr) });
 	let forwarded_catalog = id(forwarded_cb.recv());
 	assert_eq!(unsafe { moq_consume_video_config(forwarded_catalog, 0, &mut read) }, 0);
 	assert_eq!(read.preference, -1);
@@ -1615,7 +1615,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog = id(catalog_cb.recv());
 
 	// The declaration survives the round trip, so a consumer knows to parse LOC.
@@ -1730,7 +1730,7 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog = id(catalog_cb.recv());
 
 	let mut audio_cfg = moq_audio_config {
@@ -1913,7 +1913,7 @@ fn catalog_section_roundtrip() {
 	// Consume to verify the sections survive the wire.
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	// Both sections come back; iterate by index to find each by name.
@@ -3567,6 +3567,31 @@ fn named_consumers_cancel_while_subscribing() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A lost catalog track ends the reader with the transport code other consumers report, so a
+/// player can wait for the source to return instead of treating the catalog as malformed.
+#[test]
+fn a_lost_catalog_track_is_a_transport_error() {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let track = broadcast
+		.create_track(
+			hang::catalog::Catalog::DEFAULT_NAME,
+			hang::catalog::Catalog::default_track_info(),
+		)
+		.unwrap();
+	let at = moq_net::Timestamp::from_millis(1_000).unwrap();
+	let mut group = track.append_group(at).unwrap();
+	group.write_frame(at, "{}").unwrap();
+	group.finish().unwrap();
+	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+	let cb = Callback::new();
+	id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), cb.ptr) });
+	assert_eq!(moq_consume_catalog_free(id(cb.recv())), 0);
+	track.abort(moq_net::Error::Cancel).unwrap();
+	assert_eq!(cb.recv_terminal(), crate::error::MOQ_ERROR_MOQ);
+	assert_eq!(moq_consume_close(consume), 0);
+}
+
 #[test]
 fn catalog_cancel_while_subscribing() {
 	// A bare moq-net broadcast has no catalog track, so its subscribe waits on the handler.
@@ -3575,12 +3600,73 @@ fn catalog_cancel_while_subscribing() {
 	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
 
 	let cb = Callback::new();
-	let catalog = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), cb.ptr) });
+	let catalog = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), cb.ptr) });
 	let _unanswered = crate::ffi::RUNTIME.block_on(requests.requested_track()).unwrap();
 
 	assert_eq!(moq_consume_catalog_cancel(catalog), 0);
 	assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
 	assert_eq!(moq_consume_close(consume), 0);
+}
+
+/// Updates that arrive together reach a holding reader in order while it may still play them,
+/// each with its timestamp; an arrival reader takes only the newest.
+#[test]
+fn a_holding_reader_reads_every_update_within_its_delay() {
+	// A reader `delay` behind the live edge (3s) plays from `3000 - delay`, so it needs the update
+	// in effect there and every later one.
+	for (delay_ms, expected) in [
+		(0, vec![3_000]),
+		(999, vec![2_000, 3_000]),
+		(1_001, vec![1_000, 2_000, 3_000]),
+	] {
+		// A raw broadcast, since a moq-c one stamps its own catalog from its clock.
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(
+				hang::catalog::Catalog::DEFAULT_NAME,
+				hang::catalog::Catalog::default_track_info(),
+			)
+			.unwrap();
+		for ms in [1_000, 2_000, 3_000] {
+			let at = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut group = track.append_group(at).unwrap();
+			group.write_frame(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
+			group.finish().unwrap();
+		}
+		// Kept alive, so the reader subscribing later still finds the finished track.
+		let _finished = track.finish().unwrap();
+		let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+		let cb = Callback::new();
+		id(unsafe { moq_consume_catalog(consume, delay_ms * 1_000, Some(channel_callback), cb.ptr) });
+		let mut read = Vec::new();
+		loop {
+			let code = cb.recv();
+			if code <= 0 {
+				assert_eq!(code, 0, "the finished track ends cleanly");
+				break;
+			}
+			let snapshot = code as u32;
+			let mut at = moq_timestamp::default();
+			assert_eq!(unsafe { moq_consume_catalog_timestamp(snapshot, &mut at) }, 0);
+			assert_eq!(at.scale, 1_000);
+			assert!(at.has_scale);
+			let name = "app";
+			let mut section: moq_string = unsafe { std::mem::zeroed() };
+			assert_eq!(
+				unsafe { moq_consume_catalog_section(snapshot, name.as_ptr().cast(), name.len(), &mut section) },
+				0
+			);
+			assert_eq!(
+				borrowed_string(section.data, section.len).unwrap(),
+				at.value.to_string()
+			);
+			assert_eq!(moq_consume_catalog_free(snapshot), 0);
+			read.push(at.value);
+		}
+		assert_eq!(read, expected, "a {delay_ms}ms delay");
+		assert_eq!(moq_consume_close(consume), 0);
+	}
 }
 
 #[test]
@@ -3641,7 +3727,7 @@ fn media_consumers_cancel_while_subscribing() {
 	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 	let consume = consume_local(broadcast);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog = id(catalog_cb.recv());
 
 	type Media = unsafe extern "C" fn(u32, u32, *const moq_delay, ffi::moq_status_callback, *mut c_void) -> i32;
@@ -3831,7 +3917,7 @@ fn double_close_all_resource_types() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
@@ -4670,6 +4756,243 @@ fn media_demand_refuses_a_container() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// The on-demand race `abort_unwanted` closes, for one handle. A reader joins after the watcher
+/// reported nobody wants the track, so the call keeps the track and the reader reads on. Once the
+/// reader leaves, the call ends the track and releases the handle.
+fn abort_unwanted_keeps_a_late_reader(
+	consume: u32,
+	name: &[u8],
+	demand_cb: &Callback,
+	abort: impl Fn() -> i32,
+	write: impl Fn(),
+) {
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+
+	let frame_cb = Callback::new();
+	let reader = consume_track(consume, name, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+	assert_eq!(abort(), 0, "a reader wants the track, so it stays");
+
+	write();
+	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+
+	cancel_track(reader, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+	assert_eq!(abort(), 1, "nobody wants the track, so it ends");
+	assert!(abort() < 0, "ending the track released the handle");
+	assert!(demand_cb.recv_terminal() < 0, "the watcher ends with the track's abort");
+}
+
+#[test]
+fn track_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-abort-unwanted");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	abort_unwanted_keeps_a_late_reader(
+		consume,
+		name,
+		&demand_cb,
+		|| moq_publish_track_abort_unwanted(track, 7),
+		|| {
+			let group = id(moq_publish_track_group(track));
+			assert_eq!(
+				unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(0)) },
+				0
+			);
+			assert_eq!(moq_publish_group_finish(group), 0);
+		},
+	);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Media comes from a track request here, so the reader is already joined when the handle
+/// exists: the call keeps the track for it, then ends it once it leaves.
+#[test]
+fn media_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-abort-unwanted");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	let reader = consume_track(consume, b"audio", &frame_cb);
+
+	let request = id(request_cb.recv());
+	let init = opus_head();
+	let config = moq_audio_init {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_audio_hint::default(),
+	};
+	let media = id(unsafe { moq_track_request_audio(request, &config) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+
+	assert_eq!(moq_publish_media_abort_unwanted(media, 7), 0, "the reader wants it");
+	let payload = b"opus frame";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(1000)) },
+		0,
+		"the handle still publishes"
+	);
+	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+
+	cancel_track(reader, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+	assert_eq!(moq_publish_media_abort_unwanted(media, 7), 1, "nobody wants it");
+	assert!(
+		moq_publish_media_abort_unwanted(media, 7) < 0,
+		"ending the track released the handle"
+	);
+	assert!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(2000)) } < 0,
+		"nothing publishes to a released handle"
+	);
+	assert!(demand_cb.recv_terminal() < 0);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A container handle is not a media handle, so the call refuses it as demand does.
+#[test]
+fn media_abort_unwanted_refuses_a_container() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-abort-unwanted-container");
+	let container = id(publish_container(
+		broadcast,
+		moq_container_format::MOQ_CONTAINER_FORMAT_FMP4,
+		&[],
+	));
+	assert!(moq_publish_media_abort_unwanted(container, 7) < 0);
+	assert_eq!(moq_publish_container_finish(container), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn audio_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-abort-unwanted");
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_encode_audio_demand(producer, Some(channel_callback), demand_cb.ptr) });
+
+	let pcm: Vec<u8> = (0..960).flat_map(|i| (i as f32 / 960.0).to_le_bytes()).collect();
+	let consume = consume_local(broadcast);
+	abort_unwanted_keeps_a_late_reader(
+		consume,
+		b"audio",
+		&demand_cb,
+		|| moq_encode_audio_abort_unwanted(producer, 7),
+		|| {
+			let frame = moq_audio_frame {
+				timestamp: micros(0),
+				data: pcm.as_ptr(),
+				data_size: pcm.len(),
+			};
+			assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+		},
+	);
+	assert!(
+		moq_encode_audio_finish(producer) < 0,
+		"ending the track released the handle"
+	);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn video_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-abort-unwanted");
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30_000,
+			denominator: 1001,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		join_us: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_encode_video_demand(producer, Some(channel_callback), demand_cb.ptr) });
+	let name = State::lock()
+		.video
+		.demand(Id::try_from(producer).unwrap())
+		.unwrap()
+		.name()
+		.to_string();
+
+	let rgba = gray_rgba(320, 240);
+	let consume = consume_local(broadcast);
+	abort_unwanted_keeps_a_late_reader(
+		consume,
+		name.as_bytes(),
+		&demand_cb,
+		|| moq_encode_video_abort_unwanted(producer, 7),
+		|| {
+			assert_eq!(moq_encode_video_cut(producer), 0);
+			for index in 0..5u64 {
+				let frame = moq_video_encoder_frame {
+					timestamp: micros(index * 1_001_000 / 30),
+					data: rgba.as_ptr(),
+					data_size: rgba.len(),
+				};
+				assert_eq!(unsafe { moq_encode_video_frame(producer, &frame) }, 0);
+			}
+		},
+	);
+	assert!(
+		moq_encode_video_finish(producer) < 0,
+		"ending the track released the handle"
+	);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn dynamic_serves_track_requests() {
 	let origin = id(moq_origin_create());
@@ -5107,7 +5430,7 @@ fn local_publish_consume() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
@@ -5239,7 +5562,7 @@ fn follow_local() {
 
 	// The delivered handle behaves like one from moq_origin_request.
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let mut audio_cfg = moq_audio_config {
@@ -5351,7 +5674,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 
 	let consume = request_broadcast(origin, b"a/pub");
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
@@ -5400,7 +5723,7 @@ fn consume_audio_refuses_a_sibling_of_another_instance() {
 
 	let consume = request_broadcast(origin, b"a/pub");
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
@@ -5444,7 +5767,7 @@ fn decoders_cancel_while_resolving_a_sibling() {
 
 	let consume = request_broadcast(origin, b"r/pub");
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let audio_output = moq_audio_decoder_output {
@@ -5537,7 +5860,7 @@ fn decode_audio_follows_a_sibling_broadcast_reference() {
 
 	let consume = request_broadcast(origin, b"d/pub");
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 	let decoded = moq_audio_decoder_output {
 		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
@@ -5897,7 +6220,7 @@ fn video_publish_consume() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
@@ -6159,7 +6482,7 @@ fn audio_raw_decode_reads_the_encoder_end() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 	let decoded = moq_audio_decoder_output {
 		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
@@ -6268,7 +6591,7 @@ fn video_raw_publish_consume() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let decoder = moq_video_decoder_output {
@@ -6452,7 +6775,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
@@ -6922,7 +7245,7 @@ fn video_raw_decode() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
@@ -7006,7 +7329,7 @@ fn multiple_frames_ordering() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
@@ -7070,7 +7393,7 @@ fn catalog_update_on_new_track() {
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id1 = id(catalog_cb.recv());
 	let mut audio_cfg = moq_audio_config {

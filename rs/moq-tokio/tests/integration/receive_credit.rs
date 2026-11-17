@@ -626,6 +626,8 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut header = Vec::new();
 	varint(&mut header, subscribe);
 	varint(&mut header, sequence);
+	// No previous start: 0 says unknown, since the field carries it plus one.
+	varint(&mut header, 0);
 	// The first frame.
 	varint(&mut header, 0);
 

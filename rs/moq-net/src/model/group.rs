@@ -2261,13 +2261,23 @@ impl Producer {
 	/// A finished group's own end bounds how long it stays fresh, so the last group of a
 	/// paused or finished track ages out without a successor (see
 	/// [`track::Info::max_age`]). An `end` at or before the group's start is
-	/// [`Error::TimestampMismatch`]. Fails with the abort error if the group was already
-	/// aborted.
+	/// [`Error::TimestampMismatch`], which aborts the group. Fails with the abort error if the
+	/// group was already aborted.
 	pub fn finish_at(self, end: u64) -> Result<Finished> {
-		if end <= self.start {
-			return Err(Error::TimestampMismatch);
+		if let Err(err) = self.check_end(end) {
+			let _ = self.handle.close_aborted(err.clone());
+			return Err(err);
 		}
 		self.end(Some(end))
+	}
+
+	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] at or before the
+	/// group's start.
+	pub(crate) fn check_end(&self, end: u64) -> Result<()> {
+		match end <= self.start {
+			true => Err(Error::TimestampMismatch),
+			false => Ok(()),
+		}
 	}
 
 	/// End the group without saying where it ends, returning the [`Finished`] group: every
@@ -4114,6 +4124,13 @@ impl Consumer {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		self.poll_expiry(waiter, true)
+	}
+
+	/// Whether the subscription this group was handed out under gave up on it as stale, as
+	/// [`Self::poll_expired`] or a read failing with [`Error::Old`] found.
+	#[cfg(feature = "async")]
+	pub(crate) fn is_expired(&self) -> bool {
+		self.expired
 	}
 
 	/// Apply the drift budget to a read that found nothing and is about to park, failing

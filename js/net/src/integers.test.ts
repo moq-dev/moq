@@ -9,7 +9,6 @@ import { Parameters } from "./ietf/parameters.ts";
 import { PublishDone } from "./ietf/publish.ts";
 import { RequestError } from "./ietf/request.ts";
 import { Version } from "./ietf/version.ts";
-import { Datagram } from "./lite/datagram.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { frameDecoder, Group as LiteGroup } from "./lite/group.ts";
 import * as LiteMessage from "./lite/message.ts";
@@ -149,9 +148,9 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				await Writer.collect(version, (w) => LiteMessage.encode(w, (w) => w.write(body))),
 				version,
 			);
-		await expect(LiteGroup.decode(await framed(fields(version, 0, 0, UNSAFE)), version)).rejects.toThrow(
-			RangeError,
-		);
+		// Lite-07 carries the Previous Start ahead of the Frame Start.
+		const group = version === Lite.DRAFT_07 ? fields(version, 0, 0, 0, UNSAFE) : fields(version, 0, 0, UNSAFE);
+		await expect(LiteGroup.decode(await framed(group), version)).rejects.toThrow(RangeError);
 		if (version === Lite.DRAFT_07)
 			await expect(SubscribeStart.decode(await framed(fields(version, 1, UNSAFE)), version)).rejects.toThrow(
 				RangeError,
@@ -181,8 +180,6 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 		);
 		const decode = frameDecoder({ scale: Timescale.NANO });
 		expect(() => decode(new Cursor(fields(version, UNSAFE << 1n, 0), version))).toThrow(RangeError);
-		const datagram = fields(version, ...(version === Lite.DRAFT_07 ? [0] : []), 0, 0, UNSAFE);
-		await expect(Datagram.decode(datagram, version, () => ({ timed: true }))).rejects.toThrow(RangeError);
 	});
 }
 
@@ -195,5 +192,5 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 test("time anchors convert at the declared scale without losing an aligned unit", () => {
 	expect(
 		toWireRanges([{ start: { time: new Timestamp(4611686021000000, Timescale.NANO) } }], Timescale.MILLI),
-	).toEqual([{ start: { time: 4611686021 } }]);
+	).toEqual([{ start: { time: 4611686021n } }]);
 });

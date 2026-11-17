@@ -32,8 +32,8 @@ impl codec::Bridge for Bridge {
 		Ok(())
 	}
 
-	fn finish(&mut self) -> Result<()> {
-		Ok(self.import.finish()?)
+	fn finish(self: Box<Self>) -> Result<codec::Finished> {
+		Ok(Box::new(self.import.finish()?))
 	}
 
 	fn abort(self: Box<Self>, err: moq_net::Error) {

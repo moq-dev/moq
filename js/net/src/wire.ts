@@ -24,7 +24,8 @@ export interface Broadcast {
 	localDatagrams: boolean;
 	datagrams(name: string): datagram.Consumer;
 	liveDatagrams(name: string): datagram.Consumer | undefined;
-	createDatagrams(name: string, info: Partial<datagram.Info>): datagram.Producer;
+	/** Create a datagram track, listed unless `listed` is false, as a session's track riding a stream track's subscription. */
+	createDatagrams(name: string, info: Partial<datagram.Info>, listed?: boolean): datagram.Producer;
 	requestedDatagrams(): Promise<datagram.Request | undefined>;
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
