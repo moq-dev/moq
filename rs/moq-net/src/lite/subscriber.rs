@@ -2109,7 +2109,6 @@ impl FrameIngest {
 			Some(records) => {
 				let (id, block) = records.pending.take().expect("a record precedes each frame");
 				let lite::ietf::Decoded { properties, gap } = lite::ietf::decode_properties(&block, self.framing)?;
-				group.mark_gap(id, gap)?;
 				// A plain group's frames are numbered by index, so a continuation re-sending
 				// frames its group holds finds them below its count.
 				let next = id == group.frame_count() as u64 || (!records.relayed && id == self.index);
@@ -2117,6 +2116,8 @@ impl FrameIngest {
 				if !plain && !records.relayed {
 					return Err(Error::ProtocolViolation);
 				}
+				// Only a frame we accept names the keys below its group.
+				group.mark_gap(id, gap)?;
 				(!plain).then(|| Arc::new(crate::model::object::Fields { id, properties }))
 			}
 			None => None,
