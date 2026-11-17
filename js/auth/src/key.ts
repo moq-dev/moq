@@ -2,10 +2,10 @@ import { wall } from "@moq/clock";
 import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
-import { type Claims, ClaimsSchema, Scope, ScopeSchema } from "./claims.ts";
+import { type Claims, ClaimsFieldsSchema, ClaimsSchema, Scope, ScopeSchema } from "./claims.ts";
 import * as Json from "./json.ts";
 import * as Path from "./path.ts";
-import { ClaimsFieldsSchema, encodeClaims } from "./wire.ts";
+import { encodeClaims } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.

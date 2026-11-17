@@ -134,36 +134,6 @@ export const TokenIdSchema = z
 		z.regex(/^[\x21-\x7e]*$/, { message: "Token ID must be printable ASCII without spaces" }),
 	);
 
-/**
- * Claims as this library names them; the wire spells the times and ID as the registered
- * `exp`, `iat`, `nbf`, and `jti`. Signing parses with it, so a misspelled field is refused.
- */
-export const ClaimsFieldsSchema: z.ZodMiniType<Claims> = z
-	.strictObject({
-		/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
-		root: z._default(z.string(), ""),
-		/** What the holder may publish, relative to `root`, optionally with a bitrate cap. */
-		publish: z.optional(AccessSchema),
-		/** What the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
-		subscribe: z.optional(AccessSchema),
-		/** When the token expires (`exp`), as a whole unix timestamp in seconds. */
-		expires: z.optional(UnixSecondsSchema),
-		/** When the token was issued (`iat`), as a whole unix timestamp in seconds. Informational. */
-		issued: z.optional(UnixSecondsSchema),
-		/** The time before which the token is refused (`nbf`), as a whole unix timestamp in seconds. */
-		notBefore: z.optional(UnixSecondsSchema),
-		/** The token's identifier (`jti`), which its issuer may record to revoke it. */
-		id: z.optional(TokenIdSchema),
-	})
-	.check(
-		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
-		// rejects such a token as useless. Checking `!== undefined` here would mint
-		// tokens that Rust then refuses to verify.
-		z.refine((data) => paths(data.publish).length > 0 || paths(data.subscribe).length > 0, {
-			message: "Either publish or subscribe must grant at least one pattern",
-		}),
-	);
-
 /** Write claims as a token's JSON payload. */
 export function encodeClaims({ expires, issued, notBefore, id, ...grants }: Claims) {
 	return {

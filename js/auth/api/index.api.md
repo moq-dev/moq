@@ -63,17 +63,25 @@ export const Claims: {
 	authorize: (claims: Claims, path: string) => Permissions;
 };
 
-export interface Claims {
-	expires?: number;
-	id?: TokenId;
-	issued?: number;
-	notBefore?: number;
-	publish?: Access;
-	root: string;
-	subscribe?: Access;
-}
+export type Claims = output<typeof ClaimsFieldsSchema>;
 
-export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
+export const ClaimsFieldsSchema: ZodMiniObject<{
+	expires: ZodMiniOptional<ZodMiniInt>;
+	id: ZodMiniOptional<ZodMiniString<string>>;
+	issued: ZodMiniOptional<ZodMiniInt>;
+	notBefore: ZodMiniOptional<ZodMiniInt>;
+	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
+	root: ZodMiniDefault<ZodMiniString<string>>;
+	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
+}, $strict>;
+
+export const ClaimsSchema: ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 	exp: ZodMiniOptional<ZodMiniInt>;
 	get: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
 	iat: ZodMiniOptional<ZodMiniInt>;
@@ -85,13 +93,27 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
 	put: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
-	root: ZodMiniDefault<ZodMiniString<string>>;
+	root: ZodMiniOptional<ZodMiniString<string>>;
 	sub: ZodMiniOptional<ZodMiniUnknown>;
 	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
 		path: ZodMiniArray<ZodMiniString<string>>;
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
-}, $strict>, ZodMiniTransform<Claims, {
+}, $strict>, ZodMiniTransform<{
+	expires?: number | undefined;
+	id?: string | undefined;
+	issued?: number | undefined;
+	notBefore?: number | undefined;
+	publish?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+	root?: string | undefined;
+	subscribe?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+}, {
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
@@ -103,13 +125,27 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 		rate: number;
 	} | undefined;
 	put?: string | string[] | undefined;
-	root: string;
+	root?: string | undefined;
 	sub?: unknown;
 	subscribe?: string[] | {
 		path: string[];
 		rate: number;
 	} | undefined;
-}>>;
+}>>, ZodMiniObject<{
+	expires: ZodMiniOptional<ZodMiniInt>;
+	id: ZodMiniOptional<ZodMiniString<string>>;
+	issued: ZodMiniOptional<ZodMiniInt>;
+	notBefore: ZodMiniOptional<ZodMiniInt>;
+	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
+	root: ZodMiniDefault<ZodMiniString<string>>;
+	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
+}, $strict>>;
 
 export type Grant = infer<typeof GrantSchema>;
 

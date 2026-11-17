@@ -8,15 +8,7 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
-import {
-	type Access,
-	AccessSchema,
-	decodeGrants,
-	PatternListSchema,
-	paths,
-	TokenIdSchema,
-	UnixSecondsSchema,
-} from "./wire.ts";
+import { AccessSchema, decodeGrants, PatternListSchema, paths, TokenIdSchema, UnixSecondsSchema } from "./wire.ts";
 
 export { type Access, AccessSchema, PatternListSchema, TokenIdSchema } from "./wire.ts";
 
@@ -71,6 +63,38 @@ export const ScopeSchema = z
 export type Scope = z.output<typeof ScopeSchema>;
 
 /**
+ * {@link Claims} as this library names them, the one definition of their fields. The wire
+ * spells the times and ID as the registered `exp`, `iat`, `nbf`, and `jti`, which
+ * {@link ClaimsSchema} reads. {@link Key.sign} parses with it, so a misspelled field,
+ * such as the wire's `exp` or a legacy `put`, is refused.
+ */
+export const ClaimsFieldsSchema = z
+	.strictObject({
+		/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
+		root: z._default(z.string(), ""),
+		/** What the holder may publish, relative to `root`, optionally with a bitrate cap. */
+		publish: z.optional(AccessSchema),
+		/** What the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
+		subscribe: z.optional(AccessSchema),
+		/** When the token expires (`exp`), as a whole unix timestamp in seconds. */
+		expires: z.optional(UnixSecondsSchema),
+		/** When the token was issued (`iat`), as a whole unix timestamp in seconds. Informational. */
+		issued: z.optional(UnixSecondsSchema),
+		/** The time before which the token is refused (`nbf`), as a whole unix timestamp in seconds. */
+		notBefore: z.optional(UnixSecondsSchema),
+		/** The token's identifier (`jti`), which its issuer may record to revoke it. */
+		id: z.optional(TokenIdSchema),
+	})
+	.check(
+		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
+		// rejects such a token as useless. Checking `!== undefined` here would mint
+		// tokens that Rust then refuses to verify.
+		z.refine((data) => paths(data.publish).length > 0 || paths(data.subscribe).length > 0, {
+			message: "Either publish or subscribe must grant at least one pattern",
+		}),
+	);
+
+/**
  * The payload of a token, as {@link Key.sign} takes it and {@link Key.verify} returns it.
  *
  * A pattern names exactly what it says: `alice` is one broadcast, `alice/**` is a
@@ -78,22 +102,7 @@ export type Scope = z.output<typeof ScopeSchema>;
  * {@link Access} with a cap, `{"path": [...], "rate": bps}`. The times and ID are written
  * as the registered `exp`, `iat`, `nbf`, and `jti` claims.
  */
-export interface Claims {
-	/** The root that `publish` and `subscribe` are relative to. */
-	root: string;
-	/** What the holder may publish, relative to `root`, optionally with a bitrate cap. */
-	publish?: Access;
-	/** What the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
-	subscribe?: Access;
-	/** When the token expires (`exp`), as a whole unix timestamp in seconds. */
-	expires?: number;
-	/** When the token was issued (`iat`), as a whole unix timestamp in seconds. Informational. */
-	issued?: number;
-	/** The time before which the token is refused (`nbf`), as a whole unix timestamp in seconds. */
-	notBefore?: number;
-	/** The token's identifier (`jti`), which its issuer may record to revoke it. */
-	id?: TokenId;
-}
+export type Claims = z.output<typeof ClaimsFieldsSchema>;
 
 // Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
 // Every other claim is refused, since an unknown one may narrow the grant, and a
@@ -115,10 +124,10 @@ const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * `issued`, `notBefore`, and `id`. The registered `iss` and `sub` claims are read and
  * dropped; any other field fails verification.
  */
-export const ClaimsSchema = z
-	.pipe(
+export const ClaimsSchema = z.pipe(
+	z.pipe(
 		z.strictObject({
-			root: z._default(z.string(), ""),
+			root: z.optional(z.string()),
 			publish: z.optional(AccessSchema),
 			subscribe: z.optional(AccessSchema),
 			exp: z.optional(UnixSecondsSchema),
@@ -129,8 +138,9 @@ export const ClaimsSchema = z
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
+		// Fed to the strict fields, so a claim misnamed here is refused rather than dropped.
 		z.transform(
-			({ iss: _iss, sub: _sub, exp, iat, nbf, jti, ...grants }, ctx): Claims => ({
+			({ iss: _iss, sub: _sub, exp, iat, nbf, jti, ...grants }, ctx): z.input<typeof ClaimsFieldsSchema> => ({
 				...decodeGrants(grants, ctx),
 				...(exp !== undefined && { expires: exp }),
 				...(iat !== undefined && { issued: iat }),
@@ -138,15 +148,9 @@ export const ClaimsSchema = z
 				...(jti !== undefined && { id: jti }),
 			}),
 		),
-	)
-	.check(
-		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
-		// rejects such a token as useless. Checking `!== undefined` here would mint
-		// tokens that Rust then refuses to verify.
-		z.refine((data) => paths(data.publish).length > 0 || paths(data.subscribe).length > 0, {
-			message: "Either publish or subscribe must grant at least one pattern",
-		}),
-	);
+	),
+	ClaimsFieldsSchema,
+);
 
 /**
  * The access a {@link Claims} grants at a specific path, with every pattern rebased so
