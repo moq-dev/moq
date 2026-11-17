@@ -54,20 +54,36 @@ fn resolve(base: Option<&Path>, path: PathRef) -> Result<Option<Path>, Error> {
 		(false, true) => Path::new(head),
 		(false, false) => Path::concat(head, path.rest.as_str()),
 	};
-	Ok(suffix.ok().filter(|suffix| suffix.parts().count() <= Path::MAX_PARTS))
+	Ok(suffix.ok().filter(|suffix| suffix.depth() <= Path::MAX_PARTS))
 }
 
-/// The first `keep` segments of `path`, or `None` if it has fewer.
+/// The first `keep` raw parts of `path`, or `None` if it has fewer.
+///
+/// TEMPORARY MIGRATION, delete at the next version cut (and count [`Path::parts`] here and
+/// wherever [`raw_parts`] is used): the previous release counts `keep` by every `/`, escaped
+/// or not, and also speaks lite-07, so a keep counted by segment would resolve to another
+/// path on a mixed-version link. A head may end inside an escape; the rest completes it, or
+/// the resolved path is invalid and refused.
 fn head(path: &Path, keep: usize) -> Option<&str> {
+	raw_head_len(path.as_str(), keep).map(|end| &path.as_str()[..end])
+}
+
+/// The byte length of the first `keep` raw parts of `s`, or `None` if it has fewer.
+/// TEMPORARY MIGRATION: see [`head`].
+fn raw_head_len(s: &str, keep: usize) -> Option<usize> {
 	if keep == 0 {
-		return Some("");
+		return Some(0);
 	}
-	let s = path.as_str();
-	let mut ends = s
-		.match_indices('/')
+	s.match_indices('/')
 		.map(|(i, _)| i)
-		.chain((!s.is_empty()).then_some(s.len()));
-	ends.nth(keep - 1).map(|end| &s[..end])
+		.chain((!s.is_empty()).then_some(s.len()))
+		.nth(keep - 1)
+}
+
+/// The parts of `path` split at every `/`, escaped or not. The empty path has none.
+/// TEMPORARY MIGRATION: see [`head`].
+fn raw_parts(path: &Path) -> impl Iterator<Item = &str> {
+	path.as_str().split_terminator('/')
 }
 
 /// Resolves the bases on a received announce stream. Only used on versions with
@@ -102,6 +118,20 @@ impl AnnounceDecoder {
 			}
 		}
 		Ok(suffix)
+	}
+
+	/// The next unassigned id.
+	pub fn next(&self) -> u64 {
+		self.live.next
+	}
+
+	/// Assign the next id to a claim at `path` that no ANNOUNCE_START carries: an edit of
+	/// the stream's prefixes presents a live claim there.
+	pub fn insert(&mut self, path: Path) -> u64 {
+		let id = self.live.next;
+		self.live.next += 1;
+		self.live.suffixes.insert(id, path);
+		id
 	}
 
 	/// The id the last start assigned.
@@ -229,9 +259,24 @@ impl AnnounceEncoder {
 
 		// Distances count back from the id this START takes.
 		let path = self.path_ref(&suffix, id);
-		self.heads.insert(suffix.parts(), id);
+		self.heads.insert(raw_parts(&suffix), id);
 		self.live.suffixes.insert(id, suffix);
 		(Some(id), path)
+	}
+
+	/// The next unassigned id.
+	pub fn next(&self) -> u64 {
+		self.live.next
+	}
+
+	/// Assign the next id to a claim at `path` without an ANNOUNCE_START: an edit of the
+	/// stream's prefixes presents a live claim there.
+	pub fn insert(&mut self, path: Path) -> u64 {
+		let id = self.live.next;
+		self.live.next += 1;
+		self.heads.insert(raw_parts(&path), id);
+		self.live.suffixes.insert(id, path);
+		id
 	}
 
 	/// An ANNOUNCE_END for a live `id`.
@@ -240,20 +285,19 @@ impl AnnounceEncoder {
 			return;
 		}
 		let suffix = self.live.suffixes.remove(&id).expect("end for a live id");
-		self.heads.remove(suffix.parts(), id);
+		self.heads.remove(raw_parts(&suffix), id);
 	}
 
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
 	fn path_ref(&self, suffix: &Path, next: u64) -> PathRef {
 		let form: Form = self.version.into();
 		let literal = || PathRef::literal(suffix.clone());
-		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
+		let Some((keep, id)) = self.heads.longest(raw_parts(suffix)) else {
 			return literal();
 		};
 		// Where the segments after `keep` start, sharing the suffix's buffer.
-		let s = suffix.as_str();
-		let start = s.match_indices('/').nth(keep - 1).map_or(s.len(), |(i, _)| i + 1);
-		let rest = suffix.slice_from(start);
+		let end = raw_head_len(suffix.as_str(), keep).expect("the longest shared head is within the suffix");
+		let rest = suffix.slice_from((end + 1).min(suffix.len()));
 
 		let base = next - id;
 		let keep = keep as u64;
@@ -429,6 +473,36 @@ mod tests {
 
 		let (_, wire) = encoder.start(Path::from_static("a/b/d"));
 		assert_eq!(wire, path(2, 2, "d"));
+	}
+
+	/// TEMPORARY MIGRATION, delete at the next version cut and expect whole segments: the
+	/// previous release counts a keep by every `/`, so both ends do until it is gone. These
+	/// are the wire values the previous release sends and resolves, so a mixed-version link
+	/// agrees in both directions.
+	#[test]
+	fn keeps_raw_parts_across_an_escaped_slash() {
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		start(&mut encoder, &mut decoder, r"room/a\/b/cam-1");
+		let (_, wire) = encoder.start(Path::from_static(r"room/a\/b/cam-2"));
+		assert_eq!(wire, path(1, 3, "cam-2"));
+		let (_, wire) = encoder.start(Path::from_static(r"room/a\/c"));
+		assert_eq!(wire, path(1, 2, "c"));
+
+		// What the previous release sends for those resolves to the same paths.
+		let suffix = decoder.start(Some(path(1, 3, "cam-2"))).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/b/cam-2");
+		let suffix = decoder.start(Some(path(1, 2, "c"))).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/c");
+		// A head ending inside an escape that nothing completes is refused, its id assigned.
+		assert_eq!(decoder.start(Some(path(3, 2, ""))).unwrap(), None);
+		assert_eq!(decoder.last(), 3);
+
+		// A claim an edit inserts is indexed the same way, so its end leaves nothing behind.
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let id = encoder.insert(Path::from_static(r"a\/b"));
+		encoder.end(id);
+		assert!(encoder.heads.children.is_empty());
 	}
 
 	#[test]

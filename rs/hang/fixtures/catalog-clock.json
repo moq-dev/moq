@@ -19,8 +19,8 @@
 			}
 		}
 	},
-	"media": {
+	"sync": {
 		"clock": { "wall": 1751846400000000, "timescale": 1000000 },
-		"join": { "interval": 2000 }
+		"interval": 2000
 	}
 }

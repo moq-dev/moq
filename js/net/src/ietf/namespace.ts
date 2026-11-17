@@ -4,43 +4,25 @@ import type { Reader, Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/**
- * Convert the escaped moq-net path representation into IETF namespace tuple fields.
- *
- * Every `\` in a valid path escapes the `\` or `/` after it.
- */
+/** The IETF namespace tuple fields of a path: each segment's content. */
 function toTuple(namespace: Path.Valid): string[] {
-	if (namespace === "") return [];
-
-	const parts = [""];
-	for (let i = 0; i < namespace.length; i++) {
-		const ch = namespace[i];
-		if (ch === "/") {
-			parts.push("");
-		} else if (ch === "\\") {
-			parts[parts.length - 1] += namespace[++i];
-		} else {
-			parts[parts.length - 1] += ch;
-		}
-	}
-	return parts;
+	return Path.parts(namespace).map(Path.unescape);
 }
 
 /**
  * Convert IETF namespace tuple fields into the escaped moq-net path representation.
  *
- * Every `\` and `/` in a field is escaped, the only spelling a path accepts, so every path
- * returns from its own tuple unchanged. Throws when a field ends in `/`, which escapes to a
- * path with an empty segment, or when the separators and escapes push the path past
- * {@link Path.MAX_BYTES}.
+ * Every `\` and `/` in a field is escaped, the only spelling a path accepts, so each field is
+ * one path segment and every path returns from its own tuple unchanged. Throws on an empty
+ * field, or when the separators and escapes push the path past {@link Path.MAX_BYTES}.
  */
 export function fromTuple(parts: string[]): Path.Valid {
-	const escaped = parts.map((part) => part.replaceAll("\\", "\\\\").replaceAll("/", "\\/")).join("/");
+	const escaped = parts.map(Path.escape).join("/");
 	if (tooLong(escaped)) throw new ProtocolViolation(`namespace exceeds ${Path.MAX_BYTES} bytes as a path`);
 	try {
 		return Path.from(escaped);
 	} catch (cause) {
-		throw new ProtocolViolation("namespace field escapes to an empty path segment", { cause });
+		throw new ProtocolViolation("namespace has an empty field", { cause });
 	}
 }
 

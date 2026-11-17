@@ -43,7 +43,7 @@ async fn each_joining_viewer_reads_the_held_group() {
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		for join in 0..3 {
 			let viewer = origin(3 + join);

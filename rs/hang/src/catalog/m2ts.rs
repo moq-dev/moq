@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Marked `#[non_exhaustive]` so additional optional fields can be added without bumping the major
 /// version. External callers build one with [`M2ts::new`] and assign the fields they need.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +31,7 @@ pub struct M2ts {
 	/// The rate the source's PCR paced the whole multiplex at, in bits per second, null packets
 	/// included. Present only while the source holds a constant rate.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub mux_rate: Option<u64>,
 }
 

@@ -554,12 +554,12 @@ impl<T: Serialize> Snapshot<T> {
 				return Ok(None);
 			}
 			if let Some(group) = self.group.take() {
-				group.close()?;
+				group.finish()?;
 			}
 			if self.fresh && self.largest.is_none() {
 				self.track.skip_groups(0..start);
 			}
-			self.group = Some(self.track.append_group(start)?);
+			self.group = Some(self.track.append_group(timestamp)?);
 			self.largest = Some(start);
 			self.opened = Some(stamp.group);
 			#[cfg(feature = "bench")]
@@ -569,11 +569,11 @@ impl<T: Serialize> Snapshot<T> {
 		}
 		let group = self.group.as_mut().expect("a delta follows a snapshot");
 		if let Err(err) = group.write_frame(timestamp, frame.payload.clone()) {
-			let _ = self.group.take().unwrap().close();
+			let _ = self.group.take().unwrap().finish();
 			return Err(err.into());
 		}
 		if !self.deltas {
-			self.group.take().unwrap().close()?;
+			self.group.take().unwrap().finish()?;
 		}
 		frame.commit();
 		#[cfg(feature = "bench")]
@@ -585,7 +585,7 @@ impl<T: Serialize> Snapshot<T> {
 
 	fn finish(&mut self) -> moq_json::Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		// The output keeps its own clone, whose appends the end refuses.
 		Ok(self.track.clone().finish().map(drop)?)
@@ -1024,19 +1024,23 @@ impl BucketTrack {
 }
 
 /// Each prefix of `path` from the root down to `path` itself, paired with the
-/// next segment below it (`None` at `path`).
+/// next segment below it (`None` at `path`). An escaped `/` stays in its segment.
 fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
-	let mut at = Some(0);
+	let mut parts = moq_net::path::parts(path);
+	let mut end = Some(0);
 	std::iter::from_fn(move || {
-		let end = at?;
-		if end == path.len() {
-			at = None;
+		let prefix = &path[..end?];
+		let Some(segment) = parts.next() else {
+			end = None;
 			return Some((path, None));
-		}
-		let start = if end == 0 { 0 } else { end + 1 };
-		let next = path[start..].find('/').map_or(path.len(), |i| start + i);
-		at = Some(next);
-		Some((&path[..end], Some(&path[start..next])))
+		};
+		// Segments are contiguous, one `/` apart.
+		end = Some(if prefix.is_empty() {
+			segment.len()
+		} else {
+			prefix.len() + 1 + segment.len()
+		});
+		Some((prefix, Some(segment)))
 	})
 }
 
@@ -1335,7 +1339,7 @@ impl NodePublisher {
 			let Some(rest) = entry.path.strip_prefix(&path) else {
 				continue;
 			};
-			let child = rest.as_str().split('/').next().filter(|child| !child.is_empty());
+			let child = rest.parts().next();
 			track.add(entry, child, tick);
 		}
 		track.publish(tick, stamp);
@@ -1790,13 +1794,15 @@ mod tests {
 				.expect("subscribe");
 
 			if frames > 0 {
-				let mut group = producer.append_group(0).expect("group");
+				let mut group = producer
+					.append_group(Timestamp::from_millis(0).unwrap())
+					.expect("group");
 				for _ in 0..frames {
 					group
 						.write_frame(Timestamp::ZERO, vec![0u8; frame_size])
 						.expect("write");
 				}
-				group.close().expect("close");
+				group.finish().expect("close");
 
 				let mut group = sub.recv_group().await.expect("recv").expect("group");
 				while group.read_frame().await.expect("read").is_some() {}
@@ -1921,7 +1927,7 @@ mod tests {
 	/// The same, without blocking: `None` once nothing more is buffered.
 	fn try_next_frame(track: &mut track::Ordered) -> Option<moq_net::frame::Frame> {
 		use futures::FutureExt;
-		let mut group = track.next_group().now_or_never()?.expect("ok")?;
+		let mut group = track.next_group().now_or_never()?.expect("ok")?.group()?;
 		group.read_frame().now_or_never()?.expect("ok")
 	}
 
@@ -2248,12 +2254,13 @@ mod tests {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let start = video.largest().map_or(0, |largest| largest.group + 1);
-			let mut group = video.append_group(start).expect("group");
+			let mut group = video
+				.append_group(Timestamp::from_millis(video.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+				.expect("group");
 			group
-				.write_frame(Timestamp::from_millis(start).unwrap(), vec![0u8; size])
+				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; size])
 				.expect("write");
-			group.close().expect("close");
+			group.finish().expect("close");
 			let mut group = sub.recv_group().await.expect("recv").expect("group");
 			while group.read_frame().await.expect("read").is_some() {}
 		}
@@ -2624,6 +2631,11 @@ mod tests {
 				("a/bc/d", None)
 			]
 		);
+		// An escaped `/` is content of its segment, never a level of its own.
+		assert_eq!(
+			walk(r"a\/b/c\\"),
+			[("", Some(r"a\/b")), (r"a\/b", Some(r"c\\")), (r"a\/b/c\\", None)]
+		);
 	}
 
 	/// A held prefix carries its rollup, the broadcast at exactly the prefix,
@@ -2709,9 +2721,9 @@ mod tests {
 			subs.push(track.subscribe(None).await.expect("subscribe"));
 		}
 		{
-			let mut group = video.append_group(0).expect("group");
+			let mut group = video.append_group(Timestamp::from_millis(0).unwrap()).expect("group");
 			group.write_frame(Timestamp::ZERO, vec![0u8; 10]).expect("write");
-			group.close().expect("close");
+			group.finish().expect("close");
 		}
 		drive_tick().await;
 		let (_, stats) = announced(&origin).await;
@@ -3190,7 +3202,7 @@ mod tests {
 			let mut track = subscribe(broadcast, &name).await;
 			let mut first = None;
 			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
-				let start = group.unwrap().unwrap().start;
+				let start = group.unwrap().unwrap().group().expect("a group").start;
 				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
 			let first = first.expect("a run's first group is listed");

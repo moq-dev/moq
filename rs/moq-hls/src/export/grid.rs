@@ -1,7 +1,7 @@
 //! Numbering a rendition's groups into HLS segments on the broadcast's join-interval grid.
 //!
 //! HLS numbers segments by position, so every edge and every reload has to derive the same
-//! consecutive numbers from timestamps alone. The catalog's `media.join.interval` fixes the
+//! consecutive numbers from timestamps alone. The catalog's `sync.interval` fixes the
 //! segment length, the smallest whole multiple of the interval that is at least [`MIN_SEGMENT`]
 //! (see [`segment_length`]), which draws a grid line at every multiple of that length in pts.
 //! Every rendition numbers its segments on it, so they share segment numbers while each cuts its

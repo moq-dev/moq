@@ -546,7 +546,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 /// by a `length_size`-byte big-endian length) into Annex-B by replacing every
 /// length prefix with a 4-byte start code. This is the inverse of the
 /// length-prefixing done by [`crate::codec::h264::Avc1`] / [`crate::codec::h265::Hvc1`].
-pub fn length_prefixed_to_annexb(data: &[u8], length_size: usize, out: &mut Vec<u8>) -> anyhow::Result<()> {
+pub fn length_prefixed_to_annexb(data: &[u8], length_size: usize, out: &mut Vec<u8>) -> Result<()> {
 	for nal in length_prefixed_nals(data, length_size)? {
 		out.extend_from_slice(&START_CODE);
 		out.extend_from_slice(nal?);

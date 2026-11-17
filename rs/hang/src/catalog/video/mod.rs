@@ -46,22 +46,25 @@ pub struct Video {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub renditions: BTreeMap<String, VideoConfig>,
 
 	/// Render the video at this size in pixels.
 	/// This is separate from the display aspect ratio because it does not require reinitialization.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub display: Option<Display>,
 
 	/// The clockwise rotation of the video in degrees.
 	/// Default: 0
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub rotation: Option<f64>,
 
 	/// If true, the decoder will flip the video horizontally
 	/// Default: false
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub flip: Option<bool>,
 }
 
@@ -191,6 +194,7 @@ pub struct VideoConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -201,6 +205,7 @@ pub struct VideoConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
 	/// The instance of the stream the reference names, when the catalog knows it. Absent names
@@ -211,11 +216,12 @@ pub struct VideoConfig {
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub label: Option<String>,
 
 	/// The codec, see the registry for details:
@@ -228,15 +234,19 @@ pub struct VideoConfig {
 	/// One of the best examples is H264, which needs the sps/pps to function.
 	/// If not provided, this information is (automatically) inserted before each key-frame (marginally higher overhead).
 	#[serde(default)]
-	#[serde_as(as = "Option<Hex>")]
+	#[serde_as(as = "crate::catalog::NotNull<Hex>")]
 	pub description: Option<Bytes>,
 
 	/// The largest encoded width/height the track carries, fixed for its name, never zero.
 	///
 	/// The picture resizes in band at a keyframe below these ceilings, unless the
 	/// `description` pins it. Absent means unknown; a publisher may fill it once.
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub coded_width: Option<u32>,
 	/// The height counterpart of `coded_width`.
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub coded_height: Option<u32>,
 
 	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
@@ -244,27 +254,33 @@ pub struct VideoConfig {
 	///
 	/// Absent means the decoded picture's own shape. A publisher with non-square
 	/// samples sets the picture's aspect here, never the sample aspect.
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub display_aspect_width: Option<u32>,
 	/// The height counterpart of `display_aspect_width`.
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub display_aspect_height: Option<u32>,
 
 	/// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
 	///
 	/// Live state, not identity: a publisher may fill it in once the bitstream reveals it.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub color: Option<Color>,
 
 	/// How the picture maps onto the viewer's field of view. Absent means rectilinear.
 	///
 	/// Live state, like [`color`](Self::color).
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub projection: Option<Projection>,
 
 	/// How each eye's view is packed into the frame. Absent means mono.
 	///
 	/// Live state, like [`color`](Self::color).
 	#[serde(default)]
-	#[serde_as(as = "Option<DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<DisplayFromStr>")]
 	pub stereo: Option<Stereo>,
 
 	/// Each picture weaves two fields, so a renderer deinterlaces it. Only written when true.
@@ -275,7 +291,7 @@ pub struct VideoConfig {
 
 	/// The maximum bitrate of the video track, if known, at most 2^53 - 1.
 	#[serde(default)]
-	#[serde_as(as = "Option<crate::snapshot::Number>")]
+	#[serde_as(as = "crate::catalog::NotNull<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
@@ -294,6 +310,7 @@ pub struct VideoConfig {
 
 	/// The maximum frame rate of the video track, if known.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub framerate: Option<f64>,
 
 	/// The most frames that can precede a frame in decode order and follow it in presentation
@@ -303,12 +320,14 @@ pub struct VideoConfig {
 	/// that authors decode times infers them from the timestamps instead. A publisher that
 	/// declares it keeps it for the track's life, and never reorders deeper.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub reorder: Option<u8>,
 
 	/// If true, the decoder will optimize for latency.
 	///
 	/// Default: true
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub optimize_for_latency: Option<bool>,
 
 	/// Container format for frame encoding.
@@ -316,30 +335,20 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay between a frame being ready and the publisher flushing it.
-	/// The player's jitter buffer should be larger than this value.
-	/// If not provided, the player should assume each frame is flushed immediately.
+	/// The largest media span the publisher hands to the transport behind a frame's presentation
+	/// timestamp: the reorder delay of a frame presented after frames decoded behind it, or the span
+	/// of a batch written together, such as an fMP4 fragment. A consumer's jitter buffer should be at
+	/// least this large. Absent when the publisher measured none.
 	///
-	/// This is measured at the publisher (encoder latency, segment size, B-frame
-	/// reordering), never on the network a consumer sees. It only ever grows over the life of a
-	/// stream.
+	/// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	/// whatever the frame rate; encoder latency and the network don't count. It only ever grows
+	/// over the life of a stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
 	/// rounds down into a promise the publisher can't keep.
-	///
-	/// ex:
-	/// - If each frame is flushed immediately, this would be 1000/fps.
-	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
-	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
-
-	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
-	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
-	#[serde_as(as = "Option<MillisCeil>")]
-	#[serde(default)]
-	pub warmup: Option<std::time::Duration>,
 
 	/// How far this rendition's frames reach the transport behind the broadcast's other
 	/// renditions: a constant offset, either supplied by the publisher or measured as the least
@@ -394,7 +403,6 @@ impl VideoConfig {
 			optimize_for_latency: None,
 			container: Container::default(),
 			jitter: None,
-			warmup: None,
 			delay: None,
 		}
 	}
@@ -416,7 +424,7 @@ impl VideoConfig {
 	}
 }
 
-impl crate::catalog::Rendition for VideoConfig {
+impl crate::catalog::Entry for VideoConfig {
 	fn check(&self) -> crate::Result<()> {
 		for (field, value) in [
 			("codedWidth", self.coded_width),
@@ -446,19 +454,6 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn warmup_round_trips() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		assert!(serde_json::to_value(&config).unwrap().get("warmup").is_none());
-		for millis in [0, 80, 1_000] {
-			config.warmup = Some(std::time::Duration::from_millis(millis));
-			let encoded = serde_json::to_value(&config).unwrap();
-			assert_eq!(encoded["warmup"], millis);
-			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
-			assert_eq!(decoded.warmup, config.warmup);
-		}
-	}
-
-	#[test]
 	fn reorder_keeps_zero_distinct_from_absent() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		assert!(serde_json::to_value(&config).unwrap().get("reorder").is_none());
@@ -468,18 +463,6 @@ mod test {
 			assert_eq!(encoded["reorder"], depth);
 			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
 			assert_eq!(decoded.reorder, Some(depth));
-		}
-	}
-
-	#[test]
-	fn warmup_rounds_up() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		for (nanos, millis) in [(1, 1), (499_999, 1), (333_200_000, 334)] {
-			config.warmup = Some(std::time::Duration::from_nanos(nanos));
-			let encoded = serde_json::to_value(&config).unwrap();
-			assert_eq!(encoded["warmup"], millis);
-			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
-			assert_eq!(decoded.warmup, Some(std::time::Duration::from_millis(millis)));
 		}
 	}
 

@@ -1291,7 +1291,6 @@ dependencies = [
 name = "moq-mux"
 version = "0.10.11"
 dependencies = [
- "anyhow",
  "base64",
  "bitstream-io",
  "bytes",

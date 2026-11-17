@@ -28,6 +28,19 @@ describe("specifiers", () => {
 		]);
 	});
 
+	test("reads declaration files", () => {
+		const source = `
+			import { type Report, Support } from "@moq/static";
+			export { type Show } from "@moq/export";
+			export default class Banner extends Support {
+				protected detect(): Promise<Report>;
+			}
+			export declare function rows(): import("@moq/query").Rows;
+		`;
+
+		expect(specifiers(source)).toEqual(["@moq/static", "@moq/export", "@moq/query"]);
+	});
+
 	test("ignores comments and strings", () => {
 		const source = `
 			// import "@moq/comment";

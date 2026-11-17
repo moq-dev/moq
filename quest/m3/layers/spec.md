@@ -51,7 +51,3 @@ viewers.
   `moq-studio --watch` prototype plays it, planned as
   `quest/m2/compose/layout.md` there. Check: that quest's file is gone from
   moq-dev/studio's `main` because its PR merged.
-
-## Required
-
-- [hang applies catalog updates at their timestamp](/quest/m2/catalog-at-timestamp.md) - a composition's changes land on the frame stamped alike
