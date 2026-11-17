@@ -197,7 +197,7 @@ pub enum Transport {
 	Quic,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
-	/// A TCP connection using qmux framing, plaintext or TLS.
+	/// A plaintext TCP connection using qmux framing.
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,
@@ -212,6 +212,8 @@ pub enum Transport {
 	WebRtc,
 	/// A WebTransport connection over HTTP/3.
 	WebTransport,
+	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
+	Tls,
 	/// A transport name this auth server does not recognize.
 	#[serde(other)]
 	Unknown,
@@ -224,6 +226,7 @@ impl Transport {
 			Self::Quic => "quic",
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
+			Self::Tls => "tls",
 			Self::Unix => "unix",
 			Self::Http => "http",
 			Self::Rtmp => "rtmp",
@@ -438,6 +441,16 @@ mod tests {
 			(Transport::Srt, "srt"),
 			(Transport::WebRtc, "webrtc"),
 		] {
+			let request = Request::new("relay-1", transport, "/room");
+			let json = serde_json::to_value(&request).unwrap();
+			assert_eq!(json["transport"], text);
+			assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+		}
+	}
+
+	#[test]
+	fn stream_link_transports_keep_their_own_names() {
+		for (transport, text) in [(Transport::Tcp, "tcp"), (Transport::Tls, "tls")] {
 			let request = Request::new("relay-1", transport, "/room");
 			let json = serde_json::to_value(&request).unwrap();
 			assert_eq!(json["transport"], text);

@@ -616,7 +616,7 @@ mod tests {
 		let url: Url = format!("tls://localhost:{port}/room?jwt=credential").parse().unwrap();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.unwrap();
-			assert_eq!(request.transport(), crate::Transport::Tcp);
+			assert_eq!(request.transport(), crate::Transport::Tls);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
 			let session = request.ok().await.unwrap();
@@ -637,10 +637,11 @@ mod tests {
 			matches!(untrusted, Ok(Err(_))),
 			"an untrusted certificate must be refused"
 		);
-		let _session = kio::clock::timeout(Duration::from_secs(5), dial(true).established())
+		let session = kio::clock::timeout(Duration::from_secs(5), dial(true).established())
 			.await
 			.expect("trusted dial timed out")
 			.expect("trusted dial failed");
+		assert_eq!(session.transport(), Some(crate::Transport::Tls));
 		let (_server, _accepted) = kio::clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
