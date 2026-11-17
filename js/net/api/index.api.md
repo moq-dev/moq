@@ -340,8 +340,8 @@ export namespace Error {
 		readonly code: SessionCode;
 	}
 	export class Skipped extends Error {
-		constructor(sequence: bigint);
-		readonly sequence: bigint;
+		constructor(start: bigint);
+		readonly start: bigint;
 	}
 	export class Stream extends Error {
 		constructor(code: StreamCode, options?: Error.StreamOptions);
@@ -367,9 +367,9 @@ export namespace Error {
 export namespace Frame {
 	export class Consumer {
 		get arrived(): Clock.Instant | undefined;
+		readonly index: number;
 		readAll(): Promise<Uint8Array>;
 		readChunk(): Promise<Uint8Array | undefined>;
-		readonly sequence: number;
 		readonly size: number;
 		readonly timestamp: Time.Timestamp;
 	}
@@ -397,22 +397,22 @@ export namespace Group {
 		get frameCount(): number;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
-		readFrameSequence(options?: Group.ReadOptions): Promise<{
-			sequence: number;
+		readFrameIndex(options?: Group.ReadOptions): Promise<{
+			index: number;
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		readable(): Promise<void>;
-		readonly sequence: bigint;
+		readonly start: bigint;
 		tryReadFrame(): Group.Frame | undefined;
-		tryReadFrameSequence(): {
-			sequence: number;
+		tryReadFrameIndex(): {
+			index: number;
 		} & Group.Frame | undefined;
 	}
 	export interface Finished {
 		readonly closed: Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
-		readonly sequence: bigint;
+		readonly start: bigint;
 	}
 	export interface Frame {
 		arrived?: Clock.Instant;
@@ -420,17 +420,17 @@ export namespace Group {
 		timestamp: Time.Timestamp;
 	}
 	export interface Info {
-		sequence: bigint;
+		start: bigint;
 	}
 	export class Producer {
-		constructor(sequence: bigint);
+		constructor(start: bigint);
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): Group.Finished;
 		finishAt(end: bigint): Group.Finished;
-		readonly sequence: bigint;
+		readonly start: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
 	export interface ReadOptions {
@@ -673,12 +673,12 @@ export namespace Time {
 		static fromMicros(us: number): Time.Timestamp;
 		static fromMillis(ms: number): Time.Timestamp;
 		isBefore(other: Time.Timestamp): boolean;
+		get key(): bigint | undefined;
 		static now(): Time.Timestamp;
 		readonly scale: Time.Timescale | undefined;
 		static unscaled(key: bigint | number): Time.Timestamp;
 		readonly value: number;
 	}
-	export let keyOf: (timestamp: Time.Timestamp) => bigint | undefined;
 }
 
 export interface Timed<T> {
@@ -688,17 +688,11 @@ export interface Timed<T> {
 
 export namespace Track {
 	export type Anchor = {
-		absolute: bigint;
-		relative?: never;
-		time?: never;
-	} | {
-		absolute?: never;
 		relative: bigint;
 		time?: never;
 	} | {
-		absolute?: never;
 		relative?: never;
-		time: Time.Timestamp;
+		time: bigint;
 	};
 	export type Bound = {
 		excluded?: never;
@@ -731,7 +725,7 @@ export namespace Track {
 	export type Fill = Track.FillGroups | Track.FillLookup;
 	export class FillGroups {
 		[Symbol.dispose](): void;
-		accept(sequence: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
@@ -748,12 +742,12 @@ export namespace Track {
 	}
 	export class FillLookup {
 		[Symbol.dispose](): void;
-		accept(sequence: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		readonly kind: "lookup";
 		get maxDelay(): Clock.Duration | null;
 		get priority(): number;
-		readonly time: Time.Timestamp;
+		readonly time: bigint;
 	}
 	export interface Finished {
 		abort(error: Error): void;
@@ -788,6 +782,7 @@ export namespace Track {
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
 		info(): Promise<Track.Info>;
+		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		nextGroup(): Promise<Group.Consumer | undefined>;
@@ -810,7 +805,7 @@ export namespace Track {
 		constructor(name: string);
 		abort(error: Error): void;
 		accept(info?: Track.InfoInit): this;
-		appendGroup(): Group.Producer;
+		appendGroup(start: Time.Timestamp): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		createGroup(sequence: bigint): Group.Producer;
@@ -844,6 +839,7 @@ export namespace Track {
 		finished(): Promise<Track.Position>;
 		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
+		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		nextInRange(from: bigint): bigint | undefined;
