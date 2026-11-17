@@ -86,64 +86,91 @@ function rint(x: number): number {
 }
 
 // A mixed-radix complex FFT of 480 points, scaled by 1/480 as CELT's is.
+const FFT_FACTORS = [4, 4, 2, 3, 5];
+
+// One decimation-in-time stage: blocks of p*m outputs, each combining p transforms of length m.
+interface FftStage {
+	p: number;
+	m: number;
+	// The twiddle for subsequence q at bin k, at q * m + k.
+	twR: Float64Array;
+	twI: Float64Array;
+	// The p-point DFT's roots, at r * p + q.
+	rootR: Float64Array;
+	rootI: Float64Array;
+}
+
 class Fft {
-	static readonly #FACTORS = [4, 4, 2, 3, 5];
-	readonly #cos = Float64Array.from({ length: N }, (_, k) => Math.cos((-2 * Math.PI * k) / N));
-	readonly #sin = Float64Array.from({ length: N }, (_, k) => Math.sin((-2 * Math.PI * k) / N));
+	// Which input lands in each output slot before the first stage, as the recursion would read it.
+	readonly #order = new Int32Array(N);
+	// Innermost first.
+	readonly #stages: FftStage[] = [];
 	readonly #tr = new Float64Array(5);
 	readonly #ti = new Float64Array(5);
 
-	run(inR: Float64Array, inI: Float64Array, outR: Float64Array, outI: Float64Array): void {
-		this.#step(inR, inI, 0, 1, N, outR, outI, 0, 0);
-		for (let k = 0; k < N; k++) {
-			outR[k] /= N;
-			outI[k] /= N;
+	constructor() {
+		const order = (at: number, stride: number, n: number, out: number, depth: number): void => {
+			if (n === 1) {
+				this.#order[out] = at;
+				return;
+			}
+			const p = FFT_FACTORS[depth];
+			for (let q = 0; q < p; q++) order(at + q * stride, stride * p, n / p, out + (q * n) / p, depth + 1);
+		};
+		order(0, 1, N, 0, 0);
+
+		let stride = N;
+		for (const p of [...FFT_FACTORS].reverse()) {
+			stride /= p;
+			const m = N / stride / p;
+			const twR = new Float64Array(p * m);
+			const twI = new Float64Array(p * m);
+			for (let q = 0; q < p; q++) {
+				for (let k = 0; k < m; k++) {
+					const angle = (-2 * Math.PI * q * k * stride) / N;
+					twR[q * m + k] = Math.cos(angle);
+					twI[q * m + k] = Math.sin(angle);
+				}
+			}
+			const rootR = new Float64Array(p * p);
+			const rootI = new Float64Array(p * p);
+			for (let i = 0; i < p * p; i++) {
+				const angle = (-2 * Math.PI * (Math.floor(i / p) * (i % p))) / p;
+				rootR[i] = Math.cos(angle);
+				rootI[i] = Math.sin(angle);
+			}
+			this.#stages.push({ p, m, twR, twI, rootR, rootI });
 		}
 	}
 
-	// Decimation in time: transform each of the p interleaved subsequences into its slot, then
-	// combine them with one radix-p butterfly per output bin.
-	#step(
-		inR: Float64Array,
-		inI: Float64Array,
-		at: number,
-		stride: number,
-		n: number,
-		outR: Float64Array,
-		outI: Float64Array,
-		out: number,
-		depth: number,
-	): void {
-		if (n === 1) {
-			outR[out] = inR[at];
-			outI[out] = inI[at];
-			return;
+	run(inR: Float64Array, inI: Float64Array, outR: Float64Array, outI: Float64Array): void {
+		for (let i = 0; i < N; i++) {
+			outR[i] = inR[this.#order[i]] / N;
+			outI[i] = inI[this.#order[i]] / N;
 		}
-		const p = Fft.#FACTORS[depth];
-		const m = n / p;
-		for (let q = 0; q < p; q++)
-			this.#step(inR, inI, at + q * stride, stride * p, m, outR, outI, out + q * m, depth + 1);
-
 		const tr = this.#tr;
 		const ti = this.#ti;
-		for (let k = 0; k < m; k++) {
-			for (let q = 0; q < p; q++) {
-				const w = (q * k * stride) % N;
-				const xr = outR[out + q * m + k];
-				const xi = outI[out + q * m + k];
-				tr[q] = xr * this.#cos[w] - xi * this.#sin[w];
-				ti[q] = xr * this.#sin[w] + xi * this.#cos[w];
-			}
-			for (let r = 0; r < p; r++) {
-				let sr = 0;
-				let si = 0;
-				for (let q = 0; q < p; q++) {
-					const w = ((q * r * N) / p) % N;
-					sr += tr[q] * this.#cos[w] - ti[q] * this.#sin[w];
-					si += tr[q] * this.#sin[w] + ti[q] * this.#cos[w];
+		for (const { p, m, twR, twI, rootR, rootI } of this.#stages) {
+			for (let out = 0; out < N; out += p * m) {
+				for (let k = 0; k < m; k++) {
+					for (let q = 0; q < p; q++) {
+						const x = out + q * m + k;
+						const w = q * m + k;
+						tr[q] = outR[x] * twR[w] - outI[x] * twI[w];
+						ti[q] = outR[x] * twI[w] + outI[x] * twR[w];
+					}
+					for (let r = 0; r < p; r++) {
+						let sr = 0;
+						let si = 0;
+						for (let q = 0; q < p; q++) {
+							const w = r * p + q;
+							sr += tr[q] * rootR[w] - ti[q] * rootI[w];
+							si += tr[q] * rootI[w] + ti[q] * rootR[w];
+						}
+						outR[out + r * m + k] = sr;
+						outI[out + r * m + k] = si;
+					}
 				}
-				outR[out + r * m + k] = sr;
-				outI[out + r * m + k] = si;
 			}
 		}
 	}
