@@ -44,7 +44,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   item re-checked for a downstream caller first.
 - **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
-  [config names](/quest/m2/relay-config-names.md) and
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
 - **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
