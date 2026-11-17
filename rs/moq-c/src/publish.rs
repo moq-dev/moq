@@ -94,9 +94,8 @@ enum Family {
 	Open {
 		/// Handles that may still publish, ended on close.
 		open: HashSet<Child>,
-		/// Finished producers, kept so a late subscriber still finds their tracks, or `None` for
-		/// a family that drops them on finish.
-		kept: Option<Vec<Box<dyn Send>>>,
+		/// Finished producers, kept so a late subscriber still finds their tracks.
+		kept: Vec<Box<dyn Send>>,
 	},
 	/// The broadcast closed: its children ended and new ones are refused.
 	Closed,
@@ -124,16 +123,7 @@ impl Children {
 	pub(crate) fn new() -> Self {
 		Self(Arc::new(std::sync::Mutex::new(Family::Open {
 			open: HashSet::new(),
-			kept: Some(Vec::new()),
-		})))
-	}
-
-	/// A family that drops each finished producer instead of keeping it until the close, for
-	/// children no late subscriber looks up, such as a socket endpoint's streams.
-	pub(crate) fn unkept() -> Self {
-		Self(Arc::new(std::sync::Mutex::new(Family::Open {
-			open: HashSet::new(),
-			kept: None,
+			kept: Vec::new(),
 		})))
 	}
 
@@ -164,29 +154,18 @@ impl Children {
 	}
 
 	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already
-	/// has or the family keeps none.
+	/// has.
 	pub(crate) fn keep(&self, child: Child, producer: impl Send + 'static) {
 		let producer: Box<dyn Send> = Box::new(producer);
 		let mut family = self.lock();
 		if let Family::Open { open, kept } = &mut *family {
 			open.remove(&child);
-			if let Some(kept) = kept {
-				kept.push(producer);
-				return;
-			}
+			kept.push(producer);
+			return;
 		}
 		// Dropped outside the lock: the last producer's drop tears its track down.
 		drop(family);
 		drop(producer);
-	}
-
-	/// How many children are open and how many finished producers are kept.
-	#[cfg(test)]
-	pub(crate) fn counts(&self) -> (usize, usize) {
-		match &*self.lock() {
-			Family::Open { open, kept } => (open.len(), kept.as_ref().map_or(0, Vec::len)),
-			Family::Closed => (0, 0),
-		}
 	}
 
 	/// Whether the broadcast closed, ending its children.
@@ -1210,28 +1189,6 @@ impl Publish {
 			children: children.clone(),
 		};
 		children.insert(&mut self.tracks, raw, Child::Track)
-	}
-
-	/// Hand a socket stream's `track` half to C as a raw track handle, a child of the
-	/// endpoint's `children` like a track is of its broadcast.
-	pub(crate) fn socket_track(&mut self, track: moq_net::track::Producer, children: &Children) -> Result<Id, Error> {
-		let raw = Kept {
-			inner: track,
-			children: children.clone(),
-		};
-		children.insert(&mut self.tracks, raw, Child::Track)
-	}
-
-	/// End a closed endpoint's open `track` halves, as a broadcast's close ends its tracks,
-	/// and let go of its finished ones.
-	pub(crate) fn socket_close(&mut self, children: &Children) {
-		for child in children.close() {
-			if let Child::Track(id) = child
-				&& let Some(track) = self.tracks.remove(id)
-			{
-				track.abort(moq_net::Error::Unroutable);
-			}
-		}
 	}
 
 	/// Append the next group to a raw track, starting at `start`, returning a group producer.

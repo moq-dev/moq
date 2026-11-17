@@ -707,10 +707,10 @@ pub struct MoqTrackProducer {
 /// How far a track binding got.
 #[derive(Default)]
 enum TrackPhase {
-	/// Publishing, as a child of `family` unless it has none, as a socket's track does.
+	/// Publishing, as a child of `family`.
 	Open {
 		raw: moq_net::track::Producer,
-		family: Option<Children>,
+		family: Children,
 	},
 	/// Finished, and kept by its family until the broadcast closes. It may still take groups
 	/// below its end, and abort.
@@ -755,19 +755,12 @@ impl Drop for MoqTrackProducer {
 }
 
 impl MoqTrackProducer {
-	/// Wrap a socket's track without a broadcast family.
-	pub(crate) fn from_socket(raw: moq_net::track::Producer) -> Self {
-		Self {
-			phase: std::sync::Mutex::new(TrackPhase::Open { raw, family: None }),
-		}
-	}
-
 	/// Wrap `raw` as a child of the broadcast `children` belongs to.
 	fn child(raw: moq_net::track::Producer, children: &Children) -> Result<Arc<Self>, MoqError> {
 		children.adopt(Arc::new(Self {
 			phase: std::sync::Mutex::new(TrackPhase::Open {
 				raw,
-				family: Some(children.clone()),
+				family: children.clone(),
 			}),
 		}))
 	}
@@ -788,17 +781,12 @@ impl MoqTrackProducer {
 		let mut phase = std::mem::take(&mut *self.phase.lock().unwrap());
 		let raw = phase.raw()?.clone();
 		match (f(raw), phase) {
-			(
-				Ok(writer),
-				TrackPhase::Open {
-					family: Some(family), ..
-				},
-			) => family.adopt(Arc::new(writer)),
+			(Ok(writer), TrackPhase::Open { family, .. }) => family.adopt(Arc::new(writer)),
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),
 			(Err(err), phase) => {
 				let family = match &phase {
-					TrackPhase::Open { family, .. } => family.clone(),
+					TrackPhase::Open { family, .. } => Some(family.clone()),
 					TrackPhase::Finished(_) | TrackPhase::Closed => None,
 				};
 				*self.phase.lock().unwrap() = phase;
@@ -965,9 +953,7 @@ impl MoqTrackProducer {
 					*phase = TrackPhase::Open { raw, family };
 					return Err(err.into());
 				}
-				if let Some(family) = family {
-					family.keep(raw.clone());
-				}
+				family.keep(raw.clone());
 				TrackPhase::Finished(raw)
 			}
 			finished @ TrackPhase::Finished(_) => finished,
