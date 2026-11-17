@@ -198,6 +198,8 @@ export namespace Window {
 	}
 }
 
+export function after(track: Track.Producer, at: Time.Timestamp): Time.Timestamp;
+
 export function deepEqual(a: unknown, b: unknown): boolean;
 
 export function diff(oldVal: unknown, newVal: unknown): Diff;

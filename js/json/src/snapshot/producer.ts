@@ -1,7 +1,7 @@
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { MAX_FRAME_BYTES } from "../limits.ts";
-import { frameTime, openGroup, startsPast } from "../time.ts";
+import { frameTime, startsPast } from "../time.ts";
 
 import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
@@ -139,7 +139,7 @@ export class Producer<T> {
 		if (encoded.keyframe) {
 			// Opened before the previous group finishes, so a key at or before the newest group's is
 			// refused with the previous group still open.
-			const group = openGroup(this.#track, at);
+			const group = this.#track.appendGroup(at);
 			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.

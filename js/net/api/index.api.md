@@ -793,6 +793,7 @@ export namespace Track {
 		skipGroups(start: bigint, end: bigint): void;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
+		get timescale(): Time.Timescale | null | undefined;
 		writeFrame(frame: Group.Frame): void;
 	}
 	export interface Range {

@@ -1594,6 +1594,11 @@ export class Producer {
 		return this.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 	}
 
+	/** The timescale from the committed {@link Info}: `null` when scale-less, undefined before {@link accept}. */
+	get timescale(): Timescale | null | undefined {
+		return this.#state.info.peek()?.timescale;
+	}
+
 	/**
 	 * Settles once the track's outcome is final: `null` once its declared end is reached and
 	 * settled (every group below it finished; its error, if declared with one) or on a clean
