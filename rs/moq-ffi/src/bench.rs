@@ -281,8 +281,8 @@ async fn rust_ffi() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("calls".into(), None).unwrap();
 	let group = track.append_group().unwrap().consume().unwrap();
-	report.call("sequence", || {
-		black_box(black_box(&group).sequence());
+	report.call("start", || {
+		black_box(black_box(&group).start());
 	});
 	let consumer = track.consume(None).unwrap();
 	report.call("info", || {
