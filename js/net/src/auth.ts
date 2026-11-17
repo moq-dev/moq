@@ -18,7 +18,7 @@
  */
 
 import type { Wall } from "@moq/clock";
-import type { Getter } from "@moq/signals";
+import type { GetPromise, Getter } from "@moq/signals";
 import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
 
@@ -53,7 +53,7 @@ export interface Credential {
 	 * peer closed it without one or it was withdrawn, or the handle's end. A session ending is
 	 * not one: the next session presents it again.
 	 */
-	readonly closed: PromiseLike<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 	/**
 	 * Resolves once a peer first accepts the token. Rejects with {@link Unsupported} when a
 	 * session neither carries AUTH nor lets a request carry a token (moq-lite without AUTH),
@@ -75,7 +75,7 @@ export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
 	/** Settles when the peer withdraws this unanswered token or closes the session. */
-	readonly closed: PromiseLike<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 	/**
 	 * Grant the token until the returned {@link Issued} is revoked or closed.
 	 *
@@ -106,7 +106,7 @@ export interface Issued {
 	/** End the grant without a reason. */
 	close(): void;
 	/** Settles once the peer withdraws the token or its stream ends. */
-	readonly closed: PromiseLike<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 }
 
 /**

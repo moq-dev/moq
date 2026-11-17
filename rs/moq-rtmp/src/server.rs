@@ -7,10 +7,11 @@
 //! `play` command. The caller inspects the app and stream key, makes an
 //! authorization decision, and either:
 //!
-//! - **[`Request::Publish`]**: [`Publish::accept`] (ingest into an origin at a
-//!   path) or [`Publish::reject`]. This is the contribution path (OBS, ffmpeg).
-//! - **[`Request::Play`]**: [`Play::accept`] (serve a broadcast from an origin
-//!   down to the player) or [`Play::reject`]. This is the egress path: a player
+//! - **[`Request::Publish`]**: [`Publish::accept`] with an [`Import`] (ingest into
+//!   an origin at a path) or [`Publish::reject`]. This is the contribution path
+//!   (OBS, ffmpeg).
+//! - **[`Request::Play`]**: [`Play::accept`] with an [`Export`] (serve a broadcast
+//!   from an origin down to the player) or [`Play::reject`]. This is the egress path: a player
 //!   (VLC, ffplay, mpv) pulls `rtmp://host/<app>/<key>` and we stream it back.
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
@@ -76,7 +77,7 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// A listener's play session has no equivalent,
 /// which is why [`configure_socket`]'s keepalive is not optional.
-pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a play request may wait for its broadcast and initial FLV header
 /// before the server rejects it.
@@ -450,7 +451,7 @@ async fn sleep_until(at: Option<kio::clock::Instant>) {
 /// [`Server`] applies this to every socket it accepts. Call it yourself when you own
 /// the listener and hand the stream to [`accept_stream`]: the keepalive is the ONLY
 /// thing bounding a play session whose viewer vanished without a FIN while its
-/// broadcast was quiet. [`PUBLISH_IDLE_TIMEOUT`] covers the publish direction, but
+/// broadcast was quiet. A media timeout covers the publish direction, but
 /// nothing reads or writes on a silent play socket, so it would otherwise live until
 /// the process restarted, holding its origin consumer open.
 ///
@@ -586,10 +587,10 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// RTMP media into it, published as `ingest` says, until the client disconnects.
+	/// Accept the publish: announce the [`Import`]'s broadcast in its publisher and pump the
+	/// RTMP media into it, published as its ingest says, until the client disconnects.
 	///
-	/// `origin` is whatever the caller wants the media published into (e.g. a
+	/// The publisher is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
 	/// token). This future resolves when the connection ends, so callers usually
 	/// run it on its own task.
@@ -598,13 +599,12 @@ impl<S: Stream> Publish<S> {
 	/// stays up for the ingest's [linger](moq_mux::Ingest::linger), and the future resolves
 	/// after that. Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(
-		mut self,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(mut self, import: Import<'_>) -> Result<()> {
+		let Import {
+			publisher: origin,
+			broadcast: path,
+			ingest,
+		} = import;
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
@@ -713,9 +713,6 @@ pub struct Play<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_delay`](Self::with_delay).
-	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -745,22 +742,19 @@ impl<S: Stream> Play<S> {
 		self.peer
 	}
 
-	/// Set the FLV release delay and stalled-group budget.
-	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.delay = delay;
-		self
-	}
-
-	/// Accept the play: subscribe to the broadcast at `path` in `origin`, mux it
+	/// Accept the play: subscribe to the [`Export`]'s broadcast in its subscriber, mux it
 	/// to FLV, and stream the tags down to the player until either side ends.
 	///
 	/// Waits for the broadcast to be announced (so a player can connect slightly
 	/// before the publisher), cancelling cleanly if the viewer disconnects first.
 	/// This future resolves when playback ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(mut self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(mut self, export: Export<'_>) -> Result<()> {
+		let Export {
+			subscriber: origin,
+			broadcast: path,
+			delay,
+		} = export;
 		let Ok(mut following) = origin.follow(&path, None) else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
@@ -837,11 +831,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(
-				moq_net::track::Delay::default()
-					.with_min(self.delay)
-					.with_max(self.delay),
-			)
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -920,6 +910,51 @@ impl<S: Stream> Play<S> {
 		}
 		tracing::debug!(peer = %self.peer, %reason, "rtmp play rejected");
 		Ok(())
+	}
+}
+
+/// Where and how [`Publish::accept`] publishes an RTMP publish's media.
+#[non_exhaustive]
+pub struct Import<'a> {
+	/// The producer the media is published into.
+	pub publisher: &'a origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+}
+
+impl<'a> Import<'a> {
+	/// Publish into `publisher` under `broadcast` with the default [`Ingest`](moq_mux::Ingest).
+	pub fn new(publisher: &'a origin::Producer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			publisher,
+			broadcast: broadcast.into(),
+			ingest: moq_mux::Ingest::default(),
+		}
+	}
+}
+
+/// Where and how [`Play::accept`] reads the broadcast it serves to an RTMP player.
+#[non_exhaustive]
+pub struct Export<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a origin::Consumer,
+	/// The broadcast to serve, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// The FLV release delay and stalled-group budget. Defaults to 500 ms; zero releases
+	/// available frames immediately without deadline drops.
+	pub delay: Duration,
+}
+
+impl<'a> Export<'a> {
+	/// Serve `broadcast` from `subscriber` with the default delay.
+	pub fn new(subscriber: &'a origin::Consumer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			delay: crate::DEFAULT_DELAY,
+		}
 	}
 }
 
@@ -1170,7 +1205,6 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1814,7 +1848,11 @@ mod tests {
 		let mut ingest = moq_mux::Ingest::default();
 		ingest.linger = linger;
 		publish
-			.accept(&origin, moq_net::Path::from_static("live/cam0"), &ingest)
+			.accept(Import {
+				publisher: &origin,
+				broadcast: moq_net::Path::from_static("live/cam0"),
+				ingest,
+			})
 			.await
 			.unwrap();
 	}
@@ -2227,7 +2265,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2300,7 +2338,8 @@ mod tests {
 			let Some(Request::Play(play)) = server.accept().await else {
 				panic!("expected a play request");
 			};
-			play.accept(&play_origin, moq_net::Path::from_static("live/cam0")).await
+			play.accept(Export::new(&play_origin, moq_net::Path::from_static("live/cam0")))
+				.await
 		});
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
@@ -2371,7 +2410,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2649,7 +2688,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -2707,7 +2746,7 @@ mod tests {
 
 		tokio::time::pause();
 		let server_task = tokio::spawn(async move {
-			play.accept(&consumer, moq_net::Path::from_static("live/missing"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/missing")))
 				.await
 				.unwrap();
 		});
@@ -2774,7 +2813,7 @@ mod tests {
 				let origin = origin.clone();
 				tokio::spawn(async move {
 					publish
-						.accept(&origin, moq_net::Path::from_static("live/cam0"), &Default::default())
+						.accept(Import::new(&origin, moq_net::Path::from_static("live/cam0")))
 						.await
 				});
 			}

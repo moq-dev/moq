@@ -325,7 +325,7 @@ async fn refresh<S: ObjectStore>(shared: Arc<Shared<S>>, mut tracks: Vec<Snapsho
 			let index = track.index.lock().unwrap();
 			(index.dir.clone(), index.cursor().clone(), index.timed())
 		};
-		let listed = index::list(store.inner(), &dir, &cursor, timed, ended).await?;
+		let listed = index::list(store.inner(), &dir, &cursor, ended).await?;
 		track.index.lock().unwrap().extend(&listed.objects);
 		if let Some(end) = listed.end {
 			ends.push((track.name.clone(), end));

@@ -78,7 +78,9 @@ Future<void> throughput(
   Future<void> step(int n) async {
     final readers = [for (final consumer in consumers) read(consumer, n)];
     for (final track in tracks) {
-      final group = track.appendGroup();
+      final group = track.appendGroup(
+        start: Timestamp(value: n * c.frames, scale: 1000000),
+      );
       try {
         for (var f = 0; f < c.frames; f++) {
           group.writeFrame(
@@ -156,7 +158,7 @@ Future<void> main() async {
   }
   final broadcast = BroadcastProducer();
   final track = broadcast.publishTrack(name: 'calls', info: null);
-  final producer = track.appendGroup();
+  final producer = track.appendGroup(start: Timestamp.unscaled(0));
   final group = producer.consume();
   final consumer = track.consume(subscription: null);
   void call(String name, Object? Function() fn) {
@@ -175,7 +177,7 @@ Future<void> main() async {
     });
   }
 
-  call('sequence', group.sequence);
+  call('start', group.start);
   call('info', consumer.info);
   consumer.dispose();
   group.dispose();

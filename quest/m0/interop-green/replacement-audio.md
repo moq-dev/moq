@@ -1,35 +1,28 @@
-# [M] Restore the replacement media case: audio after a route switch
+# [M] Restore the replacement media case on Firefox
 
 ## Goal
 
-`just test media --media-cases replacement` passes every run on Chromium under CPU load, and the
-default media run runs it again. Remove its quarantine in `test/interop/clients/js/media.ts` and
-`test/interop/README.md`.
+`just test media --media-cases replacement --media-engines firefox` passes every run, and the
+default media run on Firefox runs it again. Remove the quarantine off Chromium in
+`test/interop/clients/js/media.ts` and `test/interop/README.md`.
 
 ## Plan
 
-Evidence from the quest's PR, with the case at `ce616b52c` and `cbb742cec` on a loaded host
-(`quest gate just test media --media-cases replacement` in a loop, with and without 24 busy
-loops): it failed 1 of 8, then 2 of 12 runs, and none of 31 runs after a temporary `console.warn`
-per decoded audio frame, so it is a timing race. Each failure is `audioStalled:true` in
-`live incumbent fallback plays` (lite-06, lite-07) or `live replacement plays`, with the picture
-painting.
+Chromium runs the case again by default. Its audio no longer goes silent across the groups a
+starved viewer skips: the restarted decoder is re-primed on the frames before each gap, and a gap
+lands what the decoder still holds instead of resetting it away.
 
-One failing lite-07 fallback, timed from the log:
+Decided 2026-11-16 (maintainer, on [moq-dev/moq#8980](https://github.com/moq-dev/moq/pull/8980#issuecomment-6943194650)):
 
-- 238 ms after the newer publisher stopped the incumbent's announce returned; its audio
-  subscription was ok at 298 ms. The incumbent's `fetch error: ... group=62 error=group is past
-  the budget` and `skipping missing groups: track=audio 0 -> 69` follow, so the first audio group
-  the reader got was 69, about a second of retained audio behind the incumbent's live picture
-  (the stalled ring's `audioTimestamp` 9507 ms against a picture at 10548 ms).
-- 600 ms after that first group, at the 1039 ms bound, the ring was still stalled.
+- ✅ Lift the quarantine on Chromium even though loaded runs still fail about one in six (rejected:
+  keep it until the underruns are fixed). What still fails there is the steady-state starvation the
+  sibling cases share, not the gaps.
+- ✅ Leave Firefox to this quest (rejected: fix it in that PR). Its fallback misses the bound as
+  often before the gap fixes as after, so it is a separate cause.
 
-Open: where those 600 ms go. The decoder resets the ring on a changed instance
-(`js/watch/src/audio/decoder.ts` `#runDecoder`), so the join snaps onto the clock; the question is
-whether the ring waits for audio at the clock behind a backlog it must drop (then a join at the
-live edge is the fix), or the starved page just decodes late (then the bound needs a load term
-derived from the host, not a constant). Trace the ring's join and un-stall in the worklet on a
-failing run; the largest-group replay at tune-in
-([moq-dev/moq#8844](https://github.com/moq-dev/moq/pull/8844)) may overlap.
+On Firefox, the fallback (`live incumbent fallback plays`) misses its 1039 ms bound about one run in
+five on an unloaded host, as often before those fixes as after: one failing run had neither a
+picture nor started audio, another a picture with the audio stalled. Root-cause it on Firefox first,
+reading the player's state across the fallback. WebKit was never run; check it once Firefox passes.
 
 Public API: none. Wire: none.

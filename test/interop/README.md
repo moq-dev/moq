@@ -138,9 +138,9 @@ released relays and clients, skip it.
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
-`Connection` counts the refused session as connected, so it must redial it
-like any other close and, once a short retry window runs out, publish the same
-session error. Chromium treats a
+`Connection` counts the refused session as connected, but it never stayed up
+past the healthy bar, so the handle must stop at it without redialing and
+publish the same session error. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
@@ -380,10 +380,9 @@ with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
 controls always run, including when a planned break skips cross-version lanes,
 so a broken reader cannot make compatibility failures ambiguous.
 
-Each `moq-net` library states whether a draft has FETCH (lite-05 onward
-today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails, unless a planned break covers
-the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
+The draft decides whether FETCH runs (lite-05 onward); an older draft is logged
+and its FETCH lanes skipped, so a library that drops FETCH on a draft that has it
+fails those lanes. Both Rust versions FETCH the group the
 publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
@@ -551,12 +550,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The replacement case is quarantined from the default run on every engine: under CPU
-load it intermittently leaves the audio stalled past the switch bound after a route
-switch or fallback (the viewer logs `skipping missing groups` on the audio track first),
-and Firefox also showed intermittent missing tone samples. Run it explicitly with
-`just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run off Chromium: on Firefox its
+fallback intermittently misses the switch bound, as often with the audio fixes that
+restored it on Chromium as without them. Run it explicitly with
+`--media-cases replacement --media-engines firefox`; its content, sync, switch, and
+fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
@@ -679,9 +677,10 @@ refusal retains its meaning and both bindings emit the same bytes.
 
 `lite_tracks_interop` checks moq-lite-07's Tracks Stream both ways: `tracks.ts`
 answers a Rust TRACKS request with js/net's publisher, whose listing (each
-TRACKS\_ADD with its TRACK\_INFO, SYNCED, a TRACKS\_REMOVE, then the FIN when
-the broadcast ends) Rust decodes, and it re-encodes Rust's listing events byte for
-byte.
+TRACKS\_ADD with its kind and info, a datagram track's DATAGRAMS\_INFO beside a
+track's TRACK\_INFO of the same name, SYNCED, a TRACKS\_REMOVE and a datagram
+track's TRACKS\_FINISH, then the FIN when the broadcast ends) Rust decodes, and it
+re-encodes Rust's listing events of both kinds byte for byte.
 
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
@@ -713,6 +712,6 @@ inflated size. The harness enables the relay's `[stats]` and `[internal]` listen
 The HLS grid lane has the Rust publisher (moq-mux) and each native JS runtime
 (`@moq/hang`) publish one fixed frame schedule, with GOPs on and off the 2 s grid, a
 discontinuity, and a finish, and the Rust reader prints each broadcast's declared
-`media.join.interval` and every rendition's groups with their first pts, the input an HLS
+`sync.interval` and every rendition's groups with their first pts, the input an HLS
 edge numbers segments from. The two readouts must be identical, so a browser-published
 broadcast exports as HLS like a native one.

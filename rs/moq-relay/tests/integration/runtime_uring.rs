@@ -5,7 +5,7 @@
 //!
 //! Linux-only like the mode itself. Unsupported local kernels skip loudly;
 //! CI_STRICT makes CI refuse them.
-#![cfg(target_os = "linux")]
+#![cfg(uring)]
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -172,12 +172,12 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let publisher = connect(client().with_publisher(&origin), wt_url.clone()).await;
 
@@ -270,12 +270,12 @@ async fn uring_workers_serve_every_configured_version() {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let raw = format!("moql://127.0.0.1:{port}/versions");
 	let (version, client) = pinned("moq-transport-22");
@@ -433,7 +433,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
 	let label = version.map_or("every version", |version| version.as_str());
 	// Only moq-transport puts the deadline on the wire.
-	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
+	let ietf = version.is_some_and(|version| !version.is_lite());
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
@@ -702,12 +702,12 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
 	let subscriber_origin = moq_tokio::origin::spawn();
@@ -780,12 +780,12 @@ async fn traced_session(congestion: Option<moq_tokio::quic::CongestionControl>) 
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
 
 	let subscriber_origin = moq_tokio::origin::spawn();

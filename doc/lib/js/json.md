@@ -18,10 +18,10 @@ reader will not pick it up.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
 Compression is the track's: create it with `compression: "deflate"`, which JSON benefits
-from, and readers see plain frames either way. Producers take
-a `Timed` value, `{ value, at }`, where `at` is the capture time written as
-the frame timestamp, and the snapshot and stream consumers return the same
-shape. Nothing fills in now: every write takes `at`. On an untimed track (no
+from, and readers see plain frames either way. Every write takes
+`(value, at)`, such as `update(value, at)`, where `at` is the capture time
+written as the frame timestamp, and the consumers return a `Timed` value,
+`{ value, at }`. Nothing fills in now: every write takes `at`. On an untimed track (no
 `timescale`) it is `Time.Timestamp.unscaled(key)`: a snapshot or window
 restatement opens its group at that key, which must pass every group the
 track holds, and a delta or op rides the open group, so it reads back with
@@ -40,7 +40,9 @@ for await (const { value, at } of consumer) {
 `next()` yields every buffered state of the group it is reading and skips a
 group once a newer one supersedes it: the consumer takes the track, a
 `Track.Consumer` such as `broadcast.track(name)`, and subscribes to it itself at
-a zero `delay.max`, so nothing can raise its budget. Use `latest()` to skip
+a zero `delay.max`, so nothing else can raise its budget. A reader that applies
+each state at its timestamp passes its playout delay as `delay` to keep the
+superseded states it may still need. Use `latest()` to skip
 straight to the head, and `close()` to end the subscription.
 
 A stream rides one group with no record-count or cumulative byte limit. The

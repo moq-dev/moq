@@ -1,12 +1,21 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
-import { supportCacheKey } from "../support-probe";
-import { decoderConfigKey } from "./config";
+import { stubSupport } from "../webcodecs.test-util";
 import { Source, type Target } from "./source";
+
+// What the stubbed WebCodecs decoder says about each config the source probes: every rendition plays
+// unless a test says otherwise.
+let answer: (config: VideoDecoderConfig) => boolean | Promise<boolean>;
+let decoder: Disposable;
+beforeEach(() => {
+	answer = () => true;
+	decoder = stubSupport({ video: (config) => answer(config) });
+});
+afterEach(() => decoder[Symbol.dispose]());
 
 const flush = () => yieldNow();
 
@@ -56,9 +65,9 @@ async function withoutWarnings(fn: () => Promise<void>): Promise<void> {
 describe("Source error signal", () => {
 	it("is unsupported when the catalog has video renditions but none are supported", async () => {
 		await withoutWarnings(async () => {
+			answer = () => false;
 			const source = new Source({
 				broadcast: mockBroadcast({ hd: config("hev1.1.6.L120.90") }),
-				supported: async () => false,
 			});
 
 			await settle();
@@ -71,15 +80,15 @@ describe("Source error signal", () => {
 
 	it("treats a support probe throw as unsupported without aborting the remaining renditions", async () => {
 		await withoutWarnings(async () => {
+			answer = (probed) => {
+				if (probed.codec === "not-a-codec") throw new Error("probe failed");
+				return true;
+			};
 			const source = new Source({
 				broadcast: mockBroadcast({
 					bad: config("not-a-codec"),
 					good: config("avc1.640028"),
 				}),
-				supported: async (rendition) => {
-					if (rendition.codec === "not-a-codec") throw new Error("probe failed");
-					return true;
-				},
 			});
 
 			await settle();
@@ -91,24 +100,20 @@ describe("Source error signal", () => {
 	});
 
 	it("does not wedge the effect when a support probe never settles", async () => {
-		// `supported` is consumer-supplied, and a rerun waits for the tasks it spawned, so a probe
-		// that never settles would hold the next run shut for good unless it races the teardown.
+		// A rerun waits for the tasks it spawned, so a probe that never settles would hold the next
+		// run shut for good unless it races the teardown.
 		await withoutWarnings(async () => {
-			const supported = new Signal<(config: Catalog.VideoConfig) => Promise<boolean>>(
-				() => new Promise<boolean>(() => {}), // never settles
-			);
-
-			const source = new Source({
-				broadcast: mockBroadcast({ hd: config("avc1.640028") }),
-				supported,
-			});
+			answer = () => new Promise<boolean>(() => {}); // never settles
+			const state = mutableBroadcast({ hd: config("avc1.640028") });
+			const source = new Source({ broadcast: state.broadcast });
 
 			await settle();
 			expect(source.out.available.peek()).toEqual({});
 
-			// Swapping the probe reruns the effect, which has to tear the parked one down first.
+			// A catalog update reruns the effect, which has to tear the parked probe down first.
 			// If it cannot, this rerun never opens and the new probe never runs.
-			supported.set(async () => true);
+			answer = () => true;
+			state.catalog.set({ video: { renditions: { hd: config("avc1.64001f") } } });
 			await settle();
 
 			expect(Object.keys(source.out.available.peek())).toEqual(["hd"]);
@@ -118,9 +123,9 @@ describe("Source error signal", () => {
 	});
 
 	it("is undefined when the catalog has no video renditions", async () => {
+		answer = () => false;
 		const source = new Source({
 			broadcast: mockBroadcast({}),
-			supported: async () => false,
 		});
 
 		await settle();
@@ -157,7 +162,7 @@ describe("Source error signal", () => {
 				},
 			},
 		});
-		const source = new Source({ broadcast, supported: async () => true });
+		const source = new Source({ broadcast });
 
 		const error = console.error;
 		console.error = () => {};
@@ -183,7 +188,6 @@ describe("Source disabled rendition selection", () => {
 		});
 		const source = new Source({
 			broadcast: state.broadcast,
-			supported: async () => true,
 		});
 
 		await settle();
@@ -220,7 +224,6 @@ describe("Source disabled rendition selection", () => {
 				high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
 			}),
 			target: { name: "high" },
-			supported: async () => true,
 		});
 
 		await settle();
@@ -234,7 +237,6 @@ describe("Source disabled rendition selection", () => {
 				high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
 				low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }),
 			}),
-			supported: async () => true,
 		});
 
 		await settle();
@@ -245,7 +247,7 @@ describe("Source disabled rendition selection", () => {
 
 	it("deselects the selected rendition once every rendition is disabled", async () => {
 		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
-		const source = new Source({ broadcast: state.broadcast, supported: async () => true });
+		const source = new Source({ broadcast: state.broadcast });
 
 		await settle();
 		expect(source.out.track.peek()).toBe("high");
@@ -265,7 +267,6 @@ describe("Source disabled rendition selection", () => {
 				low: config("avc1.64001e", { bitrate: 1_000_000 }),
 				high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
 			}),
-			supported: async () => true,
 		});
 
 		await settle();
@@ -276,14 +277,12 @@ describe("Source disabled rendition selection", () => {
 	it("does not repeat support probes for metadata-only changes", async () => {
 		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
 		let probes = 0;
-		const supported = async () => {
+		answer = () => {
 			probes++;
 			return true;
 		};
-		Object.assign(supported, { [supportCacheKey]: decoderConfigKey });
 		const source = new Source({
 			broadcast: state.broadcast,
-			supported,
 		});
 
 		await settle();
@@ -309,25 +308,21 @@ describe("Source disabled rendition selection", () => {
 		source.close();
 	});
 
-	it("repeats custom support probes when metadata changes", async () =>
+	it("repeats the support probe when a decoder field changes", async () =>
 		withoutWarnings(async () => {
-			const state = mutableBroadcast({ high: config("avc1.640028", { codedWidth: 1280 }) });
+			const state = mutableBroadcast({ high: config("avc1.640028") });
 			let probes = 0;
-			const source = new Source({
-				broadcast: state.broadcast,
-				supported: async (rendition) => {
-					probes++;
-					return (rendition.codedWidth ?? 0) <= 1920;
-				},
-			});
+			answer = (probed) => {
+				probes++;
+				return probed.codec.startsWith("avc1");
+			};
+			const source = new Source({ broadcast: state.broadcast });
 
 			await settle();
 			expect(probes).toBe(1);
 			expect(Object.keys(source.out.available.peek())).toEqual(["high"]);
 
-			state.catalog.set({
-				video: { renditions: { high: config("avc1.640028", { codedWidth: 3840 }) } },
-			});
+			state.catalog.set({ video: { renditions: { high: config("hvc1.1.6.L93.B0") } } });
 			await settle();
 
 			expect(probes).toBe(2);
@@ -343,7 +338,6 @@ describe("Source rendition rank", () => {
 				e: config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 3_000_000 }),
 				d: config("avc1.64001e", { codedWidth: 1280, codedHeight: 720, bitrate: 3_000_000 }),
 			}),
-			supported: async () => true,
 		});
 
 		await settle();
@@ -357,7 +351,6 @@ describe("Source rendition rank", () => {
 				unknown: config("avc1.640028", { codedWidth: 1280, codedHeight: 720 }),
 				zero: config("avc1.64001e", { codedWidth: 1280, codedHeight: 720, bitrate: 0 }),
 			}),
-			supported: async () => true,
 		});
 
 		await settle();
@@ -371,7 +364,6 @@ describe("Source rendition rank", () => {
 				a: config("avc1.640028", { bitrate: 9_000_000 }),
 				b: config("avc1.64001e", { codedWidth: 640, codedHeight: 360, bitrate: 1_000_000 }),
 			}),
-			supported: async () => true,
 		});
 
 		await settle();
@@ -386,10 +378,10 @@ describe("Source rendition preference", () => {
 		source: config("hvc1.1.6.L93.B0", { codedWidth: 1280, codedHeight: 720, bitrate: 2_000_000 }),
 		fallback: config("avc1.64001f", { codedWidth: 1280, codedHeight: 720, bitrate: 4_000_000, preference: -1 }),
 	});
-	const decodes = (prefix: string) => async (config: Catalog.VideoConfig) => !config.codec.startsWith(prefix);
+	const decodes = (prefix: string) => (config: VideoDecoderConfig) => !config.codec.startsWith(prefix);
 
 	it("selects a supported source over a lower preference with a higher bitrate", async () => {
-		const source = new Source({ broadcast: mockBroadcast(renditions()), supported: async () => true });
+		const source = new Source({ broadcast: mockBroadcast(renditions()) });
 
 		await settle();
 		expect(source.out.track.peek()).toBe("source");
@@ -403,7 +395,6 @@ describe("Source rendition preference", () => {
 				fallback: config("avc1.64001f", { bitrate: 1_000_000, preference: -1 }),
 			}),
 			target: { bitrate: 1_500_000 },
-			supported: async () => true,
 		});
 
 		await settle();
@@ -412,7 +403,8 @@ describe("Source rendition preference", () => {
 	});
 
 	it("selects a lower preference when the source is unsupported", async () => {
-		const source = new Source({ broadcast: mockBroadcast(renditions()), supported: decodes("hvc1") });
+		answer = decodes("hvc1");
+		const source = new Source({ broadcast: mockBroadcast(renditions()) });
 
 		await settle();
 		expect(source.out.track.peek()).toBe("fallback");
@@ -424,13 +416,15 @@ describe("Source rendition preference", () => {
 			av1: config("av01.0.08M.08", { codedWidth: 1280, codedHeight: 720, preference: 1 }),
 			...renditions(),
 		});
-		const all = new Source({ broadcast, supported: async () => true });
-		const noAv1 = new Source({ broadcast, supported: decodes("av01") });
-
+		const all = new Source({ broadcast });
 		await settle();
 		expect(all.out.track.peek()).toBe("av1");
-		expect(noAv1.out.track.peek()).toBe("source");
 		all.close();
+
+		answer = decodes("av01");
+		const noAv1 = new Source({ broadcast });
+		await settle();
+		expect(noAv1.out.track.peek()).toBe("source");
 		noAv1.close();
 	});
 
@@ -438,7 +432,6 @@ describe("Source rendition preference", () => {
 		const source = new Source({
 			broadcast: mockBroadcast(renditions()),
 			target: { name: "fallback" },
-			supported: async () => true,
 		});
 
 		await settle();
@@ -464,7 +457,6 @@ describe("Source rendition preference", () => {
 				other: config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 900_000 }),
 			}),
 			target: { bitrate: 1_000_000 },
-			supported: async () => true,
 		});
 
 		await settle();
@@ -481,7 +473,6 @@ describe("conflicting rendition metadata", () => {
 				bitrate: config("avc1.640028", { bitrate: 500000 }),
 			}),
 			target: { width: 640, height: 360, bitrate: 1000000 },
-			supported: async () => true,
 		});
 		try {
 			if (!source.pending.peek()) await source.pending.changed();
@@ -503,7 +494,7 @@ describe("Source viewer ceiling", () => {
 	it("follows the highest enabled rendition through enable and disable flips", async () => {
 		const renditions = ladder();
 		const { broadcast, catalog } = mutableBroadcast(renditions);
-		const source = new Source({ broadcast, supported: async () => true });
+		const source = new Source({ broadcast });
 		try {
 			await settle();
 			// Over the selection margin, so a rate that reaches it selects 1080p.
@@ -525,7 +516,7 @@ describe("Source viewer ceiling", () => {
 
 	it("is a rate that selects that rendition", async () => {
 		const rate = new Signal<number | undefined>(undefined);
-		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true, rate });
+		const source = new Source({ broadcast: mockBroadcast(ladder()), rate });
 		try {
 			await settle();
 			const ceiling = source.out.ceiling.peek() ?? 0;
@@ -542,7 +533,7 @@ describe("Source viewer ceiling", () => {
 
 	it("holds the last rate while it is unknown, and ranks alone before the first", async () => {
 		const rate = new Signal<number | undefined>(undefined);
-		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true, rate });
+		const source = new Source({ broadcast: mockBroadcast(ladder()), rate });
 		try {
 			await settle();
 			expect(source.out.track.peek()).toBe("1080p");
@@ -564,7 +555,7 @@ describe("Source viewer ceiling", () => {
 			"360p": config("avc1.640028", { codedWidth: 640, codedHeight: 360, bitrate: 800_000 }),
 			"4k": config("avc1.640028", { codedWidth: 3840, codedHeight: 2160 }),
 		});
-		const source = new Source({ broadcast, supported: async () => true });
+		const source = new Source({ broadcast });
 		try {
 			await settle();
 			expect(source.out.ceiling.peek()).toBe(1_000_000);
@@ -581,7 +572,7 @@ describe("Source viewer ceiling", () => {
 
 	it("stays within the target's caps, without margin when the rate cannot steer", async () => {
 		const target = new Signal<Target | undefined>({ height: 720 });
-		const source = new Source({ broadcast: mockBroadcast(ladder()), target, supported: async () => true });
+		const source = new Source({ broadcast: mockBroadcast(ladder()), target });
 		try {
 			await settle();
 			expect(source.out.ceiling.peek()).toBe(3_000_000);
@@ -602,24 +593,4 @@ describe("Source viewer ceiling", () => {
 			source.close();
 		}
 	});
-});
-
-it("defaults to the decoder's probe when no supported input is given", async () => {
-	const globals = globalThis as unknown as Record<string, unknown>;
-	const original = globals.VideoDecoder;
-	globals.VideoDecoder = {
-		isConfigSupported: async (c: VideoDecoderConfig) => ({ supported: c.codec === "avc1.42e01e", config: c }),
-	};
-	const source = new Source({
-		broadcast: mockBroadcast({ rejected: config("avc1.640028"), cam: config("avc1.42e01e") }),
-	});
-	try {
-		await settle();
-		expect(Object.keys(source.out.available.peek())).toEqual(["cam"]);
-		expect(source.out.track.peek()).toBe("cam");
-	} finally {
-		source.close();
-		if (original === undefined) delete globals.VideoDecoder;
-		else globals.VideoDecoder = original;
-	}
 });

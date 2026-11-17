@@ -3,7 +3,8 @@ import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
-import { supported as decoderSupported } from "./supported";
+import { decoderConfigKey } from "./config";
+import { supported } from "./supported";
 
 /** What the viewer wants from the audio rendition. */
 export type Target = {
@@ -11,23 +12,12 @@ export type Target = {
 	name?: string;
 };
 
-/**
- * A function that checks if an audio configuration can be played.
- *
- * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
- */
-export type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
-
 /** Signals the source reads. */
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 
 	// The desired rendition/bitrate of the audio.
 	target: Getter<Target | undefined>;
-
-	// A function that checks if an audio configuration can be played. Renditions that fail the
-	// probe are filtered out. Defaults to `Decoder.supported`, the WebCodecs probe.
-	supported: Getter<Supported | undefined>;
 };
 
 /** Signals the source derives. */
@@ -58,7 +48,8 @@ export class Source {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
-	#probe = new SupportProbe<Catalog.AudioConfig>("audio");
+	// Renditions the WebCodecs decoder, or its polyfill, cannot play are filtered out.
+	#probe = new SupportProbe<Catalog.AudioConfig>("audio", { supported, key: decoderConfigKey });
 
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Audio | undefined>(undefined),
@@ -79,7 +70,6 @@ export class Source {
 		this.in = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
-			supported: getter(props?.supported),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -98,11 +88,10 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.in.supported) ?? decoderSupported;
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.audio?.renditions) ?? {};
-		this.#probe.run(effect, supported, renditions, (available) => this.#out.available.set(available));
+		this.#probe.run(effect, renditions, (available) => this.#out.available.set(available));
 	}
 
 	#runSelected(effect: Effect): void {

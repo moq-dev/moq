@@ -223,10 +223,14 @@ impl Sink {
 	/// Once that audio has played, the sink plays comfort noise at the level of
 	/// the quietest 20 ms it played, at most -60 dBFS, rather than running dry,
 	/// and the [`Observer`](super::Observer) counts no gap. That lasts until the
-	/// utterance [`next`](Self::next) starts plays. Writes before then, such as a
-	/// codec's final frames, continue the audio before the silence.
-	pub fn end(&mut self) {
-		self.channel.lock().unwrap().prod.end();
+	/// utterance [`resume`](Self::resume) starts plays. Writes before then, such
+	/// as a codec's final frames, continue the audio before the silence.
+	///
+	/// A player calls it at the decoder's [`Read::End`](crate::decode::Read::End),
+	/// the marker a publisher's [`discontinuity`](crate::encode::Producer::discontinuity)
+	/// sends. The sink plays on; [`finish`](Self::finish) is what ends it.
+	pub fn silence(&mut self) {
+		self.channel.lock().unwrap().prod.silence();
 	}
 
 	/// Start the next utterance after a declared silence with the next
@@ -235,8 +239,8 @@ impl Sink {
 	/// It plays one [`latency`](Input::latency) after that write, behind
 	/// whatever is still queued, with comfort noise filling the wait, the way a
 	/// new sink's first write plays behind its opening silence.
-	pub fn next(&mut self) {
-		self.channel.lock().unwrap().prod.next();
+	pub fn resume(&mut self) {
+		self.channel.lock().unwrap().prod.resume();
 	}
 
 	/// How much audio is queued between the last [`write`](Self::write) and the
@@ -728,7 +732,7 @@ mod tests {
 		// 100 ms of a quiet background, then a declared end.
 		let quiet = 0.0002;
 		let _ = sink.write(&pcm(quiet, 4_800)).unwrap();
-		sink.end();
+		sink.silence();
 		let mut heard = Vec::new();
 		for _ in 0..150 {
 			mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
@@ -740,7 +744,7 @@ mod tests {
 		assert!((rms(noise) - quiet as f64).abs() < 0.00001, "rms {}", rms(noise));
 
 		// The next utterance plays one latency after its first write, with noise until then.
-		sink.next();
+		sink.resume();
 		let _ = sink.write(&pcm(0.5, 960)).unwrap();
 		let mut until = 0;
 		loop {

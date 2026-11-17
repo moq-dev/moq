@@ -484,7 +484,7 @@ class Model {
 		const writer = entry.writer;
 		if (!writer) return;
 		// The cache reclaimed it while idle: this route never carries the rest.
-		if (writer.isClosed) {
+		if (writer.closed.peek() !== undefined) {
 			entry.writer = undefined;
 			return;
 		}

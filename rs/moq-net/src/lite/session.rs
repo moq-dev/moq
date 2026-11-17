@@ -193,8 +193,8 @@ pub struct Config {
 	pub subscribe: Option<origin::Producer>,
 
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_hop`.
-	pub peer_hop: Option<Hop>,
+	/// declare one itself. See `Client::with_peer_node`.
+	pub peer_node: Option<Hop>,
 
 	/// The version of the protocol to use.
 	pub version: Version,
@@ -231,7 +231,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		setup_stream,
 		publish,
 		subscribe,
-		peer_hop,
+		peer_node,
 		version,
 		mut our_setup,
 		peer_setup,
@@ -261,8 +261,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	if our_setup.hop.is_none() {
 		our_setup.hop = publish
 			.as_ref()
-			.map(|origin| origin.hop())
-			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
+			.map(|origin| origin.node())
+			.or_else(|| subscribe.as_ref().map(|origin| origin.node()))
 			.map(Hop::from);
 	}
 	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
@@ -373,7 +373,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		version,
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
-		peer_hop,
+		peer_node,
 		auth: auth.clone(),
 		peer_grant,
 		client,
@@ -387,7 +387,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		recv_bandwidth: recv_bw_for_sub,
 		version,
 		peer_setup,
-		peer_hop,
+		peer_node,
 		// Local policy for what pulling from this peer costs. Set only when we
 		// configured a price; otherwise the subscriber charges what the peer declared
 		// for its own egress.
@@ -409,6 +409,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		)?;
 	}
 
+	let route_publish = publisher.route_publish();
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -428,7 +429,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		ended: None,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early, client),
+		subscriber: SubscriberDriver::new(subscriber, early, client, route_publish),
 		session,
 		withholding,
 	};
@@ -1020,7 +1021,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
@@ -1066,7 +1067,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
@@ -1147,7 +1148,7 @@ mod tests {
 				setup_stream: None,
 				publish: None,
 				subscribe: None,
-				peer_hop: None,
+				peer_node: None,
 				version: Version::Lite07,
 				our_setup: Setup::default(),
 				peer_setup: None,
@@ -1235,7 +1236,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup,
 			peer_setup: None,
@@ -1305,7 +1306,7 @@ mod tests {
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
@@ -1361,7 +1362,7 @@ mod tests {
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
@@ -1396,7 +1397,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version,
 			our_setup: Setup::default(),
 			peer_setup,
@@ -1494,7 +1495,7 @@ mod tests {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
 		let log = transport.log.clone();
 		let mut server = raw_session(transport.clone(), Version::Lite07, false, None);
-		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		server.goaway.send(crate::goaway::Goaway::new()).unwrap();
 		let _ = server.driver.poll(&kio::Waiter::noop());
 		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
 		transport.grant_credit();
@@ -1512,7 +1513,6 @@ mod tests {
 				matches!(
 					client
 						.goaway
-						.producer()
 						.send(crate::goaway::Goaway::redirect("https://other.example/")),
 					Err(Error::ProtocolViolation)
 				),
@@ -1522,7 +1522,6 @@ mod tests {
 			assert!(
 				server
 					.goaway
-					.producer()
 					.send(crate::goaway::Goaway::redirect("https://other.example/"))
 					.is_ok(),
 				"{version}"

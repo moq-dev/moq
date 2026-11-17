@@ -590,7 +590,6 @@ mod tests {
 			StreamError::GroupTooLarge,
 			StreamError::TimestampMismatch,
 			StreamError::Unauthorized,
-			StreamError::Yielded,
 			StreamError::ControlTimeout,
 			StreamError::App(7),
 			StreamError::Unknown(0x1234),

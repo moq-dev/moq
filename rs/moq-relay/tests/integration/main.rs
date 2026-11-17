@@ -9,7 +9,7 @@
 
 mod auth_lifetime;
 // Its listeners are the simulator (`test-support`) and the io_uring workers.
-#[cfg(any(feature = "test-support", target_os = "linux"))]
+#[cfg(any(feature = "test-support", uring))]
 mod bitrate_caps;
 mod cluster_close;
 #[cfg(feature = "test-support")]

@@ -143,6 +143,7 @@ impl Script {
 				}
 				return StatusCode::NO_CONTENT.into_response();
 			}
+			_ => return StatusCode::BAD_REQUEST.into_response(),
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
@@ -302,12 +303,12 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let pub_session = kio::clock::timeout(
 		TIMEOUT,
@@ -475,12 +476,36 @@ async fn admits_and_reports_the_session() {
 	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 	assert_eq!(connect.node, "test-relay");
 	assert_eq!(connect.transport, moq_auth::Transport::Tcp);
+	assert_eq!(pub_session.transport(), Some(moq_tokio::Transport::Tcp));
 	assert_eq!(connect.path, "/room");
 	assert_eq!(connect.query.as_deref(), Some("jwt=token"));
 	assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 	assert!(connect.local.is_some_and(|addr| addr.port() == port));
 	assert!(connect.tls.is_none());
 	assert!(connect.token.is_none(), "moq-lite carries no SETUP token");
+
+	drop(pub_session);
+	drop(sub_session);
+	relay.abort();
+}
+
+/// A `tls://` session reaches the auth server as `tls`, and both ends of it report `tls`, so
+/// a policy keyed on `tcp` sees only the plaintext link.
+#[tokio::test]
+async fn reports_a_tls_session_as_tls() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.tls = Some(true);
+	config.tls.generate = vec!["localhost".into()];
+	let cluster = crate::spawn_cluster(cluster::Options::default());
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, config).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tls", port)).await;
+
+	let seen = script.seen.lock().unwrap().clone();
+	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+	assert_eq!(connect.transport, moq_auth::Transport::Tls);
+	assert_eq!(pub_session.transport(), Some(moq_tokio::Transport::Tls));
+	assert_eq!(sub_session.transport(), Some(moq_tokio::Transport::Tls));
 
 	drop(pub_session);
 	drop(sub_session);
@@ -749,12 +774,14 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	let mut round_trip = async |payload: &'static [u8]| {
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 		let mut group = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timeout")
@@ -893,12 +920,15 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let send = |index: usize, sequence: u64| {
 			let mut group = tracks[index]
 				.1
-				.append_group(tracks[index].1.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(tracks[index].1.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
 				.expect("append group");
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"media".as_ref())
 				.expect("write frame");
-			let group = group.close().expect("finish group");
+			let group = group.finish().expect("finish group");
 			assert_eq!(group.start, sequence);
 		};
 		for (index, sub) in subs.iter_mut().enumerate() {
@@ -912,7 +942,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Deafen alice's audio: everything else stays as admitted.
 		let mut narrow = grant(Duration::from_secs(3600));
-		narrow.subscribe = ["alice/video/**".parse().unwrap()].into_iter().collect();
+		narrow.subscribe.path = ["alice/video/**".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 		clock.advance(CADENCE);
 
@@ -1046,7 +1076,7 @@ async fn http_routes_hold_a_lease() {
 		.create_track("video", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
@@ -1412,7 +1442,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
+	policy.mtls_link = mtls_peer.then_some(moq_auth::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -1942,6 +1972,24 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		script.on_connect(Answer::Grant(replacement));
 		let token = subscriber.auth().add("replacement").unwrap();
 		kio::clock::timeout(TIMEOUT, token.answered()).await.unwrap().unwrap();
+		// The credential rides `token`; the query is exactly what the client dialed.
+		let attach = script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.find(|request| request.event == Event::Attach)
+			.cloned()
+			.expect("the token was never attached");
+		assert_eq!(attach.query.as_deref(), Some("jwt=token"), "{scheme}");
+		assert_eq!(
+			attach.token,
+			Some(moq_auth::Token {
+				kind: moq_auth::Token::OUT_OF_BAND,
+				value: b"replacement".to_vec(),
+			}),
+			"{scheme}"
+		);
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
@@ -1949,7 +1997,9 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = b_track
-			.append_group(b_track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(b_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(
@@ -1957,7 +2007,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 				b"new prefix".as_ref(),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, b_sub.recv_group())
 				.await
@@ -1978,7 +2028,9 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			ended.as_ref().err()
 		);
 		let mut group = a_track
-			.append_group(a_track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(a_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(
@@ -1986,7 +2038,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 				b"original prefix".as_ref(),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, a_sub.recv_group())
 				.await
@@ -2006,12 +2058,12 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	let script = Script::new(Grant::new(all(), all()));
 	let mut server = moq_tokio::listen::Config::default();
-	server.extensions.solicit = false;
+	server.decline_solicit = true;
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = vec!["moq-transport-22".parse().unwrap()];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let client = config.init(Default::default()).unwrap().with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 	let publisher = client
@@ -2102,7 +2154,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 	for scheme in ["tcp", "ws"] {
 		for peer in [false, true] {
 			let mut grant = Grant::new(all(), all());
-			grant.peer = peer;
+			grant.link = peer.then_some(moq_auth::Link::Peer);
 			let script = Script::new(grant);
 			let auth = build_auth(script.spawn().await);
 			let mut options = cluster::Options::default();
@@ -2230,22 +2282,25 @@ async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 	relay.abort();
 }
 
-/// Once a session went live, the native reconnect loop redials an in-band unauthorized
-/// refusal like any other close, rather than judging its kind.
+/// An in-band unauthorized refusal of the first session ends the native reconnect loop,
+/// as a refused dial does: it never went live, so a redial would present the same credential.
 #[tokio::test]
-async fn websocket_unauthorized_keeps_native_reconnect_going() {
+async fn websocket_unauthorized_ends_a_first_session() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	script.on_connect(Answer::Status(401));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let connection = client().with_reconnect(true).connect(room_url("ws", port));
-	script
-		.until("a second dial", |seen| {
-			seen.iter().filter(|request| request.event == Event::Connect).count() >= 2
-		})
-		.await;
-	assert!(
-		connection.poll_closed(&kio::Waiter::noop()).is_pending(),
-		"the refusal ended the loop"
-	);
+	kio::clock::timeout(TIMEOUT, connection.closed())
+		.await
+		.expect("the refusal kept the loop redialing")
+		.expect_err("the refusal ended the loop cleanly");
+	let connects = script
+		.seen
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|request| request.event == Event::Connect)
+		.count();
+	assert_eq!(connects, 1, "redialed after the refusal");
 	relay.abort();
 }

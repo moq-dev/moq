@@ -116,7 +116,7 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): Required names every quest that may still change lite-07 bytes.
 The explicit `Oldest` anchor rides [time addressing's model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md),
-whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
+whose lite-07 encoding [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries.
 
 Decided 2026-11-10 (maintainer, /quest-plan on what could be proved about
 moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
@@ -149,7 +149,7 @@ would need a breaking release had it landed right after the cut:
   waits on nixpkgs as well as the cut; dropping the check, which would find a
   transcript flaw only after the freeze.
 - ✅ The wire half of group drops split out as its own quest, which this
-  waited on in place of [the public drop signal](/quest/m2/group-drops.md),
+  waited on in place of the public drop signal,
   an API change that doesn't touch the wire. It settled without a
   wire-format change ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774)):
   both publishers already name a Group Stream the subscriber stopped in
@@ -167,16 +167,14 @@ route key lane's early signal above end when
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
 
-- ✅ [YIELDED continuations](/quest/m2/yield-defer.md) leave lite-07 for
-  lite-08, where they are designed with takeover (rejected: keep them).
-- ✅ The `ietf` extension stays, and
-  [rides only moq-transport tracks](/quest/m2/ietf-records-per-track.md)
+- ✅ YIELDED continuations leave lite-07 for lite-08 ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)), where they are designed with takeover (rejected: keep them).
+- ✅ The `ietf` extension stays, and rides only moq-transport tracks
   (rejected: as it is, where every frame on a relay link carries a record).
-- ✅ [The `\` path escape is finished](/quest/m2/path-escape.md) rather than
+- ✅ The `\` path escape is finished rather than
   removed: moq-transport names a track by a tuple, and the escape is how a
   moq-lite path carries one.
 - ✅ Subscriber Min Age stays, reversing the 2026-11-14 pick, and
-  [gains its reader](/quest/m2/min-age-join.md);
+  gains its reader;
   [moq-dev/moq#8839](https://github.com/moq-dev/moq/pull/8839), which
   removed it, was closed.
 - ✅ Kept as they are: datagram tracks, including the lite-05/06 bridge (a
@@ -184,10 +182,11 @@ audited the lite-07 draft for what it could lose):
   negotiating with today's behaviour; the hidden `.` path prefix; and the
   route plan of [cache-aware multicast](/quest/m2/multicast/README.md)
   (rejected: routing as a separately versioned SETUP extension).
-- The smaller wire fixes ride [lite-07 by start](/quest/m2/time-addressing/lite07.md),
-  which rewrites the same messages: Max Age as value plus one, no GROUP
-  `Frame Start`, no Padding stream or datagram type, a kind in the track
-  listing, and drops as spans with no count.
+- The smaller wire fixes rode [lite-07 by start](https://github.com/moq-dev/moq/pull/8908):
+  Max Age as value plus one, no Padding stream or datagram type, a kind in
+  the track listing, and drops as spans with no count. GROUP `Frame Start`
+  left with YIELDED continuations
+  ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)).
 - Not reopened: AUTH_ERROR's retry codes (2026-11-14) and AUTH_OK's rate
   fields, which wait for lite-08 ([rate grant](/quest/m5/rate-grant.md)).
 
@@ -197,13 +196,8 @@ the version that ships them.
 
 ## Required
 
-- [YIELDED deferred](/quest/m2/yield-defer.md) - removes reset code 0x3C and continuations from the lite-07 wire
-- [ietf records per track](/quest/m2/ietf-records-per-track.md) - changes the extension's framing on relay links
-- [Path escape](/quest/m2/path-escape.md) - defines a path segment when a path carries an escape
-- [Min Age join](/quest/m2/min-age-join.md) - makes Subscriber Min Age normative
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
-- [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 
 ## Related

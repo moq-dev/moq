@@ -1,7 +1,8 @@
 //! Encode raw PCM and publish it as a moq audio track.
 //!
 //! The output codec is selected via [`Codec`], and the implementation behind it
-//! via [`Kind`]: a platform encoder when the host has one, software otherwise.
+//! via [`Backend`]: a platform encoder when the host has one, software otherwise.
+//! [`Kind`] says what the audio carries, so Opus tunes for voice or music.
 //! AAC has no software encoder, so a host without a platform one refuses it.
 //!
 //! Entry points, high to low level:
@@ -27,7 +28,7 @@ mod producer;
 mod capture;
 
 pub use encoded::Encoded;
-pub use encoder::{Codec, Config, Encoder, Finish, Input, Kind};
+pub use encoder::{Backend, Codec, Config, Encoder, Finish, Input, Kind};
 pub use producer::{Finished, Options, Producer};
 
 #[cfg(feature = "capture")]

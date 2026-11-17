@@ -93,7 +93,9 @@ async fn shaped_uplink_disables_and_resumes() {
 		tracks.push(track);
 	}
 	let remote = await_announced(&receiver.consume(), "ladder").await;
-	let catalog = MoqMediaCatalogConsumer::subscribe(&remote).await.unwrap();
+	let catalog = MoqMediaCatalogConsumer::subscribe(&remote, Duration::ZERO)
+		.await
+		.unwrap();
 	let first = catalog.next().await.unwrap().expect("catalog ended");
 	let low = MoqMediaTrackConsumer::subscribe(
 		&remote,

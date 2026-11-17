@@ -55,7 +55,7 @@ async fn pair(origins: Option<Origins<'_>>) -> Pair {
 		if let Some(origins) = &origins {
 			config = config.with_subscriber(origins.subscribe.clone());
 		}
-		let mut request = config.accept_request(harness::now(), server).await.unwrap();
+		let mut request = config.handshake(harness::now(), server).await.unwrap();
 		let requests = request.requests();
 		let (session, driver) = request.ok().await.unwrap();
 		harness::spawn(driver);
@@ -123,9 +123,8 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
 	let (client, server) = create_mock_session_pair(mock);
-	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE.
-	let mut server_extensions = moq_net::setup::Extensions::default();
-	server_extensions.solicit = false;
+	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE, as to a
+	// peer without MoQ Solicit.
 	let (subscribe, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	harness::spawn(driver);
 	let client = async {
@@ -141,9 +140,9 @@ async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Reques
 	let server = async {
 		let mut request = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_extensions(server_extensions)
+			.with_solicit(false)
 			.with_subscriber(subscribe.clone())
-			.accept_request(harness::now(), server)
+			.handshake(harness::now(), server)
 			.await
 			.unwrap();
 		let requests = request.requests();

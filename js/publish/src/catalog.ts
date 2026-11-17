@@ -17,7 +17,7 @@ const ESTIMATE_INTERVAL = Duration.millis(1000);
  * application's own sections, e.g. `scte35`) each edit only their own keys, so their sections
  * compose instead of clobbering one another.
  *
- * The `media.clock` is advertised from the first snapshot: every js/publish timestamp is the
+ * The `sync.clock` is advertised from the first snapshot: every js/publish timestamp is the
  * installed clock's instant in microseconds, so PTS zero is the wall time of instant zero. The
  * mapping is fixed when the producer is created, so a later system-clock adjustment never retimes
  * the broadcast. A page whose wall clock reads before 2020 has not set it yet (a device booted
@@ -66,7 +66,7 @@ export class CatalogProducer {
 		this.#pending = undefined;
 		if (estimate) this.#lastEstimate = now();
 		const at = Time.Timestamp.now();
-		for (const output of this.#outputs) output.update({ value: this.#value, at });
+		for (const output of this.#outputs) output.update(this.#value, at);
 	}
 
 	/**
@@ -76,7 +76,7 @@ export class CatalogProducer {
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-		output.update({ value: this.#value, at: Time.Timestamp.now() });
+		output.update(this.#value, Time.Timestamp.now());
 
 		this.#outputs.add(output);
 		effect.cleanup(() => {
@@ -136,5 +136,5 @@ function advertised(catalog: Catalog.Root, field: "jitter" | "delay"): [string, 
 function pageRoot(): Catalog.Root {
 	const at = Math.round((origin().asUnixMillis() - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
 	if (at < 0) return {};
-	return { media: { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } } };
+	return { sync: { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } } };
 }

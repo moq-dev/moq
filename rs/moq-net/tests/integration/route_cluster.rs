@@ -46,7 +46,7 @@ async fn join(
 	let acceptor = acceptor.clone().with_link(origin::Link::Peer);
 	let mut options = MockConnectOptions::new(lite07());
 	options.client_publish = Some(dialer.consume().with_hidden(true));
-	options.client_subscribe = Some(dialer.with_preference(origin::Preference::new(preference)));
+	options.client_subscribe = Some(dialer.with_priority(origin::Priority::new(preference)));
 	options.server_publish = Some(acceptor.consume().with_hidden(true));
 	options.server_subscribe = Some(acceptor);
 	options.cost = Some(cost);
@@ -78,12 +78,12 @@ impl Links {
 		preference: i8,
 	) {
 		let pair = join(dialer, link, acceptor, cost, preference).await;
-		self.0.push((dialer.hop().get(), acceptor.hop().get(), pair));
+		self.0.push((dialer.node().get(), acceptor.node().get(), pair));
 	}
 
 	/// Close the session between `a` and `b`, and forget it.
 	fn cut(&mut self, a: &origin::Producer, b: &origin::Producer) {
-		let (a, b) = (a.hop().get(), b.hop().get());
+		let (a, b) = (a.node().get(), b.node().get());
 		let between = |(x, y, _): &(u64, u64, MockPair)| (*x, *y) == (a, b) || (*x, *y) == (b, a);
 		let (_, _, pair) = self.0.iter().find(|link| between(link)).expect("no such link");
 		cut(pair);
@@ -92,7 +92,7 @@ impl Links {
 
 	/// `node` dies: every session it holds closes.
 	fn kill(&mut self, node: &origin::Producer) {
-		let hop = node.hop().get();
+		let hop = node.node().get();
 		let touches = |(x, y, _): &(u64, u64, MockPair)| *x == hop || *y == hop;
 		self.0
 			.iter()
@@ -240,7 +240,7 @@ impl Publisher {
 			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 			group.write_frame(timestamp, tagged(self.name, key, frame)).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 
@@ -328,7 +328,7 @@ async fn a_far_edge_reads_a_claim_and_sees_its_withdrawal_once() {
 	quiesce().await;
 	for (relay, watch) in regions.relays().zip(&mut watched) {
 		let seen = watch.seen();
-		assert_eq!(kinds(&seen), [Kind::End], "relay {}: {seen:?}", relay.hop());
+		assert_eq!(kinds(&seen), [Kind::End], "relay {}: {seen:?}", relay.node());
 	}
 }
 
@@ -620,7 +620,7 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 	let mut subscribing = Vec::new();
 	for relay in lan.relays() {
 		for (under, instance) in [("a", &narrow_instance), ("b", &wide_instance)] {
-			let path = format!("live/{under}/{}", relay.hop());
+			let path = format!("live/{under}/{}", relay.node());
 			let broadcast = relay.consume().request(path.as_str(), None).await.unwrap();
 			assert_eq!(broadcast.info().instance.as_ref(), Some(instance), "{path}");
 			// Reading a track sends the request on to the claim.
@@ -637,7 +637,7 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 	narrow_paths.sort();
 	let expected = |under: &str| {
 		let mut paths: Vec<_> = (lan.relays())
-			.map(|relay| format!("live/{under}/{}", relay.hop()))
+			.map(|relay| format!("live/{under}/{}", relay.node()))
 			.collect();
 		paths.sort();
 		paths
@@ -700,7 +700,7 @@ async fn an_epochless_replacement_restarts_everywhere() {
 		assert!(
 			matches!(start.as_slice(), [Seen { kind: Kind::Start, .. }]),
 			"relay {}: {start:?}",
-			relay.hop()
+			relay.node()
 		);
 		watched.push((watch, start[0].instance.clone()));
 	}
@@ -709,7 +709,7 @@ async fn an_epochless_replacement_restarts_everywhere() {
 	quiesce().await;
 	for (relay, (watch, before)) in lan.relays().zip(&mut watched) {
 		let seen = watch.seen();
-		let hop = relay.hop();
+		let hop = relay.node();
 		assert!(
 			seen.iter()
 				.all(|seen| seen.kind != Kind::End && seen.kind != Kind::Offline),
@@ -756,7 +756,7 @@ async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) 
 		session
 	};
 	let server_fut = async {
-		let mut handshake = (server.accept_request(now(), server_transport.clone()).await).expect("server handshake");
+		let mut handshake = (server.handshake(now(), server_transport.clone()).await).expect("server handshake");
 		let requests = handshake.requests();
 		let (session, driver) = handshake.ok().await.expect("server accept");
 		spawn(driver);
@@ -1034,12 +1034,13 @@ async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 
 /// `L` claims `live/a` and `vod/l` at a relay whose client lists `live`, then withdraws
 /// `live/a`, its last claim there. Its route to the client ends behind that batch, closed
-/// by its floor: the client sees `live/a` End where the relay certifies the request, and
-/// Offline where the relay's grant to `L` (`live/a` and `vod`) knows only part of it.
-/// Either way `L`'s later churn under `vod` costs the client nothing, so the route is gone.
+/// by its floor: the client sees `live/a` End, even where the relay's grant to `L` covers
+/// only `live/a` and `vod`, since the relay asks `L` for everything and refuses only what
+/// the grant does not cover, so `L`'s floor certifies the withdrawal. Either way `L`'s
+/// later churn under `vod` costs the client nothing, so the route is gone.
 #[kio::test]
 async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
-	for (scoped, gone) in [(false, Kind::End), (true, Kind::Offline)] {
+	for (scoped, gone) in [(false, Kind::End), (true, Kind::End)] {
 		let relay = produce_origin(1);
 		let l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
 		if scoped {

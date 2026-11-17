@@ -44,8 +44,8 @@ fn verdict(client: &Client, url: &url::Url, err: &Error) -> Verdict {
 /// Three knobs, each with one job: `initial` and `multiplier` set the wait before
 /// each retry, `max` caps it, and `healthy` decides which sessions count as failed
 /// attempts. See [`moq_net::reconnect::Backoff`], which this resolves to, for how
-/// the policy applies them. It applies only once a session has been established: a first
-/// dial that reaches no session ends the connection instead of retrying.
+/// the policy applies them. Until a session has stayed up past `healthy` or been drained by
+/// a GOAWAY, a failed dial or a closed session ends the connection instead of retrying.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -74,7 +74,8 @@ pub struct Backoff {
 	)]
 	pub multiplier: u32,
 
-	/// Cap on the delay between reconnect attempts. Defaults to 5s; zero leaves it uncapped.
+	/// Cap on the delay between reconnect attempts. Defaults to 5s; `none` leaves it uncapped,
+	/// and zero retries at once.
 	///
 	/// A cap below `initial` caps the first delay too.
 	#[usage(
@@ -84,7 +85,7 @@ pub struct Backoff {
 		setting = "connect.backoff.max"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub max: Option<crate::cli::Duration>,
+	pub max: Option<crate::cli::Bound>,
 
 	/// How long a session must stay up to count as healthy. Defaults to 1s; zero is refused.
 	///
@@ -95,7 +96,8 @@ pub struct Backoff {
 	#[serde(skip)]
 	pub healthy: Option<crate::cli::Duration>,
 
-	/// Maximum time to spend retrying before giving up. Unset or zero retries forever.
+	/// Maximum time to spend retrying before giving up. Unset or `none` retries forever, and
+	/// zero gives up at the first failure.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
 	/// each candidate but the last gets up to 5s, and the last runs to `--connect-timeout`,
@@ -110,7 +112,7 @@ pub struct Backoff {
 		setting = "connect.backoff.timeout"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub timeout: Option<crate::cli::Duration>,
+	pub timeout: Option<crate::cli::Bound>,
 	#[usage(
 		name = "backoff-initial",
 		long = "backoff-initial",
@@ -188,11 +190,10 @@ impl Backoff {
 				*knob = set.into();
 			}
 		}
-		// A configured zero turns the bound off.
 		let bounds = [(&mut backoff.max, self.max), (&mut backoff.timeout, self.timeout)];
 		for (bound, set) in bounds {
 			if let Some(set) = set {
-				*bound = Some(set.into()).filter(|set: &Duration| !set.is_zero());
+				*bound = set.into();
 			}
 		}
 		backoff
@@ -204,6 +205,13 @@ impl Backoff {
 		if self.resolve().healthy.is_zero() {
 			return Err(Error::BackoffHealthy);
 		}
+		// TODO(next release): delete, with `cli::bound::warn_zero`.
+		let zero: Vec<_> = [("max", self.max), ("timeout", self.timeout)]
+			.into_iter()
+			.filter(|(_, set)| set.and_then(Into::into).is_some_and(|set: Duration| set.is_zero()))
+			.map(|(name, _)| format!("connect.backoff.{name}"))
+			.collect();
+		crate::cli::bound::warn_zero(&zero);
 		Ok(())
 	}
 
@@ -282,12 +290,12 @@ impl From<Redirect> for moq_net::reconnect::Redirect {
 	}
 }
 
-/// How a reconnect loop reacts to a peer's GOAWAY.
+/// How a reconnect loop hands over to a new session after a peer's GOAWAY.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct Goaway {
+pub struct Handover {
 	/// What to do with the URI a peer names in its GOAWAY. `same-host` (the
 	/// default) lets it move us between ports and schemes on the host we already
 	/// chose, `follow` also lets it name the host, and `ignore` redials the
@@ -306,8 +314,7 @@ pub struct Goaway {
 	/// "500ms". It closes sooner, once its replacement is up and it carries no
 	/// subscription or fetch. A GOAWAY naming a shorter deadline wins, since the peer
 	/// force-closes at its own deadline regardless, but a longer one does not extend
-	/// it. Defaults to 10 seconds.
-	/// `None` uses the default; zero disables this duration.
+	/// it. Defaults to 10 seconds; zero closes the old session at once.
 	#[usage(
 		name = "connect-goaway-handover",
 		long,
@@ -336,7 +343,7 @@ pub struct Goaway {
 	legacy_handover: Option<crate::cli::Duration>,
 }
 
-impl Default for Goaway {
+impl Default for Handover {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::SameHost,
@@ -347,7 +354,7 @@ impl Default for Goaway {
 	}
 }
 
-impl Goaway {
+impl Handover {
 	pub(crate) fn deprecated(&self) -> crate::cli::Deprecated {
 		let mut found = crate::cli::Deprecated::default();
 		if self.legacy_redirect.is_some() {
@@ -368,8 +375,8 @@ impl Goaway {
 	}
 
 	/// The policy these knobs configure, with each unset one at its default.
-	pub(crate) fn resolve(&self) -> moq_net::reconnect::Goaway {
-		let mut goaway = moq_net::reconnect::Goaway::default();
+	pub(crate) fn resolve(&self) -> moq_net::reconnect::Handover {
+		let mut goaway = moq_net::reconnect::Handover::default();
 		goaway.redirect = self.redirect.into();
 		if let Some(handover) = self.handover {
 			goaway.handover = handover.into();
@@ -889,8 +896,9 @@ pub struct Snapshot {
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
-/// redials with exponential backoff. A first dial that reaches no session never retries:
-/// the loop stops with its error, so a setup mistake surfaces at once. The read surface
+/// redials with exponential backoff. Until a session has stayed up past the healthy bar or
+/// been drained by a GOAWAY, nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
+/// credential does, stops the loop with its error, so a setup mistake surfaces at once. The read surface
 /// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
@@ -964,9 +972,9 @@ impl Connection {
 		// Every session of one connection reaches the same peer, so they share one hop: a
 		// route one learned is then never another's to announce, such as a successor's
 		// grant check judging what its draining predecessor learned.
-		let client = match client.peer_hop {
+		let client = match client.peer_node {
 			Some(_) => client,
-			None => client.with_peer_hop(random_hop()),
+			None => client.with_peer_node(random_hop()),
 		};
 
 		let closed: CloseGuard = Default::default();
@@ -1591,13 +1599,13 @@ mod tests {
 		parsed.backoff.initial = Some((Duration::from_secs(7)).into());
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Some((Duration::from_secs(11)).into());
-		parsed.backoff.timeout = Some((Duration::ZERO).into());
+		parsed.backoff.timeout = Some(crate::cli::Bound::NONE);
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
-		assert_eq!(parsed.backoff.timeout(), None, "0 means retry forever");
+		assert_eq!(parsed.backoff.timeout(), None, "none means retry forever");
 
 		// With no flags, the parser defaults resolve to the policy's defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -1612,6 +1620,46 @@ mod tests {
 		assert_eq!(parsed.backoff.resolve().initial, Duration::from_secs(3));
 	}
 
+	/// `max` and `timeout` each read unset as the default, `none` as off, and zero as zero,
+	/// from a flag and from a config file alike.
+	#[test]
+	fn a_backoff_bound_is_unset_off_zero_or_a_value() {
+		#[derive(usage_rs::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
+		struct Wrapper {
+			#[usage(flatten)]
+			backoff: Backoff,
+		}
+
+		let defaults = moq_net::reconnect::Backoff::default();
+		for field in ["max", "timeout"] {
+			let read = |backoff: &moq_net::reconnect::Backoff| match field {
+				"max" => backoff.max,
+				_ => backoff.timeout,
+			};
+			let flag = format!("--connect-backoff-{field}");
+			for (value, expected) in [
+				(None, read(&defaults)),
+				(Some("none"), None),
+				(Some("0s"), Some(Duration::ZERO)),
+				(Some("3s"), Some(Duration::from_secs(3))),
+			] {
+				let args = value.map_or_else(Vec::new, |value| vec![flag.as_str(), value]);
+				let flagged = Wrapper::parse_from(&args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>())
+					.unwrap()
+					.backoff;
+				assert_eq!(read(&flagged.resolve()), expected, "{flag} {value:?}");
+
+				let file = value.map_or_else(String::new, |value| format!("{field} = \"{value}\""));
+				let filed: Backoff = toml::from_str(&file).unwrap();
+				assert_eq!(read(&filed.resolve()), expected, "{file:?}");
+				let saved: Backoff = toml::Value::try_from(&filed).unwrap().try_into().unwrap();
+				assert_eq!(read(&saved.resolve()), expected, "{file:?} round-trip");
+			}
+		}
+	}
+
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
 	#[test]
 	fn cli_does_not_clobber_toml_goaway() {
@@ -1620,13 +1668,13 @@ mod tests {
 		#[usage(settings)]
 		struct Wrapper {
 			#[usage(flatten)]
-			goaway: Goaway,
+			goaway: Handover,
 		}
 
 		// No flags passed: the typed defaults are present.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
 		assert_eq!(parsed.goaway.redirect, Redirect::SameHost);
-		assert_eq!(parsed.goaway.resolve(), moq_net::reconnect::Goaway::default());
+		assert_eq!(parsed.goaway.resolve(), moq_net::reconnect::Handover::default());
 
 		// Flags passed: they land where the merge can see them.
 		let parsed = Wrapper::parse_from(&[
@@ -1783,6 +1831,12 @@ mod tests {
 
 	/// A retry delay and healthy bar short enough to stay out of a test's way.
 	const FAST: Duration = Duration::from_millis(50);
+
+	/// Hold the live session past a [`FAST`] healthy bar, so its end retries: until a
+	/// session has been healthy, a close ends the loop like a failed first dial.
+	async fn outlast_fast() {
+		kio::clock::sleep(FAST).await;
+	}
 
 	fn url(value: &str) -> Url {
 		value.parse().expect("valid url")
@@ -2055,7 +2109,7 @@ mod tests {
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Some((Duration::ZERO).into());
+		config.backoff.timeout = Some(crate::cli::Bound::NONE);
 		let client = config.init(Default::default()).expect("build client");
 		let started = kio::clock::now();
 		let connection = client.connect(url("moqz://localhost/"));
@@ -2071,7 +2125,7 @@ mod tests {
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.backoff.timeout = Some((Duration::ZERO).into());
+		config.backoff.timeout = Some(crate::cli::Bound::NONE);
 		let client = config.init(Default::default()).expect("build client");
 		for target in ["https://a!b:1/", "wss://a!b:1/", "moqt://a!b:1/", "tls://a!b:1/"] {
 			let connection = client.connect(url(target));
@@ -2108,8 +2162,8 @@ mod tests {
 
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
-		// Zero retries forever, so only the first walk failing fast ends this loop.
-		config.backoff.timeout = Some((Duration::ZERO).into());
+		// No give-up, so only the first walk failing fast ends this loop.
+		config.backoff.timeout = Some(crate::cli::Bound::NONE);
 		// No timer may be pending while a dial is in flight, since the paused clock
 		// jumps to it whenever the runtime idles. Linux and macOS refuse a loopback
 		// connect inside the call, but Windows reports it later, after retrying the
@@ -2129,13 +2183,13 @@ mod tests {
 	/// A connection to `host` that had a session and now redials a [`dead`] address.
 	///
 	/// A first walk that fails ends the loop rather than retrying, so a test of the retry
-	/// loop starts from a session: this serves one, repoints `host` at a dead address, and
-	/// ends the session from the server. Returns the connection, already reporting
+	/// loop starts from a healthy session: this serves one past a [`FAST`] healthy bar,
+	/// repoints `host` at a dead address, and ends the session from the server. Returns the connection, already reporting
 	/// [`Status::Disconnected`], the live server's address and its later sessions, and the
 	/// server task.
 	async fn redialing(
 		host: &str,
-		config: crate::connect::Config,
+		mut config: crate::connect::Config,
 	) -> (
 		Connection,
 		std::net::SocketAddr,
@@ -2144,6 +2198,7 @@ mod tests {
 	) {
 		let (live, mut accepted, task) = serve(crate::origin::spawn()).await;
 		crate::resolve::hosts::point(host, [live]);
+		config.backoff.healthy = Some((FAST).into());
 		let mut connection = config
 			.init(Default::default())
 			.unwrap()
@@ -2159,6 +2214,7 @@ mod tests {
 			"the failing port stays reserved"
 		);
 		crate::resolve::hosts::point(host, failing);
+		outlast_fast().await;
 		drop(session);
 		assert_eq!(connection.status().await.unwrap(), Status::Disconnected);
 		(connection, live, accepted, task)
@@ -2175,7 +2231,7 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
-		config.backoff.timeout = Some((Duration::ZERO).into());
+		config.backoff.timeout = Some(crate::cli::Bound::NONE);
 		let (mut connection, live, mut accepted, _task) = redialing(HOST, config).await;
 		let monitor = connection.monitor();
 
@@ -2217,7 +2273,7 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
-		config.backoff.timeout = Some((Duration::ZERO).into());
+		config.backoff.timeout = Some(crate::cli::Bound::NONE);
 		let (connection, _live, _accepted, _task) = redialing(HOST, config).await;
 		let mut monitor = connection.monitor();
 
@@ -2259,6 +2315,7 @@ mod tests {
 		};
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
+		config.backoff.healthy = Some((FAST).into());
 		let connection = config
 			.init(Default::default())
 			.unwrap()
@@ -2298,6 +2355,7 @@ mod tests {
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {
 				kio::clock::timeout(WAIT, grant.changed()).await.unwrap().unwrap();
 			}
+			outlast_fast().await;
 			session.abort(moq_net::Error::Cancel);
 		}
 		drop(connection);
@@ -2317,12 +2375,16 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
-		let connection = config
+		config.backoff.healthy = Some((FAST).into());
+		let mut connection = config
 			.init(Default::default())
 			.unwrap()
 			.connect(url(&format!("tcp://{addr}/")));
 
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		outlast_fast().await;
 		connection.auth().abort(moq_net::Error::App(9));
 		session.abort(moq_net::Error::Cancel);
 		let closed = kio::clock::timeout(WAIT, connection.closed())
@@ -2675,12 +2737,14 @@ mod tests {
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2692,8 +2756,7 @@ mod tests {
 		crate::resolve::hosts::point(HOST, [addr_b]);
 		let drained = kio::clock::now();
 		session_a
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(DEADLINE))
+			.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(DEADLINE)))
 			.unwrap();
 
 		let _session_b = kio::clock::timeout(WAIT, accepted_b.recv())
@@ -2702,12 +2765,14 @@ mod tests {
 			.unwrap();
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2768,12 +2833,14 @@ mod tests {
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2782,7 +2849,8 @@ mod tests {
 		assert_eq!(g0.start, 0);
 
 		crate::resolve::hosts::point(HOST, [addr_b]);
-		session_a.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		outlast_fast().await;
+		session_a.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		let session_b = kio::clock::timeout(WAIT, accepted_b.recv()).await.unwrap().unwrap();
 		let mut state = monitor.state();
 		while !matches!(state.phase, Phase::Connected { .. }) || state.connects < 2 {
@@ -2826,12 +2894,14 @@ mod tests {
 		assert!(monitor.stats().is_some());
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2840,10 +2910,11 @@ mod tests {
 		assert_eq!(g1.start, 1, "the drained session stopped delivering");
 	}
 
-	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps
-	/// the session: no migration and no redial. Its close then reconnects like any drop.
+	/// Under [`Restart::Handoff`] an empty-URI GOAWAY that drains a session before it is
+	/// healthy changes nothing while the peer keeps the session: no migration and no redial.
+	/// Its close then reconnects like any drop.
 	#[tokio::test]
-	async fn a_waited_restart_redials_only_once_the_session_closes() {
+	async fn a_handoff_restart_of_a_young_session_redials_only_once_it_closes() {
 		use futures::FutureExt;
 		const WAIT: Duration = Duration::from_secs(10);
 
@@ -2853,18 +2924,18 @@ mod tests {
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some((FAST).into());
-		config.backoff.healthy = Some((FAST).into());
+		config.backoff.healthy = Some(Duration::from_secs(3600).into());
 		let client = config
 			.init(Default::default())
 			.unwrap()
 			.with_subscriber(subscriber.clone())
-			.with_restart(Restart::Wait);
+			.with_restart(Restart::Handoff);
 		let mut connection = client.connect(url(&format!("tcp://{addr}/")));
 		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 
-		session.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		session.goaway(moq_net::goaway::Goaway::new()).unwrap();
 
 		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
 		let _late = origin.route("late", moq_net::origin::RouteOptions::default()).unwrap();
@@ -2886,6 +2957,7 @@ mod tests {
 		);
 		assert!(accepted.try_recv().is_err(), "redialed while the session served");
 
+		outlast_fast().await;
 		session.abort(moq_net::Error::GoawayTimeout);
 		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Disconnected);
@@ -3025,12 +3097,14 @@ mod tests {
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -3057,12 +3131,14 @@ mod tests {
 		assert!(!crate::websocket::won(&url), "the race still skips QUIC's head start");
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -3093,6 +3169,8 @@ mod tests {
 		let (_, server) = sessions.recv().await.unwrap();
 		assert!(crate::websocket::won(&url));
 
+		// Past the default healthy bar, so the end redials rather than ending the loop.
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		server.abort(moq_net::Error::Cancel);
 		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);
@@ -3142,7 +3220,7 @@ mod tests {
 						let mut request = moq_net::Server::new()
 							.with_versions(versions.clone())
 							.with_subscriber(server_origin)
-							.accept_request(now, server)
+							.handshake(now, server)
 							.await
 							.unwrap();
 						// The connection credential grants nothing; only the configured token
@@ -3217,7 +3295,7 @@ mod duration_tests {
 		max,
 		"--connect-backoff-max",
 		|c: &Backoff| c.max(),
-		|d: Duration| Some(d).filter(|d| !d.is_zero())
+		Some
 	);
 	crate::cli::duration::test_config_duration!(
 		timeout_set_in_code_beats_parser_default,
@@ -3225,14 +3303,14 @@ mod duration_tests {
 		timeout,
 		"--connect-backoff-timeout",
 		|c: &Backoff| c.timeout(),
-		|d: Duration| Some(d).filter(|d| !d.is_zero())
+		Some
 	);
 	crate::cli::duration::test_config_duration!(
 		handover_set_in_code_beats_parser_default,
-		Goaway,
+		Handover,
 		handover,
 		"--connect-goaway-handover",
-		|c: &Goaway| c.resolve().handover,
+		|c: &Handover| c.resolve().handover,
 		|d| d
 	);
 }

@@ -305,6 +305,20 @@ impl Reader {
 		ranges && self.bounds.is_none_or(|(start, end)| (start..end).contains(&group))
 	}
 
+	/// Record a run this reader gave up, failing if it handed one of its groups out.
+	fn report_drop(&mut self, index: usize, range: std::ops::Range<u64>, why: &str) -> Result<(), TestCaseError> {
+		for group in range.clone() {
+			if self.reading.contains_key(&group) {
+				return Err(fail(
+					index,
+					format!("dropped {range:?} ({why}) after handing out {group}"),
+				));
+			}
+		}
+		self.dropped.extend(range.start..range.end.min(GROUPS));
+		Ok(())
+	}
+
 	/// Everything observed, to tell whether a poll found anything new.
 	fn observed(&self) -> (usize, usize, bool, usize) {
 		let frames = self
@@ -338,7 +352,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			hop: std::num::NonZeroU64::MIN,
+			node: std::num::NonZeroU64::MIN,
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};
@@ -398,13 +412,13 @@ impl Model {
 				if copy.complete(group) || !copy.given_up.insert(group) {
 					return Ok(());
 				}
-				match copy.groups.get_mut(&group) {
-					Some(parts) => {
-						for writer in parts.iter_mut().filter_map(|part| part.writer.take()) {
-							let _ = writer.abort(Error::Stream(GIVE_UP));
-						}
-					}
-					None => copy.track.drop_groups(group..group + 1, GIVE_UP),
+				let parts = copy.groups.get_mut(&group).map(Vec::as_mut_slice).unwrap_or_default();
+				for writer in parts.iter_mut().filter_map(|part| part.writer.take()) {
+					let _ = writer.abort(Error::Stream(GIVE_UP));
+				}
+				// A fetched tail is not the live feed's: the feed reports the group dropped.
+				if !parts.iter().any(|part| part.from == 0) {
+					copy.track.drop_groups(group..group + 1, GIVE_UP);
 				}
 				publisher.given_up.insert(group);
 			}
@@ -525,7 +539,7 @@ impl Model {
 				part.written += 1;
 			}
 			if part.written == frames(group) {
-				part.writer.take().unwrap().close().unwrap();
+				part.writer.take().unwrap().finish().unwrap();
 				publisher.complete.insert(group);
 			}
 			let most = publisher.written.entry(group).or_default();
@@ -541,7 +555,7 @@ impl Model {
 			for slot in 0..SLOTS {
 				while let Some(Poll::Ready(Ok(fill))) = self.instances[instance].routes[slot]
 					.as_ref()
-					.map(|copy| copy.fills.poll_requested_fill(&kio::Waiter::noop()))
+					.map(|copy| copy.fills.poll_requested_groups(&kio::Waiter::noop()))
 				{
 					filled = true;
 					let (start, end) = (fill.start().group, fill.end());
@@ -653,7 +667,14 @@ impl Model {
 		while reader.end.is_none() {
 			let polled = match reader.cursor.as_mut().unwrap() {
 				Cursor::Arrival(sub) => sub.poll_recv_group(&waiter),
-				Cursor::Ordered(sub) => sub.poll_next_group(&waiter),
+				Cursor::Ordered(sub) => match sub.poll_next_group(&waiter) {
+					// An ordered read reports its drops in turn.
+					Poll::Ready(Ok(Some(track::Item::Gap { range, error }))) => {
+						reader.report_drop(index, range, &format!("{error:?}"))?;
+						continue;
+					}
+					polled => polled.map(|res| res.map(|item| item.map(|item| item.group().expect("a group")))),
+				},
 			};
 			match polled {
 				Poll::Pending => break,
@@ -728,19 +749,15 @@ impl Model {
 			}
 		}
 
-		if reader.spec.drops
-			&& let Some(Cursor::Arrival(sub)) = &mut reader.cursor
-		{
-			while let Poll::Ready((range, err)) = sub.poll_drop(&waiter) {
-				for group in range.clone() {
-					if reader.reading.contains_key(&group) {
-						return Err(fail(
-							index,
-							format!("dropped {range:?} ({err:?}) after handing out {group}"),
-						));
-					}
-				}
-				reader.dropped.extend(range.start..range.end.min(GROUPS));
+		if reader.spec.drops && matches!(reader.cursor, Some(Cursor::Arrival(_))) {
+			loop {
+				let Some(Cursor::Arrival(sub)) = &mut reader.cursor else {
+					unreachable!("matched above")
+				};
+				let Poll::Ready((range, err)) = sub.poll_drop(&waiter) else {
+					break;
+				};
+				reader.report_drop(index, range, &format!("{err:?}"))?;
 			}
 		}
 
@@ -1360,6 +1377,46 @@ fn regressions() {
 				Op::Ranges {
 					reader: 2,
 					range: Some((6, 9)),
+				},
+			],
+			finish: false,
+		},
+		// A route giving up a group it held only a fetched tail of drops it from its live
+		// feed, so an ordered read on that route moves past it.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 0 },
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Up { instance: 1, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(true, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::GiveUp {
+					instance: 1,
+					slot: 1,
+					group: 5,
 				},
 			],
 			finish: false,

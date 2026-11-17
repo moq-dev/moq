@@ -204,8 +204,9 @@ const std::vector<Field> &Fields()
 				   1, 60000, 100, "Delay before the first reconnect attempt; it grows from here."));
 		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max, BACKOFF_MAX), 1,
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT), 0,
-				   3600000, 1000,
+		// The library's default never gives up, which this field spells as 0.
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)",
+				   d.backoff.timeout ? Millis(d.backoff.timeout, BACKOFF_TIMEOUT) : 0, 0, 3600000, 1000,
 				   "Total time to keep reconnecting after a drop before the stream fails. 0 retries "
 				   "forever. A first connect that reaches no server fails the stream at once."));
 
@@ -339,7 +340,10 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 
 	config.backoff.initial = Milliseconds(settings, BACKOFF_INITIAL, error);
 	config.backoff.max = Milliseconds(settings, BACKOFF_MAX, error);
-	config.backoff.timeout = Milliseconds(settings, BACKOFF_TIMEOUT, error);
+	// 0 here means never give up, which the library spells as no timeout: its zero gives up
+	// at the first failure.
+	if (const auto timeout = Milliseconds(settings, BACKOFF_TIMEOUT, error); timeout.count() != 0)
+		config.backoff.timeout = timeout;
 
 	// Automatic leaves the tri-states and the congestion control unset, which keeps the
 	// library default. A released family name (`delay`, `loss`) is refused like any

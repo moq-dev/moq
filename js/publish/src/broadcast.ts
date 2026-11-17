@@ -4,7 +4,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
-import { rotateVideoDimensions } from "@moq/video";
+import { rotateDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
@@ -83,7 +83,7 @@ export type BroadcastInput = {
 	 * which solicits it; undefined (the default) solicits none. A path that walks above the root from
 	 * the broadcast name is left out of the catalog with a warning, since every viewer would refuse it.
 	 */
-	echo: Getter<Moq.Path.Relative | undefined>;
+	echoPath: Getter<Moq.Path.Relative | undefined>;
 
 	/** Which renditions wait for a subscriber before encoding. Defaults to `"retain"`. */
 	onDemand: Getter<OnDemand>;
@@ -102,7 +102,7 @@ export type BroadcastInput = {
  */
 export type OnDemand = "off" | "retain" | "all";
 
-// The longest group among the video and audio renditions, the catalog's `media.join.interval`: the
+// The longest group among the video and audio renditions, the catalog's `sync.interval`: the
 // promise that every one starts a group at least that often. Undefined while none declares one, so a
 // later listing tries again; it reads every hint until then, since none is fixed yet.
 function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<unknown>>): Catalog.U53 | undefined {
@@ -133,7 +133,7 @@ export class Broadcast {
 
 	/**
 	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	 * `video`/`audio` sections and `media.join` are folded from the registered renditions (see
+	 * `video`/`audio` sections and `sync.interval` are folded from the registered renditions (see
 	 * {@link Rendition.join}); an application adds its own
 	 * root sections (e.g. `scte35`) by locking it too.
 	 */
@@ -175,7 +175,7 @@ export class Broadcast {
 	readonly #join = new Signal<Duration | undefined>(undefined);
 
 	/**
-	 * The catalog's `media.join.interval` the current network broadcast declared, in milliseconds:
+	 * The catalog's `sync.interval` the current network broadcast declared, in milliseconds:
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
@@ -198,7 +198,7 @@ export class Broadcast {
 			maxAge: getter(props?.maxAge),
 			stats: getter(props?.stats ?? false),
 			probe: getter(props?.probe),
-			echo: getter(props?.echo),
+			echoPath: getter(props?.echoPath),
 			onDemand: getter(props?.onDemand ?? "retain"),
 		};
 
@@ -326,16 +326,16 @@ export class Broadcast {
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
-				catalog.media = { ...catalog.media, join: { interval: join } };
-			} else if (catalog.media) {
-				delete catalog.media.join;
+				catalog.sync = { ...catalog.sync, interval: join };
+			} else if (catalog.sync) {
+				delete catalog.sync.interval;
 			}
 
 			if (Object.keys(video).length > 0) {
 				const section: Catalog.Video = { renditions: video };
 				// display is optional in the schema, so it gates only itself, not the whole section.
 				if (display) {
-					const { width, height } = rotateVideoDimensions(display, rotation);
+					const { width, height } = rotateDimensions(display, rotation);
 					section.display = { width: Catalog.u53(width), height: Catalog.u53(height) };
 				}
 				if (flip) section.flip = true;
@@ -366,7 +366,7 @@ export class Broadcast {
 	// Solicit feedback in the catalog's `echo` section. A path above the root names no broadcast, and a
 	// viewer refuses the whole catalog for it, so it is left out instead.
 	#runEcho(effect: Effect) {
-		const path = effect.get(this.in.echo);
+		const path = effect.get(this.in.echoPath);
 		if (path === undefined) return;
 		const name = effect.get(this.in.name);
 		if (Moq.Path.tryResolve(name, path) === undefined) {
@@ -406,7 +406,7 @@ export class Broadcast {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
 
-		effect.interval(() => writer.update(this.#stats()), Duration.millis(Report.INTERVAL));
+		effect.interval(() => writer.update(this.#stats()), Report.INTERVAL);
 	}
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
@@ -502,13 +502,15 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
-				// The zero default max age, as Rust's catalog track takes: a viewer needs only the newest
-				// snapshot. A catalog may publish once and stay unchanged for the broadcast's whole life,
-				// and a viewer arriving long after still bootstraps from it: max age only stales a
-				// superseded group, and the cache never ages out an open track's newest group.
+				// The media's max age, as Rust's catalog track takes: a viewer holding each update until
+				// its timestamp plays as far behind as the media, so a superseded snapshot stays
+				// deliverable as long. A catalog may publish once and stay unchanged for the broadcast's
+				// whole life, and a viewer arriving long after still bootstraps from it: max age only
+				// stales a superseded group, and the cache never ages out an open track's newest group.
 				const track = broadcast.createTrack(Broadcast.CATALOG_TRACK, {
 					// Each catalog snapshot is stamped when written.
 					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: maxAge === undefined ? Container.MAX_AGE : maxAge,
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
 					compression: "deflate",

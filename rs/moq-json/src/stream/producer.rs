@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::Encoder;
-use crate::Timed;
 
 use crate::Result;
 
@@ -65,7 +64,7 @@ impl<T: Serialize> Producer<T> {
 		}
 	}
 
-	/// Append one record to the log.
+	/// Append one record to the log at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// The log accepts appends for its track's life. A record larger than a frame may be is refused
 	/// with [`moq_net::Error::FrameTooLarge`] before anything is written, leaving the log intact. A
@@ -80,11 +79,8 @@ impl<T: Serialize> Producer<T> {
 	/// complete. Every later append fails on the ended track.
 	///
 	/// Returns the encoded size of the frame written.
-	pub fn append<'a>(&mut self, value: Timed<&'a T>) -> Result<usize>
-	where
-		T: 'a,
-	{
-		self.inner.lock().unwrap().append(value)
+	pub fn append(&mut self, value: &T, at: moq_net::Timestamp) -> Result<usize> {
+		self.inner.lock().unwrap().append(value, at)
 	}
 
 	/// Finish the track, closing the group, and return the [`Finished`] log.
@@ -106,6 +102,24 @@ impl<T: Serialize> Producer<T> {
 		self.inner.lock().unwrap().track.abort(err);
 		Ok(())
 	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
+	/// [`abort`](Self::abort) leaves it.
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let mut inner = self.inner.lock().unwrap();
+		// The check and the abort are one step on the track; the rest is the same cleanup.
+		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
+			drop(inner);
+			return Err(self);
+		}
+		inner.track.abort(err);
+		Ok(())
+	}
 }
 
 /// A log whose producer [finished](Producer::finish) it: it can still be read or aborted, but
@@ -115,7 +129,7 @@ impl<T: Serialize> Producer<T> {
 ///
 /// ```compile_fail,E0599
 /// # fn cannot_append(log: moq_json::stream::Finished<u32>) {
-/// log.append(&1).unwrap();
+/// log.append(&1, moq_net::Timestamp::unscaled(0)).unwrap();
 /// # }
 /// ```
 #[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
@@ -161,18 +175,18 @@ struct Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn append(&mut self, payload: Timed<&T>) -> Result<usize> {
+	fn append(&mut self, value: &T, at: moq_net::Timestamp) -> Result<usize> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
 		// A timestamp that doesn't match the track, or that its scale can't hold, is refused before
 		// anything changes: found by `write`, it would be a hole that ends the whole log.
-		let at = track.inner.info().rescale(payload.at)?;
+		let at = track.inner.info().rescale(at)?;
 
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// `record` guards the window: any failure below drops it uncommitted.
-		let record = match encoder.encode(payload.value) {
+		let record = match encoder.encode(value) {
 			Ok(record) => record,
 			// Refused before encoding, so nothing is missing from the log and nothing desynced.
 			Err(err @ crate::Error::Net(moq_net::Error::FrameTooLarge)) => return Err(err),
@@ -233,8 +247,7 @@ impl Track {
 	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
 	fn open(&mut self, timestamp: moq_net::Timestamp) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
-			let start = timestamp.value();
-			self.group = Some(self.inner.append_group(start)?);
+			self.group = Some(self.inner.append_group(timestamp)?);
 		}
 		Ok(())
 	}
@@ -273,7 +286,7 @@ impl Track {
 		// would leave the track open with `group` already taken, so a later append would open a
 		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(group) => group.close().map(drop),
+			Some(group) => group.finish().map(drop),
 			None => Ok(()),
 		};
 		// This shared state keeps its own clone, whose appends the end refuses.

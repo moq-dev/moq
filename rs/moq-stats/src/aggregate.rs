@@ -986,20 +986,30 @@ fn advance<S: Shape>(
 		// listing that ends took its broadcast with it.
 		while let Some(listing) = &mut node.listing {
 			match listing.poll_next(waiter) {
-				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added { name: listed, .. }))) => {
+				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added {
+					name: listed,
+					info: broadcast::Listed::Track(_),
+				}))) => {
 					if parse_bucket_track(&listed).is_some_and(|(bucket, _)| bucket.as_str() == name) {
 						node.offered = Some(listed);
 					}
 				}
 				Poll::Ready(Ok(Some(
-					broadcast::TracksEvent::Removed { name: listed }
-					| broadcast::TracksEvent::Finished { name: listed },
+					broadcast::TracksEvent::Removed {
+						kind: broadcast::Kind::Track,
+						name: listed,
+					}
+					| broadcast::TracksEvent::Finished {
+						kind: broadcast::Kind::Track,
+						name: listed,
+					},
 				))) => {
 					if node.offered.as_ref() == Some(&listed) {
 						node.offered = None;
 					}
 				}
-				Poll::Ready(Ok(Some(broadcast::TracksEvent::Synced))) => {}
+				// SYNCED, and datagram tracks: buckets are tracks of groups.
+				Poll::Ready(Ok(Some(_))) => {}
 				Poll::Ready(result) => {
 					if let Err(err) = result {
 						tracing::debug!(?err, name, "stats: node listing ended");
@@ -1301,9 +1311,9 @@ mod tests {
 		let consumer = egress.request(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
 
@@ -1407,18 +1417,19 @@ mod tests {
 				epoch: bucket_epoch(),
 				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
-			self.bucket
-				.update(moq_json::Timed::new(&frame, next_stamp(&self.track)))
-				.expect("publish");
+			self.bucket.update(&frame, next_stamp(&self.track)).expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
 		/// parse, so the subscription errors while the broadcast stays announced.
 		fn fail_traffic(&mut self) {
 			let at = next_stamp(&self.track);
-			let mut group = self.track.append_group(at.value()).expect("append group");
+			let mut group = self
+				.track
+				.append_group(Timestamp::from_millis(at.value()).unwrap())
+				.expect("append group");
 			group.write_frame(at, b"not json".to_vec()).expect("write frame");
-			group.close().expect("close group");
+			group.finish().expect("close group");
 		}
 	}
 
@@ -2018,10 +2029,7 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(moq_json::Timed::new(
-					&TotalsFrame::from([(String::new(), totals)]),
-					next_stamp(&self.track),
-				))
+				.update(&TotalsFrame::from([(String::new(), totals)]), next_stamp(&self.track))
 				.expect("publish");
 		}
 	}

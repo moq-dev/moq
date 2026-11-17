@@ -32,6 +32,14 @@ m1 quest on 2026-10-22.
   `unused()` rejecting on close is moot, and
   "`producer.unused()` is `producer.demand().unused()`" should point at
   `demand().wanted`.
+  And `rs/moq-auth/MIGRATE.md`'s "Mesh endpoints use the signing public
+  key" names `moq_crypto::sign`, which
+  [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855) deleted, for
+  `moq_auth::mesh`, which
+  [moq-dev/moq#8756](https://github.com/moq-dev/moq/pull/8756) removed:
+  drop it, or correct it against the published moq-auth. `sh/migrate.sh`
+  refuses that edit outside the cut, so
+  [moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947) left it here.
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
@@ -66,8 +74,10 @@ m1 quest on 2026-10-22.
 - Known break, a Nix option rather than a Rust API (added 2026-10-31, from
   [moq-dev/moq#7343](https://github.com/moq-dev/moq/pull/7343)): the NixOS
   module option `services.moq-relay.cluster.rootUrl` takes a non-empty
-  list instead of a string. Migrate `rootUrl = "https://root:4443";` to
-  `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
+  list instead of a string, and is renamed `cluster.connect`
+  ([moq-dev/moq#8924](https://github.com/moq-dev/moq/pull/8924)). Migrate
+  `rootUrl = "https://root:4443";` to `connect = [ "https://root:4443" ];`;
+  an empty list fails evaluation, and `rootUrl` fails it naming `connect`.
   Write it into `rs/moq-relay/MIGRATE.md`'s transition section (its
   `## Unreleased` section until the cut names the version).
 

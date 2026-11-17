@@ -16,10 +16,14 @@ Those methods, `poll_acked` on `send::Stream` and `send::Finished` and
 `Finished::offset`, forward to `moq-quic`'s public `send::Stream::poll_acked`.
 They fail with the peer's stop code (`send::Error::Stopped`) or the
 connection's loss (`send::Error::Connection`); a reset consumes the handle, so
-no handle ever waits past one. qmux and the browser transport stay on the
-trait's default `Acked::Unsupported` (decided 2026-10-22 and 2026-10-26,
-maintainer): writing into TCP is not delivery, and the browser's
-`WebTransportSendStream.getStats()` is unimplemented in shipping Chrome.
+no handle ever waits past one. qmux answers `Acked::Sent` once its link
+takes the bytes, which billing counts and acknowledgment consumers ignore:
+writing into TCP is still not delivery (decided 2026-10-22, maintainer;
+`Sent` added 2026-11-17 in
+[moq-dev/moq#8930](https://github.com/moq-dev/moq/pull/8930)). The browser
+transport stays on the trait's default `Acked::Unsupported` (decided
+2026-10-26): its `WebTransportSendStream.getStats()` is unimplemented in
+shipping Chrome.
 
 Decided 2026-11-15 (maintainer, /quest-complete): ✅ keep only the trap tests,
 on the crate-private methods, and drop the public driver API this quest

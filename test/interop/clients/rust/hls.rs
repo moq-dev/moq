@@ -1,5 +1,5 @@
 //! HLS grid interop: `publish` writes a fixed frame schedule through moq-mux, whose catalog
-//! measures and declares `media.join.interval`, and `read` prints a broadcast's declared interval
+//! measures and declares `sync.interval`, and `read` prints a broadcast's declared interval
 //! and each rendition's groups, the first pts every HLS edge numbers segments from on that grid.
 //! The harness reads this publisher and the native JS one (`js-native/hls.ts`), which publishes
 //! the same schedule through `@moq/hang`, and requires the two readouts identical.
@@ -126,11 +126,11 @@ async fn main() -> anyhow::Result<()> {
 				.await?
 				.context("catalog ended before declaring its join interval")?;
 			let renditions = catalog.video.renditions.len() + catalog.audio.renditions.len();
-			if catalog.media.join.is_some() && renditions == 2 {
+			if catalog.sync.interval.is_some() && renditions == 2 {
 				break catalog;
 			}
 		};
-		let interval = catalog.media.interval().expect("checked above");
+		let interval = catalog.sync.interval.expect("checked above");
 		println!("hls interval={}", interval.as_millis());
 		let mut renditions: Vec<(&str, String, Container)> = Vec::new();
 		for (name, config) in &catalog.video.renditions {
@@ -145,7 +145,11 @@ async fn main() -> anyhow::Result<()> {
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 			let mut groups = broadcast.track(&name)?.subscribe(replay).await?.ordered();
 			let mut out = Vec::new();
-			while let Some(mut group) = groups.next_group().await? {
+			while let Some(item) = groups.next_group().await? {
+				// A group given up on starts no segment.
+				let moq_net::track::Item::Group(mut group) = item else {
+					continue;
+				};
 				let Some(frame) = group.read_frame().await? else {
 					continue;
 				};

@@ -27,7 +27,8 @@ const dispose = count.subscribe(n => console.log(n)); // subscribe to changes ma
 
 Updates are batched, coalescing multiple updates into a single microtask.
 The old and new values are then compared to avoid unnecessary wakeups: plain objects and arrays by their keys, length, and contents, everything else like a `Set` would (class instances by identity except the clock's immutable values, which compare by value; `NaN` equal to itself).
-It's possible to skip this check, but please benchmark it first...
+`update` compares the same way, so return a new value rather than changing the old one in place.
+Change it in place with `mutate(fn)` instead, which always notifies, and pass `set(value, true)` to notify for an equal value, such as a repeated command.
 
 ### Effect
 
@@ -154,7 +155,6 @@ Effects also provide lifecycle helpers that auto-cleanup:
 
 - **`effect.set(signal, value, cleanup)`** - temporarily set the value of a signal for the duration of the effect
 - **`effect.timer(fn, duration)`** - run once after a `Duration` on the `@moq/clock` clock, cancelled on cleanup
-- **`effect.timeout(fn, duration)`** - run a nested effect until a `Duration` elapses
 - **`effect.interval(fn, period)`** - run every `Duration` period on the `@moq/clock` clock, cancelled on cleanup
 - **`effect.animate(fn)`** - `requestAnimationFrame` that cancels on cleanup
 - **`effect.event(target, type, fn)`** - `addEventListener` that removes on cleanup/rerun via `AbortSignal`

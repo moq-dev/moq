@@ -1,7 +1,7 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Signal } from "@moq/signals";
+import { Once, Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
@@ -21,7 +21,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, SessionBroadcast, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream, Writer } from "../stream.ts";
+import { Cursor, Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
@@ -31,7 +31,7 @@ import { ObjectDatagram } from "./datagram.ts";
 import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
-import { Frame, Group as GroupMessage } from "./object.ts";
+import { decodeGroupGap, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
@@ -1790,7 +1790,7 @@ class Tokens {
 	issue(value: string): Credential {
 		const token: Credential = {
 			grant: new Signal<Grant | undefined>(undefined),
-			closed: new Promise(() => {}),
+			closed: new Once<Error | null>(),
 			answered: Promise.resolve(),
 			close: () => {
 				this.#issued.delete(token);
@@ -2244,15 +2244,20 @@ const V22 = Version.DRAFT_22;
 const TRACK_ENDED_STATUS = 0x2;
 
 /** A group stream the publisher opened, decoded down to its objects. */
+/** The END_OF_GROUP object status. */
+const END_OF_GROUP = 3;
+
 interface ServedGroup {
 	/** The group's sequence number. */
 	sequence: bigint;
 	/** Whether the header claimed the stream starts at the group's first object. */
 	firstObject: boolean;
-	/** Whether the header claimed the stream's FIN ends the group (END_OF_GROUP). */
+	/** Whether the stream ended with an explicit END_OF_GROUP; the header never claims one. */
 	endOfGroup: boolean;
 	/** Each object's absolute id (reconstructed from its delta) and payload. */
 	objects: { id: number; payload: string }[];
+	/** The Prior Group ID Gap each object carried, by object id, when any did. */
+	gaps?: Map<number, bigint>;
 }
 
 /** A fill's fetch stream, decoded down to its objects. */
@@ -2360,23 +2365,41 @@ async function readGroup(stream: ReadableStream<Uint8Array> | Reader): Promise<S
 
 	// Decoded by hand rather than through Frame: a filter that trims a group's head puts the
 	// first object's absolute id in the delta, which Frame.decode refuses on principle.
+	expect(header.flags.hasEnd).toBe(false);
 	const objects: { id: number; payload: string }[] = [];
+	const gaps = new Map<number, bigint>();
 	let id = 0;
 	let first = true;
+	let endOfGroup = false;
 	while (!(await reader.done())) {
+		expect(endOfGroup).toBe(false);
 		const delta = await reader.u53();
 		id = first ? delta : id + delta + 1;
 		first = false;
-		await reader.read(await reader.u53()); // object properties
-		const payload = await reader.read(await reader.u53());
+		if (header.flags.hasExtensions) {
+			const properties = await reader.read(await reader.u53());
+			const gap = new Cursor(properties, reader.version).exact(properties.byteLength, decodeGroupGap);
+			if (gap !== undefined) gaps.set(id, gap);
+		}
+		const size = await reader.u53();
+		if (size === 0) {
+			const status = await reader.u53();
+			if (status === END_OF_GROUP) {
+				endOfGroup = true;
+				continue;
+			}
+			expect(status).toBe(0);
+		}
+		const payload = await reader.read(size);
 		objects.push({ id, payload: new TextDecoder().decode(payload) });
 	}
 
 	return {
 		sequence: header.groupId,
 		firstObject: header.flags.firstObject,
-		endOfGroup: header.flags.hasEnd,
+		endOfGroup,
 		objects,
+		gaps: gaps.size > 0 ? gaps : undefined,
 	};
 }
 
@@ -2385,7 +2408,7 @@ async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<bigin
 	const reader = new Reader(stream, undefined, V22);
 	const header = await GroupMessage.decode(reader, V22);
 	expect(header.flags.hasEnd).toBe(false);
-	const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+	const frame = await reader.decode((c) => Frame.decode(c, header.flags));
 	expect(frame.endOfTrack).toBe(true);
 	expect(await reader.done()).toBe(true);
 	return header.groupId;
@@ -2502,6 +2525,37 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 
 		// Groups 0 and 3 are outside the range, so nothing more is opened.
 		expect(await opens(fx.uni.read(), clock)).toBe(false);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * A filter starting past a finished group's end serves none of it and names no end either:
+ * END_OF_GROUP goes one past the group's real last object, which the filter skipped, as in
+ * Rust's `end_object`.
+ */
+test("draft-22: a filter starting past a group's end claims no END_OF_GROUP", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	writeGroup(track, 2);
+	writeGroup(track, 2);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 5n, endGroup: 1n, endObject: 0n },
+		}),
+	);
+
+	try {
+		const served = await readGroup(await nextUni(fx.uni));
+		expect(served).toEqual({ sequence: 0n, firstObject: false, endOfGroup: false, objects: [] });
 	} finally {
 		fx.close();
 		client.close();
@@ -2859,14 +2913,11 @@ test("LARGEST_OBJECT is the live edge", async () => {
 	}
 });
 
-/**
- * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
- * out of timestamps: with no declared Timescale there are no units to read one in.
- */
+/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; objects carry none either way. */
 test.each([
 	[ALPN.DRAFT_20, Version.DRAFT_20],
 	[ALPN.DRAFT_22, Version.DRAFT_22],
-] as const)("%s: opt-out omits timestamps", async (_alpn, version) => {
+] as const)("%s: opt-out omits the Track Properties", async (_alpn, version) => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture(version);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -2885,21 +2936,14 @@ test.each([
 		expect(ok.properties.timescale !== undefined).toBe(propertiesWanted);
 		expect(ok.properties.groupOrder !== undefined).toBe(propertiesWanted);
 
-		// With no TIMESCALE declared there are no units to read a timestamp in, so the objects
-		// must not carry one either: a bare value invites a peer to read it as some default.
 		writeGroup(track, 1);
 
 		const served = await nextUni(fx.uni);
 		const reader = new Reader(served, undefined, version);
 		const header = await GroupMessage.decode(reader, version);
-		expect(header.flags.hasExtensions).toBe(propertiesWanted);
+		expect(header.flags.hasExtensions).toBe(false);
 
 		await reader.u53(); // object id delta
-		if (propertiesWanted) {
-			const length = await reader.u53();
-			expect(length).toBeGreaterThan(0); // the properties block, carrying the timestamp
-			await reader.read(length);
-		}
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
 		fx.close();
@@ -2934,9 +2978,9 @@ test.each([[Version.DRAFT_18, GroupOrder.Descending]] as const)(
 	},
 );
 
-/** A track with units declares TIMESCALE in SUBSCRIBE_OK and stamps each object. */
-test("a timed track declares TIMESCALE and stamps its objects", async () => {
-	for (const version of [Version.DRAFT_18] as const) {
+/** A track with units declares TIMESCALE in SUBSCRIBE_OK, the units of its Group IDs, and stamps no object. */
+test("a timed track declares TIMESCALE and sends no Timestamp", async () => {
+	for (const version of IETF_VERSIONS) {
 		const fx = fixture(version);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const { client, ok } = await runSubscribe(
@@ -2949,22 +2993,68 @@ test("a timed track declares TIMESCALE and stamps its objects", async () => {
 			}),
 		);
 
-		expect(ok.properties.timescale !== undefined).toBe(true);
+		expect(ok.properties.timescale).toBe(Timescale.MILLI);
 
-		writeGroup(track, 1);
-		const served = await nextUni(fx.uni);
-		const reader = new Reader(served, undefined, version);
-		const header = await GroupMessage.decode(reader, version);
-		expect(header.flags.hasExtensions).toBe(true);
-
-		await reader.u53(); // object id delta
-		const length = await reader.u53();
-		expect(length).toBeGreaterThan(0);
-		await reader.read(length);
-		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
+		writeGroup(track, 2);
+		const served = await readGroup(new Reader(await nextUni(fx.uni), undefined, version));
+		expect(served.objects.map((object) => object.payload)).toEqual(["0.0", "0.1"]);
+		expect(served.gaps).toBeUndefined();
 
 		fx.close();
 		client.close();
+	}
+});
+
+/**
+ * Object 0 of a group names the skip run just below it as its Prior Group ID Gap, whether
+ * `skipGroups` declared it or an append past a gap left it.
+ */
+test.each(["skipGroups", "append"] as const)("our object 0 names the skipped keys below it: %s", async (how) => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const write = (key: bigint, frames: number) => {
+			if (how === "append" && frames === 1) {
+				// A scale-less track appends at its frame's key, skipping what it passes.
+				track.writeFrame({ payload: new TextEncoder().encode(`${key}.0`), timestamp: Timestamp.unscaled(key) });
+				return;
+			}
+			const group = track.createGroup(key);
+			for (let i = 0; i < frames; i++) {
+				group.writeFrame({
+					payload: new TextEncoder().encode(`${key}.${i}`),
+					timestamp: Timestamp.unscaled(key),
+				});
+			}
+			group.finish();
+		};
+		write(0n, 1);
+		const first = await readGroup(await nextUni(fx.uni));
+		expect(first.sequence).toBe(0n);
+		expect(first.gaps).toBeUndefined();
+
+		if (how === "skipGroups") {
+			track.skipGroups(1n, 4n);
+			write(4n, 2);
+		} else write(4n, 1);
+		const next = await readGroup(await nextUni(fx.uni));
+		expect(next.sequence).toBe(4n);
+		// Only object 0 carries it.
+		expect(next.gaps).toEqual(new Map([[0, 3n]]));
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
 	}
 });
 
@@ -2991,11 +3081,14 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 		const header = await GroupMessage.decode(reader, V22);
 		expect(header.groupId).toBe(5n);
 		for (let i = 0; i < 5; i++) {
-			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags));
 			expect(frame.payload).toEqual(new Uint8Array([i]));
 		}
 		if (finished) {
 			group.finish();
+			// The group finished before the track named its end, so it claims its own.
+			const end = await reader.decode((c) => Frame.decode(c, header.flags));
+			expect(end.isObject || end.endOfTrack).toBe(false);
 			expect(await reader.done()).toBe(true);
 		}
 		track.finishAt({ group: 5n, frame: 5 });
@@ -3010,12 +3103,12 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 			expect(endHeader.groupId).toBe(5n);
 			expect(endHeader.flags.hasEnd).toBe(false);
 			expect(endHeader.flags.firstObject).toBe(false);
-			const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+			const frame = await end.decode((c) => Frame.decode(c, endHeader.flags));
 			expect(frame.endOfTrack).toBe(true);
 			expect(frame.idDelta).toBe(5);
 			expect(await end.done()).toBe(true);
 		} else {
-			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags));
 			expect(frame.endOfTrack).toBe(true);
 			expect(frame.idDelta).toBe(0);
 			expect(await reader.done()).toBe(true);
@@ -3057,7 +3150,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
 		const header = await GroupMessage.decode(reader, V22);
-		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags));
 
 		// The group stream's close fails once it FINs, like a reset after its FIN.
 		const closed = Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get;
@@ -3080,14 +3173,14 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		track.finish();
 		track.close();
 
-		const inline = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+		const inline = await reader.decode((c) => Frame.decode(c, header.flags));
 		expect(inline.endOfTrack).toBe(true);
 		const marker = await fx.uni.read();
 		if (!marker.value) throw new Error("missing standalone terminal stream");
 		const end = new Reader(marker.value, undefined, V22);
 		const endHeader = await GroupMessage.decode(end, V22);
 		expect(endHeader.groupId).toBe(5n);
-		const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+		const frame = await end.decode((c) => Frame.decode(c, endHeader.flags));
 		expect(frame.endOfTrack).toBe(true);
 		expect(frame.idDelta).toBe(5);
 		expect(await client.reader.u53()).toBe(PublishDone.id);
@@ -4292,7 +4385,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.reportedLargest(track, { group: 4n, frame: 3 });
+	hooks.reportedLargest(track, { group: 4n, frame: 3 }, false);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4528,9 +4621,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 		const reading = readGroup(data).then(() => undefined, error);
 		const reader = new Reader(observed, undefined, V22);
 		const header = await GroupMessage.decode(reader, V22);
-		expect((await reader.decode((body) => Frame.decode(body, header.flags, Timescale.MILLI))).payload).toEqual(
-			new Uint8Array([1]),
-		);
+		expect((await reader.decode((body) => Frame.decode(body, header.flags))).payload).toEqual(new Uint8Array([1]));
 		reader.stop(new Error("observation complete"));
 		const parameters = new Parameters();
 		parameters.subscriptionFilter = { kind: "absolute", startGroup: 1n, startObject: 0n };
@@ -4795,7 +4886,7 @@ async function readServed(
 	return served;
 }
 
-test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async () => {
+test("a SUBSCRIBE carries no budget, so the publisher's own policy bounds it", async () => {
 	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
@@ -4805,23 +4896,16 @@ test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async
 			trackNamespace: Path.from("test"),
 			trackName: "video",
 			subscriberPriority: 128,
-			maxAge: 250,
 		}),
 	);
 	try {
-		expect(track.subscription.peek()?.delay?.max).toEqual(Duration.millis(250));
-		const parameters = new Parameters();
-		parameters.maxAge = 900;
+		const unbounded = Duration.millis(Number.MAX_SAFE_INTEGER);
+		expect(track.subscription.peek()?.delay?.max).toEqual(unbounded);
 		await client.writer.u53(SubscribeUpdate.id);
-		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		await new SubscribeUpdate({ requestId: 2n }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.delay?.max).toEqual(Duration.millis(900));
-		await client.writer.u53(SubscribeUpdate.id);
-		await new SubscribeUpdate({ requestId: 4n }).encode(client.writer, fx.version);
-		expect(await client.reader.u53()).toBe(RequestOk.id);
-		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.delay?.max).toEqual(Duration.millis(900));
+		expect(track.subscription.peek()?.delay?.max).toEqual(unbounded);
 	} finally {
 		client.close();
 		track.finish();

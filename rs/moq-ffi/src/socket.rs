@@ -205,7 +205,7 @@ mod tests {
 	fn frame(group: &MoqGroupProducer, payload: &[u8]) -> MoqFrame {
 		MoqFrame {
 			payload: payload.into(),
-			timestamp: MoqTimestamp::unscaled(group.sequence()),
+			timestamp: MoqTimestamp::unscaled(group.start()),
 		}
 	}
 
@@ -231,7 +231,7 @@ mod tests {
 		let reverse = server.producer();
 		let consumer = server.consumer();
 		drop(server);
-		assert!(consumer.info().max_age_unlimited);
+		assert_eq!(consumer.info().max_age, None);
 		// Create the later group first: the reliable ascending reader must wait for 0.
 		let later = producer.create_group(1).unwrap();
 		later.write_frame(frame(&later, b"later")).unwrap();

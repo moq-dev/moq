@@ -70,13 +70,13 @@ pub enum Error {
 
 	/// A client on a simulated host was asked to look a name up, which only a real resolver can.
 	/// The payload is the name.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	#[error("{0} can't be resolved from a simulated host; dial an IP literal or pinned addresses")]
 	SimResolve(String),
 
 	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
-	CreateEndpoint(#[source] driver::endpoint::Error),
+	CreateEndpoint(#[source] std::io::Error),
 
 	/// The resolved transport settings are ones the QUIC stack refuses.
 	#[error("invalid quic config: {0}")]
@@ -190,8 +190,8 @@ pub enum Error {
 		message: String,
 		/// The HTTP status the server answered the CONNECT with, when it answered with one.
 		///
-		/// Read at conversion time rather than kept as a [`web`] error, so the
-		/// classification survives without that crate appearing in this crate's public API.
+		/// Read at conversion time rather than kept as a WebTransport error, so the
+		/// classification survives without that module appearing in this crate's public API.
 		status: Option<u16>,
 	},
 
@@ -303,7 +303,7 @@ enum Bind {
 	/// A UDP socket at this address
 	Udp(net::SocketAddr),
 	/// This port, or an ephemeral one for 0, on a simulated host
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	Sim(driver::sim::Host, u16),
 }
 
@@ -311,14 +311,14 @@ impl Bind {
 	fn port(&self) -> u16 {
 		match self {
 			Self::Udp(addr) => addr.port(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Self::Sim(_, port) => *port,
 		}
 	}
 
 	/// A new endpoint, and whether its socket reaches IPv4 destinations as well as its own family
 	#[cfg_attr(
-		not(feature = "sim"),
+		not(feature = "test-support"),
 		allow(unused_mut, reason = "only a simulated socket seeds the endpoint")
 	)]
 	fn endpoint(&self) -> Result<(driver::endpoint::Endpoint, bool)> {
@@ -329,7 +329,7 @@ impl Bind {
 				let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 				(socket.into(), dual_stack)
 			}
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Self::Sim(host, port) => {
 				let (socket, seed) = host.bind(*port).map_err(Error::BindSocket)?;
 				config.rng_seed = Some(seed);
@@ -337,7 +337,7 @@ impl Bind {
 				(socket.into(), false)
 			}
 		};
-		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(Error::CreateEndpoint)?;
+		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(endpoint_error)?;
 		Ok((endpoint, dual_stack))
 	}
 }
@@ -356,7 +356,7 @@ impl Client {
 	pub fn is_simulated(&self) -> bool {
 		match self.bind {
 			Bind::Udp(_) => false,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Bind::Sim(..) => true,
 		}
 	}
@@ -366,7 +366,7 @@ impl Client {
 	}
 
 	/// [`Self::new`], binding each endpoint on `host` at the configured port.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub fn simulated(config: &connect::Config, quic: &crate::quic::Config, host: driver::sim::Host) -> Result<Self> {
 		Self::bound(config, quic, Bind::Sim(host, config.resolve().bind.port()))
 	}
@@ -465,7 +465,7 @@ impl Client {
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr();
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if self.is_simulated()
 			&& addr.addresses().is_none()
 			&& let url::Host::Domain(domain) = &target
@@ -601,6 +601,14 @@ impl Error {
 	}
 }
 
+/// Map a driver endpoint failure onto the public error, which names no driver type.
+fn endpoint_error(err: driver::endpoint::Error) -> Error {
+	match err {
+		driver::endpoint::Error::Config(err) => Error::Config(err),
+		driver::endpoint::Error::Io(err) => Error::CreateEndpoint(err),
+	}
+}
+
 fn map_client_error(err: web::Error) -> Error {
 	let status = client_status(&err);
 	match status.and_then(crate::ConnectError::from_status_u16) {
@@ -647,7 +655,7 @@ pub(crate) struct Options {
 	pub tls: crate::tls::Serve,
 	pub demux: super::demux::Demux,
 	/// Bind on this simulated host instead of a UDP socket.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	pub sim: Option<driver::sim::Host>,
 }
 
@@ -659,7 +667,7 @@ impl Server {
 			member,
 			tls: served,
 			demux,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim,
 		} = options;
 		let quic = quic.resolve();
@@ -763,7 +771,7 @@ impl Server {
 
 		// A group socket was released only after every member bound and the
 		// steering filter covered the final array.
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		let simulated = match &sim {
 			Some(host) => {
 				let (socket, seed) = host.bind(listen.port()).map_err(Error::BindSocket)?;
@@ -772,7 +780,7 @@ impl Server {
 			}
 			None => None,
 		};
-		#[cfg(not(feature = "sim"))]
+		#[cfg(not(feature = "test-support"))]
 		let simulated = None;
 		let socket = match simulated {
 			Some(socket) => socket,
@@ -781,7 +789,7 @@ impl Server {
 					Some(member) => member.into_inner(),
 					None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 				};
-				driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?
+				driver::wrap_udp_socket(socket).map_err(Error::CreateEndpoint)?
 			}
 		};
 		let socket = demux.wrap(socket);
@@ -792,7 +800,7 @@ impl Server {
 			),
 			None => (driver::endpoint::Endpoint::new(endpoint_config, socket), None),
 		};
-		let quic = quic.map_err(Error::CreateEndpoint)?;
+		let quic = quic.map_err(endpoint_error)?;
 		demux.attach(&quic);
 
 		Ok(Self {
@@ -1083,7 +1091,7 @@ mod tests {
 			member: None,
 			tls,
 			demux,
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: None,
 		})
 		.expect("server init");
@@ -1175,7 +1183,7 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: None,
 		})
 		.expect("server init");
@@ -1288,7 +1296,7 @@ mod tests {
 			member: None,
 			tls,
 			demux: Default::default(),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			sim: None,
 		})
 		.expect("server init");

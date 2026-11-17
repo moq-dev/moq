@@ -67,18 +67,13 @@ fn outcome<T: Encode<V>, V: Copy + Into<Form>>(
 
 /// Decode `data` the way a session does, with what it refuses checked before what it decodes.
 fn run(case: &Case, data: &[u8]) -> String {
-	let crate::Version::Lite(version) = case.version else {
+	let crate::Version(crate::Draft::Lite(version)) = case.version else {
 		return format!("{} is not a moq-lite version", case.version);
 	};
 	let decoder = || Decoder::new(data, version.into());
 	match case.message {
 		Message::Announce => match super::AnnounceBroadcast::decode_slice(data, version) {
 			Ok((super::AnnounceBroadcast::Refused { .. }, used)) if used == data.len() => "withdrawn".to_string(),
-			Ok((super::AnnounceBroadcast::Dead(super::Dead::Closed { moved, .. }), used))
-				if used == data.len() && moved.iter().any(|(_, heard)| heard.is_err()) =>
-			{
-				"withdrawn".to_string()
-			}
 			decoded => outcome(data, version, decoded),
 		},
 		Message::AnnounceInit => {

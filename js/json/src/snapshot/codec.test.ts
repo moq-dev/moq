@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import * as z from "zod/mini";
 import { MissingSnapshot } from "../error.ts";
-import { next, resetKeys } from "../key.test-util.ts";
+import { key, resetKeys } from "../key.test-util.ts";
 import { Decoder } from "./decoder.ts";
 import { type Config, Encoder } from "./encoder.ts";
 
@@ -329,11 +329,11 @@ test("update after finish reports the closed track", async () => {
 
 	const track = new Track.Producer("test");
 	const producer = new Producer<Doc>({ track, deltas: true });
-	producer.update(next({ a: 1 }));
-	producer.update(next({ a: 2 })); // a delta, so a group is open
+	producer.update({ a: 1 }, key());
+	producer.update({ a: 2 }, key()); // a delta, so a group is open
 	producer.finish();
 
-	expect(() => producer.update(next({ a: 3 }))).toThrow("track is closed");
+	expect(() => producer.update({ a: 3 }, key())).toThrow("track is closed");
 });
 
 // A root that isn't an object has no recursive merge patch, so it forces a snapshot regardless of

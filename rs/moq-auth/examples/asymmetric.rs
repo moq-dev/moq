@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
 	println!("Private key:\n{}\n", private_key.to_str()?);
 
 	// Extract the public key for the relay.
-	let public_key = private_key.to_public()?;
+	let public_key = private_key.public()?;
 	println!("Public key (give this to the relay):\n{}\n", public_key.to_str()?);
 
 	// Sign a token with the private key.

@@ -48,7 +48,7 @@ Decided 2026-11-13:
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 
 - ✅ `refresh()` takes no argument and raises `Wanted Group`, which
-  [time addressing](/quest/m2/time-addressing/lite07.md) makes a start
+  [time addressing](https://github.com/moq-dev/moq/pull/8908) makes a start
   time: the node asks for a group that starts after the newest it holds
   (rejected: a request counter riding SUBSCRIBE_UPDATE's update number,
   with every group tagged by the highest update its publisher had seen,
@@ -115,7 +115,7 @@ Recommendations for the PR:
 - The refresh signal's shape on `Demand`: recommend one awaitable that
   resolves each time a new group is asked for and is cleared by the next
   `append_group`, so the three hand-written comparisons become one call and
-  no caller sees a group number. `Fill::wanted()` returns `Option<u64>`
+  no caller sees a group number. `FillGroups::wanted()` returns `Option<u64>`
   with a third meaning (the next group to serve); leave it, or rename it in
   the same PR if it reads as the same thing.
 - Mirror `wanted` and the signal in `@moq/net` and the bindings' demand
@@ -123,8 +123,8 @@ Recommendations for the PR:
 - Update the lite draft (TRACK_INFO's interval, `Wanted Group`'s text, and
   the changelog), `doc/concept/moq-lite.md`, and the matching JS. Run
   `just test interop --all`.
-- Land after [time addressing](/quest/m2/time-addressing/lite07.md), so
-  `Wanted Group` is written once, as a time.
+- `Wanted Group` is `Wanted Start` since [time addressing](https://github.com/moq-dev/moq/pull/8908):
+  the wanted group's start plus one.
 
 Tests: a relay chain where many readers join and call `refresh()` on a
 one-frame track produces one group per interval at the publisher, with time
@@ -137,11 +137,6 @@ the bindings; additive otherwise (`refresh()`, the interval on `Info`).
 Wire: lite-07-wip TRACK_INFO gains the interval; SUBSCRIBE_UPDATE keeps
 `Wanted Group` and gains nothing.
 
-## Required
-
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - `Wanted Group` becomes the start time this requests by
-
 ## Related
 
 - [Hang thumbnails](/quest/m4/hang-thumbnail.md) - the one-frame track this refreshes
-- [Writing a group needs no invented start](/quest/m2/group-api.md) - changes `append_group` beside the `Demand` this changes

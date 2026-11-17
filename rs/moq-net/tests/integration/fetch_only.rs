@@ -55,7 +55,7 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Rou
 				.write_frame(group.at_start(), format!("{key}-{frame}").into_bytes())
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let _finished = track.clone().finish().unwrap();
 
@@ -154,6 +154,8 @@ async fn relayed(version: &str) {
 
 /// A subscriber arriving at a copy learned from TRACK_STATUS still gets timestamped
 /// frames: the copy is timed from TRACK_STATUS_OK, and the resumed SUBSCRIBE keeps it so.
+/// moq-transport carries a frame's time as its Group ID, in the units TRACK_STATUS_OK
+/// declared, so the group is keyed by its time.
 #[kio::test]
 async fn a_subscribe_after_track_status_keeps_timestamps() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
@@ -181,9 +183,9 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 			crate::support::wanted(track.demand()).await.unwrap();
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let stamp = Timestamp::from_millis(123_456).unwrap();
-			let mut group = track.append_next().unwrap();
+			let mut group = track.append_group(stamp).unwrap();
 			group.write_frame(stamp, b"frame".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			let frame = group.read_frame().await.unwrap().unwrap();
@@ -331,7 +333,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	for frame in frames(key) {
 		group.write_frame(group.at_start(), frame).unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// Publish a live track of groups `0..groups`, which the publisher keeps writing.

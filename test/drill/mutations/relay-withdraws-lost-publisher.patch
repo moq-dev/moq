@@ -9,7 +9,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -11417,7 +11417,7 @@
+@@ -11454,7 +11454,7 @@
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -18,7 +18,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -11503,7 +11503,7 @@
+@@ -11540,7 +11540,7 @@
  		let validity = if subscriber.version.has_instance() {
  			Default::default()
  		} else {
@@ -27,7 +27,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
  		// The handler exists before the requester sees the source, so a track it
-@@ -11532,7 +11532,8 @@
+@@ -11569,7 +11569,8 @@
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -37,7 +37,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Queues this route on its prefix's ready set when its request queue wakes.
-@@ -11550,7 +11551,7 @@
+@@ -11587,7 +11588,7 @@
  	) -> Self {
  		Self {
  			route,
@@ -49,7 +49,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -706,7 +706,7 @@
+@@ -1109,7 +1109,7 @@
  				if let Some(served) = self.served.remove(&(id, claim, prefix))
  					&& ended
  				{
@@ -57,11 +57,11 @@ diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subs
 +					std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
  				}
  			}
- 			// A stream this node asked for is never sent routes.
-@@ -751,7 +751,7 @@
+ 			// What the peer is sent goes to the half answering it.
+@@ -1154,7 +1154,7 @@
  		{
  			tracing::debug!(route = %subscriber.log_path(&path), node = id, "dropping looped claim");
- 			for entry in self.previous.remove(&key).into_iter().chain(self.served.remove(&key)) {
+ 			if let Some(entry) = self.served.remove(&key) {
 -				entry.route.dynamic.withdrawn();
 +				std::mem::ManuallyDrop::into_inner(entry.route.dynamic).withdrawn();
  			}

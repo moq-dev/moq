@@ -45,7 +45,7 @@ test("a bucket follows the listing to each new run", async () => {
 	const bucket = new Consumer(broadcast.consume()).bucket("");
 
 	const first = publish(broadcast, "bucket.e1.json");
-	first.update({ value: { epoch: "e1", tiers: { "": { paths: { cam: { publisher: { bytes: 5 } } } } } }, at: key() });
+	first.update({ epoch: "e1", tiers: { "": { paths: { cam: { publisher: { bytes: 5 } } } } } }, key());
 	const update = await bucket.next();
 	if (update?.kind !== "frame") throw new Error("expected a frame");
 	expect(update.frame.epoch).toBe("e1");
@@ -53,7 +53,7 @@ test("a bucket follows the listing to each new run", async () => {
 	expect(update.frame.tiers[""]?.paths.cam?.publisher).toMatchObject({ bytes: 5, frames: 0, stale: { bytes: 0 } });
 
 	// A merge-patch delta lands on the snapshot.
-	first.update({ value: { epoch: "e1", tiers: { "": { paths: { cam: { publisher: { bytes: 9 } } } } } }, at: key() });
+	first.update({ epoch: "e1", tiers: { "": { paths: { cam: { publisher: { bytes: 9 } } } } } }, key());
 	expect(await bucket.next()).toMatchObject({
 		kind: "frame",
 		frame: { tiers: { "": { paths: { cam: { publisher: { bytes: 9 } } } } } },
@@ -62,11 +62,11 @@ test("a bucket follows the listing to each new run", async () => {
 	// A new run replaces the old one, whose counters start over.
 	const second = publish(broadcast, "bucket.e2.json");
 	broadcast.removeTrack("bucket.e1.json");
-	second.update({ value: { epoch: "e2", tiers: {} }, at: key() });
+	second.update({ epoch: "e2", tiers: {} }, key());
 	expect(await bucket.next()).toMatchObject({ kind: "frame", frame: { epoch: "e2", tiers: {} } });
 
 	// Another bucket's run is not this one's.
-	publish(broadcast, "acme/bucket.e3.json").update({ value: { epoch: "e3" }, at: key() });
+	publish(broadcast, "acme/bucket.e3.json").update({ epoch: "e3" }, key());
 	broadcast.removeTrack("bucket.e2.json");
 	expect(await bucket.next()).toEqual({ kind: "ended" });
 
@@ -80,12 +80,9 @@ test("totals, presence, and prefix tracks decode with defaults", async () => {
 	const broadcast = origin.route(Path.from(".stats/node")).broadcast;
 	const consumer = new Consumer(broadcast.consume());
 
-	publish(broadcast, "totals.json").update({ value: { "": { sessions: { sessions_started: 2 } } }, at: key() });
-	publish(broadcast, presenceTrack("acme")).update({ value: { gold: {} }, at: key() });
-	publish(broadcast, prefixTrack("acme/live")).update({
-		value: { "": { self: { publisher: { bytes: 3 } } } },
-		at: key(),
-	});
+	publish(broadcast, "totals.json").update({ "": { sessions: { sessions_started: 2 } } }, key());
+	publish(broadcast, presenceTrack("acme")).update({ gold: {} }, key());
+	publish(broadcast, prefixTrack("acme/live")).update({ "": { self: { publisher: { bytes: 3 } } } }, key());
 
 	expect((await consumer.totals().next())?.[""]?.sessions.sessions_started).toBe(2);
 	expect((await consumer.presence("acme").next())?.gold?.sessions_failed.transport).toBe(0);
@@ -100,23 +97,34 @@ test("concurrent bucket reads each get a frame", async () => {
 	const broadcast = origin.route(Path.from(".stats/node/a")).broadcast;
 	const bucket = new Consumer(broadcast.consume()).bucket("");
 	const run = publish(broadcast, "bucket.e1.json");
-	run.update({ value: { epoch: "e1" }, at: key() });
+	run.update({ epoch: "e1" }, key());
 
 	const first = bucket.next();
 	const second = bucket.next();
 	expect((await first)?.kind).toBe("frame");
-	run.update({ value: { epoch: "e1", tiers: { "": {} } }, at: key() });
+	run.update({ epoch: "e1", tiers: { "": {} } }, key());
 	expect(await second).toMatchObject({ kind: "frame", frame: { tiers: { "": {} } } });
 	bucket.close();
 	origin.close();
 });
 
-test("legacy counter names fill in for missing canonical ones", () => {
-	const traffic = TrafficSchema.parse({ announced: 3, broadcasts: 2, broadcasts_ended: 1, broadcasts_closed: 9 });
-	expect(traffic).toMatchObject({ announces_started: 3, broadcasts_started: 2, broadcasts_ended: 1 });
-	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({
+test("a frame names each counter once and a missing counter reads zero", () => {
+	const traffic = TrafficSchema.parse({ announces_started: 3, broadcasts_started: 2, broadcasts_ended: 1 });
+	expect(traffic).toMatchObject({
+		announces_started: 3,
+		announces_ended: 0,
+		broadcasts_started: 2,
+		broadcasts_ended: 1,
+	});
+	expect(traffic).not.toHaveProperty("announced");
+	expect(PresenceSchema.parse({ sessions_started: 4, sessions_ended: 2 })).toMatchObject({
 		sessions_started: 4,
 		sessions_ended: 2,
+	});
+	// The pre-rename spellings are neither read nor kept.
+	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({
+		sessions_started: 0,
+		sessions_ended: 0,
 	});
 });
 

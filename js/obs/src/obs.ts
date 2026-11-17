@@ -29,8 +29,8 @@ const INHERITED = { realm: "OBS_WEBSOCKET_DATA_REALM_GLOBAL", slotName: "moq.inh
 // before connecting shows an error dialog and emits neither, so this is the only sign of it.
 const START_TIMEOUT = Duration.secs(30);
 
-// libobs holds at most this many video encoders per output (MAX_OUTPUT_VIDEO_ENCODERS), one per layer.
-const MAX_LAYERS = 10;
+// libobs holds at most this many video encoders per output (MAX_OUTPUT_VIDEO_ENCODERS), one per rendition.
+const MAX_RENDITIONS = 10;
 
 /** How to reach OBS. */
 export interface ConnectProps {
@@ -59,7 +59,7 @@ export type Destination =
 			/** A token presented to the relay, kept out of the URL so a reconnect presents the current one. */
 			token?: string;
 			/** Video renditions to publish, 1 to 10, each at `i/N` of the output size and bitrate. Defaults to 1. */
-			layers?: number;
+			renditions?: number;
 	  }
 	| {
 			kind: "rtmp";
@@ -70,7 +70,7 @@ export type Destination =
 	  };
 
 /** What `configure` writes to the profile. Anything left out keeps the profile's value. */
-export interface Publish {
+export interface Config {
 	/** The OBS profile to hold this destination, created when missing. Defaults to `MoQ`. */
 	profile?: string;
 	destination: Destination;
@@ -246,32 +246,32 @@ export class Obs {
 	}
 
 	/**
-	 * Puts `publish.destination` in a dedicated profile and tunes it for low latency, switching
+	 * Puts `config.destination` in a dedicated profile and tunes it for low latency, switching
 	 * OBS to that profile. The user's other profiles keep their service and settings.
 	 *
 	 * Refuses while any OBS output runs, since switching profiles resets them. Calls made before
 	 * an earlier one settles wait for it.
 	 */
-	configure(publish: Publish): Promise<Configured> {
-		const run = this.#configuring.then(() => this.#configure(publish));
+	configure(config: Config): Promise<Configured> {
+		const run = this.#configuring.then(() => this.#configure(config));
 		this.#configuring = run.catch(() => {});
 		return run;
 	}
 
-	async #configure(publish: Publish): Promise<Configured> {
-		const destination = publish.destination;
-		const layers = destination.kind === "moq" ? (destination.layers ?? 1) : 1;
-		if (!Number.isInteger(layers) || layers < 1 || layers > MAX_LAYERS) {
-			throw new RangeError(`invalid layer count: ${layers}, must be 1 to ${MAX_LAYERS}`);
+	async #configure(config: Config): Promise<Configured> {
+		const destination = config.destination;
+		const renditions = destination.kind === "moq" ? (destination.renditions ?? 1) : 1;
+		if (!Number.isInteger(renditions) || renditions < 1 || renditions > MAX_RENDITIONS) {
+			throw new RangeError(`invalid rendition count: ${renditions}, must be 1 to ${MAX_RENDITIONS}`);
 		}
 		if (destination.kind === "moq") this.#requirePlugin();
-		const fps = publish.video?.fps;
+		const fps = config.video?.fps;
 		if (fps !== undefined && (!Number.isInteger(fps) || fps < 1)) throw new RangeError(`invalid fps: ${fps}`);
-		for (const kbps of [publish.video?.bitrate, publish.audio?.bitrate]) {
+		for (const kbps of [config.video?.bitrate, config.audio?.bitrate]) {
 			if (kbps !== undefined && (!Number.isInteger(kbps) || kbps < 1))
 				throw new RangeError(`invalid bitrate: ${kbps}`);
 		}
-		const size = publish.video?.size;
+		const size = config.video?.size;
 		if (size && !(fits(size.width) && fits(size.height))) {
 			throw new RangeError(
 				`invalid size: ${size.width}x${size.height}, each side must be ${MIN_SIDE} to ${MAX_SIDE}`,
@@ -285,7 +285,7 @@ export class Obs {
 			throw new Error(`stop OBS's running outputs first: ${active.map((o) => o.outputName).join(", ")}`);
 		}
 
-		const profile = publish.profile ?? PROFILE;
+		const profile = config.profile ?? PROFILE;
 		const before = Profiles.parse(await this.#session.request("GetProfileList"));
 		const created = !before.profiles.includes(profile);
 		// A new profile's canvas is the monitor's, but the scene collection was laid out on this one.
@@ -338,7 +338,7 @@ export class Obs {
 		// OBS reads these when it builds its outputs, which only a profile load does.
 		const reload: [string, string, string][] = [
 			["Output", "Mode", "Simple"],
-			["Stream1", "WHIPSimulcastTotalLayers", String(layers)],
+			["Stream1", "WHIPSimulcastTotalLayers", String(renditions)],
 			// Enhanced Broadcasting would replace an RTMP destination's encoders with its own.
 			["Stream1", "EnableMultitrackVideo", "false"],
 		];
@@ -346,7 +346,7 @@ export class Obs {
 		for (const [category, name, value] of reload) {
 			if ((await this.#parameter(category, name)) !== value) stale.push(`${category}.${name}`);
 		}
-		if (changed && layers > 1) stale.push("Video");
+		if (changed && renditions > 1) stale.push("Video");
 		// Set until a reload finishes, so a retry after a dropped connection still reloads.
 		if ((await this.#parameter(...PENDING)) !== null) stale.push("an interrupted reload");
 
@@ -371,10 +371,8 @@ export class Obs {
 			["SimpleOutput", "UseAdvanced", "true"],
 			["SimpleOutput", "x264Settings", options],
 		];
-		if (publish.video?.bitrate !== undefined)
-			live.push(["SimpleOutput", "VBitrate", String(publish.video.bitrate)]);
-		if (publish.audio?.bitrate !== undefined)
-			live.push(["SimpleOutput", "ABitrate", String(publish.audio.bitrate)]);
+		if (config.video?.bitrate !== undefined) live.push(["SimpleOutput", "VBitrate", String(config.video.bitrate)]);
+		if (config.audio?.bitrate !== undefined) live.push(["SimpleOutput", "ABitrate", String(config.audio.bitrate)]);
 
 		if (stale.length > 0) await this.#setParameter(...PENDING, "true");
 

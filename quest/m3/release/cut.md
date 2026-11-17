@@ -211,10 +211,6 @@ with the suites above.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 
-- ✅ The cut waits on [the relay's memory growth](/quest/m2/relay-memory.md)
-  by name: the chat scenario's relay uses about 17% more memory on `main`
-  than on `release`, and 0.22 is not announced with that unexplained
-  (rejected: cutting and investigating after).
 - ✅ The cut waits on [the rind 0.4 adapters](/quest/m0/rind-adapters.md)
   ([moq-dev/moq#8432](https://github.com/moq-dev/moq/pull/8432)), so the
   `UnsupportedCpu` error that exists only for rind 0.3 is never published.
@@ -223,10 +219,13 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   method to an existing binding object, which the API diff counts as a
   break once 0.22 is published.
 - ✅ End-to-end encryption does not publish at this cut
-  ([its own unpublished crate](/quest/m2/e2ee-crate.md)), so `moq-e2ee` is
-  no longer a retired name, and the paragraph above about publishing a
-  pointer above 0.0.25 no longer applies: the name is held for
-  [the finished format](/quest/m3/e2ee-format.md).
+  ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
+  so `moq-e2ee` is no longer a retired name, and the paragraph above about
+  publishing a pointer above 0.0.25 no longer applies: the name is held for
+  [the finished format](/quest/m3/e2ee-format.md). `release` still holds
+  `rs/moq-e2ee` at 0.0.25 and publishes it; once the cut merges `main` into
+  `release`, its copy is `publish = false` at 0.0.26. Check that
+  release-plz proposes nothing for `moq-e2ee`.
 - ✅ The hand-written C API publishes as `libmoq` 0.22
   ([its final line](/quest/m2/libmoq-name.md)), reversing 2026-10-25, so the
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
@@ -235,7 +234,6 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
-- [Relay memory](/quest/m2/relay-memory.md) - the relay's memory growth since `release` is fixed or recorded before 0.22 is announced
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed

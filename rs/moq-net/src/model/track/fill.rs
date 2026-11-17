@@ -2,8 +2,8 @@
 //!
 //! A miss is a key a reader wants that the cache doesn't hold and the live feed will
 //! never deliver. A reader joins the fill already covering it, or queues a new one, and a
-//! handler serves each fill it takes as one bounded run: [`Fill::accept`] for each group it
-//! has, [`Fill::drop_groups`] for the rest.
+//! handler serves each fill it takes as one bounded run: [`FillGroups::accept`] for each group it
+//! has, [`FillGroups::drop_groups`] for the rest.
 //!
 //! A fill serves under what its readers ask now: a reader changing its priority, budget, or
 //! order moves every fill it waits on, queued or taken. Only the first group's start frame
@@ -60,7 +60,7 @@ struct Pending {
 	// How many joins still read each key: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
 	// What its handler accepted that no join has picked up yet, which holds back the next
-	// group: see [`Fill::poll_wanted_changed`].
+	// group: see [`FillGroups::poll_wanted_changed`].
 	unseen: RangeSet<u64>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each key.
@@ -830,14 +830,14 @@ pub(super) fn poll_requested(
 			start,
 			end,
 			frame_end,
-			time,
 			flight,
 			asks,
 			result,
 		};
-		return Poll::Ready(Ok(Fill {
-			inner: Arc::new(SendCell::new(inner)),
-			prev: None,
+		let inner = Arc::new(SendCell::new(inner));
+		return Poll::Ready(Ok(match time {
+			Some(time) => Fill::Lookup(FillLookup { inner, time }),
+			None => Fill::Groups(FillGroups { inner, prev: None }),
 		}));
 	}
 
@@ -850,6 +850,15 @@ pub(super) fn poll_requested(
 		Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
 		Poll::Pending => Poll::Pending,
 	}
+}
+
+/// What readers ask a [`Requests`](super::Requests) handler for: a run of groups to serve, or a
+/// time to look up.
+pub enum Fill {
+	/// Groups readers miss.
+	Groups(FillGroups),
+	/// A time a reader's range starts at that no cached group resolves.
+	Lookup(FillLookup),
 }
 
 /// A run of groups readers miss, for a [`Requests`](super::Requests) handler to serve.
@@ -870,7 +879,7 @@ pub(super) fn poll_requested(
 /// A clone serves the same fill, and the fill is settled once the last clone drops. Each
 /// clone watches on its own, so its first [`poll_wanted_changed`](Self::poll_wanted_changed)
 /// reports the current value.
-pub struct Fill {
+pub struct FillGroups {
 	// Its track state reaches every group of the track, so the cell proves `Send` once
 	// here instead of inside every session machine holding a fill.
 	inner: Arc<SendCell<Inner>>,
@@ -878,7 +887,7 @@ pub struct Fill {
 	prev: Option<Option<u64>>,
 }
 
-impl Clone for Fill {
+impl Clone for FillGroups {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone(),
@@ -887,7 +896,7 @@ impl Clone for Fill {
 	}
 }
 
-/// The state a [`Fill`] and its per-group handles share. The last one dropping settles what
+/// The state a fill and its per-group handles share. The last one dropping settles what
 /// was left.
 struct Inner {
 	state: kio::Producer<TrackState>,
@@ -897,14 +906,61 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	time: Option<u64>,
 	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
 	flight: bool,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
 
-impl Fill {
+/// A time a reader's range starts at that no group the cache holds resolves, for a
+/// [`Requests`](super::Requests) handler to look up: [`accept`](Self::accept) the group
+/// containing it, the newest one starting at or before it, or the oldest group when every group
+/// starts after it. The reader's range then starts there.
+///
+/// A lookup owes no group, so it waits only on its first accept. Dropped unanswered, as a
+/// handler that can't resolve times does, the reader's range reaches back to the newest group
+/// the cache holds at or before the time, or, with none, reads every group the cache holds and
+/// asks none starting before the time.
+pub struct FillLookup {
+	inner: Arc<SendCell<Inner>>,
+	time: u64,
+}
+
+impl FillLookup {
+	/// The time to look up, in the track's timescale (a bare start on a scale-less track).
+	pub fn time(&self) -> u64 {
+		self.time
+	}
+
+	/// The most urgent delivery priority among the readers waiting on it now.
+	pub fn priority(&self) -> i8 {
+		self.inner.asks.read().priority()
+	}
+
+	/// The most tolerant age budget among the readers waiting on it now, or `None` for the
+	/// publisher's max age alone. Each reader still enforces its own.
+	pub fn max_delay(&self) -> Option<Duration> {
+		self.inner.max_delay()
+	}
+
+	/// Insert group `key`, the one containing [`time`](Self::time), into the track's cache,
+	/// handing it to the readers waiting on the lookup, and return a [`group::Producer`] to fill.
+	///
+	/// `info` sets the track's [`Info`] if it hasn't been accepted yet, and is ignored otherwise.
+	/// Errors with [`Error::Duplicate`] if the group was already answered or cached,
+	/// [`Error::Skipped`] if the track skipped it, or the track's abort error.
+	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
+		self.inner.accept(key, info.into())
+	}
+
+	/// The groups the answer may lie in, which a test checks the lookup was asked over.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn span(&self) -> ops::Range<u64> {
+		self.inner.start.group..self.inner.end
+	}
+}
+
+impl FillGroups {
 	/// The first group to fill, and the frame within it to start from.
 	pub fn start(&self) -> Position {
 		self.inner.start
@@ -932,22 +988,6 @@ impl Fill {
 	/// The exclusive end group.
 	pub fn end(&self) -> u64 {
 		self.inner.end
-	}
-
-	/// The time a reader's range starts at that no group the cache holds resolves, in the
-	/// track's timescale (a bare start on a scale-less track), so this fill looks it up:
-	/// [`accept`](Self::accept) the group containing it, the newest one starting at or before
-	/// it, or the oldest group when every group starts after it. The reader's range then
-	/// starts there.
-	///
-	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
-	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
-	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
-	/// reaches back to the newest group the cache holds at or before the time, or, with none,
-	/// reads every group the cache holds and asks none starting before the time. `None` for
-	/// a fill of groups.
-	pub fn time(&self) -> Option<u64> {
-		self.inner.time
 	}
 
 	/// The most urgent delivery priority among the readers waiting on it now.
@@ -1571,7 +1611,7 @@ impl Readers {
 	}
 }
 
-/// One group of a [`Fill`], for a session serving it a group at a time. Answering it answers
+/// One group of a [`FillGroups`], for a session serving it a group at a time. Answering it answers
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GroupFill {
@@ -1616,7 +1656,7 @@ impl GroupFill {
 		self.inner.accept_from(self.key, Some(info), frames)
 	}
 
-	/// Poll until no reader waits on this group, as [`Fill::poll_unwanted`].
+	/// Poll until no reader waits on this group, as [`FillGroups::poll_unwanted`].
 	pub(crate) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(self.key, waiter)
 	}
@@ -1638,7 +1678,7 @@ impl GroupFill {
 		}
 	}
 
-	/// Insert the group into the cache, as [`Fill::accept`].
+	/// Insert the group into the cache, as [`FillGroups::accept`].
 	#[cfg(test)]
 	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(self.key, info.into())

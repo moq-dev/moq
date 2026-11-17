@@ -8,7 +8,6 @@
 //! to a remote URL (client side), or whether the media flow is RTP-in
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
-use crate::vendor::str0m;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -33,6 +32,10 @@ const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
 /// How often a capped ingest repeats its REMB, as libwebrtc does, so a lost one costs
 /// at most this long, and an encoder that drifted up is pulled back.
 const REMB_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often an ingest repeats its keyframe request while a video line waits on its first
+/// keyframe, so a lost PLI costs at most this long rather than a whole GOP.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
@@ -113,6 +116,8 @@ pub struct Session {
 	/// The ingest's cap, metered and steered through REMB. `None` until
 	/// [`Session::with_rate`], so always for egress sessions.
 	rate: Option<IngestRate>,
+	/// Which ingested frames may reach the sink. Unused by egress sessions.
+	ingest_order: IngestOrder,
 }
 
 impl Session {
@@ -128,6 +133,7 @@ impl Session {
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 			rate: None,
+			ingest_order: IngestOrder::default(),
 		})
 	}
 
@@ -145,6 +151,7 @@ impl Session {
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 			rate: None,
+			ingest_order: IngestOrder::default(),
 		})
 	}
 
@@ -279,7 +286,24 @@ impl Session {
 						tracing::warn!(cap = cap.rate.as_bps(), "ingest exceeded its cap plus burst; closing");
 						return Err(Error::RateLimited { cap: cap.rate });
 					}
+					// Ordered on the line's own RTP time: the session timeline keeps each line
+					// strictly increasing, which would hide a late frame.
 					let media_us = media_time_to_micros(&data.time);
+					match self
+						.ingest_order
+						.admit(data.mid, data.is_keyframe(), media_us, Instant::now())
+					{
+						Admit::Forward => {}
+						Admit::Drop => return Ok(()),
+						Admit::Request => {
+							if let Some(mut writer) = self.agent.rtc_mut().writer(data.mid) {
+								writer
+									.request_keyframe(data.rid, str0m::media::KeyframeRequestKind::Pli)
+									.map_err(Error::rtc)?;
+							}
+							return Ok(());
+						}
+					}
 					let timestamp_us = self.ingest_clock.normalize(data.mid, arrival, media_us);
 					sink.on_frame(
 						data.mid,
@@ -358,6 +382,9 @@ impl Session {
 					None
 				};
 				sink.on_track(mid, kind, codec, audio_params)?;
+				let video = kind == str0m::media::MediaKind::Video;
+				let pli = negotiated.iter().any(|params| params.fb_pli());
+				self.ingest_order.open(mid, video, pli, Instant::now());
 				// REMB only where the publisher negotiated it; str0m offers it on video alone.
 				if let Some(rate) = &mut self.rate
 					&& negotiated.iter().any(|params| params.fb_remb())
@@ -430,6 +457,86 @@ impl IngestRate {
 	/// When the next REMB is due, once a cap was set and there is a line to send it on.
 	fn remb_at(&self) -> Option<Instant> {
 		(self.steered && !self.remb.is_empty()).then_some(self.next_remb)
+	}
+}
+
+/// Which ingested frames may reach the sink, line by line.
+///
+/// RTP can join a publisher mid-group, and deliver a packet late, as a retransmission does. A
+/// frame that depends on a keyframe never seen cannot open a group, so a video line drops its
+/// frames until its first keyframe, asking the publisher for one meanwhile where it negotiated
+/// PLI. A late frame would rewind a group already published, so a line drops it too: audio,
+/// whose every frame opens a group, anything not after its last frame, and video anything
+/// before its last keyframe.
+#[derive(Default)]
+struct IngestOrder {
+	lines: HashMap<str0m::media::Mid, IngestLine>,
+}
+
+/// Where one ingested line stands.
+enum IngestLine {
+	/// Video yet to see a keyframe, with when it may next ask for one: `None` without PLI.
+	Keyless { request_at: Option<Instant> },
+	/// Video forwarding, refusing anything before its last keyframe at `keyframe`.
+	Video { keyframe: u64 },
+	/// Audio forwarding, refusing anything not after its last frame at `last`.
+	Audio { last: Option<u64> },
+}
+
+/// What to do with an ingested frame.
+#[derive(Debug, PartialEq, Eq)]
+enum Admit {
+	/// Hand it to the sink.
+	Forward,
+	/// Drop it.
+	Drop,
+	/// Drop it and ask the publisher for a keyframe.
+	Request,
+}
+
+impl IngestOrder {
+	/// Start ordering `mid`'s frames; a video line asks for its first keyframe with PLI if `pli`.
+	fn open(&mut self, mid: str0m::media::Mid, video: bool, pli: bool, now: Instant) {
+		let line = match video {
+			true => IngestLine::Keyless {
+				request_at: pli.then_some(now),
+			},
+			false => IngestLine::Audio { last: None },
+		};
+		self.lines.insert(mid, line);
+	}
+
+	/// Whether a frame on `mid` at its line's RTP time `timestamp_us` reaches the sink, and whether
+	/// to ask for a keyframe.
+	fn admit(&mut self, mid: str0m::media::Mid, keyframe: bool, timestamp_us: u64, now: Instant) -> Admit {
+		let Some(line) = self.lines.get_mut(&mid) else {
+			return Admit::Forward;
+		};
+		match line {
+			IngestLine::Keyless { request_at } if !keyframe => match request_at {
+				Some(at) if now >= *at => {
+					*at = now.saturating_add(KEYFRAME_REQUEST_INTERVAL);
+					Admit::Request
+				}
+				_ => Admit::Drop,
+			},
+			IngestLine::Keyless { .. } => {
+				*line = IngestLine::Video { keyframe: timestamp_us };
+				Admit::Forward
+			}
+			IngestLine::Video { keyframe: floor } if timestamp_us < *floor => Admit::Drop,
+			IngestLine::Video { keyframe: floor } => {
+				if keyframe {
+					*floor = timestamp_us;
+				}
+				Admit::Forward
+			}
+			IngestLine::Audio { last: Some(last) } if timestamp_us <= *last => Admit::Drop,
+			IngestLine::Audio { last } => {
+				*last = Some(timestamp_us);
+				Admit::Forward
+			}
+		}
 	}
 }
 
@@ -596,11 +703,16 @@ fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
 /// events arrive on the ingest side.
 pub(crate) struct Bridges {
 	inner: HashMap<str0m::media::Mid, Box<dyn codec::Bridge>>,
+	/// The finished bridges' tracks, served until the bridges are dropped.
+	finished: Vec<codec::Finished>,
 }
 
 impl Bridges {
 	pub fn new() -> Self {
-		Self { inner: HashMap::new() }
+		Self {
+			inner: HashMap::new(),
+			finished: Vec::new(),
+		}
 	}
 
 	pub fn insert(&mut self, mid: str0m::media::Mid, bridge: Box<dyn codec::Bridge>) {
@@ -616,8 +728,8 @@ impl Bridges {
 
 	/// Finish every bridge's track after the final frame.
 	pub fn finish(&mut self) -> Result<()> {
-		for bridge in self.inner.values_mut() {
-			bridge.finish()?;
+		for bridge in std::mem::take(&mut self.inner).into_values() {
+			self.finished.push(bridge.finish()?);
 		}
 		Ok(())
 	}
@@ -652,7 +764,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> Result<str0m::
 		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
-			Codec::Opus => config.enable_opus(true),
+			Codec::Opus => config.enable_opus(true, false),
 			Codec::H264 => config.enable_h264(true),
 			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),
@@ -665,12 +777,16 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> Result<str0m::
 	Ok(config)
 }
 
-/// A str0m config, refusing a CPU that rind, the stack's crypto, cannot run on.
-///
-/// str0m falls back on rind's provider, which panics on such a CPU instead.
+/// A str0m config on rind's crypto, refusing a CPU that rind cannot run on.
 pub(crate) fn rtc_config() -> std::result::Result<str0m::RtcConfig, moq_crypto::cpu::UnsupportedCpu> {
 	moq_crypto::cpu::check()?;
-	Ok(str0m::RtcConfig::new())
+	// rind-str0m repeats the check above, so its error is unreachable here.
+	let crypto = rind_str0m::default_provider().expect("the CPU check passed");
+	Ok(str0m::RtcConfig::new()
+		.set_crypto_provider(Arc::new(crypto))
+		// str0m's default today, pinned so a release that turns on DTLS 1.3 or
+		// version auto-selection changes the wire only when MoQ opts in.
+		.set_dtls_version(str0m::config::DtlsVersion::Dtls12))
 }
 
 /// Build a codec-restricted [`Rtc`] for the client egress path (which lets
@@ -682,19 +798,18 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Result<Rtc> {
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own
-/// [`crate::ice::reader`], with the ICE candidates to advertise.
+/// [`crate::ice::reader`], advertising the bound address (loopback when it is
+/// unspecified).
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
-/// server paths share one socket via `crate::server::mux` instead. `advertise`
-/// IPs are used verbatim (reusing the bound port); empty falls back to the
-/// bound address, substituting loopback when that address is unspecified.
-pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<crate::ice::Socket> {
+/// server paths share one socket via `crate::server::mux` instead.
+pub async fn bind_udp() -> Result<crate::ice::Socket> {
 	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
-	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
+	let locals = advertised_candidates(&[], udp.local_addr()?)?;
 	Ok(crate::ice::Socket::new(udp.clone(), locals, crate::ice::reader(udp))?)
 }
 
-/// Pair configured ICE candidates with the bound UDP port and validate them.
+/// The ICE host candidates to advertise for a socket bound at `local`, validated.
 pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr) -> Result<Vec<SocketAddr>> {
 	let port = local.port();
 	let candidates = if advertise.is_empty() {
@@ -710,9 +825,15 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 		}
 		vec![candidate]
 	} else {
-		// Reuse the bound port across each advertised IP, since str0m's ICE agent
-		// picks the destination port from the candidate it's pairing against.
-		advertise.iter().map(|addr| SocketAddr::new(addr.ip(), port)).collect()
+		// Sent as given: a NAT or load balancer may forward another public port to
+		// the bound one. Port 0 asks for the bound port.
+		advertise
+			.iter()
+			.map(|addr| match addr.port() {
+				0 => SocketAddr::new(addr.ip(), port),
+				_ => *addr,
+			})
+			.collect()
 	};
 
 	for addr in &candidates {
@@ -730,6 +851,55 @@ mod tests {
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	/// A video line drops its frames until its first keyframe, asking for one at once and then
+	/// at most once an interval, and forwards everything after it; a line without PLI waits
+	/// without asking.
+	#[test]
+	fn video_waits_for_its_first_keyframe() {
+		let mut order = IngestOrder::default();
+		let (video, silent) = (Mid::from("1"), Mid::from("2"));
+		let t0 = Instant::now();
+		order.open(video, true, true, t0);
+		order.open(silent, true, false, t0);
+
+		assert_eq!(order.admit(video, false, 0, t0), Admit::Request);
+		let early = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL - Duration::from_millis(1));
+		assert_eq!(order.admit(video, false, 33_000, early), Admit::Drop);
+		let due = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL);
+		assert_eq!(order.admit(video, false, 66_000, due), Admit::Request);
+		assert_eq!(order.admit(video, true, 100_000, due), Admit::Forward);
+		assert_eq!(order.admit(video, false, 133_000, due), Admit::Forward);
+
+		let late = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL * 5);
+		assert_eq!(order.admit(silent, false, 0, late), Admit::Drop);
+		assert_eq!(order.admit(silent, true, 33_000, late), Admit::Forward);
+	}
+
+	/// A late frame is dropped where it would rewind a published group: audio anything not
+	/// after its last frame, video anything before its last keyframe. A video delta may still
+	/// dip below another delta, as a reordered picture does.
+	#[test]
+	fn late_frames_are_dropped() {
+		let mut order = IngestOrder::default();
+		let (audio, video) = (Mid::from("0"), Mid::from("1"));
+		let t0 = Instant::now();
+		order.open(audio, false, false, t0);
+		order.open(video, true, false, t0);
+
+		assert_eq!(order.admit(audio, false, 40_000, t0), Admit::Forward);
+		assert_eq!(order.admit(audio, false, 20_000, t0), Admit::Drop);
+		assert_eq!(order.admit(audio, false, 40_000, t0), Admit::Drop);
+		assert_eq!(order.admit(audio, false, 60_000, t0), Admit::Forward);
+
+		assert_eq!(order.admit(video, true, 100_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 166_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 133_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 66_000, t0), Admit::Drop);
+		assert_eq!(order.admit(video, true, 66_000, t0), Admit::Drop);
+		assert_eq!(order.admit(video, true, 200_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 166_000, t0), Admit::Drop);
+	}
 
 	#[test]
 	fn sender_reports_outside_the_wall_range_are_ignored() {
@@ -797,17 +967,6 @@ mod tests {
 	fn advertised_candidates_keep_bound_address_when_specific() {
 		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
 		assert_eq!(advertised_candidates(&[], local).unwrap(), vec![local]);
-	}
-
-	#[test]
-	fn advertised_candidates_reuse_bound_port_for_configured_addresses() {
-		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
-		let advertised = vec!["127.0.0.1:1000".parse().unwrap(), "[::1]:2000".parse().unwrap()];
-
-		assert_eq!(
-			advertised_candidates(&advertised, local).unwrap(),
-			vec!["127.0.0.1:4444".parse().unwrap(), "[::1]:4444".parse().unwrap()]
-		);
 	}
 
 	#[test]
