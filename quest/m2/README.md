@@ -52,7 +52,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
-  [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
