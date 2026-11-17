@@ -658,6 +658,8 @@ export class Consumer {
 	/**
 	 * This consumer's backing state and path, for a clone. Opaque (`never`) so the state type
 	 * stays unexported; a subclass passes it straight back into its own `super(...)`.
+	 *
+	 * @internal
 	 */
 	protected shareState(): never {
 		return {

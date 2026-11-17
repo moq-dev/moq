@@ -71,6 +71,7 @@ import {
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export { type Fill, FillGroups, FillLookup, Requests } from "./fill.ts";
+export { rescale, rescaleIn } from "./rescale.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
 // `undefined` when nothing is deliverable now.
@@ -135,8 +136,8 @@ export type Compression = "none" | "deflate";
 /**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
- * A producer declares these once from an {@link InfoInit} (via {@link Request.accept} or
- * {@link Producer.accept}); a consumer awaits them via {@link Subscriber.info}
+ * A producer declares these once from an {@link InfoInit} (via {@link Producer.accept});
+ * a consumer awaits them via {@link Subscriber.info}
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
@@ -474,7 +475,7 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
  * Created internally by the broadcast when a subscription (or info lookup) needs a track
  * served; answer it with {@link accept} or {@link reject}.
  *
- * @public
+ * @internal
  */
 export class Request {
 	/** The requested track name. */
@@ -1008,7 +1009,7 @@ let ordered_: {
 let makeDemand: (name: string, wanted: Getter<bigint | undefined>, state: TrackState) => Demand;
 
 /**
- * A watch-only view of a track's subscriber demand, from {@link Producer.demand} or {@link Request.demand}. Mirrors the
+ * A watch-only view of a track's subscriber demand, from {@link Producer.demand}. Mirrors the
  * Rust `Demand`.
  *
  * Lets a publisher gate work (on-demand capture or encoding) on whether anyone is subscribed,
@@ -1069,8 +1070,8 @@ let makeSubscriber: (name: string, state: TrackState) => Subscriber;
  * read cursor. Groups are mirrored into every live subscriber and retained for the
  * idle cache window so a late subscriber can replay groups within its media budget.
  *
- * Obtained from {@link Request.accept} (the wire asks the application for a track to
- * serve) or constructed directly for an in-process track.
+ * Obtained from `Broadcast.Producer.createTrack` or constructed directly for an in-process
+ * track.
  */
 export class Producer {
 	/** The track name. */
@@ -1720,7 +1721,7 @@ export class Producer {
 		// terminal state.
 		const lost = new TooFarBehind();
 		EVICTED.add(lost);
-		if (!entry.group.isClosed) entry.group.abort(lost);
+		if (entry.group.closed.peek() === undefined) entry.group.abort(lost);
 		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror, lost));
 		this.#unlink(entry);
 		for (const mirror of mirrors) mirror.close();
@@ -4583,6 +4584,8 @@ export class Subscriber {
 	 * end of the track: a group may still arrive, or one may be parked beyond the
 	 * {@link withRange} cap. Use it to drain what the retained window already holds, where
 	 * waiting for a sequence nothing will republish would park forever.
+	 *
+	 * @internal
 	 */
 	tryRecvGroup(): GroupConsumer | undefined {
 		this.#live();
@@ -4942,8 +4945,9 @@ export class Ordered {
 	}
 
 	/**
-	 * Take the next group as {@link nextGroup} would, without waiting; see
-	 * {@link Subscriber.tryRecvGroup}. Mirrors the Rust `poll_next_group`.
+	 * Take the next group as {@link nextGroup} would, without waiting: `undefined` when nothing
+	 * is deliverable right now, which is not by itself the end of the track. Mirrors the Rust
+	 * `poll_next_group`.
 	 */
 	tryNextGroup(): GroupConsumer | undefined {
 		return taken(

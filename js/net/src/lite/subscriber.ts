@@ -1973,7 +1973,7 @@ export class Subscriber {
 		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay?.asNanos()]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
-		if (entry && !entry.group.isClosed) {
+		if (entry && entry.group.closed.peek() === undefined) {
 			consumer = entry.group.mirror();
 		} else {
 			const group = new netGroup.Producer(sequence);

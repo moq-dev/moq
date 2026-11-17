@@ -698,11 +698,6 @@ export class Producer {
 		}
 	}
 
-	/** True once the group has been closed. */
-	get isClosed(): boolean {
-		return this.#state.closed.peek() !== undefined;
-	}
-
 	/**
 	 * Ends the group without saying where it ends, returning it as {@link Finished}: every frame
 	 * written reaches its readers, but they can't tell the group is whole. Idempotent, as the
@@ -1353,11 +1348,6 @@ export class Consumer {
 			this.#verdict.peek() !== undefined ||
 			(this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
 		);
-	}
-
-	/** True once this handle or the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
-	get isClosed(): boolean {
-		return this.#verdict.peek() !== undefined || this.#released || this.#settled();
 	}
 
 	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.
