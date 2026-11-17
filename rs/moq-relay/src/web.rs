@@ -1259,13 +1259,15 @@ mod tests {
 			)
 			.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut refused = Web::new(
 			auth::Auth::refuse("test"),
 			cluster.clone(),
@@ -1501,12 +1503,14 @@ mod tests {
 			)
 			.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		for tier in ["first", "second"] {
 			for selector in [FetchGroup::Num(0), FetchGroup::Latest] {
@@ -1616,11 +1620,13 @@ mod tests {
 		// Group 0 can only present until group 1 starts at 1s, a full second behind the 2s
 		// edge: past the 500ms max age, so it is no longer served.
 		for millis in [0, 1000, 2000] {
-			let mut group = track.append_group(millis).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_millis(millis).unwrap())
+				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(millis).unwrap(), b"frame".as_ref())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let status = serve_fetch(

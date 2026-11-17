@@ -131,6 +131,8 @@ fn reconnect() {
 		announced(&server.origin).await;
 		assert_eq!(connection.connects(), 1);
 
+		// Past the default healthy bar, so the restart is retried rather than ending the loop.
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		server.stop().await;
 		drop(session);
 		let mut server = Server::with_identity(&network, addr, tls).await;
@@ -273,7 +275,7 @@ impl Publisher {
 			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
 		let _source = source.finish().unwrap();

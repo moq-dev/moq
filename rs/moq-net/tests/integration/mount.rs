@@ -33,7 +33,7 @@ fn publish(origin: &origin::Producer, path: &str) -> (origin::Route, track::Prod
 		.unwrap();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), path.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	(route, track)
 }
 

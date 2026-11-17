@@ -166,11 +166,11 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
-	export interface Drain {
+	export interface Goaway {
 		readonly timeout?: Clock.Duration;
 		readonly uri: string;
 	}
-	export interface Goaway {
+	export interface Handover {
 		handover?: Clock.Duration;
 		redirect?: Connection.Redirect;
 	}
@@ -182,7 +182,7 @@ export namespace Connection {
 		consume?: Origin.Producer;
 		delay?: Connection.Backoff;
 		enabled?: boolean | Signals.Signal<boolean>;
-		goaway?: Connection.Goaway;
+		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
 		share?: boolean;
 		signal?: never;
@@ -201,7 +201,7 @@ export namespace Connection {
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		closed: Promise<Error | null>;
-		readonly draining: Signals.GetPromise<Connection.Drain>;
+		readonly draining: Signals.GetPromise<Connection.Goaway>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;
@@ -726,22 +726,32 @@ export namespace Track {
 		priority?: number;
 		signal?: AbortSignal;
 	}
-	export class Fill {
+	export type Fill = Track.FillGroups | Track.FillLookup;
+	export class FillGroups {
 		[Symbol.dispose](): void;
 		accept(sequence: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
 		isWanted(sequence: bigint): boolean;
+		readonly kind: "groups";
 		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
-		readonly time?: Time.Timestamp;
 		unwanted(sequence: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
+	}
+	export class FillLookup {
+		[Symbol.dispose](): void;
+		accept(sequence: bigint, info?: Track.Info): Group.Producer;
+		close(): void;
+		readonly kind: "lookup";
+		get maxDelay(): Clock.Duration | null;
+		get priority(): number;
+		readonly time: Time.Timestamp;
 	}
 	export interface Finished {
 		abort(error: Error): void;
@@ -803,8 +813,9 @@ export namespace Track {
 		get closed(): Signals.GetPromise<Error | null>;
 		createGroup(sequence: bigint): Group.Producer;
 		demand(): Track.Demand;
+		fail(error: Error): Track.Finished;
 		finish(): Track.Finished;
-		finishAt(end: Track.Position, error?: Error): void;
+		finishAt(end: Track.Position): void;
 		info(): Promise<Track.Info>;
 		largest(): Track.Position | undefined;
 		readonly name: string;

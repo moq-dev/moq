@@ -266,7 +266,7 @@ async fn produce(
 		// so one landing in the same millisecond as the last starts a millisecond later.
 		let start = previous.map_or(millis(), |previous: u64| millis().max(previous + 1));
 		previous = Some(start);
-		let mut group = track.append_group(start)?;
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(start)?)?;
 		let mut header = GroupHeader {
 			connection,
 			broadcast: &path,
@@ -302,7 +302,7 @@ async fn produce(
 			stats.frame_sent(zeros.len());
 		}
 
-		group.close()?;
+		group.finish()?;
 		if sequence == 0 {
 			published.establish();
 		}
@@ -734,7 +734,7 @@ mod tests {
 			let stats = stats.clone();
 			tokio::spawn(async move { drain(consumer, Duration::ZERO, &stats).await })
 		};
-		let mut failed = track.append_group(0).unwrap();
+		let mut failed = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		failed
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"{}"))
 			.unwrap();
@@ -743,13 +743,13 @@ mod tests {
 		assert_eq!(stats.subscriptions.load(Ordering::Relaxed), 1);
 		assert_eq!(stats.subscriptions_established.load(Ordering::Relaxed), 0);
 		failed.abort(moq_net::Error::Lagged).unwrap();
-		let mut complete = track.append_group(1).unwrap();
+		let mut complete = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 		complete
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), Bytes::from_static(b"{}"))
 			.unwrap();
 		wait_for(&stats.frames_recv, 2).await;
 		assert!(!stats.ready());
-		complete.close().unwrap();
+		complete.finish().unwrap();
 		wait_for(&stats.subscriptions_established, 1).await;
 		assert!(stats.ready());
 		let _track = track.finish().unwrap();
@@ -1070,11 +1070,11 @@ mod tests {
 			.route("bench/current/0/0", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let track = peer.broadcast().create_track(TRACK, timed()).unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(b"{}"))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let announced = discover(&origin, "bench/current");
@@ -1104,7 +1104,7 @@ mod tests {
 			.unwrap();
 		let track = broadcast.broadcast().create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		let header = serde_json::json!({
 			"fps": 1,
 			"frame_size": 200,
@@ -1114,7 +1114,7 @@ mod tests {
 		group
 			.write_frame(moq_net::Timestamp::ZERO, serde_json::to_vec(&header).unwrap())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		task.await.unwrap().unwrap();
@@ -1131,11 +1131,11 @@ mod tests {
 	async fn drain_survives_a_failed_group() {
 		// Group `n` starts at `n` milliseconds.
 		fn write_group(track: &mut track::Producer, n: u64) {
-			let mut group = track.append_group(n).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::from_millis(n).unwrap()).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(n).unwrap(), header(n))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let stats = Arc::new(Stats::default());
@@ -1158,7 +1158,7 @@ mod tests {
 		// Group 1 opens and is picked up by the drain, then the relay gives up on it.
 		// Aborting a group nobody is reading drops its cached frames, so wait for the
 		// drain to be parked inside it before failing it.
-		let mut group = track.append_group(1).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), header(1))
 			.unwrap();
@@ -1189,13 +1189,15 @@ mod tests {
 	async fn lost_to_an_overtaken_group(max_delay: Duration) -> u64 {
 		// Group `n` starts at its first frame, which carries the header numbering it.
 		fn write_group(track: &mut track::Producer, n: u64, millis: &[u64]) {
-			let mut group = track.append_group(millis[0]).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_millis(millis[0]).unwrap())
+				.unwrap();
 			for (i, &millis) in millis.iter().enumerate() {
 				let at = moq_net::Timestamp::from_millis(millis).unwrap();
 				let payload = if i == 0 { header(n) } else { Bytes::from_static(b"{}") };
 				group.write_frame(at, payload).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let stats = Arc::new(Stats::default());
@@ -1208,14 +1210,16 @@ mod tests {
 			tokio::spawn(async move { drain(consumer, max_delay, &stats).await })
 		};
 
-		let mut first = track.append_group(1_000).unwrap();
+		let mut first = track
+			.append_group(moq_net::Timestamp::from_millis(1_000).unwrap())
+			.unwrap();
 		let at = moq_net::Timestamp::from_millis(1_000).unwrap();
 		first.write_frame(at, header(0)).unwrap();
 		wait_for(&stats.frames_recv, 1).await;
 
 		write_group(&mut track, 1, &[1_100]);
 		write_group(&mut track, 2, &[1_500, 1_600]);
-		first.close().unwrap();
+		first.finish().unwrap();
 		wait_for(&stats.groups_recv, 2).await;
 
 		// A last group moves the live frontier past group 2, so 1 and 2 are accounted.

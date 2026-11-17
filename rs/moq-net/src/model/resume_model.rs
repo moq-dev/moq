@@ -412,13 +412,13 @@ impl Model {
 				if copy.complete(group) || !copy.given_up.insert(group) {
 					return Ok(());
 				}
-				match copy.groups.get_mut(&group) {
-					Some(parts) => {
-						for writer in parts.iter_mut().filter_map(|part| part.writer.take()) {
-							let _ = writer.abort(Error::Stream(GIVE_UP));
-						}
-					}
-					None => copy.track.drop_groups(group..group + 1, GIVE_UP),
+				let parts = copy.groups.get_mut(&group).map(Vec::as_mut_slice).unwrap_or_default();
+				for writer in parts.iter_mut().filter_map(|part| part.writer.take()) {
+					let _ = writer.abort(Error::Stream(GIVE_UP));
+				}
+				// A fetched tail is not the live feed's: the feed reports the group dropped.
+				if !parts.iter().any(|part| part.from == 0) {
+					copy.track.drop_groups(group..group + 1, GIVE_UP);
 				}
 				publisher.given_up.insert(group);
 			}
@@ -539,7 +539,7 @@ impl Model {
 				part.written += 1;
 			}
 			if part.written == frames(group) {
-				part.writer.take().unwrap().close().unwrap();
+				part.writer.take().unwrap().finish().unwrap();
 				publisher.complete.insert(group);
 			}
 			let most = publisher.written.entry(group).or_default();
@@ -555,7 +555,7 @@ impl Model {
 			for slot in 0..SLOTS {
 				while let Some(Poll::Ready(Ok(fill))) = self.instances[instance].routes[slot]
 					.as_ref()
-					.map(|copy| copy.fills.poll_requested_fill(&kio::Waiter::noop()))
+					.map(|copy| copy.fills.poll_requested_groups(&kio::Waiter::noop()))
 				{
 					filled = true;
 					let (start, end) = (fill.start().group, fill.end());
@@ -1377,6 +1377,46 @@ fn regressions() {
 				Op::Ranges {
 					reader: 2,
 					range: Some((6, 9)),
+				},
+			],
+			finish: false,
+		},
+		// A route giving up a group it held only a fetched tail of drops it from its live
+		// feed, so an ordered read on that route moves past it.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 0 },
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Up { instance: 1, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(true, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::GiveUp {
+					instance: 1,
+					slot: 1,
+					group: 5,
 				},
 			],
 			finish: false,

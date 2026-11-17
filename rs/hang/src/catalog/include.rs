@@ -30,6 +30,8 @@ pub struct Include {
 	pub instance: Option<moq_net::Instance>,
 }
 
+impl crate::catalog::Entry for Include {}
+
 impl Include {
 	/// An include at `broadcast`, accepting whichever stream resolves.
 	pub fn new(broadcast: impl Into<moq_net::path::Relative>) -> Self {

@@ -837,8 +837,6 @@ fn publish_catalog_config_invalid_broadcast() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -911,8 +909,6 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -970,8 +966,6 @@ fn publish_video_config_replaces_its_own_rendition() {
 		coded_width: 640,
 		coded_height: 360,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1023,8 +1017,6 @@ fn manual_video_identity_change_is_refused() {
 		coded_height: 360,
 		container: moq_container::default(),
 		preference: 0,
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1256,8 +1248,6 @@ fn publish_catalog_roundtrip() {
 		coded_width: width,
 		coded_height: height,
 		container: moq_container::default(),
-		warmup_us: 250_000,
-		has_warmup: true,
 		broadcast: reference.as_ptr().cast(),
 		broadcast_len: reference.len(),
 		instance: instance.as_ptr().cast(),
@@ -1280,8 +1270,6 @@ fn publish_catalog_roundtrip() {
 		coded_width: width,
 		coded_height: height,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1361,8 +1349,6 @@ fn publish_catalog_roundtrip() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1385,7 +1371,6 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(video_cfg.coded_width, 1920);
 	assert_eq!(video_cfg.coded_height, 1080);
-	assert_eq!((video_cfg.warmup_us, video_cfg.has_warmup), (250_000, true));
 	// Normalized: a reader sees the plain relative path.
 	assert_eq!(
 		borrowed_string(video_cfg.broadcast, video_cfg.broadcast_len).as_deref(),
@@ -1520,8 +1505,6 @@ fn a_half_specified_coded_size_round_trips() {
 		coded_width: 1920,
 		coded_height: 0, // absent, not "zero pixels tall"
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1549,8 +1532,6 @@ fn a_half_specified_coded_size_round_trips() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1623,8 +1604,6 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 			init: std::ptr::null(),
 			init_len: 0,
 		},
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1653,8 +1632,6 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -1817,8 +1794,6 @@ fn unpublishable_catalog_containers_are_rejected() {
 		coded_width: 0,
 		coded_height: 0,
 		container,
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -3643,8 +3618,6 @@ fn media_consumers_cancel_while_subscribing() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -5007,7 +4980,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		reader
 	};
 	let first = id(group_cb.recv_reading(&mut reader));
@@ -5052,7 +5025,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
@@ -5202,8 +5175,6 @@ fn local_publish_consume() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -5958,8 +5929,6 @@ fn video_publish_consume() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
-		warmup_us: 0,
-		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
 		instance: std::ptr::null(),
@@ -7437,16 +7406,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
-	assert!(config.has_backoff_max);
 	assert_eq!(
-		config.backoff_max_us,
-		expected.connect.backoff.max().unwrap_or_default().as_micros() as u64
+		config
+			.has_backoff_max
+			.then(|| std::time::Duration::from_micros(config.backoff_max_us)),
+		expected.connect.backoff.max()
 	);
-	assert!(config.has_backoff_timeout);
-	assert_eq!(
-		expected.connect.backoff.timeout().unwrap_or_default(),
-		std::time::Duration::from_micros(config.backoff_timeout_us)
-	);
+	assert!(!config.backoff_max_unlimited);
+	// No give-up is both the default and the absent value.
+	assert!(!config.has_backoff_timeout);
+	assert_eq!(expected.connect.backoff.timeout(), None);
 
 	let websocket = expected.connect.websocket.resolve();
 	assert!(config.has_websocket_enabled);
@@ -7485,30 +7454,53 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 }
 
-/// Presence flags preserve explicit zero durations; backoff zero retries forever,
-/// while keep-alive zero resolves to the derived interval.
+/// Presence flags preserve explicit zero durations; keep-alive zero resolves to the
+/// derived interval.
 #[test]
 fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
-	config.backoff_timeout_us = 0;
-	config.has_backoff_timeout = true;
 	config.quic_keep_alive_us = 0;
 	config.has_quic_keep_alive = true;
-
-	let explicit = parsed(&config);
 	assert_eq!(
-		explicit.connect.backoff.timeout,
+		parsed(&config).quic.keep_alive,
 		Some((std::time::Duration::ZERO).into())
 	);
-	assert_eq!(explicit.quic.keep_alive, Some((std::time::Duration::ZERO).into()));
 
-	// Without the flags the same zeroes mean nothing at all.
-	let defaults = parsed(&client_config());
-	assert_ne!(
-		defaults.connect.backoff.timeout,
-		Some((std::time::Duration::ZERO).into())
-	);
-	assert_eq!(defaults.quic.resolve().keep_alive, None);
+	// Without the flag the same zero means nothing at all.
+	assert_eq!(parsed(&client_config()).quic.resolve().keep_alive, None);
+}
+
+/// The backoff's `max` and `timeout` each read absent as the default, off as no bound, and
+/// zero as zero, resolving to what moq-tokio's flags `none` and `0s` do.
+#[test]
+fn a_backoff_bound_is_unset_off_zero_or_a_value() {
+	let defaults = crate::client::Config::default().connect.backoff;
+	let three = std::time::Duration::from_secs(3);
+	let bounds = |config: &moq_client_config| {
+		let backoff = parsed(config).connect.backoff;
+		(backoff.max(), backoff.timeout())
+	};
+
+	assert_eq!(bounds(&client_config()), (defaults.max(), defaults.timeout()));
+	assert_eq!(defaults.timeout(), None, "absent is already off");
+
+	let mut off = client_config();
+	off.backoff_max_unlimited = true;
+	assert_eq!(bounds(&off), (None, None));
+
+	for value in [std::time::Duration::ZERO, three] {
+		let mut set = client_config();
+		set.backoff_max_us = value.as_micros() as u64;
+		set.has_backoff_max = true;
+		set.backoff_timeout_us = value.as_micros() as u64;
+		set.has_backoff_timeout = true;
+		assert_eq!(bounds(&set), (Some(value), Some(value)), "{value:?}");
+	}
+
+	let mut both = client_config();
+	both.has_backoff_max = true;
+	both.backoff_max_unlimited = true;
+	assert!(unsafe { crate::parse_client(Some(&both)) }.is_err());
 }
 
 #[test]
@@ -8183,14 +8175,17 @@ fn announce_route_crosses_a_relay_session() {
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	for (session, cb) in [
-		(downstream, &downstream_cb),
-		(downstream_client, &downstream_client_cb),
-		(upstream, &upstream_cb),
-		(upstream_client, &upstream_client_cb),
+	// Each client first: closed by its peer before it was healthy, it would end on its own.
+	// Its peer gone, the accepted session ends too.
+	for (client, client_cb, accepted, accepted_cb) in [
+		(downstream_client, &downstream_client_cb, downstream, &downstream_cb),
+		(upstream_client, &upstream_client_cb, upstream, &upstream_cb),
 	] {
-		assert_eq!(moq_session_close(session), 0);
-		cb.recv_terminal();
+		assert_eq!(moq_session_close(client), 0);
+		client_cb.recv_terminal();
+		accepted_cb.recv_terminal();
+		// The terminal snapshot already released the handle.
+		assert!(moq_session_close(accepted) < 0);
 	}
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
@@ -8297,10 +8292,12 @@ fn a_minted_instance_pins_request_and_follow() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	for (session, cb) in [(session, &session_cb), (client, &client_cb)] {
-		assert_eq!(moq_session_close(session), 0);
-		cb.recv_terminal();
-	}
+	// The client first: closed by its peer before it was healthy, it would end on its own.
+	assert_eq!(moq_session_close(client), 0);
+	client_cb.recv_terminal();
+	// Its peer gone, the accepted session ends too, which releases its handle.
+	session_cb.recv_terminal();
+	assert!(moq_session_close(session) < 0);
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
 	assert_eq!(moq_route_free(route), 0);
@@ -8448,18 +8445,14 @@ fn server_rejects_a_session() {
 	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
 
 	// The rejection closes a session the transport already established, so the client
-	// sees it connect first, then reports the rejection while it redials, whatever its kind.
-	let protocol = loop {
-		if let Some(protocol) = client_cb.recv().protocol {
-			break protocol;
-		}
-	};
+	// sees it connect first. Refused before it was healthy, the session then ends with the
+	// rejection rather than redialing, as a refused first dial does.
+	let terminal = client_cb.recv_terminal();
+	let protocol = terminal.protocol.expect("the terminal snapshot names the rejection");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
 	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32);
-	let again = id(server_cb.recv());
-	assert_eq!(moq_session_request_reject(again, 403), 0);
-	assert_eq!(moq_session_close(client), 0);
-	client_cb.recv_terminal();
+	// The terminal snapshot already released the handle.
+	assert!(moq_session_close(client) < 0);
 
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
@@ -9477,7 +9470,13 @@ fn a_credential_rides_every_reconnect() {
 	let _first = first.accept(moq_net::auth::Grant::all());
 	assert_eq!(answer.recv().0, 0);
 
-	// The server ends the session; the client redials and presents the token again.
+	// The server ends the session once it was healthy; the client redials and presents the
+	// token again.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the test thread has no runtime; the C API's session ages on the real clock"
+	)]
+	std::thread::sleep(Duration::from_secs(1));
 	server.admit();
 	let again = server.token();
 	assert_eq!(again.token().as_ref(), b"kept", "the reconnect presents it again");

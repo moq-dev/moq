@@ -3028,11 +3028,11 @@ mod tests {
 					return;
 				};
 				let track = request.accept(moq_net::track::Info::default());
-				let mut group = track.append_group(0).unwrap();
+				let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 				group
 					.write_frame(moq_net::Timestamp::unscaled(0), Bytes::from_static(b"retained"))
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				self.broadcast.close();
 				*self.track.lock().unwrap() = Some(track);
 			}

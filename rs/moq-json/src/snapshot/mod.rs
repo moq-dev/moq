@@ -757,7 +757,7 @@ mod test {
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track.clone(), cfg(false));
 		producer.update(next(&json!({ "a": 1 }))).unwrap();
-		track.finish_at(moq_net::track::Position::group(2), None).unwrap();
+		track.finish_at(moq_net::track::Position::group(2)).unwrap();
 
 		producer.modify(key()).unwrap()["a"] = json!(2);
 		assert!(matches!(
@@ -776,7 +776,7 @@ mod test {
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track.clone(), cfg(false));
 		producer.update(next(&json!({ "a": 1 }))).unwrap();
-		track.finish_at(moq_net::track::Position::group(10), None).unwrap();
+		track.finish_at(moq_net::track::Position::group(10)).unwrap();
 		let _finished = producer.clone().finish().unwrap();
 
 		assert!(matches!(
@@ -1041,14 +1041,14 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		track
 	}
 
@@ -1156,7 +1156,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1170,7 +1170,7 @@ mod test {
 				Bytes::from(serde_json::to_vec(&json!({ "a": 1 })).unwrap()),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		match consumer.poll_latest(&waiter) {
 			Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "a": 1 })),
