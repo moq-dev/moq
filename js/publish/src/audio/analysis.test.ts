@@ -123,6 +123,17 @@ describe("Analysis", () => {
 		expect(analysis.probability(chunk(samples, 480, 960, 48_000))).toBeCloseTo(LIBOPUS_48K_20MS[0], 4);
 	});
 
+	test("a loud frame before the first window sets the peak that room tone is judged against", () => {
+		const analysis = new Analysis({ sampleRate: 48_000 });
+		const loud = Float32Array.from({ length: 480 }, (_, n) => (n % 2 ? 0.3 : -0.3));
+		expect(analysis.push({ timestamp: Duration.ZERO, channels: [loud] })).toBe(true);
+		// The signal's room tone, from 1 s to 2 s, 10 ms at a time.
+		const samples = signal(48_000);
+		const active: boolean[] = [];
+		for (let at = 48_000; at < 96_000; at += 480) active.push(analysis.push(chunk(samples, at, at + 480, 48_000)));
+		expect(active.slice(-50)).not.toContain(true);
+	});
+
 	test("digital silence is inactive", () => {
 		const analysis = new Analysis({ sampleRate: 48_000 });
 		const silence = new Float32Array(960);

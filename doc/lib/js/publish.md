@@ -98,7 +98,8 @@ within a second or so (SILK's detector decides alone at 8 and 12 kHz). Once it h
 scored 200 ms of silence nothing more is sent and the end is declared, so
 listeners play comfort noise instead of receiving encoded silence. Noise as
 loud as the talker, within 25 dB of their speech, keeps sending, as it does in
-libopus. Speech reopens the gate with the 20 ms before it, which keeps most soft
+libopus; so does any noise before they first speak, since the analysis's first
+scored frame sets the level it is judged against. Speech reopens the gate with the 20 ms before it, which keeps most soft
 onsets the detector scores late; a faint one it misses entirely is still
 clipped.
 Music and sources without a kind always send.

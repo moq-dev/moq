@@ -268,10 +268,12 @@ export class Analysis {
 			}
 		}
 		if (max <= SILENCE) return false;
-		if (probability === undefined) return true;
 
+		// libopus raises the peak on a frame without a valid analysis too.
 		energy /= samples * frame.channels.length;
-		if (probability > ACTIVITY_THRESHOLD) this.#peak = Math.max(0.999 * this.#peak, energy);
+		if (probability === undefined || probability > ACTIVITY_THRESHOLD)
+			this.#peak = Math.max(0.999 * this.#peak, energy);
+		if (probability === undefined) return true;
 		return probability >= ACTIVITY_THRESHOLD || this.#peak < PSEUDO_SNR_THRESHOLD * energy;
 	}
 
