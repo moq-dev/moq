@@ -4811,7 +4811,7 @@ fn track_abort_unwanted_keeps_a_late_reader() {
 		&demand_cb,
 		|| moq_publish_track_abort_unwanted(track, 7),
 		|| {
-			let group = id(moq_publish_track_group(track));
+			let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
 			assert_eq!(
 				unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(0)) },
 				0

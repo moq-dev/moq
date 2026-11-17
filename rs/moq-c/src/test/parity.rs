@@ -525,10 +525,12 @@ fn session_tokens_and_grants() {
 	let _watcher = id(unsafe { moq_session_grants(client, Some(channel_callback), ending.ptr) });
 	assert_eq!(moq_grant_free(id(ending.recv())), 0);
 
-	assert_eq!(moq_session_close(session), 0);
-	session_cb.recv_terminal();
+	// The client first: closed by its peer before it was healthy, it would end on its own.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
+	// Its peer gone, the accepted session ends too, which releases its handle.
+	session_cb.recv_terminal();
+	assert!(moq_session_close(session) < 0);
 	loop {
 		let code = ending.recv();
 		if code <= 0 {
