@@ -2514,7 +2514,6 @@ impl Request for SubscribeServe {
 						version: shared.version,
 						stamp,
 						outcomes: Default::default(),
-						ietf,
 						object_records: ietf && track.info().ietf().is_some(),
 					};
 
@@ -3096,7 +3095,7 @@ enum FetchServe {
 		chunk: Option<crate::frame::Payload>,
 		batch: Box<Objects>,
 		batch_pos: usize,
-		/// The `ietf` extension's object records, when negotiated.
+		/// The `ietf` extension's object records, when negotiated and the track carries them.
 		records: Option<lite::ietf::Records>,
 	},
 }
@@ -3195,7 +3194,8 @@ impl Request for FetchServe {
 					writer.bill(group.delegate());
 					let capped = msg.end_frame.is_some();
 					let timescale = stamp.map(|stamp| stamp.timescale);
-					let records = lite::ietf::Records::new(ietf, capped, timescale);
+					// Only a track a moq-transport publisher made carries records.
+					let records = (ietf && group.ietf().is_some()).then(|| lite::ietf::Records::new(capped, timescale));
 
 					*self = Self::Serve {
 						group,
@@ -4766,10 +4766,9 @@ struct Subscription {
 	stamp: Option<Stamp>,
 	/// Outcomes shared by the subscription and every group it serves.
 	outcomes: Arc<GroupOutcomes>,
-	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
-	ietf: bool,
-	/// Whether the track carries moq-transport object records on `ietf` streams, which a
-	/// continuation cannot resume.
+	/// Whether the session negotiated the `ietf` extension and a moq-transport publisher made
+	/// the track, so its group streams carry object records, which a continuation cannot
+	/// resume.
 	object_records: bool,
 }
 
@@ -4784,10 +4783,9 @@ struct GroupContext {
 	stamp: Option<Stamp>,
 	/// Outcomes shared by the subscription and every group it serves.
 	outcomes: Arc<GroupOutcomes>,
-	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
-	ietf: bool,
-	/// Whether the track carries moq-transport object records on `ietf` streams, which a
-	/// continuation cannot resume.
+	/// Whether the session negotiated the `ietf` extension and a moq-transport publisher made
+	/// the track, so its group streams carry object records, which a continuation cannot
+	/// resume.
 	object_records: bool,
 }
 
@@ -4856,7 +4854,6 @@ impl Subscription {
 			version: self.version,
 			stamp: self.stamp,
 			outcomes: self.outcomes.clone(),
-			ietf: self.ietf,
 			object_records: self.object_records,
 		}
 	}
@@ -6147,7 +6144,6 @@ impl CoverageBench {
 			version,
 			stamp: None,
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 		let mut this = Self {
@@ -6307,7 +6303,7 @@ enum GroupState {
 		chunk: Option<crate::frame::Payload>,
 		batch: Box<Objects>,
 		batch_pos: usize,
-		/// The `ietf` extension's object records, when negotiated.
+		/// The `ietf` extension's object records, when negotiated and the track carries them.
 		records: Option<lite::ietf::Records>,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
@@ -6411,7 +6407,10 @@ impl GroupServe {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
-			Ok(()) => lite::ietf::Records::new(self.ctx.ietf, self.capped, self.ctx.stamp.map(|stamp| stamp.timescale)),
+			Ok(()) => self
+				.ctx
+				.object_records
+				.then(|| lite::ietf::Records::new(self.capped, self.ctx.stamp.map(|stamp| stamp.timescale))),
 			Err(err) => {
 				// The header wrote nothing, so the group-stream reset has nothing to pin
 				// it to this subscription. The run loop reads the slot and resets the
@@ -6959,7 +6958,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7006,7 +7004,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7074,7 +7071,6 @@ mod serve_group_test {
 				version: Version::Lite06,
 				stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 				outcomes: Default::default(),
-				ietf: false,
 				object_records: false,
 			};
 			let track = track::Producer::new(
@@ -7149,7 +7145,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 		let track = track::Producer::new(
@@ -7220,7 +7215,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7271,7 +7265,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7339,7 +7332,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7519,7 +7511,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7592,7 +7583,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7642,7 +7632,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7691,7 +7680,6 @@ mod serve_group_test {
 			version: Version::Lite06,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 
@@ -7768,7 +7756,6 @@ mod serve_group_test {
 			version,
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
-			ietf: false,
 			object_records: false,
 		};
 		let bounds = Bounds::new(&[lite::Range::span(Some(0), 0, None, None)], false);
@@ -10039,7 +10026,6 @@ mod serve_group_test {
 				version: Version::Lite07,
 				stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
 				outcomes: outcomes.clone(),
-				ietf: false,
 				object_records: false,
 			};
 			let bounds = Bounds::new(&[lite::Range::span(Some(start_group), 0, None, None)], false);
@@ -12549,6 +12535,102 @@ mod tests {
 			);
 			assert!(!log.resets().is_empty(), "{version}: the request was not refused");
 		}
+	}
+
+	/// The lite-07 Group Stream a subscriber gets for one finished group of a track `info`
+	/// describes, on a session that negotiated the `ietf` extension or not.
+	async fn served_group(info: crate::track::Info, ietf: bool) -> Vec<u8> {
+		use kio::Task;
+		let version = Version::Lite07;
+		let origin = crate::origin::Config::default().produce();
+		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		for (millis, payload) in [(0, &b"key"[..]), (33, b"delta")] {
+			group
+				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), payload)
+				.unwrap();
+		}
+		group.finish().unwrap();
+
+		let request = lite::Subscribe {
+			order: crate::track::Order::Ascending,
+			instance: None,
+			node: 0,
+			depth: 0,
+			id: 0,
+			broadcast: crate::Path::from_static("room"),
+			track: "video".into(),
+			priority: 0,
+			max_delay: Duration::ZERO,
+			min_delay: None,
+			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			update: 0,
+		};
+		let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
+		let log = session.log.clone();
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
+			.await
+			.unwrap();
+		let estimate = kio::Producer::default();
+		let probe = probe_server(
+			crate::driver::Transport::new(session.clone()),
+			stream,
+			version,
+			&estimate,
+		);
+		let mut shared = probe.shared;
+		{
+			let shared = Arc::get_mut(&mut shared).expect("one owner");
+			shared.origin = origin.consume();
+			shared.peer_setup = lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(ietf);
+			shared
+				.peer_setup
+				.set(lite::Setup {
+					ietf,
+					..Default::default()
+				})
+				.unwrap();
+		}
+		let mut control = Control {
+			shared: shared.clone(),
+			runtime: crate::time::sim(),
+			state: ControlState::Subscribe(RequestServe::new(shared, probe.stream.unwrap())),
+		};
+		let serving = kio::clock::timeout(Duration::from_millis(10), kio::wait(|waiter| control.poll(waiter))).await;
+		assert!(serving.is_err(), "the subscription ended");
+
+		// Stream 0 is the request's own; the group's opened after it.
+		let mut bytes = Vec::new();
+		for (stream, sent) in log.trail() {
+			if let (1, crate::lite::test_transport::Sent::Write(chunk)) = (stream, sent) {
+				bytes.extend(chunk);
+			}
+		}
+		assert!(!bytes.is_empty(), "no group stream");
+		bytes
+	}
+
+	/// The `ietf` extension costs a moq-lite track nothing: its Group Stream is the same bytes
+	/// on a session that negotiated it, while a moq-transport track's carries its records.
+	#[kio::test]
+	async fn a_moq_lite_group_is_the_same_bytes_with_the_ietf_extension() {
+		let plain = crate::track::Info::timed();
+		assert_eq!(
+			served_group(plain.clone(), true).await,
+			served_group(plain, false).await
+		);
+
+		let mut relayed = crate::track::Info::timed();
+		relayed.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			version: crate::ietf::Version::Draft22,
+			values: Vec::new(),
+		}));
+		let without = served_group(relayed.clone(), false).await;
+		let with = served_group(relayed, true).await;
+		// A Group State, then an empty record before each of the two frames.
+		assert_eq!(with.len(), without.len() + 1 + 2 * 2);
 	}
 
 	#[kio::test]

@@ -45,7 +45,8 @@ struct Ingested {
 enum Session {
 	Lite {
 		version: lite::Version,
-		/// The session negotiated the `ietf` extension, so each frame follows a record.
+		/// The session negotiated the `ietf` extension and the track has a Version, so
+		/// each frame follows a record.
 		records: bool,
 		frame_start: u64,
 	},
@@ -92,9 +93,11 @@ pub fn ingest(data: &[u8]) -> bool {
 			// The track arrives timed exactly when the wire stamps it: never before Lite05,
 			// always on Lite05/06 (an untimed one carries its send times), as declared after.
 			let timed = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
+			// Only the `ietf` extension carries a Version, and only on a track that has one.
+			let draft = draft.filter(|_| settings & 0x10 != 0 && version.has_ietf());
 			let session = Session::Lite {
 				version,
-				records: settings & 0x10 != 0 && version.has_ietf(),
+				records: draft.is_some(),
 				frame_start: (settings >> 5) as u64,
 			};
 			// Only lite-07 can mark a track compressed.
@@ -380,7 +383,8 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 		}
 	}
 
-	// moq-lite-07 with the `ietf` extension: a plain Group State, then records.
+	// moq-lite-07 with the `ietf` extension, on a track a draft-18 publisher made: a plain
+	// Group State, then records.
 	let lite07 = super::LITE_VERSIONS.len() - 1;
 	let mut data = vec![(lite07 * 2) as u8, 0x10, 2, 0];
 	for payload in [&b"ab"[..], b"c"] {
