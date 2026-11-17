@@ -1333,6 +1333,11 @@ class Reader implements ResumeSource {
 		return this.#learnEnd();
 	}
 
+	skippedBelow(key: bigint): bigint {
+		this.sync();
+		return this.#copies.reduce((longest, copy) => max(longest, hooks.skippedBelow(copy.sub, key)), 0n);
+	}
+
 	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();

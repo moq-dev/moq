@@ -275,10 +275,7 @@ mod tests {
 			},
 			fields: Some(Arc::new(Fields {
 				id,
-				properties: Properties {
-					block: Some(block),
-					..Default::default()
-				},
+				properties: Properties { block: Some(block) },
 			})),
 			inflated: None,
 		}

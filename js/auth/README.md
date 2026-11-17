@@ -70,8 +70,8 @@ const claims: Claims = {
   root: "demo",
   publish: ["bbb/**"], // `demo/bbb` and everything beneath it
   subscribe: ["**"], // Any broadcast under `demo/`
-  exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now (in seconds)
-  iat: Math.floor(Date.now() / 1000), // Issued at (in seconds)
+  expires: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now (in seconds), written as `exp`
+  issued: Math.floor(Date.now() / 1000), // Issued at (in seconds), written as `iat`
 };
 
 // Sign a token
@@ -94,10 +94,10 @@ The token expires in an hour unless `--ttl`, `--expires`, or `--unbounded` says 
 You can also verify a token, then scope it to a connection path the way `moq auth serve` does:
 
 ```typescript
-import { authorize, Key } from "@moq/auth";
+import { Claims, Key } from "@moq/auth";
 
 const claims = await Key.verify(key, token); // signature, kid, strict claims, and expiry
-const permissions = authorize(claims, "rooms/meeting-123"); // patterns relative to the path
+const permissions = Claims.authorize(claims, "rooms/meeting-123"); // patterns relative to the path
 ```
 
 Or as a CLI:

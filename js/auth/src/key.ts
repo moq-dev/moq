@@ -2,10 +2,10 @@ import { wall } from "@moq/clock";
 import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
-import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
+import { type Claims, ClaimsFieldsSchema, ClaimsSchema, Scope, ScopeSchema } from "./claims.ts";
 import * as Json from "./json.ts";
 import * as Path from "./path.ts";
-import { encodeGrants } from "./wire.ts";
+import { encodeClaims } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
@@ -20,9 +20,9 @@ export const KeyIdSchema = z.string().check(
 export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
- * Key operations that can be performed
+ * What a key may be used for: signing tokens, verifying them, or both.
  */
-export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
+export const OperationSchema = z.enum(["sign", "verify"]);
 /** A value parsed by {@link OperationSchema}. */
 export type Operation = z.infer<typeof OperationSchema>;
 
@@ -165,11 +165,12 @@ function parse(jwk: string): Key {
 /**
  * Sign the claims with this key, returning the encoded token.
  *
- * `iat` is written only when the claims carry one, so an unset field stays off the
- * wire rather than being stamped with the current time.
+ * `issued` is written only when the claims carry one, so an unset field stays off the
+ * wire rather than being stamped with the current time; nor is an `id` invented.
  *
  * Takes each role as {@link Claims} spell it: its patterns, or `{path, rate}` when capped.
- * The legacy `put`/`get` spelling is refused; it is written only when it says the same.
+ * A field {@link Claims} lacks is refused, the wire's `exp` and the legacy `put`/`get`
+ * included.
  *
  * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
  * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
@@ -181,10 +182,7 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	// Scope-check and sign what the schema parsed, never the raw input.
 	let parsed: Claims;
 	try {
-		if ("put" in claims || "get" in claims) {
-			throw new Error("legacy put/get grants are refused; sign publish and subscribe instead");
-		}
-		parsed = ClaimsSchema.parse(claims);
+		parsed = ClaimsFieldsSchema.parse(claims);
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
@@ -192,8 +190,7 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureClaimsWithinScope(key, parsed);
 
 	const joseKey = await importJoseKey(key);
-	// Written the legacy way when that says the same thing, so older verifiers accept it.
-	const jwt = await new jose.SignJWT(encodeGrants(parsed))
+	const jwt = await new jose.SignJWT(encodeClaims(parsed))
 		.setProtectedHeader({
 			alg: key.alg,
 			typ: "JWT",
@@ -220,8 +217,8 @@ async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Cla
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
 	const now = wall().asUnixMillis() / 1000;
-	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
-	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
+	if (claims.expires !== undefined && claims.expires <= now) throw new Error("Token has expired");
+	if (claims.notBefore !== undefined && claims.notBefore > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);
 	return claims;
 }
@@ -403,7 +400,7 @@ export const Key = {
 };
 
 function ensureClaimsWithinScope(key: PublicKey | SymmetricKey | Key, claims: Claims): void {
-	if (key.scope && !scopeAllows(key.scope, claims)) {
+	if (key.scope && !Scope.allows(key.scope, claims)) {
 		throw new Error("Token capabilities exceed the key scope");
 	}
 }

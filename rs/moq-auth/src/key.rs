@@ -18,10 +18,6 @@ pub enum KeyOperation {
 	Sign,
 	/// Verify a signature.
 	Verify,
-	/// Decrypt content.
-	Decrypt,
-	/// Encrypt content.
-	Encrypt,
 }
 
 /// <https://datatracker.ietf.org/doc/html/rfc7518#section-6>
@@ -482,7 +478,7 @@ impl Key {
 	///
 	/// Fails for symmetric (`oct`) keys, which have no public half, and for a key that cannot
 	/// verify in the first place.
-	pub fn to_public(&self) -> crate::Result<Self> {
+	pub fn public(&self) -> crate::Result<Self> {
 		if !self.operations.contains(&KeyOperation::Verify) {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
@@ -787,6 +783,7 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		}
 	}
 
@@ -893,7 +890,7 @@ mod tests {
 		let key = Key::from_str(json).unwrap();
 		assert_eq!(key.operations, sign_verify());
 
-		let public = key.to_public().unwrap();
+		let public = key.public().unwrap();
 		assert_eq!(public.operations, [KeyOperation::Verify].into());
 	}
 
@@ -1066,6 +1063,7 @@ mod tests {
 			expires: None,
 			issued: None,
 			not_before: None,
+			id: None,
 		};
 
 		let result = key.sign(&invalid_claims);
@@ -1244,6 +1242,7 @@ mod tests {
 			expires: None,
 			issued: None,
 			not_before: None,
+			id: None,
 		};
 		let token = key.sign(&claims).unwrap();
 
@@ -1264,6 +1263,7 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		};
 
 		let token = key.sign(&original_claims).unwrap();
@@ -1352,7 +1352,7 @@ mod tests {
 		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()))
 			.expect("HMAC key generation failed");
 
-		assert!(key.to_public().is_err());
+		assert!(key.public().is_err());
 	}
 
 	#[test]
@@ -1361,7 +1361,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert_eq!(key.kid, public_key.kid);
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
@@ -1388,7 +1388,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert_eq!(key.kid, public_key.kid);
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
@@ -1422,7 +1422,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert_eq!(key.kid, public_key.kid);
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
@@ -1674,7 +1674,7 @@ mod tests {
 			"validation using private key"
 		);
 
-		let public_verified_claims = key.to_public().unwrap().verify(&token).unwrap();
+		let public_verified_claims = key.public().unwrap().verify(&token).unwrap();
 		assert_eq!(public_verified_claims.root, claims.root, "validation using public key");
 	}
 
@@ -1711,7 +1711,7 @@ mod tests {
 
 		// Different algorithm should fail verification
 		let private_result = key_ps256.verify(&token);
-		let public_result = key_ps256.to_public().unwrap().verify(&token);
+		let public_result = key_ps256.public().unwrap().verify(&token);
 		assert!(private_result.is_err());
 		assert!(public_result.is_err());
 	}
@@ -1725,7 +1725,7 @@ mod tests {
 		assert!(key.operations.contains(&KeyOperation::Sign));
 		assert!(key.operations.contains(&KeyOperation::Verify));
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert!(!public_key.operations.contains(&KeyOperation::Sign));
 		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
@@ -1760,7 +1760,7 @@ mod tests {
 		assert!(key.operations.contains(&KeyOperation::Sign));
 		assert!(key.operations.contains(&KeyOperation::Verify));
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert!(!public_key.operations.contains(&KeyOperation::Sign));
 		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
@@ -1869,11 +1869,11 @@ mod tests {
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
 		assert!(matches!(key.sign(&outside), Err(crate::Error::ScopeExceeded)));
 
-		// Written back the way it was read, so the old CLI still loads it.
+		// Written back as the pattern it reads as.
 		assert!(
 			serde_json::to_string(&key)
 				.unwrap()
-				.contains(r#""scope":{"root":"demo","put":["room"]}"#)
+				.contains(r#""scope":{"root":"demo","publish":["room/**"]}"#)
 		);
 	}
 
@@ -1998,7 +1998,7 @@ mod tests {
 			std::fs::write(&path, "").unwrap();
 			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-			let public = Key::generate(Algorithm::ES256, None).unwrap().to_public().unwrap();
+			let public = Key::generate(Algorithm::ES256, None).unwrap().public().unwrap();
 			public.to_file(&path).unwrap();
 			assert_eq!(mode(&path), 0o644);
 			std::fs::remove_file(&path).ok();

@@ -18,7 +18,7 @@ accept loop that decides in process.
 - **Refusals.** `Refusal` carries a `refusal::Reason` (`Refused`, `Forbidden`, or `Expired`) and optional `root` and `tier`. An auth server returns it as JSON with HTTP 403; `Client` returns `Error::Refused(refusal)`. Legacy plain-text 401/403 bodies and unknown reason strings read as `Refused`. Set `root` only from a verified credential, never the dialed path. Embedded relay deciders pass the same shape in `auth::Error::Refused`.
 - **Client.** `Client` drives a lease against an auth server over `https://`, `unix://`, or loopback `http://`. It revalidates on cadence and retries through an outage until the grant expires, revokes on a 401, 403, or a grant it cannot read or accept, and reports `end` with the session's byte totals.
 - **Server** (feature `serve`). `serve::Server` is the reference auth server behind `moq auth serve`: JWTs from the query or the moq-transport SETUP token, certificate grants, anonymous rules, tiers, and session caps. `Server::router` mounts it in your own axum service.
-- **Keys and claims.** Generate HMAC, RSA, ECDSA, or EdDSA keys as JWKs, sign `Claims` (`root`, a publish and a subscribe `Access` with their optional `Rate` caps, `exp`), and verify them. `Claims::authorize(path)` scopes verified claims to the path a client dialed, exactly as `moq auth serve` does.
+- **Keys and claims.** Generate HMAC, RSA, ECDSA, or EdDSA keys as JWKs, sign `Claims` (`root`, a publish and a subscribe `Access` with their optional `Rate` caps, an expiry, and an optional `TokenId`), and verify them. `Claims::authorize(path)` scopes verified claims to the path a client dialed, exactly as `moq auth serve` does.
 
 ```bash
 cargo add moq-auth

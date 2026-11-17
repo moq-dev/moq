@@ -1733,13 +1733,13 @@ impl FrameIngest {
 		let fields = match &mut self.records {
 			Some(records) => {
 				let (id, block) = records.pending.take().expect("a record precedes each frame");
-				let lite::ietf::Decoded { properties, gap } =
-					lite::ietf::decode_properties(&block, self.framing, true)?;
-				group.mark_gap(id, gap)?;
+				let lite::ietf::Decoded { properties, gap } = lite::ietf::decode_properties(&block, self.framing)?;
 				let plain = id == group.frame_count() as u64 && properties.is_empty();
 				if !plain && !records.relayed {
 					return Err(Error::ProtocolViolation);
 				}
+				// Only a frame we accept names the keys below its group.
+				group.mark_gap(id, gap)?;
 				(!plain).then(|| Arc::new(crate::model::object::Fields { id, properties }))
 			}
 			None => None,
@@ -4828,7 +4828,7 @@ mod tests {
 	/// as the moq-transport subgroup it mirrors could hold none otherwise.
 	#[kio::test]
 	async fn ietf_records_need_extensions_for_properties() {
-		// Object 0 with a draft-18 block holding 0x20 = 1, or an untimed Timestamp.
+		// Object 0 with a draft-18 block holding 0x20 = 1, or a Timestamp.
 		for record in [&[2, 0x20, 1][..], &[2, 0x10, 7]] {
 			for (state, ok) in [(0x1 | 0x4, true), (0x1, false)] {
 				let mut body = vec![state, 0];
@@ -4840,16 +4840,15 @@ mod tests {
 		}
 	}
 
-	/// On a timed track, the frame holds an object's time, so a record cannot carry a second,
-	/// mutable Timestamp that could disagree with it. Records that say nothing of time, or
-	/// seal a Timestamp moq-transport egress cannot rewrite, cross beside the frame's.
+	/// A record's Timestamp, mutable or sealed, is a property like any other: nothing reads
+	/// time from it, so the frame keeps the time its own header carries.
 	#[kio::test]
 	async fn ietf_records_leave_time_to_their_frame() {
 		let frame = crate::coding::varint::zigzag(500);
 		// Each record after its Object code: Object 0 unless it says otherwise.
 		for (record, ok, reason) in [
 			(&[0, 0][..], true, "nothing at all"),
-			(&[0, 3, 0x10, 500], false, "a mutable Timestamp"),
+			(&[0, 3, 0x10, 500], true, "a mutable Timestamp"),
 			(&[0, 2, 0x20, 1], true, "properties without a Timestamp"),
 			(&[0, 5, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
 			(&[1 << 1, 0], true, "Object 1 without properties"),

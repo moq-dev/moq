@@ -1104,6 +1104,20 @@ impl Holdings for TrackState {
 }
 
 impl TrackState {
+	/// How many keys just below `key` the publisher declared it never produced: the skip
+	/// run that ends at `key`, as a moq-transport Prior Group ID Gap names it.
+	fn skipped_below(&self, key: u64) -> u64 {
+		let Some(below) = key.checked_sub(1) else {
+			return 0;
+		};
+		match self.drops.get_key_value(&below) {
+			Some((run, Hole::Skip)) => key - run.start,
+			_ => 0,
+		}
+	}
+}
+
+impl TrackState {
 	/// [`Holdings::containing`] on a lite-07 copy, which holds only part of the track: a group
 	/// held before `time` contains it only once nothing between them is still to arrive, so
 	/// until then it waits for the group starting there, the gap's holes, a group past it,
@@ -6727,6 +6741,15 @@ impl Consumer {
 		self.with_state(|state| state?.read().max_key)
 	}
 
+	/// See [`TrackState::skipped_below`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn skipped_below(&self, key: u64) -> u64 {
+		if let Some(serving) = self.serving() {
+			return serving.skipped_below(key);
+		}
+		self.with_state(|state| state.map_or(0, |state| state.read().skipped_below(key)))
+	}
+
 	/// Ready once [`Self::latest_key`] is `Some`: the track holds a group. Stays pending
 	/// on a track that closed without one.
 	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -10769,6 +10792,16 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().max_key,
 			Inner::Resume(resume, _) => resume.latest(),
+		}
+	}
+
+	/// How many keys just below `key` the publisher declared it never produced; see
+	/// [`Producer::skip_groups`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn skipped_below(&self, key: u64) -> u64 {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().skipped_below(key),
+			Inner::Resume(resume, _) => resume.skipped_below(key),
 		}
 	}
 
@@ -28009,8 +28042,11 @@ mod test {
 					fields: Some(Arc::new(super::super::object::Fields {
 						id,
 						properties: super::super::object::Properties {
-							sealed_time: Some(Timestamp::ZERO),
-							..Default::default()
+							block: Some(super::super::object::Block {
+								// Each Object ID's own property, so sharing can't swap them.
+								bytes: bytes::Bytes::copy_from_slice(&[0x20, id as u8]),
+								immutable: id.is_multiple_of(2),
+							}),
 						},
 					})),
 					inflated: None,
@@ -28090,11 +28126,12 @@ mod test {
 			b"c".as_slice(),
 			"the same ordinal cannot alias a different Object ID"
 		);
-		assert!(
-			a.iter()
-				.chain(&b)
-				.all(|object| object.fields.as_ref().unwrap().properties.sealed_time == Some(Timestamp::ZERO))
-		);
+		for object in a.iter().chain(&b) {
+			let fields = object.fields.as_ref().unwrap();
+			let block = fields.properties.block.as_ref().unwrap();
+			assert_eq!(&block.bytes[..], [0x20, fields.id as u8], "object {}", fields.id);
+			assert_eq!(block.immutable, fields.id.is_multiple_of(2), "object {}", fields.id);
+		}
 		assert_eq!(live.handle().content().unwrap().cost().0, 3);
 	}
 

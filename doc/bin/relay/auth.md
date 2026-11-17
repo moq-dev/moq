@@ -254,14 +254,17 @@ outage still closes.
 | `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
 | `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` ends that credential's grant, including after connect; another accepted token can keep the session alive. A token is refused from its `exp` on and before its `nbf`. |
-| `iss`, `sub`, `jti` | Read and ignored. |
+| `jti` | The token's ID, which its issuer may record to revoke it: 1 to 128 printable ASCII characters, without spaces. Optional; `moq auth sign --id` writes one. |
+| `iss`, `sub` | Read and ignored. |
 
 Any other claim refuses the token with its name, `aud` included: an unknown
 claim may narrow the grant, and a misspelled `root` would otherwise widen it to
 everything. Put application data somewhere other than the token.
 
-Tokens and key scopes from the older `moq-token` format still work: each `put`
-and `get` prefix `p` reads as the subtree `p/**`.
+Tokens and key scopes from the older `moq-token` format still verify: each
+`put` and `get` prefix `p` reads as the subtree `p/**`. Nothing writes that
+form any more, so a verifier that reads only `put` and `get`, such as moq-relay
+0.14 and earlier, refuses a new token.
 
 ### Bitrate caps
 

@@ -147,7 +147,6 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 						ietf::Version::Draft22,
 					)
 					.unwrap(),
-					..Default::default()
 				},
 			})
 		});
@@ -1749,7 +1748,6 @@ impl Default for Messages {
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
-				max_age: None,
 				new_group: None,
 				request_id: ietf::RequestId(2),
 				track_namespace: Path::from_static("room/alice"),
@@ -1916,7 +1914,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			range_filters: false,
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 		}
 		.encode(w, BENCH_IETF)
 		.unwrap(),

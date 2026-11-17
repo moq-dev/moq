@@ -37,8 +37,11 @@ const samples = (): Sample[] =>
 				.map((line) => JSON.parse(line) as Sample)
 		: [];
 
-// Chromium loops this constant tone as its microphone. Its default fake device has silent
-// intervals of its own, which would make an audible onset ambiguous.
+// Chromium loops this tone as its microphone. Its default fake device has silent
+// intervals of its own, which would make an audible onset ambiguous. A truly constant tone would not
+// do either: the publisher's voice activity detector learns it as background within a second and
+// sends nothing. Dipping it 18 dB for 40 ms twice a second keeps it reading as speech, and the
+// dip stays above the -40 dBFS onset threshold.
 const wav = Buffer.alloc(44 + 48_000 * 2);
 wav.write("RIFF", 0);
 wav.writeUInt32LE(wav.length - 8, 4);
@@ -52,8 +55,10 @@ wav.writeUInt16LE(2, 32);
 wav.writeUInt16LE(16, 34);
 wav.write("data", 36);
 wav.writeUInt32LE(wav.length - 44, 40);
-for (let i = 0; i < 48_000; i++)
-	wav.writeInt16LE(Math.round(8192 * Math.sin((2 * Math.PI * 440 * i) / 48_000)), 44 + i * 2);
+for (let i = 0; i < 48_000; i++) {
+	const level = i % 24_000 < 1_920 ? 1024 : 8192;
+	wav.writeInt16LE(Math.round(level * Math.sin((2 * Math.PI * 440 * i) / 48_000)), 44 + i * 2);
+}
 const tone = join(out, "tone.wav");
 await Bun.write(tone, wav);
 

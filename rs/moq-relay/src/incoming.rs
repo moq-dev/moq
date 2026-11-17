@@ -10,7 +10,7 @@ pub trait Incoming: Sealed {}
 
 impl Incoming for moq_tokio::server::Request {}
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 impl Incoming for crate::uring::Request {}
 
 #[cfg(feature = "test-support")]
