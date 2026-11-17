@@ -2584,7 +2584,9 @@ type Drift = {
 	budget: number;
 	// The budget is the track's max age, which no widening passes: its verdicts are final.
 	bounded: boolean;
-	presentation?: { sequence: bigint; timestamp: Timestamp };
+	// The live edge: its group, and the newest time it presents, in milliseconds. A scale-less
+	// track's bare starts count as milliseconds, as the Rust `age` reads them.
+	presentation?: { sequence: bigint; at: number };
 	end?: bigint;
 };
 
@@ -2792,20 +2794,24 @@ export class Subscriber {
 		// newer group outside its one-group window still supersedes it.
 		const end = this.#fetchBudget === undefined ? this.#cursor.peek().end : undefined;
 		const timeline = this.#state.timeline;
-		let presentation: { sequence: bigint; timestamp: Timestamp } | undefined;
+		let presentation: Drift["presentation"];
 		const info = this.#state.info.peek();
-		// An accepted untimed track cannot contain a presentation timestamp.
-		if (info === undefined || info.timescale != null) {
-			// The edge wants the newest content that exists, so it takes the newest
-			// stamped group's latest frame: walk back from the cap to the first one.
-			for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
-				const group = timeline[i];
-				if (hooks.groupFailed(group) || !this.#judges(group.start)) continue;
-				const timestamp = hooks.groupTimestamp(group);
-				if (timestamp === undefined) continue;
-				presentation = { sequence: group.start, timestamp: hooks.groupLatest(group) ?? timestamp };
+		// The edge wants the newest content that exists, so it takes the newest stamped group's
+		// latest frame: walk back from the cap to the first one. A scale-less track's frames carry
+		// no timestamp, so its edge is the newest group's start.
+		const scaleless = info !== undefined && info.timescale == null;
+		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
+			const group = timeline[i];
+			if (hooks.groupFailed(group) || !this.#judges(group.start)) continue;
+			if (scaleless) {
+				if (!hooks.groupStarted(group)) continue;
+				presentation = { sequence: group.start, at: Number(group.start) };
 				break;
 			}
+			const timestamp = hooks.groupTimestamp(group);
+			if (timestamp === undefined) continue;
+			presentation = { sequence: group.start, at: (hooks.groupLatest(group) ?? timestamp).asMillis() };
+			break;
 		}
 
 		const update = this.#state.update.peek();
@@ -2888,9 +2894,12 @@ export class Subscriber {
 	// from another copy, or outliving this subscriber. Once closed, only the wall clock judges
 	// it, from the arrivals kept at close.
 	#staleAt(sequence: bigint, drift: Drift, wake = false, held?: Superseded): boolean {
-		const arrived = this.#arrivals
+		const arrival = this.#arrivals ? undefined : this.#arrival(sequence, drift.end);
+		let arrived = this.#arrivals
 			? this.#keptSupersededAt(sequence, drift, held)
-			: this.#supersededAt(this.#arrival(sequence, drift.end), drift, held);
+			: this.#supersededAt(arrival, drift, held);
+		// A group finished whole ages from its own end without a successor.
+		if (arrived === undefined && !this.#arrivals) arrived = this.#endedAt(sequence);
 		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
 		const deadline = arrived.since(Instant.ZERO).asNanos() + drift.budget * 1_000_000;
@@ -2899,15 +2908,53 @@ export class Subscriber {
 		// A closed subscriber keeps no timeline to bound the reach with.
 		if (this.#arrivals) return false;
 
-		const successor = this.#successor(sequence, drift.end);
-		if (!successor) return false;
-		const reach = hooks.groupTimestamp(successor)?.asMillis();
+		const reach = this.#reach(sequence, drift.end);
 		return (
 			drift.presentation !== undefined &&
 			drift.presentation.sequence > sequence &&
 			reach !== undefined &&
-			drift.presentation.timestamp.asMillis() - reach >= drift.budget
+			drift.presentation.at - reach >= drift.budget
 		);
+	}
+
+	// The cached group starting at `sequence`, failed or not.
+	#held(sequence: bigint): GroupConsumer | undefined {
+		const timeline = this.#state.timeline;
+		const group = timeline[timelineIndex(timeline, sequence)];
+		return group?.start === sequence ? group : undefined;
+	}
+
+	// A start or a group's end, in milliseconds of presentation time: a scale-less track's bare
+	// units count as milliseconds. Mirrors the Rust `TrackState::presented` and `age`.
+	#presented(value: bigint): number | undefined {
+		const info = this.#state.info.peek();
+		if (info === undefined) return undefined;
+		const scale = info.timescale;
+		return scale == null ? Number(value) : (Number(value) * 1000) / scale;
+	}
+
+	// The furthest presentation time, in milliseconds, group `sequence` could still reach: its own
+	// end once finished whole, else where its immediate successor below `end` begins, undefined
+	// when nothing proves where it stops. Mirrors the Rust `TrackState::reach`.
+	#reach(sequence: bigint, end: bigint | undefined): number | undefined {
+		const own = this.#held(sequence)?.end;
+		if (own !== undefined) return this.#presented(own);
+		const successor = this.#successor(sequence, end);
+		if (!successor) return undefined;
+		const info = this.#state.info.peek();
+		if (info !== undefined && info.timescale == null) return this.#presented(successor.start);
+		return hooks.groupTimestamp(successor)?.asMillis();
+	}
+
+	// When group `sequence`, finished whole, stops presenting on the wall clock: its arrival plus
+	// its span, which stands in for a successor arriving, so the last group of a paused or
+	// finished track ages out without one. Mirrors the Rust `TrackState::ended_at`.
+	#endedAt(sequence: bigint): Instant | undefined {
+		const group = this.#held(sequence);
+		const end = group?.end;
+		if (group === undefined || end === undefined || end <= sequence) return undefined;
+		const span = this.#presented(end - sequence);
+		return span === undefined ? undefined : hooks.groupArrived(group).checkedAdd(Duration.millis(span));
 	}
 
 	// When the wall clock starts: the cached `arrival`'s arrival, or that of the one `held`
