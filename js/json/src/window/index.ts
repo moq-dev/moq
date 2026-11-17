@@ -22,7 +22,7 @@
  * outweigh the track's `refresh` ratio times the header that opened it, a join asks for a group past
  * the largest, and the {@link Producer} restates the window there. It also rolls at the frame and
  * byte caps, or when the caller cuts. A {@link Consumer} never surfaces a roll.
- * `ProducerConfig.checkpointRecords` bounds the suffix repeated on each roll for a long-lived window.
+ * `Config.checkpointRecords` bounds the suffix repeated on each roll for a long-lived window.
  *
  * A reader gets a `push` event when a record arrives, `pop` when a contiguous span leaves, and
  * `skip` when a span was dropped before this reader saw it. A reader that keeps up sees pushes and
@@ -36,7 +36,7 @@
  * @module
  */
 
-export { Consumer, type ConsumerConfig } from "./consumer.ts";
+export { Consumer } from "./consumer.ts";
 export { Decoder, type Event, type Group, type Span } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
-export { type Finished, Producer, type ProducerConfig } from "./producer.ts";
+export { type Finished, Producer } from "./producer.ts";

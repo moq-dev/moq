@@ -218,7 +218,7 @@ impl<T: Serialize> Snapshot<T> {
 	/// The value is written at that timestamp and measures the entry's `jitter` and `delay`; one
 	/// ahead of now measures as zero delay. An unchanged value writes nothing and measures nothing.
 	pub fn update(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		match self.inner.update(Timed::new(value, timestamp))? {
+		match self.inner.update(value, timestamp)? {
 			Some(size) => self.listing.record(size, Some(timestamp)),
 			None => Ok(()),
 		}
@@ -239,6 +239,20 @@ impl<T: Serialize> Snapshot<T> {
 	/// catalog entry.
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged, entry included, when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the handle back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
 	}
 }
 
@@ -299,7 +313,7 @@ impl<T: Serialize> Stream<T> {
 	/// error publishing the measured bitrate is returned after the record was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, value: &T, timestamp: moq_net::Timestamp) -> crate::Result<()> {
-		let size = match self.inner.append(Timed::new(value, timestamp)) {
+		let size = match self.inner.append(value, timestamp) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
 			Err(
@@ -340,6 +354,20 @@ impl<T: Serialize> Stream<T> {
 	/// catalog entry.
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged, entry included, when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the handle back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
 	}
 }
 
@@ -615,14 +643,14 @@ mod test {
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
-		let published = catalog.snapshot().media.clock;
+		let published = catalog.snapshot().sync.clock;
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
 		let first = catalog
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
-		assert_eq!(catalog.snapshot().media.clock, published, "the clock never moves");
+		assert_eq!(catalog.snapshot().sync.clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
 		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();

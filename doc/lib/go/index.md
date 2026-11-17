@@ -21,7 +21,7 @@ catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamp
 `TimestampFromScale` and `TimestampFromDuration` build one exactly; `TimestampToDuration` rounds down to a whole nanosecond.
 Every write takes a timestamp, and the library never substitutes zero or now.
 A raw track with a `nil` timescale is untimed: each frame carries `moq.Unscaled(key)`, its group's key, whose `Scale` is `nil`.
-`TrackInfo.Compression` set to `CompressionDeflate` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+`TrackInfo.Compression` set to `DeflateCompression()` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `Update`, `Append`, `Push`, and `Pop` take a final `moq.Timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
 skips to the newest state where `Next` yields each one. A read timestamp is at the track's timescale.
@@ -106,7 +106,7 @@ track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
 video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
     Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
-    Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
+    Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.AutoEncoder()},
     Track: &track,
 })
 _ = video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(pts, 90_000), Data: rgba})
@@ -141,7 +141,7 @@ shows which module holds each.
 - **Catalog timing.** Each catalog from `CatalogConsumer.Next` carries the `Timestamp` it takes effect at on the broadcast's media timeline. `NewCatalogConsumer(ctx, broadcast, 0)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `Preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.ErrUnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A zero `moq.Subscription{}`, a nil `*Subscription`, and `moq.DefaultSubscription()` all mean moq-net's defaults, whose zero `Delay` starts at the newest group and skips a superseded one at once. Set `Delay.MaxUnlimited` for no subscriber limit, and `Delay.MinUnstated` to leave the target latency unstated. Decoders take the same `moq.Delay`.
-- **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `Demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call the producer's `AbortUnwanted(code)` once `WantedChanged` returns nil rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+- **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `Demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `AbortUnwanted(code)` on its producer (raw, media, audio, video, or JSON) once `WantedChanged` returns nil rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next nil on a fresh `Demand()`, since one that already returned nil misses a subscriber that came and went.
 
 ## Runtime
 

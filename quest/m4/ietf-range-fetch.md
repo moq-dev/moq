@@ -30,7 +30,7 @@ frozen scope `doc/concept/standard.md` states, which kept only joining
 `FETCH`.
 
 What makes it possible: moq-transport's Prior Group ID Gap object extension,
-which [IETF time addressing](/quest/m2/ietf-time-addressing.md) sends on
+which [IETF time addressing](https://github.com/moq-dev/moq/pull/8918) sends on
 egress and reads on ingest as a best-effort SUBSCRIBE_SKIP. What counts as
 proven:
 
@@ -68,10 +68,6 @@ of two moq-net relays over moq-transport replays a multi-group run. Run the
 interop suite with `--all`.
 
 Public API: none. Wire: none (draft-defined messages only).
-
-## Required
-
-- [IETF time addressing](/quest/m2/ietf-time-addressing.md) - reads Prior Group ID Gap on ingest
 
 ## Closes
 

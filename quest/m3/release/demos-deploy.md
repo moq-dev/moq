@@ -21,12 +21,13 @@ demos go back to their format before sockets, since
 them). This quest was "moq.dev's hosted demos run on sockets" until then.
 
 What that changes here: MoQ Boy on `release` already speaks the restored
-format ([its quest](/quest/m2/sockets/boy.md)), so the hosted relays need no
+format, which `main` restored in
+[moq-dev/moq#8936](https://github.com/moq-dev/moq/pull/8936), so the hosted relays need no
 new version for it and the auth server keeps `demo/viewer/**`. CARLA was
 added on `main` after `release` branched; its restored format
-([its quest](/quest/m2/sockets/carla.md)) uses the same grant. Read both
-quests' merged PRs for the grants they settled before deploying, since each
-re-decides its grant rather than restoring it blindly.
+([moq-dev/moq#8937](https://github.com/moq-dev/moq/pull/8937)) uses the same
+grant. Read both quests' merged PRs for the grants they settled before
+deploying, since each re-decides its grant rather than restoring it blindly.
 
 The cut publishes no MoQ Boy package
 ([moq-dev/moq#8446](https://github.com/moq-dev/moq/pull/8446), 2026-11-10):
@@ -49,14 +50,9 @@ package.
     subscribes `viewer/carla/**`, each under the relay's `demo` root.
   - The site's `moq` submodule moves to the cut, its `moq/js/moq-boy`
     workspace becomes `moq/demo/boy`, and `src/components/boy.tsx` imports
-    the element from there (`src/element.tsx`), keeping `prefix-viewer`.
+    the element from there (`src/element.ts`), keeping `prefix-viewer`.
 
   Then open both demos in a browser and drive a truck and a game; an agent can
   drive Chrome for that check.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [MoQ Boy viewers publish their commands again](/quest/m2/sockets/boy.md) - settles the emulator's and viewers' grants this deploys
-- [CARLA drivers publish their controls again](/quest/m2/sockets/carla.md) - settles the worker's and drivers' grants this deploys

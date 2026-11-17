@@ -262,11 +262,7 @@ async fn connect_route_auth_on(
 		client_publish: Some(client_origin.clone()),
 		server_subscribe: Some(server_origin.clone()),
 		server_requests: true,
-		server_extensions: Some({
-			let mut extensions = moq_net::setup::Extensions::default();
-			extensions.solicit = false;
-			extensions
-		}),
+		server_declines_solicit: true,
 		client_auth,
 		..Default::default()
 	})
@@ -410,8 +406,8 @@ struct Options {
 	server_subscribe: Option<origin::Producer>,
 	/// Take the server's AUTH requests before its driver runs.
 	server_requests: bool,
-	/// The server's extensions, when not the defaults.
-	server_extensions: Option<moq_net::setup::Extensions>,
+	/// The server acts as a moq-transport peer without MoQ Solicit.
+	server_declines_solicit: bool,
 	version: Option<&'static str>,
 	/// The connection credential the client's SETUP presents.
 	client_token: Option<&'static [u8]>,
@@ -456,10 +452,9 @@ async fn connect(opts: Options) -> Pair {
 		client = client.with_auth(handle);
 	}
 
-	let mut server = Server::new().with_versions(version.into());
-	if let Some(extensions) = opts.server_extensions {
-		server = server.with_extensions(extensions);
-	}
+	let mut server = Server::new()
+		.with_versions(version.into())
+		.with_solicit(!opts.server_declines_solicit);
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish);
 	}
@@ -479,7 +474,7 @@ async fn connect(opts: Options) -> Pair {
 	};
 	let server_fut = async {
 		let mut handshake = server
-			.accept_request(now(), server_transport)
+			.handshake(now(), server_transport)
 			.await
 			.expect("server handshake");
 		let setup_token = handshake.token().cloned();
@@ -2265,7 +2260,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 			.await;
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
-		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.server.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		support::Draining::recv(&first.client.draining())
 			.await
 			.expect("the GOAWAY");
@@ -2321,7 +2316,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		// Its first poll queues the token; the driver runs only once this side drains.
 		let mut adding = Box::pin(added(&handle, "late"));
 		assert!(adding.as_mut().now_or_never().is_none());
-		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.client.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_tokens.next().now_or_never().is_none(),

@@ -10,7 +10,7 @@
 //!   [`Decoded`] interleaved `f32` samples.
 //!
 //! [`Options`] keeps subscription and output policy separate from the
-//! lower-level decoder [`Config`], whose [`Kind`] picks the backend: a
+//! lower-level decoder [`Config`], whose [`Backend`] picks the implementation: a
 //! platform decoder first where one takes the track, then software (libopus,
 //! PCM, and symphonia for AAC-LC).
 
@@ -23,4 +23,4 @@ mod decoder;
 pub use backpressure::Backpressure;
 pub use consumer::{Consumer, Delay, Options, Output, Read, Start};
 pub use decoded::Decoded;
-pub use decoder::{Config, Decoder, Kind};
+pub use decoder::{Backend, Config, Decoder};

@@ -263,7 +263,8 @@ class SelectionTest(unittest.TestCase):
             [c for c in calls if c[:2] == ["bun", "run"]],
             [["bun", "run", "test", *junit(d)] for d in ("js/view", "doc")],
         )
-        self.assertTrue(any(c[:3] == ["bun", "test", *junit(".")[:1]] and junit(".")[1] in c for c in calls))
+        root_test = ["bun", "--no-env-file", "test", *junit(".")]
+        self.assertTrue(any(c[: len(root_test)] == root_test for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
         self.packages["doc"].pop("scripts")

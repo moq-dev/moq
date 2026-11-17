@@ -73,7 +73,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		group
 			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
 	let _source = source.finish().unwrap();
@@ -108,9 +108,10 @@ async fn a_stalled_reader_keeps_every_group_its_budget_covers() {
 
 /// The stall backs up the relay: with a budget shorter than it, the groups that waited for
 /// credit past the budget are skipped. Group 0 took the one free credit as the stall began.
+/// moq-transport carries no subscriber budget, so its relay keeps every group.
 #[kio::test]
 async fn a_budget_shorter_than_the_stall_skips_what_waited_past_it() {
-	for version in VERSIONS {
+	for version in VERSIONS.into_iter().filter(|version| version.starts_with("moq-lite")) {
 		let version: Version = version.parse().unwrap();
 		let got = stalled_read(version, Duration::from_millis(1500)).await;
 		assert_eq!(got, [0, 3, 4].into(), "{version}");

@@ -48,7 +48,7 @@ the reverse (decided 2026-10-20, maintainer):
   Subscribe ID, Sequence, and Timestamp, since datagram tracks dropped the
   relayed `ietf` fields and the Inflated Size from it, so
   `MAX_DATAGRAM_HEADER` (28, `rs/moq-e2ee/src/limits.rs` and
-  `js/crypto/src/e2ee/limits.ts`) covers moq-lite. [moq-dev/moq#7959](https://github.com/moq-dev/moq/pull/7959)
+  `js/e2ee/src/limits.ts`) covers moq-lite. [moq-dev/moq#7959](https://github.com/moq-dev/moq/pull/7959)
   restores moq-transport datagrams using existing OBJECT_DATAGRAM framing,
   without adding header fields. Re-check the allowance if that framing changes.
 - Ranges: every moq-net range starts at a group's first frame

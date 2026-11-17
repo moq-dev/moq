@@ -11,12 +11,12 @@ import { accept as acceptSession, connect as connectSession } from "../connectio
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, requestedGroups } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Fill, Producer, Subscriber, Subscription } from "../track.ts";
+import type { FillGroups, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
 import { Publisher as LitePublisher } from "./publisher.ts";
@@ -40,7 +40,7 @@ async function peers(alpn: string) {
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const requests = track.requests();
 	void (async () => {
-		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				if (sequence === 1n) {
 					fill.dropGroups(1n, 2n);
@@ -255,10 +255,10 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and keeps it open.
 	const requests = track.requests();
-	const fills: Fill[] = [];
+	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requests.requestedFill();
-		if (!fill) throw new Error("no fill");
+		const fill = await requestedGroups(requests);
+		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -322,10 +322,10 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and never finishes it.
 	const requests = track.requests();
-	const fills: Fill[] = [];
+	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requests.requestedFill();
-		if (!fill) throw new Error("no fill");
+		const fill = await requestedGroups(requests);
+		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -348,7 +348,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 
 		// The history reader leaves mid-group, and the live one reads past it: nobody holds the
 		// group any more, so the copy cancels its FETCH and aborts the truncated group rather
-		// than keep downloading it.
+		// than keep downloading it. The publisher may close the group's stream first, once the
+		// narrower budget left it stale, which leaves the copy a closed group: either way the
+		// source loses its last reader.
 		group?.close();
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
@@ -357,7 +359,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 			timeout(
 				Duration.millis(2000),
 				(async () => {
-					while (hooks.holdsGroup(reader, 0n)) await sleep(Duration.millis(10));
+					while (source.demand().wanted.peek()) await sleep(Duration.millis(10));
 				})(),
 			),
 		);
@@ -375,10 +377,9 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	}
 });
 
-// Lite-07: a filled group whose stream the publisher yielded, then gave up, ends with the drop the
-// copy's subscription, which the fill rides, names it with: the group's own error, rather than
-// waiting paused on a continuation that never comes.
-test("copy fill: a yielded group its subscription's drop names ends", async () => {
+// Lite-07: a filled group whose stream the session reset to make room ends with TOO_FAR_BEHIND, which
+// the drop on the copy's subscription, which the fill rides, names too.
+test("copy fill: a group reset to make room ends", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
@@ -393,10 +394,10 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 	// The archive answers group 0 with one frame and keeps it open, so its stream is still open, and
 	// group 1 whole.
 	const requests = track.requests();
-	const fills: Fill[] = [];
+	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requests.requestedFill();
-		if (!fill) throw new Error("no fill");
+		const fill = await requestedGroups(requests);
+		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -418,10 +419,10 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 		const group = await history.recvGroup();
 		expect(group?.sequence).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
-		const source = await archived;
+		await archived;
 
-		// The session resets the group's stream to make room, and the group is gone before a new
-		// stream could continue it, so the publisher drops it on the subscription the fill rides.
+		// The session resets the group's stream to make room, so the publisher drops it on the
+		// subscription the fill rides.
 		const one = await history.recvGroup();
 		expect(one?.sequence).toBe(1n);
 		while (await one?.readFrame());
@@ -430,15 +431,13 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 		const open = lines(pair.server).streams.list();
 		expect(open.length).toBe(1);
 		open[0]?.preempt();
-		source.abort(new StreamError(StreamCode(70), { message: "gone" }));
 
-		// Still paused without it, which the deadline, fired once every pending task settled,
-		// reports as elapsed.
+		// Within the deadline, which fires once every pending task settled.
 		const ended = await clock
 			.drive(timeout(Duration.millis(1000), Promise.resolve(group?.closed)))
 			.catch((err: unknown) => err);
 		expect(ended).toBeInstanceOf(StreamError);
-		expect((ended as StreamError).code).toBe(StreamCode(70));
+		expect((ended as StreamError).code).toBe(StreamCode.TooFarBehind);
 		history.close();
 		reader.close();
 	} finally {
@@ -499,7 +498,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		let archived = false;
 		const requests = track.requests();
 		void (async () => {
-			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
 				for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 					if (sequence !== 2n || !archived) {
 						fill.refuseGroups(sequence, sequence + 1n, new StreamError(StreamCode.NotFound));

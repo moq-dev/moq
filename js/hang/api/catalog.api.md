@@ -233,12 +233,6 @@ export const IncludeSchema: ZodMiniObject<{
 
 export const InstanceSchema: ZodMiniType<ReferenceInstance, string>;
 
-export type Join = infer<typeof JoinSchema>;
-
-export const JoinSchema: ZodMiniObject<{
-	interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-}, $strip>;
-
 export type Json = infer<typeof JsonSchema>;
 
 export type JsonConfig = infer<typeof JsonConfigSchema>;
@@ -271,18 +265,6 @@ export const JsonSchema: ZodMiniObject<{
 export type KnownMode = "snapshot" | "stream";
 
 export const MOQ_EPOCH_UNIX_MILLIS: 1577836800000;
-
-export type Media = infer<typeof MediaSchema>;
-
-export const MediaSchema: ZodMiniObject<{
-	clock: ZodMiniOptional<ZodMiniObject<{
-		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
-		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-	}, $strip>>;
-	join: ZodMiniOptional<ZodMiniObject<{
-		interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-	}, $strip>>;
-}, $strip>;
 
 export type Mode = infer<typeof ModeSchema>;
 
@@ -393,17 +375,15 @@ export const RootSchema: ZodMiniObject<{
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
 	}, $strip>>;
-	media: ZodMiniOptional<ZodMiniObject<{
+	stats: ZodMiniOptional<ZodMiniObject<{
+		track: ZodMiniString<string>;
+	}, $strip>>;
+	sync: ZodMiniOptional<ZodMiniObject<{
 		clock: ZodMiniOptional<ZodMiniObject<{
 			timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 			wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 		}, $strip>>;
-		join: ZodMiniOptional<ZodMiniObject<{
-			interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-		}, $strip>>;
-	}, $strip>>;
-	stats: ZodMiniOptional<ZodMiniObject<{
-		track: ZodMiniString<string>;
+		interval: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	}, $strip>>;
 	text: ZodMiniOptional<ZodMiniObject<{
 		renditions: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
@@ -521,6 +501,16 @@ export const RootSchema: ZodMiniObject<{
 	}, $strip>>;
 }, $loose>;
 
+export interface Skipped {
+	audio: Record<string, number>;
+	binary: Record<string, number>;
+	include: Record<string, number>;
+	json: Record<string, number>;
+	text: Record<string, number>;
+	version: number;
+	video: Record<string, number>;
+}
+
 export type Stats = infer<typeof StatsSchema>;
 
 export const StatsSchema: ZodMiniObject<{
@@ -596,6 +586,16 @@ export const TextSchema: ZodMiniObject<{
 		role: string;
 		track?: string | undefined;
 	}>, Record<string, unknown>>>;
+}, $strip>;
+
+export type Timeline = infer<typeof TimelineSchema>;
+
+export const TimelineSchema: ZodMiniObject<{
+	clock: ZodMiniOptional<ZodMiniObject<{
+		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
+		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+	}, $strip>>;
+	interval: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 }, $strip>;
 
 export type Track = infer<typeof TrackSchema>;
@@ -834,6 +834,8 @@ export const hexSchema: ZodMiniString<string>;
 export function modeSupported(mode: Mode): mode is KnownMode;
 
 export const nonzeroU53Schema: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+
+export function skipped(root: Root): Skipped | undefined;
 
 export function track(id: string, config: {
 	track?: string;

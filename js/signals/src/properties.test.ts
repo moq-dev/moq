@@ -84,7 +84,9 @@ function edit(v: unknown, kind: Edit): unknown {
 }
 
 type Op =
-	| { op: "set"; value: unknown; notify: boolean | undefined }
+	| { op: "set"; via: "set" | "update"; value: unknown; force: boolean }
+	// Changes nothing in place, which must notify all the same.
+	| { op: "mutate" }
 	// Sets a near-copy of the current value, where equality bugs hide.
 	| { op: "edit"; edit: Edit }
 	| { op: "listen"; kind: Kind }
@@ -92,7 +94,10 @@ type Op =
 	| { op: "unlisten"; index: number };
 
 const op: fc.Arbitrary<Op> = fc.oneof(
-	fc.record({ op: fc.constant("set" as const), value, notify: fc.constantFrom(undefined, true, false) }),
+	fc
+		.record({ op: fc.constant("set" as const), via: fc.constantFrom("set", "update"), value, force: fc.boolean() })
+		.map((o) => (o.via === "update" ? { ...o, force: false } : o)),
+	fc.constant({ op: "mutate" as const }),
 	fc.record({ op: fc.constant("edit" as const), edit: fc.constantFrom<Edit>("clone", "rename", "grow") }),
 	fc.record({ op: fc.constant("listen" as const), kind: fc.constantFrom<Kind>("subscribe", "changed", "effect") }),
 	fc.record({ op: fc.constant("unlisten" as const), index: fc.nat() }),
@@ -105,7 +110,8 @@ type Listener = { kind: Kind; seen: unknown[]; pending: boolean; gone: boolean }
 // The reference model of the notification contract. A write captures the value it replaces,
 // and the flush at the end of the microtask delivers the final value to every listener when
 // it differs from that capture or the write was forced. A write while nobody listens drops
-// the capture, so nothing is delivered for it. A silent write captures nothing.
+// the capture, so nothing is delivered for it. `update` is an unforced write and `mutate` a
+// forced write of the current value, since no write method may notify differently.
 type Model = {
 	value: unknown;
 	base?: { value: unknown };
@@ -121,27 +127,33 @@ type Real = {
 	dispose: Map<number, () => void>;
 };
 
+// The model's half of a write.
+function write(m: Model, value: unknown, force: boolean): void {
+	m.base ??= { value: m.value };
+	m.value = value;
+	if (force) m.force = true;
+	if (![...m.listeners.values()].some((l) => !l.pending && !l.gone)) {
+		m.base = undefined;
+		m.force = false;
+	} else if (!m.queue.includes("flush")) {
+		m.queue.push("flush");
+	}
+}
+
 function apply(m: Model, r: Real, o: Op): void {
 	switch (o.op) {
 		case "edit":
-			apply(m, r, { op: "set", value: edit(m.value, o.edit), notify: undefined });
+			apply(m, r, { op: "set", via: "set", value: edit(m.value, o.edit), force: false });
+			return;
+		case "mutate":
+			r.signal.mutate(() => {});
+			write(m, m.value, true);
 			return;
 		case "set": {
-			r.signal.set(o.value, o.notify);
-
-			if (o.notify === false) {
-				m.value = o.value;
-				return;
-			}
-			m.base ??= { value: m.value };
-			m.value = o.value;
-			if (o.notify) m.force = true;
-			if (![...m.listeners.values()].some((l) => !l.pending && !l.gone)) {
-				m.base = undefined;
-				m.force = false;
-			} else if (!m.queue.includes("flush")) {
-				m.queue.push("flush");
-			}
+			if (o.via === "update") r.signal.update(() => o.value);
+			else if (o.force) r.signal.set(o.value, true);
+			else r.signal.set(o.value);
+			write(m, o.value, o.force);
 			return;
 		}
 		case "listen": {

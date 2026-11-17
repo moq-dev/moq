@@ -3,7 +3,7 @@ import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -96,7 +96,10 @@ export class Connection implements Session {
 	#cluster?: Cluster.Hops;
 
 	// The peer's GOAWAY, read off its SETUP stream.
-	#goaway = new Once<Drain>();
+	#goaway = new Once<Goaway>();
+
+	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
+	#closed = new Once<Error | null>();
 
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
@@ -121,13 +124,12 @@ export class Connection implements Session {
 		client,
 		publish,
 		solicit,
+		declaredSolicit = true,
 		hidden = false,
-		maxAge = false,
 		activeCount = false,
 		cluster,
 		handle,
 		early = [],
-		extensions,
 		peerImplementation,
 	}: {
 		url: URL;
@@ -143,10 +145,10 @@ export class Connection implements Session {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/** Whether our own SETUP declared MoQ Solicit; `false` only in a test acting as a peer without it. */
+		declaredSolicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
-		/** Whether the peer accepts subscriber max age. */
-		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/**
@@ -158,8 +160,6 @@ export class Connection implements Session {
 		handle?: Auth.Handle;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
 		early?: Reader[];
-		/** What our own SETUP offered; every extension when omitted. */
-		extensions?: { solicit: boolean };
 		/** The implementation the peer's SETUP advertised, read before the session starts. */
 		peerImplementation?: string;
 	}) {
@@ -190,6 +190,10 @@ export class Connection implements Session {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		void quic.closed.then(
+			(info) => this.#closed.set(fromClose(info)),
+			(err: unknown) => this.#closed.set(error(err)),
+		);
 		this.#client = client;
 
 		this.#auth.violated.subscribe((err) => {
@@ -208,10 +212,9 @@ export class Connection implements Session {
 			auth: this.#auth,
 		});
 		this.#solicit = solicit;
-		this.#declaredSolicit = extensions?.solicit ?? true;
+		this.#declaredSolicit = declaredSolicit;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
-			maxAge,
 			session: this.#session,
 			quic,
 			cluster,
@@ -407,7 +410,7 @@ export class Connection implements Session {
 				const msg = await this.#request(stream, "publish_namespace", decoded);
 				if (!msg) break;
 
-				// Unless we declined it, we declare that advertisements to us must be
+				// Unless a test declined it, we declare that advertisements to us must be
 				// solicited (MoQ Solicit), and writing the option at all proves the peer
 				// implements the extension, whichever value it chose. It also cannot have
 				// advertised before reading our SETUP, since our SETUP is what says whether
@@ -610,12 +613,12 @@ export class Connection implements Session {
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
-	get draining(): GetPromise<Drain> {
+	get draining(): GetPromise<Goaway> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
-	get closed(): Promise<Error | null> {
-		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
+	/** Settles when the session closes, decoding the peer's close code; see {@link Session.closed}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 }

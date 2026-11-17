@@ -3,7 +3,7 @@ import { ClockSchema, MOQ_EPOCH_UNIX_MILLIS, wallClockTime } from "./index.ts";
 import { RootSchema } from "./root.ts";
 
 // Mirrors rs/hang/fixtures/catalog-clock.json: the canonical shape, with the clock and the join
-// interval in the root `media` section. A reader maps media timestamps through `media.clock` after
+// interval in the root `sync` section. A reader maps media timestamps through `sync.clock` after
 // timescale conversion.
 const FIXTURE = {
 	video: {
@@ -26,9 +26,9 @@ const FIXTURE = {
 			},
 		},
 	},
-	media: {
+	sync: {
 		clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
-		join: { interval: 2000 },
+		interval: 2000,
 	},
 };
 
@@ -90,9 +90,9 @@ test("wallClockTime refuses bad inputs", () => {
 
 test("the packaged shape maps media timestamps through the media clock", () => {
 	const catalog = RootSchema.parse(FIXTURE);
-	const clock = catalog.media?.clock;
+	const clock = catalog.sync?.clock;
 	if (!clock) throw new Error("fixture lost its clock");
-	expect(Number(catalog.media?.join?.interval)).toBe(2000);
+	expect(Number(catalog.sync?.interval)).toBe(2000);
 
 	// PTS 2000 (ms) lands 2s after the wall epoch.
 	expect(wallClockTime(clock, 2000, 1000).getTime()).toBe(MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);

@@ -396,7 +396,7 @@ let activeMeta: Json.Snapshot.Producer<unknown> | undefined;
 
 const setMeta = (value: unknown) => {
 	currentMeta = value;
-	activeMeta?.update({ value, at: Net.Time.Timestamp.now() });
+	activeMeta?.update(value, Net.Time.Timestamp.now());
 };
 
 const meta = new Signals.Effect();
@@ -416,7 +416,7 @@ meta.run((effect) => {
 	});
 
 	const producer = new Json.Snapshot.Producer<unknown>({ track });
-	producer.update({ value: currentMeta, at: Net.Time.Timestamp.now() });
+	producer.update(currentMeta, Net.Time.Timestamp.now());
 	activeMeta = producer;
 	effect.cleanup(() => {
 		if (activeMeta === producer) activeMeta = undefined;

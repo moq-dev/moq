@@ -221,7 +221,7 @@ test("feeds every rendition off one decoded source", async () => {
 
 	const capture = new Capture({
 		enabled: true,
-		source: new Signal({ samples, sampleRate: 48_000, channelCount: 1, kind: "auto" }) as never,
+		source: new Signal({ samples, sampleRate: 48_000, channelCount: 1 }) as never,
 	});
 	await settle();
 

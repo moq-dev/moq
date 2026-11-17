@@ -161,7 +161,7 @@ typealias TrackRequests = uniffi.moq.MoqTrackRequests
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 
 /**
- * The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
+ * The read side of a raw track: yields groups in start order, skipping ahead if it falls behind.
  */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 
@@ -259,17 +259,18 @@ typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
 
-/** A location within a track: a group sequence and a frame index in it. */
+/** A location within a track: a group start and a frame index in it. */
 typealias Position = uniffi.moq.MoqPosition
 
-/** Options for fetching one past group by sequence. */
+/** Options for fetching one past group by start. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 
 /**
- * How a track's frames are compressed on the wire: `DEFLATE`, or `null` in [TrackInfo] for none.
+ * How a track's frames are compressed on the wire: `Compression.deflate()`, or `null` in
+ * [TrackInfo] for none. Compare a received one with `==` or by `name()`.
  */
 typealias Compression = uniffi.moq.MoqCompression
 
@@ -308,7 +309,7 @@ typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
 
-/** A video codec identifier (H.264 or H.265). */
+/** Selects the video encoder codec. Build one with `VideoCodec.h264()` or `VideoCodec.h265()`. */
 typealias VideoCodec = uniffi.moq.MoqVideoCodec
 
 /**
@@ -389,8 +390,10 @@ typealias ConnectionState = uniffi.moq.MoqConnectionState
 
 /**
  * Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
- * Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
- * session, such as a refused credential, ends the connection with its error rather than retrying.
+ * A null field keeps its default, zero means zero (retry at once, or give up at the first failure),
+ * and `maxUnlimited` lifts the ceiling. Until a session has stayed up past 1s or been drained by a
+ * GOAWAY, a failed dial or a closed session, such as a refused credential, ends the connection with
+ * its error rather than retrying.
  */
 typealias Backoff = uniffi.moq.MoqBackoff
 
@@ -408,7 +411,8 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // directly. `dev.moq.media.Container` aliases `MoqContainer` for signatures, but its
 // variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
-// (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).
+// (AudioCodec, VideoCodec, Compression) expose constructors through the alias
+// (`AudioCodec.opus()`).
 
 /** Writes live datagrams with an independent sequence counter and no cache. */
 typealias DatagramProducer = uniffi.moq.MoqDatagramProducer

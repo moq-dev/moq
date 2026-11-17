@@ -25,7 +25,7 @@ because a downstream iGPU transcode trial needs it now.
 Decided 2026-11-13 (maintainer, /quest-run): stream-credit stays in m1 and
 no longer gates m2, since takeover, its only wire change, moved to m3.
 Its YIELDED continuations leave lite-07 again in m2
-([yield-defer](/quest/m2/yield-defer.md), 2026-11-16).
+([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965), 2026-11-16).
 
 Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
