@@ -3055,7 +3055,7 @@ mod tests {
 				keyframe: true,
 			};
 			container.write(&mut group, &[frame]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 
 		write(0);
@@ -3113,7 +3113,7 @@ mod tests {
 				keyframe: true,
 			};
 			container.write(&mut group, &[frame]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 
 		write(0);
@@ -3171,7 +3171,7 @@ mod tests {
 				keyframe: true,
 			};
 			container.write(&mut group, &[frame]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 
 		write(6);
