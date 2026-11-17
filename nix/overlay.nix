@@ -140,8 +140,7 @@ in
         --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg libmoqNativeLibs.cmake}
       substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
         $out/lib/cmake/moq/moq-config-version.cmake \
-        --subst-var-by VERSION "$version" \
-        --subst-var-by MAJOR_VERSION "''${version%%.*}"
+        --subst-var-by VERSION "$version"
 
       runHook postInstall
     '';

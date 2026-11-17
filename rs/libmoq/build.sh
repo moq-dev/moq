@@ -80,7 +80,6 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
 
     # Generate CMake config files from templates (no pkg-config on Windows).
     mkdir -p "$PACKAGE_DIR/lib/cmake/moq"
-    MAJOR_VERSION="${VERSION%%.*}"
 
     # The native libraries an external linker must pass alongside moq.lib,
     # quoted the way rs/libmoq/CMakeLists.txt and nix/overlay.nix format them.
@@ -93,7 +92,6 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
         -e "s|@MOQ_NATIVE_LIBS_QUOTED@|${NATIVE_LIBS_QUOTED}|g" \
         "$SCRIPT_DIR/cmake/moq-config.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config.cmake"
     sed -e "s|@VERSION@|${VERSION}|g" \
-        -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
         "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
 else
     # Release builds must match the host. A mismatch would silently mislabel

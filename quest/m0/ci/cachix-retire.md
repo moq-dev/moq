@@ -40,8 +40,8 @@ otherwise have to move.
   push` would fail), any local action it uses, the deletion of
   `cachix.yml`, and `main`'s `cache.yml` in place of `release`'s, whose
   dispatch-only `warm` job still runs `cachix push kixelated` with
-  `CACHIX_AUTH_TOKEN` and would fail once the token is gone. Match `release`'s own tag patterns (it still cuts `libmoq-v*`
-  where `main` cuts `moq-c-v*`) and the flake attributes `release` builds; the
+  `CACHIX_AUTH_TOKEN` and would fail once the token is gone. Match `release`'s own tag patterns and the flake attributes `release` builds
+  (`main` cuts `libmoq-v*` like `release`); the
   `cache-write` Environment must admit those tags.
 - On the first `moq-relay-v*` or `moq-cli-v*` tag after the backport, record
   its `release-nix.yml` pushes from all three legs, then

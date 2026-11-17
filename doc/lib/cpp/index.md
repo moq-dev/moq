@@ -92,7 +92,9 @@ auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes ever
 auto session = ok(client->connect("https://relay.example.com").get());
 auto announced = ok(session->consume()->follow("my-stream.hang", nullptr));
 auto broadcast = ok(announced->available().get());   // the first call is never null
-auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
+// A zero delay reads only the newest catalog; a player that holds each update until its
+// media reaches the catalog's `timestamp` passes its playout delay instead.
+auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast, {}).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[id, video] : catalog->video) {
         // The rendition carries its own broadcast and track, which the subscribe follows.
@@ -142,7 +144,7 @@ auto broadcast = route->broadcast();
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
-moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
+moq::VideoEncoderOutput output{moq::VideoCodec::h264(), std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
@@ -231,11 +233,11 @@ screen.reset();              // stopped watching: its share returns to camera
 
 ## Compressed tracks
 
-`moq::TrackInfo::compression` set to DEFLATE on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`moq::TrackInfo::compression` set to `moq::Compression::deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
 ## Subscription defaults
 
-Start every subscription from `moq::subscription_defaults()` and change its fields. It holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once, and passing `std::nullopt` for a subscription means the same. A bare `moq::Subscription{}` does not: the generated records carry no duration defaults, so its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated.
+Start every subscription from `moq::subscription_defaults()` and change its fields. It holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once, and passing `std::nullopt` for a subscription means the same. A bare `moq::Subscription{}` does not: the generated records carry no duration defaults, so its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated. Likewise a bare `moq::TrackInfo{}` leaves `max_age` unset, which sets no publisher limit, while passing `std::nullopt` for the info keeps moq-net's zero, which serves only the live edge; set `max_age` to zero to keep that default in a record.
 
 ## Track demand
 
@@ -251,11 +253,11 @@ To end a track nobody wants, call the producer's `abort_unwanted(code)` once `wa
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
 
-Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `session->credential(token)` returns a `Credential` that `route->set_auth(credential)` or `claim->set_auth(credential)` names (empty for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `answered()` resolves to the verdict, and `cancel()` withdraws it unless a route or claim still names it.
+Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once. `answered()` resolves once the relay accepts them, or to an `Error` carrying its refusal code. A server-accepted session's `tokens()` is null. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `session->credential(token)` returns a `Credential` that `route->set_auth(credential)` or `claim->set_auth(credential)` names (empty for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `answered()` resolves to the verdict, and `cancel()` withdraws it unless a route or claim still names it.
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (a first dial that reaches no session ends the session with that error rather than retrying); independent watchers keep their own revisions.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed session, such as a refused credential, ends the session with that error rather than retrying); independent watchers keep their own revisions.
 
 ## Shutdown
 

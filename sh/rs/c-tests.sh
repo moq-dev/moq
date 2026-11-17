@@ -76,3 +76,26 @@ for source in rs/libmoq/c-tests/*.c; do
     echo "running $source"
     "$bin"
 done
+
+# find_package(moq <version>) takes the same 0.x line only, at least as new as
+# the request: render the packed version file the way build.sh and
+# nix/overlay.nix do, and ask CMake about each request.
+if command -v cmake >/dev/null; then
+    pkg="$out/cmake-pkg"
+    mkdir -p "$pkg" "$out/cmake-probe"
+    sed 's/@VERSION@/0.22.1/' rs/libmoq/cmake/moq-config-version.cmake.in >"$pkg/moq-config-version.cmake"
+    echo 'set(moq_FOUND TRUE)' >"$pkg/moq-config.cmake"
+    # request:found
+    for case in ":1" "0.22:1" "0.22.1:1" "0.22.2:0" "0.23:0" "0.21:0" "0.6:0" "1.0:0"; do
+        request="${case%%:*}"
+        want="${case##*:}"
+        printf 'cmake_minimum_required(VERSION 3.21)\nproject(probe NONE)\nfind_package(moq %s QUIET CONFIG PATHS "%s" NO_DEFAULT_PATH)\nif(moq_FOUND)\n  message(STATUS "found=1")\nelse()\n  message(STATUS "found=0")\nendif()\n' \
+            "$request" "$pkg" >"$out/cmake-probe/CMakeLists.txt"
+        got=$(cmake -S "$out/cmake-probe" -B "$out/cmake-probe/build" 2>&1 | sed -n 's/.*found=\([01]\).*/\1/p')
+        rm -rf "$out/cmake-probe/build"
+        if [ "$got" != "$want" ]; then
+            echo "find_package(moq $request) against 0.22.1: found=$got, want $want" >&2
+            exit 1
+        fi
+    done
+fi
