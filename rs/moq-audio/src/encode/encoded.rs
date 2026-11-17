@@ -20,6 +20,10 @@ pub struct Encoded {
 	/// silent. Always [`Activity::Active`] for codecs without a discontinuous
 	/// mode, and for the coded frames that punctuate a silent run.
 	pub activity: Activity,
+	/// Whether the codec was in discontinuous transmission once it coded this
+	/// packet. A coded packet in a silent run is a keep-alive, not speech, so a
+	/// voice producer drops it.
+	pub(crate) in_dtx: bool,
 }
 
 impl Encoded {
@@ -28,6 +32,7 @@ impl Encoded {
 		Self {
 			payload,
 			activity: Activity::Active,
+			in_dtx: false,
 		}
 	}
 }

@@ -125,13 +125,14 @@ pub struct CaptureArgs {
 	pub software: bool,
 
 	/// Capture a microphone, by the id `moq devices` reports. Bare
-	/// `--microphone`, or no audio source flag, opens the default input.
+	/// `--microphone`, or no audio source flag, opens the default input. It is
+	/// encoded as voice, which sends nothing while its talker is silent.
 	#[usage(long, group = "audio-source")]
 	pub microphone: Option<Option<String>>,
 
 	/// Capture the system (desktop) audio instead of a microphone: everything the
 	/// machine is playing, minus this process. macOS only, and it needs the Screen
-	/// Recording permission.
+	/// Recording permission. It is encoded as music.
 	#[usage(long, group = "audio-source")]
 	pub system_audio: bool,
 
@@ -1177,9 +1178,16 @@ impl CaptureArgs {
 
 	/// The audio encode settings. `track` is left unset so the name derives
 	/// from the codec, the way the video side names its track; consumers find
-	/// it through the catalog either way.
+	/// it through the catalog either way. The source sets the kind, as
+	/// `@moq/publish`'s microphone and screen sources do.
 	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
+		use moq_audio::encode::Kind;
+
 		let mut options = moq_audio::encode::Options::default();
+		options.config.kind = Some(match self.system_audio {
+			true => Kind::Music,
+			false => Kind::Voice,
+		});
 		options.config.bitrate = self
 			.audio_bitrate
 			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
@@ -1253,6 +1261,22 @@ pub(crate) mod tests {
 				video == "demand"
 			);
 			assert_eq!(args.audio_capture(Allocator::unlimited()).2, audio == "demand");
+		}
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn the_audio_source_sets_its_kind() {
+		use moq_audio::encode::Kind;
+		use moq_net::bandwidth::Allocator;
+
+		for (flags, kind) in [
+			(&[][..], Kind::Voice),
+			(&["--microphone"][..], Kind::Voice),
+			(&["--system-audio"][..], Kind::Music),
+		] {
+			let options = capture_args(flags).audio_capture(Allocator::unlimited()).1;
+			assert_eq!(options.config.kind, Some(kind), "{flags:?}");
 		}
 	}
 
