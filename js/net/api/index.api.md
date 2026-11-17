@@ -436,7 +436,8 @@ export namespace Group {
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
-		finish(end?: bigint): Group.Finished;
+		finish(): Group.Finished;
+		finishAt(end: bigint): Group.Finished;
 		get isClosed(): boolean;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
