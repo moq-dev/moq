@@ -161,8 +161,7 @@ test("a holding watcher reads every update it may still play, in order", async (
 		// Subscribed before the updates land, as a live reader is; all three arrive before it reads.
 		const updates = watch(broadcast.consume(), { delay })[Symbol.asyncIterator]();
 		const first = updates.next();
-		for (const ms of [1000, 2000, 3000])
-			producer.update(catalog(ms / 1000), Moq.Time.Timestamp.fromMillis(ms));
+		for (const ms of [1000, 2000, 3000]) producer.update(catalog(ms / 1000), Moq.Time.Timestamp.fromMillis(ms));
 		producer.finish();
 		const read: number[] = [];
 		for (let next = await first; !next.done; next = await updates.next()) read.push(next.value.at.asMillis());
