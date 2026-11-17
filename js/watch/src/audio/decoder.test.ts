@@ -7,11 +7,10 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { supportCacheKey } from "../support-probe";
 import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
-import { decoderConfigKey } from "./config";
+import { stubSupport } from "../webcodecs.test-util";
 import type { Message, State, Terms } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
@@ -177,17 +176,23 @@ let codecs = 0;
 let codecErrors: AudioDecoderInit["error"][] = [];
 // Thrown by the next `decode`, as WebCodecs does synchronously for a chunk it refuses.
 let decodeThrows: Error | undefined;
+// Thrown by the next `configure`, as WebCodecs does for a config it cannot set up.
+let configureThrows: Error | undefined;
 let deferAudioOutput = false;
 let pendingAudio: (() => void)[] = [];
 let audioInputs: number[] = [];
 let audioConfigs: AudioDecoderConfig[] = [];
 let audioChunks: EncodedAudioChunkInit[] = [];
+// The stub decoder's answer to the source's support probe.
+let audioSupport: (config: AudioDecoderConfig) => Promise<boolean>;
 
 beforeEach(() => {
+	audioSupport = async () => true;
 	frameTimestamp = 0;
 	codecs = 0;
 	codecErrors = [];
 	decodeThrows = undefined;
+	configureThrows = undefined;
 	deferAudioOutput = false;
 	pendingAudio = [];
 	audioInputs = [];
@@ -199,6 +204,9 @@ beforeEach(() => {
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
 
 	class Codec {
+		static async isConfigSupported(config: AudioDecoderConfig) {
+			return { supported: await audioSupport(config), config };
+		}
 		state = "configured";
 		needsKey = true;
 		readonly init: AudioDecoderInit;
@@ -208,6 +216,7 @@ beforeEach(() => {
 			codecs++;
 		}
 		configure(config: AudioDecoderConfig) {
+			if (configureThrows) throw configureThrows;
 			audioConfigs.push(config);
 			this.needsKey = true;
 		}
@@ -362,9 +371,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
-	const supportProbes = mock(async () => true);
-	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
-	const source = new Source({ broadcast, supported: supportProbes });
+	const source = new Source({ broadcast });
 	const lookahead = new Signal(Duration.millis(buffered ? 1000 : 0));
 	const stretch = new Signal(STRETCH);
 	const sync = new Sync({ delay, lookahead, stretch });
@@ -386,7 +393,6 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	};
 
 	return {
-		supportProbes,
 		delay,
 		lookahead,
 		stretch,
@@ -481,7 +487,7 @@ for (const description of [undefined, "1190"]) {
 }
 
 for (const cmaf of [false, true]) {
-	it(`a ${cmaf ? "CMAF" : "legacy"} gap releases accounting for codec outputs it discarded`, async () => {
+	it(`a ${cmaf ? "CMAF" : "legacy"} gap lands the codec outputs still pending before restarting it`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();
 		deferAudioOutput = true;
@@ -496,15 +502,9 @@ for (const cmaf of [false, true]) {
 			expect(playback.inserted()).toHaveLength(0);
 			playback.push({ kind: "gap", timestamp: Duration.micros(140_000), duration: Duration.micros(20_000) });
 			await microtasks();
+			// A starved decoder can hold everything since the last gap, which a reset alone would drop.
 			expect(pendingAudio).toHaveLength(0);
-			deferAudioOutput = false;
-			frameTimestamp = 160_000;
-			const resumed = frame();
-			playback.push({ ...resumed, group: 2n });
-			await microtasks();
-			expect(audioInputs).toHaveLength(7);
-			expect(playback.inserted()).toContain(resumed.frame.timestamp.asMicros());
-			await playback.play(5);
+			expect(playback.inserted()).toHaveLength(6);
 			expect(playback.sync.playing.peek()).toBe(true);
 		} finally {
 			playback.close();
@@ -524,6 +524,69 @@ it("decodes an audio packet inside a group after a gap", async () => {
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp.asMicros());
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
+
+// The warmup the restarted decoder needs is the last frames before the gap, restamped to end where
+// the frame after it starts, so it trims their output instead of the frame's.
+it("re-primes the decoder on the warmup before a gap, so the frame after it plays", async () => {
+	const playback = await play(Duration.millis(100));
+	try {
+		playback.restore({ warmup: 80 });
+		await microtasks();
+		await playback.play();
+		const played = audioChunks.length;
+		const decoded = playback.feedback().audio?.decoded ?? 0;
+		playback.push({
+			kind: "gap",
+			timestamp: Duration.micros(frameTimestamp + 20_000),
+			duration: Duration.millis(100),
+		});
+		frameTimestamp += 100_000;
+		const next = frame();
+		playback.push({ ...next, group: 1n });
+		await microtasks();
+		const at = next.frame.timestamp.asMicros();
+		expect(audioChunks.slice(played).map((chunk) => chunk.timestamp)).toEqual([
+			at - 80_000,
+			at - 60_000,
+			at - 40_000,
+			at - 20_000,
+			at,
+		]);
+		expect(playback.inserted()).toContain(at);
+		// The pre-roll's output is not counted as decoded again; only the frame after the gap is.
+		expect(playback.feedback().audio?.decoded).toBe(decoded + 1);
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
+
+// AAC frames state no duration, so the codec's frame length (1024 samples) is what the pre-roll covers.
+it("re-primes an AAC decoder on frames that state no duration", async () => {
+	const playback = await play(Duration.millis(100));
+	try {
+		playback.restore({ codec: "mp4a.40.2", sampleRate: 48_000, numberOfChannels: 2, warmup: 80 });
+		await microtasks();
+		await playback.play();
+		const played = audioChunks.length;
+		playback.push({
+			kind: "gap",
+			timestamp: Duration.micros(frameTimestamp + 20_000),
+			duration: Duration.millis(100),
+		});
+		frameTimestamp += 100_000;
+		const next = frame();
+		playback.push({ ...next, group: 1n });
+		await microtasks();
+		// Four 21.3 ms frames cover the 80 ms warmup, ahead of the frame after the gap.
+		const chunks = audioChunks.slice(played).map((chunk) => chunk.timestamp);
+		expect(chunks).toHaveLength(5);
+		expect(chunks.at(-1)).toBe(next.frame.timestamp.asMicros());
 	} finally {
 		playback.close();
 		await microtasks();
@@ -1466,7 +1529,7 @@ async function livePlayback(burst: number) {
 		out: { catalog, active: new Signal({ closed: {} }) },
 		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
 	const sync = new Sync({ delay: new Signal<Delay>("auto") });
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
@@ -1632,8 +1695,8 @@ describe("Decoder across a rename", () => {
 		}
 	});
 
-	// The probe accepts a CMAF init segment it cannot parse for Opus, so setup throws before the
-	// replacement's consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
+	// `configure` throws for the replacement's config after its consumer exists, so the failure
+	// must still release the arrival estimate that consumer replaced.
 	it("reports a replacement that fails to set up and stops holding the delay", async () => {
 		const playback = await livePlayback(12);
 		try {
@@ -1641,7 +1704,8 @@ describe("Decoder across a rename", () => {
 			const warm = playback.sync.out.delay.peek();
 			expect(warm.asMillis()).toBeGreaterThan(200);
 
-			playback.rename("audio/1", { container: { kind: "cmaf", init: "AAAA" } });
+			configureThrows = new TypeError("unsupported config");
+			playback.rename("audio/1", { numberOfChannels: 1 });
 			await microtasks();
 
 			expect(playback.error.peek()).toBeInstanceOf(Error);
@@ -1727,6 +1791,12 @@ it("starts above the decoded audio floor without expanding PCM storage", async (
 it("waits for video support before allowing audio-only startup", async () => {
 	const playback = await play(Duration.millis(100), true);
 	let resolve!: (supported: boolean) => void;
+	using _decoder = stubSupport({
+		video: () =>
+			new Promise<boolean>((done) => {
+				resolve = done;
+			}),
+	});
 	const source = new VideoSource({
 		broadcast: {
 			out: {
@@ -1739,10 +1809,6 @@ it("waits for video support before allowing audio-only startup", async () => {
 				}),
 			},
 		} as unknown as Broadcast,
-		supported: () =>
-			new Promise<boolean>((done) => {
-				resolve = done;
-			}),
 	});
 	const video = new VideoDecoder({ source, sync: playback.sync });
 	try {
@@ -1845,6 +1911,10 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 		startup: new Signal({ start: Duration.millis(0), end: Duration.millis(100) }),
 	});
 	let reject!: (error: Error) => void;
+	audioSupport = () =>
+		new Promise<boolean>((_resolve, fail) => {
+			reject = fail;
+		});
 	const failure = new Error("audio support probe failed");
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
 	const source = new Source({
@@ -1865,10 +1935,6 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 				}),
 			},
 		} as unknown as Broadcast,
-		supported: () =>
-			new Promise<boolean>((_resolve, fail) => {
-				reject = fail;
-			}),
 	});
 	const decoder = new Decoder({ source, sync });
 	try {

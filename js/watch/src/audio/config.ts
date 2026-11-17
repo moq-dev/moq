@@ -78,7 +78,7 @@ export function decoderDescription(codec: string, description: Uint8Array | unde
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
-export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): Duration | undefined {
+export function frameDuration(config: { readonly codec: string; readonly sampleRate: number }): Duration | undefined {
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -96,7 +96,7 @@ export function packetDuration(codec: string, frame: Container.Frame): Duration 
 	return samples === undefined ? undefined : Duration.millis((samples * 1000) / OPUS_RATE);
 }
 
-function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): number | undefined {
+function frameSamples(config: { readonly codec: string; readonly sampleRate: number }): number | undefined {
 	switch (Util.Aac.objectType(config.codec)) {
 		case 2:
 			return AAC_LC_FRAME_SAMPLES;

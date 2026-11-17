@@ -1,12 +1,12 @@
 use crate::Error;
 use std::{fmt, str::FromStr};
 
-/// A subset of jsonwebtoken algorithms.
+/// The JWT signing algorithms a key may use.
 ///
-/// We could support all of them, but there's currently no point using public key crypto.
-/// The relay can fetch any resource it wants; it doesn't need to forge tokens.
-///
+/// HMAC keys are shared secrets, so every verifier can also mint tokens. Prefer an
+/// asymmetric algorithm such as ES256 so a relay holds only the public half.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Algorithm {
 	/// HMAC with SHA-256.
 	HS256,

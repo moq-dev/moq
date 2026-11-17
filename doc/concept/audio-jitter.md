@@ -687,7 +687,7 @@ all.
 ### Declared silence
 
 A publisher that stops sending on purpose, such as a muted push-to-talk
-speaker, marks the stop with a declared end. The silence after it says
+speaker or a talker who falls silent, marks the stop with a declared end. The silence after it says
 nothing about the path, so relaxing toward the prior would only make a
 listener who sat through a long mute come back over-buffered. `end()` tells
 the estimator that a declared end lies between the previous observation and

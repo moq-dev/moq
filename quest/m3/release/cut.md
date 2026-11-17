@@ -219,10 +219,13 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   method to an existing binding object, which the API diff counts as a
   break once 0.22 is published.
 - ✅ End-to-end encryption does not publish at this cut
-  ([its own unpublished crate](/quest/m2/e2ee-crate.md)), so `moq-e2ee` is
-  no longer a retired name, and the paragraph above about publishing a
-  pointer above 0.0.25 no longer applies: the name is held for
-  [the finished format](/quest/m3/e2ee-format.md).
+  ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
+  so `moq-e2ee` is no longer a retired name, and the paragraph above about
+  publishing a pointer above 0.0.25 no longer applies: the name is held for
+  [the finished format](/quest/m3/e2ee-format.md). `release` still holds
+  `rs/moq-e2ee` at 0.0.25 and publishes it; once the cut merges `main` into
+  `release`, its copy is `publish = false` at 0.0.26. Check that
+  release-plz proposes nothing for `moq-e2ee`.
 - ✅ The hand-written C API publishes as `libmoq` 0.22
   ([its final line](/quest/m2/libmoq-name.md)), reversing 2026-10-25, so the
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two

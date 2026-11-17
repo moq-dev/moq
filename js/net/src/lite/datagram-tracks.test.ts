@@ -151,9 +151,9 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 		expect(pair.server.sendStreams.datagrams.find((other) => other !== queue)?.sendOrder).toBe(
 			sendOrder({ priority: 31, publisher: 7 }),
 		);
-		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
-		datagrams.append(Timestamp.unscaled(1n), new Uint8Array(898));
-		datagrams.append(Timestamp.unscaled(2n), new Uint8Array(897));
+		// Type, Subscribe ID, Sequence, and the bare Timestamp each occupy one byte here.
+		datagrams.append(Timestamp.unscaled(1n), new Uint8Array(897));
+		datagrams.append(Timestamp.unscaled(2n), new Uint8Array(896));
 		expect((await reader.recv())?.sequence).toBe(2n);
 	} finally {
 		second.close();

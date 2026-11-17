@@ -194,9 +194,9 @@ export class File {
 								(sample) => sample.toAudioData(),
 								signal,
 							),
+							// A file is whatever the user picked, so it carries no kind and the encoder
+							// leaves the Opus tuning to the browser.
 							...format,
-							// A file is whatever the user picked, so leave the Opus tuning to the encoder.
-							kind: "auto",
 						}
 					: undefined,
 		};

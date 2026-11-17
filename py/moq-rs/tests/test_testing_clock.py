@@ -33,8 +33,8 @@ def test_a_pending_timer_waits_for_advance() -> None:
 
             # Group 0 stalls with no frame, so the in-order read waits on it until
             # group 1 has been out for delay.max: a native timer is pending.
-            _stalled = track.append_group()
-            later = track.append_group()
+            _stalled = track.append_group(moq.Timestamp.unscaled(0))
+            later = track.append_group(moq.Timestamp.unscaled(1))
             later.write_frame(b"later", moq.Timestamp.unscaled(later.start))
             later.finish()
             pending = asyncio.ensure_future(consumer.read_frame())

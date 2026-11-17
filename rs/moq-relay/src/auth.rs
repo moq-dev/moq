@@ -1081,7 +1081,7 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 }
 
 /// Build an auth request from the path, credential, role, and implementation carried in SETUP.
-#[cfg(any(feature = "test-support", target_os = "linux"))]
+#[cfg(any(feature = "test-support", uring))]
 pub(crate) fn request_for_setup(
 	auth: &Auth,
 	setup: &moq_net::server::Handshake,
@@ -1109,6 +1109,7 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
 		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Tls => moq_auth::Transport::Tls,
 		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
 		// A transport added to moq-tokio before this mapping learns it still reaches
 		// the decider, named as one it does not recognize.
@@ -1359,7 +1360,7 @@ mod tests {
 	#[test]
 	fn every_transport_has_an_auth_name() {
 		use moq_tokio::Transport as T;
-		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Unix] {
+		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Tls, T::Unix] {
 			assert_eq!(super::transport(transport).as_str(), transport.as_str());
 		}
 	}

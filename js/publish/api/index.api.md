@@ -70,7 +70,7 @@ export namespace Audio {
 		channelCount: number;
 		sampleRate: number;
 	}
-	export type Kind = "voice" | "music" | "auto";
+	export type Kind = "voice" | "music";
 	export type Opus = "opus" | Audio.OpusConfig;
 	export type OpusConfig = {
 		bitrate?: number;
@@ -83,13 +83,13 @@ export namespace Audio {
 	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.AudioConfig>;
 	export interface SampleSource {
 		channelCount: number;
-		kind: Audio.Kind;
+		kind?: Audio.Kind;
 		sampleRate: number;
 		samples: ReadableStream<AudioData>;
 	}
 	export type Source = Audio.StreamTrack | Audio.SourceConfig | Audio.SampleSource;
 	export interface SourceConfig {
-		kind: Audio.Kind;
+		kind?: Audio.Kind;
 		track: Audio.StreamTrack;
 	}
 	export type Stats = Required<Pick<Hang.Stats.RenditionInput, "frames" | "bytes">> & {

@@ -81,14 +81,15 @@ impl Version {
 
 	/// Whether the session may carry unreliable QUIC datagrams (lite-05 §6.4): single-frame
 	/// groups on lite-05/06, a datagram track's datagrams on lite-07, which adds a leading
-	/// type and padding. Older than lite-05 never sends or accepts datagrams.
+	/// type. Older than lite-05 never sends or accepts datagrams.
 	pub(crate) fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
 	/// Whether a subscriber subscribes to a datagram track through its own Datagrams Stream
-	/// (0x9), whose datagrams carry the datagram track's own sequence. Added in lite-07;
-	/// earlier versions carry single-frame groups as datagrams on a SUBSCRIBE subscription.
+	/// (0x9), whose datagrams carry the datagram track's own sequence and a leading type.
+	/// Added in lite-07; earlier versions carry single-frame groups as datagrams on a
+	/// SUBSCRIBE subscription.
 	pub(crate) fn has_datagram_tracks(self) -> bool {
 		!matches!(
 			self,
@@ -111,14 +112,6 @@ impl Version {
 	/// Whether either endpoint may open an Auth Stream (0x7) to present a token and
 	/// learn its grant. Added in lite-07.
 	pub(crate) fn has_auth(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether datagrams have a type and either endpoint may send padding streams or datagrams.
-	pub(crate) fn has_padding(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -173,6 +166,12 @@ impl Version {
 		)
 	}
 
+	/// Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
+	/// earlier versions have no frame bounds, and a lite-07 subscription reads whole groups.
+	pub(crate) fn has_group_frame_start(self) -> bool {
+		matches!(self, Self::Lite06)
+	}
+
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
 	/// Added in lite-07; an earlier subscription is served newest first.
 	pub(crate) fn has_order(self) -> bool {
@@ -195,6 +194,15 @@ impl Version {
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
 	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
 	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one,
+	/// so 0 says no limit. Added in lite-07; earlier wires carry bare milliseconds.
+	pub(crate) fn has_unlimited_max_delay(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -296,11 +304,11 @@ impl Version {
 		)
 	}
 
-	/// Whether a Group Stream reset with YIELDED pauses its group, which a later stream
-	/// continues. Added in lite-07; an earlier publisher out of stream credit gives the reset
-	/// group up.
-	#[cfg(feature = "async")]
-	pub(crate) fn has_yield(self) -> bool {
+	/// Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream
+	/// ends a finished group with GROUP_END and a closed one with a bare FIN. A publisher then
+	/// closes an expired group's stream rather than resetting it. Added in lite-07; earlier
+	/// versions end every group with a bare FIN.
+	pub(crate) fn has_group_end(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -318,9 +326,9 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count`.
-	/// Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
-	pub(crate) fn has_group_count(self) -> bool {
+	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and an exclusive
+	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
+	pub(crate) fn has_group_span(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -328,9 +336,8 @@ impl Version {
 	}
 
 	/// Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
-	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
-	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
-	/// earlier versions name every hole in SUBSCRIBE_DROP.
+	/// SUBSCRIBE_DROP, for groups that existed. Added in lite-07; earlier versions name every
+	/// hole in SUBSCRIBE_DROP.
 	pub(crate) fn has_skip(self) -> bool {
 		!matches!(
 			self,
@@ -470,13 +477,13 @@ impl fmt::Display for Version {
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
 		match v {
-			Version::Lite01 => crate::Version::Lite(Version::Lite01),
-			Version::Lite02 => crate::Version::Lite(Version::Lite02),
-			Version::Lite03 => crate::Version::Lite(Version::Lite03),
-			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-			Version::Lite05 => crate::Version::Lite(Version::Lite05),
-			Version::Lite06 => crate::Version::Lite(Version::Lite06),
-			Version::Lite07 => crate::Version::Lite(Version::Lite07),
+			Version::Lite01 => crate::Version::lite(Version::Lite01),
+			Version::Lite02 => crate::Version::lite(Version::Lite02),
+			Version::Lite03 => crate::Version::lite(Version::Lite03),
+			Version::Lite04 => crate::Version::lite(Version::Lite04),
+			Version::Lite05 => crate::Version::lite(Version::Lite05),
+			Version::Lite06 => crate::Version::lite(Version::Lite06),
+			Version::Lite07 => crate::Version::lite(Version::Lite07),
 		}
 	}
 }
@@ -485,9 +492,9 @@ impl TryFrom<crate::Version> for Version {
 	type Error = ();
 
 	fn try_from(v: crate::Version) -> Result<Self, Self::Error> {
-		match v {
-			crate::Version::Lite(v) => Ok(v),
-			crate::Version::Ietf(_) => Err(()),
+		match v.0 {
+			crate::Draft::Lite(v) => Ok(v),
+			crate::Draft::Ietf(_) => Err(()),
 		}
 	}
 }

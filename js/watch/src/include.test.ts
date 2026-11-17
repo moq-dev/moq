@@ -9,6 +9,7 @@ import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
+import { stubSupport } from "./webcodecs.test-util";
 
 function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
 	const publication = origin.route(Path.from(path), { instance: instance && { id: instance, epoch: 0n } });
@@ -38,6 +39,7 @@ async function unwanted(track: Track.Producer): Promise<void> {
 const video = (codec: string) => ({ codec, container: { kind: "legacy" as const } });
 
 it("reads a listed include's catalog but no media, keeping its rendition IDs its own", async () => {
+	using _decoder = stubSupport({ video: () => true });
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const include = publish(origin, "room/extra.hang");
@@ -81,7 +83,7 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 		await settle();
 		expect(child.out.catalog.peek()?.video?.renditions.video?.codec).toBe("vp8");
 
-		const media = new Source({ broadcast: child, target: { name: "video" }, supported: async () => true });
+		const media = new Source({ broadcast: child, target: { name: "video" } });
 		selection.cleanup(() => media.close());
 		await settle();
 		expect(media.out.track.peek()).toBe("video");
@@ -419,6 +421,7 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 });
 
 it("offers every include's renditions to selection, subscribing only the selected one", async () => {
+	using _decoder = stubSupport({ video: () => true });
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const parentHd = parent.createTrack("hd");
@@ -472,7 +475,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const catalog = new Signal(root({ hd: sized(1920, 1080, 5_000_000) }));
 	const broadcast = new Broadcast({ origin, name: Path.from("room/main.hang"), catalogFormat: "manual", catalog });
 	const rate = new Signal<number | undefined>(1_000_000);
-	const source = new Source({ broadcast, supported: async () => true, rate });
+	const source = new Source({ broadcast, rate });
 	const selection = new Effect();
 	try {
 		await settle();

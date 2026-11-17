@@ -1273,7 +1273,7 @@ impl Incoming {
 			.zip(session.peer_certificates())
 			.map(|(tls, chain)| tls.peer(chain.to_vec()));
 		Self {
-			transport: Transport::Tcp,
+			transport: if tls.is_some() { Transport::Tls } else { Transport::Tcp },
 			url: None,
 			link: Link {
 				remote,
@@ -1408,7 +1408,7 @@ impl Request {
 			active,
 		} = incoming;
 		let handshake = server
-			.accept_request(moq_net::time::Instant::now(), session)
+			.handshake(moq_net::time::Instant::now(), session)
 			.with_deadline(deadline)
 			.await?;
 		Ok(Self {
@@ -1453,11 +1453,11 @@ impl Request {
 		self
 	}
 
-	/// Assign the hop id this peer's routes are attributed to; see
-	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
+	/// Assign the Node ID this peer's routes are attributed to; see
+	/// [`moq_net::server::Handshake::with_peer_node`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
-	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
-		*self.handshake = (*self.handshake).with_peer_hop(hop);
+	pub fn with_peer_node(mut self, node: std::num::NonZeroU64) -> Self {
+		*self.handshake = (*self.handshake).with_peer_node(node);
 		self
 	}
 
@@ -1661,8 +1661,8 @@ impl Request {
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		self.handshake.peer_hop()
+	pub fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_node()
 	}
 
 	/// The implementation the client advertised in its SETUP, such as
@@ -2166,7 +2166,7 @@ mod tests {
 			}
 			let handshake = moq_net::Server::new()
 				.with_timeout(Some(std::time::Duration::from_secs(60)))
-				.accept_request(moq_net::time::Instant::now(), server)
+				.handshake(moq_net::time::Instant::now(), server)
 				.await
 				.expect("a buffered SETUP");
 			let request = Request {
@@ -2403,7 +2403,7 @@ mod tests {
 			server: moq_net::Server::new().with_timeout(Some(timeout)),
 		};
 		let start = kio::clock::now();
-		let accept = setup.server.accept_request(moq_net::time::Instant::now(), peer.clone());
+		let accept = setup.server.handshake(moq_net::time::Instant::now(), peer.clone());
 		let Err(err) = accept.with_deadline(setup.deadline()).await else {
 			panic!("a peer that never sent SETUP was accepted");
 		};
@@ -2495,7 +2495,7 @@ mod tests {
 			session
 		});
 
-		let accept = setup.server.accept_request(moq_net::time::Instant::now(), server);
+		let accept = setup.server.handshake(moq_net::time::Instant::now(), server);
 		let Ok(request) = accept.with_deadline(deadline).await else {
 			panic!("a prompt SETUP was refused");
 		};

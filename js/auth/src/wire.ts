@@ -1,17 +1,17 @@
 /**
- * The JSON encoding of the grants in claims, key scopes, and auth server grants.
+ * The JSON encoding of claims, key scopes, and auth server grants.
  *
- * Grants were once prefix lists named `put` and `get`, and every published `moq-token`
- * reader still expects them. A role with a bitrate cap is written as an object,
- * `{"path": [...], "rate": bps}`, which every older reader refuses rather than drop the
- * cap, so a capped role is never written as prefixes. Must stay in lockstep with
- * `wire.rs` in the Rust `moq-auth` crate.
+ * Grants are written as `publish` and `subscribe`. They were once prefix lists named
+ * `put` and `get`, which are still read. A role with a bitrate cap is written as an
+ * object, `{"path": [...], "rate": bps}`, which every older reader refuses rather than
+ * drop the cap. Must stay in lockstep with `wire.rs` in the Rust `moq-auth` crate.
  *
  * @module
  */
 
-import { Pattern, Patterns } from "@moq/pattern";
+import { Pattern } from "@moq/pattern";
 import * as z from "zod/mini";
+import type { Claims } from "./claims.ts";
 
 /** A list of pattern texts, each validated by `Pattern.parse`. */
 export const PatternListSchema = z.array(
@@ -107,35 +107,40 @@ export function decodeGrants<T extends WireGrants>(wire: T, ctx: { issues: unkno
 	}
 }
 
-/**
- * Write grants the legacy way when every pattern is a subtree and no role is capped, so
- * every published `moq-token` reader agrees on what they grant. Anything a prefix can't
- * say is written as `publish`/`subscribe`, which an older reader refuses rather than
- * misreads. An empty uncapped role is omitted either way.
- */
+/** Omit a role that grants nothing and carries no cap, as both libraries write it. */
 export function encodeGrants<T extends { publish?: Access; subscribe?: Access }>(
 	grants: T,
-): Omit<T, "publish" | "subscribe"> & WireGrants {
+): Omit<T, "publish" | "subscribe"> & { publish?: Access; subscribe?: Access } {
 	const { publish, subscribe, ...rest } = grants;
-	const prefixes = (access: Access | undefined) => {
-		// A cap has no prefix form, so one moves the whole document to patterns.
-		if (access !== undefined && !Array.isArray(access)) return undefined;
-		const out: string[] = [];
-		for (const pattern of new Patterns(paths(access).map((text) => Pattern.parse(text)))) {
-			const prefix = pattern.asPrefix();
-			if (prefix === undefined) return undefined;
-			out.push(prefix);
-		}
-		return out;
+	const kept = (access: Access | undefined) =>
+		access !== undefined && (!Array.isArray(access) || access.length > 0) ? access : undefined;
+	const pub = kept(publish);
+	const sub = kept(subscribe);
+	return { ...rest, ...(pub && { publish: pub }), ...(sub && { subscribe: sub }) };
+}
+
+/**
+ * A token's identifier, its `jti` claim, such as a UUID an issuer records to revoke it.
+ * One to 128 printable ASCII characters, so it logs safely and both libraries bound it by
+ * the same length. An issuer picks it; nothing here invents one.
+ *
+ * Mirrors `moq_auth::TokenId` in the Rust crate.
+ */
+export const TokenIdSchema = z
+	.string()
+	.check(
+		z.minLength(1),
+		z.maxLength(128),
+		z.regex(/^[\x21-\x7e]*$/, { message: "Token ID must be printable ASCII without spaces" }),
+	);
+
+/** Write claims as a token's JSON payload. */
+export function encodeClaims({ expires, issued, notBefore, id, ...grants }: Claims) {
+	return {
+		...encodeGrants(grants),
+		...(expires !== undefined && { exp: expires }),
+		...(issued !== undefined && { iat: issued }),
+		...(notBefore !== undefined && { nbf: notBefore }),
+		...(id !== undefined && { jti: id }),
 	};
-	const put = prefixes(publish);
-	const get = prefixes(subscribe);
-	if (put === undefined || get === undefined) {
-		const kept = (access: Access | undefined) =>
-			access !== undefined && (!Array.isArray(access) || access.length > 0) ? access : undefined;
-		const pub = kept(publish);
-		const sub = kept(subscribe);
-		return { ...rest, ...(pub && { publish: pub }), ...(sub && { subscribe: sub }) };
-	}
-	return { ...rest, ...(put.length && { put }), ...(get.length && { get }) };
 }
