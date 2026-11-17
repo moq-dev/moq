@@ -1350,7 +1350,7 @@ class Reader implements ResumeSource {
 		return serving && hooks.holeEnd(serving.sub, key, dropped);
 	}
 
-		// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
+	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();
 		const serving = this.#serving();

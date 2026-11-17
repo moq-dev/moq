@@ -1,10 +1,4 @@
-import {
-	fromTransport,
-	ProtocolViolation,
-	StreamCode,
-	StreamError,
-	toStreamCode,
-} from "../error.ts";
+import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";

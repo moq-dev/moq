@@ -1366,7 +1366,8 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) => producer.#createGroup(sequence, start, fill);
+		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
+			producer.#createGroup(sequence, start, fill);
 		hooks.arrivingGroup = (producer, sequence) => {
 			const group = producer.#cached.get(sequence)?.group;
 			if (!group || group.closed.peek() !== undefined) return undefined;
@@ -3410,7 +3411,12 @@ export class Subscriber {
 			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
 			// The answer counts once held.
 			const holdings = this.#holdings();
-			if (answer !== undefined && producer && holdings.nextStart(answer) !== answer && cachedMayStart(producer, answer))
+			if (
+				answer !== undefined &&
+				producer &&
+				holdings.nextStart(answer) !== answer &&
+				cachedMayStart(producer, answer)
+			)
 				continue;
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
@@ -4486,12 +4492,7 @@ export class Subscriber {
 					if (dropped) return dropped;
 				} else if (this.#dropsSeen) {
 					// A cursor #tryDrop reads reports it there.
-					this.#pending = insertDrop(
-						this.#pending,
-						group.start,
-						group.start + 1n,
-						staleHole(drift.budget),
-					);
+					this.#pending = insertDrop(this.#pending, group.start, group.start + 1n, staleHole(drift.budget));
 				}
 				continue;
 			}

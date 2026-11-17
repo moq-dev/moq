@@ -522,8 +522,10 @@ function servingMaxDelay(requested: number | null): Duration | null {
 /**
  * The floor of a subscription's read cursor for the wire serving it.
  *
- * On lite-06 it is the group the subscription named (or 0), and its max delay decides what
- * above the floor is worth delivering.
+ * Lite-07 has none: its ranges name the group containing a time start, which a floor at the time
+ * would cut. Before lite-07 a start names the first group starting at or after it, so the floor
+ * is the start the subscription named (or 0 on lite-06), and its max delay decides what above the
+ * floor is worth delivering. Mirrors the Rust `Frames::floor`.
  *
  * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
  * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
@@ -532,6 +534,7 @@ function servingMaxDelay(requested: number | null): Duration | null {
  * must not read as a request to replay the whole cache on join.
  */
 function cursorFloor(version: Version, startGroup: bigint | undefined, latest: bigint | undefined): bigint {
+	if (hasRanges(version)) return 0n;
 	if (startGroup !== undefined) return startGroup;
 	if (resolvesStart(version)) return 0n;
 	return latest ?? 0n;
@@ -1583,10 +1586,11 @@ export class Publisher {
 							// the cursor only rises on its own, and a finished group below the old
 							// floor (a quiet catalog) is never served otherwise.
 							const requested = bounds.startGroup;
-							const start =
-								update.startGroup === undefined &&
-								requested !== undefined &&
-								!resolvesStart(this.version)
+							const start = hasRanges(this.version)
+								? 0n
+								: update.startGroup === undefined &&
+										requested !== undefined &&
+										!resolvesStart(this.version)
 									? (hooks.latestSequence(track) ?? 0n)
 									: (update.startGroup ?? (resolvesStart(this.version) ? 0n : undefined));
 							if (start !== undefined) {
@@ -1651,7 +1655,7 @@ export class Publisher {
 							) {
 								startSent = true;
 								startSequence = bounds.startGroup;
-								raiseFloor(bounds.startGroup);
+								if (!hasRanges(this.version)) raiseFloor(bounds.startGroup);
 								const start = new SubscribeStart(rangeStarts(bounds.startGroup), answered(largest));
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))

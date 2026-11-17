@@ -2815,10 +2815,8 @@ export class Subscriber {
 			}));
 			if (hasRanges(this.version)) {
 				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit(
-					[...toWireRanges(ranges), ...fillRanges],
-					fillRanges.length,
-					(id) => entry.fillIds.has(id),
+				const edited = entry.live.edit([...toWireRanges(ranges), ...fillRanges], fillRanges.length, (id) =>
+					entry.fillIds.has(id),
 				);
 				edit = edited;
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
