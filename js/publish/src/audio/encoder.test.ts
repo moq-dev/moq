@@ -670,11 +670,10 @@ test("a voice source sends nothing while its talker is silent", async () => {
 
 	await push(0, 5, false);
 	await push(100_000, 3, true);
-	// The first silent frame scores as speech (SILK counts the last subframe twice), then 200 ms of
-	// hangover, then the end is declared where the sent audio stops.
+	// 200 ms of hangover, then the end is declared where the sent audio stops.
 	await push(160_000, 15, false);
 	await push(460_000, 2, true);
-	expect(written).toEqual([...frames(80_000, 15), [380_000, 0], ...frames(440_000, 3)]);
+	expect(written).toEqual([...frames(80_000, 14), [360_000, 0], ...frames(440_000, 3)]);
 	expect(encoder.out.active.peek()).toBe(true);
 
 	// A mute in the middle of a word ends it there, and unmuting into silence sends nothing.

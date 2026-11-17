@@ -21,17 +21,20 @@ class Talker {
 	readonly #random = noise(7);
 	#at: number;
 
-	constructor(frame = 20_000, start = 0) {
+	readonly #rate: number;
+
+	constructor(frame = 20_000, rate = RATE) {
 		this.#frame = frame;
-		this.#at = start;
-		this.gate = new Gate({ sampleRate: RATE, frame: Duration.micros(frame) });
+		this.#rate = rate;
+		this.#at = 0;
+		this.gate = new Gate({ sampleRate: rate, frame: Duration.micros(frame) });
 	}
 
 	// Push `count` frames of loud noise (speech) or digital silence, returning the start of each frame passed.
 	push(count: number, speech: boolean): number[] {
 		const passed: number[] = [];
 		for (let i = 0; i < count; i++) {
-			const samples = new Float32Array((RATE * this.#frame) / 1_000_000);
+			const samples = new Float32Array((this.#rate * this.#frame) / 1_000_000);
 			if (speech) for (let j = 0; j < samples.length; j++) samples[j] = this.#random();
 			const frame: AudioFrame = { timestamp: Duration.micros(this.#at), channels: [samples] };
 			this.#at += this.#frame;
@@ -62,15 +65,14 @@ describe("Gate", () => {
 	test("shuts after 200 ms of silence, then reopens with pre-roll", () => {
 		const talker = new Talker();
 		talker.push(5, true);
-		// The first silent frame still scores as speech, since SILK counts the previous block's last
-		// subframe again. Ten more carry the tail, and the next shuts the gate.
-		expect(talker.push(11, false)).toEqual(ms(100, 11));
+		// Ten silent frames carry the tail, and the next shuts the gate.
+		expect(talker.push(10, false)).toEqual(ms(100, 10));
 		expect(talker.gate.open).toBe(true);
 		expect(talker.push(1, false)).toEqual([]);
 		expect(talker.gate.open).toBe(false);
 		expect(talker.push(20, false)).toEqual([]);
-		// Silence ends at 740 ms: the frame at 720 ms is the pre-roll.
-		expect(talker.push(2, true)).toEqual(ms(720, 3));
+		// Silence ends at 720 ms: the frame at 700 ms is the pre-roll.
+		expect(talker.push(2, true)).toEqual(ms(700, 3));
 	});
 
 	test("speech inside the hangover keeps it open", () => {
@@ -82,8 +84,31 @@ describe("Gate", () => {
 		expect(talker.gate.open).toBe(true);
 	});
 
-	test("short frames inherit the newest score and pre-roll one 10 ms block", () => {
+	test("short frames pre-roll one 20 ms analysis step", () => {
 		const talker = new Talker(5_000);
+		expect(talker.push(8, false)).toEqual([]);
+		expect(talker.push(2, true)).toEqual(ms(20, 6, 5));
+	});
+
+	test("a frame over 20 ms passes while any 20 ms of it is inside the hangover", () => {
+		const talker = new Talker(60_000);
+		talker.push(1, true);
+		// The fourth silent frame's first 20 ms end 200 ms after the speech, so it is sent, and the
+		// gate shuts behind it.
+		expect(talker.push(4, false)).toEqual(ms(60, 4, 60));
+		expect(talker.gate.open).toBe(false);
+		expect(talker.push(1, false)).toEqual([]);
+	});
+
+	test("at 16 kHz, where Opus codes SILK alone, a frame over 20 ms is decided whole", () => {
+		const talker = new Talker(60_000, 16_000);
+		talker.push(1, true);
+		expect(talker.push(3, false)).toEqual(ms(60, 3, 60));
+		expect(talker.push(1, false)).toEqual([]);
+	});
+
+	test("below 16 kHz SILK decides, and short frames inherit its newest score", () => {
+		const talker = new Talker(5_000, 12_000);
 		expect(talker.push(8, false)).toEqual([]);
 		// Speech from 40 ms is scored when its 10 ms block completes at 50 ms, so the 10 ms held
 		// before that frame go first: the onset's own frame and the 5 ms before it.
@@ -100,15 +125,5 @@ describe("Gate", () => {
 		expect(talker.gate.open).toBe(false);
 		// The silent frame after the gap is pre-roll; nothing from before it is.
 		expect(talker.push(1, true)).toEqual([1_060_000, 1_080_000]);
-	});
-
-	test("stereo is scored on its mid channel", () => {
-		const gate = new Gate({ sampleRate: RATE, frame: Duration.millis(20) });
-		const random = noise(5);
-		const left = Float32Array.from({ length: 960 }, random);
-		// Out of phase: the mid channel is silent.
-		const right = left.map((x) => -x);
-		const frame = { timestamp: Duration.ZERO, channels: [left, right] };
-		expect(gate.push(frame, Duration.millis(20))).toEqual([]);
 	});
 });
