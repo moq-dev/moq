@@ -2467,7 +2467,7 @@ test("origin: a blind request ends with its session, and the next session answer
 		enabled: true,
 		url: reconnectUrl,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 		consume: clientOrigin,
 		share: false,
 	});

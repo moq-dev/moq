@@ -90,7 +90,7 @@ test("an empty GOAWAY migrates the follower to the replacement session", async (
 		consume,
 		goaway: { handover },
 		// A session younger than this counts as redirected immediately and backs off first.
-		delay: { initial: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1) },
 	});
 	const watched = consume.follow(Path.from("cam"));
 
@@ -136,7 +136,7 @@ test("a replacement that closes mid-handover hands back to the draining session"
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: { initial: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1) },
 	});
 
 	try {
@@ -176,7 +176,7 @@ test("a GOAWAY without a timeout hands over at the configured cap", async () => 
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: { initial: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1) },
 	});
 
 	try {
@@ -203,7 +203,7 @@ test("a refused redirect ends the connection instead of reconnecting", async () 
 		const clock = new Manual();
 		const installed = clock.install();
 		const { dials } = fleet();
-		const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Duration.millis(1) } });
+		const reload = new Reload({ url, websocket: { enabled: false }, backoff: { initial: Duration.millis(1) } });
 
 		try {
 			await waitUntil(() => reload.status.peek() === "connected");
@@ -233,7 +233,7 @@ test("a certificate pin refuses a redirect to another host even under follow", a
 		websocket: { enabled: false },
 		webtransport: { serverCertificateHashes: [{ value: "00".repeat(32) }] },
 		goaway: { redirect: "follow" },
-		delay: { initial: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1) },
 	});
 
 	try {
@@ -434,7 +434,7 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 		websocket: { enabled: false },
 		versions: [Lite.ALPN_07_WIP],
 		goaway: { handover },
-		delay: { initial: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1) },
 	});
 	try {
 		const token = reload.auth.add("token");
@@ -525,7 +525,7 @@ test.each([
 		websocket: { enabled: false },
 		goaway: { handover },
 		// Every session outlives the healthy bar, so the immediate-redirect damping never applies.
-		delay: {
+		backoff: {
 			initial: Duration.millis(10),
 			multiplier: 4,
 			max: Duration.millis(1000),
@@ -563,7 +563,7 @@ test("redirect endpoint keys omit userinfo without changing the dial URL", async
 		url: from,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: { initial: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10) },
 	});
 
 	try {
@@ -590,7 +590,7 @@ test("a redirect loop stops at the retry window", async () => {
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: {
+		backoff: {
 			initial: Duration.millis(10),
 			multiplier: 4,
 			max: Duration.millis(1000),
@@ -622,7 +622,7 @@ test("a loop no faster than the capped delay migrates without backing off", asyn
 		websocket: { enabled: false },
 		goaway: { handover },
 		// Each session lives exactly the cap, so it already redials no faster than the backoff would.
-		delay: { initial: Duration.millis(10), max: life, healthy: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10), max: life, healthy: Duration.millis(10) },
 	});
 
 	try {
@@ -645,7 +645,7 @@ test("a one-way rolling restart migrates without backing off", async () => {
 		websocket: { enabled: false },
 		goaway: { handover },
 		// Long enough that any backoff would be visible.
-		delay: { initial: Duration.millis(1000) },
+		backoff: { initial: Duration.millis(1000) },
 	});
 
 	try {
@@ -669,7 +669,7 @@ test("repeated GOAWAYs back to the same place are restarts, not a loop", async (
 		websocket: { enabled: false },
 		goaway: { handover },
 		// Long enough that any backoff would be visible.
-		delay: { initial: Duration.millis(300), healthy: Duration.millis(300) },
+		backoff: { initial: Duration.millis(300), healthy: Duration.millis(300) },
 	});
 
 	try {
@@ -697,7 +697,7 @@ test("a peer restarting through immediate GOAWAYs escalates the backoff but neve
 		websocket: { enabled: false },
 		goaway: { handover },
 		// The waits add up to far more than the window, which a restart restarts after each one.
-		delay: {
+		backoff: {
 			initial: Duration.millis(10),
 			multiplier: 2,
 			max: Duration.millis(1000),
@@ -729,7 +729,7 @@ test("a first session drained before it is healthy keeps retrying once its relay
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: { initial: Duration.millis(10), max: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10), max: Duration.millis(10) },
 	});
 
 	try {
