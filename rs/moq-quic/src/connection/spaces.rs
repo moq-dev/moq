@@ -190,6 +190,13 @@ impl PacketSpace {
 			.chain(&self.pending.crypto)
 	}
 
+	/// Whether a packet in flight carries CRYPTO data the peer has not acknowledged.
+	pub(super) fn has_crypto_in_flight(&self) -> bool {
+		self.sent_packets
+			.range(..)
+			.any(|(_, packet)| packet.retransmits.get().is_some_and(|retransmits| !retransmits.crypto.is_empty()))
+	}
+
 	/// Verifies sanity of an ECN block and returns whether congestion was encountered.
 	pub(super) fn detect_ecn(&mut self, newly_acked: u64, ecn: frame::EcnCounts) -> Result<bool, &'static str> {
 		let ect0_increase = ecn

@@ -3,6 +3,8 @@
 //! `MOQ_QUIC_SEED` and `MOQ_QUIC_CASES` pick the workloads, and `just rs quic-sim` sweeps a fresh
 //! seed. A failure prints the shrunken case, whose `seed` replays the run exactly.
 
+use std::collections::VecDeque;
+
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestCaseResult, TestRunner};
 
@@ -166,6 +168,145 @@ fn handshake(seed: u64, latency: Duration, to_server: Link, to_client: Link) -> 
 	prop_assert_eq!(pair.server_conn_mut(server_ch).active_rem_cid_seq(), 1);
 	prop_assert_eq!(pair.client_conn_mut(client_ch).active_local_cid_seq().0, 1);
 	Ok(())
+}
+
+/// A corrupted ServerHello costs one round trip, not a PTO: the Handshake packets coalesced with
+/// it reach the client, which cannot read them yet and probes in Initial at once, and that probe
+/// makes the server re-send the ServerHello at once (RFC 9002 §6.2.3).
+#[test]
+fn a_corrupted_server_hello_is_resent_on_the_clients_probe() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(50);
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	arrive(&mut pair.server, &mut pair.time);
+	pair.server.drive(pair.time, pair.client.addr);
+	assert_eq!(corrupt(&mut pair.server.outbound, SpaceId::Initial), 1);
+	pair.drive_server();
+
+	// Neither side's loss detection timer fires below, so every reply is to an arrival
+	let sent = pair.time;
+	arrive(&mut pair.client, &mut pair.time);
+	let probes = pair.client_conn_mut(client_ch).stats().frame_tx;
+	pair.client.drive(pair.time, pair.server.addr);
+	let after = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert!(
+		after.ping + after.crypto > probes.ping + probes.crypto,
+		"the client did not probe in Initial"
+	);
+	assert!(spaces(&pair.client.outbound).contains(&SpaceId::Initial));
+	pair.drive_client();
+
+	arrive(&mut pair.server, &mut pair.time);
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let resent = pair.server_conn_mut(server_ch).stats().frame_tx.crypto;
+	pair.server.drive(pair.time, pair.client.addr);
+	assert!(
+		pair.server_conn_mut(server_ch).stats().frame_tx.crypto > resent,
+		"the server answered the probe without its ServerHello"
+	);
+	assert!(spaces(&pair.server.outbound).contains(&SpaceId::Initial));
+	assert_eq!(pair.time - sent, 2 * pair.latency);
+
+	pair.drive();
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+	assert!(is_connected(pair.server_conn_mut(server_ch)));
+}
+
+/// A client's 1-RTT packet reaching the server ahead of its Finished means the Finished is late
+/// or lost. The server answers with a Handshake PING acknowledging what the client sent there,
+/// and the client, seeing its Finished still unacknowledged, re-sends it at once rather than on a
+/// PTO that Initial losses may have backed off past the idle timeout.
+#[test]
+fn a_corrupted_finished_is_resent_when_1rtt_overtakes_it() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(50);
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	arrive(&mut pair.server, &mut pair.time);
+	pair.drive_server();
+	arrive(&mut pair.client, &mut pair.time);
+	pair.client.drive(pair.time, pair.server.addr);
+	assert_eq!(corrupt(&mut pair.client.outbound, SpaceId::Handshake), 1);
+	assert!(
+		spaces(&pair.client.outbound).contains(&SpaceId::Data),
+		"the client sent no 1-RTT packet with its Finished"
+	);
+	pair.drive_client();
+
+	let sent = pair.time;
+	arrive(&mut pair.server, &mut pair.time);
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let pings = pair.server_conn_mut(server_ch).stats().frame_tx.ping;
+	pair.server.drive(pair.time, pair.client.addr);
+	assert!(!is_connected(pair.server_conn_mut(server_ch)));
+	assert!(
+		pair.server_conn_mut(server_ch).stats().frame_tx.ping > pings,
+		"the server waited for the Finished in silence"
+	);
+	assert!(spaces(&pair.server.outbound).contains(&SpaceId::Handshake));
+	pair.drive_server();
+
+	arrive(&mut pair.client, &mut pair.time);
+	let finished = pair.client_conn_mut(client_ch).stats().frame_tx.crypto;
+	pair.client.drive(pair.time, pair.server.addr);
+	assert!(
+		pair.client_conn_mut(client_ch).stats().frame_tx.crypto > finished,
+		"the client did not re-send its Finished"
+	);
+	assert_eq!(pair.time - sent, 2 * pair.latency);
+
+	pair.drive();
+	assert!(is_connected(pair.server_conn_mut(server_ch)));
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
+/// Moves `time` to the next datagram `endpoint` receives
+fn arrive(endpoint: &mut TestEndpoint, time: &mut Instant) {
+	*time = endpoint.inbound.front().expect("a datagram on its way").0;
+}
+
+/// Each coalesced packet's space, for every datagram in `outbound`
+fn spaces(outbound: &VecDeque<(Transmit, Bytes)>) -> Vec<SpaceId> {
+	outbound
+		.iter()
+		.flat_map(|(_, datagram)| packets(datagram))
+		.map(|(space, _)| space)
+		.collect()
+}
+
+/// Flips a bit in the AEAD tag of every packet in `space`, which the receiver then fails to
+/// authenticate and drops, still reading the packets coalesced with it. Returns how many.
+fn corrupt(outbound: &mut VecDeque<(Transmit, Bytes)>, space: SpaceId) -> usize {
+	let mut count = 0;
+	for (_, datagram) in outbound.iter_mut() {
+		let mut bytes = datagram.to_vec();
+		for (_, range) in packets(datagram).into_iter().filter(|(s, _)| *s == space) {
+			bytes[range.end - 1] ^= 1;
+			count += 1;
+		}
+		*datagram = bytes.into();
+	}
+	count
+}
+
+/// Each coalesced packet of `datagram`: its space and where it lies
+fn packets(datagram: &[u8]) -> Vec<(SpaceId, ops::Range<usize>)> {
+	use crate::packet::{FixedLengthConnectionIdParser, PartialDecode};
+	let parser = FixedLengthConnectionIdParser::new(RandomConnectionIdGenerator::default().cid_len());
+	let mut packets = Vec::new();
+	let mut rest = Some(BytesMut::from(datagram));
+	let mut start = 0;
+	while let Some(bytes) = rest.take() {
+		let (decoded, tail) = PartialDecode::new(bytes, &parser, true).expect("a valid datagram");
+		let len = decoded.data().len();
+		packets.push((decoded.space().expect("a protected packet"), start..start + len));
+		start += len;
+		rest = tail;
+	}
+	packets
 }
 
 fn probability(max: f64) -> impl Strategy<Value = f64> + Clone {

@@ -2595,6 +2595,21 @@ impl Connection {
 		ecn: Option<EcnCodepoint>,
 		partial_decode: PartialDecode,
 	) {
+		// A Handshake packet before the Handshake keys means the server's Initial with the
+		// ServerHello was lost or is late (RFC 9002 §6.2.3). Probing in Initial now, rather than
+		// on a PTO backed off by then, lets the server re-send it (see `process_early_payload`).
+		// At most one probe per datagram the server sends, and those are bound by its
+		// anti-amplification limit.
+		if self.side.is_client()
+			&& partial_decode.space() == Some(SpaceId::Handshake)
+			&& self.spaces[SpaceId::Handshake].crypto.is_none()
+			&& self.spaces[SpaceId::Initial].crypto.is_some()
+			&& remote == self.path.remote
+		{
+			trace!("Handshake packet before the ServerHello; probing in Initial");
+			let initial = &mut self.spaces[SpaceId::Initial];
+			initial.loss_probes = initial.loss_probes.max(1);
+		}
 		if let Some(decoded) =
 			packet_crypto::unprotect_header(partial_decode, &self.spaces, self.peer_params.stateless_reset_token)
 		{
@@ -2687,6 +2702,22 @@ impl Connection {
 							number,
 							packet,
 						});
+						// A client sends 1-RTT only after its Finished, so its Finished is
+						// overtaken or lost. If lost, the client may hear nothing more from
+						// us: our flight is acknowledged, and any Handshake packet it sent
+						// after the Finished was ACK-only, which we never acknowledge alone.
+						// Its PTO, backed off by Initial losses, can outlast the idle timeout.
+						// So a Handshake PING goes out now, with an ACK of those packets if
+						// any arrived: the ACK lets the client declare the Finished lost
+						// (RFC 9002 §6.1.2), the PING makes a client that re-sends unacked
+						// CRYPTO on a probe do so (see `process_early_payload`), and our PTO
+						// repeats it if lost. At most one per buffered packet.
+						let handshake = &mut self.spaces[SpaceId::Handshake];
+						if handshake.crypto.is_some() {
+							trace!("1-RTT before the Finished; probing in Handshake");
+							handshake.ping_pending = true;
+							handshake.pending_acks.set_immediate_ack_required();
+						}
 					} else {
 						trace!("dropping short packet during handshake");
 					}
@@ -3091,10 +3122,20 @@ impl Connection {
 		}
 
 		if ack_eliciting {
+			let space = &mut self.spaces[packet.header.space()];
 			// In the initial and handshake spaces, ACKs must be sent immediately
-			self.spaces[packet.header.space()]
-				.pending_acks
-				.set_immediate_ack_required();
+			space.pending_acks.set_immediate_ack_required();
+			// The peer still sends ack-eliciting packets here, a probe or a retransmission, but
+			// even this one's ACK left our CRYPTO data unacknowledged: the peer most likely lacks
+			// it, as when a lost ServerHello leaves the client probing in Initial. Our own PTO,
+			// backed off by then, would answer those probes with bare ACKs for seconds, so a
+			// probe re-sends the oldest unacknowledged CRYPTO now (RFC 9002 §6.2.3). That is one
+			// datagram per ack-eliciting packet the peer sends, and anti-amplification still
+			// bounds a server before the client's address is validated.
+			if space.has_crypto_in_flight() {
+				trace!(space = ?packet.header.space(), "peer probed with our CRYPTO unacknowledged");
+				space.loss_probes = space.loss_probes.max(1);
+			}
 		}
 
 		self.write_crypto();
