@@ -4,14 +4,21 @@
 #include <obs-data.h>
 #include <cctype>
 #include <string>
+#include <utility>
+
+inline std::string Upper(std::string text)
+{
+	for (char &c : text)
+		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	return text;
+}
 
 // The setting that holds the hard peak an encoder honors under `rate_control`, or null
 // when it has none (CQP, CRF, ICQ, or a mode that only averages). The peak is what
 // reservations, the catalog, and dynamic bitrate price a rendition at.
 inline const char *EncoderPeakKey(const std::string &id, std::string rate_control)
 {
-	for (char &c : rate_control)
-		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	rate_control = Upper(std::move(rate_control));
 	// CBR holds the encoder at its bitrate, so that is also its peak.
 	if (rate_control == "CBR")
 		return "bitrate";
@@ -29,16 +36,24 @@ inline const char *EncoderPeakKey(const std::string &id, std::string rate_contro
 struct MoQPeak {
 	const char *key = nullptr;
 	long long kbps = 0;
+	// The average NVENC's plain VBR holds beside its peak, which must stay at or below it,
+	// or 0 when the encoder has none.
+	long long average_kbps = 0;
 };
 
 // The peak these encoder settings configure, with a null key when they configure none.
 inline MoQPeak EncoderPeak(const std::string &id, obs_data_t *settings)
 {
-	const char *key = EncoderPeakKey(id, obs_data_get_string(settings, "rate_control"));
+	const std::string rate_control = obs_data_get_string(settings, "rate_control");
+	const char *key = EncoderPeakKey(id, rate_control);
 	if (!key)
 		return {};
 	const long long kbps = obs_data_get_int(settings, key);
-	return kbps > 0 ? MoQPeak{key, kbps} : MoQPeak{};
+	if (kbps <= 0)
+		return {};
+	// NVENC's plain VBR averages at "bitrate" beside its peak in "max_bitrate".
+	const bool averaged = std::string(key) == "max_bitrate" && Upper(rate_control) == "VBR";
+	return {key, kbps, averaged ? obs_data_get_int(settings, "bitrate") : 0};
 }
 
 // Configures `settings` to run `id` at constant quality under a peak of `cap_kbps`, where

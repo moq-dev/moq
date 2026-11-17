@@ -70,6 +70,18 @@ int main()
 	}
 	assert(!EncoderPeakKey("obs_qsv11_v2", "VBR"));
 
+	// NVENC's plain VBR averages beside its peak; CQVBR and CBR have no average to keep.
+	obs_data_t vbr;
+	obs_data_set_string(&vbr, "rate_control", "VBR");
+	obs_data_set_int(&vbr, "bitrate", 6000);
+	obs_data_set_int(&vbr, "max_bitrate", 8000);
+	const MoQPeak averaged = EncoderPeak("obs_nvenc_h264_tex", &vbr);
+	assert(averaged.kbps == 8000 && averaged.average_kbps == 6000);
+	assert(EncoderPeak("obs_x264", &x264).average_kbps == 0);
+	obs_data_t cq;
+	assert(ApplyEncoderRate("obs_nvenc_h264_tex", &cq, 2500));
+	assert(EncoderPeak("obs_nvenc_h264_tex", &cq).average_kbps == 0);
+
 	// A peak of 0 is none: NVENC reads it as the driver's own limit.
 	obs_data_t unbounded;
 	obs_data_set_string(&unbounded, "rate_control", "CQVBR");

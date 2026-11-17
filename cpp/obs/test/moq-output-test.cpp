@@ -218,10 +218,9 @@ long long obs_data_get_int(obs_data_t *settings, const char *)
 	return settings == reinterpret_cast<obs_data_t *>(MID_ENCODER) ? 4000 : 8000;
 }
 
-// The settings a retune builds carry only the one rate, so the stub is that setting.
+// The settings a retune builds carry only its rates, so the stub is those settings.
 struct obs_data {
-	std::string key;
-	long long bitrate = 0;
+	std::vector<std::pair<std::string, long long>> rates;
 };
 
 obs_data_t *obs_data_create()
@@ -231,8 +230,7 @@ obs_data_t *obs_data_create()
 
 void obs_data_set_int(obs_data_t *data, const char *key, long long value)
 {
-	data->key = key;
-	data->bitrate = value;
+	data->rates.emplace_back(key, value);
 }
 
 uint32_t obs_encoder_get_caps(const obs_encoder_t *)
@@ -243,7 +241,8 @@ uint32_t obs_encoder_get_caps(const obs_encoder_t *)
 void obs_encoder_update(obs_encoder_t *encoder, obs_data_t *settings)
 {
 	std::lock_guard<std::mutex> lock(g_updates_mutex);
-	g_updates.emplace_back(encoder, settings->key, settings->bitrate);
+	for (const auto &[key, kbps] : settings->rates)
+		g_updates.emplace_back(encoder, key, kbps);
 	delete settings;
 }
 
@@ -759,6 +758,33 @@ int main()
 		}
 	}
 	printf("capped VBR retunes its peak setting: ok\n");
+
+	// NVENC's plain VBR also averages at "bitrate", which must not exceed the lowered peak
+	// or the encoder rejects the pair, so the grant and the restore move both.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_encoder_id = "obs_nvenc_h264_tex";
+		g_rate_control = "VBR";
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		auto keyframe = TestH264Keyframe();
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		MoQOutputStatsTest::Retarget(o, VIDEO_ENCODER, moq::RateTarget::kEnabled{800'000});
+		o.Stop();
+		const auto applied = updates();
+		CHECK(applied.size() >= 4);
+		if (applied.size() >= 4) {
+			const auto tail = applied.size() - 4;
+			CHECK(applied[tail] == (Update{VIDEO_ENCODER, "max_bitrate", 800}));
+			CHECK(applied[tail + 1] == (Update{VIDEO_ENCODER, "bitrate", 800}));
+			CHECK(applied[tail + 2] == (Update{VIDEO_ENCODER, "max_bitrate", 8000}));
+			CHECK(applied[tail + 3] == (Update{VIDEO_ENCODER, "bitrate", 8000}));
+		}
+	}
+	printf("plain VBR retunes its average with its peak: ok\n");
 
 	// Two video encoders form a ladder: the higher rung sits one priority below the
 	// lower, and a disabled rung leaves the catalog disabled, dropping its packets

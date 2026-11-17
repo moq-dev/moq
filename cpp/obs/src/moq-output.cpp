@@ -75,11 +75,15 @@ const moq::Error *PhaseFailure(const moq::ConnectionPhase &phase)
 
 // Retune `encoder` to `bitrate_bps` in its `key` setting, the way OBS's own RTMP dynamic
 // bitrate does. The key is where the encoder holds its peak: "bitrate" for most, but
-// "max_bitrate" for NVENC's constant quality.
-void SetBitrate(obs_encoder_t *encoder, const char *key, uint64_t bitrate_bps)
+// "max_bitrate" for NVENC's constant quality. An encoder that also averages (NVENC's plain
+// VBR) keeps that average at `average_kbps`, lowered to the peak so the pair stays valid.
+void SetBitrate(obs_encoder_t *encoder, const char *key, uint64_t bitrate_bps, long long average_kbps)
 {
 	OBSDataAutoRelease settings = obs_data_create();
-	obs_data_set_int(settings, key, (long long)(bitrate_bps / 1000));
+	const long long peak_kbps = (long long)(bitrate_bps / 1000);
+	obs_data_set_int(settings, key, peak_kbps);
+	if (average_kbps > 0)
+		obs_data_set_int(settings, "bitrate", std::min(average_kbps, peak_kbps));
 	obs_encoder_update(encoder, settings);
 }
 
@@ -415,6 +419,7 @@ void MoQOutput::Reset()
 		OBSEncoder encoder;
 		const char *key;
 		uint64_t bitrate_bps;
+		long long average_kbps;
 	};
 	std::vector<Restore> restore;
 
@@ -424,7 +429,8 @@ void MoQOutput::Reset()
 			track.producer->finish();
 		if (track.rate && track.applied_bps != track.bitrate_bps) {
 			if (OBSEncoder strong = OBSGetStrongRef(track.encoder))
-				restore.push_back({std::move(strong), track.rate_key, track.bitrate_bps});
+				restore.push_back(
+					{std::move(strong), track.rate_key, track.bitrate_bps, track.average_kbps});
 		}
 	}
 	video_tracks.clear();
@@ -461,7 +467,7 @@ void MoQOutput::Reset()
 	lock.unlock();
 
 	for (auto &r : restore)
-		SetBitrate(r.encoder, r.key, r.bitrate_bps);
+		SetBitrate(r.encoder, r.key, r.bitrate_bps, r.average_kbps);
 }
 
 std::string MoQOutput::GetInstance()
@@ -762,7 +768,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 void MoQOutput::Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target)
 {
 	if (const auto *enabled = std::get_if<moq::RateTarget::kEnabled>(&target.get_variant())) {
-		SetBitrate(encoder, track.rate_key, enabled->bitrate_bps);
+		SetBitrate(encoder, track.rate_key, enabled->bitrate_bps, track.average_kbps);
 		track.applied_bps = enabled->bitrate_bps;
 		track.enabled = true;
 		return;
@@ -918,6 +924,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		const bool dynamic = obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_DYN_BITRATE;
 		if (dynamic && (peak.key || BitrateDriven(rate_control))) {
 			entry.rate_key = peak.key ? peak.key : "bitrate";
+			entry.average_kbps = peak.average_kbps;
 			entry.rate = moq::RateControl::init(moq::RatePolicy{entry.bitrate_bps, lower_bps});
 			entry.applied_bps = entry.bitrate_bps;
 			entry.encoder = OBSGetWeakRef(encoder);
