@@ -89,7 +89,7 @@ pub enum Error {
 
 	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
-	CreateEndpoint(#[source] driver::endpoint::Error),
+	CreateEndpoint(#[source] std::io::Error),
 
 	/// The resolved transport settings are ones the QUIC stack refuses.
 	#[error("invalid quic config: {0}")]
@@ -350,7 +350,7 @@ impl Bind {
 				(socket.into(), false)
 			}
 		};
-		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(Error::CreateEndpoint)?;
+		let endpoint = driver::endpoint::Endpoint::new(config, socket).map_err(endpoint_error)?;
 		Ok((endpoint, dual_stack))
 	}
 }
@@ -614,6 +614,14 @@ impl Error {
 	}
 }
 
+/// Map a driver endpoint failure onto the public error, which names no driver type.
+fn endpoint_error(err: driver::endpoint::Error) -> Error {
+	match err {
+		driver::endpoint::Error::Config(err) => Error::Config(err),
+		driver::endpoint::Error::Io(err) => Error::CreateEndpoint(err),
+	}
+}
+
 fn map_client_error(err: web::Error) -> Error {
 	let status = client_status(&err);
 	match status.and_then(crate::ConnectError::from_status_u16) {
@@ -794,7 +802,7 @@ impl Server {
 					Some(member) => member.into_inner(),
 					None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 				};
-				driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?
+				driver::wrap_udp_socket(socket).map_err(Error::CreateEndpoint)?
 			}
 		};
 		let socket = demux.wrap(socket);
@@ -805,7 +813,7 @@ impl Server {
 			),
 			None => (driver::endpoint::Endpoint::new(endpoint_config, socket), None),
 		};
-		let quic = quic.map_err(Error::CreateEndpoint)?;
+		let quic = quic.map_err(endpoint_error)?;
 		demux.attach(&quic);
 
 		Ok(Self {

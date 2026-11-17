@@ -322,7 +322,7 @@ impl Server {
 
 		// The QUIC backend and a `tls://` listener verify client certificates; the
 		// other qmux listeners (plaintext tcp/unix/websocket) never ask for one, so a
-		// server with neither would ignore the CA or pinned peers. A caller opening
+		// server with neither would ignore the CA. A caller opening
 		// only the streams owns QUIC elsewhere.
 		let tcp_tls = build_streams && config.tcp.bind.is_some() && config.tcp.tls == Some(true);
 		let client_auth = !config.tls.root.is_empty();
@@ -910,7 +910,7 @@ struct TcpTls {
 
 impl TcpTls {
 	// The same certificate resolver and client-certificate policy as the QUIC
-	// listeners, so CA roots and pinned peers mean the same on `tls://`.
+	// listeners, so CA roots mean the same on `tls://`.
 	fn new(
 		_config: &crate::listen::Config,
 		versions: &moq_net::Versions,

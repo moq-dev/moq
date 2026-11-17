@@ -43,8 +43,7 @@ pub struct Config {
 
 	/// Serve TLS on the TCP listener with the listen certificate, for `tls://`
 	/// dials. It asks for a client certificate as the QUIC listener does: optionally
-	/// under CA roots, required under pinned peers, so a peer on it authenticates
-	/// with mTLS or a token.
+	/// under CA roots, so a peer on it authenticates with mTLS or a token.
 	#[usage(
 		long = "listen-tcp-tls",
 		name = "listen-tcp-tls",
@@ -495,8 +494,8 @@ mod tests {
 	}
 
 	/// A `tls://` listener with no QUIC beside it verifies client certificates
-	/// as QUIC does: CA roots accept a chained certificate or a token-only client,
-	/// pinned peers require a pinned certificate. The request reports the chain
+	/// as QUIC does: CA roots accept a chained certificate or a token-only client.
+	/// The request reports the chain
 	/// and the SNI.
 	#[tokio::test]
 	async fn tls_verifies_a_client_certificate() {
