@@ -31,6 +31,7 @@ import {
 import { Handover } from "./handover";
 import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
+import { playable } from "./playhead";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -190,6 +191,8 @@ export class Decoder {
 
 	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
+	// How far ahead of the clock the ring renders, so what it renders sounds when due.
+	#output: Getter<Duration | undefined>;
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
 	// the queued tail plays out and a return with the same shape reuses the graph.
@@ -282,6 +285,10 @@ export class Decoder {
 				lead: delay.saturatingSub(held),
 				complete,
 			};
+		});
+		this.#output = this.#signals.computed((effect) => {
+			const ring = effect.get(this.#ring);
+			return ring ? effect.get(ring.lead) : undefined;
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
@@ -946,7 +953,7 @@ export class Decoder {
 			delay: this.#delay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
-			playhead: this.sync,
+			playhead: playable(this.sync, this.#output),
 		});
 		effect.cleanup(() => consumer.close());
 		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });

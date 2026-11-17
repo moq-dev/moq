@@ -76,16 +76,19 @@ export interface ConsumerProps {
 	predecessor?: Consumer;
 	/**
 	 * The playout clock this reader feeds, such as the player's `Sync` (default: none). A missing
-	 * group whose successor starts at or before the media time it presents now could only arrive
-	 * too late to play, so it is skipped then rather than waited for: a reader resuming behind the
-	 * live edge moves on once the clock passes the hole, not a whole `delay.min` later.
+	 * group whose successor starts at or before the oldest media the clock still plays could only
+	 * arrive too late to play, so it is skipped then rather than waited for: a reader resuming behind
+	 * the live edge moves on once the clock passes the hole, not a whole `delay.min` later.
 	 */
 	playhead?: Playhead;
 }
 
 /** A playout clock, which a {@link Consumer} reads to tell when a missing group could no longer play. */
 export interface Playhead {
-	/** The media time presenting now, or undefined while nothing presents. */
+	/**
+	 * The oldest media time the player still plays, or undefined while nothing presents: the media
+	 * presenting now, less however far a player that catches up late media lets it trail.
+	 */
 	now(): Duration | undefined;
 	/** Changes whenever {@link Playhead.now} jumps rather than advancing with the wall clock: a re-anchor, a new delay, or a pause. */
 	readonly anchor: Getter<unknown>;

@@ -3,7 +3,7 @@ use crate::origin;
 use crate::transport::poll::Session as _;
 use crate::{
 	Error, Hop, SessionError, StreamError,
-	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
+	coding::{Decode, DecodeError, Encode, Reader, Stream, StreamCodes as _, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
 	util::TaskSet,
@@ -405,6 +405,7 @@ impl Launch {
 		let datagrams = (session.max_datagram_size() != 0).then(|| Datagrams {
 			session: session.clone(),
 			subscriber: subscriber.clone(),
+			version,
 			held: Vec::new(),
 			caught_up: true,
 		});
@@ -675,7 +676,8 @@ impl SetupAccept {
 					self.step = SetupStep::Accept;
 				}
 				SetupStep::Accept => {
-					let recv = ready!(session.poll_accept_uni(waiter)).map_err(Error::from_transport)?;
+					let recv =
+						ready!(session.poll_accept_uni(waiter)).map_err(|err| self.version.transport_error(err))?;
 					self.step = SetupStep::Peek(Reader::new(recv, crate::Version::ietf(self.version)));
 				}
 				SetupStep::Peek(reader) => {
@@ -750,10 +752,10 @@ pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: boo
 	let path = params.get_bytes(ietf::ParameterBytes::Path);
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if client && path.is_some() {
-		return Err(SessionError::InvalidPath.into());
+		return Err(crate::ietf::error::session::INVALID_PATH.into());
 	}
 	if client && params.get_bytes(ietf::ParameterBytes::Authority).is_some() {
-		return Err(SessionError::InvalidAuthority.into());
+		return Err(crate::ietf::error::session::INVALID_AUTHORITY.into());
 	}
 	let path = match path {
 		Some(bytes) => Some(
@@ -888,7 +890,7 @@ impl SendSetup {
 			match &mut self.step {
 				SetupSend::Open(open, _) => {
 					let send = ready!(self.session.poll_open_uni(open, waiter, Default::default()))
-						.map_err(Error::from_transport)?;
+						.map_err(|err| self.version.transport_error(err))?;
 					let SetupSend::Open(_, params) = std::mem::replace(&mut self.step, SetupSend::Done) else {
 						unreachable!("matched above");
 					};
@@ -1071,7 +1073,7 @@ impl Unis {
 				None => match self.session.poll_accept_uni(waiter) {
 					Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::ietf(self.uni.version)),
 					Poll::Ready(Err(err)) => {
-						self.ended = Some(Error::from_transport(err));
+						self.ended = Some(self.uni.version.transport_error(err));
 						break;
 					}
 					Poll::Pending => break,
@@ -1299,6 +1301,7 @@ fn died_before_header(err: &Error) -> bool {
 struct Datagrams {
 	session: Transport,
 	subscriber: Subscriber,
+	version: Version,
 	/// Unknown aliases held before the source machines run: at most one receive budget.
 	held: Vec<bytes::Bytes>,
 	/// Whether the receive pass read the queue empty rather than yielding to its budget.
@@ -1323,7 +1326,7 @@ impl Datagrams {
 					for payload in std::mem::take(&mut self.held) {
 						self.route(payload, false)?;
 					}
-					return Poll::Ready(Err(Error::from_transport(err)));
+					return Poll::Ready(Err(self.version.transport_error(err)));
 				}
 			};
 			self.route(payload, hold)?;
@@ -1705,7 +1708,10 @@ impl<R: crate::transport::poll::RecvStream> ReadGoaways<R> {
 			match msg.request_id {
 				None if version == Version::Draft18 => return Poll::Ready(Err(Error::ProtocolViolation)),
 				Some(request_id) if request_id.0 % 2 != u64::from(!self.client) => {
-					return Poll::Ready(Err(DecodeError::Session(SessionError::InvalidRequestId).into()));
+					return Poll::Ready(Err(DecodeError::Session(
+						crate::ietf::error::session::INVALID_REQUEST_ID,
+					)
+					.into()));
 				}
 				_ => {}
 			}
@@ -2699,6 +2705,25 @@ mod tests {
 		(log, None)
 	}
 
+	/// A session close reads against moq-transport's registry on every path, so a peer closing
+	/// with a code only moq-lite assigns (0x30, NOT_SUPPORTED there) is an unknown code here.
+	#[kio::test]
+	async fn a_session_closed_with_a_moq_lite_code_reads_unknown() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			crate::transport::poll::Session::close(&session, 0x30, "closed by the peer");
+			let (_, result) = drive_unis(version, session, None, None).await;
+			let Some(Err(err)) = result else {
+				panic!("{version:?}: the closed session did not end the accept loop: {result:?}");
+			};
+			assert_eq!(
+				err.session(),
+				Some(&SessionError::Unknown(0x30)),
+				"{version:?}: {err:?}"
+			);
+		}
+	}
+
 	/// A peer opening uni streams at once gets a budget of them accepted per poll, leaving
 	/// the rest for later so the session's other tasks run in between.
 	#[kio::test]
@@ -3162,19 +3187,27 @@ mod tests {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
-					SessionError::AuthTokenCacheOverflow,
+					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], SessionError::UnknownAuthTokenAlias, "DELETE"),
-				(&[0x02, 0x07][..], SessionError::UnknownAuthTokenAlias, "USE_ALIAS"),
+				(
+					&[0x00, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"DELETE",
+				),
+				(
+					&[0x02, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"USE_ALIAS",
+				),
 				(
 					&[0x03][..],
-					SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"USE_VALUE without a type",
 				),
 				(
 					&[0x04, 0x00][..],
-					SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"an unknown alias type",
 				),
 			] {
@@ -3276,8 +3309,11 @@ mod tests {
 	async fn a_server_setup_with_path_or_authority_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (param, expected) in [
-				(ietf::ParameterBytes::Path, SessionError::InvalidPath),
-				(ietf::ParameterBytes::Authority, SessionError::InvalidAuthority),
+				(ietf::ParameterBytes::Path, crate::ietf::error::session::INVALID_PATH),
+				(
+					ietf::ParameterBytes::Authority,
+					crate::ietf::error::session::INVALID_AUTHORITY,
+				),
 			] {
 				let mut params = ietf::Parameters::default();
 				params.set_bytes(param, b"a".to_vec());
@@ -3295,7 +3331,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (token, expected) in [
 				// An Alias Type of 4 does not exist.
-				(&[0x04][..], Some(SessionError::KeyValueFormatting)),
+				(&[0x04][..], Some(crate::ietf::error::session::KEY_VALUE_FORMATTING)),
 				// REGISTER alias 7, type 0, empty value.
 				(&[0x01, 0x07, 0x00][..], None),
 			] {
@@ -3452,7 +3488,10 @@ mod tests {
 
 		let closes = log.closes();
 		assert_eq!(closes.len(), 1, "{closes:?}");
-		assert_eq!(SessionError::from_code(closes[0].0), SessionError::InvalidPath);
+		assert_eq!(
+			SessionError::from_code(closes[0].0),
+			crate::ietf::error::session::INVALID_PATH
+		);
 		let before = log.before_close().unwrap();
 		assert!(
 			!before
@@ -3474,8 +3513,8 @@ mod tests {
 		for (request_id, expected) in [
 			(Some(0), None),
 			(Some(4), None),
-			(Some(1), Some(SessionError::InvalidRequestId)),
-			(Some(5), Some(SessionError::InvalidRequestId)),
+			(Some(1), Some(crate::ietf::error::session::INVALID_REQUEST_ID)),
+			(Some(5), Some(crate::ietf::error::session::INVALID_REQUEST_ID)),
 			// Required on the control stream.
 			(None, Some(SessionError::ProtocolViolation)),
 		] {
@@ -3614,7 +3653,7 @@ mod tests {
 			for (payload, expected, why) in [
 				(
 					frame(version, ietf::SubscribeNamespace::ID, &[0, 0, 0]),
-					SessionError::InvalidRequestId,
+					crate::ietf::error::session::INVALID_REQUEST_ID,
 					"a Request ID with our parity",
 				),
 				(

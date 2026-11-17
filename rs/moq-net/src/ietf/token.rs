@@ -132,7 +132,7 @@ fn encode(token: &Token, version: Version) -> Result<Vec<u8>, EncodeError> {
 /// Decode a Token structure, refusing what this endpoint cannot accept.
 fn decode(buf: &[u8], version: Version, setup: bool) -> Result<Token, SessionError> {
 	// Section 8.9: a structure that cannot be decoded closes with KEY_VALUE_FORMATTING_ERROR.
-	let malformed = |_| SessionError::KeyValueFormatting;
+	let malformed = |_| crate::ietf::error::session::KEY_VALUE_FORMATTING;
 	let mut r = Decoder::new(buf, version.into());
 
 	// Every field an alias type names decodes before its meaning applies, so a truncated
@@ -145,13 +145,13 @@ fn decode(buf: &[u8], version: Version, setup: bool) -> Result<Token, SessionErr
 			// cache, section 9.1.4 treats one in SETUP as a value and the alias is unused.
 			if !setup {
 				r.varint().map_err(malformed)?;
-				return Err(SessionError::AuthTokenCacheOverflow);
+				return Err(crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW);
 			}
 		}
 		DELETE | USE_ALIAS => {
 			r.varint().map_err(malformed)?;
 			if !r.is_empty() {
-				return Err(SessionError::KeyValueFormatting);
+				return Err(crate::ietf::error::session::KEY_VALUE_FORMATTING);
 			}
 			// Section 9.1.4: nothing can have been registered before SETUP.
 			if setup {
@@ -160,9 +160,9 @@ fn decode(buf: &[u8], version: Version, setup: bool) -> Result<Token, SessionErr
 			// Section 9.1.3: a cache size of 0 prohibits aliases, so none was ever registered.
 			// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2),
 			// so the session closes; doc/concept/standard.md records the deviation.
-			return Err(SessionError::UnknownAuthTokenAlias);
+			return Err(crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS);
 		}
-		_ => return Err(SessionError::KeyValueFormatting),
+		_ => return Err(crate::ietf::error::session::KEY_VALUE_FORMATTING),
 	}
 
 	let kind = r.varint().map_err(malformed)?;
@@ -377,7 +377,10 @@ mod tests {
 		for version in VERSIONS {
 			let err = request(version, &[REGISTER, 7, token().kind], &token().value).unwrap_err();
 			assert!(
-				matches!(err, DecodeError::Session(SessionError::AuthTokenCacheOverflow)),
+				matches!(
+					err,
+					DecodeError::Session(crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW)
+				),
 				"{version:?}: {err:?}"
 			);
 		}
@@ -389,7 +392,10 @@ mod tests {
 			for alias_type in [DELETE, USE_ALIAS] {
 				let err = request(version, &[alias_type, 7], &[]).unwrap_err();
 				assert!(
-					matches!(err, DecodeError::Session(SessionError::UnknownAuthTokenAlias)),
+					matches!(
+						err,
+						DecodeError::Session(crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS)
+					),
 					"{version:?} {alias_type}: {err:?}"
 				);
 			}
@@ -411,7 +417,10 @@ mod tests {
 			] {
 				let err = request(version, fields, &[]).unwrap_err();
 				assert!(
-					matches!(err, DecodeError::Session(SessionError::KeyValueFormatting)),
+					matches!(
+						err,
+						DecodeError::Session(crate::ietf::error::session::KEY_VALUE_FORMATTING)
+					),
 					"{version:?} {why}: {err:?}"
 				);
 			}
@@ -433,7 +442,7 @@ mod tests {
 				let params = structure(version, fields, &[]);
 				let err = from_setup(&params, version).unwrap_err();
 				assert!(
-					matches!(err, Error::Session(SessionError::KeyValueFormatting)),
+					matches!(err, Error::Session(crate::ietf::error::session::KEY_VALUE_FORMATTING)),
 					"{version:?} {why}: {err:?}"
 				);
 			}

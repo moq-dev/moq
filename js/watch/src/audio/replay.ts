@@ -2,8 +2,8 @@
  * Replay a recorded arrival trace through the player's consumer and ring on a simulated clock.
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
- * real `Container.Consumer` decides what to deliver, wait for, and skip, at the hole wait and max delay
- * the decoder sets. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
+ * real `Container.Consumer` decides what to deliver, wait for, and skip, at the hole wait, max delay, and
+ * clock the decoder gives it. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
  * does: a gap restarts only the codec. One render quantum is read every quantum's worth of that same
  * clock, which is what the AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring and the
@@ -26,6 +26,7 @@ import { type Delay, STRETCH, Sync } from "../sync";
 import { Backpressure } from "./buffer";
 import { frameDuration } from "./config";
 import { maxDelay as audioMaxDelay, bound, ringHold, target } from "./latency";
+import { playable } from "./playhead";
 import { AudioRingBuffer } from "./ring-buffer";
 
 /** An AudioWorklet render quantum, in frames. */
@@ -257,6 +258,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		{
 			format: new Container.Legacy.Format("audio"),
 			delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
+			playhead: playable(sync),
 		},
 	);
 

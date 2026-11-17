@@ -19,6 +19,18 @@ audio hole, through an ordered reader whose budget is the ring's size
 the container consumer, as this quest planned before; keep the playhead rule
 and the separate wait).
 
+Interim rule, decided 2026-11-17 (maintainer, /quest-run,
+[moq-dev/moq#8982](https://github.com/moq-dev/moq/pull/8982)): ✅ browser
+audio ends a hole once the group past it trails the clock by the ring's
+stretch bound (`playable(sync, output)` in `js/watch/src/audio/playhead.ts`),
+the rule #8982 ships (rejected: main's bare clock with only the replay harness
+fixed and re-budgeted; the estimate wait, which brought back the Firefox resume
+silence). It is the only option with no measured regression in the browser,
+and native audio keeps its estimate wait until
+[moq-dev/moq#8984](https://github.com/moq-dev/moq/pull/8984) settles one rule.
+The work below replaces `playable` with the ordered reader's `Gap`, so
+`playable` and the audio consumer's clock go with it.
+
 Why the playhead rule goes: natively, ending an audio hole once the clock
 reaches the group past it took `bursty` from 3 to 155 underruns a minute
 (`just test audio-quality --runtimes native --codecs opus --duration 40
@@ -54,11 +66,6 @@ Work:
   runs each, since `congestion` is noisy. Confirm the resume hole with
   #8799's repro, `taskset -c 4-5 nix develop --command just test media
   --media-engines firefox --media-cases rename,pause`.
-
-## Waiting
-
-- moq-dev/moq: [#8910](https://github.com/moq-dev/moq/pull/8910) merges,
-  which defines `Item` and `Gap` for the JS mirror to follow.
 
 ## Related
 
