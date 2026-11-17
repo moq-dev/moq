@@ -143,6 +143,7 @@ impl Script {
 				}
 				return StatusCode::NO_CONTENT.into_response();
 			}
+			_ => return StatusCode::BAD_REQUEST.into_response(),
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
@@ -917,7 +918,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Deafen alice's audio: everything else stays as admitted.
 		let mut narrow = grant(Duration::from_secs(3600));
-		narrow.subscribe = ["alice/video/**".parse().unwrap()].into_iter().collect();
+		narrow.subscribe.path = ["alice/video/**".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 		clock.advance(CADENCE);
 
@@ -1417,7 +1418,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
+	policy.mtls_link = mtls_peer.then_some(moq_auth::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -1947,6 +1948,24 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		script.on_connect(Answer::Grant(replacement));
 		let token = subscriber.auth().add("replacement").unwrap();
 		kio::clock::timeout(TIMEOUT, token.answered()).await.unwrap().unwrap();
+		// The credential rides `token`; the query is exactly what the client dialed.
+		let attach = script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.find(|request| request.event == Event::Attach)
+			.cloned()
+			.expect("the token was never attached");
+		assert_eq!(attach.query.as_deref(), Some("jwt=token"), "{scheme}");
+		assert_eq!(
+			attach.token,
+			Some(moq_auth::Token {
+				kind: moq_auth::Token::OUT_OF_BAND,
+				value: b"replacement".to_vec(),
+			}),
+			"{scheme}"
+		);
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
@@ -2111,7 +2130,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 	for scheme in ["tcp", "ws"] {
 		for peer in [false, true] {
 			let mut grant = Grant::new(all(), all());
-			grant.peer = peer;
+			grant.link = peer.then_some(moq_auth::Link::Peer);
 			let script = Script::new(grant);
 			let auth = build_auth(script.spawn().await);
 			let mut options = cluster::Options::default();

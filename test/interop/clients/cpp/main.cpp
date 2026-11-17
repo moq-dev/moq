@@ -118,7 +118,14 @@ T until(moq::Future<T> future, Clock::time_point deadline, const char *what) {
 std::string patterns(const std::vector<std::string> &list) {
     std::string out = "[";
     for (size_t i = 0; i < list.size(); i++) {
-        out += (i == 0 ? "\"" : ", \"") + list[i] + "\"";
+        out += i == 0 ? "\"" : ", \"";
+        for (char c : list[i]) {
+            if (c == '"' || c == '\\') {
+                out += '\\';
+            }
+            out += c;
+        }
+        out += "\"";
     }
     return out + "]";
 }

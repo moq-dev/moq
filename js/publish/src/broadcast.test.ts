@@ -146,8 +146,8 @@ test("sibling broadcasts on one page advertise the same capture clock", async ()
 		camera.video("video").config.set(videoConfig);
 		screen.video("video").config.set(videoConfig);
 		await settle();
-		const cameraClock = (await readCatalog(camera))?.media?.clock;
-		const screenClock = (await readCatalog(screen))?.media?.clock;
+		const cameraClock = (await readCatalog(camera))?.sync?.clock;
+		const screenClock = (await readCatalog(screen))?.sync?.clock;
 		if (!cameraClock || !screenClock) throw new Error("siblings must advertise their page clock");
 		expect(cameraClock).toEqual(screenClock);
 		const captured = 1_000_000;
@@ -1042,15 +1042,15 @@ test("the catalog declares the longest group as the join interval once it lists 
 
 	// Nothing but text is listed, so no interval is declared yet, while the clock already is.
 	const before = await readCatalog(broadcast);
-	expect(before?.media?.join).toBeUndefined();
-	expect(before?.media?.clock).toBeDefined();
+	expect(before?.sync?.interval).toBeUndefined();
+	expect(before?.sync?.clock).toBeDefined();
 
 	// Audio lists first, yet the video registered beside it has the longer group, which wins.
 	audio.config.set(audioConfig);
 	await settle();
 	const catalog = await readCatalog(broadcast);
-	expect(catalog?.media?.join).toEqual({ interval: Catalog.u53(2000) });
-	expect(catalog?.media?.clock).toEqual(before?.media?.clock);
+	expect(catalog?.sync?.interval).toEqual(Catalog.u53(2000));
+	expect(catalog?.sync?.clock).toEqual(before?.sync?.clock);
 	expect(catalog?.audio?.renditions["audio/data"]).not.toHaveProperty("hls");
 
 	// No record tracks reserve a name any more.
@@ -1065,7 +1065,7 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	video.join.set(Duration.millis(2000));
 	video.config.set(videoConfig);
 	await settle();
-	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
+	expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(2000));
 
 	// A longer GOP, from a config change or a later rendition, leaves the declared grid alone.
 	video.join.set(Duration.millis(4000));
@@ -1073,12 +1073,12 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	later.join.set(Duration.millis(6000.5));
 	later.config.set(videoConfig);
 	await settle();
-	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
+	expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(2000));
 
 	// A new network broadcast declares again, rounding up to whole milliseconds.
 	name.set(Path.from("renamed.hang"));
 	await settle();
-	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(6001));
+	expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(6001));
 	broadcast.close();
 });
 
@@ -1089,12 +1089,12 @@ test("an audio-only broadcast declares its join, and no join declares nothing", 
 	audio.config.set(audioConfig);
 	await settle();
 	// A zero join is no positive spacing, so nothing is promised.
-	expect((await readCatalog(broadcast))?.media?.join).toBeUndefined();
+	expect((await readCatalog(broadcast))?.sync?.interval).toBeUndefined();
 
 	// A later listing tries again once a duration is known.
 	audio.join.set(Duration.millis(20));
 	await settle();
-	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(20));
+	expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(20));
 	broadcast.close();
 });
 
@@ -1116,7 +1116,7 @@ test("an on-demand rendition declares the interval before encoding, and a media 
 
 	expect(video.track.peek()).toBeUndefined();
 	const catalog = await readCatalog(broadcast);
-	expect(catalog?.media?.join?.interval).toBe(Catalog.u53(2000));
+	expect(catalog?.sync?.interval).toBe(Catalog.u53(2000));
 	expect(catalog?.video?.renditions.video).not.toHaveProperty("hls");
 
 	const media = net.track("video").subscribe();

@@ -162,7 +162,7 @@ impl Nvenc {
 		// cudarc 0.19's DriverError is Debug-only (no Display), so format with `{e:?}`.
 		let codec_guid = codec_guid(config.codec);
 
-		let cuda = input_context(config.input)?;
+		let cuda = input_context(config.input, &config.device)?;
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
 			.map_err(|e| Error::codec(anyhow::anyhow!("NVENC init: {e}")))?;
 
@@ -485,11 +485,22 @@ fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<(Vec<u8>, I, 
 		.map_err(|e| Error::codec(anyhow::anyhow!("NVENC lock output: {e}")))
 }
 
-/// Match the declared Vulkan device before allocating an NVENC session.
-fn input_context(input: Option<vulkan::Device>) -> Result<Arc<CudaContext>, Error> {
+/// The CUDA device NVENC opens: the declared Vulkan device's, the named render
+/// node's, or the first, refusing a render node that is not the Vulkan device.
+fn input_context(input: Option<vulkan::Device>, named: &crate::Device) -> Result<Arc<CudaContext>, Error> {
+	let ordinal = cuda::ordinal(named)?;
 	let Some(device) = input else {
-		return CudaContext::new(0).map_err(|e| Error::codec(anyhow::anyhow!("CUDA init: {e:?}")));
+		return CudaContext::new(ordinal.unwrap_or(0)).map_err(|e| Error::codec(anyhow::anyhow!("CUDA init: {e:?}")));
 	};
+	let input = vulkan_ordinal(device)?;
+	if ordinal.is_some_and(|ordinal| ordinal != input) {
+		return Err(Error::Unsupported(format!("{named} is not external Vulkan {device}")));
+	}
+	CudaContext::new(input).map_err(|e| Error::codec(anyhow::anyhow!("CUDA input device {input}: {e:?}")))
+}
+
+/// The CUDA ordinal of the declared Vulkan device, matched by UUID.
+fn vulkan_ordinal(device: vulkan::Device) -> Result<usize, Error> {
 	matching_driver(device)?;
 	let count = CudaContext::device_count().map_err(|e| Error::codec(anyhow::anyhow!("CUDA enumerate: {e:?}")))?;
 	for ordinal in 0..count {
@@ -498,8 +509,7 @@ fn input_context(input: Option<vulkan::Device>) -> Result<Arc<CudaContext>, Erro
 		let uuid = cudarc::driver::result::device::get_uuid(physical)
 			.map_err(|e| Error::codec(anyhow::anyhow!("CUDA UUID: {e:?}")))?;
 		if uuid.bytes.map(|byte| u8::from_ne_bytes(byte.to_ne_bytes())) == device.device_uuid {
-			return CudaContext::new(ordinal as usize)
-				.map_err(|e| Error::codec(anyhow::anyhow!("CUDA input device {ordinal}: {e:?}")));
+			return Ok(ordinal as usize);
 		}
 	}
 	Err(Error::Unsupported(format!(

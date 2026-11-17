@@ -25,12 +25,50 @@ test("from refuses a backslash that escapes neither a backslash nor a slash", ()
 	expect(() => Path.from("a\\", "b")).toThrow("escapes neither");
 });
 
-test("resolve refuses a stranded escape", () => {
-	// Segments split at an escaped `/` too, so popping past one strands its `\`.
-	const base = Path.from("a\\/b/c");
-	expect(() => Path.resolve(base, asRel(".."))).toThrow("escapes neither");
-	expect(Path.tryResolve(base, asRel(".."))).toBeUndefined();
-	expect(Path.resolve(base, asRel("d"))).toBe(Path.from("a\\/b/d"));
+test("an escaped slash is content, never a separator", () => {
+	// It neither ends nor empties a segment, wherever it sits.
+	for (const raw of ["\\/a", "\\/\\/a", "a/\\/b"]) {
+		expect(Path.from(raw)).toBe(raw as Path.Valid);
+		expect(Path.parts(Path.from(raw)).includes("")).toBe(false);
+	}
+	// TEMPORARY MIGRATION, delete at the next version cut and move these up: the previous
+	// release would trim or collapse the bare `/` an escaped one leaves at an end or doubled.
+	for (const raw of ["\\/", "a\\/", "a\\//b", "\\/\\/", "a/\\/", "\\//a"]) {
+		expect(() => Path.from(raw)).toThrow("empty segment");
+	}
+	// A bare one beside it still does.
+	for (const raw of ["a\\///b", "/\\/", "\\//", "a\\\\/", "\\\\//a"]) {
+		expect(() => Path.from(raw)).toThrow("empty segment");
+	}
+
+	const path = Path.from("room/a\\/b/.c\\/d");
+	expect(Path.parts(path)).toEqual(["room", "a\\/b", ".c\\/d"]);
+	expect(Path.parts(path).map(Path.unescape)).toEqual(["room", "a/b", ".c/d"]);
+	expect(Path.hasPrefix(Path.from("room/a\\/b"), path)).toBe(true);
+	expect(Path.hasPrefix(Path.from("room/a"), path)).toBe(false);
+	expect(Path.stripPrefix(Path.from("room/a\\/b"), path)).toBe(Path.from(".c\\/d"));
+	expect(Path.head(path, 2)).toBe(Path.from("room/a\\/b"));
+	expect(Path.head(path, 4)).toBeUndefined();
+
+	// TEMPORARY MIGRATION, delete at the next version cut and expect 32 segments to decode: the
+	// previous release counts every `/`, so an escaped one still counts against the limit.
+	const deep = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}\\/${i}`).join("/");
+	expect(Path.parts(Path.from(deep))).toHaveLength(Path.MAX_PARTS);
+	expect(() => Path.decode(deep)).toThrow("parts");
+});
+
+test("resolve walks whole escaped segments", () => {
+	// `a\/b` is one segment, so `..` pops all of it.
+	const base = Path.from("a\\/b/c/d");
+	expect(Path.resolve(base, asRel(".."))).toBe(Path.from("a\\/b"));
+	expect(Path.tryResolve(base, asRel("../.."))).toBe(Path.empty());
+	expect(Path.tryResolve(base, asRel("../../.."))).toBeUndefined();
+	expect(Path.resolve(base, asRel("x\\/y"))).toBe(Path.from("a\\/b/c/x\\/y"));
+
+	const target = Path.from("a\\/b/e\\/f");
+	const rel = Path.relative(target, base);
+	expect(rel).toBe(asRel("../e\\/f"));
+	expect(Path.resolve(base, rel as Path.Relative)).toBe(target);
 });
 
 test("from treats the empty path as the root", () => {
@@ -256,8 +294,9 @@ test("normalizeRelative preserves an all-dot reference", () => {
 	expect(Path.normalizeRelative("./foo")).toBe(asRel("foo"));
 	expect(Path.normalizeRelative("foo/./bar")).toBe(asRel("foo/bar"));
 	expect(Path.normalizeRelative("../foo")).toBe(asRel("../foo"));
-	// Dropping a `.` cannot strand the `\` of an escaped `/` before it.
-	expect(() => Path.normalizeRelative("a\\/.")).toThrow("escapes neither");
+	// A `.` after an escaped `/` is inside its segment, not one of its own.
+	expect(Path.normalizeRelative("a\\/.")).toBe(asRel("a\\/."));
+	expect(Path.normalizeRelative("./a\\/.")).toBe(asRel("a\\/."));
 	expect(Path.normalizeRelative("a\\\\/.")).toBe(asRel("a\\\\"));
 });
 
@@ -287,7 +326,7 @@ test("decode never allocates per slash of a hostile path", () => {
 	const split = spyOn(String.prototype, "split");
 	const indexOf = spyOn(String.prototype, "indexOf");
 	try {
-		expect(() => Path.decode(slashes)).toThrow("empty segment");
+		expect(() => Path.decode(slashes)).toThrow("parts");
 		indexOf.mockClear();
 		let error: unknown;
 		try {

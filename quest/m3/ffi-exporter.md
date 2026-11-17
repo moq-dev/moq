@@ -142,8 +142,7 @@ language's public API (`sh/api-diff`) and its Impact section lists every
 rename for the packages' `MIGRATE.md`. Reshapes that outlive the generator
 land before the cut instead: the open-set rule in `rs/moq-ffi/AGENTS.md`
 (selector objects, `Unknown` variants, and a null `max_age` for no limit) and
-[the group rename](/quest/m2/time-addressing/bindings.md); the switch keeps
-those shapes. The audit's other binding findings were not picked: the `Moq`
+the group rename; the switch keeps those shapes. The audit's other binding findings were not picked: the `Moq`
 facade Kotlin and Dart start from stays, and `MoqError`'s variants stay as
 they are.
 

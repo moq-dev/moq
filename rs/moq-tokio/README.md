@@ -18,7 +18,6 @@ Establishes MoQ connections over a few different transports, all compiled in and
 - **TCP**, **TLS**, and **Unix sockets** (Unix only) via [qmux](https://crates.io/crates/qmux)
 
 Also handles TLS, certificate generation, logging setup, and reconnection logic, with Usage-derived configuration ready for binaries.
-`quic::web` exposes WebTransport streams, datagrams, and send groups without requiring a MoQ session; its session also implements moq-net's poll traits directly.
 
 ## Examples
 

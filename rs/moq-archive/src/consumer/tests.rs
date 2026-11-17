@@ -655,6 +655,26 @@ async fn an_empty_or_unrecognized_prefix_is_refused() {
 	archive.raw("video/segments/0000000000000000000", b"x").await;
 	assert!(matches!(open(archive.store.clone()).await, Some(Error::Path(_))));
 
+	// Release's version 1 layout and an older main build's version 4 are refused by version,
+	// before any of their keys is read.
+	for (info, key, version) in [
+		(
+			&br#"{"version":1,"priority":0,"timescale":1000}"#[..],
+			"video/segments/0000000000000000000",
+			1,
+		),
+		(
+			br#"{"version":4,"priority":0,"timescale":1000}"#,
+			"video/0000000000000000000-0000000000000000000-0000000000000000000",
+			4,
+		),
+	] {
+		let archive = Archive::new();
+		archive.raw("video/.info", info).await;
+		archive.raw(key, b"x").await;
+		assert_eq!(open(archive.store.clone()).await, Some(Error::Version(version)));
+	}
+
 	// A directory that is not a canonical track name.
 	let archive = Archive::new();
 	archive

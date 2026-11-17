@@ -13,7 +13,8 @@ multicast](/quest/m2/multicast/README.md)): this waits on the
 [bake-off](https://github.com/moq-dev/moq/pull/8880). Its first and third findings are
 in `path::Router`'s indexes and its doubts and dead hops, which the new router
 replaces; the second, per-broadcast rewrites in `route/node.rs`, the
-[router](/quest/m2/multicast/router.md) takes as a requirement. If the new
+router (`route::relay::Router`, from
+[moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)) takes as a requirement. If the new
 rule goes ahead, [the switch](/quest/m2/multicast/switch.md) deletes this
 quest with the fixtures that pin it; if it does not, this starts as written.
 
