@@ -850,7 +850,9 @@ export class Decoder {
 		for (const read of reads) {
 			if (!(await this.#apply(effect, decoder, config, order, read))) return false;
 			if (!order.admit(read)) continue;
-			const duration = packetDuration(config.codec, read.frame);
+			// A frame stating no duration, such as AAC's, runs the codec's frame length, as queuedRanges
+			// counts it.
+			const duration = packetDuration(config.codec, read.frame) ?? frameDuration(config);
 			if (!(await this.#decode(effect, decoder, read.frame, duration))) return false;
 		}
 		return true;

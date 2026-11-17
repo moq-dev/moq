@@ -560,6 +560,33 @@ it("re-primes the decoder on the warmup before a gap, so the frame after it play
 	}
 });
 
+// AAC frames state no duration, so the codec's frame length (1024 samples) is what the pre-roll covers.
+it("re-primes an AAC decoder on frames that state no duration", async () => {
+	const playback = await play(Duration.millis(100));
+	try {
+		playback.restore({ codec: "mp4a.40.2", sampleRate: 48_000, numberOfChannels: 2, warmup: 80 });
+		await microtasks();
+		await playback.play();
+		const played = audioChunks.length;
+		playback.push({
+			kind: "gap",
+			timestamp: Duration.micros(frameTimestamp + 20_000),
+			duration: Duration.millis(100),
+		});
+		frameTimestamp += 100_000;
+		const next = frame();
+		playback.push({ ...next, group: 1n });
+		await microtasks();
+		// Four 21.3 ms frames cover the 80 ms warmup, ahead of the frame after the gap.
+		const chunks = audioChunks.slice(played).map((chunk) => chunk.timestamp);
+		expect(chunks).toHaveLength(5);
+		expect(chunks.at(-1)).toBe(next.frame.timestamp.asMicros());
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
+
 // A subscription's head arrives newest-first, one group per frame. Chrome's AudioDecoder stamps every
 // output from its first input, so decoding the older frames after it shifts the rest of the track.
 for (const cmaf of [false, true]) {

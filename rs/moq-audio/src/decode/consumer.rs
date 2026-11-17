@@ -395,8 +395,10 @@ impl Consumer {
 					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
+					// The fresh encoder's pre-skip primes nothing yet, so it is trimmed again.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
+						self.decoder.reapply_delay();
 					}
 					// A group with nothing below it, which its publisher declares by skipping
 					// every start before it, is the track's first, and a group delivers from its
@@ -745,7 +747,8 @@ impl Consumer {
 
 	/// Start a new timeline after a gap or past a declared end. The decoder is not reset:
 	/// the next group already starts on a keyframe, and the history it keeps primes the
-	/// packets after the break, so a gap trims no more warmup than the decoder still lacks.
+	/// packets after the break, so a gap trims no more warmup than the decoder still lacks,
+	/// and no pre-skip, which only a fresh encoder starts with.
 	///
 	/// Samples the resampler still holds arrived before the break, so they are drained
 	/// as their own frame first rather than filtered together with what follows it.
@@ -762,7 +765,6 @@ impl Consumer {
 		self.epoch = None;
 		self.delay_trimmed = 0;
 		self.warmup_until = None;
-		self.decoder.reapply_delay();
 		Ok(())
 	}
 
@@ -2646,6 +2648,77 @@ mod tests {
 			third.timestamp,
 			advance(second.timestamp, second_frames, 48_000).unwrap()
 		);
+	}
+
+	/// A lost group leaves the same encoder running, so its pre-skip, trimmed once at the
+	/// stream's start, is not trimmed again off the media after the loss.
+	#[tokio::test(start_paused = true)]
+	async fn a_lost_group_does_not_trim_the_pre_skip_again() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			layout: Layout::Mono,
+		};
+		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
+		let mut catalog = encoder.catalog();
+		catalog.warmup = None;
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		// Two packets, then a seek skips groups the viewer never gets.
+		let pcm = vec![0.25f32; encoder.frame_size()];
+		for micros in [0, 20_000, 1_000_000] {
+			if micros == 1_000_000 {
+				producer.seek(1_000_000).unwrap();
+			}
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: None,
+					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		let _finished = producer.finish().unwrap();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let mut after = None;
+		let mut lost = false;
+		while let Some(read) = consumer.read().await.unwrap() {
+			match read {
+				Read::Gap { .. } => lost = true,
+				Read::Frame(frame) if lost => {
+					after = Some((
+						frame.timestamp.as_micros().unwrap(),
+						frame.data.len() / size_of::<f32>(),
+					));
+					break;
+				}
+				Read::Frame(_) | Read::End { .. } => {}
+			}
+		}
+		assert_eq!(after, Some((1_000_000, 960)));
 	}
 
 	thread_local! {
