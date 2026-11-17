@@ -16,12 +16,9 @@ pub struct Fetch<'a> {
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
-	pub node: u64,
-	/// How many leading segments of the broadcast path make up the prefix of the route
-	/// the request follows (lite-07); 0 with no node named.
-	pub depth: u64,
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	/// Reader freshness budget. Lite07+ only; omission uses the publisher's max age alone.
@@ -41,7 +38,6 @@ impl Fetch<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
-			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
@@ -64,7 +60,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 		let max_delay = match version.has_fetch_max_delay() {
@@ -86,7 +82,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 			broadcast,
 			instance,
 			node,
-			depth,
 			track,
 			priority,
 			max_delay,
@@ -106,7 +101,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node, self.depth)?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 		match version.has_fetch_max_delay() {
@@ -140,8 +135,7 @@ mod test {
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
@@ -190,9 +184,9 @@ mod test {
 	#[test]
 	fn fetch_node_roundtrips_only_on_lite07() {
 		let mut msg = fetch_sample();
-		msg.node = 0x7a3f;
-		assert_eq!(fetch_roundtrip(Version::Lite07, &msg).node, 0x7a3f);
-		assert_eq!(fetch_roundtrip(Version::Lite06, &msg).node, 0);
+		msg.node = Some(crate::route::NodeId { relay: 0x7a3f, start: 9 });
+		assert_eq!(fetch_roundtrip(Version::Lite07, &msg).node, Some(crate::route::NodeId { relay: 0x7a3f, start: 9 }));
+		assert_eq!(fetch_roundtrip(Version::Lite06, &msg).node, None);
 	}
 
 	#[test]

@@ -59,7 +59,7 @@
 
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet},
+	collections::{BTreeMap, BTreeSet, VecDeque},
 	fmt,
 	sync::Arc,
 	time::Duration,
@@ -283,10 +283,13 @@ struct Peer<I, A> {
 	session: u64,
 	/// It sent GOAWAY.
 	draining: bool,
-	/// Its marker arrived: what it sends now answers what this node asked.
+	/// Its first marker arrived: what it sends now answers what this node asked.
 	answering: bool,
-	/// What this node asked it for, each with whether its initial set arrived.
+	/// What it answers of what this node asked it for, each with whether its initial set
+	/// arrived.
 	asked: BTreeMap<Path, bool>,
+	/// The edits of that set it has yet to answer, oldest first.
+	asking: VecDeque<Edit>,
 	/// What it asks this node for, none inside another.
 	asks: BTreeSet<Path>,
 	/// The forwarding nodes it offers a route to.
@@ -363,8 +366,40 @@ struct Best<N> {
 }
 
 /// How candidate routes order, lower first: rank, then one with no marked link on its
-/// path, the next hop in use, the shorter path, and the neighbour.
-type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, N);
+/// path, the next hop in use, the shorter path, the neighbour's Node ID, and its session.
+type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, NodeId, N);
+
+/// What changed at a router since its caller last asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Changes<I> {
+	/// The forwarding nodes whose selected route changed.
+	pub routes: BTreeSet<NodeId>,
+	/// The broadcasts whose claims, or what the reader shows of them, may have changed.
+	pub broadcasts: BTreeSet<Broadcast<I>>,
+}
+
+impl<I> Default for Changes<I> {
+	fn default() -> Self {
+		Self {
+			routes: BTreeSet::new(),
+			broadcasts: BTreeSet::new(),
+		}
+	}
+}
+
+/// One claim a request for a broadcast may follow from a node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Way<N, A> {
+	/// The forwarding node that announces the claim.
+	pub origin: NodeId,
+	/// Where a request following it goes next.
+	pub next: Next<N>,
+	/// The claim as it stands at this node: its cost, priority, and drain joined with
+	/// the route's.
+	pub claim: Claim<A>,
+	/// The one a request naming no node takes.
+	pub closest: bool,
+}
 
 /// What a router retains, for budgets and leak checks.
 #[cfg(test)]
@@ -461,6 +496,8 @@ pub(crate) struct Router<N, I, A> {
 	deadlines: BTreeSet<(Instant, Broadcast<I>)>,
 	reader: Reader<A, I>,
 	out: Vec<(N, Msg<I, A>)>,
+	/// What changed since [`Self::changes`] last took it, once a caller follows it.
+	log: Option<Changes<I>>,
 	/// Routes, claims, hops, and neighbours visited, for per-change work checks.
 	#[cfg(test)]
 	work: std::cell::Cell<usize>,
@@ -547,6 +584,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			deadlines: BTreeSet::new(),
 			reader: Reader::default(),
 			out: Vec::new(),
+			log: None,
 			#[cfg(test)]
 			work: std::cell::Cell::new(0),
 			#[cfg(test)]
@@ -618,6 +656,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for broadcast in &gone {
 			self.exports(broadcast);
 		}
+		if let Some(log) = &mut self.log {
+			log.broadcasts.extend(gone);
+		}
 	}
 
 	// --- Sessions ---
@@ -647,7 +688,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				session: self.sessions,
 				draining: false,
 				answering: false,
-				asked: ask.iter().map(|prefix| (prefix.clone(), false)).collect(),
+				asked: BTreeMap::new(),
+				asking: VecDeque::new(),
 				asks: BTreeSet::new(),
 				offers: BTreeSet::new(),
 				sent: BTreeMap::new(),
@@ -655,12 +697,113 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				told: BTreeMap::new(),
 			},
 		);
+		// A scoped neighbour whose grant covers nothing is asked for nothing.
+		if ask.is_empty() {
+			return Ok(());
+		}
 		let edit = Edit {
 			remove: Vec::new(),
 			add: ask.into_iter().collect(),
 		};
+		self.peers.get_mut(&peer).expect("just connected").asking.push_back(edit.clone());
 		self.out.push((peer, Msg::Ask(edit)));
 		Ok(())
+	}
+
+	/// Edit what this node asks `peer` for, an endpoint or scoped neighbour: a node that
+	/// never forwards asks only for what its readers want. The edit takes effect at the
+	/// neighbour's marker, where this node drops what the removed prefixes covered.
+	pub fn ask(&mut self, peer: N, edit: Edit) -> Result<(), Error> {
+		let state = self.peers.get_mut(&peer).ok_or(Error::UnknownNeighbor)?;
+		if state.routing().is_some() {
+			return Err(Error::Partial);
+		}
+		// As the set stands once every edit before this one is answered.
+		let mut set: BTreeSet<Path> = state.asked.keys().cloned().collect();
+		for pending in &state.asking {
+			for prefix in &pending.remove {
+				set.remove(prefix);
+			}
+			set.extend(pending.add.iter().cloned());
+		}
+		for prefix in &edit.remove {
+			if !set.remove(prefix) {
+				return Err(Error::UnknownPrefix);
+			}
+		}
+		for prefix in &edit.add {
+			if within_any(prefix, &set) || within_set(&set, prefix).next().is_some() {
+				return Err(Error::Nested);
+			}
+			set.insert(prefix.clone());
+		}
+		state.asking.push_back(edit.clone());
+		self.out.push((peer, Msg::Ask(edit)));
+		Ok(())
+	}
+
+	/// What this node asks `peer` for, once the neighbour answers every edit.
+	pub fn asking(&self, peer: N) -> BTreeSet<Path> {
+		let Some(state) = self.peers.get(&peer) else {
+			return BTreeSet::new();
+		};
+		let mut set: BTreeSet<Path> = state.asked.keys().cloned().collect();
+		for pending in &state.asking {
+			for prefix in &pending.remove {
+				set.remove(prefix);
+			}
+			set.extend(pending.add.iter().cloned());
+		}
+		set
+	}
+
+	/// Whether `peer` has answered every edit of what this node asks it for.
+	pub fn answered(&self, peer: N) -> bool {
+		self.peers.get(&peer).is_some_and(|state| state.asking.is_empty())
+	}
+
+	/// Follow what changes from here on, for [`Self::changes`].
+	pub fn follow(&mut self) {
+		self.log.get_or_insert_default();
+	}
+
+	/// Take what changed since the last call, if [`Self::follow`] was called.
+	pub fn changes(&mut self) -> Changes<I> {
+		self.log.as_mut().map(std::mem::take).unwrap_or_default()
+	}
+
+	/// The route this node uses to `origin`: the neighbour, and the offer as it stands here.
+	pub fn best(&self, origin: NodeId) -> Option<(N, &Offer)> {
+		self.best.get(&origin).map(|best| (best.via, &best.offer))
+	}
+
+	/// How `peer`'s link is configured.
+	pub fn port(&self, peer: N) -> Option<Port> {
+		self.peers.get(&peer).map(|state| state.port.clone())
+	}
+
+	/// The broadcasts `origin` claims, as far as this node knows.
+	pub fn claimed(&self, origin: NodeId) -> impl Iterator<Item = &Broadcast<I>> {
+		self.known.get(&origin).into_iter().flat_map(|known| known.items.keys())
+	}
+
+	/// Whether a request `peer` sent may follow `origin`'s claim of `broadcast` from here:
+	/// never one that reached this node over a marked link when `peer`'s is marked too, as
+	/// `peer` is never told of it.
+	pub fn admits(&self, peer: N, origin: NodeId, broadcast: &Broadcast<I>) -> bool {
+		let marked = self.peers.get(&peer).is_some_and(|peer| peer.port.upstream);
+		!(marked && self.crossed_mark(origin, broadcast))
+	}
+
+	/// How many routes and claims `peer` holds of what this node sent it: what a neighbour
+	/// that lost everything would be sent again.
+	pub fn held(&self, peer: N) -> usize {
+		let Some(state) = self.peers.get(&peer) else {
+			return 0;
+		};
+		let claims = |origin: &NodeId| self.known.get(origin).map_or(0, |known| known.items.len());
+		let routes: usize = state.sent.keys().map(|origin| 1 + claims(origin)).sum();
+		routes + state.told.values().map(BTreeMap::len).sum::<usize>()
 	}
 
 	/// The session to `peer` closed: everything learned or sent on it goes, and a routing
@@ -843,7 +986,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// Whether `peer` sent the initial set of `prefix`, which this node asks it for, or
 	/// `None` when it does not ask for it.
 	pub fn is_synced(&self, peer: N, prefix: &Path) -> Option<bool> {
-		self.peers.get(&peer)?.asked.get(prefix).copied()
+		let peer = self.peers.get(&peer)?;
+		let pending = || peer.asking.iter().any(|edit| edit.add.contains(prefix));
+		(peer.asked.get(prefix).copied()).or_else(|| pending().then_some(false))
 	}
 
 	/// Take in a message `from` sent. An error is a message the rule never sends, which
@@ -854,7 +999,23 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		match msg {
 			Msg::Ask(edit) => return self.edit(from, edit),
 			Msg::Edited => {
+				// It answers this node's oldest edit, which takes effect here for both.
+				let edit = peer.asking.pop_front().ok_or(Error::Unasked)?;
 				peer.answering = true;
+				for prefix in &edit.add {
+					peer.asked.insert(prefix.clone(), false);
+				}
+				let mut lost = Vec::new();
+				for prefix in &edit.remove {
+					peer.asked.remove(prefix);
+					lost.extend(peer.given.keys().filter(|(path, _)| super::view::within(path, prefix)).cloned());
+				}
+				for broadcast in lost {
+					self.peers.get_mut(&from).expect("a neighbour").given.remove(&broadcast);
+					self.ungive(&broadcast, from);
+					self.restate(broadcast, Change::Lost);
+				}
+				self.done();
 				return Ok(());
 			}
 			Msg::Synced(prefix) => {
@@ -1246,6 +1407,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				mine.offer.marked,
 				current != Some(via),
 				offer.path.len(),
+				offer.path.last().expect("a heard route names its sender").node,
 				via,
 			);
 			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
@@ -1263,6 +1425,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
 		};
+		if let Some(log) = &mut self.log {
+			log.routes.insert(origin);
+		}
 		// Whether its claims are reachable follows the route, and so does the rank of each
 		// that the rank reaches.
 		if flipped && let Some(known) = self.known.get(&origin) {
@@ -1796,6 +1961,73 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		})
 	}
 
+	/// Every claim of `broadcast` a request may follow from here, as [`Self::closest`]
+	/// chooses among them: of the best precedence, available, and reached by a route.
+	pub fn ways(&self, broadcast: &Broadcast<I>) -> Vec<Way<N, A>> {
+		let closest = self.closest(broadcast).map(|(origin, _)| origin);
+		let top = (self.claims_of(broadcast)).map(|(_, claim)| precedence(&claim.item)).min();
+		let mut ways = Vec::new();
+		for (origin, claim) in self.claims_of(broadcast) {
+			if Some(precedence(&claim.item)) != top || claim.unavailable {
+				continue;
+			}
+			// Every neighbour that gave this node its own claim serves it, so a reader
+			// already holds another copy when the one it follows closes.
+			if origin == self.me
+				&& let Some(givers) = self.givers.get(broadcast)
+			{
+				let source = self.sources.get(broadcast);
+				for (peer, given) in givers {
+					self.visit();
+					if precedence(&given.item) != precedence(&claim.item) || given.unavailable {
+						continue;
+					}
+					let mut given = given.clone();
+					given.draining |= self.peers.get(peer).is_some_and(|peer| peer.draining);
+					ways.push(Way {
+						origin,
+						next: Next::Local(*peer),
+						claim: given,
+						closest: closest == Some(origin) && source == Some(peer),
+					});
+				}
+				continue;
+			}
+			let way = match origin == self.me {
+				true => self.sources.get(broadcast).map(|source| (Next::Local(*source), claim.clone())),
+				false => self.best.get(&origin).map(|best| {
+					let claim = Claim {
+						cost: claim.cost.saturating_add(best.offer.cost),
+						priority: claim.priority.min(best.offer.priority),
+						draining: claim.draining || best.offer.draining,
+						..claim.clone()
+					};
+					(Next::Via(best.via), claim)
+				}),
+			};
+			if let Some((next, claim)) = way {
+				ways.push(Way {
+					origin,
+					next,
+					claim,
+					closest: closest == Some(origin),
+				});
+			}
+		}
+		ways
+	}
+
+	/// Whether `origin`'s claim of `broadcast` reached this node over a marked link: its
+	/// route crossed one, or a marked neighbour gave this node its own.
+	fn crossed_mark(&self, origin: NodeId, broadcast: &Broadcast<I>) -> bool {
+		match origin == self.me {
+			true => (self.sources.get(broadcast))
+				.and_then(|source| self.peers.get(source))
+				.is_some_and(|source| source.port.upstream),
+			false => self.best.get(&origin).is_some_and(|best| best.offer.marked),
+		}
+	}
+
 	/// The claim of `broadcast` a request takes from here, with its claimant: among the
 	/// claims of the best precedence, reachable or not, the best rank of the route and the
 	/// claim together that a route reaches.
@@ -1844,6 +2076,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// date for every broadcast that may have changed.
 	fn refresh(&mut self) {
 		let dirty = std::mem::take(&mut self.dirty);
+		if let Some(log) = &mut self.log {
+			log.broadcasts.extend(dirty.iter().cloned());
+		}
 		let mut now: BTreeMap<I, BTreeMap<Path, Option<Shown<A>>>> = BTreeMap::new();
 		for broadcast in &dirty {
 			self.visit();
@@ -2039,11 +2274,16 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// node's reader shows one there and it did not come from `peer`. It is the closest
 	/// claim while one is reachable; else the claim of the best precedence, unavailable;
 	/// else, while the reader waits to show it offline, the claim it showed, unavailable.
-	/// Never a withdrawal while the reader still shows the claim.
+	/// Never a withdrawal while the reader still shows the claim. A claim that reached this
+	/// node over a marked link is never told over another, as a route is never sent.
 	fn stands(&self, peer: N, path: &Path, from: &Path, instance: &I) -> Option<Told<A>> {
 		self.reader.get(instance.clone(), from)?;
 		let broadcast = (from.clone(), instance.clone());
-		let source = |origin: NodeId| origin == self.me && self.sources.get(&broadcast) == Some(&peer);
+		let marked = self.peers[&peer].port.upstream;
+		let source = |origin: NodeId| {
+			(origin == self.me && self.sources.get(&broadcast) == Some(&peer))
+				|| (marked && self.crossed_mark(origin, &broadcast))
+		};
 		let claim = match self.closest(&broadcast) {
 			Some((origin, _)) if source(origin) => return None,
 			Some((origin, claim)) if origin == self.me => claim.clone(),
@@ -2070,7 +2310,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				// Lost, and waiting out the debounce: what it showed, to every asker alike.
 				None => {
 					let gone = self.gone.get(from)?.get(instance)?;
-					if gone.source == Some(peer) {
+					let crossed = (gone.source.as_ref())
+						.and_then(|source| self.peers.get(source))
+						.is_some_and(|source| marked && source.port.upstream);
+					if gone.source == Some(peer) || crossed {
 						return None;
 					}
 					gone.claim.clone()
@@ -2174,11 +2417,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		!self.out.is_empty() || !self.stale.is_empty() || !self.fresh.is_empty()
 	}
 
-	/// The route this node uses to `origin`: the neighbour, and the offer as it stands here.
-	pub fn best(&self, origin: NodeId) -> Option<(N, &Offer)> {
-		self.best.get(&origin).map(|best| (best.via, &best.offer))
-	}
-
 	/// The forwarding nodes this node routes to.
 	pub fn routes(&self) -> Vec<NodeId> {
 		self.best.keys().copied().collect()
@@ -2247,6 +2485,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			deadlines: _,
 			reader,
 			out,
+			log: _,
 			work: _,
 			history: _,
 			forgets: _,

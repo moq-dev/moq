@@ -28,7 +28,7 @@ const ANNOUNCE: u8 = 1;
 /// ANNOUNCE_REQUEST messages.
 const ANNOUNCE_STREAM: u8 = 3;
 const ANNOUNCE_START: u64 = 0;
-const ANNOUNCE_REQUEST: u64 = 16;
+const ANNOUNCE_REQUEST: u64 = 5;
 
 /// A lite-07 varint off the front of `buf`: as many leading ones as bytes follow.
 fn varint(buf: &mut &[u8]) -> Option<u64> {

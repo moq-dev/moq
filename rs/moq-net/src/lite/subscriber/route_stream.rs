@@ -3,7 +3,7 @@
 //! Each endpoint says everything about routing on one unidirectional stream: as a
 //! subscriber, the edits of the prefixes it asks for, and as a publisher, the routes
 //! and claims answering what its peer asks for. One stream each way keeps a side's
-//! messages in order, so a hold's answer never overtakes the route it follows.
+//! messages in order, so a route's claims never overtake the route.
 //!
 //! The session is one neighbour of the origin's route node for both directions. When
 //! the session publishes from one origin and subscribes into another, each origin's
@@ -19,7 +19,7 @@ use crate::{
 	driver::Transport,
 	lite::{self, AnnounceBroadcast as Msg, Version},
 	origin,
-	route::{self, node},
+	route::{node, relay},
 	transport::poll::Session as _,
 };
 
@@ -37,7 +37,13 @@ pub(in crate::lite) struct Publish {
 	pub origin: origin::Consumer,
 	pub auth: crate::auth::Link,
 	pub withdrawal: crate::session::Withdrawal,
+	/// Whether this side's SETUP declared a Node ID: it forwards, and trusts the peer
+	/// with the whole tree.
+	pub routing: bool,
 }
+
+/// How long the peer may leave this side's stream unread before the session closes.
+const STALL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Closes the session whose peer stopped reading the stream.
 struct Stall {
@@ -48,10 +54,10 @@ struct Stall {
 }
 
 impl Stall {
-	/// Ready once the writer made no progress for [`route::path::HOLD`].
+	/// Ready once the writer made no progress for [`STALL`].
 	fn poll(&mut self, written: u64, waiter: &kio::Waiter) -> Poll<()> {
 		if self.armed.as_ref().is_none_or(|(_, at)| *at != written) {
-			let deadline = crate::time::Deadline::after(&self.runtime, route::path::HOLD);
+			let deadline = crate::time::Deadline::after(&self.runtime, STALL);
 			self.armed = Some((deadline, written));
 		}
 		let (deadline, _) = self.armed.as_mut().expect("armed above");
@@ -69,8 +75,8 @@ impl Stall {
 /// Where this side's stream stands.
 enum Sending {
 	Open,
-	/// The session is leaving: every route is ended, and the stream finishes once that
-	/// is flushed.
+	/// The session is leaving: the stream finishes once what it holds is flushed, which
+	/// ends everything the peer was sent.
 	Ending,
 	/// Finished: waiting for the peer to read it.
 	Closing,
@@ -187,43 +193,42 @@ impl RouteStream {
 		// Start from the grant the setup token earns, so the initial set never
 		// advertises something it would end a moment later.
 		ready!(self.publish.auth.poll_setup_answered(waiter));
-		let chains = ready!(subscriber.peer_setup.poll_lite06_chain(waiter));
 		let link_cost = ready!(subscriber.poll_link_cost(waiter));
-		// The route layer files a scoped peer's routes under the route key it proved, and
-		// names the peer by the Node ID its SETUP declared, or else by the last hop of
-		// the first route the peer sends.
+		// Two endpoints that both declared a Node ID exchange routes.
+		let peer = ready!(subscriber.peer_setup.poll_node(waiter));
 		let permit = subscriber.auth.permit(crate::auth::Direction::Subscribe);
-		if permit.regions().is_some() {
-			let _ = ready!(subscriber.peer_setup.poll_node(waiter));
-		}
 
 		let answering = self.publish.origin.route_node();
 		let shared = answering.same(&subscriber.origin.route_node());
-		let mut routed = Routed::new(subscriber, link_cost, &permit, shared.then_some(&self.publish.origin))?;
+		let routing = peer.filter(|_| self.publish.routing && shared);
+		let mut routed = Routed::new(subscriber, link_cost, &permit, shared.then_some(&self.publish.origin), routing)?;
 		let mut streams = vec![routed.stream()];
 		if !shared {
-			let peer = node::Peer {
-				tag: subscriber.peer_setup.tag(),
-				node: subscriber.peer_setup.node().map_or(0, |node| node.get()),
-			};
-			let link = route::Link {
+			let port = relay::Port {
 				// The peer prices the link on what it receives; nothing here charges it.
 				cost: 1,
 				priority: 0,
-				upstream: self.publish.origin.upstream(),
-				proxy: self.publish.origin.proxy(),
-				scope: None,
+				upstream: self.publish.origin.upstream() || !self.publish.origin.proxy(),
 				// This origin asks the peer for nothing.
-				interest: Default::default(),
-				..Default::default()
+				role: relay::Role::Scoped(Vec::new()),
 			};
-			let stream = (answering.connect(peer, link))
+			let stream = (answering.connect(subscriber.peer_setup.tag(), port))
 				.map_err(|_| Error::ProtocolViolation)?
 				.with_clock(subscriber.runtime.clone());
 			streams.push(Arc::new(stream));
 		}
 		let main = streams.last().expect("the session's key").clone();
-		let answer = Answer::new(self.publish.origin.clone(), self.publish.auth.clone(), main, chains);
+		let answer = Answer::new(
+			self.publish.origin.clone(),
+			self.publish.auth.clone(),
+			main,
+			routing.is_some(),
+		);
+		// A routing peer is sent everything and sends anything, so neither grant may
+		// leave part of the tree out.
+		if routing.is_some() && !(answer.whole() && super::routed::whole(&permit)) {
+			return Poll::Ready(Err(Error::Unauthorized));
+		}
 		for (prefix, snapshot) in self.wants.drain(..) {
 			routed.want(prefix, snapshot);
 		}
@@ -258,7 +263,7 @@ impl Running {
 		}
 		let direction = crate::auth::Direction::Subscribe;
 		while let Poll::Ready(permit) = subscriber.auth.poll_permit(direction, &mut self.epoch, waiter) {
-			self.routed.limit(&permit);
+			self.routed.limit(&permit)?;
 		}
 
 		// What the node queued goes out before the peer's next messages are read, and
@@ -289,6 +294,13 @@ impl Running {
 	) -> Poll<Result<(), Error>> {
 		loop {
 			ready!(self.budget.poll_yield(waiter));
+			// What the node serves through the session goes into the origin whether or not
+			// the peer reads this side's stream.
+			for stream in &self.streams {
+				while let Poll::Ready(output) = stream.poll_serve(waiter) {
+					self.routed.output(subscriber, output);
+				}
+			}
 			match self.sending {
 				Sending::Open | Sending::Ending => {
 					// Deliver what is buffered before taking more work.
@@ -316,8 +328,8 @@ impl Running {
 						continue;
 					}
 					if publish.withdrawal.poll(waiter).is_ready() {
-						// The session is leaving: end every route, then finish the stream.
-						self.answer.withdraw(&mut self.writer)?;
+						// The session is leaving: finishing the stream ends what the peer was sent.
+						self.answer.withdraw();
 						self.routed.silence();
 						self.sending = Sending::Ending;
 						continue;
@@ -335,18 +347,18 @@ impl Running {
 				Sending::Closed => {}
 			}
 
-			let ready = self.streams.iter().find_map(|stream| match stream.poll_output(waiter) {
-				Poll::Ready(output) => Some(output),
+			let ready = self.streams.iter().find_map(|stream| match stream.poll_wire(waiter) {
+				Poll::Ready(msg) => Some(msg),
 				Poll::Pending => None,
 			});
-			if let Some(output) = ready {
-				match output {
-					node::Output::Serve { .. } | node::Output::Unserve { .. } | node::Output::Ask(_) => {
-						for request in self.routed.output(subscriber, output) {
+			if let Some(msg) = ready {
+				match msg {
+					node::Msg::Ask(edit) => {
+						for request in self.routed.ask(edit) {
 							self.writer.buffer(&request)?;
 						}
 					}
-					output => self.answer.output(&mut self.writer, output)?,
+					msg => self.answer.output(&mut self.writer, msg)?,
 				}
 				continue;
 			}
@@ -354,7 +366,7 @@ impl Running {
 				Poll::Ready(res) => res?,
 				Poll::Pending => {
 					// Everything the node queued is served, so what the peer synced shows.
-					self.routed.release(waiter);
+					self.routed.release();
 					break;
 				}
 			}
@@ -371,31 +383,43 @@ impl Running {
 				return Err(Error::ProtocolViolation);
 			}
 		}
-		let Some(reader) = self.reader.as_mut().filter(|_| !self.finished) else {
+		if self.reader.is_none() || self.finished {
 			return Ok(false);
-		};
+		}
 		// Each message goes into the node, so a peer streaming them must not hold the
 		// session's other tasks.
-		let mut read = false;
 		let mut budget = kio::coop::Budget::new(32);
+		let read = self.read(subscriber, &mut budget, waiter);
+		// One pass of messages reaches the node's other sessions as one change.
+		for stream in &self.streams {
+			stream.flush();
+		}
+		read
+	}
+
+	/// Read what the peer's stream holds, until it runs dry or `budget` does.
+	fn read(
+		&mut self,
+		subscriber: &Subscriber,
+		budget: &mut kio::coop::Budget,
+		waiter: &kio::Waiter,
+	) -> Result<bool, Error> {
+		let reader = self.reader.as_mut().expect("checked by the caller");
+		let mut read = false;
 		loop {
 			// Out of budget: the yield wakes the machine, which sends before it reads on.
 			if budget.poll_yield(waiter).is_pending() {
 				return Ok(false);
 			}
 			match reader.poll_decode_maybe::<Msg>(waiter) {
-				// A DEAD's ROUTE_UPDATEs follow it with nothing between.
-				Poll::Ready(Ok(Some(Msg::Request { .. }))) if self.routed.moving() => {
-					return Err(Error::ProtocolViolation);
-				}
 				Poll::Ready(Ok(Some(Msg::Request { more, remove, add }))) => self.answer.request(more, remove, add)?,
 				// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
 				Poll::Ready(Ok(Some(_))) if self.answer.continuing() => return Err(Error::ProtocolViolation),
 				Poll::Ready(Ok(Some(announce))) => self.routed.receive(announce)?,
-				// The peer is leaving: its routes ended, and it asks for nothing more.
+				// The peer is leaving: what it sent ended, and it asks for nothing more.
 				Poll::Ready(Ok(None)) => {
 					self.finished = true;
-					self.routed.finish()?;
+					self.routed.finish();
 					return Ok(true);
 				}
 				// The peer may only finish the stream: while the session lives, whatever else
@@ -425,6 +449,7 @@ impl Publish {
 				.consume(),
 			auth: crate::auth::Link::new(false),
 			withdrawal: Default::default(),
+			routing: false,
 		}
 	}
 }

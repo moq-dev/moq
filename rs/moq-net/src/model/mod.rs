@@ -68,7 +68,6 @@ pub mod origin {
 	};
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::{Lane, NodeFilter};
-	pub use crate::route::RouteKey;
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.

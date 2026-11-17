@@ -1,5 +1,5 @@
-//! The bake-off: the multicast epic's rule ([`multi::Router`]) beside today's
-//! [`path::Router`] on the same meshes and failure schedules.
+//! The bake-off: the multicast epic's rule as prototyped ([`multi::Router`]) beside
+//! the router that ships, on the same meshes and failure schedules.
 //!
 //! Every arm builds the same [`Mesh`], sees the same failure at the same instant, and
 //! is measured by the same [`Lab`]: messages, hops of delay until every relay's
@@ -16,7 +16,6 @@ use super::*;
 /// The arms measured, in the report's order.
 fn arms() -> Vec<Arm> {
 	vec![
-		Arm::TODAY,
 		Arm::PLAIN,
 		Arm::with(|tune| tune.suspect = Suspect::Flagged),
 		Arm::with(|tune| tune.suspect = Suspect::Local),
@@ -54,13 +53,10 @@ pub(super) const MULTI: [Arm; 4] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT
 /// timeout of 3 s.
 pub(super) const IDLE: usize = 120;
 
-/// A mesh to measure, and whether today's rule can run it.
+/// A mesh to measure.
 pub(super) struct Shape {
 	pub name: &'static str,
 	pub mesh: Mesh,
-	/// Today's rule qualifies an identity across one scoped link and refuses to
-	/// again, so a publisher two grants away is never seen.
-	pub today: bool,
 }
 
 fn pair(a: Node, b: Node) -> (Node, Node) {
@@ -209,13 +205,8 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 /// Every shape, at about `relays` relays each.
 pub(super) fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 	let mut rng = XorShift(0x6d6f_7100 + relays as u64);
-	let open = |name, mesh| Shape {
-		name,
-		mesh,
-		today: true,
-	};
-	// Today's rule cannot run three meshes: a qualified identity crosses one grant.
-	let grants = |name, today, mesh: Option<Mesh>| mesh.map(|mesh| Shape { name, mesh, today });
+	let open = |name, mesh| Shape { name, mesh };
+	let grants = |name, mesh: Option<Mesh>| mesh.map(|mesh| Shape { name, mesh });
 	let (regions, edges) = match relays {
 		..12 => (2, 2),
 		12..24 => (3, 3),
@@ -233,18 +224,12 @@ pub(super) fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 	// A mesh too small for its gateways is left out.
 	shapes.extend(
 		[
-			grants(
-				"two_meshes_one_grant",
-				true,
-				joined(2, relays / 2, 1, false, publishers),
+			grants("two_meshes_one_grant", joined(2, relays / 2, 1, false, publishers),
 			),
-			grants(
-				"two_meshes_two_grants",
-				true,
-				joined(2, relays / 2, 2, false, publishers),
+			grants("two_meshes_two_grants", joined(2, relays / 2, 2, false, publishers),
 			),
-			grants("three_meshes_chain", false, joined(3, relays / 3, 1, false, publishers)),
-			grants("three_meshes_ring", false, joined(3, relays / 3, 1, true, publishers)),
+			grants("three_meshes_chain", joined(3, relays / 3, 1, false, publishers)),
+			grants("three_meshes_ring", joined(3, relays / 3, 1, true, publishers)),
 		]
 		.into_iter()
 		.flatten(),
@@ -616,11 +601,11 @@ fn a_relay_with_no_claim_offers_no_route() {
 		lab.net.held()
 	};
 	for publishers in [1, 2, 9] {
-		let (all, today) = (held(Arm::TUNED, publishers), held(Arm::TODAY, publishers));
+		let all = held(Arm::TUNED, publishers);
 		for arm in [Arm::LEAN, Arm::RELAY] {
 			let lean = held(arm, publishers);
 			println!(
-				"{publishers} publishers: {all:?} {lean:?} {today:?} under {}",
+				"{publishers} publishers: {all:?} {lean:?} under {}",
 				arm.name()
 			);
 			assert!(
@@ -628,7 +613,6 @@ fn a_relay_with_no_claim_offers_no_route() {
 				"{publishers} under {}",
 				arm.name()
 			);
-			assert!(lean.routes <= today.routes, "{publishers} under {}", arm.name());
 		}
 	}
 }
@@ -696,7 +680,7 @@ fn quiesce(net: &mut MultiSim) {
 fn tune(arm: Arm) -> multi::Tune {
 	match arm {
 		Arm::Multi(tune) => tune,
-		Arm::Path(_) | Arm::Relay(_) => panic!("not the prototype"),
+		Arm::Relay(_) => panic!("not the prototype"),
 	}
 }
 
@@ -854,8 +838,7 @@ fn benchmark_bakeoff_failures() {
 				// Without the session floor and a burst read first, a 32-relay mesh
 				// hunts through millions of messages: the 12-relay rows show it.
 				let hunts = matches!(arm, Arm::Multi(tune) if !(tune.floor && tune.batch));
-				if (arm == Arm::TODAY && !shape.today)
-					|| (relays > 16 && hunts && std::env::var("MOQ_BAKEOFF_ARMS").is_err())
+				if (relays > 16 && hunts && std::env::var("MOQ_BAKEOFF_ARMS").is_err())
 					|| unwanted("MOQ_BAKEOFF_ARMS", &arm.name())
 					|| unwanted("MOQ_BAKEOFF_SHAPES", shape.name)
 				{
@@ -918,7 +901,7 @@ fn benchmark_bakeoff_growth() {
 	cases.extend([1, 8, 64].map(|claims| ("broadcasts", tiers_of(32, 8, claims))));
 	cases.extend([8, 16, 32].map(|relays| ("links", clique(relays, 8))));
 	for (grows, mesh) in cases {
-		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
+		for arm in [Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
 			let tree = mesh.tree();
 			let mut lab = Lab::new(arm, &mesh);
 			lab.coarse = true;
@@ -952,13 +935,13 @@ fn benchmark_bakeoff_growth() {
 	}
 }
 
-/// The cases the routes epic measured today's rule on, for both.
+/// The cases the routes epic measured the rule it shipped on, for each arm.
 #[test]
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_baseline() {
 	println!("case,rule,route_messages,claim_items,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
-	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
+	for arm in [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
 		let mut rng = XorShift(0x6d6f_7100 + 24);
 		let sparse: Vec<Mesh> = (0..16).map(|_| Mesh::sparse(24, &mut rng)).collect();
 		let groups = [
