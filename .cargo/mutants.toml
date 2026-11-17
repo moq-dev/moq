@@ -94,11 +94,4 @@ exclude_re = [
     # The full diff it skips holds the same changes in another order, and a source
     # switch has already marked every claim that differs.
     'path\.rs:\d+:80: replace != with == in Router<N, A>::present$',
-    # A route used live through the neighbour heard a live offer, which the edit
-    # ranks before every held one, so it moves first; of two live ones, the next
-    # selection is the same whichever moves.
-    'path\.rs:\d+:48: delete ! in Router<N, A>::edited_exact$',
-    # Collecting a held identity only costs work: the refresh rebuilds its views from
-    # the routes that hold it, and an origin keeps its view apart.
-    'path\.rs:\d+:21: replace \|\| with && in Router<N, A>::collect$',
 ]

@@ -1090,6 +1090,62 @@ fn a_widening_edit_keeps_the_first_holds_deadline() {
 	assert!(router.route_for(7, &p("a")).is_none(), "held past the first deadline");
 }
 
+/// Where the preferred route an edit widens is used through another neighbour, a live
+/// route through the edited one moves rather than a held one before it by key: only a
+/// route in use may stay on a path through a doubted node.
+#[test]
+fn a_widening_edit_moves_the_live_route_past_a_held_one() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(BTreeSet::from([p("a/x"), p("a/y"), p("a/z")])).unwrap();
+	for (peer, id) in [(1, 1), (2, 2), (3, 6)] {
+		router.connect(peer, id, Link::default()).unwrap();
+		router.edited(peer);
+	}
+	let through_six = reach(&[(7, 0), (6, 1), (1, 1)]);
+	for prefix in ["a/x", "a/y", "a/z"] {
+		router.route(1, 7, p(prefix), Some(through_six.clone()));
+	}
+	router.route(2, 7, p("a/x"), Some(path::Reach::Finite(along(&[(7, 0), (2, 1)], 0))));
+	router.disconnect([3], Instant::ZERO);
+	router.route(1, 7, p("a/y"), Some(path::Reach::Held));
+	assert!(matches!(
+		router.route_for(7, &p("a/x")),
+		Some(path::Route::Live { next: 2, .. })
+	));
+	assert!(matches!(router.route_for(7, &p("a/y")), Some(path::Route::Held { .. })));
+	assert!(matches!(
+		router.route_for(7, &p("a/z")),
+		Some(path::Route::Live { next: 1, .. })
+	));
+
+	router.watch(BTreeSet::from([p("a")])).unwrap();
+	router.edited(1);
+	assert!(
+		matches!(router.route_for(7, &p("a")), Some(path::Route::Live { next: 1, .. })),
+		"{}",
+		router.dump()
+	);
+}
+
+/// Collecting an identity a route still holds keeps its views.
+#[test]
+fn collecting_a_held_identity_keeps_its_views() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(BTreeSet::from([p("a")])).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p("a"), Some(offered(1, 0)));
+	router.batch(1, 7, p("a"), vec![(p("a/x"), Some(1))], Some(1));
+	router.route(1, 7, p("a"), Some(path::Reach::Held));
+	let views = |router: &path::Router<usize, u8>| -> Vec<((Id, Path), View<u8>)> {
+		router.views().map(|(key, view)| (key.clone(), view.clone())).collect()
+	};
+	let before = views(&router);
+	assert!(!before.is_empty());
+	router.collect(7);
+	assert_eq!(views(&router), before);
+}
+
 /// A route outside what this node asked the neighbour for is refused, and so is one to
 /// this node's own identity.
 #[test]
