@@ -131,7 +131,7 @@ export type BroadcastInput = {
 		height: number;
 		width: number;
 	} | undefined>;
-	echo: Signals.Getter<Net.Path.Relative | undefined>;
+	echoPath: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Duration | null | undefined>;

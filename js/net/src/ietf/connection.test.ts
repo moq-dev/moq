@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
-import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -257,7 +256,6 @@ test("uni streams before SETUP are held until it lands", async () => {
 
 	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test", {
 		client: false,
-		extensions: offered(),
 	});
 	expect(early.length).toBe(2);
 
@@ -305,7 +303,7 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { early } = await exchangeSetup(pair.server, version, "test", { client: false, extensions: offered() });
+	const { early } = await exchangeSetup(pair.server, version, "test", { client: false });
 	expect(early.length).toBe(0);
 });
 

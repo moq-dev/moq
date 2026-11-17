@@ -7,7 +7,7 @@
 End-to-end encryption for [Media over QUIC](https://moq.dev), mirroring the Rust `moq-crypto`
 crate's `e2ee` module. `E2ee` encrypts groups, datagrams, and track names so relays cannot read
 them. It wraps `@moq/net` and checks each timestamp with `@moq/net`'s
-`Datagram.rescale(info, timestamp)` before encrypting, so a frame it accepts is one `@moq/net`
+`Track.rescale(info, timestamp)` before encrypting, so a frame it accepts is one `@moq/net`
 accepts.
 
 ## Encryption

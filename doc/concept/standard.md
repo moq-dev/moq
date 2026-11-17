@@ -55,8 +55,7 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
 before a `SUBSCRIBE_NAMESPACE` is synced.
-Both libraries offer solicit unless a side's `extensions` setting declines it,
-which connects it as a peer that does not speak that extension. The pooled JavaScript `Connection` has no such setting yet.
+Both libraries always offer solicit.
 moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
 so the receiving session mints one per announcement.
 
@@ -71,8 +70,10 @@ does and a browser session does not yet.
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this
 object state between relays. moq-lite-07 is still a work in progress
 (`moq-lite-07-wip`), negotiated only when both sides enable it, so a peer that
-does not offer it does not carry this state. Only Rust offers the extension, when
-`extensions.ietf` is set, and `moq-relay` always does on moq-lite-07.
+does not offer it does not carry this state. Only `moq-relay` offers the extension,
+always, on moq-lite-07. It costs a moq-lite track nothing: only a track a moq-transport
+publisher made carries the state, so the groups of any other cross the hop byte for
+byte as they would without the extension.
 [moq-e2ee](/draft/moq-e2ee), published and experimental, is not a transport extension. It encrypts
 application payloads, so relays still forward named tracks they cannot read.
 See [Encryption](/concept/hang#encryption).
