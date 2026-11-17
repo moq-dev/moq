@@ -50,8 +50,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
-  [finish](/quest/m2/finish-sweep.md), and
-  [moq-json writes](/quest/m2/json-write-at.md).
+  and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
