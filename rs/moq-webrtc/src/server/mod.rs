@@ -279,18 +279,10 @@ mod tests {
 		std::net::UdpSocket::bind(addr).expect_err("a live clone keeps the port");
 
 		drop(clone);
-		// The abort only requests cancellation: the demux task drops its socket once the
-		// runtime next polls it, which a single yield does not guarantee. Retry until a deadline.
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-		loop {
-			match std::net::UdpSocket::bind(addr) {
-				Ok(_) => break,
-				Err(err) if tokio::time::Instant::now() >= deadline => {
-					panic!("the dropped server kept its port: {err}")
-				}
-				Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-			}
-		}
+		// The abort only schedules the demux task to be dropped; yielding lets this
+		// current-thread runtime run it, which drops its socket handle.
+		tokio::task::yield_now().await;
+		std::net::UdpSocket::bind(addr).expect("the dropped server kept its port");
 	}
 
 	#[tokio::test]

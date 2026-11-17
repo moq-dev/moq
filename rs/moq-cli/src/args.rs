@@ -1816,11 +1816,11 @@ mod tests {
 
 	/// The WebRTC media socket flags configure the listener, so a dialer refuses them.
 	#[test]
-	fn rtc_media_flags_need_the_listener() {
+	fn webrtc_media_flags_need_the_listener() {
 		for flag in [["--udp-bind", "[::]:5000"], ["--public-addr", "203.0.113.1:5000"]] {
-			let listen = [&["rtc", "--listen", "127.0.0.1:8443"][..], &flag].concat();
+			let listen = [&["webrtc", "--listen", "127.0.0.1:8443"][..], &flag].concat();
 			export(&listen).unwrap().validate().unwrap();
-			let connect = [&["rtc", "--connect", "http://remote/whip"][..], &flag].concat();
+			let connect = [&["webrtc", "--connect", "http://remote/whip"][..], &flag].concat();
 			let err = export(&connect).err().expect("a dialer took a listener flag");
 			assert!(err.to_string().contains("--listen"), "{flag:?}: {err}");
 		}
