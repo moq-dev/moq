@@ -15,8 +15,10 @@ first (inject a flush error through the `probe` backend).
 
 - `rs/moq-video/src/decode/consumer.rs`: at a Gap or End, `self.drain().await?`
   returns before queueing `Read::Gap`/`Read::End` and setting `recover`, and
-  the marker is already consumed. Queue the boundary and arm recovery before
-  the fallible drain, as the end-of-track branch does. From
+  the marker is already consumed. Keep the drained pictures ahead of their
+  boundary: take the drain's result without `?`, queue whatever it drained,
+  then the boundary, arm recovery, and only then return the drain's error.
+  Read the end-of-track branch, which already survives a failed drain. From
   [moq-dev/moq#6475](https://github.com/moq-dev/moq/pull/6475).
 - `rs/moq-video/src/decode/decoder.rs`: an entry pushes per keyframe whose SPS
   changes colour space and pops only when a delivered picture reaches it; a
