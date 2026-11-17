@@ -320,7 +320,7 @@ impl<S: ObjectStore> Track<S> {
 				|| match (self.timescale, frame.timestamp) {
 					(Some(timescale), Some(pts)) => {
 						let duration = units(config.duration, timescale);
-						let first = building.object.start()?.pts.expect("a timed object starts timed");
+						let first = building.object.timestamp().expect("a timed object starts timed");
 						match boundary {
 							true => pts.saturating_sub(first) >= duration,
 							// An oversized group splits once its own run here reaches the duration.
