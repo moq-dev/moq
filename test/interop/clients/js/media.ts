@@ -163,7 +163,7 @@ const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
 if (!native && values.cases === undefined) {
 	console.error(
-		"QUARANTINE\treplacement\tintermittent audio stall after a route switch under CPU load; see quest/m0/interop-green/README.md",
+		"QUARANTINE\treplacement\tintermittent audio silence after skipped groups under CPU load; see quest/m0/interop-green/replacement-audio.md",
 	);
 }
 

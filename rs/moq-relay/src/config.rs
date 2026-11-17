@@ -157,8 +157,34 @@ struct Cli {
 /// flattens it has its own spec, so `Config::spec()` would hand back the wrong
 /// one and read as though it were theirs.
 pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
-	Cli::spec()
+	static SPEC: std::sync::OnceLock<usage_rs::spec::Spec<'static>> = std::sync::OnceLock::new();
+	SPEC.get_or_init(|| {
+		let base = Cli::spec();
+		// `[connect]` is the shared client fragment, flattened whole; its `url` and `tokens`
+		// still parse so [`Config::resolve`] can refuse them, but help no longer offers them.
+		let flags = base
+			.root
+			.flags
+			.iter()
+			.map(|meta| usage_rs::spec::FlagMeta {
+				hide: meta.hide || meta.flag.longs.iter().any(|long| REFUSED_CONNECT.contains(long)),
+				..*meta
+			})
+			.collect::<Vec<_>>();
+		let root = usage_rs::spec::CommandMeta {
+			flags: flags.leak(),
+			..*base.root
+		};
+		usage_rs::spec::Spec {
+			root: Box::leak(Box::new(root)),
+			..*base
+		}
+	})
 }
+
+/// The `[connect]` flags a relay refuses: cluster dials take their peers and
+/// credentials from `[cluster]`.
+const REFUSED_CONNECT: [&str; 2] = ["connect", "connect-token"];
 
 /// Every setting the relay merges, as its flags declare them.
 pub(crate) const fn registry() -> usage_rs::config::Registry {
@@ -219,7 +245,7 @@ impl Config {
 		let (cli, cli_layer) = match Cli::parse_from_with_settings(&argv) {
 			Ok(parsed) => parsed,
 			Err(err) => {
-				let answer = moq_tokio::cli::answer(Cli::spec(), Cli::command(), &argv, err);
+				let answer = moq_tokio::cli::answer(spec(), Cli::command(), &argv, err);
 				if answer.is_question() {
 					answer.exit();
 				}
@@ -322,6 +348,7 @@ impl Config {
 	pub(crate) fn resolve(mut self) -> anyhow::Result<Resolved> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		self.check_connect()?;
 		// Here rather than at an endpoint, since io_uring workers and lazily built
 		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
 		// is checked by `Cluster::new`, which embedders call directly.
@@ -347,6 +374,33 @@ impl Config {
 			.clone();
 		self.connect.implementation = Some(implementation);
 		Ok(Resolved(self))
+	}
+
+	/// Refuse the `[connect]` keys a cluster dial has no use for.
+	///
+	/// The relay flattens the whole client fragment as the template for cluster dials,
+	/// but a peer's address and credential come from `[cluster]`: a URL here would be
+	/// read by nothing, and tokens here would reach every peer, LAN ones included.
+	fn check_connect(&self) -> anyhow::Result<()> {
+		let mut refused = Vec::new();
+		if self.connect.url.is_some() {
+			refused.push(
+				"--connect / MOQ_CONNECT / connect.url: name the peers to dial with \
+				 --cluster-connect / MOQ_CLUSTER_CONNECT / cluster.connect",
+			);
+		}
+		if !self.connect.tokens.is_empty() {
+			refused.push(
+				"--connect-token / MOQ_CONNECT_TOKEN / connect.tokens: give peers a credential with \
+				 --cluster-token / MOQ_CLUSTER_TOKEN / cluster.token, or a `token` on a cluster.connect peer",
+			);
+		}
+		anyhow::ensure!(
+			refused.is_empty(),
+			"moq-relay does not read these settings; remove them and try again:\n  {}",
+			refused.join("\n  ")
+		);
+		Ok(())
 	}
 
 	/// Refuse worker options that need a worker group, or a build, this relay lacks.
@@ -668,6 +722,80 @@ mod tests {
 		] {
 			assert!(err.contains(line), "missing {line:?} from {err}");
 		}
+	}
+
+	/// What the refusal says for `[connect]`'s URL and its tokens.
+	const REFUSED_URL: &str = "--connect / MOQ_CONNECT / connect.url: name the peers to dial with \
+	                           --cluster-connect / MOQ_CLUSTER_CONNECT / cluster.connect";
+	const REFUSED_TOKENS: &str = "--connect-token / MOQ_CONNECT_TOKEN / connect.tokens: give peers a credential \
+	                              with --cluster-token / MOQ_CLUSTER_TOKEN / cluster.token";
+
+	/// `[connect]`'s URL and tokens stop the relay from a flag or the file, naming
+	/// what replaces each, while the rest of `[connect]` still resolves.
+	#[test]
+	fn connect_url_and_tokens_refuse_to_boot() {
+		if !test_env::Env::without(&["MOQ_CONNECT", "MOQ_CONNECT_TOKEN"]).isolate() {
+			return;
+		}
+		let refusal = |config: Config| config.resolve().expect_err("must refuse").to_string();
+
+		let flags = Config::parse_and_merge(["moq-relay", "--connect", "https://peer.example/"]).unwrap();
+		let err = refusal(flags);
+		assert!(err.contains(REFUSED_URL) && !err.contains("connect.tokens"), "{err}");
+		let flags = Config::parse_and_merge(["moq-relay", "--connect-token", "secret"]).unwrap();
+		let err = refusal(flags);
+		assert!(err.contains(REFUSED_TOKENS) && !err.contains("connect.url"), "{err}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(&path, "[connect]\nurl = 'https://peer.example/'\ntokens = ['secret']\n").unwrap();
+		let file = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
+		let err = refusal(file);
+		assert!(err.contains(REFUSED_URL) && err.contains(REFUSED_TOKENS), "{err}");
+
+		let rest = Config::parse_and_merge([
+			"moq-relay",
+			"--connect-bind",
+			"[::]:0",
+			"--connect-timeout",
+			"5s",
+			"--connect-version",
+			"moq-lite-05",
+			"--connect-tls-root",
+			"ca.pem",
+		])
+		.unwrap();
+		rest.resolve().expect("the dial template's other keys still resolve");
+	}
+
+	/// The same refusal from the environment, the half a deployment most often uses.
+	#[test]
+	fn connect_env_refuses_to_boot() {
+		if !test_env::Env::default()
+			.set("MOQ_CONNECT", "https://peer.example/")
+			.set("MOQ_CONNECT_TOKEN", "secret")
+			.isolate()
+		{
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
+		let err = config.resolve().expect_err("must refuse").to_string();
+		assert!(err.contains(REFUSED_URL) && err.contains(REFUSED_TOKENS), "{err}");
+	}
+
+	/// `--help` no longer offers the two refused `[connect]` flags, and still lists the rest.
+	#[test]
+	fn help_omits_the_refused_connect_flags() {
+		let argv = [std::ffi::OsStr::new("--help")];
+		let err = Cli::parse_from(&argv).unwrap_err();
+		let help = moq_tokio::cli::answer(spec(), Cli::command(), &argv, err)
+			.message()
+			.to_string();
+		assert!(help.contains("--connect-bind"), "{help}");
+		assert!(
+			!help.contains("--connect <") && !help.contains("--connect-token"),
+			"{help}"
+		);
 	}
 
 	/// A released config file is parsed where the tables used to live, so the relay

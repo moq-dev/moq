@@ -238,7 +238,7 @@ pub(crate) fn within_any(path: &Path, regions: &BTreeSet<Path>) -> bool {
 
 /// `path` and every prefix above it, the root first, as the strings a `Path`-keyed
 /// map is looked up by.
-fn heads(path: &Path) -> impl Iterator<Item = &str> {
+pub(crate) fn heads(path: &Path) -> impl Iterator<Item = &str> {
 	let s = path.as_str();
 	let ends = path.parts().scan(0, |end, part| {
 		*end += part.len() + usize::from(*end > 0);

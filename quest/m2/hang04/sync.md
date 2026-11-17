@@ -34,8 +34,9 @@ Facts found by the audit:
 - The clock times text cues, data tracks, `m2ts` frames, stats `arrival`,
   and the catalog track itself
   (`rs/hang/src/catalog/root.rs`: "snapshots share the broadcast clock with
-  media"), which
-  [catalog at timestamp](/quest/m2/catalog-at-timestamp.md) makes normative.
+  media"), which the draft's Catalog section makes normative: an update
+  takes effect at its frame's timestamp, citing `{{clock}}`, so retarget
+  that reference with the rename.
   The draft's own Clock section calls it "the broadcast's one continuous
   clock".
 - hang-03 and `release` carry `clock` at the root, so a published 0.21
@@ -58,14 +59,14 @@ For the PR:
   (`Option<Duration>`, whole milliseconds rounded up, as `Join::interval` is
   today), `Catalog::media` becomes `Catalog::sync`, and `Join`, `JoinWire`,
   and `Media::interval()` go. JS mirrors it: `root.sync`, `SyncSchema`.
-- The section is strict from its first day, under the rule
-  [one strict rule](/quest/m2/hang04/shape.md) applies to the rest: a `sync`
-  that is not an object, a malformed `clock`, or an `interval` that is not a
-  positive integer refuses the catalog. Delete `deserialize_media` and its
-  JS twin, the `DefaultOnError` on the interval, and the draft's "belongs to
-  another application" and "MUST treat it as absent" sentences. A root
-  `media` key is then an application's own again, and is ignored like the
-  retired root `clock` (`a_retired_root_clock_and_hls_field_are_ignored`).
+- The section reads under the draft Root section's one rule, as every root
+  section does (`deserialize_object` for the section and `deserialize_some`
+  for its members in Rust, plain `z.optional` in JS): a `sync` that is not
+  an object or is `null`, a malformed `clock`, or an `interval` that is not
+  a positive integer refuses the catalog. A root `media` key is then an
+  application's own again, and is ignored like the retired root `clock`
+  (`a_retired_root_clock_and_hls_field_are_ignored`). Move the `media` cases
+  in `rs/hang/fixtures/catalog-parity.json` to `sync`.
 - Draft: rename the Media section and its anchors, fold Join into it, and
   rewrite the hang-04 changelog lines that describe `media`. The mpegts
   draft and the HLS section cite the interval by name.
@@ -86,8 +87,3 @@ Public API: breaking. Rust `hang::catalog::{Media, Join}` and
 `Catalog::media`; JS `root.media`, `MediaSchema`, `JoinSchema`. Wire: the
 hang-04 catalog JSON, unpublished; a main-built reader of `media.clock`
 finds no clock in a new catalog.
-
-## Related
-
-- [hang applies catalog updates at their timestamp](/quest/m2/catalog-at-timestamp.md) - puts the catalog track itself on this clock
-- [One rule refuses a mis-shaped catalog section](/quest/m2/hang04/shape.md) - the rule this section follows from the start
