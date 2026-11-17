@@ -27,7 +27,10 @@ Remaining, each needing hardware to measure that the peak holds:
   `maxrate` as the peak; check what the driver does with `bitrate` and whether
   the encoder advertises `OBS_ENCODER_CAP_DYN_BITRATE` (it does not today).
 
-Whatever measures as not holding stays CBR. Extend `EncoderPeakKey` and
+Whatever measures as not holding stays CBR. Decided by the maintainer: "Use
+OBS Output settings" in Simple mode stays CBR, and every encoder keeps its own
+default quality level (x264 CRF 23, NVENC target quality 20) until the VMAF
+harness ([quest/m9/video-quality](/quest/m9/video-quality/README.md)) picks one. Extend `EncoderPeakKey` and
 `ApplyEncoderRate`; the output follows from them.
 
 Public API: none. Wire: none.
