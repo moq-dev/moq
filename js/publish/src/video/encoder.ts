@@ -67,9 +67,9 @@ export interface Config {
 	maxBitrate?: number;
 
 	/**
-	 * Multiplies the default bitrate cap, which is 4 Mbps for 720p30 H.264 and levels off toward
-	 * 10 Mbps for larger pictures. `maxBitrate` still caps the result. (default: 1)
-	 * NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	 * Multiplies the default bitrate cap. At 30 fps H.264 that cap is 4 Mbps for 720p and levels off
+	 * toward 10 Mbps for larger pictures; 60 fps costs 1.5x, and other codecs scale it (H.265 0.7x).
+	 * `maxBitrate` still caps the result. (default: 1)
 	 */
 	bitrateScale?: number;
 
