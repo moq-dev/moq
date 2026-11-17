@@ -1120,7 +1120,11 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = live.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = loop {
+			if let Some(group) = live.next_group().await.unwrap().unwrap().group() {
+				break group;
+			}
+		};
 		assert!(group.read_frame().await.unwrap().is_some());
 
 		transcoder.abort();
