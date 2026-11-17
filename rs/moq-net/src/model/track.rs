@@ -10285,13 +10285,18 @@ impl Subscriber {
 
 	/// Record `key` as served, so no cut or drop of it is reported afterwards.
 	fn settle(&mut self, key: u64) {
+		if let Some(end) = key.checked_add(1) {
+			self.settle_range(key..end);
+		}
+	}
+
+	/// Record `keys` as served or reported, so no cut or drop of them is reported again.
+	fn settle_range(&mut self, keys: ops::Range<u64>) {
 		let record = match &mut self.inner {
 			Inner::Plain(cursor) => &mut cursor.record,
 			Inner::Resume(_, logical) => &mut logical.record,
 		};
-		if let Some(end) = key.checked_add(1) {
-			record.tell(key..end, Report::Settled);
-		}
+		record.tell(keys, Report::Settled);
 	}
 
 	/// The key cursor behind [`Ordered`], which owns the only public door to it.
@@ -11139,9 +11144,35 @@ impl Ordered {
 			let Poll::Ready((range, hole)) = polled else {
 				return;
 			};
-			// A skip was never a group: nothing was given up.
-			if let Hole::Drop { error, .. } = hole {
-				self.gaps.insert(range.start, (range.end, error.into()));
+			match hole {
+				Hole::Drop { error, .. } => {
+					self.gaps.insert(range.start, (range.end, error.into()));
+				}
+				// A skip was never a group: nothing was given up, and it replaces a drop
+				// still waiting.
+				Hole::Skip => self.forget_gaps(range),
+			}
+		}
+	}
+
+	/// Remove `skipped` from the gaps waiting, splitting those it only partly covers.
+	fn forget_gaps(&mut self, skipped: ops::Range<u64>) {
+		// The gaps never overlap, so their ends rise with their starts: walk down from the
+		// highest one that starts below the skip's end, and stop at the first that ends before it.
+		let hit: Vec<u64> = self
+			.gaps
+			.range(..skipped.end)
+			.rev()
+			.take_while(|(_, (end, _))| *end > skipped.start)
+			.map(|(start, _)| *start)
+			.collect();
+		for start in hit {
+			let (end, error) = self.gaps.remove(&start).expect("the gap was just found");
+			if start < skipped.start {
+				self.gaps.insert(start, (skipped.start, error.clone()));
+			}
+			if end > skipped.end {
+				self.gaps.insert(skipped.end, (end, error));
 			}
 		}
 	}
@@ -11157,6 +11188,8 @@ impl Ordered {
 	/// A gap as an item, which the read has now moved past.
 	fn give(&mut self, range: ops::Range<u64>, error: Error) -> Item {
 		self.at = self.at.max(range.end);
+		// Told once: no later drop of these keys is a gap again.
+		self.inner.settle_range(range.clone());
 		Item::Gap { range, error }
 	}
 
@@ -19359,6 +19392,58 @@ mod test {
 			items(&mut ordered),
 			["group 0", "gap 1..2 (delivery timeout)"],
 			"the end is clean after every gap"
+		);
+	}
+
+	/// A gap returned is told once: a later drop of the same keys, even a final one that would
+	/// replace a stale report on the wire, is no second gap.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_is_returned_once() {
+		let producer = received_producer(None);
+		let budget = Duration::from_millis(50);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(items(&mut ordered), ["group 0", "pending"]);
+		// The budget gives up on the group still owed, as stale.
+		elapse(&producer, budget);
+		assert_eq!(items(&mut ordered), ["gap 1..2 (old)", "group 2", "pending"]);
+		producer.drop_groups(1..2, StreamError::DeliveryTimeout);
+		put(&producer, 3, None);
+		assert_eq!(items(&mut ordered), ["group 3", "pending"]);
+	}
+
+	/// A skip replaces a drop still waiting for the groups below it, so the keys it names are
+	/// no gap, and the part of a drop it leaves still is.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skip_replaces_a_buffered_gap() {
+		let producer = received_producer(None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		producer.drop_groups(4..8, StreamError::DeliveryTimeout);
+		assert_eq!(items(&mut ordered), ["group 0", "pending"]);
+		producer.skip_groups(5..7);
+		producer.drop_groups(1..2, StreamError::DeliveryTimeout);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 1..2 (delivery timeout)", "group 2", "pending"]
+		);
+		put(&producer, 3, None);
+		assert_eq!(
+			items(&mut ordered),
+			[
+				"group 3",
+				"gap 4..5 (delivery timeout)",
+				"gap 7..8 (delivery timeout)",
+				"pending"
+			]
 		);
 	}
 
