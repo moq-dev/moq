@@ -1172,13 +1172,14 @@ async fn a_killed_mp4_recording_is_repaired() {
 		.expect("spawn export");
 	let (mut publisher, feeding) = import(&relay);
 
+	// Audio fragments as its groups end, video only at the next keyframe, two seconds in.
 	kio::clock::timeout(TIMEOUT, async {
-		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+		while fragmented(&std::fs::read(&path).unwrap_or_default()).len() < 2 {
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
-	.expect("the recording never grew");
+	.expect("the recording never held a fragment of each track");
 	// The recorder holds its lock while it writes, so repairing now would corrupt the file.
 	let mid = std::fs::read(&path).unwrap();
 	let refused = moq_repair(&path).await;
@@ -1233,6 +1234,18 @@ fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
 		boxes.push(atom);
 	}
 	boxes
+}
+
+/// The track ids with a complete moof+mdat fragment in a recording, possibly mid-write.
+fn fragmented(file: &[u8]) -> std::collections::HashSet<u32> {
+	boxes(file)
+		.windows(2)
+		.filter_map(|pair| match pair {
+			[mp4_atom::Any::Moof(moof), mp4_atom::Any::Mdat(_)] => Some(moof),
+			_ => None,
+		})
+		.flat_map(|moof| moof.traf.iter().map(|traf| traf.tfhd.track_id))
+		.collect()
 }
 
 /// Count the frames the relay delivers on `demo`'s video track as they arrive. A GOP lasts two

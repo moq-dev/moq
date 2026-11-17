@@ -1966,7 +1966,12 @@ pub fn path(data: &[u8]) -> bool {
 			Err(crate::path::Error::TooLong)
 		} else if escaped_segments(s).iter().any(|segment| !paired(segment)) {
 			Err(crate::path::Error::InvalidEscape)
-		} else if escaped_segments(s).iter().any(String::is_empty) {
+		} else if escaped_segments(s).iter().any(String::is_empty)
+			// TEMPORARY MIGRATION, delete at the next version cut: the previous release splits at
+			// every `/`, escaped or not, so a `/` doubled or at the end is refused even after a `\`.
+			|| s.ends_with('/')
+			|| s.contains("//")
+		{
 			Err(crate::path::Error::EmptySegment)
 		} else {
 			Ok(())
