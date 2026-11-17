@@ -156,7 +156,12 @@ test("gaps closer than the warmup still play, the pre-roll carrying over the las
 	for (const start of [1_000_000, 2_000_000]) {
 		terminal.update(gap);
 		terminal.update(frame(1n, start));
-		expect(terminal.preroll().map((p) => p.timestamp)).toEqual([start - 80_000, start - 60_000, start - 40_000, start - 20_000]);
+		expect(terminal.preroll().map((p) => p.timestamp)).toEqual([
+			start - 80_000,
+			start - 60_000,
+			start - 40_000,
+			start - 20_000,
+		]);
 		terminal.decoded(packet(start), Duration.micros(20_000));
 		expect(terminal.span(opus(start)).frames).toBe(960);
 	}

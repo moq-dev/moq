@@ -1510,7 +1510,11 @@ mod tests {
 			assert_eq!(frames, 4 * 960, "{cut:?}");
 			// A primed decoder trims nothing after the gap.
 			let (stamps, _) = warmup_output(cut, 6).await;
-			assert_eq!(stamps[2..], [1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000], "{cut:?}");
+			assert_eq!(
+				stamps[2..],
+				[1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000],
+				"{cut:?}"
+			);
 		}
 	}
 

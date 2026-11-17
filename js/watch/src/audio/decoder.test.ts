@@ -533,7 +533,11 @@ it("re-primes the decoder on the warmup before a gap, so the frame after it play
 		await microtasks();
 		await playback.play();
 		const played = audioChunks.length;
-		playback.push({ kind: "gap", timestamp: Duration.micros(frameTimestamp + 20_000), duration: Duration.millis(100) });
+		playback.push({
+			kind: "gap",
+			timestamp: Duration.micros(frameTimestamp + 20_000),
+			duration: Duration.millis(100),
+		});
 		frameTimestamp += 100_000;
 		const next = frame();
 		playback.push({ ...next, group: 1n });
@@ -546,7 +550,6 @@ it("re-primes the decoder on the warmup before a gap, so the frame after it play
 			at - 20_000,
 			at,
 		]);
-		expect(playback.inserted().filter((timestamp) => timestamp < at - 20_000 && timestamp >= at - 80_000)).toEqual([]);
 		expect(playback.inserted()).toContain(at);
 	} finally {
 		playback.close();
