@@ -6,7 +6,6 @@
 //! returned answer, then hands the resulting `str0m::Rtc` to the internal
 //! session driver in ingest mode (the same sink the WHIP server uses).
 
-use crate::vendor::str0m;
 use str0m::{
 	Candidate,
 	change::SdpAnswer,

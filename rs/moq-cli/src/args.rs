@@ -1991,6 +1991,34 @@ mod tests {
 		assert!(matches!(format(&[]), Some(PublishFormat::Ts { program: None })));
 	}
 
+	/// `--udp-bind` and `--public-addr` configure the server's shared socket, so a `--connect` client refuses them.
+	#[test]
+	fn webrtc_socket_flags_require_listen() {
+		for verb in ["import", "export"] {
+			let url = "http://127.0.0.1:8443/live";
+			for flag in [["--public-addr", "1.2.3.4:5"], ["--udp-bind", "0.0.0.0:0"]] {
+				assert!(
+					Invocation::try_parse_from(["moq", verb, "webrtc", "--connect", url, flag[0], flag[1]]).is_err(),
+					"{verb} webrtc --connect {}",
+					flag[0]
+				);
+			}
+			assert!(
+				Invocation::try_parse_from([
+					"moq",
+					verb,
+					"webrtc",
+					"--listen",
+					"127.0.0.1:8443",
+					"--public-addr",
+					"1.2.3.4:5"
+				])
+				.is_ok(),
+				"{verb} webrtc --listen --public-addr"
+			);
+		}
+	}
+
 	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
 	#[test]
 	fn import_srt_takes_a_program() {

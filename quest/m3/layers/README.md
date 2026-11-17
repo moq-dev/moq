@@ -33,7 +33,7 @@ broadcast to share the listing catalog's PTS timeline, `media.clock`, and
 - **Shape:** ✅ all in the composition broadcast's catalog, its updates timed
   (rejected: the catalog listing children with a separate timed track for
   placement; everything in one track). A catalog update applies at its
-  timestamp ([that rule](/quest/m2/catalog-at-timestamp.md), m2).
+  timestamp (the hang draft's Catalog section, landed in m2).
 - **Clock:** ✅ each child carries the composer's offset from its PTS to the
   composition's (rejected: aligning children by their `media.clock` wall
   times, which depends on publishers' clocks agreeing and drops the latency

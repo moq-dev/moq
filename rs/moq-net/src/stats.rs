@@ -150,7 +150,7 @@ use std::{
 };
 
 use kio::Lock;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::{Path, Pattern, Patterns, time::Instant, util::SendCell};
 
@@ -477,12 +477,10 @@ impl SessionBytes {
 /// Every counter is cumulative, so a rate is `delta / delta_t` and a live
 /// count is `started - ended`. This is also the wire shape of one entry on a
 /// published stats track (the `moq-stats` crate serializes maps of these).
-/// Serialize writes both the canonical `*_started`/`*_ended` names and the
-/// legacy `announced`/`*_closed` spellings so an older consumer still reads a
-/// new relay; deserialize accepts either spelling, with the canonical name
-/// winning when both are present. Unknown fields from a newer publisher are
-/// ignored and missing fields from an older one default to zero.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Unknown fields from a newer publisher are ignored and missing fields from
+/// an older one default to zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct Traffic {
 	/// Cumulative broadcast announce events on this slice.
@@ -524,134 +522,6 @@ pub struct Traffic {
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,
-}
-
-/// One spelling of a counter edge on the wire: absent, or a present integer.
-///
-/// Decoding goes through `u64`, so an explicit `null` is refused rather than
-/// read as absent; only a missing field takes the default.
-#[derive(Default, Clone, Copy)]
-struct Edge(Option<u64>);
-
-impl<'de> Deserialize<'de> for Edge {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		u64::deserialize(deserializer).map(|v| Self(Some(v)))
-	}
-}
-
-/// Prefer the canonical `*_started`/`*_ended` spelling; fall back to the
-/// legacy name so a consumer built after the rename still reads an older relay.
-fn counter_edge(canonical: Edge, legacy: Edge) -> u64 {
-	canonical.0.or(legacy.0).unwrap_or(0)
-}
-
-#[derive(Serialize)]
-struct TrafficSer {
-	announces_started: u64,
-	announced: u64,
-	announces_ended: u64,
-	announced_closed: u64,
-	announced_bytes: u64,
-	broadcasts_started: u64,
-	broadcasts: u64,
-	broadcasts_ended: u64,
-	broadcasts_closed: u64,
-	subscriptions_started: u64,
-	subscriptions: u64,
-	subscriptions_ended: u64,
-	subscriptions_closed: u64,
-	fetches: u64,
-	bytes: u64,
-	frames: u64,
-	groups: u64,
-	datagrams: u64,
-	inflated: u64,
-	stale: Content,
-}
-
-impl From<Traffic> for TrafficSer {
-	fn from(t: Traffic) -> Self {
-		Self {
-			announces_started: t.announces_started,
-			announced: t.announces_started,
-			announces_ended: t.announces_ended,
-			announced_closed: t.announces_ended,
-			announced_bytes: t.announced_bytes,
-			broadcasts_started: t.broadcasts_started,
-			broadcasts: t.broadcasts_started,
-			broadcasts_ended: t.broadcasts_ended,
-			broadcasts_closed: t.broadcasts_ended,
-			subscriptions_started: t.subscriptions_started,
-			subscriptions: t.subscriptions_started,
-			subscriptions_ended: t.subscriptions_ended,
-			subscriptions_closed: t.subscriptions_ended,
-			fetches: t.fetches,
-			bytes: t.bytes,
-			frames: t.frames,
-			groups: t.groups,
-			datagrams: t.datagrams,
-			inflated: t.inflated,
-			stale: t.stale,
-		}
-	}
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct TrafficDe {
-	announces_started: Edge,
-	announced: Edge,
-	announces_ended: Edge,
-	announced_closed: Edge,
-	announced_bytes: u64,
-	broadcasts_started: Edge,
-	broadcasts: Edge,
-	broadcasts_ended: Edge,
-	broadcasts_closed: Edge,
-	subscriptions_started: Edge,
-	subscriptions: Edge,
-	subscriptions_ended: Edge,
-	subscriptions_closed: Edge,
-	fetches: u64,
-	bytes: u64,
-	frames: u64,
-	groups: u64,
-	datagrams: u64,
-	inflated: u64,
-	stale: Content,
-}
-
-impl From<TrafficDe> for Traffic {
-	fn from(d: TrafficDe) -> Self {
-		Self {
-			announces_started: counter_edge(d.announces_started, d.announced),
-			announces_ended: counter_edge(d.announces_ended, d.announced_closed),
-			announced_bytes: d.announced_bytes,
-			broadcasts_started: counter_edge(d.broadcasts_started, d.broadcasts),
-			broadcasts_ended: counter_edge(d.broadcasts_ended, d.broadcasts_closed),
-			subscriptions_started: counter_edge(d.subscriptions_started, d.subscriptions),
-			subscriptions_ended: counter_edge(d.subscriptions_ended, d.subscriptions_closed),
-			fetches: d.fetches,
-			bytes: d.bytes,
-			frames: d.frames,
-			groups: d.groups,
-			datagrams: d.datagrams,
-			inflated: d.inflated,
-			stale: d.stale,
-		}
-	}
-}
-
-impl Serialize for Traffic {
-	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		TrafficSer::from(*self).serialize(serializer)
-	}
-}
-
-impl<'de> Deserialize<'de> for Traffic {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		TrafficDe::deserialize(deserializer).map(Into::into)
-	}
 }
 
 impl Traffic {
@@ -698,10 +568,9 @@ impl Traffic {
 /// show how close one session came to the bounds on what it holds.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
-/// sessions, presence, or totals track. Serialize writes both the canonical names and the legacy
-/// `sessions`/`sessions_closed` spellings; deserialize accepts either, with
-/// the canonical name winning when both are present.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// sessions, presence, or totals track.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct Presence {
 	/// Cumulative sessions refused before admission, by reason.
@@ -730,97 +599,6 @@ pub struct Presence {
 	/// Cumulative routes and claims a lite-07 session forwarded that this
 	/// node refused, withdrawing each and keeping the session.
 	pub routes_refused: u64,
-}
-
-#[derive(Serialize)]
-struct PresenceSer {
-	sessions_refused: Refusals,
-	sessions_failed: Failures,
-	requests: u64,
-	sessions_started: u64,
-	sessions: u64,
-	sessions_ended: u64,
-	sessions_closed: u64,
-	sent_bytes: u64,
-	received_bytes: u64,
-	announces_peak: u64,
-	subscriptions_peak: u64,
-	wire_tx: u64,
-	wire_rx: u64,
-	routes_refused: u64,
-}
-
-impl From<Presence> for PresenceSer {
-	fn from(p: Presence) -> Self {
-		Self {
-			sessions_refused: p.sessions_refused,
-			sessions_failed: p.sessions_failed,
-			requests: p.requests,
-			wire_tx: p.wire_tx,
-			wire_rx: p.wire_rx,
-			sessions_started: p.sessions_started,
-			sessions: p.sessions_started,
-			sessions_ended: p.sessions_ended,
-			sessions_closed: p.sessions_ended,
-			sent_bytes: p.sent_bytes,
-			received_bytes: p.received_bytes,
-			announces_peak: p.announces_peak,
-			subscriptions_peak: p.subscriptions_peak,
-			routes_refused: p.routes_refused,
-		}
-	}
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct PresenceDe {
-	sessions_refused: Refusals,
-	sessions_failed: Failures,
-	requests: u64,
-	sessions_started: Edge,
-	sessions: Edge,
-	sessions_ended: Edge,
-	sessions_closed: Edge,
-	sent_bytes: u64,
-	received_bytes: u64,
-	announces_peak: u64,
-	subscriptions_peak: u64,
-	#[serde(default)]
-	wire_tx: u64,
-	#[serde(default)]
-	wire_rx: u64,
-	routes_refused: u64,
-}
-
-impl From<PresenceDe> for Presence {
-	fn from(d: PresenceDe) -> Self {
-		Self {
-			sessions_refused: d.sessions_refused,
-			sessions_failed: d.sessions_failed,
-			requests: d.requests,
-			wire_tx: d.wire_tx,
-			wire_rx: d.wire_rx,
-			sessions_started: counter_edge(d.sessions_started, d.sessions),
-			sessions_ended: counter_edge(d.sessions_ended, d.sessions_closed),
-			sent_bytes: d.sent_bytes,
-			received_bytes: d.received_bytes,
-			announces_peak: d.announces_peak,
-			subscriptions_peak: d.subscriptions_peak,
-			routes_refused: d.routes_refused,
-		}
-	}
-}
-
-impl Serialize for Presence {
-	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		PresenceSer::from(*self).serialize(serializer)
-	}
-}
-
-impl<'de> Deserialize<'de> for Presence {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		PresenceDe::deserialize(deserializer).map(Into::into)
-	}
 }
 
 impl Presence {
@@ -2546,7 +2324,7 @@ mod tests {
 
 	#[test]
 	fn outcome_wire_fields_default_and_roundtrip_without_changing_live_count() {
-		let old: Presence = serde_json::from_str(r#"{"sessions":4,"sessions_closed":2}"#).unwrap();
+		let old: Presence = serde_json::from_str(r#"{"sessions_started":4,"sessions_ended":2}"#).unwrap();
 		assert_eq!(old.sessions_refused, Refusals::default());
 		assert_eq!(old.sessions_failed, Failures::default());
 		let mut current = old;
@@ -3088,7 +2866,7 @@ mod tests {
 	fn traffic_parses_with_missing_and_unknown_fields() {
 		// Wire forward/backward compat: a frame entry from an older publisher
 		// (missing fields) or a newer one (extra fields) must still parse.
-		let old: Traffic = serde_json::from_str(r#"{"announced":1,"bytes":5}"#).expect("older shape parses");
+		let old: Traffic = serde_json::from_str(r#"{"announces_started":1,"bytes":5}"#).expect("older shape parses");
 		assert_eq!(old.announces_started, 1);
 		assert_eq!(old.bytes, 5);
 		assert_eq!(old.announced_bytes, 0, "missing fields default to zero");
@@ -3506,7 +3284,7 @@ mod tests {
 
 	#[test]
 	fn request_counter_is_additive_and_compatible_with_old_frames() {
-		let old: Presence = serde_json::from_str(r#"{"sessions":2,"sessions_closed":1}"#).unwrap();
+		let old: Presence = serde_json::from_str(r#"{"sessions_started":2,"sessions_ended":1}"#).unwrap();
 		assert_eq!(old.requests, 0);
 		let mut requests = Presence {
 			requests: 3,
@@ -3642,66 +3420,47 @@ mod tests {
 	}
 
 	#[test]
-	fn traffic_decodes_old_new_and_both_spellings() {
-		// A new consumer reads an old relay, a new relay, and the dual-name
-		// frame this serializer actually emits, all as the same Traffic.
+	fn traffic_round_trips_each_counter_once() {
 		let expected = expected_traffic();
-		let old = r#"{"announced":2,"announced_closed":1,"broadcasts":4,"broadcasts_closed":3,"subscriptions":6,"subscriptions_closed":5,"bytes":9}"#;
-		let new = r#"{"announces_started":2,"announces_ended":1,"broadcasts_started":4,"broadcasts_ended":3,"subscriptions_started":6,"subscriptions_ended":5,"bytes":9}"#;
-		assert_eq!(serde_json::from_str::<Traffic>(old).unwrap(), expected);
-		assert_eq!(serde_json::from_str::<Traffic>(new).unwrap(), expected);
-		let both = serde_json::to_string(&expected).unwrap();
-		assert!(both.contains("\"announces_started\":2"), "{both}");
-		assert!(both.contains("\"announced\":2"), "{both}");
-		assert!(both.contains("\"announces_ended\":1"), "{both}");
-		assert!(both.contains("\"announced_closed\":1"), "{both}");
-		assert!(both.contains("\"broadcasts_started\":4"), "{both}");
-		assert!(both.contains("\"broadcasts\":4"), "{both}");
-		assert!(both.contains("\"subscriptions_started\":6"), "{both}");
-		assert!(both.contains("\"subscriptions\":6"), "{both}");
-		assert_eq!(serde_json::from_str::<Traffic>(&both).unwrap(), expected);
+		let json = serde_json::to_string(&expected).unwrap();
+		for name in [
+			"announces_started",
+			"announces_ended",
+			"broadcasts_started",
+			"broadcasts_ended",
+			"subscriptions_started",
+			"subscriptions_ended",
+		] {
+			assert_eq!(json.matches(&format!("\"{name}\":")).count(), 1, "{json}");
+		}
+		for old in [
+			"announced",
+			"announced_closed",
+			"broadcasts",
+			"broadcasts_closed",
+			"subscriptions",
+			"subscriptions_closed",
+		] {
+			assert!(!json.contains(&format!("\"{old}\":")), "{json}");
+		}
+		assert_eq!(serde_json::from_str::<Traffic>(&json).unwrap(), expected);
+		// A counter the frame omits reads as zero.
+		let missing: Traffic = serde_json::from_str(r#"{"announces_started":2}"#).unwrap();
+		assert_eq!(missing.announces_started, 2);
+		assert_eq!(missing.announces_ended, 0);
 	}
 
 	#[test]
-	fn presence_decodes_old_new_and_both_spellings() {
+	fn presence_round_trips_each_counter_once() {
 		let expected = expected_presence();
-		assert_eq!(
-			serde_json::from_str::<Presence>(r#"{"sessions":3,"sessions_closed":1}"#).unwrap(),
-			expected
-		);
-		assert_eq!(
-			serde_json::from_str::<Presence>(r#"{"sessions_started":3,"sessions_ended":1}"#).unwrap(),
-			expected
-		);
-		let both = serde_json::to_string(&expected).unwrap();
-		assert!(both.contains("\"sessions_started\":3"), "{both}");
-		assert!(both.contains("\"sessions\":3"), "{both}");
-		assert!(both.contains("\"sessions_ended\":1"), "{both}");
-		assert!(both.contains("\"sessions_closed\":1"), "{both}");
-		assert_eq!(serde_json::from_str::<Presence>(&both).unwrap(), expected);
-	}
-
-	#[test]
-	fn counter_edge_canonical_wins_when_spellings_disagree() {
-		let traffic: Traffic =
-			serde_json::from_str(r#"{"announces_started":9,"announced":1,"announces_ended":8,"announced_closed":0}"#)
-				.unwrap();
-		assert_eq!(traffic.announces_started, 9);
-		assert_eq!(traffic.announces_ended, 8);
-
-		let presence: Presence =
-			serde_json::from_str(r#"{"sessions_started":4,"sessions":0,"sessions_ended":2,"sessions_closed":9}"#)
-				.unwrap();
-		assert_eq!(presence.sessions_started, 4);
-		assert_eq!(presence.sessions_ended, 2);
-	}
-
-	#[test]
-	fn counter_edge_refuses_null() {
-		// A present null is malformed, not absent: it must not fall through to the legacy spelling or to zero.
-		assert!(serde_json::from_str::<Traffic>(r#"{"announces_started":null,"announced":7}"#).is_err());
-		assert!(serde_json::from_str::<Traffic>(r#"{"subscriptions_closed":null}"#).is_err());
-		assert!(serde_json::from_str::<Presence>(r#"{"sessions_started":null}"#).is_err());
-		assert!(serde_json::from_str::<Presence>(r#"{"sessions":null,"sessions_closed":1}"#).is_err());
+		let json = serde_json::to_string(&expected).unwrap();
+		assert_eq!(json.matches("\"sessions_started\":3").count(), 1, "{json}");
+		assert_eq!(json.matches("\"sessions_ended\":1").count(), 1, "{json}");
+		assert!(!json.contains("\"sessions\":"), "{json}");
+		assert!(!json.contains("\"sessions_closed\":"), "{json}");
+		assert_eq!(serde_json::from_str::<Presence>(&json).unwrap(), expected);
+		let missing: Presence = serde_json::from_str(r#"{"sessions_started":3}"#).unwrap();
+		assert_eq!(missing.sessions_started, 3);
+		assert_eq!(missing.sessions_ended, 0);
 	}
 }

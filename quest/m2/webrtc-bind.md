@@ -64,8 +64,6 @@ For the PR:
 - An advertised candidate is sent exactly as given. Keep the existing
   default for an unspecified bind address (loopback with the bound port).
   Test that a `--public-addr` with its own port reaches the SDP answer.
-- Fix the flag's `requires = "rtc-listen"`
-  (`rs/moq-cli/src/webrtc.rs:34`), which names no flag.
 - Recommended, not decided by the maintainer: record the crate's version
   line in the PR. The manifest reads `0.3.12`
   (`rs/moq-webrtc/Cargo.toml:8`), so `just version 0.22.0` moves it onto the
@@ -78,5 +76,4 @@ CLI: `--public-addr` now advertises its port. Wire: none.
 
 ## Related
 
-- [moq-webrtc runs on upstream str0m](/quest/m2/str0m-upstream.md) - swaps the stack under the same session code
 - [A WebRTC feed on the shared port](/quest/m3/one-port/rtc-feed.md) - adds the second socket source this leaves room for

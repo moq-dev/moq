@@ -21,7 +21,7 @@ import {
 } from "./connect.ts";
 import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
-import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
+import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
@@ -40,8 +40,10 @@ const PROBE_MAX = Duration.secs(300);
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Nothing retries until a session to the current URL has been established: the
- * first attempt failing stops that URL with its error. After that, every failure is retried,
+ * lockstep. Nothing retries until a session to the current URL has been established, which
+ * takes staying up past {@link ReloadDelay.healthy} or being drained by a GOAWAY, which no
+ * refusal sends: an attempt failing, or a session closing sooner, stops that URL with its error. That covers a relay refusing a session right after
+ * accepting it, as it does a rejected token on moq-lite 03 or later. After that, every failure is retried,
  * including an attempt that outlives {@link ConnectProps.timeout}, until
  * {@link ReloadDelay.timeout} runs out, whatever the error, an auth rejection included; only a
  * refused GOAWAY redirect stops the current URL sooner. A new URL or a disable/re-enable starts another sequence.
@@ -121,7 +123,7 @@ export type ReloadProps = Omit<
 	delay?: ReloadDelay;
 
 	/** How to react to the peer's GOAWAY; every field falls back to its default. */
-	goaway?: GoawayProps;
+	goaway?: Handover;
 };
 
 /**
@@ -189,8 +191,9 @@ export type ReloadStatus = "connecting" | "connected" | "disconnected";
  * The reconnect loop behind a Connection handle: connects, waits for the session to end, then
  * redials with exponential backoff.
  *
- * The first attempt for a URL fails fast instead: until a session to it has been established,
- * a failed attempt sets {@link Reload.error} rather than retrying, so a setup mistake such as an
+ * The first attempt for a URL fails fast instead: until a session to it has stayed up past
+ * {@link ReloadDelay.healthy} or been drained by a GOAWAY, a failed attempt or a closed session sets {@link Reload.error}
+ * rather than retrying, so a setup mistake such as an
  * untrusted certificate or no version in common surfaces at once. A page opened before its
  * relay is reachable therefore stays disconnected until a new URL or a disable/re-enable.
  *
@@ -304,7 +307,7 @@ export class Reload {
 	delay: ReloadDelay;
 
 	/** How to react to the peer's GOAWAY (not reactive). */
-	goaway: GoawayProps;
+	goaway: Handover;
 
 	/**
 	 * The URL an accepted GOAWAY redirect assigned, or undefined while the loop dials
@@ -367,8 +370,9 @@ export class Reload {
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
-	// The configured href a session has been established for. Until it matches, a failed attempt
-	// gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
+	// The configured href a session stayed up past the healthy bar for, or the peer drained with a
+	// GOAWAY. Until it matches, a failed
+	// attempt or a closed session gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
 	// resume a URL that worked.
 	#establishedHref: string | undefined;
 
@@ -543,8 +547,13 @@ export class Reload {
 		// The session this run serves, ended with the run. A drained one leaves this slot
 		// for #draining, which outlives the run.
 		let current: Session | undefined;
+		// Set once the session is live, so #retry can tell a healthy session that
+		// later dropped from a connect failure or a peer that flaps immediately.
+		let connected: Instant | undefined;
 		effect.cleanup(() => {
 			if (current) {
+				// A session torn down while live, as on a page hide, may already have earned it.
+				if (connected !== undefined) this.#settle(href, connected);
 				this.#end(current);
 				if (this.established.peek() === current) this.#serve(undefined);
 				current = undefined;
@@ -553,9 +562,6 @@ export class Reload {
 		});
 
 		effect.spawn(async () => {
-			// Set once the session is live, so #retry can tell a healthy session that
-			// later dropped from a connect failure or a peer that flaps immediately.
-			let connected: Instant | undefined;
 			// Whether the last failure was a dial to a GOAWAY redirect's target.
 			let redirectFailed = false;
 
@@ -614,7 +620,6 @@ export class Reload {
 					this.#serve(connection);
 					this.#setDialing(false);
 					connected = now();
-					this.#establishedHref = href;
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
@@ -642,7 +647,18 @@ export class Reload {
 						reached = raced;
 					}
 					const ended = raced instanceof Reached ? { uri: "" } : raced;
+					this.#settle(href, connected);
 					if (ended === null || ended instanceof Error) {
+						// Until a session has stayed up past the healthy bar, a close stops the URL as a
+						// failed attempt does: it is how a relay refuses a session it already accepted.
+						// No error kind is read.
+						if (this.#establishedHref !== href) {
+							console.warn(`connection closed, not retrying: ${ended ? reason(ended) : "no error"}`);
+							current = undefined;
+							this.#serve(undefined);
+							this.#giveUp(ended ?? new Error("connection closed"));
+							return;
+						}
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
 						current = undefined;
@@ -654,6 +670,10 @@ export class Reload {
 					}
 
 					current = undefined;
+					// A peer's GOAWAY establishes the URL however soon it came: the peer accepted the
+					// session and asked us to move, which a refusal never does, so a page opened while
+					// its relay drains rides out the restart. Leaving the fallback is our own.
+					if (!reached) this.#establishedHref = href;
 					// A pinned WebSocket URL can win the race against the primary. Judge the
 					// redirect against that endpoint, not the primary we never reached.
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
@@ -667,7 +687,7 @@ export class Reload {
 					// backoff already paces it, so its replacement dials at once. A fallback that
 					// served past the healthy bar still earns the healthy reset.
 					if (reached) {
-						this.#follow(connection, at, pinnedTransport(connection.transport, this.#pinned()));
+						this.#follow(connection, at, pinnedTransport(connection.transport, this.#pinned()), href);
 						if (now().since(connected).ge(this.#pacing().healthy)) {
 							this.#delay = undefined;
 							this.#deadline = undefined;
@@ -719,8 +739,9 @@ export class Reload {
 					return;
 				}
 
-				// The first attempt fails fast: a URL that never yielded a session is more likely
-				// misconfigured than restarting, and only the app can fix that.
+				// Attempts fail fast until a session was established: a URL that never held one past
+				// the healthy bar is more likely misconfigured than restarting, and only the app can
+				// fix that.
 				if (this.#establishedHref !== href) {
 					console.warn("connection failed, not retrying:", err);
 					this.#giveUp(error(err));
@@ -769,7 +790,7 @@ export class Reload {
 	 * to go next and leave the old session serving until it drains. Returns false when the
 	 * redirect is refused, which ends the sequence rather than redialing.
 	 */
-	#migrate(connection: Session, dialing: URL, drain: Drain): boolean {
+	#migrate(connection: Session, dialing: URL, drain: Goaway): boolean {
 		// The pin is a WebTransport option. A WebSocket that won the race never used it.
 		const pinned = pinnedTransport(connection.transport, this.#pinned());
 
@@ -818,8 +839,11 @@ export class Reload {
 	 * place or a refused redirect is ignored, since we are already leaving. No loop scoring:
 	 * only a probe that got through leads here, and the probe's backoff paces those.
 	 */
-	#follow(connection: Session, dialing: URL, pinned: boolean): void {
+	#follow(connection: Session, dialing: URL, pinned: boolean, href: string): void {
 		void connection.draining.then((drain) => {
+			// The peer accepted the fallback session and asked us to move, so its GOAWAY establishes
+			// the URL as one off the live session does, while the sequence still targets it.
+			if (this.#sequenceHref === href) this.#establishedHref = href;
 			let next: URL | undefined;
 			try {
 				next = target(this.goaway.redirect ?? "same-host", drain.uri, dialing, pinned);
@@ -889,6 +913,11 @@ export class Reload {
 	#retire(): void {
 		const draining = this.#draining?.retire();
 		if (draining) this.#end(draining);
+	}
+
+	// Mark `href` established once the session connected at `connected` stayed up past the healthy bar.
+	#settle(href: string, connected: Instant): void {
+		if (now().since(connected).ge(this.#pacing().healthy)) this.#establishedHref = href;
 	}
 
 	// Resolved per use rather than at construction, so an edit to `delay` (including one that

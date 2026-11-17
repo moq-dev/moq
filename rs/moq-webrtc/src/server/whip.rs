@@ -4,7 +4,6 @@
 //! and returns an SDP answer. The request path becomes the broadcast name on
 //! the upstream publish origin.
 
-use crate::vendor::str0m;
 #[cfg(feature = "server")]
 use axum::{
 	Router,
@@ -162,7 +161,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		offer,
 		mut ingest,
 	} = request;
-	let offer = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer)?;
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).
@@ -207,7 +206,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	let cancel = server.register_session(resource_id.clone());
 	tracing::info!(%broadcast, %instance, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
-	let mut answer = sdp::render_answer(&answer);
+	let mut answer = sdp::render_answer(&answer, &refused);
 	if let Some(cap) = cap {
 		answer = sdp::cap_answer(&answer, rate::steer(cap));
 	}

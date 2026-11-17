@@ -1,7 +1,7 @@
 /**
  * Proves a relay's rejection reaches the page over WebTransport and WebSocket.
  * WebTransport.closed has to carry the relay's code; a WebSocket Connection has
- * to redial the refused session within its retry window, then publish its MalformedAuthToken
+ * to stop at the refused session, without redialing, and publish its MalformedAuthToken
  * session error.
  *
  * Chromium treats the server's HTTP/3 control stream ending as fatal, so a server that ends it
