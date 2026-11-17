@@ -343,7 +343,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	for (let sequence = 0n; sequence < GROUP_COUNT; sequence++) hooks.appendNext(producer).finish();
+	for (let key = 0n; key < GROUP_COUNT; key++) hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote
@@ -399,7 +399,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) hooks.appendNext(producer).finish();
+	for (let key = 0; key < GROUP_COUNT; key++) hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const video = remote.track("video");
@@ -453,7 +453,7 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	for (let sequence = 0; sequence < 10; sequence++) hooks.appendNext(producer).finish();
+	for (let key = 0; key < 10; key++) hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	try {
@@ -498,9 +498,9 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { maxAge: null });
-	for (let sequence = 0; sequence < 5; sequence++) {
+	for (let key = 0; key < 5; key++) {
 		const group = hooks.appendNext(producer);
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.unscaled(group.start) });
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 	}
 	const newest = hooks.appendNext(producer);
@@ -541,7 +541,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	for (const sequence of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(sequence).finish();
+	for (const key of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(key).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const bounded = (end: bigint) =>
@@ -3076,7 +3076,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 		try {
 			// Unfinished, so its stream holds the only credit.
 			// Each group stamped in sequence order, since the track checks a late group's start.
-			const at = (sequence: bigint) => Timestamp.fromMillis(1_000 + Number(sequence));
+			const at = (key: bigint) => Timestamp.fromMillis(1_000 + Number(key));
 			const held = producer.createGroup(2n);
 			held.writeFrame(textFrame("held", at(2n)));
 			expect((await settled(subscriber.recvGroup(), "the held group"))?.start).toBe(2n);

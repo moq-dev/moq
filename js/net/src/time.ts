@@ -7,7 +7,7 @@
  */
 import { Instant, now } from "@moq/clock";
 import { toNumber } from "./util/bigint.ts";
-import { checkSequence } from "./util/sequence.ts";
+import { checkKey } from "./util/key.ts";
 
 /** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
 export type Timescale = number & { readonly _brand: "timescale" };
@@ -113,7 +113,7 @@ export class Timestamp {
 			if (!Number.isSafeInteger(key) || key < 0) throw new RangeError(`invalid timestamp key: ${key}`);
 			key = BigInt(key);
 		}
-		building = checkSequence(key);
+		building = checkKey(key);
 		// The constructor reads `building` first, so its arguments go unused.
 		return new Timestamp(0, Timescale.SECOND);
 	}

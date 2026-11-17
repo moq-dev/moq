@@ -39,13 +39,13 @@ function respond(requests: Requests, archive: Archive): FillGroups[] {
 }
 
 function serve(fill: FillGroups, archive: Archive): void {
-	for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-		const frames = archive.get(sequence);
+	for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+		const frames = archive.get(key);
 		if (!frames) {
-			fill.dropGroups(sequence, sequence + 1n);
+			fill.dropGroups(key, key + 1n);
 			continue;
 		}
-		const group = fill.accept(sequence);
+		const group = fill.accept(key);
 		for (const frame of frames)
 			group.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
@@ -251,7 +251,7 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	hooks.receiveTrack(track);
 	const reader = track.subscribe({ delay: { max: null } });
 	const ordered = reader.ordered();
-	for (const sequence of [0n, 2n]) hooks.receiveGroup(track, { start: sequence, offset: 0 }).finish();
+	for (const key of [0n, 2n]) hooks.receiveGroup(track, { start: key, offset: 0 }).finish();
 	expect((await ordered.nextGroup())?.start).toBe(0n);
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
@@ -798,10 +798,10 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 	try {
 		const broadcast = new BroadcastProducer();
 		const track = broadcast.createTrack("video", { maxAge: null });
-		const write = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint) => {
+			const group = track.createGroup(key);
 			group.writeFrame({
-				payload: enc.encode(`live ${sequence}`),
+				payload: enc.encode(`live ${key}`),
 				timestamp: Timestamp.unscaled(group.start),
 			});
 			group.finish();
@@ -884,9 +884,9 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 	await yieldNow();
 	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => "none")])).toBe("none");
 
-	for (const sequence of [2n, 7n]) {
-		const group = fill.accept(sequence);
-		group.writeFrame({ payload: enc.encode(`old ${sequence}`), timestamp: Timestamp.unscaled(group.start) });
+	for (const key of [2n, 7n]) {
+		const group = fill.accept(key);
+		group.writeFrame({ payload: enc.encode(`old ${key}`), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 	}
 	// A handler that can't tell leaves each start at the group held containing its time.
@@ -1263,15 +1263,15 @@ async function session(alpn: string) {
 	void (async () => {
 		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
 			fills.push(fill);
-			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-				if (sequence === 1n) {
+			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+				if (key === 1n) {
 					fill.dropGroups(1n, 2n);
 					continue;
 				}
-				const group = fill.accept(sequence);
+				const group = fill.accept(key);
 				group.writeFrame({
-					payload: enc.encode(`old ${sequence}`),
-					timestamp: Timestamp.fromMillis(Number(sequence) * 1000),
+					payload: enc.encode(`old ${key}`),
+					timestamp: Timestamp.fromMillis(Number(key) * 1000),
 				});
 				group.finish();
 			}
@@ -1596,11 +1596,11 @@ function lookups(requests: Requests, lookup: (time: bigint) => bigint | undefine
 				fill.close();
 				continue;
 			}
-			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-				const group = fill.accept(sequence);
+			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+				const group = fill.accept(key);
 				group.writeFrame({
-					payload: enc.encode(`g${sequence}`),
-					timestamp: Timestamp.fromMillis(Number(sequence)),
+					payload: enc.encode(`g${key}`),
+					timestamp: Timestamp.fromMillis(Number(key)),
 				});
 				group.finish();
 			}

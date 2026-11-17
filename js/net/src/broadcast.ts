@@ -312,14 +312,14 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
-	sequence: bigint,
+	key: bigint,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
 	const subscriber = subscribe(state, name, {
 		...track.Subscription.default(),
 		priority: options.priority,
-		ranges: [{ start: { time: sequence }, end: { time: sequence } }],
+		ranges: [{ start: { time: key }, end: { time: key } }],
 	});
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);
@@ -327,12 +327,12 @@ async function fetchGroup(
 		// Judged in this turn when the track is known, so a cached group is taken before anything
 		// else can change it. A track requested on demand opens its handler once accepted, so its
 		// miss is judged then.
-		let asked = hooks.askFetch(subscriber, sequence);
+		let asked = hooks.askFetch(subscriber, key);
 		if (asked === "pending") {
 			await untilAborted(subscriber.info(), options.signal);
-			asked = hooks.askFetch(subscriber, sequence);
+			asked = hooks.askFetch(subscriber, key);
 		}
-		if (asked !== true) throw new NotFound(`group ${sequence}`);
+		if (asked !== true) throw new NotFound(`group ${key}`);
 		for (;;) {
 			const recv = hooks.tryRecvGroup(subscriber, true);
 			switch (recv.kind) {
@@ -350,7 +350,7 @@ async function fetchGroup(
 				case "error":
 					throw recv.error;
 				case "done":
-					throw new NotFound(`group ${sequence}`);
+					throw new NotFound(`group ${key}`);
 			}
 			await untilAborted(changed(subscriber), options.signal);
 		}
@@ -420,7 +420,7 @@ export class Producer {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
-			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
+			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
 			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
@@ -474,7 +474,7 @@ export class Producer {
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
-	 * An append on the track throws if it would reuse a sequence an earlier track of the name
+	 * An append on the track throws if it would reuse a key an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
 	 * open track or a live request already holds the name. `info` resolves as
 	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
@@ -582,7 +582,7 @@ export class Consumer {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
 			largest: (name) => largest(this.#state, name),
-			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
+			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
 			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),

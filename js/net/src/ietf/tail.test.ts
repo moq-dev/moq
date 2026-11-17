@@ -273,9 +273,9 @@ test("a reader holds for groups from SUBSCRIBE_OK's Largest that land after a hi
 
 	// Asked before the lower groups land: a reader that ended early returns nothing.
 	const held = reader.recvGroup();
-	for (const sequence of [3n, 4n]) {
-		const low = groupStream(subscriber, sequence);
-		low.write(object(`${sequence}.0`));
+	for (const key of [3n, 4n]) {
+		const low = groupStream(subscriber, key);
+		low.write(object(`${key}.0`));
 		low.finish();
 	}
 	expect(await readAll(await held)).toEqual(["3.0"]);

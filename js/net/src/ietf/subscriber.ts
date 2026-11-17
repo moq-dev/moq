@@ -23,7 +23,7 @@ import {
 import { type FillGroups, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { finalKey, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
@@ -36,8 +36,8 @@ import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unrequested, unwanted } from "../util/demand.ts";
+import { min } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { min } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
 import { bounded, wireSpan } from "../window.ts";
 import { wireOf } from "../wire.ts";
@@ -1173,13 +1173,13 @@ export class Subscriber {
 						// The join may already bring a miss in this run. Let it answer first instead
 						// of fetching the same head twice.
 						const join = this.#joins.get(producer);
-						if (join && fill.start <= join.sequence && fill.end > join.sequence) {
+						if (join && fill.start <= join.key && fill.end > join.key) {
 							await untilAborted(join.settled, signal);
 							// A failed join costs that head. Retrying it as standalone would hide a publisher bug.
-							if (fill.isWanted(join.sequence))
+							if (fill.isWanted(join.key))
 								fill.refuseGroups(
-									join.sequence,
-									join.sequence + 1n,
+									join.key,
+									join.key + 1n,
 									new NotFound("joining FETCH did not provide the head"),
 								);
 						}
@@ -1498,7 +1498,7 @@ export class Subscriber {
 			if (fetchId === undefined) throw await this.#closedSession();
 			// Registered before the FETCH goes out: its stream can overtake FETCH_OK. It stays
 			// until the subscription ends, so a head that lands after a whole group won the
-			// sequence is read away rather than refused.
+			// key is read away rather than refused.
 			this.#fetches.set(fetchId, Promise.resolve(subscription));
 			subscription.fetchIds.push(fetchId);
 
@@ -1514,7 +1514,7 @@ export class Subscriber {
 				groupOrder: "ascending",
 			});
 			await Message.write(request.writer, Fetch.id, msg, version);
-			console.debug(`joining fetch: id=${fetchId} group=${join.sequence}`);
+			console.debug(`joining fetch: id=${fetchId} group=${join.key}`);
 
 			const response = await untilAborted(request.next(), signal);
 			if (response === undefined) throw new Error("joining FETCH ended before its response");
@@ -1949,7 +1949,7 @@ export class Subscriber {
 			const timescale = this.#timescales.get(group.trackAlias);
 			// A stream for the group a join is fetching the head of may start partway
 			// through it, at the Object ID the head ends before (see Join).
-			const join = subscription.join?.sequence === group.groupId ? subscription.join : undefined;
+			const join = subscription.join?.key === group.groupId ? subscription.join : undefined;
 			let first = join?.outstanding === true;
 			const decode = (c: Cursor) => Frame.decode(c, group.flags, first);
 			let nextObject = 0;
@@ -1982,7 +1982,7 @@ export class Subscriber {
 							? object?.idDelta
 							: undefined;
 					if (start === 0 && object?.isObject) {
-						// The whole group: it stands alone unless the head already took the sequence.
+						// The whole group: it stands alone unless the head already took the key.
 						if (!join.whole()) {
 							stream.stop(new Error("the group's head was served twice"));
 							return;
@@ -2032,7 +2032,7 @@ export class Subscriber {
 					} catch (err: unknown) {
 						throw new ProtocolViolation(`invalid END_OF_TRACK: ${reason(error(err))}`);
 					}
-					subscription.end ??= finalSequence(end);
+					subscription.end ??= finalKey(end);
 					return;
 				}
 				if (!frame.isObject) {
@@ -2134,10 +2134,10 @@ export class Subscriber {
 		const { join, track, tail, timescale } = subscription;
 		// A draft-22 fill is one of the subscription's own data streams, which PUBLISH_DONE
 		// counts. A draft-18 joining FETCH is a request of its own; the join holds the end for it.
-		const read = isDraft20(version) ? tail.open(join.sequence) : undefined;
+		const read = isDraft20(version) ? tail.open(join.key) : undefined;
 
 		let producer: netGroup.Producer | undefined;
-		// A whole group took the sequence first, or the join gave up: read the rest away.
+		// A whole group took the key first, or the join gave up: read the rest away.
 		let discarding = false;
 		let next = 0;
 		try {
@@ -2176,8 +2176,8 @@ export class Subscriber {
 				// another group, which a head of one group does not have. A later Object ID Delta
 				// is added to the prior ID, so only 1 is the next object.
 				if (first) {
-					if (object.group !== join.sequence) {
-						throw new JoinUnsupported(`the head answered group ${object.group}, not ${join.sequence}`);
+					if (object.group !== join.key) {
+						throw new JoinUnsupported(`the head answered group ${object.group}, not ${join.key}`);
 					}
 					if (object.object !== 0) throw new JoinUnsupported("the head does not start at object 0");
 				} else if (object.group !== undefined) {
@@ -2186,9 +2186,9 @@ export class Subscriber {
 					throw new JoinUnsupported("a gap in the head cannot be stitched");
 				}
 
-				const timestamp = objectTime(timescale, join.sequence);
+				const timestamp = objectTime(timescale, join.key);
 				if (first) {
-					producer = join.open(() => track.createGroup(join.sequence));
+					producer = join.open(() => track.createGroup(join.key));
 					if (!producer) {
 						discarding = true;
 						if (!object.payload) await skipPayload(stream, object.size);
@@ -2200,7 +2200,7 @@ export class Subscriber {
 				join.wrote();
 				next += 1;
 			}
-			console.debug(`join head: group=${join.sequence} objects=${next}`);
+			console.debug(`join head: group=${join.key} objects=${next}`);
 			join.finish(producer);
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
@@ -2308,7 +2308,7 @@ export class Subscriber {
 				return;
 			}
 		}
-		// Its time is its sequence, as a group's is its ID.
+		// Its time is its key, as a group's is its ID.
 		let timestamp: Timestamp;
 		try {
 			timestamp = objectTime(binding.timescale, datagram.groupId);

@@ -8,7 +8,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { rescaleIn } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
-import { checkSequence, max } from "./util/sequence.ts";
+import { checkKey, max } from "./util/key.ts";
 
 /** A single unreliable payload, addressed within its datagram track. */
 export interface Datagram {
@@ -170,7 +170,7 @@ export class Producer {
 		if (closed !== undefined) throw closed ?? new Error("datagram track is closed");
 		const properties = state.info.peek();
 		if (!properties) throw new Error("datagram track has not been accepted");
-		const sequence = checkSequence(datagram.sequence);
+		const sequence = checkKey(datagram.sequence);
 		if (datagram.payload.byteLength > MAX_PAYLOAD) throw new Error("datagram payload too large");
 		// A scale-less datagram's timestamp is its sequence.
 		const timestamp = rescaleIn(properties, datagram.timestamp, sequence);

@@ -28,8 +28,8 @@ import { Queue } from "./queue.ts";
 import { rescaleIn } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
+import { checkKey, RESERVED } from "./util/key.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
-import { checkSequence, RESERVED } from "./util/sequence.ts";
 
 // A live tail budget, including a conservative charge for each frame's object and queue slot.
 const TAIL_BYTES = 32 * 1024 * 1024;
@@ -277,7 +277,7 @@ export class Producer {
 	#holds = 0;
 
 	constructor(start: bigint) {
-		if (checkSequence(start) >= RESERVED) throw new RangeError(`group start out of range: ${start}`);
+		if (checkKey(start) >= RESERVED) throw new RangeError(`group start out of range: ${start}`);
 		this.#state = new GroupState(start);
 		this.start = start;
 		this.#demand = makeDemand(start, this.#wanted, this.#state);

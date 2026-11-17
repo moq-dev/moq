@@ -1,5 +1,5 @@
 /**
- * Stream instances: one continuous stream at a path. Within one, group sequences never
+ * Stream instances: one continuous stream at a path. Within one, group keys never
  * restart and never name two different groups, so a reader continues across every route that
  * shares it; different instances are never stitched together.
  * Mirrors `Instance` in rs/moq-net.

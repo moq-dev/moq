@@ -46,10 +46,10 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				while (datagrams.priority.peek() !== 17) await datagrams.priority.changed();
 				expect(info.priority).toBe(streams && alpn !== ALPN_07_WIP ? 0 : -7);
 				const stamp = Timestamp.fromMicros(1234567);
-				const sequence = (1n << 53n) + 1n;
-				datagrams.insert({ sequence, timestamp: stamp, payload: new Uint8Array([7, 8]) });
+				const key = (1n << 53n) + 1n;
+				datagrams.insert({ sequence: key, timestamp: stamp, payload: new Uint8Array([7, 8]) });
 				const received = await reader.recv();
-				expect(received?.sequence).toBe(sequence);
+				expect(received?.sequence).toBe(key);
 				expect(received?.timestamp?.asMicros()).toBe(streams && alpn !== ALPN_07_WIP ? 1234000 : 1234567);
 				expect(received?.payload).toEqual(new Uint8Array([7, 8]));
 				if (track) {

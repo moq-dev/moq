@@ -33,9 +33,9 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
-	for (let sequence = 0; sequence < 10; sequence++) {
+	for (let key = 0; key < 10; key++) {
 		const group = hooks.appendNext(producer);
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(sequence * 1000) });
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(key * 1000) });
 		group.finish();
 	}
 
@@ -74,9 +74,9 @@ for (const [version, alpn] of [
 		const publication = origin.route(Path.from("room"));
 		const broadcast = publication.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-		const write = (sequence: number, millis: number) => {
-			const group = producer.createGroup(BigInt(sequence));
-			group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+		const write = (key: number, millis: number) => {
+			const group = producer.createGroup(BigInt(key));
+			group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		};
 		write(0, 0);
@@ -90,13 +90,13 @@ for (const [version, alpn] of [
 		expect(await received(reader, 1)).toEqual([0n]);
 		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge, so they are reported
 		// stale after SUBSCRIBE_START.
-		for (const [sequence, millis] of [
+		for (const [key, millis] of [
 			[1, 1000],
 			[2, 2000],
 			[3, 3000],
 			[4, 6000],
 		]) {
-			write(sequence, millis);
+			write(key, millis);
 		}
 		expect(await received(reader, 2)).toEqual([3n, 4n]);
 
@@ -124,9 +124,9 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	const write = (sequence: number, millis: number) => {
-		const group = producer.createGroup(BigInt(sequence));
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+	const write = (key: number, millis: number) => {
+		const group = producer.createGroup(BigInt(key));
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 		group.finish();
 	};
 	write(0, 0);
@@ -140,13 +140,13 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) }, ranges });
 	expect(await received(reader, 1)).toEqual([0n]);
 	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.
-	for (const [sequence, millis] of [
+	for (const [key, millis] of [
 		[1, 1000],
 		[2, 2000],
 		[3, 3000],
 		[4, 6000],
 	]) {
-		write(sequence, millis);
+		write(key, millis);
 	}
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 

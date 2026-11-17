@@ -37,11 +37,11 @@ function finished(producer: TrackProducer, size: number): bigint {
 // released once its close settles.
 async function cached(producer: TrackProducer): Promise<bigint[]> {
 	const subscriber = producer.subscribe({ delay: { max: null } });
-	const sequences: bigint[] = [];
-	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) sequences.push(group.start);
+	const keys: bigint[] = [];
+	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) keys.push(group.start);
 	subscriber.close();
 	await yieldNow();
-	return sequences;
+	return keys;
 }
 
 // Taking a group is a cache access: a reader handed one just inside the window can still read
@@ -205,7 +205,7 @@ test("a forgotten failed fill answer leaves its gap owed", async () => {
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
-		for (const sequence of [0n, 2n]) hooks.receiveGroup(producer, { start: sequence, offset: 0 }).finish();
+		for (const key of [0n, 2n]) hooks.receiveGroup(producer, { start: key, offset: 0 }).finish();
 		hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true }).abort(new Error("archive failed"));
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
 		await yieldNow();

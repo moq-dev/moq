@@ -45,17 +45,17 @@ function frame(payload: string, version: Version, delta = 0): Uint8Array {
  * A group stream the test writes by hand, handed to the subscriber as if it arrived. Its first
  * frame starts at `sequence` milliseconds, so group starts strictly increase with their keys.
  */
-function groupStream(subscriber: Subscriber, sequence: bigint) {
+function groupStream(subscriber: Subscriber, key: bigint) {
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
 	const handled = subscriber.runGroup(
-		new GroupMessage({ subscribe: 0n, sequence }),
+		new GroupMessage({ subscribe: 0n, key: key }),
 		new Reader(readable, undefined, subscriber.version),
 	);
 	let first = true;
 	return {
 		write: (payload: string) => {
-			controller.enqueue(frame(payload, subscriber.version, first ? Number(sequence) : 0));
+			controller.enqueue(frame(payload, subscriber.version, first ? Number(key) : 0));
 			first = false;
 		},
 		finish: () => controller.close(),
@@ -392,9 +392,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await clock.advance(Duration.millis(50));
 
 		// QUIC does not order streams, so the lowered groups land after the FIN.
-		for (const sequence of [1n, 2n]) {
-			const late = groupStream(subscriber, sequence);
-			late.write(`${sequence}.0`);
+		for (const key of [1n, 2n]) {
+			const late = groupStream(subscriber, key);
+			late.write(`${key}.0`);
 			late.finish();
 			await late.handled;
 		}
@@ -435,9 +435,9 @@ test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
 	using clock = manual();
 	const { subscriber, reader, respond, fin } = await subscribed(Version.DRAFT_07, Duration.millis(60_000));
 	await respond({ start: new SubscribeStart([0n]) });
-	for (const sequence of [0n, 2n]) {
-		const group = groupStream(subscriber, sequence);
-		group.write(`${sequence}.0`);
+	for (const key of [0n, 2n]) {
+		const group = groupStream(subscriber, key);
+		group.write(`${key}.0`);
 		group.finish();
 		await group.handled;
 	}

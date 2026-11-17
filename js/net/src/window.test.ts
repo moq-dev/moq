@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Anchor, Range } from "./track.ts";
-import { UNBOUNDED } from "./util/sequence.ts";
+import { UNBOUNDED } from "./util/key.ts";
 import {
 	AT_KEYS,
 	type Containing,

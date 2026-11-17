@@ -108,22 +108,22 @@ for (const wire of WIRES) {
 		const demand = track.demand();
 		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 
-		for (const sequence of [PAST_SAFE, MAX_QUIC]) {
-			const group = track.createGroup(sequence);
+		for (const key of [PAST_SAFE, MAX_QUIC]) {
+			const group = track.createGroup(key);
 			group.writeFrame({
-				payload: enc.encode(`first ${sequence}`),
+				payload: enc.encode(`first ${key}`),
 				timestamp: Timestamp.unscaled(group.start),
 			});
 			group.writeFrame({
-				payload: enc.encode(`second ${sequence}`),
+				payload: enc.encode(`second ${key}`),
 				timestamp: Timestamp.unscaled(group.start),
 			});
 			group.finish();
 
 			const received = await reader.recvGroup();
-			expect(received?.start).toBe(sequence);
-			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`first ${sequence}`);
-			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`second ${sequence}`);
+			expect(received?.start).toBe(key);
+			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`first ${key}`);
+			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`second ${key}`);
 			expect(await received?.readFrame()).toBeUndefined();
 			received?.close();
 		}

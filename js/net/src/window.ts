@@ -11,7 +11,7 @@
 
 import type { Duration } from "@moq/clock";
 import type { Anchor, Range } from "./track.ts";
-import { max, min, UNBOUNDED } from "./util/sequence.ts";
+import { max, min, UNBOUNDED } from "./util/key.ts";
 
 /** A run of group starts `[start, end)`; an open run ends at {@link UNBOUNDED}. */
 export type Run = { start: bigint; end: bigint };

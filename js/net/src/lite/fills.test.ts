@@ -160,8 +160,7 @@ test("range fills: the last recovery finishing reports the fills empty", async (
 
 	// Every group arrives while a stream of the recovery is still read, which keeps it.
 	recovery.reading = true;
-	for (let sequence = peer.fill.wanted(); sequence !== undefined; sequence = peer.fill.wanted())
-		peer.fill.accept(sequence).finish();
+	for (let key = peer.fill.wanted(); key !== undefined; key = peer.fill.wanted()) peer.fill.accept(key).finish();
 	expect(fills.poll(tail, true)).toBe(true);
 	expect(fills.ask.groups).toEqual([]);
 	expect(fills.isEmpty()).toBe(false);
@@ -257,9 +256,9 @@ test("range fills: a lost wait releases what it listened to", async () => {
 	} as typeof original);
 	try {
 		// Woken by the tail each time, as live groups arriving wake the serve loop.
-		for (let sequence = 10n; sequence < 110n; sequence++) {
+		for (let key = 10n; key < 110n; key++) {
 			const wait = fills.changed(tail);
-			tail.account(sequence, sequence + 1n);
+			tail.account(key, key + 1n);
 			await wait;
 		}
 		expect(live).toBe(0);

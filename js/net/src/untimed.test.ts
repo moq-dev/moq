@@ -45,7 +45,7 @@ const WIRES: Wire[] = [
  * Serve one group of `timestamps` on a track with `timescale`, starting at `sequence` (the next
  * one by default), and read it back over `wire`.
  */
-async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: Timestamp[], sequence?: bigint) {
+async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: Timestamp[], key?: bigint) {
 	const pair = createMockTransportPair(wire.protocol);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -61,7 +61,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
 			const track = request.accept({ timescale });
-			const group = sequence === undefined ? hooks.appendNext(track) : track.createGroup(sequence);
+			const group = key === undefined ? hooks.appendNext(track) : track.createGroup(key);
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}

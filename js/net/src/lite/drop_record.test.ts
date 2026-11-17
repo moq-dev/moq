@@ -141,8 +141,8 @@ async function chain(up: Version, down: Version) {
 		track,
 		remote,
 		/** Write group `sequence` presenting at `millis`, with `size` bytes of payload. */
-		write(sequence: bigint, millis: number, size = 1) {
-			const group = track.createGroup(sequence);
+		write(key: bigint, millis: number, size = 1) {
+			const group = track.createGroup(key);
 			group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		},
@@ -249,14 +249,14 @@ const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [
 
 // Groups 1 to 4 after group 0 at 0s: 1 and 2 end 3s and 4s behind the 6s edge, and 3 starts 3s
 // behind it, so a 1.5s budget gives up 1 and 2 and still takes 3.
-function behindTheEdge(write: (sequence: bigint, millis: number) => void) {
-	for (const [sequence, millis] of [
+function behindTheEdge(write: (key: bigint, millis: number) => void) {
+	for (const [key, millis] of [
 		[1n, 1000],
 		[2n, 2000],
 		[3n, 3000],
 		[4n, 6000],
 	] as const)
-		write(sequence, millis);
+		write(key, millis);
 }
 
 // Readers on the viewer while the publisher still holds groups 0 to 5 and the relay and the
@@ -271,7 +271,7 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 	const first = chained.remote.track("video").subscribe(WIDE);
 	const owed = chained.remote.track("video").subscribe(WIDE);
 	await chained.reached();
-	for (let sequence = 0n; sequence < 5n; sequence++) chained.write(sequence, Number(sequence) * 1000);
+	for (let key = 0n; key < 5n; key++) chained.write(key, Number(key) * 1000);
 	const read: unknown[][] = [];
 	for (let i = 0; i < 5; i++) read.push(settled(await next(first)));
 	expect(groupsOf(read)).toEqual([0n, 1n, 2n, 3n, 4n]);
@@ -430,8 +430,8 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 test("through a lite-06 upstream, a group reported dropped as it lands is fetched for a widened lite-07 viewer", async () => {
 	using clock = manual();
 	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07);
-	for (let sequence = 0n; sequence < 10n; sequence++) {
-		if (sequence !== 7n) chained.write(sequence, Number(sequence) * 1000);
+	for (let key = 0n; key < 10n; key++) {
+		if (key !== 7n) chained.write(key, Number(key) * 1000);
 	}
 	// Reaches groups 5 and up by media time.
 	const first = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(3500) }, ranges: [{}] });

@@ -217,8 +217,8 @@ test("wanted reflects mirror demand until the last reader leaves", async () => {
 	expect(wanted.peek()).toBe(false);
 });
 
-function pair(sequence: bigint) {
-	const producer = new Producer(sequence);
+function pair(key: bigint) {
+	const producer = new Producer(key);
 	return { producer, consumer: producer.consume() };
 }
 
@@ -280,10 +280,10 @@ test("a live group retains its tail, while fast readers keep up and lagging read
 	const fast = producer.consume();
 	const slow = producer.consume();
 	const payload = new Uint8Array(1024 * 1024);
-	for (let sequence = 0; sequence < 128; sequence++) {
+	for (let key = 0; key < 128; key++) {
 		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.start) });
 		const frame = await fast.readFrameIndex();
-		expect(frame?.index).toBe(sequence);
+		expect(frame?.index).toBe(key);
 		expect(frame?.payload).toBe(payload);
 		expect(hooks.groupCacheBytes(producer)).toBeLessThanOrEqual(32 * 1024 * 1024);
 	}

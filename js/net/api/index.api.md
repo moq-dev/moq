@@ -703,7 +703,7 @@ export namespace Track {
 	};
 	export type Compression = "none" | "deflate";
 	export class Consumer {
-		fetchGroup(sequence: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
+		fetchGroup(key: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
 		info(options?: Track.InfoOptions): Promise<Track.Info>;
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
@@ -729,14 +729,14 @@ export namespace Track {
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
-		isWanted(sequence: bigint): boolean;
+		isWanted(key: bigint): boolean;
 		readonly kind: "groups";
 		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
-		unwanted(sequence: bigint): Promise<void>;
+		unwanted(key: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
 	}
@@ -753,7 +753,7 @@ export namespace Track {
 		abort(error: Error): void;
 		close(): void;
 		readonly closed: Signals.GetPromise<Error | null>;
-		createGroup(sequence: bigint): Group.Producer;
+		createGroup(key: bigint): Group.Producer;
 		info(): Promise<Track.Info>;
 		readonly name: string;
 		requests(): Track.Requests;
@@ -808,7 +808,7 @@ export namespace Track {
 		appendGroup(start: Time.Timestamp): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		createGroup(sequence: bigint): Group.Producer;
+		createGroup(key: bigint): Group.Producer;
 		demand(): Track.Demand;
 		fail(error: Error): Track.Finished;
 		finish(): Track.Finished;

@@ -42,7 +42,7 @@ import { toNumber } from "../util/bigint.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
-import { max, saturatingSub } from "../util/sequence.ts";
+import { max, saturatingSub } from "../util/key.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -771,7 +771,7 @@ export class Publisher {
 				delay: { max: Duration.millis(Varint.MAX_U53), min: null },
 				ranges: serveRanges(range),
 			});
-			const startGroup = range.start ? range.start.group : hooks.latestSequence(track);
+			const startGroup = range.start ? range.start.group : hooks.latestKey(track);
 			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
 			// The live cursor's lowest group, which a fill-only update never lowers.
 			let floor = startGroup ?? 0n;
@@ -872,8 +872,8 @@ export class Publisher {
 			// The stream serving the highest group, where a widening fill's tail resumes.
 			let live: LiveGroup | undefined;
 			const serveGroup = (group: group.Consumer, slice: GroupSlice) => {
-				const stream: LiveGroup = { sequence: group.start, slice, retired: false };
-				if (!live || group.start >= live.sequence) live = stream;
+				const stream: LiveGroup = { key: group.start, slice, retired: false };
+				if (!live || group.start >= live.key) live = stream;
 				const task = this.#runGroup({
 					track,
 					requestId: msg.requestId,
@@ -945,7 +945,7 @@ export class Publisher {
 								// A stream still serving this group from the fill's edge keeps what it
 								// covers, so the tail resumes where that stream stops.
 								const streaming =
-									live?.sequence === at &&
+									live?.key === at &&
 									live.slice.skip <= slice.skip &&
 									!live.retired &&
 									!excludes(requested, at, live.slice)
@@ -1462,19 +1462,19 @@ export class Publisher {
 			if (fill.kind === "empty") return;
 
 			// A fill we cannot serve is reset right after its header, so it needs no rank.
-			const sequence = fill.kind === "group" ? fill.start.group : undefined;
+			const key = fill.kind === "group" ? fill.start.group : undefined;
 			const object = fill.kind === "group" ? frameBound(fill.start.object) : 0;
 			stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version,
-				sendOrder: sequence === undefined ? undefined : ranking.rank(sequence, object),
+				sendOrder: key === undefined ? undefined : ranking.rank(key, object),
 			});
 			if (!stream) {
 				console.debug(`fill stream failed to open: fill=${requestId}`);
 				return;
 			}
 			streams.opened += 1;
-			if (sequence !== undefined) ranking.add(stream, sequence, object);
+			if (key !== undefined) ranking.add(stream, key, object);
 
 			await untilAborted(new FetchHeader({ requestId }).encode(stream, version), cancelled);
 
@@ -2342,7 +2342,7 @@ interface EndLocation {
  * the fill cap, and the advertised LARGEST_OBJECT all agree on where it is.
  */
 interface LiveEdge {
-	/** The newest group sequence, absent before any group exists. */
+	/** The newest group key, absent before any group exists. */
 	latest?: bigint;
 
 	/**
@@ -2392,8 +2392,8 @@ class FetchWriter {
 		this.#priority = priority;
 	}
 
-	/** Write `read` of group `sequence`, following the prior object of that group, if any. */
-	async object(sequence: bigint, read: ReadGroupFrame, stop: AbortSignal): Promise<void> {
+	/** Write `read` of group `key`, following the prior object of that group, if any. */
+	async object(key: bigint, read: ReadGroupFrame, stop: AbortSignal): Promise<void> {
 		const chunks = read.chunks;
 		const obj = new FetchFrame({
 			payload: chunks ? undefined : read.frame.payload,
@@ -2401,7 +2401,7 @@ class FetchWriter {
 			priority: this.#priority,
 		});
 		const position = {
-			group: sequence,
+			group: key,
 			object: read.index,
 			first: !this.#written,
 		};
@@ -2505,7 +2505,7 @@ interface GroupSlice {
 
 /** The stream serving a subscription's highest group, as it was opened. */
 interface LiveGroup {
-	sequence: bigint;
+	key: bigint;
 	slice: GroupSlice;
 	/** Set once a narrowing gave the stream up before its FIN. */
 	retired: boolean;
@@ -2525,7 +2525,7 @@ type FillServe =
 
 /** Snapshot the live edge of a track. */
 function liveEdge(track: TrackSubscriber): LiveEdge {
-	const latest = hooks.latestSequence(track);
+	const latest = hooks.latestKey(track);
 	const largest = hooks.objectLargest(track);
 	if (!largest) return latest === undefined ? {} : { latest, next: { group: latest, object: 0n } };
 
@@ -2577,22 +2577,20 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge, version: IetfVersion
  * Trim a group to the filter's object bounds, so nothing outside the requested range is
  * sent. Interior groups are served whole.
  */
-function groupSlice(range: ServeRange, sequence: bigint): GroupSlice {
+function groupSlice(range: ServeRange, key: bigint): GroupSlice {
 	return {
-		skip: range.start?.group === sequence ? frameBound(range.start.object) : 0,
+		skip: range.start?.group === key ? frameBound(range.start.object) : 0,
 		until:
-			range.end?.group === sequence && range.end.object !== undefined
-				? frameBound(range.end.object + 1n)
-				: undefined,
+			range.end?.group === key && range.end.object !== undefined ? frameBound(range.end.object + 1n) : undefined,
 	};
 }
 
-/** Whether `range` drops objects a stream serving `slice` of group `sequence` would send. */
-function excludes(range: ServeRange, sequence: bigint, slice: GroupSlice): boolean {
-	const ours = groupSlice(range, sequence);
+/** Whether `range` drops objects a stream serving `slice` of group `key` would send. */
+function excludes(range: ServeRange, key: bigint, slice: GroupSlice): boolean {
+	const ours = groupSlice(range, key);
 	return (
-		(range.start !== undefined && sequence < range.start.group) ||
-		(range.end !== undefined && sequence > range.end.group) ||
+		(range.start !== undefined && key < range.start.group) ||
+		(range.end !== undefined && key > range.end.group) ||
 		ours.skip > slice.skip ||
 		(ours.until !== undefined && (slice.until === undefined || ours.until < slice.until))
 	);

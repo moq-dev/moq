@@ -1202,9 +1202,9 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			await Promise.all(arrivals);
 			const ordered = consumer.ordered();
 			try {
-				for (const sequence of [1n, 2n]) {
+				for (const key of [1n, 2n]) {
 					const group = await ordered.nextGroup();
-					expect(group?.start).toBe(sequence);
+					expect(group?.start).toBe(key);
 					if (!group) throw new Error("missing prefix group");
 					expect(await group.readString()).toBe("object 0");
 					expect(await group.readString()).toBe("object 0");
@@ -1492,7 +1492,7 @@ test.each([
 
 	// This tests stream framing, independent of gaps below these groups. An ordered
 	// subscription with this budget would wait for the unreceived groups 0..2.
-	for (const sequence of expected) expect((await track.recvGroup())?.start).toBe(BigInt(sequence));
+	for (const key of expected) expect((await track.recvGroup())?.start).toBe(BigInt(key));
 	track.close();
 });
 
@@ -1525,9 +1525,9 @@ for (const [name, firstObject, bytes] of [
 		const { subscriber, track } = await subscribeTrack();
 		const opened = Promise.withResolvers<Tail>();
 		const open = Tail.prototype.open;
-		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, key) {
 			opened.resolve(this);
-			return open.call(this, sequence);
+			return open.call(this, key);
 		});
 		const cancelled = jest.fn();
 		let controller: ReadableStreamDefaultController<Uint8Array>;
@@ -1569,9 +1569,9 @@ test("an END_OF_TRACK after the track closed locally leaves the session open", a
 	const close = spyOn(pair.server, "close");
 	const opened = Promise.withResolvers<void>();
 	const open = Tail.prototype.open;
-	const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+	const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, key) {
 		opened.resolve();
-		return open.call(this, sequence);
+		return open.call(this, key);
 	});
 	const ended = Promise.withResolvers<void>();
 	// Restored even when an assertion or a wait below fails, so no other test runs through the spies.

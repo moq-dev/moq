@@ -12,12 +12,12 @@ import { hasGroupEnd, hasGroupFrameStart, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
-	sequence: bigint;
+	key: bigint;
 
 	/**
 	 * Lite-07: the start of the group before this one on the track, or undefined when the
 	 * publisher does not know it. No group starts strictly between the two, so the starts between
-	 * are skipped. A receiver refuses one at or above `sequence` as a malformed track.
+	 * are skipped. A receiver refuses one at or above `key` as a malformed track.
 	 */
 	previous?: bigint;
 
@@ -32,17 +32,17 @@ export class Group {
 
 	constructor({
 		subscribe,
-		sequence,
+		key: sequence,
 		previous,
 		frameStart = 0,
 	}: {
 		subscribe: bigint;
-		sequence: bigint;
+		key: bigint;
 		previous?: bigint;
 		frameStart?: number;
 	}) {
 		this.subscribe = subscribe;
-		this.sequence = sequence;
+		this.key = sequence;
 		this.previous = previous;
 		this.frameStart = frameStart;
 	}
@@ -52,12 +52,12 @@ export class Group {
 	 * previous group and this one, empty when the previous group is unknown or just below.
 	 */
 	passedOver(): { start: bigint; end: bigint } {
-		return passedOver(this.previous, this.sequence);
+		return passedOver(this.previous, this.key);
 	}
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.subscribe);
-		await w.u62(this.sequence);
+		await w.u62(this.key);
 		// Plus one, so 0 says unknown.
 		if (hasGroupEnd(version)) await w.u62(this.previous === undefined ? 0n : this.previous + 1n);
 		if (hasGroupFrameStart(version)) {
@@ -70,11 +70,11 @@ export class Group {
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
-		const sequence = await r.u62();
+		const key = await r.u62();
 		const plusOne = hasGroupEnd(version) ? await r.u62() : 0n;
 		const previous = plusOne === 0n ? undefined : plusOne - 1n;
 		const frameStart = hasGroupFrameStart(version) ? await r.u53() : 0;
-		return new Group({ subscribe, sequence, previous, frameStart });
+		return new Group({ subscribe, key: key, previous, frameStart });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

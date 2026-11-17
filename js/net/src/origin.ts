@@ -1343,10 +1343,10 @@ export interface RouteOptions {
 	/**
 	 * Serve this stable instance `id` at `epoch`, in place of a freshly minted one.
 	 *
-	 * Only for a publisher that continues the instance's sequence space across restarts,
+	 * Only for a publisher that continues the instance's key space across restarts,
 	 * announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
 	 * stitch every route of one instance together, so a publisher that restarts its group
-	 * sequences under an old instance splices unrelated groups into their tracks. The highest
+	 * keys under an old instance splices unrelated groups into their tracks. The highest
 	 * epoch wins over every older one of the instance, cheaper or not. Naming an instance grants
 	 * nothing: publishing still needs the path's grant.
 	 */
@@ -1474,8 +1474,8 @@ export class Producer implements Table {
 	 * This is how local content enters an origin. Fill the broadcast through
 	 * {@link Route.broadcast}. The route serves a fresh random instance, minted here and kept
 	 * for its lifetime, across {@link Route.withdraw} and {@link Route.announce}, since its
-	 * sequences continue: a new route is a new stream that never splices into an old one. A
-	 * publisher that continues one sequence space across restarts may name a stable instance
+	 * keys continue: a new route is a new stream that never splices into an old one. A
+	 * publisher that continues one key space across restarts may name a stable instance
 	 * instead ({@link RouteOptions.instance}).
 	 *
 	 * Announced at once unless created {@link RouteOptions.hidden | hidden}. A hidden route
@@ -3183,7 +3183,7 @@ export class Request {
 	 * instance, bound when it first announces or {@link Route.instance} first reads it, so readers that resolved the path through the
 	 * claim keep reading the same stream. Once this route stops being advertised the
 	 * claim moves to a fresh instance, so a job that restarts beneath it is a new stream
-	 * for its restarted sequences, and a request naming the ended instance is refused. Under a
+	 * for its restarted keys, and a request naming the ended instance is refused. Under a
 	 * claim naming its instance, the route mints a fresh one. Closing the route withdraws
 	 * only this path: the claim keeps answering later requests. Created
 	 * visible, the route announces now and answers the requesters waiting on its path. Created
@@ -3206,7 +3206,7 @@ export class Request {
 	 * Serve a held broadcast under this claim without announcing an exact route.
 	 *
 	 * Takes ownership of a consumer; a producer stays the caller's. Every answer at this
-	 * path belongs to the claim's instance and must continue the same sequences and
+	 * path belongs to the claim's instance and must continue the same keys and
 	 * bytes. Start a new claim for different content, or use {@link route} for a job
 	 * that can restart independently.
 	 */

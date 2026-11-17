@@ -998,10 +998,10 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
 					// A received tail uses its wire position even without a locally retained prefix.
-					group = new GroupMessage({ subscribe: 0n, sequence: 0n, frameStart: 5 });
+					group = new GroupMessage({ subscribe: 0n, key: 0n, frameStart: 5 });
 				} else {
 					await encodeSubscribeResponse(sub.writer, { finish: new SubscribeFinish(2n) }, version);
-					group = new GroupMessage({ subscribe: 0n, sequence: 2n });
+					group = new GroupMessage({ subscribe: 0n, key: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });
 				await writer.u53(DataType.Group);

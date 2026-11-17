@@ -161,11 +161,11 @@ for (const version of VERSIONS) {
 		if (!first) throw new Error("missing first group");
 		expect(await payloads(first)).toEqual(["1a", "", "1c"]);
 		first.close();
-		for (const sequence of [3n, 4n]) {
+		for (const key of [3n, 4n]) {
 			const group = await ordered.nextGroup();
-			expect(group?.start).toBe(sequence);
+			expect(group?.start).toBe(key);
 			if (!group) throw new Error("missing group");
-			expect(await payloads(group)).toEqual([`${sequence}a`, "", `${sequence}c`]);
+			expect(await payloads(group)).toEqual([`${key}a`, "", `${key}c`]);
 			group.close();
 		}
 		expect(await ordered.nextGroup()).toBeUndefined();
@@ -179,9 +179,9 @@ for (const version of VERSIONS) {
 		const zero = await missing;
 		expect(zero?.start).toBe(0n);
 		zero?.close();
-		for (const sequence of [1n, 3n, 4n]) {
+		for (const key of [1n, 3n, 4n]) {
 			const group = await overlap.nextGroup();
-			expect(group?.start).toBe(sequence);
+			expect(group?.start).toBe(key);
 			group?.close();
 		}
 		expect(await overlap.nextGroup()).toBeUndefined();

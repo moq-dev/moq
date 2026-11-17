@@ -30,8 +30,8 @@ const MAX_DELAY = Duration.millis(30_000);
 // The send orders a subscription at priority 0 gives its streams, in the order they opened,
 // when stream `i` carries group `i` of `count` all still in flight.
 function expected(order: Order, count: number): number[] {
-	return Array.from({ length: count }, (_, sequence) =>
-		sendOrder({ priority: 0, position: order === "ascending" ? sequence : count - 1 - sequence }),
+	return Array.from({ length: count }, (_, key) =>
+		sendOrder({ priority: 0, position: order === "ascending" ? key : count - 1 - key }),
 	);
 }
 
@@ -80,8 +80,8 @@ function liteSendOrders(transport: MockTransport): number[] {
 	const written = headers.get(transport);
 	return transport.sendStreams.uni
 		.flatMap((stream, index) => {
-			const sequence = written?.get(index)?.[3];
-			return stream.sendOrder === undefined || sequence === undefined ? [] : [[sequence, stream.sendOrder]];
+			const key = written?.get(index)?.[3];
+			return stream.sendOrder === undefined || key === undefined ? [] : [[key, stream.sendOrder]];
 		})
 		.sort(([a], [b]) => a - b)
 		.map(([, order]) => order);
@@ -109,13 +109,13 @@ function writeGroup(track: TrackProducer): GroupProducer {
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
 async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
-	const sequences: bigint[] = [];
+	const keys: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
-		sequences.push(group.start);
+		keys.push(group.start);
 	}
-	return sequences;
+	return keys;
 }
 
 // Resolve once the producer's aggregate subscription satisfies `predicate`.

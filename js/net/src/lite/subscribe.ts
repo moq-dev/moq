@@ -3,7 +3,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
-import { UNBOUNDED } from "../util/sequence.ts";
+import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY } from "../window.ts";
 import * as Duration from "./duration.ts";
@@ -30,7 +30,7 @@ import {
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
  *
  * Lite-06 writes the raw floor (`undefined` and 0 are both group 0). A pre-06 wire
- * encodes the sequence + 1: omitting the floor is 0 (the latest group, where the
+ * encodes the key + 1: omitting the floor is 0 (the latest group, where the
  * publisher starts) and an explicit 0 is 1, replay from the beginning.
  */
 async function encodeStartGroup(w: Writer, version: Version, startGroup?: bigint) {
@@ -1051,7 +1051,7 @@ export class SubscribeStart {
  * producing any groups.
  */
 export class SubscribeFinish {
-	/** The exclusive final group sequence: the first sequence that will never be produced. */
+	/** The exclusive final group key: the first key that will never be produced. */
 	group: bigint;
 	/** The stream error code the track ended with, if it did not end cleanly. Draft-07+ only. */
 	error?: number;
@@ -1118,7 +1118,7 @@ export class SubscribeStarted {
 
 /**
  * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: a non-empty `[Group Start, Group End)` on lite-07, an
- * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved sequence
+ * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved key
  * 2^64-1, so it never names that group.
  */
 async function decodeGroups(r: Reader, version: Version): Promise<{ start: bigint; end: bigint }> {
@@ -1143,13 +1143,13 @@ async function encodeGroups(w: Writer, start: bigint, end: bigint, version: Vers
  * Names groups that existed but will not be delivered: aborted or reset, evicted or expired with
  * no copy left, or stale.
  *
- * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names sequences
+ * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names keys
  * declared skipped, which lite-07 names in {@link SubscribeSkip}.
  */
 export class SubscribeDrop {
-	/** The first dropped group sequence. */
+	/** The first dropped group key. */
 	start: bigint;
-	/** One past the last dropped group sequence. */
+	/** One past the last dropped group key. */
 	end: bigint;
 	error: number;
 
@@ -1203,14 +1203,14 @@ export class SubscribeDrop {
 }
 
 /**
- * Names sequences the publisher declared it will never produce (see `Producer.skipGroups`):
+ * Names keys the publisher declared it will never produce (see `Producer.skipGroups`):
  * final, with no error, ending no reader. Lite-07+; earlier versions name them in a
  * {@link SubscribeDrop}.
  */
 export class SubscribeSkip {
-	/** The first skipped group sequence. */
+	/** The first skipped group key. */
 	start: bigint;
-	/** One past the last skipped group sequence. */
+	/** One past the last skipped group key. */
 	end: bigint;
 
 	constructor(props: { start: bigint; end: bigint }) {

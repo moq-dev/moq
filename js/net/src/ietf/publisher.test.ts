@@ -953,11 +953,11 @@ test("a group stream whose FIN never completes is reset when the group expires",
 			server,
 		);
 
-		const write = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint) => {
+			const group = track.createGroup(key);
 			group.writeFrame({
 				payload: new TextEncoder().encode("frame"),
-				timestamp: Timestamp.fromMillis(Number(sequence)),
+				timestamp: Timestamp.fromMillis(Number(key)),
 			});
 			group.finish();
 		};
@@ -1040,11 +1040,11 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 		await SubscribeOk.decode(client.reader, VERSION);
 
 		// Timestamps a millisecond apart, so only the wall clock since group 1 arrived convicts group 0.
-		const write = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint) => {
+			const group = track.createGroup(key);
 			group.writeFrame({
 				payload: new TextEncoder().encode("frame"),
-				timestamp: Timestamp.fromMillis(Number(sequence)),
+				timestamp: Timestamp.fromMillis(Number(key)),
 			});
 			group.finish();
 		};
@@ -1128,8 +1128,8 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 			server,
 		);
 
-		const write = (sequence: bigint, ms: number) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint, ms: number) => {
+			const group = track.createGroup(key);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
 		};
@@ -2814,12 +2814,12 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 	// No max age: group 9 is served live, and a zero budget would give it up mid-write once the
 	// live group supersedes it, racing this test's read of the refused fill.
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	for (const sequence of [0n, 3n, 9n]) {
-		const group = track.createGroup(sequence);
+	for (const key of [0n, 3n, 9n]) {
+		const group = track.createGroup(key);
 		for (let i = 0; i < 2; i++)
 			group.writeFrame({
-				payload: new TextEncoder().encode(`${sequence}.${i}`),
-				timestamp: Timestamp.fromMillis(Number(sequence)),
+				payload: new TextEncoder().encode(`${key}.${i}`),
+				timestamp: Timestamp.fromMillis(Number(key)),
 			});
 		group.finish();
 	}
@@ -4267,10 +4267,10 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 		expect(
 			served
 				.sort((a, b) => Number(a.sequence - b.sequence))
-				.map(({ sequence, objects }) => ({ sequence, objects })),
+				.map(({ sequence: key, objects }) => ({ key: key, objects })),
 		).toEqual([
-			{ sequence: 2n, objects: [{ id: 1, payload: "2.1" }] },
-			{ sequence: 3n, objects: [{ id: 0, payload: "3.0" }] },
+			{ key: 2n, objects: [{ id: 1, payload: "2.1" }] },
+			{ key: 3n, objects: [{ id: 0, payload: "3.0" }] },
 		]);
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, fx.version);

@@ -41,12 +41,12 @@ async function peers(alpn: string) {
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
-			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-				if (sequence === 1n) {
+			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+				if (key === 1n) {
 					fill.dropGroups(1n, 2n);
 					continue;
 				}
-				write(fill.accept(sequence), sequence, "old");
+				write(fill.accept(key), key, "old");
 			}
 			fill.close();
 		}
@@ -70,10 +70,10 @@ async function peers(alpn: string) {
 }
 
 // Group `sequence` presents at `sequence` seconds, with its origin in its payload.
-function write(group: ReturnType<Producer["createGroup"]>, sequence: bigint, kind: string): void {
+function write(group: ReturnType<Producer["createGroup"]>, key: bigint, kind: string): void {
 	group.writeFrame({
-		payload: enc.encode(`${kind} ${sequence}`),
-		timestamp: Timestamp.fromMillis(Number(sequence) * 1000),
+		payload: enc.encode(`${kind} ${key}`),
+		timestamp: Timestamp.fromMillis(Number(key) * 1000),
 	});
 	group.finish();
 }
@@ -113,7 +113,7 @@ const NARROW: Subscription = { delay: { max: Duration.millis(500) } };
 const WIDE: Subscription = { delay: { max: null }, order: "ascending" };
 
 function populate(track: Producer): void {
-	for (let sequence = 0n; sequence < 5n; sequence++) write(track.createGroup(sequence), sequence, "live");
+	for (let key = 0n; key < 5n; key++) write(track.createGroup(key), key, "live");
 }
 
 // What `take` read, in sequence order.
@@ -121,7 +121,7 @@ function sorted(got: Map<bigint, string>): [bigint, string][] {
 	return [...got].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const ALL = [0n, 1n, 2n, 3n, 4n].map((sequence): [bigint, string] => [sequence, `live ${sequence}`]);
+const ALL = [0n, 1n, 2n, 3n, 4n].map((key): [bigint, string] => [key, `live ${key}`]);
 
 test("copy fill: lite-07 fills below a start resolved from the budget, as far as the reader's own budget reaches", async () => {
 	const peer = await peers(Lite.ALPN_07_WIP);
@@ -204,11 +204,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				order: "ascending",
 			};
 			const first = peer.remote.track("video").subscribe(history);
-			for (let sequence = 0n; sequence < 4n; sequence++)
-				write(peer.track.createGroup(sequence), sequence, "live");
+			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
 			// Before lite-07 a subscription carries no order and is served newest first, so only
 			// the set of groups is fixed.
-			expect(sorted(await take(first, 4)).map(([sequence]) => sequence)).toEqual([0n, 1n, 2n, 3n]);
+			expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
 
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.
@@ -499,12 +498,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const requests = track.requests();
 		void (async () => {
 			for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
-				for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-					if (sequence !== 2n || !archived) {
-						fill.refuseGroups(sequence, sequence + 1n, new StreamError(StreamCode.NotFound));
+				for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+					if (key !== 2n || !archived) {
+						fill.refuseGroups(key, key + 1n, new StreamError(StreamCode.NotFound));
 						continue;
 					}
-					const group = fill.accept(sequence);
+					const group = fill.accept(key);
 					for (let frame = 0; frame < 5; frame++)
 						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
 					group.finish();

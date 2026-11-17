@@ -180,7 +180,7 @@ interface Copy {
 }
 
 /** Answers a fetch of `sequence` that `local`, the route's own cache, may serve. */
-type Fill = (sequence: number, local: () => Promise<GroupConsumer>) => Promise<GroupConsumer>;
+type Fill = (key: number, local: () => Promise<GroupConsumer>) => Promise<GroupConsumer>;
 
 /** A route's broadcast, which fetches upstream what its cache lacks, the way a relay forwards a fetch. */
 class Upstream extends BroadcastConsumer {
@@ -191,7 +191,7 @@ class Upstream extends BroadcastConsumer {
 		const local = wireOf(this).fetchGroup;
 		if (!local) throw new Error("a produced broadcast always fetches");
 		overrideBroadcastWire(this, {
-			fetchGroup: (name, sequence, options) => fill(Number(sequence), () => local(name, sequence, options)),
+			fetchGroup: (name, key, options) => fill(Number(key), () => local(name, key, options)),
 		});
 		this.#fill = fill;
 	}
@@ -472,7 +472,7 @@ class Model {
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		void (async () => {
 			for await (const request of serving.requested()) {
-				request.serve(Upstream.of(broadcast, (sequence, local) => this.fill(instance, slot, sequence, local)));
+				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
 			}
 		})();
 		publisher.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };
@@ -522,21 +522,21 @@ class Model {
 	async fill(
 		instance: number,
 		slot: number,
-		sequence: number,
+		key: number,
 		local: () => Promise<GroupConsumer>,
 	): Promise<GroupConsumer> {
 		this.progress++;
 		const publisher = this.instances[instance];
 		const copy = publisher.routes[slot];
 		if (!copy) throw routeFailure();
-		if (copy.givenUp.has(sequence)) throw giveUp();
-		if (copy.groups.has(sequence)) return local();
-		const written = publisher.written.get(sequence) ?? 0;
-		if (sequence >= GROUPS || written === 0) throw new NotFound(`group ${sequence}`);
-		const writer = copy.track.createGroup(BigInt(sequence));
-		copy.groups.set(sequence, { written: 0, writer });
+		if (copy.givenUp.has(key)) throw giveUp();
+		if (copy.groups.has(key)) return local();
+		const written = publisher.written.get(key) ?? 0;
+		if (key >= GROUPS || written === 0) throw new NotFound(`group ${key}`);
+		const writer = copy.track.createGroup(BigInt(key));
+		copy.groups.set(key, { written: 0, writer });
 		const group = writer.consume();
-		this.write(instance, slot, sequence, written);
+		this.write(instance, slot, key, written);
 		return group;
 	}
 
@@ -650,29 +650,29 @@ class Model {
 			}
 			if (recv.kind === "group") {
 				const group = recv.group;
-				const sequence = Number(group.start);
-				if (reader.reading.has(sequence)) {
-					throw fail(index, `group ${sequence} handed out twice: ${reader.handed}`);
+				const key = Number(group.start);
+				if (reader.reading.has(key)) {
+					throw fail(index, `group ${key} handed out twice: ${reader.handed}`);
 				}
 				const last = reader.handed.at(-1);
-				if (reader.spec.ordered && last !== undefined && last >= sequence) {
-					throw fail(index, `group ${sequence} out of order after ${reader.handed}`);
+				if (reader.spec.ordered && last !== undefined && last >= key) {
+					throw fail(index, `group ${key} out of order after ${reader.handed}`);
 				}
 				// Only an arrival cursor says where its range resolved.
 				const start = reader.spec.ordered ? undefined : hooks.servingResolved(reader.sub)[0]?.start;
 				const resolved = start === undefined ? undefined : Number(start);
-				if (!admits(reader, sequence, resolved)) {
+				if (!admits(reader, key, resolved)) {
 					throw fail(
 						index,
-						`group ${sequence} outside ranges ${reader.ranges} (resolved from ${resolved}) and bounds ${reader.local}`,
+						`group ${key} outside ranges ${reader.ranges} (resolved from ${resolved}) and bounds ${reader.local}`,
 					);
 				}
-				if (!instance.written.has(sequence)) {
-					throw fail(index, `group ${sequence} handed out before any route had it`);
+				if (!instance.written.has(key)) {
+					throw fail(index, `group ${key} handed out before any route had it`);
 				}
-				reader.handed.push(sequence);
+				reader.handed.push(key);
 				const reading: Reading = { group, frames: 0 };
-				reader.reading.set(sequence, reading);
+				reader.reading.set(key, reading);
 				void this.#read(index, reader, reading);
 			} else if (recv.kind === "done") {
 				if (!reader.parked) this.#endClean(index, reader);
@@ -707,7 +707,7 @@ class Model {
 
 	/** Read a group handed out to its end, checking each frame against the model. */
 	async #read(index: number, reader: Reader, reading: Reading): Promise<void> {
-		const sequence = Number(reading.group.start);
+		const key = Number(reading.group.start);
 		for (;;) {
 			let frame: Frame | undefined;
 			try {
@@ -721,19 +721,16 @@ class Model {
 			if (reader.gone) return;
 			this.progress++;
 			if (!frame) {
-				if (reading.frames !== frames(sequence) || !this.instances[reader.instance].complete.has(sequence)) {
-					this.failure ??= fail(index, `group ${sequence} ended cleanly after ${reading.frames} frames`);
+				if (reading.frames !== frames(key) || !this.instances[reader.instance].complete.has(key)) {
+					this.failure ??= fail(index, `group ${key} ended cleanly after ${reading.frames} frames`);
 				}
 				reading.end = null;
 				return;
 			}
-			const expected = payload(reader.instance, sequence, reading.frames);
+			const expected = payload(reader.instance, key, reading.frames);
 			const read = dec.decode(frame.payload);
-			if (read !== expected || reading.frames >= frames(sequence)) {
-				this.failure ??= fail(
-					index,
-					`group ${sequence} frame ${reading.frames} read ${read}, expected ${expected}`,
-				);
+			if (read !== expected || reading.frames >= frames(key)) {
+				this.failure ??= fail(index, `group ${key} frame ${reading.frames} read ${read}, expected ${expected}`);
 				return;
 			}
 			reading.frames++;
@@ -781,10 +778,10 @@ class Model {
 			if (!reader) continue;
 			this.poll(index);
 			// A frame read still waiting with a frame or its end ready was never woken.
-			for (const [sequence, reading] of reader.reading) {
+			for (const [key, reading] of reader.reading) {
 				if (reading.end !== undefined) continue;
 				const ready = reading.group.done ? "its end" : reading.group.tryReadFrame() ? "a frame" : undefined;
-				if (ready) throw fail(index, `group ${sequence} has ${ready} ready that never woke its read`);
+				if (ready) throw fail(index, `group ${key} has ${ready} ready that never woke its read`);
 			}
 			if (observed(reader) !== seen[index]) {
 				throw fail(
@@ -826,15 +823,15 @@ class Model {
 		let problems = "";
 		if (missing.length > 0) problems += `missing groups ${missing}; `;
 		if (reader.spec.budget === "hour") {
-			for (const [sequence, reading] of reader.reading) {
-				if (reading.end === null || !carried(sequence) || instance.givenUp.has(sequence)) continue;
+			for (const [key, reading] of reader.reading) {
+				if (reading.end === null || !carried(key) || instance.givenUp.has(key)) continue;
 				// Like a group under the floor, one older than an expiry may be gone from its own copy
 				// or from the route it would continue from.
 				const gone = reading.end instanceof TooFarBehind || reading.end instanceof NotFound;
-				if (gone && instance.expired !== undefined && sequence <= instance.expired) continue;
+				if (gone && instance.expired !== undefined && key <= instance.expired) continue;
 				// Unlike Rust, an ended JS reader follows no route, so a route failure ends a group still read.
 				if (ended && reading.end instanceof Error && routeFailed(reading.end)) continue;
-				problems += `group ${sequence} stopped at frame ${reading.frames} (${reading.end}); `;
+				problems += `group ${key} stopped at frame ${reading.frames} (${reading.end}); `;
 			}
 		}
 		const live = finish && instance.live().length > 0;

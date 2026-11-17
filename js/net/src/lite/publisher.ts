@@ -26,7 +26,7 @@ import type * as Instance from "../instance.ts";
 import {
 	type DropRun,
 	datagramTrackInfo,
-	finalSequence,
+	finalKey,
 	type Hole,
 	hiddenBelow,
 	hooks,
@@ -47,7 +47,7 @@ import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
-import { max, min } from "../util/sequence.ts";
+import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import type { Resolved } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -275,7 +275,7 @@ type FrameBounds = {
 };
 
 /**
- * The frames of `sequence` a subscription asked for, as a start index and an inclusive end.
+ * The frames of `key` a subscription asked for, as a start index and an inclusive end.
  *
  * The frame bounds qualify the start and end group only; every other group is served whole.
  * Which groups are served at all is the serving subscriber's ranges and floor,
@@ -285,10 +285,10 @@ type FrameBounds = {
  * change `bounds`. Nothing downstream trims the frame range: it is a wire request,
  * deliberately decoupled from the receiver's local read cursor.
  */
-function frameRange(bounds: FrameBounds, sequence: bigint): { start: number; end?: number } {
+function frameRange(bounds: FrameBounds, key: bigint): { start: number; end?: number } {
 	return {
-		start: bounds.startGroup === sequence ? bounds.startFrame : 0,
-		end: bounds.endGroup === sequence ? bounds.endFrame : undefined,
+		start: bounds.startGroup === key ? bounds.startFrame : 0,
+		end: bounds.endGroup === key ? bounds.endFrame : undefined,
 	};
 }
 
@@ -980,7 +980,7 @@ export class Publisher {
 			track.close();
 			return;
 		}
-		const latest = hooks.latestSequence(track);
+		const latest = hooks.latestKey(track);
 		let floor = cursorFloor(this.version, msg.startGroup, latest);
 		// The ranges cap what is served; the floor only pins where an older wire starts.
 		track.withRange({ start: { included: floor } });
@@ -996,7 +996,7 @@ export class Publisher {
 		let legacy: datagram.Consumer | undefined;
 		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
-		// Lite-05 and later name every sequence below the end that this subscription never
+		// Lite-05 and later name every key below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
 		// for a group that will not come. A gap that never arrived stays until the end sweep
 		// names it: this side cannot tell when the subscriber stopped waiting for it.
@@ -1030,7 +1030,7 @@ export class Publisher {
 			// brings later is not waited for. Lite-01/02 keep their arrival floor, as Rust does.
 			if (this.version !== Version.DRAFT_01 && this.version !== Version.DRAFT_02) {
 				let newest = latest;
-				for (const known of [hooks.latestSequence(track), hooks.peekLargest(track).largest?.group]) {
+				for (const known of [hooks.latestKey(track), hooks.peekLargest(track).largest?.group]) {
 					if (known !== undefined) newest = newest === undefined ? known : max(newest, known);
 				}
 				const resolved = cursorFloor(this.version, msg.startGroup, newest);
@@ -1303,7 +1303,7 @@ export class Publisher {
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
-		// What the wire was told of each sequence: served, or given up, and how. Kept in the
+		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
 		// The read cursor's floor; the subscription's ranges cap it.
@@ -1322,7 +1322,7 @@ export class Publisher {
 		// Dispositions before START refine its boundary; later ones must be named as drops.
 		const skipped: DropRun[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
-		let startSequence: bigint | undefined;
+		let startKey: bigint | undefined;
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
@@ -1351,7 +1351,7 @@ export class Publisher {
 		// Report where each range an update added starts, once it resolves, or with no start once
 		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
-			if (startSequence === undefined || unstarted.length === 0) return true;
+			if (startKey === undefined || unstarted.length === 0) return true;
 			const resolved = hooks.servingResolved(track);
 			const positions = controls.positions();
 			const waiting: bigint[] = [];
@@ -1369,7 +1369,7 @@ export class Publisher {
 				}
 				let start: bigint | undefined;
 				if (range) {
-					start = max(range.start, startSequence);
+					start = max(range.start, startKey);
 					if (range.end !== undefined && range.end <= start) start = undefined;
 				}
 				const started = new SubscribeStarted(id, start);
@@ -1474,7 +1474,7 @@ export class Publisher {
 		// stream FIN says where it stops.
 		const boundary = () => {
 			const end = hooks.subscriberEnd(track);
-			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1n) + 1n;
+			return end ? finalKey(end) : (hooks.latestKey(track) ?? -1n) + 1n;
 		};
 
 		// Declare the boundary immediately; groups below it can still be in flight. Lite-07 carries
@@ -1527,17 +1527,17 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
-				if (startSequence !== undefined && skipped.length > 0) {
+				if (startKey !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
 						// A stale run below the start is never named, so a wider budget may serve it. A
 						// final one is named all the same: no budget brings it back, and a subscriber
 						// filling below the start (a relay whose reader reaches lower) must still learn
 						// its fate. Mirrors the Rust `TrackRun::resolve`.
-						const below = min(range.end, startSequence);
+						const below = min(range.end, startKey);
 						if (range.stale !== undefined) {
 							if (range.start < below) record?.untell(range.start, below);
 						} else if (!(await forward(range.start, below, range))) return false;
-						if (!(await forward(max(range.start, startSequence), range.end, range))) return false;
+						if (!(await forward(max(range.start, startKey), range.end, range))) return false;
 					}
 					skipped.length = 0;
 				}
@@ -1581,7 +1581,7 @@ export class Publisher {
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
-							// an empty track the next group is the latest, whatever its sequence.
+							// an empty track the next group is the latest, whatever its key.
 							// Lite-06 encodes an absent start as no floor, so it drops back to 0:
 							// the cursor only rises on its own, and a finished group below the old
 							// floor (a quiet catalog) is never served otherwise.
@@ -1591,7 +1591,7 @@ export class Publisher {
 								: update.startGroup === undefined &&
 										requested !== undefined &&
 										!resolvesStart(this.version)
-									? (hooks.latestSequence(track) ?? 0n)
+									? (hooks.latestKey(track) ?? 0n)
 									: (update.startGroup ?? (resolvesStart(this.version) ? 0n : undefined));
 							if (start !== undefined) {
 								floor = start;
@@ -1600,7 +1600,7 @@ export class Publisher {
 								// covers them. A raised one sends no early drop: the subscriber already
 								// stops owing below its floor, and a later update may lower it again to
 								// ask for the groups the wire was told nothing of.
-								if (startSequence !== undefined) startSequence = min(startSequence, start);
+								if (startKey !== undefined) startKey = min(startKey, start);
 							}
 							bounds.startGroup = update.startGroup;
 							bounds.startFrame = update.startFrame;
@@ -1654,7 +1654,7 @@ export class Publisher {
 									(bounds.startGroup === largest.group && startFrame > largest.frame))
 							) {
 								startSent = true;
-								startSequence = bounds.startGroup;
+								startKey = bounds.startGroup;
 								if (!hasRanges(this.version)) raiseFloor(bounds.startGroup);
 								const start = new SubscribeStart(rangeStarts(bounds.startGroup), answered(largest));
 								if (
@@ -1670,7 +1670,7 @@ export class Publisher {
 							const end = hooks.servingEnd(track);
 							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
 								startSent = true;
-								startSequence = end;
+								startKey = end;
 								const start = new SubscribeStart(rangeStarts(end), answered(largest));
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
@@ -1697,8 +1697,8 @@ export class Publisher {
 								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
 							) {
 								startSent = true;
-								startSequence = runs[0].start;
-								const start = new SubscribeStart(rangeStarts(startSequence), answered(largest));
+								startKey = runs[0].start;
+								const start = new SubscribeStart(rangeStarts(startKey), answered(largest));
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1730,24 +1730,24 @@ export class Publisher {
 						// names what it held back, and the drops below account for the rest.
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
 							startSent = true;
-							startSequence = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
-							const start = new SubscribeStart(rangeStarts(startSequence), answered(largest));
+							startKey = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
+							const start = new SubscribeStart(rangeStarts(startKey), answered(largest));
 							if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version))))
 								return false;
 							continue;
 						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
 						if (!(await reportStarted(true))) return false;
-						// Name every sequence from the start to the end this subscription never
+						// Name every key from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
-						if (startSequence !== undefined) {
-							// A sequence the publisher declared skipped went out as a skip already; one
+						if (startKey !== undefined) {
+							// A key the publisher declared skipped went out as a skip already; one
 							// it never declared might have existed, so it is not found.
 							const unserved: Hole = {
 								error: new StreamError(StreamCode.NotFound, { message: "group not served" }),
 							};
 							// Only the groups inside the ranges are owed.
-							for (const run of hooks.servingRuns(track, startSequence, boundary())) {
+							for (const run of hooks.servingRuns(track, startKey, boundary())) {
 								if (!(await drop(run.start, run.end, unserved))) return false;
 							}
 						}
@@ -1771,7 +1771,7 @@ export class Publisher {
 				}
 
 				const group = recv.group;
-				// Never a second stream for a sequence this subscription already accounted for (served,
+				// Never a second stream for a key this subscription already accounted for (served,
 				// sent as a datagram, or dropped, stale or not): a subscriber settles every drop for good,
 				// and a reader wider than a stale one asks for the group with a request of its own.
 				if (record?.told(group.start)) {
@@ -1792,24 +1792,23 @@ export class Publisher {
 					startSent = true;
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
-					startSequence = min(group.start, source ?? group.start);
+					startKey = min(group.start, source ?? group.start);
 					// A group given up cannot be where the feed starts. Adjacent runs given up with
 					// different errors stay separate, so walk them in order.
 					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 					for (const range of skipped) {
-						if (range.start <= startSequence && range.end > startSequence)
-							startSequence = min(range.end, group.start);
+						if (range.start <= startKey && range.end > startKey) startKey = min(range.end, group.start);
 					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
-					// Group Start is the latest group, and this sequence becomes the floor.
+					// Group Start is the latest group, and this key becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
-					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startSequence);
+					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
 					if (
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(rangeStarts(startSequence), answered(largest)) },
+								{ start: new SubscribeStart(rangeStarts(startKey), answered(largest)) },
 								this.version,
 							),
 						))
@@ -2346,7 +2345,7 @@ export class Publisher {
 	async #serveGroup(stream: Writer, options: RunGroup) {
 		const { sub, group, givenUp, stamp, compress, priority, previous, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
-		const msg = new GroupMessage({ subscribe: sub, sequence: group.start, previous, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, key: group.start, previous, frameStart: startFrame });
 		// Lite-07 ends a finished group with GROUP_END and closes, rather than resets, the stream of
 		// a group that expires on it: the stream accounts for the group, so no drop names it.
 		const closes = hasGroupEnd(this.version);
@@ -2449,7 +2448,7 @@ export class Publisher {
 					(err: unknown) => error(err),
 				);
 				if (failed === undefined) {
-					console.debug(`closing expired group: subscribe=${sub} sequence=${group.start}`);
+					console.debug(`closing expired group: subscribe=${sub} key=${group.start}`);
 					stream.close();
 					group.close();
 					return await stream.closed.then(
