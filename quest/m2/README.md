@@ -22,7 +22,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 
 - **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
   for lite-08; [the ietf extension](/quest/m2/ietf-records-per-track.md)
-  costs nothing on a moq-lite track; [the path escape](/quest/m2/path-escape.md)
+  costs nothing on a moq-lite track; the path escape
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
@@ -45,9 +45,8 @@ removal, a rename, or a wire, catalog, or format change that is free until
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
-- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
-  [claims](/quest/m2/auth-claims.md), and
-  [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
+- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md) and
+  [claims](/quest/m2/auth-claims.md). End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
@@ -69,8 +68,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
   [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
-- **Bindings.** [Dart as experimental](/quest/m2/dart-experimental.md) and
-  [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
+- **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
 

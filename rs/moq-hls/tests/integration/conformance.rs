@@ -65,7 +65,7 @@ async fn segments_match_their_manifests() {
 		.expect("publish");
 	let mut broadcast = publication.broadcast().clone();
 	let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
-	seeded.media.join = hang::catalog::Join::new(DURATION);
+	seeded.sync.interval = Some(DURATION);
 	let mut catalog =
 		moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default().with_catalog(seeded))
 			.expect("catalog");

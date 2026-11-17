@@ -17,7 +17,7 @@ can keep passing on code that has moved on. Milestone m4.
   [reconnect](/quest/m4/reconnect-trace-validation.md) and
   [subscribe](/quest/m4/subscribe-trace-validation.md) reuse: route's trace
   validation, which was to build them, gave way to the
-  exhaustive route search, which [the router](/quest/m2/multicast/router.md) now carries (decided
+  exhaustive route search, which `route::tests::multicast_search` now runs on the new router (decided
   2026-11-14, maintainer, on [moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)). The
   sweep records each step as the model action it corresponds to (the
   `verify-resume` skill's Coverage table is the mapping) with the variables

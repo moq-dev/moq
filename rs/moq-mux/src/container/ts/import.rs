@@ -8284,7 +8284,7 @@ pub(super) mod test {
 			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
 		)
 		.unwrap();
-		let provisional = catalog.snapshot().media.clock.expect("a clock");
+		let provisional = catalog.snapshot().sync.clock.expect("a clock");
 		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -8297,9 +8297,8 @@ pub(super) mod test {
 
 		import
 			.decode(&audio_pes_packet(DATA_PID, 0, 3_600 * 90_000, &[0xDE, 0xAD]))
-			.unwrap()
-			.expect_continue();
-		let anchored = catalog.snapshot().media.clock.expect("a clock");
+			.unwrap();
+		let anchored = catalog.snapshot().sync.clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
 		let published = clocks.drain();
 		assert!(!published.is_empty(), "the first PES releases the catalog");
@@ -11450,8 +11449,8 @@ pub(super) mod test {
 			"the first snapshot carries the PID"
 		);
 		assert_eq!(
-			first.media.clock,
-			catalog.snapshot().media.clock,
+			first.sync.clock,
+			catalog.snapshot().sync.clock,
 			"the first snapshot carries the anchored clock"
 		);
 		import

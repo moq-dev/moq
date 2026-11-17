@@ -1525,7 +1525,7 @@ fn reach(scope: &Patterns, claim: &Pattern) -> Vec<Pattern> {
 
 /// The paths a prefix can cover, using an exact pattern at the path depth limit.
 fn prefix_claim(prefix: &Path) -> Result<Pattern, InvalidPattern> {
-	if prefix.parts().count() == Path::MAX_PARTS {
+	if prefix.depth() == Path::MAX_PARTS {
 		Pattern::literal(prefix.as_str())
 	} else {
 		Pattern::subtree(prefix.as_str())
@@ -1963,7 +1963,7 @@ impl Mount {
 	/// and the result fits the wire limits.
 	fn resolve(&self, path: &Path) -> Option<Path> {
 		let resolved = self.target.join(&path.strip_prefix(&self.at)?).ok()?;
-		(resolved.parts().count() <= Path::MAX_PARTS).then_some(resolved)
+		(resolved.depth() <= Path::MAX_PARTS).then_some(resolved)
 	}
 
 	/// Where the origin-side absolute `path` shows on the handle, when it is at or
@@ -1976,7 +1976,7 @@ impl Mount {
 	/// wire limits, so a reader could ask for it. A route covering the target always does.
 	fn names(&self, path: &Path) -> bool {
 		path.strip_prefix(&self.target).is_none_or(|rest| {
-			self.at.parts().count() + rest.parts().count() <= Path::MAX_PARTS
+			self.at.depth() + rest.depth() <= Path::MAX_PARTS
 				&& self.at.len() + usize::from(!self.at.is_empty() && !rest.is_empty()) + rest.len() <= Path::MAX_BYTES
 		})
 	}
@@ -2103,27 +2103,19 @@ impl Default for OriginScope {
 
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
+///
+/// A pattern's literal segments are spelled like a path's, so a head fails only when it
+/// is too long for a path, and then it asks for nothing.
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<Path> {
-	let mut heads: Vec<Path> = allowed.iter().filter_map(|pattern| covering(pattern.head())).collect();
+	let mut heads: Vec<Path> = allowed
+		.iter()
+		.filter_map(|pattern| Path::new(pattern.head()).ok())
+		.collect();
 	heads.sort();
 	heads.dedup();
 	let covered = heads.clone();
 	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
 	heads
-}
-
-/// The nearest path at or above a pattern head.
-///
-/// A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
-/// falls back to its parent. A head too long for a path covers none, so it asks for nothing.
-fn covering(mut head: &str) -> Option<Path> {
-	loop {
-		match Path::new(head) {
-			Ok(path) => return Some(path),
-			Err(crate::path::Error::InvalidEscape) => head = head.rsplit_once('/').map_or("", |(parent, _)| parent),
-			Err(_) => return None,
-		}
-	}
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.
@@ -2560,7 +2552,7 @@ impl Producer {
 		// A decoded prefix and suffix are each within the wire limit, but their
 		// join might not be. Enforcing here bounds the table depth and guarantees the
 		// path can be re-encoded when forwarded.
-		if full.parts().count() > Path::MAX_PARTS {
+		if full.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
 		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
@@ -2919,7 +2911,7 @@ impl Producer {
 	) -> Result<Producer, Error> {
 		let at = self.root.join(&path::convert(at)?)?;
 		let target = self.root.join(&path::convert(target)?)?;
-		if at.parts().count() > Path::MAX_PARTS || target.parts().count() > Path::MAX_PARTS {
+		if at.depth() > Path::MAX_PARTS || target.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
 		// A mount point no pattern can spell could never be announced or authorized.
@@ -3015,7 +3007,7 @@ impl Announcing {
 	fn new(producer: &Producer, prefix: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
 		let requested = producer.root.join(&path::convert(prefix)?)?;
 		publish_path(&requested)?;
-		if requested.parts().count() > Path::MAX_PARTS {
+		if requested.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
 		let claim = prefix_claim(&requested)?;

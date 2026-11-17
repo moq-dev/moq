@@ -59,16 +59,16 @@ test("a covering claim presented at a stream's prefix keeps how far above it is"
 	expect(floors.shows(NODE, narrow.view, Path.from("live/a/b"))?.above).toBe(0n);
 });
 
-test("a claim's distance counts segments the way a path splits them, at every slash", () => {
+test("a claim's distance counts segments the way a path splits them, never at an escaped slash", () => {
 	const floors = new Floors();
-	// An escaped slash is still a segment boundary: room, `a\`, b, cam.
+	// An escaped slash is content: room, `a\/b`, cam.
 	const path = Path.from("room/a\\/b/cam");
 	const narrow = carrier(path, 0n, [[path, A]]);
 	const wide = carrier("", 1n, [["room", A]]);
 	floors.join(NODE, narrow);
 	floors.join(NODE, wide);
-	expect(Path.parts(path)).toHaveLength(4);
-	expect(floors.shows(NODE, narrow.view, path)?.above).toBe(3n);
+	expect(Path.parts(path)).toHaveLength(3);
+	expect(floors.shows(NODE, narrow.view, path)?.above).toBe(2n);
 });
 
 test("an uncertified claim stands until a floor certifies its path", () => {
