@@ -37,7 +37,7 @@ cargo run --package uniffi-bindgen --features cli -- generate --library target/r
 uniffi_bindgen_dart --library target/release/libmoq_ffi.{dylib,so} --out-dir out/
 ```
 
-The Dart generator is pinned in `flake.nix`; run `nix develop --command just dart generate` to regenerate the committed package bindings.
+The Dart generator is pinned in `flake.nix`; run `nix develop --command just dart generate` to generate the package bindings, which are not committed.
 
 ## Architecture
 
