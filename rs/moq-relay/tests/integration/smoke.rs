@@ -406,11 +406,13 @@ async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
 			.route(&path, moq_net::origin::RouteOptions::default())
 			.expect("create broadcast");
 		let track = route.broadcast().create_track("video", timed()).expect("create track");
-		let mut group = track.append_group(0).expect("append group");
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"escaped".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 		let (_pub_client, pub_connection) = kio::clock::timeout(
 			TIMEOUT,
 			connect_once(client_version(Some(publisher)).with_publisher(&pub_origin), url.clone()),
