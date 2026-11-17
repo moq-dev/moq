@@ -476,7 +476,8 @@ jobs:
       matrix:
         # The largest models get a runner each, as do the route model's two
         # largest configs (Early about 14M distinct states, LagWide about
-        # 4.7M); the `route` and `rest` legs take every other config, so a
+        # 4.7M) and the warm model (its configs take about an hour together);
+        # the `route` and `rest` legs take every other config, so a
         # new one is checked without editing this list. sh/gh/nightly.test.py
         # fails on a path that no longer exists.
         include:
@@ -488,8 +489,10 @@ jobs:
             paths: rs/moq-net/verify/route/LagWide.cfg
           - name: route
             paths: "rs/moq-net/verify/route :!rs/moq-net/verify/route/Early.cfg :!rs/moq-net/verify/route/LagWide.cfg"
+          - name: warm
+            paths: rs/moq-net/verify/warm
           - name: rest
-            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/route"
+            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/route :!rs/moq-net/verify/warm"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

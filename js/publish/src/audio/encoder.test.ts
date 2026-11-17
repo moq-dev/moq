@@ -96,6 +96,13 @@ describe("toEncoderConfig", () => {
 		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
 		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
 	});
+
+	test("tunes music, and leaves a kindless source to the browser", () => {
+		const music = toEncoderConfig(resolve(captured, "opus"), "music", {});
+		expect(music.opus).toEqual({ application: "audio", signal: "music", frameDuration: 20_000 } as never);
+		const unknown = toEncoderConfig(resolve(captured, "opus"), undefined, {});
+		expect(unknown.opus).toEqual({ frameDuration: 20_000 } as never);
+	});
 });
 
 // Like Chrome's Opus encoder, it emits one chunk per input and stamps each from the first input's
@@ -634,7 +641,65 @@ test("muting sends nothing and marks where the audio ends, keeping the rendition
 	expect(FakeAudioEncoder.probes).toHaveLength(1);
 });
 
-// With `capture="release"` a mute closes the microphone, taking its format away. The rendition stays
+// A voice source drops its talker's silence before the encoder, as a mute does: each pause is a
+// declared end placed once the hangover runs out, not when speech resumes, and the frame before
+// the speech goes first.
+test("a voice source sends nothing while its talker is silent", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { capture, encoder, feed, written } = env;
+
+	const configuring = configured();
+	capture.in.source.set({ track: {}, kind: "voice" } as never);
+	expect((await configuring).opus).toMatchObject({ signal: "voice" });
+
+	let state = 1;
+	const speech = () => {
+		state = (Math.imul(state, 1103515245) + 12345) | 0;
+		return (state >>> 8) / 0x1000000 - 0.5;
+	};
+	const push = async (start: number, count: number, talking: boolean) => {
+		for (let i = 0; i < count; i++) {
+			const samples = talking ? Float32Array.from({ length: 960 }, speech) : new Float32Array(960);
+			await feed.push({ timestamp: Duration.micros(start + i * 20_000), channels: [samples] });
+		}
+		await feed.drain();
+	};
+	const frames = (start: number, count: number) =>
+		Array.from({ length: count }, (_, i): [number, number] => [start + i * 20_000, 1]);
+
+	await push(0, 5, false);
+	await push(100_000, 3, true);
+	// The first silent frame scores as speech (SILK counts the last subframe twice), then 200 ms of
+	// hangover, then the end is declared where the sent audio stops.
+	await push(160_000, 15, false);
+	await push(460_000, 2, true);
+	expect(written).toEqual([...frames(80_000, 15), [380_000, 0], ...frames(440_000, 3)]);
+	expect(encoder.out.active.peek()).toBe(true);
+
+	// A mute in the middle of a word ends it there, and unmuting into silence sends nothing.
+	written.length = 0;
+	encoder.muted.set(true);
+	await settle();
+	encoder.muted.set(false);
+	await settle();
+	await push(1_000_000, 5, false);
+	await push(1_100_000, 1, true);
+	expect(written).toEqual([[500_000, 0], ...frames(1_080_000, 2)]);
+
+	// A mute between two captures that leaves no gap still starts the gate shut: the hangover from
+	// before it sends nothing after the declared end.
+	written.length = 0;
+	encoder.muted.set(true);
+	await settle();
+	encoder.muted.set(false);
+	await settle();
+	await push(1_120_000, 5, false);
+	await push(1_220_000, 1, true);
+	expect(written).toEqual([[1_120_000, 0], ...frames(1_200_000, 2)]);
+});
+
+// With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays
 // advertised, still enabled, through the mute. Once unmuted it is disabled until the microphone
 // reopens, so one that never does isn't advertised as sending.
 test("a muted rendition keeps its config enabled while its capture is released", async () => {

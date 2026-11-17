@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Datagram as NetDatagram, type Time } from "@moq/net";
+import { type Datagram as NetDatagram, Track as NetTrack, type Time } from "@moq/net";
 import { checkGroup } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type { TrackKey } from "./key.ts";
@@ -89,7 +89,7 @@ export class Producer {
 		if (this.#finished || this.#aborted) throw this.#aborted ?? new Error("datagram track is closed");
 		checkGroup(sequence);
 		if (sequence < this.#next) throw new Failure("reuse");
-		const at = NetDatagram.rescaleIn(this.#info, timestamp, sequence);
+		const at = NetTrack.rescaleIn(this.#info, timestamp, sequence);
 		const iv = this.#key.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1n;
 		const owned = plaintext.slice();

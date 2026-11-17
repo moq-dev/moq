@@ -36,3 +36,9 @@ macro_rules! reference {
 }
 
 reference!(VideoConfig, AudioConfig, TextConfig, JsonConfig, BinaryConfig);
+
+/// moq-hang-04 for a `track` other than the ID: a reader that ignores it subscribes to the ID, a
+/// different track.
+pub(crate) fn renamed_version(config: &impl Reference, id: &str) -> Option<u64> {
+	(config.track(id) != id).then_some(4)
+}

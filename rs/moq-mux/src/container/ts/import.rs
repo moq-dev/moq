@@ -3522,7 +3522,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				let published = video::avc(split, import, assembly, true)?;
 				*split = Default::default();
 				assembly.finish();
-				import.finish()?;
+				import.finish_in_place()?;
 				return Ok(published);
 			}
 			Stream::H265 {
@@ -3533,7 +3533,7 @@ impl<E: catalog::Catalog> Stream<E> {
 				let published = video::hevc(split, import, assembly, true)?;
 				*split = Default::default();
 				assembly.finish();
-				import.finish()?;
+				import.finish_in_place()?;
 				return Ok(published);
 			}
 			Stream::Opus(stream) => stream.finish()?,
@@ -4057,8 +4057,8 @@ impl<E: CatalogExt> AacStream<E> {
 				if let Some(end) = open.take() {
 					import.cut(Some(end))?;
 				}
-				import.finish()?;
-				self.import = None;
+				// The ended track retires with its handle, since the rest publishes under a new name.
+				drop(self.import.take().map(aac::Import::finish).transpose()?);
 				self.last = None;
 			}
 			let import = match &mut self.import {
@@ -4211,7 +4211,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.reserved.take();
 		}
 		if let Some(import) = &mut self.import {
-			import.finish()?;
+			import.finish_in_place()?;
 		}
 		Ok(drained)
 	}
@@ -4276,7 +4276,7 @@ impl OpusStream {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		Ok(self.import.finish()?)
+		Ok(self.import.finish_in_place()?)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -4707,8 +4707,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 				if let Some(end) = open.take() {
 					import.cut(Some(end))?;
 				}
-				import.finish()?;
-				self.import = None;
+				// The ended track retires with its handle, since the rest publishes under a new name.
+				drop(self.import.take().map(legacy::Import::finish).transpose()?);
 				self.last = None;
 			}
 			let import = match &mut self.import {
@@ -4822,7 +4822,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			self.reserved.take();
 		}
 		if let Some(import) = &mut self.import {
-			import.finish()?;
+			import.finish_in_place()?;
 		}
 		Ok(drained)
 	}

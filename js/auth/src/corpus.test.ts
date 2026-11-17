@@ -18,7 +18,7 @@ const corpus = (await Bun.file(new URL("../../../rs/moq-auth/tests/corpus.json",
 };
 
 // The claims as the corpus writes them: patterns reduced, absent roles empty, a capped role
-// as its wire object, and times only when present.
+// as its wire object, and times and the token ID only when present.
 function canonical(claims: Claims): unknown {
 	const role = (access: Access | undefined) =>
 		access === undefined || Array.isArray(access)
@@ -28,9 +28,10 @@ function canonical(claims: Claims): unknown {
 		root: claims.root,
 		publish: role(claims.publish),
 		subscribe: role(claims.subscribe),
-		...(claims.exp !== undefined && { exp: claims.exp }),
-		...(claims.iat !== undefined && { iat: claims.iat }),
-		...(claims.nbf !== undefined && { nbf: claims.nbf }),
+		...(claims.expires !== undefined && { exp: claims.expires }),
+		...(claims.issued !== undefined && { iat: claims.issued }),
+		...(claims.notBefore !== undefined && { nbf: claims.notBefore }),
+		...(claims.id !== undefined && { jti: claims.id }),
 	};
 }
 

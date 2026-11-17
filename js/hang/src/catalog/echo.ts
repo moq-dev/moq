@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { RelativeBroadcastSchema } from "./path";
+import { RelativeBroadcastSchema } from "./path.ts";
 
 /** The relative prefix under which viewers may publish feedback. */
 export const EchoSchema = z.object({

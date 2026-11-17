@@ -114,7 +114,7 @@ types, and the vectors regenerate once):
   Instance and tracks under the same credential, and correct the draft's
   sentence.
 - Per-group keys: add the group's wire ID (its start, after
-  [lite-07 addresses groups by start](/quest/m2/time-addressing/lite07.md))
+  [lite-07 addresses groups by start](https://github.com/moq-dev/moq/pull/8908))
   to `key_info`. For datagram tracks recommend the sequence's high bits as
   the key index, so one HKDF-Expand covers a run of datagrams; settle the
   split in the PR and bench it with `benches/protect.rs`. Then delete
@@ -165,10 +165,6 @@ and moq-lite: none.
 ## Waiting
 
 - Maintainer: submit `draft-lcurley-moq-e2ee-01` to the datatracker once the PR merges, and add a crates.io trusted publisher for `moq-e2ee` (repository `moq-dev/moq`, workflow `release-rs.yml`, environment `publish`); both need a login an agent does not hold. Done when the datatracker shows -01 and a `release-rs.yml` run publishes `moq-e2ee` through OIDC.
-
-## Required
-
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - the group identity the per-group key and the nonce bind
 
 ## Related
 

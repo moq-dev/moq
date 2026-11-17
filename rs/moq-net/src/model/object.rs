@@ -1,8 +1,6 @@
 //! Private relay metadata; public readers see only the frame or datagram payload.
 use bytes::Bytes;
 
-use crate::Timestamp;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Value {
 	Int(u64),
@@ -15,20 +13,15 @@ pub(crate) struct Property {
 	pub value: Value,
 }
 
-/// An object's relay properties, held as one encoded [`Block`].
-///
-/// On a timed track, the mutable Timestamp is never held: it is the frame's, which egress
-/// restates. On an untimed one it has no units, so it stays in the block like any other.
+/// An object's relay properties, held as one encoded [`Block`] that passes between
+/// moq-transport peers unchanged.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Properties {
-	/// The Timestamp the block's Immutable Properties hold on a timed track, which keeps
-	/// its ingress units.
-	pub sealed_time: Option<Timestamp>,
 	/// The properties, if there are any.
 	pub block: Option<Block>,
 }
 
-/// An object's properties, but for a timed track's mutable Timestamp, as one encoded list.
+/// An object's properties as one encoded list.
 ///
 /// Kept encoded because a decoded list costs many times its wire size, and a relay holds
 /// one per cached object. Egress decodes it only to re-encode for another draft.

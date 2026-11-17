@@ -854,7 +854,7 @@ async fn play_audio<O: Output>(
 							// groups were lost on the way, rather than filling the silence as a hole.
 							if std::mem::take(&mut silent) {
 								timeline = AudioTimeline::default();
-								sink.next();
+								sink.resume();
 								utterance = true;
 							}
 						}
@@ -865,7 +865,7 @@ async fn play_audio<O: Output>(
 							declare = ahead;
 							timeline = AudioTimeline::default();
 							silent = false;
-							sink.next();
+							sink.resume();
 							utterance = true;
 						}
 						None => {}
@@ -877,7 +877,7 @@ async fn play_audio<O: Output>(
 				Ok(Some(moq_audio::decode::Read::End { .. })) => {
 					// The stopped encoder's final frames may follow, and play before the silence.
 					if !silent {
-						sink.end();
+						sink.silence();
 						silent = true;
 					}
 					continue;
@@ -994,7 +994,7 @@ async fn play_audio<O: Output>(
 				output.send(Event::Utterance(Duration::try_from(frame.timestamp)?));
 			}
 			if std::mem::take(&mut declare) {
-				sink.end();
+				sink.silence();
 				silent = true;
 			}
 

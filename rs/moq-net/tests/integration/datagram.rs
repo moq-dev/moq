@@ -285,7 +285,13 @@ async fn legacy_versions_map_a_datagram_track_onto_a_subscription() {
 		assert_eq!(producer.append(millis(9), &b"mapped"[..]).unwrap(), 1);
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(datagram.sequence, 1, "{version}");
-		assert_eq!(datagram.timestamp, millis(9), "{version}");
+		// moq-transport carries no Timestamp: a datagram's time is its sequence, in the
+		// track's units.
+		let expected = match version.starts_with("moq-transport") {
+			true => millis(1),
+			false => millis(9),
+		};
+		assert_eq!(datagram.timestamp, expected, "{version}");
 		assert_eq!(&datagram.payload[..], b"mapped", "{version}");
 
 		consumer.set_priority(6);
@@ -341,7 +347,13 @@ async fn legacy_versions_carry_both_kinds_of_a_name() {
 		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
 		assert_eq!(&datagram.payload[..], b"datagram", "{hops:?}");
 		let timestamp = datagram.timestamp;
-		assert_eq!(timestamp.convert(Timescale::MILLI).unwrap(), millis(1), "{hops:?}");
+		// moq-transport carries no Timestamp: a datagram's time is its sequence, 0, in the
+		// units TRACK_INFO declares.
+		let expected = match hops[0].starts_with("moq-transport") {
+			true => millis(0),
+			false => millis(1),
+		};
+		assert_eq!(timestamp.convert(Timescale::MILLI).unwrap(), expected, "{hops:?}");
 
 		track.write_frame(millis(2), &b"frame"[..]).unwrap();
 		let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())

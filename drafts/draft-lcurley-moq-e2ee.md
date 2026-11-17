@@ -151,7 +151,7 @@ Neither can cause a nonce to repeat, because only the publisher instance chooses
 A restart or replacement of a publisher is a new instance and mints a new epoch.
 So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
 A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
-Transport sequence numbers therefore restart freely without any coordination between instances.
+Group starts and datagram sequences therefore restart freely without any coordination between instances.
 An ended instance stays readable only for as long as relays or archives retain it under its epoch; once another instance wins the shared path, subscribers resolve that one.
 
 
@@ -234,7 +234,8 @@ A subscriber derives both from the semantic name it wants; a publisher derives t
 A protected object is the tuple `(generation, physical_name, domain, group, frame)`.
 
 ## Grouped Frames
-A grouped frame uses `domain = 0x00`, the group's sequence as `group`, and the frame index within that group as `frame`.
+A grouped frame uses `domain = 0x00`, the group's start as `group`, and the frame index within that group as `frame`.
+The start is the Group Start of a moq-lite-07 GROUP, the Group Sequence of an earlier moq-lite version, and the Group ID on MoQ Transport, which carry the same value ({{moql}} Section "Group").
 moq-lite numbers frames from 0 in write order ({{moql}}).
 On MoQ Transport, `frame` is the explicit Object ID, never its arrival ordinal.
 Publishers supporting both transports MUST assign contiguous Object IDs from zero so that each matches its moq-lite write-order index; relays MUST NOT renumber protected objects.
@@ -265,7 +266,7 @@ AES-128-GCM encrypts the application bytes with `key`, `nonce`, and empty AAD.
 The bytes placed in the MoQ frame or datagram payload are ciphertext concatenated with the 16-byte tag, in the {{RFC5116}} convention.
 There is no inner header.
 
-Within a generation a publisher MUST allocate each semantic name's group sequences, and separately its datagram sequences, monotonically, and frame indices in write order, so an identity is encrypted at most once.
+Within a generation a publisher MUST give each semantic name's groups strictly increasing starts, allocate its datagram sequences monotonically, and frame indices in write order, so an identity is encrypted at most once.
 Encrypting at an identity the same instance already used is `reuse` and MUST be refused.
 Relays and caches forward ciphertext unchanged, so replay from a cache never re-encrypts.
 
@@ -290,7 +291,7 @@ Encrypting then compressing is forbidden: ciphertext does not compress.
 # Bounds {#bounds}
 Implementations MUST refuse non-integer identities (including NaN and infinities) and identities outside these bounds before encoding or AEAD:
 
-- `group` (grouped sequence or datagram sequence) and `kid`: `0..=2^53-1`. Above that is `identity`.
+- `group` (group start or datagram sequence) and `kid`: `0..=2^53-1`. Above that is `identity`.
 - `frame`: `0..=2^32-1`. `2^32` and above is `identity`.
 - AEAD operations with one key: at most `2^24` invocations and at most `2^36` plaintext bytes (`2^32` 16-byte blocks). Exceeding either is `exhausted`.
 

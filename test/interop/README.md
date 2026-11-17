@@ -551,12 +551,11 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The replacement case is quarantined from the default run on every engine: under CPU
-load its audio intermittently goes silent, as each group the viewer skips restarts the
-decoder and trims its 80 ms warmup, and Firefox also showed intermittent missing tone
-samples. Run it explicitly with
-`just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run off Chromium: on Firefox its
+fallback intermittently misses the switch bound, as often with the audio fixes that
+restored it on Chromium as without them. Run it explicitly with
+`--media-cases replacement --media-engines firefox`; its content, sync, switch, and
+fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
@@ -679,9 +678,10 @@ refusal retains its meaning and both bindings emit the same bytes.
 
 `lite_tracks_interop` checks moq-lite-07's Tracks Stream both ways: `tracks.ts`
 answers a Rust TRACKS request with js/net's publisher, whose listing (each
-TRACKS\_ADD with its TRACK\_INFO, SYNCED, a TRACKS\_REMOVE, then the FIN when
-the broadcast ends) Rust decodes, and it re-encodes Rust's listing events byte for
-byte.
+TRACKS\_ADD with its kind and info, a datagram track's DATAGRAMS\_INFO beside a
+track's TRACK\_INFO of the same name, SYNCED, a TRACKS\_REMOVE and a datagram
+track's TRACKS\_FINISH, then the FIN when the broadcast ends) Rust decodes, and it
+re-encodes Rust's listing events of both kinds byte for byte.
 
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07

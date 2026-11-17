@@ -70,9 +70,9 @@ impl Args {
 
 				if let Some(dir) = public_dir {
 					let path = dir.join(format!("{id}.jwk"));
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				} else if let Some(path) = public {
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				}
 
 				if let Some(dir) = out_dir {
@@ -95,6 +95,7 @@ impl Args {
 				ttl,
 				unbounded,
 				issued,
+				id,
 			} => {
 				let key = read_key(&key)?;
 				let expires = match (unbounded, expires) {
@@ -112,7 +113,8 @@ impl Args {
 					.with_publish(publish)
 					.with_subscribe(subscribe)
 					.with_expires(expires)
-					.with_issued(issued.map(Into::into));
+					.with_issued(issued.map(Into::into))
+					.with_id(id.as_deref().map(moq_auth::TokenId::decode).transpose()?);
 
 				let token = key.sign(&payload)?;
 				println!("{token}");
@@ -214,6 +216,10 @@ enum Command {
 		/// Issued-at time as a unix timestamp.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
+
+		/// The token ID, written as its `jti`, such as one you record to revoke it. None unless given.
+		#[usage(long)]
+		id: Option<String>,
 	},
 
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
@@ -635,34 +641,6 @@ impl Serve {
 			anyhow::bail!("--key, --key-dir, and --key-set conflict; pick one");
 		}
 
-		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
-		// broadcast `anon`, so either silent reading would mislead someone upgrading.
-		let mut flags = vec![
-			(
-				"--public-publish".to_string(),
-				self.public.publish.iter().collect::<Vec<_>>(),
-			),
-			("--public-subscribe".to_string(), self.public.subscribe.iter().collect()),
-			("--mtls-publish".to_string(), mtls.publish.iter().collect()),
-			("--mtls-subscribe".to_string(), mtls.subscribe.iter().collect()),
-		];
-		for (hash, rule) in &mtls.certificates {
-			for (direction, patterns) in [("publish", &rule.publish), ("subscribe", &rule.subscribe)] {
-				let patterns = patterns.iter().flat_map(|access| access.path.iter()).collect();
-				flags.push((format!("mtls.certificates.{hash}.{direction}"), patterns));
-			}
-		}
-		for (flag, patterns) in flags {
-			for pattern in patterns.into_iter().filter(|pattern| pattern.is_literal()) {
-				// A literal at the maximum depth is already its own subtree.
-				let subtree = Pattern::subtree(pattern.as_str())?;
-				if subtree != *pattern {
-					anyhow::bail!(
-						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-					);
-				}
-			}
-		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
 			Permissions::new(
 				publish.iter().cloned().collect::<moq_auth::Patterns>(),
@@ -1207,11 +1185,8 @@ link = "none"
 		let err = serve.policy().unwrap_err().to_string();
 		assert!(err.contains("conflict"), "{err}");
 		let (serve, _) = merged(&["moq", "auth", "serve", path]).unwrap();
-		let err = serve.policy().unwrap_err().to_string();
-		assert!(
-			err.contains(&format!("mtls.certificates.{leaf}.publish `alice`")),
-			"{err}"
-		);
+		// The literal `alice` names one broadcast, so the rule is valid.
+		serve.policy().unwrap();
 	}
 
 	/// A file edit narrows or revokes at the next re-check, and an edit that does not
@@ -1263,40 +1238,23 @@ link = "none"
 		assert!(server.answer(&session).await.is_err(), "deleting the rule revokes it");
 	}
 
-	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
-	/// wildcard-free rule refuses to start rather than pick silently.
+	/// A rule without a wildcard names exactly one broadcast.
 	#[test]
-	fn serve_refuses_a_rule_without_a_wildcard() {
-		for (flag, rule, hint) in [
-			("--public-publish", "anon", "anon/**"),
-			("--public-subscribe", "event/cam1.hang", "event/cam1.hang/**"),
-			("--mtls-publish", "", "**"),
-			("--mtls-subscribe", "origin", "origin/**"),
+	fn serve_accepts_a_rule_without_a_wildcard() {
+		for (flag, rule) in [
+			("--public-publish", "anon"),
+			("--public-subscribe", "event/cam1.hang"),
+			("--mtls-publish", ""),
+			("--mtls-subscribe", "origin"),
 		] {
-			let err = serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap_err();
-			let err = err.to_string();
-			assert!(err.contains(flag) && err.contains(&format!("`{hint}`")), "{err}");
+			serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap();
 		}
-		assert!(
-			serve(&[
-				"moq",
-				"auth",
-				"serve",
-				"--public-subscribe",
-				"*/chat",
-				"--mtls-publish",
-				"origin/*"
-			])
+		let policy = serve(&["moq", "auth", "serve", "--public-publish", "anon"])
 			.policy()
-			.is_ok()
-		);
-
-		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
-		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(
-			serve(&["moq", "auth", "serve", "--public-subscribe", &deepest])
-				.policy()
-				.is_ok()
+			.unwrap();
+		assert_eq!(
+			policy.public.publish,
+			["anon".parse::<Pattern>().unwrap()].into_iter().collect()
 		);
 	}
 

@@ -63,4 +63,4 @@ Work:
 ## Related
 
 - [A hole is waited for by the subscription's delay](/quest/m2/delay-hole-wait.md) - settles the wait rule this moves into the transport
-- [moq-net publishes no item without a caller](/quest/m2/unused-api/net.md) - the Rust container reader moving onto `Gap`, this quest's native counterpart
+- [moq-net's last pub items with a single container-reader caller go private](/quest/m2/unused-api/net.md) - the Rust container reader moving onto `Gap`, this quest's native counterpart

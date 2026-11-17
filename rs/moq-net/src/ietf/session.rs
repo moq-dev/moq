@@ -12,7 +12,7 @@ use std::task::{Poll, ready};
 
 use super::{
 	Control, Message, Namespaces, PublishNamespaces, Publisher, RecvFill, RecvGroup, Subscriber, Version, active_count,
-	cluster, hidden, max_age, peer, request_stream::Reject, request_update, solicit, subscriber::is_protocol_violation,
+	cluster, hidden, peer, request_stream::Reject, request_update, solicit, subscriber::is_protocol_violation,
 };
 
 type RecvStream = crate::transport::boxed::RecvStream;
@@ -774,7 +774,6 @@ pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: boo
 			cluster: cluster::peer_from_setup(&params)?,
 			solicit: solicit::from_setup(&params, version)?,
 			hidden: hidden::from_setup(&params, version),
-			max_age: max_age::from_setup(&params, version),
 			active_count: active_count::from_setup(&params),
 			flate: super::flate::from_setup(&params)?,
 		},
@@ -877,7 +876,6 @@ impl SendSetup {
 			solicit::into_setup(&mut parameters, version);
 		}
 		hidden::into_setup(&mut parameters, version);
-		max_age::into_setup(&mut parameters, version);
 		active_count::into_setup(&mut parameters);
 		request_update::into_setup(&mut parameters, version);
 		super::flate::into_setup(&mut parameters);
@@ -2839,7 +2837,6 @@ mod tests {
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::from_static("room"),

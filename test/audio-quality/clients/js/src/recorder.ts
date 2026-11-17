@@ -75,11 +75,7 @@ async function record(): Promise<void> {
 	});
 
 	const request = origin.request(Moq.Path.from(required("broadcast")));
-	let broadcast = request.active.peek();
-	while (!broadcast) {
-		await request.active.changed();
-		broadcast = request.active.peek();
-	}
+	const broadcast = await request.broadcast();
 
 	let root: Catalog.Root | undefined;
 	for await (const { value: update } of Catalog.watch(broadcast)) {

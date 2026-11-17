@@ -16,7 +16,7 @@ probe to the larger of their send target and the peer's PROBE target.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ lite-07
 freezes without the Padding Stream (0x2) and Padding Datagram (0x1) types,
-removed by [the time-addressing rewrite](/quest/m2/time-addressing/lite07.md)
+removed by [the time-addressing rewrite](https://github.com/moq-dev/moq/pull/8908)
 (rejected: keep the receive-only types for this quest). Nothing sent either.
 If the rethink below still lands on padding, it adds its stream type in a
 later lite version or a SETUP extension: an unaware peer resets an unknown

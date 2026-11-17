@@ -27,7 +27,3 @@ half the cap, which still has no peak and spends its average on calm scenes).
 - `"constant"` keeps today's reconfigure on grant changes.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [One default cap formula](/quest/m1/video-rate/cap-formula.md) - the cap this controller holds; both touch `ceiling()` in `js/publish/src/video/encoder.ts`

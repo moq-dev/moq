@@ -27,7 +27,7 @@ version" read as lite-08:
   pauses the group. lite-07 now freezes a GROUP_END with that name on that
   reserved value meaning the opposite: the group is whole, and here is its
   exclusive end timestamp
-  ([time addressing](/quest/m2/time-addressing/lite07.md)). Recommended: a
+  ([time addressing](https://github.com/moq-dev/moq/pull/8908)). Recommended: a
   distinct marker (say GROUP_PAUSE), laid out so one zero `Payload Length`
   leads to either; lite-08 is a new version, so it may re-lay what follows
   the zero.
@@ -129,5 +129,4 @@ marker, and multi-group streams.
 
 - [YIELDED deferred](/quest/m2/yield-defer.md) - removes paused groups and continuations from lite-07
 - [YIELDED reset](https://github.com/moq-dev/moq/pull/8545) - the lite-07-wip design this starts from
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - freezes the GROUP_END this must not collide with
 - [Finalize lite-07](/quest/m2/lite07-finalize.md) - freezes lite-07 without takeover or continuations

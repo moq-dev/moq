@@ -92,9 +92,9 @@ export interface Session {
 	readonly draining: GetPromise<Goaway>;
 
 	/**
-	 * Resolves when the session closes: `null` for a clean close, an `Error.Session` when the
+	 * Settles when the session closes: `null` for a clean close, an `Error.Session` when the
 	 * peer closed with a code (e.g. `SessionCode.Unauthorized` for an auth rejection), or the
 	 * transport's own failure. Never rejects.
 	 */
-	closed: Promise<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 }

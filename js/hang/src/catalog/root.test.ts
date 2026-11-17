@@ -2,7 +2,16 @@ import { expect, test } from "bun:test";
 import * as z from "zod/mini";
 import { u53 } from "./integers.ts";
 import type { ReferenceInstance, RelativeBroadcast } from "./path.ts";
-import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
+import {
+	checkRenditions,
+	DuplicateRendition,
+	encode,
+	type Root,
+	RootSchema,
+	skipped,
+	UnsupportedVersion,
+	VERSION,
+} from "./root.ts";
 import { track } from "./track.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
@@ -312,21 +321,93 @@ test("a supported catalog version is read", () => {
 	}
 });
 
-// Only a field an older reader would misread raises the version.
-test("the catalog version is needed only for misread fields", () => {
+// Only a field an older reader would misread raises an entry's version, and no moq-hang-04 field
+// raises the root's.
+test("an entry version is needed only for misread fields", () => {
 	const audio = { ...opus, warmup: 80 };
 	const root = (hd: object) =>
-		RootSchema.parse({ video: { renditions: { hd } }, audio: { renditions: { en: audio } } });
+		RootSchema.parse({
+			video: { renditions: { hd } },
+			audio: { renditions: { en: audio } },
+			include: { extra: { broadcast: "../extra" } },
+		});
+	const versions = (value: Root) => {
+		expect(value.version).toBeUndefined();
+		const entry = (map: Record<string, object> | undefined, id: string) =>
+			(map?.[id] as { version?: number } | undefined)?.version;
+		return {
+			hd: entry(value.video?.renditions, "hd"),
+			en: entry(value.audio?.renditions, "en"),
+			extra: entry(value.include, "extra"),
+		};
+	};
+	const none = { hd: undefined, en: undefined, extra: undefined };
 
-	expect(encode(root(avc)).version).toBeUndefined();
-	expect(encode(root({ ...avc, track: "hd" })).version).toBeUndefined();
-	expect(encode(root({ ...avc, track: "video" })).version).toBe(4);
+	expect(versions(encode(root(avc)))).toEqual(none);
+	expect(versions(encode(root({ ...avc, track: "hd" })))).toEqual(none);
+	expect(versions(encode(root({ ...avc, track: "video" })))).toEqual({ ...none, hd: 4 });
 	// moq-hang-04 defines no video `warmup`, so it is dropped as an unknown field.
-	expect(encode(root({ ...avc, warmup: 500 })).version).toBeUndefined();
+	expect(versions(encode(root({ ...avc, warmup: 500 })))).toEqual(none);
+	expect(JSON.stringify(encode(root({ ...avc, track: "video" })))).toContain('"hd":{"version":4,');
+
 	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", track: "chat.json" } } } });
-	expect(encode(data).version).toBe(4);
+	expect((encode(data).json?.tracks.chat as { version?: number } | undefined)?.version).toBe(4);
+
 	// A carried version is recomputed, never trusted.
-	expect(encode({ ...root(avc), version: 4 }).version).toBeUndefined();
+	const carried = {
+		...root(avc),
+		version: 4,
+		json: { tracks: { chat: { mode: "stream", version: 4 } } },
+	} as Root;
+	expect(JSON.stringify(encode(carried))).not.toContain("version");
+});
+
+// An entry a newer draft defines is skipped and reported, even one this reader would call
+// malformed, while the rest of the catalog plays.
+test("a newer entry is skipped", () => {
+	const catalog = {
+		video: { renditions: { compat: avc, next: { version: 5, codec: 42 } } },
+		audio: { renditions: { next: { version: 6 } } },
+		text: { renditions: { next: { version: 5 } } },
+		json: { tracks: { next: { version: 5 } } },
+		binary: { tracks: { next: { version: 5, mode: [] } } },
+		include: { next: { version: 5, broadcast: 7 } },
+	};
+	const parsed = RootSchema.parse(catalog);
+	expect(Object.keys(parsed.video?.renditions ?? {})).toEqual(["compat"]);
+	expect(parsed.audio?.renditions).toEqual({});
+	expect(parsed.include).toEqual({});
+	expect(skipped(parsed)).toEqual({
+		version: 6,
+		video: { next: 5 },
+		audio: { next: 6 },
+		text: { next: 5 },
+		json: { next: 5 },
+		binary: { next: 5 },
+		include: { next: 5 },
+	});
+
+	// Never written, so a republish lists only what this reader read.
+	expect(skipped(RootSchema.parse(JSON.parse(JSON.stringify(encode(parsed)))))).toBeUndefined();
+
+	// The root version still refuses the whole catalog.
+	expect(() => RootSchema.parse({ ...catalog, version: 5 })).toThrow(UnsupportedVersion);
+});
+
+test("a supported entry version is read, and a malformed one refuses the catalog", () => {
+	for (const version of [0, 3, VERSION]) {
+		const parsed = RootSchema.parse({ video: { renditions: { hd: { ...avc, version } } } });
+		expect(Object.keys(parsed.video?.renditions ?? {})).toEqual(["hd"]);
+		expect(skipped(parsed)).toBeUndefined();
+	}
+	for (const version of ["5", -1, 4.5, null, []]) {
+		expect(() => RootSchema.parse({ json: { tracks: { chat: { mode: "stream", version } } } })).toThrow(
+			z.core.$ZodError,
+		);
+	}
+	// The entry version is not kept as an extension field.
+	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", version: 4 } } } });
+	expect(data.json?.tracks.chat).toEqual({ mode: "stream" });
 });
 
 test("shared stats and echo discovery round trips without changing old catalogs", async () => {

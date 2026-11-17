@@ -4659,6 +4659,7 @@ dependencies = [
  "hashlink",
  "kio",
  "libc",
+ "moq-net",
  "moq-pattern",
  "num_enum",
  "proptest",
