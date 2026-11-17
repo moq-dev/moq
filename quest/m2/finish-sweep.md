@@ -74,4 +74,3 @@ importers, `moq_mux::import::{Track, TrackStream}`, and
 ## Related
 
 - [The frame-taking video producer](/quest/m2/video-producer.md) - renames the video type this changes
-- [TS import reports typed outcomes](/quest/m2/ts-typed-outcomes.md) - changes the TS importers' `finish` error type

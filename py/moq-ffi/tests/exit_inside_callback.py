@@ -56,7 +56,7 @@ async def main() -> None:
     origin = moq_ffi.MoqOriginProducer(moq_ffi.MoqOriginConfig())
     route = origin.route("exit", moq_ffi.MoqRouteOptions())
     broadcast = route.broadcast()
-    track = broadcast.publish_track("data", moq_ffi.MoqTrackInfo(timescale=1_000_000))
+    track = broadcast.publish_track("data", moq_ffi.MoqTrackInfo(max_age=None, timescale=1_000_000))
 
     consumer = await origin.consume().request("exit")
     subscriber = await consumer.subscribe_track("data", None)

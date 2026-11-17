@@ -26,6 +26,10 @@ use url::Url;
 /// handshake deadline, which a token arriving after the handshake does not.
 const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// This relay's product token, which every auth request carries so the server knows
+/// which grant fields it reads.
+pub(crate) const RELAY: &str = concat!("moq-relay/", env!("CARGO_PKG_VERSION"));
+
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
@@ -331,8 +335,8 @@ impl Config {
 			}
 			(None, Some(grant)) => Decider::Public(Arc::new(
 				moq_auth::Claims::default()
-					.with_publish(grant.publish)
-					.with_subscribe(grant.subscribe),
+					.with_publish(grant.publish.path)
+					.with_subscribe(grant.subscribe.path),
 			)),
 			(None, None) => unreachable!("validated above"),
 		};
@@ -353,7 +357,8 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
-	/// A valid grant does not cover the requested direction or path.
+	/// A grant does not cover the requested direction or path, or names something this
+	/// relay cannot read or use.
 	#[error("{0}")]
 	Forbidden(String),
 
@@ -372,6 +377,9 @@ impl From<moq_auth::Error> for Error {
 				refusal.reason = moq_auth::refusal::Reason::Expired;
 				Self::Refused(refusal)
 			}
+			// The server answered a grant this relay cannot read or accept: final, since
+			// asking again gets the same answer, and no fault of the client's credential.
+			err if err.is_final_grant() => Self::Forbidden(err.to_string()),
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -436,22 +444,17 @@ pub struct Token {
 	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
 	/// resolves at the absolute path it maps to.
 	pub mounts: Vec<(Path, Path)>,
-	/// Patterns the session may subscribe to, relative to `root`.
-	pub subscribe: moq_auth::Patterns,
-	/// Patterns the session may publish, relative to `root`.
-	pub publish: moq_auth::Patterns,
-	/// The most the session may publish, or no cap when absent.
-	pub publish_rate: Option<moq_auth::Rate>,
-	/// The most the session may receive from its subscriptions, or no cap when absent.
-	pub subscribe_rate: Option<moq_auth::Rate>,
+	/// What the session may subscribe to, relative to `root`, and its cap.
+	pub subscribe: moq_auth::Access,
+	/// What the session may publish, relative to `root`, and its cap.
+	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
 	/// The path this session's stats record under, empty when the grant names none.
 	pub label: Path,
-	/// Whether the session is a cluster peer, so its routes entered elsewhere.
-	pub peer: bool,
-	/// Whether the peer is upstream, so it is never offered another upstream's routes.
-	pub upstream: bool,
+	/// How the session links into the cluster, absent for a client: a peer's routes
+	/// entered elsewhere, and an upstream is never offered another upstream's routes.
+	pub link: Option<moq_auth::Link>,
 }
 
 impl Token {
@@ -483,12 +486,9 @@ impl Token {
 				.map_err(invalid)?,
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
-			publish_rate: grant.publish_rate,
-			subscribe_rate: grant.subscribe_rate,
 			tier: crate::configured_tier(grant.tier.clone()).map_err(invalid)?,
 			label: Path::new(grant.label.as_deref().unwrap_or_default()).map_err(invalid)?,
-			peer: grant.peer,
-			upstream: grant.upstream,
+			link: grant.link,
 		})
 	}
 
@@ -503,8 +503,8 @@ impl Token {
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
-			&& other.subscribe.covers(&self.subscribe)
-			&& other.publish.covers(&self.publish)
+			&& other.subscribe.path.covers(&self.subscribe.path)
+			&& other.publish.path.covers(&self.publish.path)
 	}
 }
 
@@ -639,7 +639,7 @@ impl Lease {
 	/// patterns, narrower or wider, and keeps going; the origin handles the session was
 	/// admitted with still bound it, so it never reaches past them. Without an attached
 	/// session a narrower grant ends the lease and a wider one changes nothing.
-	/// A changed root or mounts ends it, and so does a flipped `peer` or `upstream`,
+	/// A changed root or mounts ends it, and so does a changed `link`,
 	/// since the routes it already announced would be misreported as entering here or
 	/// from a peer, or offered to the wrong links. A changed tier keeps the session and
 	/// moves its [stats](Self::with_stats) to the new tier.
@@ -675,11 +675,8 @@ impl Lease {
 						}
 						// Routes the session already announced were recorded as
 						// entering here or from a peer; a flip would misreport them.
-						if fresh.peer != self.token.peer {
-							return "peer changed".into();
-						}
-						if fresh.upstream != self.token.upstream {
-							return "upstream changed".into();
+						if fresh.link != self.token.link {
+							return "link changed".into();
 						}
 						let caps = Caps::of(&grant);
 						if caps != self.caps {
@@ -690,20 +687,23 @@ impl Lease {
 							pacer.pace(caps);
 							self.caps = caps;
 						}
-						if fresh.publish != self.token.publish || fresh.subscribe != self.token.subscribe {
+						(self.token.publish.rate, self.token.subscribe.rate) = (fresh.publish.rate, fresh.subscribe.rate);
+						if fresh.publish.path != self.token.publish.path
+							|| fresh.subscribe.path != self.token.subscribe.path
+						{
 							match &self.session {
 								Some(session) => {
 									tracing::info!(
-										publish = %join(&fresh.publish),
-										subscribe = %join(&fresh.subscribe),
+										publish = %join(&fresh.publish.path),
+										subscribe = %join(&fresh.subscribe.path),
 										"grant changed; re-authorizing the session",
 									);
 									let mut grant = moq_net::auth::Grant::default();
-									grant.publish = fresh.publish.clone();
-									grant.subscribe = fresh.subscribe.clone();
+									grant.publish = fresh.publish.path.clone();
+									grant.subscribe = fresh.subscribe.path.clone();
 									session.authorize(&grant);
-									self.token.publish = fresh.publish;
-									self.token.subscribe = fresh.subscribe;
+									self.token.publish.path = fresh.publish.path;
+									self.token.subscribe.path = fresh.subscribe.path;
 								}
 								None if !self.token.covered_by(&fresh) => return lease::Reason::Narrowed,
 								None => {}
@@ -853,7 +853,7 @@ impl Decider {
 			}
 			// Nothing here can verify a token, so one is refused rather than ignored:
 			// its holder expects it to count, and the public grant is not what it says.
-			Self::Public(_) if presents_token(&request) => {
+			Self::Public(_) if request.token.is_some() => {
 				tracing::debug!(path = ?request.path, "a token was presented to public rules");
 				Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default())))))
 			}
@@ -872,16 +872,6 @@ impl Decider {
 			Self::Refuse => Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default()))))),
 		}
 	}
-}
-
-/// Whether `request` carries a token: a SETUP token of any type, or a non-empty
-/// `jwt` query parameter, form-decoded as `moq auth serve` reads it, so an escaped
-/// key such as `%6Awt` counts too.
-fn presents_token(request: &Request) -> bool {
-	request.token.is_some()
-		|| request.query.as_deref().is_some_and(|query| {
-			url::form_urlencoded::parse(query.as_bytes()).any(|(key, jwt)| key == "jwt" && !jwt.is_empty())
-		})
 }
 
 /// Admits sessions through one admission decider.
@@ -952,7 +942,9 @@ impl Auth {
 
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
 	pub fn request(&self, transport: moq_auth::Transport, path: impl Into<String>) -> Request {
-		Request::new(self.node.as_ref(), transport, path)
+		let mut request = Request::new(self.node.as_ref(), transport, path);
+		request.relay = Some(RELAY.to_string());
+		request
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
@@ -1005,8 +997,8 @@ impl Auth {
 		self.decider.decide(request, connection)
 	}
 
-	/// Admit a session on a grant decided locally, bypassing the server: the LAN
-	/// mesh credential, which the relay minted for itself.
+	/// Admit a session on a grant this relay decided for itself, bypassing the server,
+	/// such as a LAN peer whose membership proof it minted.
 	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Lease {
 		Lease::new(path, lease::Consumer::fixed(grant)).expect("the relay's own grant fits")
 	}
@@ -1292,7 +1284,6 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
 		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
-		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
 		// A transport added to moq-tokio before this mapping learns it still reaches
 		// the decider, named as one it does not recognize.
 		_ => moq_auth::Transport::Unknown,
@@ -1492,11 +1483,7 @@ mod tests {
 	fn a_lease_refuses_a_grant_the_contract_refuses() {
 		let mut tier = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
 		tier.tier = Some("a b".into());
-		let mut upstream = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-		upstream.upstream = true;
-		for grant in [tier, upstream] {
-			assert!(Lease::new("/room", lease::Consumer::fixed(grant)).is_err());
-		}
+		assert!(Lease::new("/room", lease::Consumer::fixed(tier)).is_err());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1546,7 +1533,7 @@ mod tests {
 	#[test]
 	fn every_transport_has_an_auth_name() {
 		use moq_tokio::Transport as T;
-		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Unix, T::WebRtc] {
+		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Unix] {
 			assert_eq!(super::transport(transport).as_str(), transport.as_str());
 		}
 	}
@@ -1562,8 +1549,8 @@ mod tests {
 			for publish in [false, true] {
 				let mut grant = Grant::new(Pattern::all(), Pattern::all());
 				match publish {
-					true => grant.publish_rate = Some(rate),
-					false => grant.subscribe_rate = Some(rate),
+					true => grant.publish.rate = Some(rate),
+					false => grant.subscribe.rate = Some(rate),
 				}
 				let (auth, mut admissions) = Auth::embedded("test");
 				let request = auth.request(transport, "/room");
@@ -1607,7 +1594,7 @@ mod tests {
 		let rate = moq_auth::Rate::from_bps(8000).unwrap();
 		let uncapped = Grant::new(Pattern::all(), Pattern::all());
 		let mut capped = uncapped.clone();
-		capped.subscribe_rate = Some(rate);
+		capped.subscribe.rate = Some(rate);
 
 		let applied = Arc::new(std::sync::Mutex::new(Vec::new()));
 		let record = applied.clone();
@@ -1646,8 +1633,8 @@ mod tests {
 		};
 		assert!(split.validate(false).is_ok());
 		let grant = split.public_grant().unwrap();
-		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
-		assert!(grant.publish.is_empty());
+		assert_eq!(grant.subscribe.path, patterns(&["anon/**"]));
+		assert!(grant.publish.path.is_empty());
 	}
 
 	/// An unknown `[auth]` key, such as the never-released `verifications`, fails to parse.
@@ -1692,8 +1679,8 @@ mod tests {
 		] {
 			let lease = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await.unwrap();
 			assert_eq!(lease.token().root, Path::new(root).unwrap(), "{path}");
-			assert_eq!(lease.token().publish, patterns(publish), "{path}");
-			assert_eq!(lease.token().subscribe, patterns(subscribe), "{path}");
+			assert_eq!(lease.token().publish.path, patterns(publish), "{path}");
+			assert_eq!(lease.token().subscribe.path, patterns(subscribe), "{path}");
 		}
 
 		// A path the rules don't reach is refused, never an outage the client retries.
@@ -1706,36 +1693,26 @@ mod tests {
 		}
 	}
 
-	/// Public rules verify nothing, so a token is refused rather than ignored, in
-	/// whichever form it arrives.
+	/// Public rules verify nothing, so a token is refused rather than ignored.
 	#[tokio::test]
 	async fn public_rules_refuse_a_token() {
 		let auth = config(None, &["**"])
 			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
-		query.query = Some("a=1&jwt=eyJ".into());
 		let mut setup = auth.request(moq_auth::Transport::Quic, "/");
 		setup.token = Some(moq_auth::Token {
 			kind: moq_auth::Token::CAT,
 			value: b"anything".to_vec(),
 		});
-		let mut http = auth.request(moq_auth::Transport::Http, "/");
-		http.query = Some("jwt=eyJ".into());
-		// `moq auth serve` form-decodes the key, so an escaped one is a token too.
-		let mut escaped = auth.request(moq_auth::Transport::WebSocket, "/");
-		escaped.query = Some("%6Awt=eyJ".into());
-		for request in [query, setup, http, escaped] {
-			let Err(err) = auth.admit(request).await else {
-				panic!("a token was admitted on the public grant");
-			};
-			assert!(matches!(err, Error::Refused(_)), "{err}");
-		}
+		let Err(err) = auth.admit(setup).await else {
+			panic!("a token was admitted on the public grant");
+		};
+		assert!(matches!(err, Error::Refused(_)), "{err}");
 
-		// An empty `jwt=` is no token.
-		let mut empty = auth.request(moq_auth::Transport::WebSocket, "/");
-		empty.query = Some("jwt=&b=2".into());
-		assert!(auth.admit(empty).await.is_ok());
+		// A query is the client's own: the relay reads no parameter in it as a token.
+		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
+		query.query = Some("jwt=eyJ".into());
+		assert!(auth.admit(query).await.is_ok());
 	}
 
 	/// A certificate is a fact the public rules ignore: it gets exactly what anyone does.
@@ -1756,7 +1733,7 @@ mod tests {
 		for request in [anonymous, certificate] {
 			let lease = auth.admit(request).await.unwrap();
 			assert_eq!(lease.token().root, Path::from_static("anon/room"));
-			assert_eq!(lease.token().subscribe, patterns(&["**"]));
+			assert_eq!(lease.token().subscribe.path, patterns(&["**"]));
 			assert_eq!(lease.token().tier, Tier::default());
 		}
 	}
@@ -1935,14 +1912,14 @@ mod tests {
 		grant.label = Some("project/key/123".into());
 		let token = Token::new("/vanity/room", &grant).unwrap();
 		assert_eq!(token.root, Path::from_static("pid/room"));
-		assert_eq!(token.publish, patterns(&["alice/**"]));
-		assert_eq!(token.subscribe, patterns(&["**"]));
+		assert_eq!(token.publish.path, patterns(&["alice/**"]));
+		assert_eq!(token.subscribe.path, patterns(&["**"]));
 		assert_eq!(token.tier, Tier::new(moq_net::Path::from_static("gold")));
 		assert_eq!(token.label, Path::from_static("project/key/123"));
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
 		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new())).unwrap();
-		assert_eq!(token.publish, patterns);
+		assert_eq!(token.publish.path, patterns);
 		assert!(
 			token.label.is_empty(),
 			"an absent label is the empty label, not the root"
@@ -2012,21 +1989,21 @@ mod tests {
 		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/", consumer).unwrap();
-		assert!(!lease.token().peer);
+		assert_eq!(lease.token().link, None);
 
 		let mut peer = grant;
-		peer.peer = true;
+		peer.link = Some(moq_auth::Link::Peer);
 		producer.update(peer.clone());
-		assert_eq!(lease.ended().await.to_string(), "peer changed");
+		assert_eq!(lease.ended().await.to_string(), "link changed");
 
 		// Routes already offered to (or withheld from) the session were filtered
 		// by whether it is upstream, so flipping that closes it too.
 		let (producer, consumer) = lease::Producer::new(peer.clone());
 		let mut lease = Lease::new("/", consumer).unwrap();
 		let mut upstream = peer;
-		upstream.upstream = true;
+		upstream.link = Some(moq_auth::Link::Upstream);
 		producer.update(upstream);
-		assert_eq!(lease.ended().await.to_string(), "upstream changed");
+		assert_eq!(lease.ended().await.to_string(), "link changed");
 	}
 
 	#[test]

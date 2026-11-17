@@ -1,3 +1,8 @@
+//! WebTransport over the QUIC [`driver`](crate::quic::driver).
+//!
+//! Public only with the `test-support` feature, for tests and benches: it can change in any
+//! release. MoQ sessions reach it through `connect` and `listen`.
+//!
 //! WebTransport is a protocol for client-server communication over QUIC.
 //! It's [available in the browser](https://caniuse.com/webtransport) as an alternative to HTTP and WebSockets.
 //!
