@@ -42,6 +42,16 @@ int main()
 	assert(rate_control(x264) == "VBR" && obs_data_get_int(&x264, "bitrate") == 8000);
 	assert(EncoderPeak("obs_x264", &x264).kbps == 8000);
 
+	// x264opts that set a rate of their own replace the peak, so none is advertised;
+	// options that do not touch the rate leave it.
+	obs_data_set_string(&x264, "x264opts", "tune=film vbv-bufsize=4000 crf=20");
+	assert(EncoderPeak("obs_x264", &x264).kbps == 8000);
+	for (const char *options : {"vbv-maxrate=12000", "tune=film vbv_maxrate=0", "qp=20", "bitrate=4000"}) {
+		obs_data_set_string(&x264, "x264opts", options);
+		assert(!EncoderPeak("obs_x264", &x264).key);
+	}
+	obs_data_set_string(&x264, "x264opts", "");
+
 	for (const char *id : {"obs_nvenc_h264_tex", "obs_nvenc_hevc_soft", "obs_nvenc_av1_tex"}) {
 		obs_data_t nvenc;
 		assert(ApplyEncoderRate(id, &nvenc, 2500));

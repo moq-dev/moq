@@ -3,6 +3,7 @@
 
 #include <obs-data.h>
 #include <cctype>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -32,6 +33,24 @@ inline const char *EncoderPeakKey(const std::string &id, std::string rate_contro
 	return nullptr;
 }
 
+// Whether x264's advanced options set a rate of their own. OBS applies `x264opts` after its
+// rate parameters, so a `vbv-maxrate` replaces the peak, `bitrate` replaces the rate mode,
+// and `qp` drops the VBV, and the configured bitrate no longer bounds the encoder.
+inline bool X264OptionsOverrideRate(const std::string &options)
+{
+	std::istringstream input(options);
+	std::string option;
+	while (input >> option) {
+		std::string name = option.substr(0, option.find('='));
+		for (char &c : name)
+			if (c == '_')
+				c = '-';
+		if (name == "vbv-maxrate" || name == "bitrate" || name == "qp")
+			return true;
+	}
+	return false;
+}
+
 // An encoder's hard peak in kbps and the setting that holds it.
 struct MoQPeak {
 	const char *key = nullptr;
@@ -47,6 +66,9 @@ inline MoQPeak EncoderPeak(const std::string &id, obs_data_t *settings)
 	const std::string rate_control = obs_data_get_string(settings, "rate_control");
 	const char *key = EncoderPeakKey(id, rate_control);
 	if (!key)
+		return {};
+	// A peak the user's own x264 options replace is not one we can price.
+	if (id == "obs_x264" && X264OptionsOverrideRate(obs_data_get_string(settings, "x264opts")))
 		return {};
 	const long long kbps = obs_data_get_int(settings, key);
 	if (kbps <= 0)

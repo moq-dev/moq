@@ -21,8 +21,9 @@ Remaining, each needing hardware to measure that the peak holds:
 - VideoToolbox: `rate_control` `CRF` (Apple Silicon only) with `limit_bitrate`,
   `max_bitrate` and `max_bitrate_window`, which becomes a `DataRateLimits` hint
   that may exceed the cap; an Intel Mac falls back to ABR. `vt_update` only
-  re-applies on a `bitrate` change, so a retune sets `bitrate` and `max_bitrate`
-  together.
+  re-applies on a `bitrate` change, so `SetBitrate` must write `bitrate` beside
+  `max_bitrate` and clamp it to the granted peak, as it does for NVENC's plain
+  VBR (`MoQPeak::average_kbps`); `Reset()` restores both.
 - VA-API: `QVBR` where the driver lists it (`vaapi_device_rc_supported`), with
   `maxrate` as the peak; check what the driver does with `bitrate` and whether
   the encoder advertises `OBS_ENCODER_CAP_DYN_BITRATE` (it does not today).
@@ -30,8 +31,9 @@ Remaining, each needing hardware to measure that the peak holds:
 Whatever measures as not holding stays CBR. Decided by the maintainer: "Use
 OBS Output settings" in Simple mode stays CBR, and every encoder keeps its own
 default quality level (x264 CRF 23, NVENC target quality 20) until the VMAF
-harness ([quest/m9/video-quality](/quest/m9/video-quality/README.md)) picks one. Extend `EncoderPeakKey` and
-`ApplyEncoderRate`; the output follows from them.
+harness ([quest/m9/video-quality](/quest/m9/video-quality/README.md)) picks one. Extend `EncoderPeakKey`,
+`EncoderPeak`, and `ApplyEncoderRate` for the mode, and the retune and restore
+in `moq-output.cpp` for the setting a grant writes.
 
 Public API: none. Wire: none.
 
