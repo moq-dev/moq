@@ -258,8 +258,7 @@ async fn rust_ffi() {
 		let broadcast = route.broadcast();
 		let timed = MoqTrackInfo {
 			priority: 0,
-			max_age: None,
-			max_age_unlimited: false,
+			max_age: Some(Duration::ZERO),
 			refresh: None,
 			timescale: Some(1_000_000),
 			compression: None,

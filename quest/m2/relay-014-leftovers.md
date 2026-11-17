@@ -74,7 +74,3 @@ For the PR:
 Public API: none (`Legacy` is crate-private). Config and CLI: ten hidden
 flags, their variables, and six hidden keys stop parsing; a wildcard-free
 public or mTLS pattern is accepted. Wire: none.
-
-## Related
-
-- [The relay's config names](/quest/m2/relay-config-names.md) - the old spellings this cut does refuse by name

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, cast
 
 from moq_ffi import MoqAudio as Audio
@@ -237,6 +238,16 @@ class TrackProducer:
         """
         self._inner.seek(start)
 
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
+
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
@@ -308,6 +319,16 @@ class TrackStreamProducer:
         itself enabled, at the next keyframe in the stream.
         """
         self._inner.set_enabled(enabled)
+
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
@@ -417,16 +438,23 @@ class GroupConsumer(_Stream[MediaFrame]):
 
 
 class CatalogConsumer(_Stream[Catalog]):
-    """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
+    """Async-iterable stream of :class:`Catalog` updates as the broadcast changes.
 
-    Construct with :meth:`subscribe`. Each item is the latest
-    catalog describing the broadcast's tracks; usable as an async context manager.
+    Construct with :meth:`subscribe`. Each item describes the broadcast's tracks from its
+    ``timestamp`` on the media timeline: hold one read before the media reaches it, and apply one
+    read late, or the first one read, at once. Usable as an async context manager.
     """
 
     @classmethod
-    async def subscribe(cls, broadcast: BroadcastConsumer) -> CatalogConsumer:
-        """Subscribe to the broadcast's catalog snapshots."""
-        return cls(await MoqMediaCatalogConsumer.subscribe(broadcast._inner))
+    async def subscribe(cls, broadcast: BroadcastConsumer, *, delay: timedelta = timedelta(0)) -> CatalogConsumer:
+        """Subscribe to the broadcast's catalog updates, for a reader playing ``delay`` behind the live edge.
+
+        A zero ``delay`` reads only the newest catalog, for a reader that applies each on arrival. A
+        reader that holds each update until its media reaches the update's ``timestamp`` passes its
+        playout delay instead, and reads in order every update it may still need: one stays
+        deliverable until it falls ``delay`` behind the live edge.
+        """
+        return cls(await MoqMediaCatalogConsumer.subscribe(broadcast._inner, delay))
 
     def __init__(self, inner: MoqMediaCatalogConsumer) -> None:
         self._inner = inner

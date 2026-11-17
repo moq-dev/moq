@@ -209,37 +209,21 @@ func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
 // memory. Only a video.Consumer with DecoderOutput.Surface set produces one,
 // and it stays valid until Close.
 func (f *VideoDecodedFrame) Surface() VideoSurface {
-	return videoSurface(f.inner.Surface())
-}
-
-// VideoSurface is a decoded frame's platform surface: VideoSurfacePixelBuffer on macOS and iOS.
-// Switch on it with a default case, since new platforms add kinds.
-type VideoSurface interface {
-	isVideoSurface()
-}
-
-// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
-type VideoSurfacePixelBuffer struct {
-	Pointer uint64
-}
-
-// VideoSurfaceUnknown is a surface kind this version of the package does not know yet.
-type VideoSurfaceUnknown struct{}
-
-func (VideoSurfacePixelBuffer) isVideoSurface() {}
-func (VideoSurfaceUnknown) isVideoSurface()     {}
-
-func videoSurface(surface *ffi.MoqVideoSurface) VideoSurface {
-	if surface == nil {
-		return nil
+	if surface := f.inner.Surface(); surface != nil {
+		return *surface
 	}
-	switch surface := (*surface).(type) {
-	case ffi.MoqVideoSurfacePixelBuffer:
-		return VideoSurfacePixelBuffer{Pointer: surface.Pointer}
-	default:
-		return VideoSurfaceUnknown{}
-	}
+	return nil
 }
+
+type (
+	// VideoSurface is a decoded frame's platform surface: VideoSurfacePixelBuffer on macOS and
+	// iOS, or VideoSurfaceUnknown for a kind this version cannot name yet.
+	VideoSurface = ffi.MoqVideoSurface
+	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
+	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
+	// VideoSurfaceUnknown is a surface kind this version of the package cannot name yet.
+	VideoSurfaceUnknown = ffi.MoqVideoSurfaceUnknown
+)
 
 // Close releases the frame's surface back to the decoder.
 func (f *VideoDecodedFrame) Close() {

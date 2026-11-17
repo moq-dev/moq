@@ -437,12 +437,6 @@ pub struct moq_video_config {
 	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
 	pub preference: i32,
 
-	/// Microseconds of media a decoder needs before its output is clean: after a join, decode
-	/// from the group start and present at the start plus this. The media consumers already
-	/// start this much earlier. Meaningless unless `has_warmup`.
-	pub warmup_us: u64,
-	/// Whether `warmup_us` is present; absent means none.
-	pub has_warmup: bool,
 	/// The broadcast holding the rendition's track, relative to the catalog's own broadcast
 	/// (`./source`), or NULL when it is the catalog's broadcast.
 	pub broadcast: *const c_char,
@@ -523,7 +517,9 @@ pub struct moq_audio_config {
 	pub jitter_us: u64,
 	/// Whether `jitter_us` is present; absent means frames flush at once.
 	pub has_jitter: bool,
-	/// As [moq_video_config]'s `warmup_us`.
+	/// Microseconds of media a decoder needs before its output is clean, such as Opus pre-roll:
+	/// after a join, decode from the group start and present at the start plus this. The media
+	/// consumers already start this much earlier. Meaningless unless `has_warmup`.
 	pub warmup_us: u64,
 	/// Whether `warmup_us` is present; absent means none.
 	pub has_warmup: bool,
@@ -1589,11 +1585,13 @@ pub struct moq_client_config {
 	pub backoff_multiplier: u32,
 	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
-	/// The maximum reconnect delay in microseconds; zero leaves it uncapped.
+	/// The maximum reconnect delay in microseconds; zero retries at once. Absent caps it
+	/// at 5s, and `backoff_max_unlimited` lifts the cap.
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
-	/// How long reconnection keeps trying before giving up for good; zero retries forever.
+	/// How long reconnection keeps trying before giving up for good; zero gives up at the
+	/// first failure. Absent never gives up.
 	pub backoff_timeout_us: u64,
 	/// Whether `backoff_timeout_us` is present.
 	pub has_backoff_timeout: bool,
@@ -1653,6 +1651,10 @@ pub struct moq_client_config {
 	/// Dial once instead of redialing with backoff whenever the transport drops; the
 	/// transport's close then ends the session. False redials.
 	pub once: bool,
+
+	/// Lift the cap on the reconnect delay, which then grows without bound. Refused
+	/// with `has_backoff_max`.
+	pub backoff_max_unlimited: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1698,10 +1700,17 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max().unwrap_or_default());
-		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout().unwrap_or_default());
-		dst.has_backoff_timeout = true;
+		match config.connect.backoff.max() {
+			Some(max) => {
+				dst.backoff_max_us = micros(max);
+				dst.has_backoff_max = true;
+			}
+			None => dst.backoff_max_unlimited = true,
+		}
+		if let Some(timeout) = config.connect.backoff.timeout() {
+			dst.backoff_timeout_us = micros(timeout);
+			dst.has_backoff_timeout = true;
+		}
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
@@ -1781,9 +1790,10 @@ unsafe fn connect_session(
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// Once connected, the session reconnects automatically with exponential backoff if the
-/// connection drops. A first dial that reaches no session ends it instead, with that dial's
-/// error as the terminal snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
-/// since the origins outlive the underlying connection.
+/// connection drops. Until a session has stayed up past 1s or been drained by a GOAWAY, a
+/// failed dial or a closed session, such as a refused credential, ends it instead, with that error as the terminal
+/// snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on
+/// each reconnect, since the origins outlive the underlying connection.
 ///
 /// `on_state` receives a [moq_connection_state] whenever the lifecycle changes: each
 /// connect, drop, migration, and failed dial, carrying the phase with its data and the
@@ -3415,9 +3425,6 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_width = (config.coded_width > 0).then_some(config.coded_width);
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
-		video.warmup = config
-			.has_warmup
-			.then(|| std::time::Duration::from_micros(config.warmup_us));
 		(video.broadcast, video.instance, video.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
@@ -4719,10 +4726,6 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   the terminal (`<= 0`) callback, `on_read` is never called again and
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
-///
-/// The catalog rendition's `warmup` reaches that much further back for decoder history and
-/// increases the subscription's max delay by the same amount. The steady-state skip budget
-/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///

@@ -395,6 +395,30 @@ async def test_catalog_update_on_new_track():
         break
 
 
+async def test_holding_catalog_reader_reads_every_update_within_its_delay():
+    """Updates published before the reader joins reach a holding reader in order, each with its
+    timestamp; an arrival reader takes only the newest."""
+    broadcast = moq.BroadcastProducer()
+    catalog = moq.media.CatalogProducer(broadcast)
+    for value in [1, 2]:
+        catalog.set_section("app", value)
+    consumer = broadcast.consume()
+
+    for delay, expected in [(timedelta(0), ["2"]), (timedelta(minutes=1), ["1", "2"])]:
+        async with await moq.media.CatalogConsumer.subscribe(consumer, delay=delay) as reader:
+            read: list[str] = []
+            last = 0
+            while not read or read[-1] != "2":
+                update = await asyncio.wait_for(anext(reader), timeout=10)
+                assert update.timestamp.scale is not None
+                assert update.timestamp.value > last, f"{delay} delay"
+                last = update.timestamp.value
+                # The broadcast's first catalog, published before any section, is not one of ours.
+                if "app" in update.sections:
+                    read.append(update.sections["app"])
+        assert read == expected, f"{delay} delay"
+
+
 def test_close_twice_is_a_noop():
     broadcast = moq.BroadcastProducer()
     _media = moq.media.TrackProducer.audio(
@@ -537,7 +561,7 @@ async def test_publish_track_info_and_subscription():
 
 def test_track_info_keeps_native_default_priority():
     """A partially configured TrackInfo keeps moq-ffi's default priority of 0."""
-    native = moq_ffi.MoqTrackInfo().priority
+    native = moq_ffi.MoqTrackInfo(max_age=None).priority
     assert moq.TrackInfo()._ffi().priority == native
     assert moq.TrackInfo(max_age=timedelta(seconds=2))._ffi().priority == native
     assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
@@ -560,6 +584,17 @@ def test_track_info_max_age():
     broadcast.close()
 
 
+def test_track_info_reads_compression_back():
+    """A received compression compares equal to the selector and names itself."""
+    broadcast = moq.BroadcastProducer()
+    info = moq.TrackInfo(compression=moq.Compression.deflate())
+    got = broadcast.publish_track("deflate", info).consume().info()
+    assert got.compression == moq.Compression.deflate()
+    assert got.compression is not None and got.compression.name() == "deflate"
+    assert broadcast.publish_track("plain").consume().info().compression is None
+    broadcast.close()
+
+
 def test_default_subscription_skips_superseded_groups_at_once():
     """A bare record carries moq-net's zero delay too; only an explicit None leaves a bound unset."""
     assert moq.Subscription.default() == moq.Subscription()
@@ -567,6 +602,13 @@ def test_default_subscription_skips_superseded_groups_at_once():
     assert (delay.min, delay.max) == (timedelta(0), timedelta(0))
     delay = moq.Subscription(delay=moq.Delay(min=None, max=None))._ffi().delay
     assert (delay.min, delay.max) == (None, None)
+
+
+def test_backoff_keeps_its_positional_timeout():
+    """``max_unlimited`` is keyword-only, so the fourth positional argument is still ``timeout``."""
+    backoff = moq.Backoff(None, None, None, timedelta(seconds=3))._ffi()
+    assert (backoff.timeout, backoff.max_unlimited) == (timedelta(seconds=3), False)
+    assert moq.Backoff(max_unlimited=True)._ffi().max_unlimited
 
 
 def test_string_sequences_refuse_a_bare_string():
@@ -610,7 +652,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.deflate()))
     producer = moq.json.SnapshotProducer(broadcast, track)
     consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
@@ -642,9 +684,31 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
+async def test_json_abort_unwanted_keeps_a_late_reader():
+    """An idle JSON stream ends only once a reader that joined after it went unwanted has left."""
+    broadcast = moq.BroadcastProducer()
+    producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", moq.TrackInfo(timescale=1_000)))
+    demand = producer.demand()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+
+    late = moq.json.StreamConsumer(await broadcast.consume().subscribe_track("events"))
+    assert producer.abort_unwanted(7) is False
+    producer.append("still serving", moq.Timestamp(0, 1_000))
+    record = await asyncio.wait_for(anext(late), timeout=5.0)
+    assert record == moq.json.Timed("still serving", moq.Timestamp(0, 1_000))
+
+    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    late.cancel()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+    assert producer.abort_unwanted(7) is True
+    with pytest.raises(moq.Error.Closed):
+        producer.abort_unwanted(7)
+    broadcast.close()
+
+
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.deflate()))
     producer = moq.json.WindowProducer(track)
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     demand = producer.demand()
@@ -730,7 +794,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE)
+    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.deflate())
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
     stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
@@ -1593,7 +1657,7 @@ def test_video_encoder_submits_and_receives():
             framerate=moq.video.FrameRate(numerator=30, denominator=1),
         ),
         moq.video.EncoderOutput(
-            codec=moq.video.Codec.H264,
+            codec=moq.video.Codec.h264(),
             kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.SOFTWARE()),
         ),
     )
@@ -1633,11 +1697,13 @@ def test_audio_encoder_frame_init_and_bitrate():
 
 def test_video_namespace_names_its_configuration_types():
     """``moq.video`` names every type its records take."""
+    codec = moq.video.Codec.h264()
     output = moq.video.EncoderOutput(
-        codec=moq.video.Codec.H264,
+        codec=codec,
         kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.AUTO()),
     )
-    assert output.codec == moq.VideoCodec.H264
+    assert output.codec is codec
+    assert isinstance(codec, moq.VideoCodec)
     assert moq.video.PixelFormat.RGBA == moq.VideoPixelFormat.RGBA
 
 
@@ -1733,7 +1799,7 @@ async def test_decode_video_frame():
         # variant inside the enum without declaring it a subclass, so the cast is
         # what makes the variant typecheck.
         moq.VideoEncoderOutput(
-            codec=moq.VideoCodec.H264,
+            codec=moq.VideoCodec.h264(),
             kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
         ),
         track="camera",
@@ -1773,15 +1839,6 @@ async def test_decode_video_frame():
 
     video.finish()
     broadcast.close()
-
-
-def test_video_surface_unknown_kind() -> None:
-    """A surface kind this package predates maps to the fallback arm instead of failing."""
-    from moq._records import _surface
-
-    assert _surface(None) is None
-    assert _surface(cast(Any, moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7))) == moq.VideoSurfacePixelBuffer(7)
-    assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 
 async def test_broadcast_is_reachable_only_while_announced():

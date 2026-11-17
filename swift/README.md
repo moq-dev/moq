@@ -64,7 +64,7 @@ try route.announce() // hidden routes are invisible; hold the route while it sho
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` requests a drain immediately; `try await session.closed()` waits for it and throws on delivery failure. `cancel(code: 0)` remains immediate.
 
-A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
+A note on enum casing: `MoqError` keeps Rust's PascalCase variants, some with no payload (`MoqError.Closed`) and some carrying named fields (`MoqError.Transport(reason: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Selectors Rust can add to are objects with constructors (`AudioCodec.opus()`, `VideoCodec.h264()`, `Compression.deflate()`), and `Transport` and `Video.Surface` carry an `.unknown` case for what this version cannot name yet.
 
 ## API shape
 
@@ -90,13 +90,13 @@ not found. lite-07 uses independent requests.
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
 `Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
 `TrackProducer` and advertises it in the broadcast's catalog, and a consumer takes over a
-`TrackConsumer`, except `Json.SnapshotConsumer(broadcast:name:priority:)`, which subscribes itself at a
-zero `delay.max`. You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
+`TrackConsumer`, except `Json.SnapshotConsumer(broadcast:name:priority:delay:)`, which subscribes itself at its
+`delay` (zero by default). You opt into one of three distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
 (lossy latest-value, a subscriber only sees the newest value), `Json.StreamProducer`/`Json.StreamConsumer`
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
 `JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
-track with `TrackInfo(compression: .deflate)`; consumers read it the same either way. Every JSON write
+track with `TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate())`; consumers read it the same either way. Every JSON write
 (snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
 track needs a timescale.
 

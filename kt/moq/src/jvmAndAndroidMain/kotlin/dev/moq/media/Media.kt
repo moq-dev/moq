@@ -141,7 +141,7 @@ fun CatalogConsumer.updates(): Flow<Catalog> = pull({ cancel() }) { next() }
  * updates (use [updates] for that).
  */
 suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
-    val consumer = CatalogConsumer.subscribe(broadcast)
+    val consumer = CatalogConsumer.subscribe(broadcast, java.time.Duration.ZERO)
     try {
         return consumer.next() ?: throw MoqException.Closed()
     } finally {

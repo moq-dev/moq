@@ -140,9 +140,9 @@ So "wrapper APIs do not change" in the bullets above, carried over from the
 abandoned fork plan, is a property to measure, not assume: the switch's PR diffs each
 language's public API (`sh/api-diff`) and its Impact section lists every
 rename for the packages' `MIGRATE.md`. Reshapes that outlive the generator
-land before the cut instead, in
-[the selector quest](/quest/m2/ffi-open-selectors.md) and the bindings'
-group rename; the switch keeps those shapes. The audit's other binding findings were not picked: the `Moq`
+land before the cut instead: the open-set rule in `rs/moq-ffi/AGENTS.md`
+(selector objects, `Unknown` variants, and a null `max_age` for no limit) and
+the group rename; the switch keeps those shapes. The audit's other binding findings were not picked: the `Moq`
 facade Kotlin and Dart start from stays, and `MoqError`'s variants stay as
 they are.
 

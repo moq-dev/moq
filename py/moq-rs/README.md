@@ -160,7 +160,7 @@ client = moq.Client(
   - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; reconnects share the same session, while a first dial that reaches no session ends it with that error.
+  - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; reconnects share the same session, while, until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed session, such as a refused credential, ends it with that error.
   - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
   - `.viewers() → Viewers`. Divide the receive estimate between watched broadcasts: `.watch(max_bps) → Viewer` claims up to a ceiling, `Viewer.rate()` reads its slice (`None` while there is no estimate), and dropping the viewer releases it. The summed ceilings are the PROBE target; `.set_target(bps)` overrides it (`0` sends none, `None` follows the viewers again).
   - `.grants() → GrantConsumer`. On `moq-lite-07-wip`, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
@@ -232,7 +232,7 @@ and `.cut()` ends its open group so the next edit opens one restating the window
 no window mode, so `WindowProducer` takes only the track.
 A raw frame on a scale-less track carries `Timestamp.unscaled` at its group key, but every JSON
 write takes a time on the broadcast clock. Publish JSON tracks with
-`TrackInfo(compression=moq.Compression.DEFLATE)`: the track compresses each group on the wire, and consumers read it the
+`TrackInfo(compression=moq.Compression.deflate())`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
 ### Subscribing
@@ -241,7 +241,7 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
 - **`TrackConsumer`**. Async iterator of raw groups, in start order.
   - `await .next_group() → GroupConsumer | None`. Start order; what the default iteration yields.
-  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start. Prefer it when latency matters more than order.
+  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start order. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
   - `.info() → TrackInfo`

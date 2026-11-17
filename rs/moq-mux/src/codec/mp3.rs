@@ -146,6 +146,17 @@ impl Import {
 		self.track.abort(err);
 	}
 
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
+	/// unchanged when a reader does; see
+	/// [`Producer::abort_unwanted`](crate::container::Producer::abort_unwanted).
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the importer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.track.abort_unwanted(err).map_err(|track| Self { track })
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;

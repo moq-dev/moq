@@ -246,9 +246,16 @@ func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) 
 	return &ContainerProducer{inner: inner}, nil
 }
 
-// NewCatalogConsumer subscribes to broadcast's catalog snapshots.
-func NewCatalogConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer) (*CatalogConsumer, error) {
-	inner, err := ffi.MoqMediaCatalogConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast))
+// NewCatalogConsumer subscribes to broadcast's catalog updates, for a reader playing delay
+// behind the live edge. A zero delay reads only the newest catalog, for a reader that applies
+// each on arrival. A reader that holds each update until its media reaches the update's
+// Timestamp passes its playout delay instead, and reads in order every update it may still
+// need: one stays deliverable until it falls delay behind the live edge.
+func NewCatalogConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, delay time.Duration) (*CatalogConsumer, error) {
+	if err := bridge.NonNegative(&delay, "catalog delay"); err != nil {
+		return nil, err
+	}
+	inner, err := ffi.MoqMediaCatalogConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), delay)
 	if err != nil {
 		return nil, err
 	}
@@ -444,6 +451,15 @@ func (m *TrackProducer) Seek(start uint64) error {
 	return m.inner.Seek(start)
 }
 
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (m *TrackProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
+}
+
 // Finish closes the media track.
 func (m *TrackProducer) Finish() error {
 	return m.inner.Finish()
@@ -512,6 +528,15 @@ func (m *TrackStreamProducer) Write(payload []byte) error {
 // next keyframe in the stream.
 func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 	return m.inner.SetEnabled(enabled)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (m *TrackStreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the stream.
@@ -613,7 +638,9 @@ type CatalogConsumer struct {
 	inner *ffi.MoqMediaCatalogConsumer
 }
 
-// Next returns the next catalog, or (nil, nil) when the track ends.
+// Next returns the next catalog, or (nil, nil) when the track ends. The catalog takes
+// effect at its Timestamp on the broadcast's media timeline: hold one read before the media
+// reaches it, and apply one read late, or the first one read, at once.
 func (c *CatalogConsumer) Next(ctx context.Context) (*Catalog, error) {
 	return bridge.Call(ctx, nil, c.inner.Next)
 }
@@ -630,7 +657,7 @@ func (c *CatalogConsumer) Cancel() {
 
 // CatalogSnapshot reads the first catalog snapshot and releases its subscription.
 func CatalogSnapshot(ctx context.Context, broadcast *moq.BroadcastConsumer) (*Catalog, error) {
-	consumer, err := NewCatalogConsumer(ctx, broadcast)
+	consumer, err := NewCatalogConsumer(ctx, broadcast, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 # `@moq/json`
 
 ```ts
+import { Duration } from "@moq/clock";
 import { Time } from "@moq/net";
 import { Timed } from "@moq/net";
 import { Track } from "@moq/net";
@@ -28,6 +29,7 @@ export namespace Snapshot {
 	}
 	export namespace Consumer {
 		export type Config<T> = Pick<Snapshot.Config<T>, "schema"> & {
+			delay?: Duration;
 			priority?: number;
 			track: Pick<Track.Consumer, "subscribe">;
 		};

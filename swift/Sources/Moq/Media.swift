@@ -145,16 +145,25 @@ public enum Media {
     }
 
     /// Read side of a broadcast's catalog. Iterating yields catalog updates as the
-    /// set of tracks changes.
+    /// set of tracks changes. Each takes effect at its `timestamp` on the media timeline:
+    /// hold one read before the media reaches it, and apply one read late, or the first
+    /// one read, at once.
     public final class CatalogConsumer: AsyncSequence, Sendable {
         /// The catalog update emitted by this sequence.
         public typealias Element = Catalog
 
         let ffi: MoqMediaCatalogConsumer
 
-        /// Subscribe to this broadcast's catalog snapshots.
-        public static func subscribe(broadcast: BroadcastConsumer) async throws -> CatalogConsumer {
-            CatalogConsumer(try await MoqMediaCatalogConsumer.subscribe(broadcast: broadcast.ffi))
+        /// Subscribe to this broadcast's catalog updates, for a reader playing `delay` seconds
+        /// behind the live edge. A zero `delay` reads only the newest catalog, for a reader that
+        /// applies each on arrival. A reader that holds each update until its media reaches the
+        /// update's `timestamp` passes its playout delay instead, and reads in order every update
+        /// it may still need: one stays deliverable until it falls `delay` behind the live edge.
+        public static func subscribe(
+            broadcast: BroadcastConsumer,
+            delay: TimeInterval = 0
+        ) async throws -> CatalogConsumer {
+            CatalogConsumer(try await MoqMediaCatalogConsumer.subscribe(broadcast: broadcast.ffi, delay: delay))
         }
         init(_ ffi: MoqMediaCatalogConsumer) {
             self.ffi = ffi
@@ -325,6 +334,15 @@ public enum Media {
             try ffi.seek(start: start)
         }
 
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
+        }
+
         /// Finish the track and finalize encoding.
         public func finish() throws {
             try ffi.finish()
@@ -404,6 +422,15 @@ public enum Media {
         /// keyframe in the stream.
         public func setEnabled(_ enabled: Bool) throws {
             try ffi.setEnabled(enabled: enabled)
+        }
+
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finalize the track, publishing the last access unit still waiting for a

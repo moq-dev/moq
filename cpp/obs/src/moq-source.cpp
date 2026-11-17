@@ -490,7 +490,7 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 	conn->pending_audio.reset();
 
 	conn->catalog_call =
-		moq::MediaCatalogConsumer::subscribe(conn->consumer)
+		moq::MediaCatalogConsumer::subscribe(conn->consumer, {})
 			.then(ctx->worker.Executor(),
 			      moq_source_instance_current<moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>>>(
 				      ctx, conn, moq_source_on_catalogs));
