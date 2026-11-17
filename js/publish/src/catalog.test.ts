@@ -53,7 +53,7 @@ test("catalog producer refuses an ID naming both a video and an audio rendition"
 	).toThrow(Catalog.DuplicateRendition);
 });
 
-test("catalog producer computes the version from the fields it uses", async () => {
+test("catalog producer computes each entry version from the fields it uses", async () => {
 	const catalog = new CatalogProducer();
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
@@ -61,17 +61,19 @@ test("catalog producer computes the version from the fields it uses", async () =
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 	const video = { codec: "avc1.64001f", container: { kind: "legacy" as const } };
 
-	// A caller's own version is replaced by the computed one.
+	// A caller's own version is replaced by the computed ones: the renamed rendition's, not the root's.
 	catalog.mutate((c) => {
 		c.video = { renditions: { hd: { ...video, track: "video" } } };
 		c.version = 3;
 	});
-	expect((await consumer.latest())?.value.version).toBe(4);
+	const renamed = (await consumer.latest())?.value;
+	expect(renamed).not.toHaveProperty("version");
+	expect(renamed?.video?.renditions.hd).toHaveProperty("version", 4);
 
 	catalog.mutate((c) => {
 		c.video = { renditions: { hd: video } };
 	});
-	expect((await consumer.latest())?.value).not.toHaveProperty("version");
+	expect((await consumer.latest())?.value.video?.renditions.hd).not.toHaveProperty("version");
 
 	effect.close();
 });
@@ -89,7 +91,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 
 	const first = await subscriber.nextGroup();
 	expect(first?.sequence).toBe(0n);
-	expect(await first?.readJson()).toEqual({ media: { clock: expect.anything() }, video: { renditions: {} } });
+	expect(await first?.readJson()).toEqual({ sync: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
 	catalog.mutate((c) => {
@@ -99,7 +101,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	const second = await subscriber.nextGroup();
 	expect(second?.sequence).toBe(1n);
 	expect(await second?.readJson()).toEqual({
-		media: { clock: expect.anything() },
+		sync: { clock: expect.anything() },
 		video: { renditions: {} },
 		scte35: { splices: [] },
 	});
@@ -121,7 +123,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 
 	// Before any rendition: a live-only publisher exposes its clock.
 	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	const mapping = first.media?.clock;
+	const mapping = first.sync?.clock;
 	if (!mapping) throw new Error("expected a media clock");
 	expect(mapping.timescale).toBe(1_000_000);
 
@@ -136,7 +138,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 		c.video = { renditions: {} };
 	});
 	const second = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	expect(second.media?.clock).toEqual(mapping);
+	expect(second.sync?.clock).toEqual(mapping);
 
 	effect.close();
 	installed.close();

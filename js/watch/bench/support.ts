@@ -1,35 +1,24 @@
 // Catalog-update costs with a warmed audio support verdict. Native probes run in browsers;
-// Bun's promise probe isolates selection overhead and probe counts for the nightly series.
+// Bun's stub decoder, a promise probe, isolates selection overhead and probe counts for the nightly series.
 import type * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
-import { decoderConfigKey } from "../src/audio/config";
 import { Source } from "../src/audio/source";
 import type { Broadcast } from "../src/broadcast";
-import { supportCacheKey } from "../src/support-probe";
+import { stubSupport } from "../src/webcodecs.test-util";
 
 /** Measure metadata updates over rendition count, checking every published config. */
 export async function run(): Promise<void> {
 	const native = typeof AudioDecoder !== "undefined";
-	const probe = native
-		? async (config: Catalog.AudioConfig) =>
-				(
-					await AudioDecoder.isConfigSupported({
-						codec: config.codec,
-						sampleRate: config.sampleRate,
-						numberOfChannels: config.numberOfChannels,
-					})
-				).supported ?? false
-		: async () => true;
+	using _stub = native ? undefined : stubSupport({ audio: () => true });
+	// Count the decoder's probes by wrapping whichever one answers.
+	let probes = 0;
+	const isConfigSupported = AudioDecoder.isConfigSupported.bind(AudioDecoder);
+	AudioDecoder.isConfigSupported = (config) => {
+		probes++;
+		return isConfigSupported(config);
+	};
 	console.log("probe,renditions,updates,probes,us_per_update");
 	for (const count of [1, 8, 32]) {
-		let probes = 0;
-		const supported = Object.assign(
-			async (config: Catalog.AudioConfig) => {
-				probes++;
-				return probe(config);
-			},
-			{ [supportCacheKey]: decoderConfigKey },
-		);
 		const renditions: Record<string, Catalog.AudioConfig> = Object.fromEntries(
 			Array.from({ length: count }, (_, i) => [
 				`audio${i}`,
@@ -42,7 +31,7 @@ export async function run(): Promise<void> {
 			]),
 		);
 		const catalog = new Signal<Catalog.Root>({ audio: { renditions } });
-		const source = new Source({ broadcast: { out: { catalog } } as unknown as Broadcast, supported });
+		const source = new Source({ broadcast: { out: { catalog } } as unknown as Broadcast });
 		try {
 			await source.out.available.changed();
 			if (Object.keys(source.out.available.peek()).length !== count) throw new Error("unsupported fixture");

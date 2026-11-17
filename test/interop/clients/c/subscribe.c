@@ -699,7 +699,7 @@ int main(int argc, char **argv) {
         fail("error: broadcast never announced\n");
     }
 
-    c.catalog = moq_consume_catalog((uint32_t)bc, on_catalog, &c);
+    c.catalog = moq_consume_catalog((uint32_t)bc, 0, on_catalog, &c);
     if (c.catalog <= 0) {
         fail("error: moq_consume_catalog failed: %d\n", c.catalog);
     }

@@ -7,7 +7,7 @@
 use thiserror::Error;
 
 use super::{DecodeError, EncodeError};
-use crate::{Version, ietf, lite};
+use crate::{Draft, Version, ietf, lite};
 
 /// The number does not fit the target: a varint wire form or a narrower integer.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
@@ -55,8 +55,8 @@ impl From<ietf::Version> for Form {
 impl From<Version> for Form {
 	fn from(version: Version) -> Self {
 		match version {
-			Version::Lite(v) => v.into(),
-			Version::Ietf(v) => v.into(),
+			Version(Draft::Lite(v)) => v.into(),
+			Version(Draft::Ietf(v)) => v.into(),
 		}
 	}
 }

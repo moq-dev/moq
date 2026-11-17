@@ -2,13 +2,12 @@ import { expect, mock, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Bandwidth, Origin, Path } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { stubSupport } from "./webcodecs.test-util";
 
 // Bun does not run Vite's worklet loader; these tests never create an AudioContext.
 mock.module("./audio/render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
 
 const { Player } = await import("./player");
-const Audio = await import("./audio");
-const Video = await import("./video");
 
 async function flush() {
 	for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -140,9 +139,7 @@ test("Player claims its viewer only while it downloads, and an override replaces
 test("Player selects video from its viewer grant less audio, moving up as the grant rises", async () => {
 	// Bun has no WebCodecs or Web Audio: accept every rendition so selection runs, and park the
 	// audio graph, which builds for any selected rendition, before it needs a worklet.
-	const supported = { video: Video.Decoder.supported, audio: Audio.Decoder.supported };
-	Video.Decoder.supported = async () => true;
-	Audio.Decoder.supported = async () => true;
+	using _decoders = stubSupport({ video: () => true, audio: () => true });
 	const context = Object.getOwnPropertyDescriptor(globalThis, "AudioContext");
 	globalThis.AudioContext = class extends EventTarget {
 		state = "running";
@@ -190,6 +187,8 @@ test("Player selects video from its viewer grant less audio, moving up as the gr
 		viewer: { viewers },
 	});
 	try {
+		// The support probes answer through several promise hops, then wake selection.
+		while (player.video.source.out.track.peek() === undefined) await flush();
 		await flush();
 		// The 1080p rendition over the selection margin, plus audio.
 		expect(viewers.target.peek()).toBe(5_100_000);
@@ -217,8 +216,6 @@ test("Player selects video from its viewer grant less audio, moving up as the gr
 	} finally {
 		player.close();
 		viewers.close();
-		Video.Decoder.supported = supported.video;
-		Audio.Decoder.supported = supported.audio;
 		if (context) Object.defineProperty(globalThis, "AudioContext", context);
 		else delete (globalThis as { AudioContext?: unknown }).AudioContext;
 	}

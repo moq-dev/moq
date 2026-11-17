@@ -126,7 +126,7 @@ fn kid(name: &str) -> Option<KeyId> {
 
 /// The half a server verifies with: the public key, or the shared secret.
 fn verifier(key: &Key) -> Key {
-	key.to_public().unwrap_or_else(|_| key.clone())
+	key.public().unwrap_or_else(|_| key.clone())
 }
 
 fn write(path: &Path, contents: &str) {
@@ -351,7 +351,11 @@ impl Bench {
 			}
 		};
 		let grant = runtime.block_on(post());
-		assert_eq!(grant.publish, ["**".parse().unwrap()].into_iter().collect(), "{name}");
+		assert_eq!(
+			grant.publish.path,
+			["**".parse().unwrap()].into_iter().collect(),
+			"{name}"
+		);
 		self.add(name, move || {
 			black_box(runtime.block_on(post()));
 		});
@@ -482,7 +486,7 @@ impl Bench {
 			});
 			let kid = format!("k{}", size - 1);
 			self.add(format!("verify/stage/lookup/{size}"), move || {
-				black_box(set.find_key(black_box(&kid)).unwrap());
+				black_box(set.find(black_box(&kid)).unwrap());
 			});
 		}
 

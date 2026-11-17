@@ -54,8 +54,8 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 	const preview = new Json.Snapshot.Producer({
 		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
 	});
-	user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
-	preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
+	user.update({ name: "Alice" }, Net.Time.Timestamp.now());
+	preview.update({ info: { video: true } }, Net.Time.Timestamp.now());
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
 		await flush();
@@ -93,20 +93,20 @@ test("metadata refuses values that do not match their schema and keeps the last 
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
 		// A `null` used to throw at `value.id` and end the update loop.
-		user.update({ value: null, at: Net.Time.Timestamp.now() });
-		preview.update({ value: { info: { video: "yes" } }, at: Net.Time.Timestamp.now() });
+		user.update(null, Net.Time.Timestamp.now());
+		preview.update({ info: { video: "yes" } }, Net.Time.Timestamp.now());
 		await flush();
 		expect(consumed.user.name.peek()).toBeUndefined();
 		expect(consumed.preview.peek()).toEqual({});
 
 		// The subscription survives a refused value.
-		user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
-		preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
+		user.update({ name: "Alice" }, Net.Time.Timestamp.now());
+		preview.update({ info: { video: true } }, Net.Time.Timestamp.now());
 		await flush();
 		expect(consumed.user.name.peek()).toBe("Alice");
 		expect(consumed.preview.peek()).toEqual({ video: true });
 
-		user.update({ value: { name: 42 }, at: Net.Time.Timestamp.now() });
+		user.update({ name: 42 }, Net.Time.Timestamp.now());
 		await flush();
 		expect(consumed.user.name.peek()).toBe("Alice");
 		expect(warn).toHaveBeenCalledTimes(3);

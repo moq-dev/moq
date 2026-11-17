@@ -16,7 +16,7 @@ trap 'exit 1' INT TERM
 
 # Reuse the public hook's library override, keeping checkout builds quick
 # without timing an unoptimized native library in this benchmark.
-MOQ_FFI_PROFILE=release sh/dart/generate.sh "$scratch/generated"
+MOQ_FFI_PROFILE=release sh/dart/generate.sh
 host=$(rustc -vV | sed -n 's/^host: //p')
 case "$host" in
     *-apple-*) library=libmoq_ffi.dylib ;;

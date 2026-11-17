@@ -68,7 +68,7 @@ harness:
 [positional-arguments]
 interop *args:
     uv run --no-project python ../sh/js/install.py frozen
-    just rs test -p moq-net -p moq-crypto --lib \
+    just rs test -p moq-net --features moq-net/async --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
@@ -314,6 +314,10 @@ resume-model:
 # Model-check every TLA+ config under the given paths (default: all): open findings must still break.
 tla *paths:
     bash ../sh/tla.sh {{ paths }}
+
+# Type-check the route rule's convergence proof (rs/moq-net/verify/route-algebra) with its own pinned Agda.
+route-proof:
+    nix build ..#route-proof --no-link --print-build-logs
 
 # Prove the route key model, and that each variant breaks the lemmas it names.
 route-key-model:

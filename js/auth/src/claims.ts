@@ -8,9 +8,12 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
-import { decodeGrants, decodeRoles, PatternListSchema, UnixSecondsSchema, WireRoleSchema } from "./wire.ts";
+import { AccessSchema, decodeGrants, PatternListSchema, paths, TokenIdSchema, UnixSecondsSchema } from "./wire.ts";
 
-export { PatternListSchema } from "./wire.ts";
+export { type Access, AccessSchema, PatternListSchema, TokenIdSchema } from "./wire.ts";
+
+/** A value parsed by {@link TokenIdSchema}. */
+export type TokenId = z.output<typeof TokenIdSchema>;
 
 /** Parse a list of pattern texts into a reduced union. */
 export function patterns(texts: readonly string[] | undefined): Patterns {
@@ -59,19 +62,47 @@ export const ScopeSchema = z
 /** A value parsed by {@link ScopeSchema}. */
 export type Scope = z.output<typeof ScopeSchema>;
 
-const ClaimsFields = {
-	...ScopeFields,
-	/** Patterns the holder may publish, relative to `root`, optionally with a bitrate cap. */
-	publish: z.optional(WireRoleSchema),
-	/** Patterns the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
-	subscribe: z.optional(WireRoleSchema),
-	/** Expiration time, as a whole unix timestamp in seconds. */
-	exp: z.optional(UnixSecondsSchema),
-	/** Issued-at time, as a whole unix timestamp in seconds. */
-	iat: z.optional(UnixSecondsSchema),
-	/** Not-before time, as a whole unix timestamp in seconds. Enforced by verification. */
-	nbf: z.optional(UnixSecondsSchema),
-};
+/**
+ * {@link Claims} as this library names them, the one definition of their fields. The wire
+ * spells the times and ID as the registered `exp`, `iat`, `nbf`, and `jti`, which
+ * {@link ClaimsSchema} reads. {@link Key.sign} parses with it, so a misspelled field,
+ * such as the wire's `exp` or a legacy `put`, is refused.
+ */
+export const ClaimsFieldsSchema = z
+	.strictObject({
+		/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
+		root: z._default(z.string(), ""),
+		/** What the holder may publish, relative to `root`, optionally with a bitrate cap. */
+		publish: z.optional(AccessSchema),
+		/** What the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
+		subscribe: z.optional(AccessSchema),
+		/** When the token expires (`exp`), as a whole unix timestamp in seconds. */
+		expires: z.optional(UnixSecondsSchema),
+		/** When the token was issued (`iat`), as a whole unix timestamp in seconds. Informational. */
+		issued: z.optional(UnixSecondsSchema),
+		/** The time before which the token is refused (`nbf`), as a whole unix timestamp in seconds. */
+		notBefore: z.optional(UnixSecondsSchema),
+		/** The token's identifier (`jti`), which its issuer may record to revoke it. */
+		id: z.optional(TokenIdSchema),
+	})
+	.check(
+		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
+		// rejects such a token as useless. Checking `!== undefined` here would mint
+		// tokens that Rust then refuses to verify.
+		z.refine((data) => paths(data.publish).length > 0 || paths(data.subscribe).length > 0, {
+			message: "Either publish or subscribe must grant at least one pattern",
+		}),
+	);
+
+/**
+ * The payload of a token, as {@link Key.sign} takes it and {@link Key.verify} returns it.
+ *
+ * A pattern names exactly what it says: `alice` is one broadcast, `alice/**` is a
+ * subtree, and `**` is everything under the root. A role may instead be an
+ * {@link Access} with a cap, `{"path": [...], "rate": bps}`. The times and ID are written
+ * as the registered `exp`, `iat`, `nbf`, and `jti` claims.
+ */
+export type Claims = z.output<typeof ClaimsFieldsSchema>;
 
 // Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
 // Every other claim is refused, since an unknown one may narrow the grant, and a
@@ -79,53 +110,53 @@ const ClaimsFields = {
 const IgnoredFields = {
 	iss: z.optional(z.unknown()),
 	sub: z.optional(z.unknown()),
-	jti: z.optional(z.unknown()),
 };
 
 const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
 
 /**
- * The JWT claims structure for moq-auth.
+ * A token's JSON payload, parsed into {@link Claims}.
  *
  * `root` is optional on the wire: a token scoped to the top-level path omits it, so
- * it defaults to the empty string to match the Rust `moq-auth` crate. A pattern names
- * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
- * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
- * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
- * same thing. A role may instead be `{"path": [...], "rate": bps}`, which parses into
- * `publish_rate` or `subscribe_rate` beside the patterns; a capped role is never written
- * as a prefix, since an older verifier would drop the cap. The registered `iss`, `sub`,
- * and `jti` claims are read and dropped; any other field fails verification.
+ * it defaults to the empty string to match the Rust `moq-auth` crate. Legacy `moq-token`
+ * claims read too, each `put`/`get` prefix `p` as the subtree `p/**`; signing always
+ * writes `publish` and `subscribe`. `exp`, `iat`, `nbf`, and `jti` read as `expires`,
+ * `issued`, `notBefore`, and `id`. The registered `iss` and `sub` claims are read and
+ * dropped; any other field fails verification.
  */
-export const ClaimsSchema = z
-	.pipe(
+export const ClaimsSchema = z.pipe(
+	z.pipe(
 		z.strictObject({
-			...ClaimsFields,
+			root: z.optional(z.string()),
+			publish: z.optional(AccessSchema),
+			subscribe: z.optional(AccessSchema),
+			exp: z.optional(UnixSecondsSchema),
+			iat: z.optional(UnixSecondsSchema),
+			nbf: z.optional(UnixSecondsSchema),
+			jti: z.optional(TokenIdSchema),
 			...IgnoredFields,
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
-		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeRoles(decodeGrants(claims, ctx))),
-	)
-	.check(
-		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
-		// rejects such a token as useless. Checking `!== undefined` here would mint
-		// tokens that Rust then refuses to verify.
-		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
-			message: "Either publish or subscribe must grant at least one pattern",
-		}),
-	);
-
-/**
- * JWT claims structure for moq-auth
- */
-export type Claims = z.output<typeof ClaimsSchema>;
+		// Fed to the strict fields, so a claim misnamed here is refused rather than dropped.
+		z.transform(
+			({ iss: _iss, sub: _sub, exp, iat, nbf, jti, ...grants }, ctx): z.input<typeof ClaimsFieldsSchema> => ({
+				...decodeGrants(grants, ctx),
+				...(exp !== undefined && { expires: exp }),
+				...(iat !== undefined && { issued: iat }),
+				...(nbf !== undefined && { notBefore: nbf }),
+				...(jti !== undefined && { id: jti }),
+			}),
+		),
+	),
+	ClaimsFieldsSchema,
+);
 
 /**
  * The access a {@link Claims} grants at a specific path, with every pattern rebased so
  * it is relative to that path.
  *
- * Produced by {@link authorize}. `**` grants the path itself and everything beneath
+ * Produced by {@link Claims.authorize}. `**` grants the path itself and everything beneath
  * it; the empty pattern grants exactly the path.
  */
 export interface Permissions {
@@ -154,10 +185,8 @@ export interface Permissions {
  *
  * This is authorization only. Verify the signature first with {@link Key.verify} or
  * {@link KeySet.verify}, which is where expiry is enforced.
- *
- * @public
  */
-export function authorize(claims: Claims, path: string): Permissions {
+function authorize(claims: Claims, path: string): Permissions {
 	const target = Path.normalize(path);
 	const root = Path.normalize(claims.root);
 
@@ -178,8 +207,8 @@ export function authorize(claims: Claims, path: string): Permissions {
 	}
 
 	const permissions: Permissions = {
-		subscribe: scope(patterns(claims.subscribe)),
-		publish: scope(patterns(claims.publish)),
+		subscribe: scope(patterns(paths(claims.subscribe))),
+		publish: scope(patterns(paths(claims.publish))),
 	};
 	if (permissions.subscribe.size === 0 && permissions.publish.size === 0) {
 		throw new Error(`token grants no access to path "${target}"`);
@@ -200,7 +229,7 @@ export function authorize(claims: Claims, path: string): Permissions {
  * Must stay in lockstep with `Scope::allows` in the Rust `moq-auth` crate, which
  * checks the same keys.
  */
-export function scopeAllows(scope: Scope, claims: Claims): boolean {
+function allows(scope: Scope, claims: Claims): boolean {
 	const covers = (granted: string[] | undefined, requested: string[] | undefined) => {
 		try {
 			return patterns(granted).rooted(scope.root).covers(patterns(requested).rooted(claims.root));
@@ -210,5 +239,25 @@ export function scopeAllows(scope: Scope, claims: Claims): boolean {
 		}
 	};
 
-	return covers(scope.publish, claims.publish) && covers(scope.subscribe, claims.subscribe);
+	return covers(scope.publish, paths(claims.publish)) && covers(scope.subscribe, paths(claims.subscribe));
 }
+
+/**
+ * Scope verified claims to a connection path.
+ *
+ * The counterpart of the Rust `moq-auth` crate's `Claims` methods.
+ */
+export const Claims = {
+	/** The access `claims` grants at `path`, rebased so each returned pattern is relative to `path`. */
+	authorize,
+};
+
+/**
+ * Check claims against a key's scope.
+ *
+ * The counterpart of the Rust `moq-auth` crate's `Scope` methods.
+ */
+export const Scope = {
+	/** Whether every pattern `claims` grants is covered by `scope`, per role. */
+	allows,
+};

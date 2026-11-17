@@ -22,7 +22,7 @@ import { Time, type Track } from "@moq/net";
 export const MAX_AGE = Duration.millis(30_000);
 
 /**
- * Track properties for a track carrying media frames, for `Request.accept`.
+ * Track properties for a track carrying media frames, for `Track.Producer.accept`.
  *
  * Pins the timescale to microseconds (the timestamps hang's containers stamp), and declares
  * {@link MAX_AGE} instead of `@moq/net`'s zero default, so superseded groups stay fresh long enough

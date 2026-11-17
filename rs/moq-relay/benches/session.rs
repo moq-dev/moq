@@ -92,7 +92,7 @@ impl Backend for Relay {
 			while let Some(admission) = admissions.next().await {
 				let mut grant = Grant::new(Pattern::all(), Pattern::all());
 				grant.root = Some(String::new());
-				grant.peer = admission.request.path == "/peer";
+				grant.link = (admission.request.path == "/peer").then_some(moq_auth::Link::Peer);
 				admission.grant(lease::Consumer::fixed(grant));
 			}
 		});
@@ -122,9 +122,10 @@ impl Backend for Relay {
 		let task = tokio::spawn(async move {
 			let server = moq_net::Server::new()
 				.with_versions(version.into())
-				.with_extensions(extensions);
+				.with_solicit(extensions.solicit)
+				.with_ietf(extensions.ietf);
 			let handshake = server
-				.accept_request(moq_net::time::Instant::now(), server_link)
+				.handshake(moq_net::time::Instant::now(), server_link)
 				.await
 				.unwrap();
 			Connection::new(Accepted::new(handshake, moq_auth::Transport::Quic), cluster, auth)
@@ -140,7 +141,8 @@ impl Backend for Relay {
 			.map(|origin| origin.consume().routes());
 		let mut client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_extensions(options.client_extensions);
+			.with_solicit(options.client_extensions.solicit)
+			.with_ietf(options.client_extensions.ietf);
 		// Older protocols need the peer exemption to discover dot paths.
 		if peer || hidden {
 			client = client.with_url("moql://localhost/peer".parse().unwrap());

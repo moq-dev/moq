@@ -146,7 +146,9 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 		for n in 0..4u64 {
 			let start = n * 20_000;
 			// Appending declares every start since the previous group skipped, before the packet.
-			let mut group = track.append_group(start).unwrap();
+			let mut group = track
+				.append_group(moq_net::Timestamp::from_micros(start).unwrap())
+				.unwrap();
 			let early = kio::clock::timeout(Duration::from_millis(50), reader.read()).await;
 			assert!(early.is_err(), "{version}: read {early:?} before packet {n} landed");
 			let packet = Frame {
@@ -156,7 +158,7 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 				duration: None,
 			};
 			container.write(&mut group, &[packet]).unwrap();
-			group.finish(start + 20_000).unwrap();
+			group.finish_at(start + 20_000).unwrap();
 			let read = kio::clock::timeout(TIMEOUT, reader.read())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: packet {n} never read"))

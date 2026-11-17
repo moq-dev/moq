@@ -389,9 +389,7 @@ fn decode_dead(r: &mut Decoder<'_>) -> Result<Dead, DecodeError> {
 fn decode_path(r: &mut Decoder<'_>) -> Content<Path> {
 	let bytes = r.bytes()?;
 	let path = std::str::from_utf8(bytes).ok().and_then(|path| Path::new(path).ok());
-	Ok(path
-		.filter(|path| path.parts().count() <= Path::MAX_PARTS)
-		.ok_or(Refusal::Path))
+	Ok(path.filter(|path| path.depth() <= Path::MAX_PARTS).ok_or(Refusal::Path))
 }
 
 /// Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded.

@@ -101,7 +101,7 @@ impl<R: Incoming> Connection<R> {
 		// Only this relay's origin holds its identity, so a session declaring it is this
 		// relay dialing itself under a spelling its self filter missed. Every route
 		// from it would be dropped as reflected, so refuse it rather than serve it.
-		if let Some(id) = request.peer_hop().filter(|id| lifecycle.cluster.origin.is_own(*id)) {
+		if let Some(id) = request.peer_node().filter(|id| lifecycle.cluster.origin.is_own(*id)) {
 			request.reject(moq_net::SessionError::Internal).await;
 			anyhow::bail!(
 				"refused a session declaring this relay's own identity {id}: a cluster peer URL reaches this relay itself"

@@ -4054,7 +4054,7 @@ test("a superseded stale run is unknown again, and its group is handed out", () 
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Duration.millis(500) }, ranges: [{ start: { absolute: 0n } }] });
 	hooks.dropTrackGroups(producer, 1n, 2n, staleHole(500));
-	hooks.supersedeStale(producer, undefined);
+	hooks.supersedeStale(producer);
 	expect(hooks.tryDrop(reader)).toBeUndefined();
 	producer.createGroup(1n).finish();
 	const recv = hooks.tryRecvGroup(reader, true);
@@ -4072,84 +4072,10 @@ test("superseding withdraws a partly reported stale run", () => {
 	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 5n });
 	hooks.dropTrackGroups(producer, 3n, 7n, staleHole(500));
 	expect(hooks.tryDrop(reader)).toMatchObject({ start: 3n, end: 4n, stale: 500 });
-	hooks.supersedeStale(producer, undefined);
+	hooks.supersedeStale(producer);
 	// 5 and 6 are unknown again.
 	expect(hooks.tryDrop(reader)).toBeUndefined();
 	reader.close();
-	producer.finish();
-	producer.close();
-});
-
-// A received stale run a reader reported and the relay's own update then superseded is unknown
-// again: the reader's update owes it until the upstream serves or drops it again, rather than
-// dropping it again as if the reader had judged it stale itself. Mirrors Rust.
-test("a superseded received stale report stays owed after an update", () => {
-	const producer = new TrackProducer("video").accept({});
-	const reader = producer.subscribe({ delay: { max: Duration.millis(500) }, ranges: [{ start: { absolute: 0n } }] });
-	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
-	expect(hooks.tryDrop(reader)).toMatchObject({ start: 1n, end: 3n, stale: 500 });
-	hooks.supersedeStale(producer, undefined);
-	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
-	expect(hooks.tryDrop(reader)).toBeUndefined();
-	// The upstream drops it again under the new terms: reported again.
-	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
-	expect(hooks.tryDrop(reader)).toMatchObject({ start: 1n, end: 3n, stale: 500 });
-	reader.close();
-	producer.finish();
-	producer.close();
-});
-
-test("a received stale run settles a bounded reader only through the judged ranges", () => {
-	const producer = new TrackProducer("video").accept({ maxAge: null });
-	hooks.receiveTrack(producer);
-	const bounded = (max: number) =>
-		producer.subscribe({
-			delay: { max: Duration.millis(max) },
-			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
-		});
-	const wider = bounded(5000);
-	const matching = bounded(500);
-	// The upstream judged its own range of 0..2 under 500ms.
-	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
-	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
-	// A wider budget still wants the groups, however the feed accounted for them.
-	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
-	expect(hooks.tryDrop(matching)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
-	expect(hooks.tryRecvGroup(matching, false)).toEqual({ kind: "done" });
-	// Judged against an open range, a capped reader may see an older edge.
-	hooks.supersedeStale(producer, undefined);
-	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
-	const capped = bounded(500);
-	expect(hooks.tryDrop(capped)).toBeUndefined();
-	producer.createGroup(0n).finish();
-	const recv = hooks.tryRecvGroup(wider, false);
-	expect(recv.kind === "group" ? recv.group.sequence : recv).toBe(0n);
-	if (recv.kind === "group") recv.group.close();
-	for (const reader of [wider, matching, capped]) reader.close();
-	producer.finish();
-	producer.close();
-});
-
-test("a superseded stale run leaves a bounded reader waiting, and a later reader judges it too", () => {
-	const producer = new TrackProducer("video").accept({ maxAge: null });
-	hooks.receiveTrack(producer);
-	const bounded = (max: number) =>
-		producer.subscribe({
-			delay: { max: Duration.millis(max) },
-			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
-		});
-	const wider = bounded(5000);
-	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
-	producer.createGroup(2n).finish();
-	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
-	// A reader added after the verdict judges it against the same judged ranges.
-	const later = bounded(500);
-	expect(hooks.tryDrop(later)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
-	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
-	// New terms make the groups unknown again: still wanted, never proven delivered.
-	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
-	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
-	for (const reader of [wider, later]) reader.close();
 	producer.finish();
 	producer.close();
 });
@@ -4981,10 +4907,9 @@ for (const reported of [false, true]) {
 	});
 }
 
-// The lite publisher unreports a stale skip below an idle SUBSCRIBE_START, which never went out.
-// An update between that START and the first group then neither reopens nor drops it again,
-// while a widening still re-offers its cached group.
-test("an update after an idle start leaves an unreported stale skip to a widening", () => {
+// The lite publisher unreports a stale skip below an idle SUBSCRIBE_START, which never went out, so a
+// widening still offers its cached group.
+test("an unreported stale skip below an idle start is left to a widening", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	const subscriber = producer.subscribe({ delay: { max: Duration.millis(1500) } });
 	expect(hooks.tryDrop(subscriber)).toBeUndefined();
@@ -4997,8 +4922,6 @@ test("an update after an idle start leaves an unreported stale skip to a widenin
 
 	// SUBSCRIBE_START resolved at group 1 with the skip still held for it.
 	hooks.wire(subscriber).untell(0n, 1n);
-	// An update under the same budget reopens nothing below the start.
-	expect(hooks.reofferStale(subscriber)).toEqual([]);
 	expect(hooks.tryDrop(subscriber)).toBeUndefined();
 
 	subscriber.update({ delay: { max: Duration.millis(10_000) } });
@@ -5080,9 +5003,9 @@ test("reading a shed frame head requests refresh", async () => {
 	producer.close();
 });
 
-// An end declared with an error keeps the history below it: a reader gets every group, then the
+// A track ended by `fail` keeps the history below its end: a reader gets every group, then the
 // error, even one arriving after the producer closed.
-test("an errored end keeps its history", async () => {
+test("a failed track keeps its history", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 1n]) {
 		const group = producer.createGroup(sequence);
@@ -5091,7 +5014,7 @@ test("an errored end keeps its history", async () => {
 		group.finish();
 	}
 	const failed = new StreamError(StreamCode(71));
-	producer.finishAt({ group: 2n, frame: 0 }, failed);
+	producer.fail(failed);
 	producer.close();
 	expect(producer.closed.peek()).toBe(failed);
 
@@ -5115,6 +5038,40 @@ test("an errored end keeps its history", async () => {
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0n);
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1n);
 	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+});
+
+// `fail` ends where `finish` would, after the highest group written, so a late group below it is
+// still taken. Like `finish`, it leaves whatever outcome was already given.
+test("fail ends at the live edge and leaves an end already given", async () => {
+	const failed = new StreamError(StreamCode(71));
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const latest = producer.createGroup(2n);
+	latest.writeFrame(textFrame("c", Timestamp.fromMillis(2)));
+	latest.finish();
+	producer.fail(failed);
+	expect(() => producer.createGroup(3n)).toThrow();
+	const late = producer.createGroup(1n);
+	late.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
+	late.finish();
+	const sub = producer.subscribe({ ranges: [{ start: { absolute: 1n } }], delay: { max: Duration.millis(30_000) } });
+	expect((await sub.recvGroup())?.sequence).toBe(1n);
+	expect((await sub.recvGroup())?.sequence).toBe(2n);
+	await expect(sub.recvGroup()).rejects.toBe(failed);
+	producer.close();
+
+	// An end already declared stands: the track still finishes cleanly.
+	const finished = new TrackProducer("finished").accept({ timescale: Timescale.MILLI, maxAge: null });
+	finished.finish();
+	finished.fail(failed);
+	finished.close();
+	expect(finished.closed.peek()).toBeNull();
+
+	// So does an abort.
+	const aborted = new TrackProducer("aborted").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const cause = new StreamError(StreamCode(70));
+	aborted.abort(cause);
+	aborted.fail(failed);
+	expect(aborted.closed.peek()).toBe(cause);
 });
 
 // Creating a group says nothing about the gap it leaves: groups may be created out of order. An
@@ -5226,7 +5183,7 @@ test("creating a skipped sequence throws Skipped", () => {
 	hooks.dropTrackGroups(other, 3n, 4n, { error: DROPPED });
 	hooks.dropTrackGroups(other, 4n, 5n, staleHole(1000));
 	other.skipGroups(0n, 5n);
-	hooks.supersedeStale(other, undefined);
+	hooks.supersedeStale(other);
 	const drops: unknown[] = [];
 	for (let next = hooks.tryRecvGroup(reader, true); next.kind !== "idle"; next = hooks.tryRecvGroup(reader, true)) {
 		if (next.kind === "drop") drops.push([next.start, next.end, next.skip === true]);
@@ -5274,23 +5231,6 @@ test("a skip is reported over a reported drop", () => {
 	producer.close();
 });
 
-// A received stale run is judged from where it meets the reader's span, as Rust clips it: a reader
-// asking only its suffix, through every group the upstream's range named, is settled by that suffix.
-test("a received stale run settles the suffix a narrower range asks for", () => {
-	const producer = new TrackProducer("video").accept({});
-	hooks.receiveTrack(producer);
-	hooks.supersedeStale(producer, [{ start: 0n, end: 10n }]);
-	const reader = producer.subscribe({
-		delay: { max: Duration.millis(500) },
-		ranges: [{ start: { absolute: 5n }, end: { absolute: 10n } }],
-	});
-	hooks.dropTrackGroups(producer, 0n, 10n, staleHole(500));
-	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 5n, end: 10n, stale: 500 });
-	expect(hooks.tryDrop(reader)).toBeUndefined();
-	reader.close();
-	producer.close();
-});
-
 // Skips are kept and reported as runs: a huge skipGroups or append gap costs one run and one
 // report, whatever its length. Mirrors Rust.
 test("a huge skip costs one run", () => {
@@ -5320,38 +5260,6 @@ test("a huge skip costs one run", () => {
 		expect(got.filter((entry) => typeof entry === "bigint")).toEqual(groups);
 		expect(got.filter((entry) => typeof entry !== "bigint")).toEqual([[1n, FAR, true]]);
 	}
-});
-
-// A group stale at the track's max age bound is final under any budget, yet an update that reopens
-// its stale drop must report it again rather than leave it owed: no skip offers it again. Mirrors
-// Rust.
-test("reopening stale drops reports again what is stale at the max age bound", () => {
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(1500) });
-	const reader = producer.subscribe({ delay: { max: Duration.millis(1500) } });
-	const drain = () => {
-		const got: unknown[] = [];
-		for (
-			let next = hooks.tryRecvGroup(reader, true);
-			next.kind !== "idle";
-			next = hooks.tryRecvGroup(reader, true)
-		) {
-			if (next.kind === "group") got.push(next.group.sequence);
-			else if (next.kind === "drop") got.push([next.start, next.end, next.stale]);
-		}
-		return got;
-	};
-	putGroup(producer, 0n, 0);
-	expect(drain()).toEqual([0n]);
-	for (const [sequence, millis] of [
-		[1n, 1000],
-		[2n, 2000],
-		[3n, 3000],
-		[4n, 6000],
-	] as const)
-		putGroup(producer, sequence, millis);
-	expect(drain()).toEqual([[1n, 2n, 1500], [2n, 3n, 1500], 3n, 4n]);
-	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
-	expect(drain()).toEqual([[1n, 3n, 1500]]);
 });
 
 // Mirrors moq-net's `the_reserved_sequence_is_refused` and `a_group_at_the_reserved_sequence_is_refused`.

@@ -776,6 +776,35 @@ fn a_closed_session_takes_its_mounts() {
 	assert_eq!(relay.lock().router.neighbors(), 0);
 }
 
+/// A scoped session's close doubts no node, since a scoped peer names itself as it likes,
+/// and an unscoped one doubts the Node ID it declared, whether or not a mount of it is
+/// open. A mount closes under the scope its session holds then, here one set after the
+/// mount opened.
+#[test]
+fn a_session_closing_with_its_mounts_doubts_only_if_unscoped() {
+	for scoped in [false, true] {
+		for mounted in [false, true] {
+			let relay = Node::new(2, 2, clock());
+			let session = relay.answer(peer(1, 10), Link::default(), p("other")).unwrap();
+			let mount = mounted.then(|| session.mount(p("live")).unwrap());
+			let scope = scoped.then(|| crate::route::Scope {
+				regions: vec![p("live")],
+				qualify: crate::route::qualifier([7; 32]),
+			});
+			let link = Link {
+				scope,
+				interest: Default::default(),
+				..Default::default()
+			};
+			session.relink(link, false).unwrap();
+			drop(session);
+			drop(mount);
+			let doubt = relay.lock().router.retained().doubt;
+			assert_eq!(doubt, usize::from(!scoped), "scoped {scoped}, mounted {mounted}");
+		}
+	}
+}
+
 /// The origin declares its hop id, without the qualified marker, or a random
 /// identity when nothing is left of it.
 #[test]

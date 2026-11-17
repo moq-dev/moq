@@ -87,3 +87,4 @@ loses `ConsumerProps.wait`. Wire: none.
 ## Related
 
 - [Native audio playout is a library](/quest/m3/audio-playout-library.md) - moves the placement this wait feeds into moq-audio
+- [Browser audio takes its holes from the ordered reader](/quest/m2/audio-playout/browser-audio-hole-skip.md) - moves the browser audio hole rule this settles into `@moq/net`'s ordered reader

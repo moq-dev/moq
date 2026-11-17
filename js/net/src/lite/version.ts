@@ -84,9 +84,19 @@ export function hasDatagrams(version: Version): boolean {
 	}
 }
 
-/** Whether datagram tracks have their own request and sequence space. */
+/** Whether datagram tracks have their own request and sequence space, and datagrams a leading type. */
 export function hasDatagramTracks(version: Version): boolean {
-	return hasPadding(version);
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
 }
 
 /** Whether the session supports the GOAWAY control stream (0x5) for graceful shutdown and migration. Added in lite-04. */
@@ -127,21 +137,6 @@ export function hasAuth(version: Version): boolean {
  */
 export function hasTracks(version: Version): boolean {
 	// Explicitly list older versions so future versions default to having the stream.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/** Whether datagrams have a type and either endpoint may send padding streams or datagrams. */
-export function hasPadding(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
@@ -239,7 +234,7 @@ export function hasRouteCost(version: Version): boolean {
 	}
 }
 
-/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
+/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and FETCH carry frame indices alongside
  * their group sequences, so a subscription or fetch can start and end partway through a
  * group. Added in lite-06. Older versions only address whole groups, so a route change
  * has to wait for the next group before it can resume.
@@ -260,9 +255,32 @@ export function hasFrameBounds(version: Version): boolean {
 	}
 }
 
+/** Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
+ * earlier versions have no frame bounds, and a lite-07 subscription reads whole groups. */
+export function hasGroupFrameStart(version: Version): boolean {
+	return version === Version.DRAFT_06;
+}
+
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`. Added in
  * lite-07; an earlier subscription is served newest first. */
 export function hasOrder(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one, so 0
+ * says no limit. Added in lite-07; earlier wires carry bare milliseconds. */
+export function hasUnlimitedMaxDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -598,10 +616,10 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count`. Added in lite-07;
- * earlier versions carry an inclusive `Group Start` and `Group End`.
+ * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry a non-empty `[Group Start, Group End)` with an
+ * exclusive end. Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
  */
-export function hasGroupCount(version: Version): boolean {
+export function hasGroupSpan(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -743,8 +761,8 @@ export function hasImplementation(version: Version): boolean {
 }
 
 /**
- * Whether FRAME leads with its `Payload Length`, the payload size plus one, leaving 0 for a
- * future GROUP_END. Added in lite-07; an earlier FRAME ends its header with the payload size.
+ * Whether FRAME leads with its `Payload Length`, the payload size plus one, leaving 0 for
+ * GROUP_END. Added in lite-07; an earlier FRAME ends its header with the payload size.
  */
 export function hasLengthFirst(version: Version): boolean {
 	switch (version) {
@@ -761,10 +779,12 @@ export function hasLengthFirst(version: Version): boolean {
 }
 
 /**
- * Whether a Group Stream reset with YIELDED pauses its group, which a later stream continues.
- * Added in lite-07; an earlier publisher out of stream credit gives the reset group up.
+ * Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream ends a
+ * finished group with GROUP_END and a closed one with a bare FIN. A publisher then closes an
+ * expired group's stream rather than resetting it. Added in lite-07; earlier versions end every
+ * group with a bare FIN.
  */
-export function hasYield(version: Version): boolean {
+export function hasGroupEnd(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

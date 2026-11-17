@@ -263,12 +263,12 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 
 	/// Convenience function to return a VASurfaceID vector. Useful to interface with the C API
 	/// where a surface array might be needed.
-	pub fn as_id_vec(surfaces: &[Self]) -> Vec<bindings::VASurfaceID> {
+	pub(crate) fn as_id_vec(surfaces: &[Self]) -> Vec<bindings::VASurfaceID> {
 		surfaces.iter().map(|surface| surface.id).collect()
 	}
 
 	/// Wrapper over `vaQuerySurfaceStatus` to find out any pending ops on the render target.
-	pub fn query_status(&self) -> Result<bindings::VASurfaceStatus::Type, VaError> {
+	pub(crate) fn query_status(&self) -> Result<bindings::VASurfaceStatus::Type, VaError> {
 		let mut status: bindings::VASurfaceStatus::Type = 0;
 		// Safe because `self` represents a valid VASurface.
 		va_check(unsafe { bindings::va().vaQuerySurfaceStatus(self.display.handle(), self.id, &mut status) })?;
@@ -276,7 +276,7 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 		Ok(status)
 	}
 
-	pub fn query_error(&self) -> Result<Vec<SurfaceDecodeMBError>, VaError> {
+	pub(crate) fn query_error(&self) -> Result<Vec<SurfaceDecodeMBError>, VaError> {
 		let mut raw: *const bindings::VASurfaceDecodeMBErrors = std::ptr::null();
 
 		// Safe because `self` represents a valid VASurface.
@@ -326,7 +326,7 @@ impl<D: SurfaceMemoryDescriptor> Surface<D> {
 	}
 
 	/// Returns the ID of this surface.
-	pub fn id(&self) -> bindings::VASurfaceID {
+	pub(crate) fn id(&self) -> bindings::VASurfaceID {
 		self.id
 	}
 

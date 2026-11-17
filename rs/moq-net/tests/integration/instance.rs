@@ -145,7 +145,7 @@ async fn next_hop_lost(version: &str) {
 	let _second_hop = link(
 		version,
 		&standby,
-		&relay.clone().with_preference(origin::Preference::new(-1)),
+		&relay.clone().with_priority(origin::Priority::new(-1)),
 	)
 	.await;
 	if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {

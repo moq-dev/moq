@@ -247,10 +247,7 @@ export interface OpenStream {
 	 * transport cannot tell.
 	 */
 	acknowledged(): Promise<boolean | undefined>;
-	/**
-	 * Reset the stream to make room for a higher one, failing its writer as too far behind, or on
-	 * lite-07 as yielded, pausing its group for a later stream to continue.
-	 */
+	/** Reset the stream to make room for a higher one, failing its writer as too far behind. */
 	preempt(): void;
 }
 

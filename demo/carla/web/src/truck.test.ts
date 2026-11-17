@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { applyKeys, REST } from "./input.ts";
-import { handle, SOCKET } from "./paths.ts";
+import { driverPath } from "./paths.ts";
 import type { TruckStatus } from "./schemas.ts";
 import { shiftGear, Truck } from "./truck.ts";
 
@@ -14,7 +15,6 @@ const key = () => Moq.Time.Timestamp.unscaled(keys++);
 describe("Truck video demand", () => {
 	test("only hovered or focused cameras subscribe, and focus suppresses other previews", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const hovered = new Moq.Signals.Signal<string | undefined>(undefined);
@@ -23,7 +23,6 @@ describe("Truck video demand", () => {
 				new Truck({
 					broadcastId: Moq.Path.from(id),
 					connection,
-					origin,
 					driving,
 					focused,
 					hovered,
@@ -53,7 +52,6 @@ describe("Truck video demand", () => {
 		} finally {
 			for (const truck of trucks) truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 });
@@ -64,6 +62,7 @@ describe("Truck status", () => {
 			accepted: { steering: 0.25, throttle, brake: 0, gear: "forward" },
 			autonomy: "manual",
 			estopped: false,
+			media_pipeline: {},
 		};
 	}
 
@@ -76,13 +75,11 @@ describe("Truck status", () => {
 
 	test("clears valid telemetry when the status track ends", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -93,7 +90,7 @@ describe("Truck status", () => {
 			(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
 				broadcast.consume(),
 			);
-			producer.update({ value: status(0.5), at: key() });
+			producer.update(status(0.5), key());
 			expect(await available).toBe("available");
 			expect(truck.status.peek()?.accepted.throttle).toBe(0.5);
 
@@ -106,26 +103,23 @@ describe("Truck status", () => {
 			broadcast.close();
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("a status from before the truck saw an e-stop does not unlatch it", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
 		const { broadcast, producer } = statusBroadcast();
 		const next = async (update: TruckStatus) => {
 			const changed = truck.status.changed();
-			producer.update({ value: update, at: key() });
+			producer.update(update, key());
 			await changed;
 		};
 
@@ -147,19 +141,16 @@ describe("Truck status", () => {
 			broadcast.close();
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("marks status unavailable when an active broadcast disappears", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -168,7 +159,7 @@ describe("Truck status", () => {
 
 		try {
 			active.set(broadcast.consume());
-			producer.update({ value: status(0.5), at: key() });
+			producer.update(status(0.5), key());
 			while (truck.statusState.peek() !== "available") await truck.statusState.changed();
 
 			const unavailable = truck.statusState.changed();
@@ -180,19 +171,16 @@ describe("Truck status", () => {
 			broadcast.close();
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("a canceled status consumer cannot overwrite its replacement", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -202,14 +190,14 @@ describe("Truck status", () => {
 
 		try {
 			active.set(first.broadcast.consume());
-			first.producer.update({ value: status(0.25), at: key() });
+			first.producer.update(status(0.25), key());
 			while (truck.statusState.peek() !== "available") await truck.statusState.changed();
 
 			const transitions: string[] = [];
 			const unsubscribe = truck.statusState.subscribe((state) => transitions.push(state));
 			try {
 				active.set(second.broadcast.consume());
-				second.producer.update({ value: status(0.75), at: key() });
+				second.producer.update(status(0.75), key());
 				while (truck.status.peek()?.accepted.throttle !== 0.75) await truck.status.changed();
 				await Promise.resolve();
 				await Promise.resolve();
@@ -226,7 +214,6 @@ describe("Truck status", () => {
 			second.broadcast.close();
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 });
@@ -234,17 +221,15 @@ describe("Truck status", () => {
 describe("Truck.setDrive", () => {
 	function truck() {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const t = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
-		return { t, connection, origin };
+		return { t, connection };
 	}
 
 	// Guards setDrive's contract: local state advances however small the step,
@@ -252,7 +237,7 @@ describe("Truck.setDrive", () => {
 	// in input.test.ts's stepDrive suite; this one calls setDrive directly and so
 	// cannot catch a gate added at the call site.
 	test("accumulates sub-epsilon frames instead of discarding them", () => {
-		const { t, connection, origin } = truck();
+		const { t, connection } = truck();
 		try {
 			const dt = 1 / 120;
 			for (let i = 0; i < 120; i++) {
@@ -264,31 +249,27 @@ describe("Truck.setDrive", () => {
 		} finally {
 			t.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("a single sub-epsilon frame still moves the local state", () => {
-		const { t, connection, origin } = truck();
+		const { t, connection } = truck();
 		try {
 			t.setDrive(applyKeys(t.drive.peek(), new Set(["d"]), 1 / 60));
 			expect(t.drive.peek().steering).toBeGreaterThan(0);
 		} finally {
 			t.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("claims with measured steering and gear but zero throttle and full brake", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>("truck1/front");
 		const t = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -298,6 +279,7 @@ describe("Truck.setDrive", () => {
 				accepted: { ...REST },
 				autonomy: "autonomous",
 				estopped: false,
+				media_pipeline: {},
 				measured,
 			});
 			expect(t.beginTakeover()).toBe(true);
@@ -308,19 +290,17 @@ describe("Truck.setDrive", () => {
 		} finally {
 			t.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("refuses a takeover before the truck reports status", () => {
-		const { t, connection, origin } = truck();
+		const { t, connection } = truck();
 		try {
 			expect(t.beginTakeover()).toBe(false);
 			expect(t.drive.peek()).toEqual(REST);
 		} finally {
 			t.close();
 			connection.close();
-			origin.close();
 		}
 	});
 });
@@ -328,13 +308,11 @@ describe("Truck.setDrive", () => {
 describe("Truck safety controls", () => {
 	test("a viewer e-stop does not claim the driving session", () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -347,19 +325,16 @@ describe("Truck safety controls", () => {
 		} finally {
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("a focused viewer resets only after the truck confirms the latch", () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -373,6 +348,7 @@ describe("Truck safety controls", () => {
 				accepted: { ...REST },
 				autonomy: "unknown",
 				estopped: true,
+				media_pipeline: {},
 				estop_by: "bystander",
 			});
 			truck.resetEstop();
@@ -381,19 +357,16 @@ describe("Truck safety controls", () => {
 		} finally {
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 
 	test("the tile safety action exits a confirmed e-stop without claiming control", () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -405,6 +378,7 @@ describe("Truck safety controls", () => {
 				accepted: { ...REST },
 				autonomy: "manual",
 				estopped: true,
+				media_pipeline: {},
 			});
 
 			truck.toggleEmergencyStop();
@@ -414,182 +388,184 @@ describe("Truck safety controls", () => {
 		} finally {
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 });
 
-describe("Truck sessions", () => {
+describe("Truck control", () => {
 	const decoder = new TextDecoder();
-	const encoder = new TextEncoder();
+	const HEARTBEAT = Duration.millis(250);
 
-	/** A truck whose socket endpoint accepts on the same origin as the player. */
+	/** A truck on a connection lending `origin`, where the test plays the simulator and the clock. */
 	function setup() {
-		const connection = new Moq.Connection({ enabled: false });
+		const clock = new Manual();
+		const installed = clock.install();
 		const origin = new Moq.Origin.Producer();
+		// The truck reads only the origin, which a real connection lends while it has a relay.
+		const connection = {
+			origin: new Moq.Signals.Signal<Moq.Origin.Table | undefined>(origin),
+		} as unknown as Moq.Connection;
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
+		const camera = origin.route(Moq.Path.from("carla/truck1/front.hang"));
+		const producer = new Json.Snapshot.Producer<TruckStatus>({
+			track: camera.broadcast.createTrack("status", { compression: "deflate" }),
+		});
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
-		const endpoint = new Moq.Socket.Endpoint(origin, SOCKET, "truck1");
+
+		/** Publish a status, and wait until the truck has read it. */
+		const echo = async (value: Partial<TruckStatus>) => {
+			const status: TruckStatus = {
+				accepted: { ...REST },
+				autonomy: "manual",
+				estopped: false,
+				media_pipeline: {},
+				...value,
+			};
+			producer.update(status, key());
+			while (!Bun.deepEquals(truck.status.peek(), status)) await truck.status.changed();
+		};
 		const close = () => {
 			truck.close();
-			endpoint.close();
-			connection.close();
+			producer.finish();
+			camera.close();
 			origin.close();
+			installed.close();
 		};
-		return { truck, driving, endpoint, close };
+		return { truck, driving, origin, clock, echo, close };
 	}
 
-	async function read(stream: Moq.Socket.TrackStream, reader = stream.consumer.ordered()) {
-		const frame = await reader.readFrame();
-		return frame && JSON.parse(decoder.decode(frame.payload));
+	/** Read the `control` track at `path` oldest first, a heartbeat late like the truck. */
+	async function control(origin: Moq.Origin.Producer, path: Moq.Path.Valid) {
+		const request = origin.request(path);
+		let broadcast = request.active.peek();
+		while (!broadcast) broadcast = await request.active.changed();
+		const track = broadcast.track("control");
+		const reader = track.subscribe({ order: "ascending", delay: { max: HEARTBEAT } }).ordered();
+		const read = async () => {
+			const frame = await reader.readFrame();
+			return frame && JSON.parse(decoder.decode(frame.payload));
+		};
+		return { request, track, read };
 	}
 
-	test("a driver's commands and the truck's acknowledgements travel on its own session", async () => {
-		const { truck, driving, endpoint, close } = setup();
+	/** Wait for the driver id the truck publishes its lease under. */
+	async function drive(truck: Truck, driving: Moq.Signals.Signal<string | undefined>) {
+		driving.set(truck.id);
+		let id = truck.driverId.peek();
+		while (!id) id = await truck.driverId.changed();
+		return id;
+	}
+
+	test("a driver publishes each command as a group of its own, which the status acknowledges", async () => {
+		const { truck, driving, origin, echo, close } = setup();
 		try {
-			const incoming = endpoint.acceptTrack();
-			driving.set(truck.id);
-			const dial = await incoming;
-			expect(dial.peer).toMatch(/^driver-[0-9a-f]{32}$/);
-			const stream = await dial.accept();
-			// Status names the lease by the session, never by the endpoint id.
-			while (truck.handle.peek() === undefined) await truck.handle.changed();
-			expect(truck.handle.peek()).toBe(await handle(stream.session));
+			const id = await drive(truck, driving);
+			const { track, read } = await control(origin, driverPath("truck1", id));
+			// A superseded command stays fresh for the truck's delay budget.
+			expect((await track.info()).maxAge?.asMillis()).toBe(250);
 
 			// Taking control heartbeats at once, so the truck hears the claim.
-			const command = await read(stream);
+			const command = await read();
 			expect(command.type).toBe("drive");
 
 			const measured = truck.roundTripMs.changed();
-			const pipeline = [{ label: "received→decoded", ms: 4 }];
-			const reply = { sequence: command.sequence, media_pipeline: pipeline };
-			const group = stream.producer.appendGroup();
-			group.writeFrame({
-				payload: encoder.encode(JSON.stringify(reply)),
-				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
-			});
-			group.finish();
+			await echo({ driver: id, sequence: command.sequence });
 			expect(await measured).toBeGreaterThanOrEqual(0);
-			expect(truck.pipeline.peek()).toEqual(pipeline);
 		} finally {
 			close();
 		}
 	});
 
-	test("the truck ending the session ends the lease", async () => {
-		const { truck, driving, endpoint, close } = setup();
+	test("a reset right before a drive reaches a heartbeat-late reader whole", async () => {
+		const { truck, driving, origin, echo, close } = setup();
 		try {
-			const incoming = endpoint.acceptTrack();
-			driving.set(truck.id);
-			const stream = await (await incoming).accept();
-			await read(stream);
+			const id = await drive(truck, driving);
+			const { read } = await control(origin, driverPath("truck1", id));
+			expect((await read()).type).toBe("drive");
+			await echo({ driver: id, estopped: true });
 
+			// The clock is still, so no heartbeat lands between the two.
+			truck.resetEstop();
+			truck.setDrive({ throttle: 0.5 });
+			expect((await read()).type).toBe("reset_estop");
+			expect((await read()).type).toBe("drive");
+		} finally {
+			close();
+		}
+	});
+
+	test("a claim the status has not confirmed yet is kept", async () => {
+		const { truck, driving, echo, close } = setup();
+		try {
+			await drive(truck, driving);
+			await echo({ driver: "someone-else" });
+			await echo({});
+			expect(driving.peek()).toBe(truck.id);
+		} finally {
+			close();
+		}
+	});
+
+	test("the truck no longer naming its driver ends the lease and its broadcast", async () => {
+		const { truck, driving, origin, echo, close } = setup();
+		try {
+			const id = await drive(truck, driving);
+			const { request } = await control(origin, driverPath("truck1", id));
+			await echo({ driver: id });
+
+			// A stuck truck's respawn or the watchdog let go of it.
 			const released = driving.changed();
-			stream.producer.finish();
+			await echo({});
 			expect(await released).toBeUndefined();
-			// The lease's endpoint goes with it.
-			while (truck.handle.peek() !== undefined) await truck.handle.changed();
+			while (truck.driverId.peek() !== undefined) await truck.driverId.changed();
+			// The request settles once nothing serves the path any more.
+			await request.closed;
 		} finally {
 			close();
 		}
 	});
 
-	test("releasing control ends the session cleanly", async () => {
-		const { truck, driving, endpoint, close } = setup();
+	test("a bystander's e-stop publishes a broadcast of its own until the status echoes it", async () => {
+		const { truck, driving, origin, echo, close } = setup();
+		const announced = origin.announced(Moq.Path.Pattern.parse("viewer/carla/truck1/*"));
 		try {
-			const incoming = endpoint.acceptTrack();
-			driving.set(truck.id);
-			const stream = await (await incoming).accept();
-			const reader = stream.consumer.ordered();
-			await read(stream, reader);
-
-			driving.set(undefined);
-			// Anything the heartbeat sent first, then the clean end.
-			while ((await read(stream, reader)) !== undefined);
-		} finally {
-			close();
-		}
-	});
-
-	test("a bystander's e-stop dials a session of its own without taking the lease", async () => {
-		const { truck, driving, endpoint, close } = setup();
-		try {
-			const incoming = endpoint.acceptTrack();
 			truck.emergencyStop();
-			const dial = await incoming;
-			expect(dial.peer).toMatch(/^driver-/);
-			const stream = await dial.accept();
-			const reader = stream.consumer.ordered();
-			expect((await read(stream, reader)).type).toBe("estop");
+			const entry = await announced.next();
+			if (!entry) throw new Error("no safety broadcast");
+			expect(entry.prefix).toMatch(/^viewer\/carla\/truck1\/safety-[0-9a-f]{12}$/);
+			const { request, read } = await control(origin, entry.prefix);
+			expect((await read()).type).toBe("estop");
 			expect(driving.peek()).toBeUndefined();
-			expect(truck.handle.peek()).toBeUndefined();
+			expect(truck.driverId.peek()).toBeUndefined();
 
-			// The truck's status echoing the latch is what lets the session go.
-			const broadcast = new Moq.Broadcast.Producer();
-			const producer = new Json.Snapshot.Producer<TruckStatus>({
-				track: broadcast.createTrack("status", { compression: "deflate" }),
-			});
-			try {
-				(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
-					broadcast.consume(),
-				);
-				producer.update({
-					value: {
-						accepted: { ...REST },
-						autonomy: "manual",
-						estopped: true,
-						estop_by: await handle(dial.session),
-					},
-					at: key(),
-				});
-				expect(await read(stream, reader)).toBeUndefined();
-			} finally {
-				producer.finish();
-				broadcast.close();
-			}
+			// The truck's status echoing the latch is what lets the broadcast go.
+			await echo({ estopped: true, estop_by: entry.prefix.split("/").at(-1) });
+			// The request settles once nothing serves the path any more.
+			await request.closed;
+			expect(truck.estopped.peek()).toBe(true);
 		} finally {
+			announced.close();
 			close();
 		}
 	});
-});
 
-describe("Truck safety sessions", () => {
-	test("an e-stop whose session ends unconfirmed stops showing as latched", async () => {
-		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
-		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
-		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
-		const truck = new Truck({
-			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
-			connection,
-			origin,
-			driving,
-			focused,
-		});
-		const endpoint = new Moq.Socket.Endpoint(origin, SOCKET, "truck1");
+	test("an e-stop the status never echoes stops showing as latched", async () => {
+		const { truck, clock, close } = setup();
 		try {
-			const incoming = endpoint.acceptTrack();
 			truck.emergencyStop();
 			expect(truck.estopped.peek()).toBe(true);
-			const stream = await (await incoming).accept();
-			await stream.consumer.ordered().readFrame();
-
-			// The truck goes away before its status ever echoed the latch.
-			const cleared = truck.estopped.changed();
-			stream.producer.finish();
-			expect(await cleared).toBe(false);
+			await clock.advance(Duration.millis(1_999));
+			expect(truck.estopped.peek()).toBe(true);
+			await clock.advance(Duration.millis(1));
+			expect(truck.estopped.peek()).toBe(false);
 		} finally {
-			truck.close();
-			endpoint.close();
-			connection.close();
-			origin.close();
+			close();
 		}
 	});
 });
@@ -597,13 +573,11 @@ describe("Truck safety sessions", () => {
 describe("Truck respawn", () => {
 	test("requires the truck's current lease and clears old input", async () => {
 		const connection = new Moq.Connection({ enabled: false });
-		const origin = new Moq.Origin.Producer();
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
 		const focused = new Moq.Signals.Signal<string | undefined>("truck1/front");
 		const truck = new Truck({
 			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
 			connection,
-			origin,
 			driving,
 			focused,
 		});
@@ -613,11 +587,12 @@ describe("Truck respawn", () => {
 			driving.set(truck.id);
 			expect(await active).toBe(true);
 
-			truck.handle.set("mine");
+			truck.driverId.set("mine");
 			const status = {
 				accepted: { ...REST },
 				autonomy: "manual",
 				estopped: false,
+				media_pipeline: {},
 				driver: "someone-else",
 			} satisfies TruckStatus;
 			truck.status.set(status);
@@ -641,7 +616,6 @@ describe("Truck respawn", () => {
 		} finally {
 			truck.close();
 			connection.close();
-			origin.close();
 		}
 	});
 });

@@ -8,7 +8,7 @@
 //! the frame passing through the CPU.
 //!
 //! The format is named the DRM way, which is what every producer of a DMA-BUF
-//! speaks. [`va_fourcc`] maps it to the VA-API name, which differs for packed
+//! speaks. [`DmaBuf::fourcc`] maps it to the VA-API name, which differs for packed
 //! RGB (DRM names the channels in little-endian word order, VA-API in byte
 //! order) and for planar 4:2:0 (`YU12` against `I420`).
 
@@ -27,7 +27,7 @@ use crate::{
 ///
 /// These are the `DRM_FORMAT_*` values from `drm_fourcc.h`, which the VA-API
 /// headers do not carry.
-pub mod drm {
+pub(crate) mod drm {
 	const fn fourcc(code: &[u8; 4]) -> u32 {
 		u32::from_le_bytes(*code)
 	}
@@ -59,7 +59,7 @@ pub mod drm {
 /// Returns the `VA_FOURCC_*` naming the same layout as the DRM format `drm_format`.
 ///
 /// Returns `None` for a format this crate has no mapping for.
-pub fn va_fourcc(drm_format: u32) -> Option<u32> {
+pub(crate) fn va_fourcc(drm_format: u32) -> Option<u32> {
 	Some(match drm_format {
 		drm::NV12 => VA_FOURCC_NV12,
 		drm::P010 => VA_FOURCC_P010,
@@ -81,7 +81,7 @@ pub fn va_fourcc(drm_format: u32) -> Option<u32> {
 /// Returns `None` for a format this crate has no mapping for. Guessing the
 /// render-target format wrong makes `vaCreateSurfaces` fail with an error that
 /// names neither, so an unknown format is refused up front instead.
-pub fn rt_format(fourcc: u32) -> Option<u32> {
+pub(crate) fn rt_format(fourcc: u32) -> Option<u32> {
 	match fourcc {
 		VA_FOURCC_NV12 | VA_FOURCC_I420 | VA_FOURCC_YV12 => Some(VA_RT_FORMAT_YUV420),
 		VA_FOURCC_P010 => Some(VA_RT_FORMAT_YUV420_10),
@@ -115,7 +115,7 @@ pub struct Plane {
 /// safe.
 #[derive(Debug)]
 pub struct DmaBuf {
-	/// Pixel format, a `DRM_FORMAT_*` code; see [`drm`].
+	/// Pixel format, a `DRM_FORMAT_*` code from `drm_fourcc.h`.
 	pub drm_format: u32,
 	/// Format modifier describing the tiling of the object.
 	pub modifier: u64,

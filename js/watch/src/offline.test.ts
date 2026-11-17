@@ -26,7 +26,7 @@ test("a live broadcast reads connecting until connected and again once the conne
 		track: route.broadcast.createTrack(Catalog.TRACK),
 		deltas: false,
 	});
-	producer.update({ value: {}, at: key() });
+	producer.update({}, key());
 
 	const viewer = new Origin.Producer();
 	const source = new Broadcast({ origin: viewer, name, catalogFormat: "hang", enabled: true });

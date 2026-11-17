@@ -42,6 +42,34 @@ pub struct Reader<S: RecvStream, V> {
 /// enough that an ordinary burst is still one wake.
 const WAKE_BUDGET: usize = 64 * 1024;
 
+/// How a [`Reader`] read ended, told apart where the reader knows which it was, so a caller
+/// never has to match an [`Error`] to tell a cut stream from malformed bytes.
+pub(crate) enum Recv<T> {
+	/// The next message.
+	Message(T),
+	/// The stream finished cleanly between messages.
+	Ended,
+	/// The stream was reset, or finished inside a message: the reason it gave.
+	Reset(Error),
+	/// The bytes are not a valid message.
+	Malformed(DecodeError),
+}
+
+/// Why a read gave up, before a caller picks [`Recv`] or an [`Error`].
+enum Fault {
+	Reset(Error),
+	Malformed(DecodeError),
+}
+
+impl From<Fault> for Error {
+	fn from(fault: Fault) -> Self {
+		match fault {
+			Fault::Reset(err) => err,
+			Fault::Malformed(err) => err.into(),
+		}
+	}
+}
+
 /// A stream ingest may stop reading to pace a group's writer, which holds its receive
 /// credit meanwhile.
 pub(crate) trait Pause {
@@ -142,8 +170,21 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		waiter: &kio::Waiter,
 		consume: bool,
-		mut decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<(T, usize), Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_fault(waiter, consume, decode).map_err(Error::from)
+	}
+
+	/// [`Self::poll_with_sized`], keeping a reset apart from malformed bytes.
+	fn poll_fault<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		consume: bool,
+		mut decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<(T, usize), Fault>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -151,7 +192,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		loop {
 			let want = self.want.max(1);
 			let version = &self.version;
-			let mut lease = ready!(self.stream.poll_lease(waiter, want)).map_err(|err| version.transport_error(err))?;
+			let mut lease = ready!(self.stream.poll_lease(waiter, want))
+				.map_err(|err| Fault::Reset(version.transport_error(err)))?;
 
 			// Decode against the first chunk, or a copy of as much as the last attempt needed
 			// when that spans chunks. Only a message cut across chunks pays for the copy.
@@ -196,7 +238,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					// A short read inside a complete body is malformed, but reports what it
 					// needed from the body, so always ask for at least one byte more.
 					Err(DecodeError::Short) => r.need().max(buf.len() + 1),
-					Err(e) => return Poll::Ready(Err(e.into())),
+					Err(e) => return Poll::Ready(Err(Fault::Malformed(e))),
 				};
 
 				if need <= lease.remaining() {
@@ -205,7 +247,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				}
 				// Stream closed while we still need more data.
 				if lease.is_fin() {
-					return Poll::Ready(Err(DecodeError::Short.into()));
+					return Poll::Ready(Err(Fault::Reset(DecodeError::Short.into())));
 				}
 				self.want = need;
 				// The lease keeps every byte for the retry, which copies them again, so a
@@ -296,6 +338,24 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	{
 		let version = self.version;
 		self.poll_with_maybe(waiter, true, |r| T::decode(r, version))
+	}
+
+	/// The next message, or how the stream ended instead.
+	pub(crate) fn poll_recv<T: for<'a> Decode<'a, V> + Debug>(&mut self, waiter: &kio::Waiter) -> Poll<Recv<T>>
+	where
+		V: Into<Form> + Copy,
+	{
+		match ready!(self.poll_has_more(waiter)) {
+			Err(err) => return Poll::Ready(Recv::Reset(err)),
+			Ok(false) => return Poll::Ready(Recv::Ended),
+			Ok(true) => {}
+		}
+		let version = self.version;
+		Poll::Ready(match ready!(self.poll_fault(waiter, true, |r| T::decode(r, version))) {
+			Ok((message, _)) => Recv::Message(message),
+			Err(Fault::Reset(err)) => Recv::Reset(err),
+			Err(Fault::Malformed(err)) => Recv::Malformed(err),
+		})
 	}
 
 	/// The next message without consuming it, or `None` if the stream closes cleanly first.
@@ -686,6 +746,46 @@ mod tests {
 		assert_eq!(counted(), [vec![auth], probes(2)].concat());
 	}
 
+	/// A read tells a message, a clean end, a stream cut inside a message, and malformed
+	/// bytes apart, without a caller matching the error.
+	#[test]
+	fn a_read_tells_a_cut_stream_from_malformed_bytes() {
+		use crate::lite;
+		let version = lite::Version::Lite07;
+		let waiter = &kio::Waiter::noop();
+		let probe = lite::Probe {
+			bitrate: Some(123),
+			rtt: Some(4),
+		};
+		let bytes: &'static [u8] = probe.encode_bytes(version).unwrap().to_vec().leak();
+
+		let mut reader = queue(&[bytes], version);
+		reader.stream.get_mut().fin = true;
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Message(_))
+		));
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Ended)
+		));
+
+		// The stream finishes inside the message: a cut, not a violation.
+		let mut reader = queue(&[&bytes[..2]], version);
+		reader.stream.get_mut().fin = true;
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Reset(_))
+		));
+
+		// A body cut short inside its declared size is malformed.
+		let mut reader = queue(&[&[1, 0x80]], version);
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Malformed(_))
+		));
+	}
+
 	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session
 	/// table here would have the peer decode it against the wrong registry: `Cancel` would
 	/// arrive as INTERNAL_ERROR, and `Unauthorized` as DELIVERY_TIMEOUT.
@@ -926,8 +1026,8 @@ mod tests {
 			ietf::GoAway::decode(r, ietf::Version::Draft22).map(|_| ())
 		});
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
-			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::Lite(version), false);
-			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::Lite(version), false);
+			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::lite(version), false);
+			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::lite(version), false);
 		}
 	}
 
@@ -948,12 +1048,12 @@ mod tests {
 			let mut prefix = vec![0x20];
 			Encoder::new(&mut prefix, version.into()).varint(65535).unwrap();
 			assert!(matches!(
-				setup::Client::decode_slice(&prefix, Version::Lite(version)),
+				setup::Client::decode_slice(&prefix, Version::lite(version)),
 				Err(DecodeError::Short)
 			));
 			prefix[0] = 0x21;
 			assert!(matches!(
-				setup::Server::decode_slice(&prefix, Version::Lite(version)),
+				setup::Server::decode_slice(&prefix, Version::lite(version)),
 				Err(DecodeError::Short)
 			));
 		}

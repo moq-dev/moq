@@ -9,7 +9,7 @@ import {
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
 import { UNBOUNDED } from "../util/sequence.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
@@ -21,26 +21,17 @@ import {
 	hasDropCode,
 	hasEndError,
 	hasFrameBounds,
-	hasGroupCount,
 	hasGroupOrder,
+	hasGroupSpan,
 	hasMinDelay,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
 	hasSkip,
+	hasUnlimitedMaxDelay,
 	resolvesStart,
 	Version,
 } from "./version.ts";
-
-/** Decode the `Update` number after the ranges. A wire without the field decodes as 0. */
-async function decodeUpdate(r: Reader, version: Version): Promise<bigint> {
-	return hasSkip(version) ? await r.u62() : 0n;
-}
-
-/** Encode the `Update` number, dropping it on a wire without the field. */
-async function encodeUpdate(w: Writer, version: Version, update: bigint) {
-	if (hasSkip(version)) await w.u62(update);
-}
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -145,13 +136,15 @@ interface Span {
 }
 
 /**
- * One end of a lite-07 range as the wire carries it: a model {@link Anchor}, except that a time
- * counts in the track's `Timescale` as the peer was told it.
+ * One end of a lite-07 range: a model {@link Anchor}, except that a time counts in the track's
+ * `Timescale` as the peer was told it, or bare units on a scale-less track. The wire has no
+ * absolute anchor: a group's start is its time, so `absolute` goes out as a time, an end as the
+ * time just before it, and decodes as one.
  */
 export type WireAnchor =
 	| { absolute: bigint; relative?: never; time?: never }
 	| { relative: bigint; absolute?: never; time?: never }
-	| { time: number; absolute?: never; relative?: never };
+	| { time: bigint; absolute?: never; relative?: never };
 
 /** A lite-07 range as the wire carries it; see {@link WireAnchor}. */
 export interface WireRange {
@@ -167,7 +160,7 @@ export function toWireRanges(ranges: readonly Range[], timescale: Timescale | un
 	const anchor = (anchor: Anchor | undefined): WireAnchor | undefined => {
 		if (anchor?.time === undefined) return anchor as WireAnchor | undefined;
 		if (timescale === undefined) throw new TimestampMismatch();
-		return { time: floorAt(anchor.time, timescale) };
+		return { time: BigInt(floorAt(anchor.time, timescale)) };
 	};
 	return ranges.map((range) => {
 		const out: WireRange = {};
@@ -179,24 +172,31 @@ export function toWireRanges(ranges: readonly Range[], timescale: Timescale | un
 	});
 }
 
-/** Whether any range starts or ends at a presentation time, which needs the track's timescale. */
-export function hasWireTime(ranges: readonly WireRange[] | undefined): boolean {
-	return ranges?.some((range) => range.start?.time !== undefined || range.end?.time !== undefined) ?? false;
+/**
+ * The lite-07 type and value of a range's start or `end`, `undefined` for none. Both time ends are
+ * inclusive, so an absolute end, exclusive, goes out as the time just before it; one at group 0
+ * holds nothing a time can say.
+ */
+function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, bigint?] {
+	if (anchor?.absolute !== undefined) {
+		if (!end) return [1, anchor.absolute];
+		if (anchor.absolute === 0n) throw new Error(EMPTY_RANGE);
+		return [1, anchor.absolute - 1n];
+	}
+	if (anchor?.relative !== undefined) return [2, anchor.relative];
+	if (anchor?.time !== undefined) return [1, anchor.time];
+	return [0];
 }
 
-/** Encode one lite-07 range end, `undefined` for none: an absolute end stops before its group. */
-async function encodeAnchor(w: Writer, anchor: WireAnchor | undefined) {
-	if (anchor?.absolute !== undefined) {
-		await w.u53(1);
-		await w.u62(anchor.absolute);
-	} else if (anchor?.relative !== undefined) {
-		await w.u53(2);
-		await w.u62(anchor.relative);
-	} else if (anchor?.time !== undefined) {
-		await w.u53(3);
-		await w.u53(anchor.time);
-	} else {
-		await w.u53(0);
+/** Encode one lite-07 range, its start then its end; see {@link wireAnchor}. */
+async function encodeRange(w: Writer, range: WireRange) {
+	for (const [anchor, end] of [
+		[range.start, false],
+		[range.end, true],
+	] as const) {
+		const [kind, value] = wireAnchor(anchor, end);
+		await w.u53(kind);
+		if (value !== undefined) await w.u62(value);
 	}
 }
 
@@ -209,10 +209,7 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 	if (ranges !== undefined && hasRanges(version)) {
 		if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 		await w.u53(ranges.length);
-		for (const range of ranges) {
-			await encodeAnchor(w, range.start);
-			await encodeAnchor(w, range.end);
-		}
+		for (const range of ranges) await encodeRange(w, range);
 		return;
 	}
 	if (!hasRanges(version)) {
@@ -229,26 +226,30 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 	const range: WireRange = {};
 	if (span.startGroup !== undefined) range.start = { absolute: span.startGroup };
 	if (span.endGroup !== undefined) range.end = { absolute: span.endGroup + 1n };
-	await encodeAnchor(w, range.start);
-	await encodeAnchor(w, range.end);
+	await encodeRange(w, range);
 }
 
 /**
  * The model ranges a decoded SUBSCRIBE or SUBSCRIBE_UPDATE asks for: its lite-07 list, or the one
- * span an older wire carries, whole groups either way. A time anchor counts in `timescale`, the
- * track's as the peer was told it, and is refused with {@link TimestampMismatch} without one.
+ * span an older wire carries, whole groups either way.
+ *
+ * A lite-07 time names a group by its key: the wire's group ID is its start time. The JS model
+ * still keys groups by sequence, so a time decodes as that absolute key, an end exclusive, on
+ * every track; resolving it against frame timestamps waits on the model keying groups by start.
  */
-export function requestedRanges(msg: Span & { ranges?: WireRange[] }, timescale: Timescale | undefined): Range[] {
+export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
 	if (msg.ranges) {
-		const anchor = (anchor: WireAnchor | undefined): Anchor | undefined => {
+		const anchor = (anchor: WireAnchor | undefined, end: boolean): Anchor | undefined => {
 			if (anchor?.time === undefined) return anchor as Anchor | undefined;
-			if (timescale === undefined) throw new TimestampMismatch();
-			return { time: new Timestamp(anchor.time, timescale) };
+			return { absolute: end ? anchor.time + 1n : anchor.time };
 		};
 		return msg.ranges.map((range) => {
 			const out: Range = {};
-			const start = anchor(range.start);
-			const end = anchor(range.end);
+			const start = anchor(range.start, false);
+			let end = anchor(range.end, true);
+			// Ending before its start: keep its place, covering no group, as the Rust publisher does.
+			if (start?.absolute !== undefined && end?.absolute !== undefined && end.absolute < start.absolute)
+				end = { absolute: start.absolute };
 			if (start) out.start = start;
 			if (end) out.end = end;
 			return out;
@@ -260,18 +261,16 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, timescale:
 	return [range];
 }
 
-/** Decode one lite-07 range end, `undefined` for none. */
+/** Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a count back. */
 async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
 	switch (kind) {
 		case 0:
 			return undefined;
 		case 1:
-			return { absolute: await r.u62() };
+			return { time: await r.u62() };
 		case 2:
 			return { relative: await r.u62() };
-		case 3:
-			return { time: await r.u53() };
 		default:
 			throw new ProtocolViolation(`unknown range anchor: ${kind}`);
 	}
@@ -284,9 +283,6 @@ async function decodeRange(r: Reader): Promise<WireRange> {
 	const range: WireRange = {};
 	if (start) range.start = start;
 	if (end) range.end = end;
-	// Ending at or before its start: keep its place, covering no group, as the Rust publisher does.
-	if (start?.absolute !== undefined && end?.absolute !== undefined && end.absolute < start.absolute)
-		range.end = { absolute: start.absolute };
 	return range;
 }
 
@@ -308,8 +304,9 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	let floor = true;
 	let live = false;
 	for (const range of ranges) {
-		const from = range.start?.absolute;
-		const to = range.end?.absolute;
+		// A time is the key of the group it names, inclusive as an end.
+		const from = range.start?.absolute ?? range.start?.time;
+		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
 		if (from === undefined) floor = false;
 		else if (start === undefined || from < start) start = from;
 		if (to === undefined) live = true;
@@ -363,13 +360,13 @@ function rangeSize(range: WireRange): number {
 		const lo = split(value);
 		return lengthLeadingOnes(parts.hi, lo);
 	};
-	const anchor = (anchor: WireAnchor | undefined): number => {
-		if (anchor?.absolute !== undefined) return size(1) + size(anchor.absolute);
-		if (anchor?.relative !== undefined) return size(2) + size(anchor.relative);
-		if (anchor?.time !== undefined) return size(3) + size(anchor.time);
-		return size(0);
+	const anchor = (anchor: WireAnchor | undefined, end: boolean): number => {
+		// An end at group 0 can't go out, which encoding refuses; size it as the smallest.
+		if (end && anchor?.absolute === 0n) return size(1) + size(0);
+		const [kind, value] = wireAnchor(anchor, end);
+		return size(kind) + (value === undefined ? 0 : size(value));
 	};
-	return anchor(range.start) + anchor(range.end);
+	return anchor(range.start, false) + anchor(range.end, true);
 }
 
 /** A range's anchors as a key, so equal ranges compare equal. */
@@ -597,6 +594,24 @@ async function encodeMinDelay(w: Writer, version: Version, minDelay: number | un
 	await Duration.encodeOptional(w, minDelay);
 }
 
+/** What lite-03 to lite-06 send for no `Subscriber Max Age` limit, which their bare milliseconds can't say. */
+const MAX_SAFE_DELAY_MS = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Encode the `Subscriber Max Age`, `null` for no limit: on lite-07 milliseconds plus one, 0 for
+ * no limit, and before it bare milliseconds.
+ */
+async function encodeMaxDelay(w: Writer, version: Version, maxDelay: number | null) {
+	if (hasUnlimitedMaxDelay(version)) await Duration.encodeOptional(w, maxDelay ?? undefined);
+	else await w.u53(maxDelay ?? MAX_SAFE_DELAY_MS);
+}
+
+/** Decode the inverse of {@link encodeMaxDelay}. */
+async function decodeMaxDelay(r: Reader, version: Version): Promise<number | null> {
+	if (hasUnlimitedMaxDelay(version)) return (await Duration.decodeOptional(r)) ?? null;
+	return r.u53();
+}
+
 /** Decode the `Subscriber Min Age`, as not stated on a wire without the field. */
 async function decodeMinDelay(r: Reader, version: Version): Promise<number | undefined> {
 	if (!hasMinDelay(version)) return undefined;
@@ -609,8 +624,11 @@ export class SubscribeUpdate {
 	priority: number;
 	/** See {@link Subscribe.order}. */
 	order: Order;
-	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
-	maxDelay: number;
+	/**
+	 * Subscriber max delay in milliseconds, `null` for no limit beyond the publisher's; zero skips
+	 * once a newer group is available. Lite-01/02 carry none and decode as `null`.
+	 */
+	maxDelay: number | null;
 	/**
 	 * Subscriber min delay (`Subscriber Min Age`) in milliseconds, or undefined when not stated.
 	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
@@ -627,8 +645,6 @@ export class SubscribeUpdate {
 	 * {@link remove}; {@link LiveRanges.apply} resolves a received update to every live range.
 	 */
 	ranges?: WireRange[];
-	/** See {@link Subscribe.update}: larger than the subscription's previous one. */
-	update: bigint;
 	/** Lite-07: the Range IDs of the live ranges to retire before adding {@link ranges}. */
 	remove?: bigint[];
 
@@ -636,14 +652,13 @@ export class SubscribeUpdate {
 		priority: number;
 		wantedGroup?: bigint;
 		order?: Order;
-		maxDelay?: number;
+		maxDelay?: number | null;
 		minDelay?: number;
 		startGroup?: bigint;
 		endGroup?: bigint;
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
-		update?: bigint;
 		remove?: bigint[];
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
@@ -651,14 +666,13 @@ export class SubscribeUpdate {
 		this.wantedGroup = props.wantedGroup;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
-		this.maxDelay = props.maxDelay ?? 0;
+		this.maxDelay = props.maxDelay === undefined ? 0 : props.maxDelay;
 		this.minDelay = props.minDelay;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
-		this.update = props.update ?? 0n;
 		this.remove = props.remove;
 	}
 
@@ -671,7 +685,7 @@ export class SubscribeUpdate {
 			default:
 				await w.u8(toWire(this.priority));
 				await encodeOrder(w, version, this.order);
-				await w.u53(this.maxDelay);
+				await encodeMaxDelay(w, version, this.maxDelay);
 				await encodeMinDelay(w, version, this.minDelay);
 				if (hasRanges(version)) {
 					// An edit of the live ranges, which may add none: `ranges`, or else the span as
@@ -685,15 +699,11 @@ export class SubscribeUpdate {
 						await encodeSpan(w, version, this);
 					} else {
 						await w.u53(this.ranges.length);
-						for (const range of this.ranges) {
-							await encodeAnchor(w, range.start);
-							await encodeAnchor(w, range.end);
-						}
+						for (const range of this.ranges) await encodeRange(w, range);
 					}
 				} else {
 					await encodeSpan(w, version, this, this.ranges);
 				}
-				await encodeUpdate(w, version, this.update);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				break;
 		}
@@ -703,11 +713,11 @@ export class SubscribeUpdate {
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				return new SubscribeUpdate({ priority: fromWire(await r.u8()) });
+				return new SubscribeUpdate({ priority: fromWire(await r.u8()), maxDelay: null });
 			default: {
 				const priority = fromWire(await r.u8());
 				const order = await decodeOrder(r, version);
-				const maxDelay = await r.u53();
+				const maxDelay = await decodeMaxDelay(r, version);
 				const minDelay = await decodeMinDelay(r, version);
 				let span: Span & { ranges?: WireRange[]; remove?: bigint[] };
 				if (hasRanges(version)) {
@@ -718,7 +728,6 @@ export class SubscribeUpdate {
 				} else {
 					span = await decodeSpan(r, version);
 				}
-				const update = await decodeUpdate(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
 				return new SubscribeUpdate({
 					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
@@ -727,7 +736,6 @@ export class SubscribeUpdate {
 					maxDelay,
 					minDelay,
 					...span,
-					update,
 				});
 			}
 		}
@@ -764,8 +772,11 @@ export class Subscribe {
 	 * cannot ask for anything else.
 	 */
 	order: Order;
-	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
-	maxDelay: number;
+	/**
+	 * Subscriber max delay in milliseconds, `null` for no limit beyond the publisher's; zero skips
+	 * once a newer group is available. Lite-01/02 carry none and decode as `null`.
+	 */
+	maxDelay: number | null;
 	/**
 	 * Subscriber min delay (`Subscriber Min Age`) in milliseconds, or undefined when not stated.
 	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
@@ -794,13 +805,6 @@ export class Subscribe {
 	 */
 	ranges?: WireRange[];
 
-	/**
-	 * The number of the terms in effect: the SUBSCRIBE is 0 and every SUBSCRIBE_UPDATE carries a
-	 * larger one, which a {@link SubscribeDrop} echoes. Lite-07+; earlier wires decode as 0 and
-	 * drop it on encode.
-	 */
-	update: bigint;
-
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -810,14 +814,13 @@ export class Subscribe {
 		track: string;
 		priority: number;
 		order?: Order;
-		maxDelay?: number;
+		maxDelay?: number | null;
 		minDelay?: number;
 		startGroup?: bigint;
 		endGroup?: bigint;
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
-		update?: bigint;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -827,14 +830,13 @@ export class Subscribe {
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
-		this.maxDelay = props.maxDelay ?? 0;
+		this.maxDelay = props.maxDelay === undefined ? 0 : props.maxDelay;
 		this.minDelay = props.minDelay;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
-		this.update = props.update ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -851,12 +853,11 @@ export class Subscribe {
 				break;
 			default:
 				await encodeOrder(w, version, this.order);
-				await w.u53(this.maxDelay);
+				await encodeMaxDelay(w, version, this.maxDelay);
 				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
-		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -870,13 +871,12 @@ export class Subscribe {
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				return new Subscribe({ id, broadcast, track, priority });
+				return new Subscribe({ id, broadcast, track, priority, maxDelay: null });
 			default: {
 				const order = await decodeOrder(r, version);
-				const maxDelay = await r.u53();
+				const maxDelay = await decodeMaxDelay(r, version);
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
-				const update = await decodeUpdate(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -889,7 +889,6 @@ export class Subscribe {
 					maxDelay,
 					minDelay,
 					...span,
-					update,
 				});
 			}
 		}
@@ -993,6 +992,14 @@ export class SubscribeOk {
 	}
 }
 
+/** The publisher's largest position, as SUBSCRIBE_OK reports it. Mirrors the Rust `Largest`. */
+export interface Largest {
+	/** The newest group and its last frame so far. */
+	position: Position;
+	/** The group ended at that frame, so no frame follows it: a reader knows at once that it isn't the live one. */
+	ended: boolean;
+}
+
 /**
  * Resolves where a Draft-05+ subscription starts. The first message the publisher sends,
  * once the start is known. A start above the requested one implicitly drops the groups
@@ -1010,12 +1017,12 @@ export class SubscribeStart {
 	starts: (bigint | undefined)[];
 
 	/**
-	 * The publisher's largest (group, frame) when it answered, or `undefined` for a track
-	 * with nothing yet. Draft-07+ only; not on the wire before, where it decodes as `undefined`.
+	 * The publisher's largest when it answered, or `undefined` for a track with nothing yet.
+	 * Draft-07+ only; not on the wire before, where it decodes as `undefined`.
 	 */
-	largest?: Position;
+	largest?: Largest;
 
-	constructor(starts: (bigint | undefined)[], largest?: Position) {
+	constructor(starts: (bigint | undefined)[], largest?: Largest) {
 		this.starts = starts;
 		this.largest = largest;
 	}
@@ -1028,12 +1035,14 @@ export class SubscribeStart {
 				if (group === undefined || rest.length > 0) throw new Error("one start group before draft-07");
 				return w.u62(group);
 			}
-			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
+			// Group + 1, so 0 is a track with nothing yet; the frame and whether the group ended
+			// follow only otherwise.
 			if (this.largest === undefined) {
 				await w.u53(0);
 			} else {
-				await w.u62(this.largest.group + 1n);
-				await w.u53(this.largest.frame);
+				await w.u62(this.largest.position.group + 1n);
+				await w.u53(this.largest.position.frame);
+				await w.u8(this.largest.ended ? 1 : 0);
 			}
 			await w.u53(this.starts.length);
 			for (const start of this.starts) await w.u62(start === undefined ? 0n : start + 1n);
@@ -1044,7 +1053,13 @@ export class SubscribeStart {
 		return Message.decode(r, async (r) => {
 			if (!hasRanges(version)) return new SubscribeStart([await r.u62()]);
 			const wire = await r.u62();
-			const largest = wire === 0n ? undefined : { group: wire - 1n, frame: await r.u53() };
+			let largest: Largest | undefined;
+			if (wire !== 0n) {
+				const position = { group: wire - 1n, frame: await r.u53() };
+				const ended = await r.u8();
+				if (ended > 1) throw new ProtocolViolation(`invalid Largest Ended: ${ended}`);
+				largest = { position, ended: ended === 1 };
+			}
 			// Not preallocated: each start costs a byte of the bounded message.
 			const starts: (bigint | undefined)[] = [];
 			for (let count = await r.u53(); count > 0; count--) {
@@ -1128,23 +1143,26 @@ export class SubscribeStarted {
 }
 
 /**
- * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: `Group Start` and `Group Count` on lite-07, an inclusive
- * `Group Start` and `Group End` before. Either way it ends by the reserved sequence 2^64-1, so it
- * never names that group.
+ * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: a non-empty `[Group Start, Group End)` on lite-07, an
+ * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved sequence
+ * 2^64-1, so it never names that group.
  */
 async function decodeGroups(r: Reader, version: Version): Promise<{ start: bigint; end: bigint }> {
 	const start = await r.u62();
-	const end = hasGroupCount(version) ? start + (await r.u62()) : (await r.u62()) + 1n;
-	if (end < start || end >= UNBOUNDED) throw new ProtocolViolation(`invalid group range: [${start}, ${end})`);
+	const span = hasGroupSpan(version);
+	const end = span ? await r.u62() : (await r.u62()) + 1n;
+	if (end < start || (span && end === start) || end >= UNBOUNDED)
+		throw new ProtocolViolation(`invalid group range: [${start}, ${end})`);
 	return { start, end };
 }
 
 async function encodeGroups(w: Writer, start: bigint, end: bigint, version: Version) {
-	// An empty range at 0 has no inclusive end to spell before lite-07.
-	if (end < start || end >= UNBOUNDED || (end === 0n && !hasGroupCount(version)))
+	const span = hasGroupSpan(version);
+	// An empty range at 0 has no inclusive end to spell before lite-07, and lite-07 has no empty one.
+	if (end < start || end >= UNBOUNDED || (span ? end === start : end === 0n))
 		throw new RangeError(`invalid group range: [${start}, ${end})`);
 	await w.u62(start);
-	await w.u62(hasGroupCount(version) ? end - start : end - 1n);
+	await w.u62(span ? end : end - 1n);
 }
 
 /**
@@ -1160,28 +1178,20 @@ export class SubscribeDrop {
 	/** One past the last dropped group sequence. */
 	end: bigint;
 	error: number;
-	/**
-	 * The number of the SUBSCRIBE or SUBSCRIBE_UPDATE in effect when the groups were given up
-	 * ({@link Subscribe.update}): a stale (OLD) drop under a superseded one is no verdict.
-	 * Lite-07+; earlier wires decode as 0.
-	 */
-	update: bigint;
 
-	constructor(props: { start: bigint; end: bigint; error: number; update?: bigint }) {
+	constructor(props: { start: bigint; end: bigint; error: number }) {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
-		this.update = props.update ?? 0n;
 	}
 
-	/** Name `[start, end)` given up with `err` under the terms numbered `update`, as `version` carries it. */
-	static given(start: bigint, end: bigint, err: unknown, version: Version, update = 0n): SubscribeDrop {
+	/** Name `[start, end)` given up with `err`, as `version` carries it. */
+	static given(start: bigint, end: bigint, err: unknown, version: Version): SubscribeDrop {
 		return new SubscribeDrop({
 			start,
 			end,
 			// Before lite-07 the code is the application's, so it says nothing of why.
 			error: hasDropCode(version) ? toStreamCode(err) : 0,
-			update: hasSkip(version) ? update : 0n,
 		});
 	}
 
@@ -1201,14 +1211,12 @@ export class SubscribeDrop {
 	async #encode(w: Writer, version: Version) {
 		await encodeGroups(w, this.start, this.end, version);
 		await w.u53(this.error);
-		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<SubscribeDrop> {
 		const { start, end } = await decodeGroups(r, version);
 		const error = await r.u53();
-		const update = await decodeUpdate(r, version);
-		return new SubscribeDrop({ start, end, error, update });
+		return new SubscribeDrop({ start, end, error });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

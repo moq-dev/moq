@@ -117,13 +117,13 @@ describe("unsupported catalog", () => {
 			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
 			try {
 				const ready = source.out.catalog.changed();
-				producer.update({ value: {}, at: key() });
+				producer.update({}, key());
 				await ready;
 				expect(source.out.status.peek()).toBe("live");
 
 				const rejected = source.out.status.changed();
 				const cleared = source.out.catalog.changed();
-				producer.update({ value: { version: Catalog.VERSION + 1 }, at: key() });
+				producer.update({ version: Catalog.VERSION + 1 }, key());
 				await rejected;
 				await cleared;
 				expect(source.out.status.peek()).toBe("unsupported");
@@ -169,7 +169,7 @@ for (const driven of [true, false]) {
 		});
 		try {
 			const ready = source.out.catalog.changed();
-			producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } }, at: key() });
+			producer.update({ video: { renditions: { hd: video("avc1.640028") } } }, key());
 			await ready;
 			expect(source.out.status.peek()).toBe("live");
 

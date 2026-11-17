@@ -1018,7 +1018,7 @@ mod tests {
 		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
 		harness.fill(&mut out[..STEREO]);
 		push(&mut prod, 0.5, 960);
-		prod.end();
+		prod.silence();
 		// The opening silence, the 960 pushed, then comfort noise.
 		harness.fill(&mut out);
 

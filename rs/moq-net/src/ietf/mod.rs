@@ -28,7 +28,6 @@ mod goaway;
 mod group;
 pub mod hidden;
 mod location;
-pub(crate) mod max_age;
 pub mod message;
 pub(crate) mod namespace;
 pub(crate) mod object;

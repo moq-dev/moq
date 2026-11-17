@@ -8,7 +8,7 @@ description: TOML reference for moq-relay
 `moq-relay relay.toml`. Every key is also a CLI flag and environment variable
 that joins the section and key: `listen.tls.cert` is `--listen-tls-cert` /
 `MOQ_LISTEN_TLS_CERT`. The exceptions: `listen.bind` is spelled `--listen` /
-`MOQ_LISTEN`, and `listen.extensions` and `connect.extensions` are TOML only.
+`MOQ_LISTEN`.
 Precedence is CLI, then env, then file, then defaults.
 `moq-relay --help` lists every flag.
 
@@ -45,10 +45,6 @@ bind = "127.0.0.1:4444"
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
 allow.uid = [1001]
-
-[listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
-                                     # The relay always offers ietf, for moq-lite-07 relay links.
-solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP and auth
@@ -86,7 +82,6 @@ A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
 use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
-The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
 
 `[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
@@ -107,8 +102,7 @@ so one file serves the whole cluster:
 A packet for an unlisted server ID is dropped. A forward is accepted only from a listed address
 and under the shared `key` (`openssl rand -hex 32 > forward.key`). A changed file replaces the
 map; an invalid one is logged and the last valid map kept, or stops startup. Forwarding needs
-`lb.id` and all three settings, which the `--listen-quic-lb-forward-bind`, `-key`, and `-peers`
-flags update.
+`lb.id` and all three settings.
 
 ## \[quic]
 
@@ -227,9 +221,9 @@ Pinning is off by default because every relay pins its workers to the same
 first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
-`io_uring` additionally needs Linux 6.12+; it
-shares the same reloadable TLS identity and serves every configured version
-like the shared runtime. A setting the host cannot deliver refuses to
+`io_uring` additionally needs Linux 6.12+ on a 64-bit x86, ARM, RISC-V,
+LoongArch, or POWER CPU; it shares the same reloadable TLS identity and serves
+every configured version like the shared runtime. A setting the host cannot deliver refuses to
 start rather than being ignored. Linux 6.14 up to the 7.3 fix (backported to
 stable kernels) charges io\_uring rings to `RLIMIT_MEMLOCK`: if io\_uring workers
 fail to start naming it, raise it (`LimitMEMLOCK=` under systemd).
@@ -278,11 +272,11 @@ connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost pric
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
-max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
+max_hops = 32                                         # Legacy: longest hop path on moq-lite-03 to 06 (1 to 32).
 
 [cluster.api]
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
-# tls.root = ["api-ca.pem"]                           # API server trust, independent from connect.tls.
+# root = ["api-ca.pem"]                               # API server trust, independent from connect.tls.
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
@@ -307,7 +301,6 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
-extensions.solicit = false           # Decline MoQ Solicit on outbound moq-transport sessions, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only

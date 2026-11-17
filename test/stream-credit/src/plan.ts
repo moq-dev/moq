@@ -27,6 +27,8 @@ export interface Group {
 	at?: number;
 	/** Why reading its frames stopped early. */
 	error?: string;
+	/** Each frame's payload once fetched after it stopped early for any reason but going stale, or why the fetch failed. */
+	fetched?: string[] | string;
 }
 
 /** What one subscription read. */

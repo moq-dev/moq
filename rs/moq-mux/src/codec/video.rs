@@ -180,14 +180,6 @@ pub(crate) struct Hrd {
 	pub cpb_size: u64,
 }
 
-/// A sequence header that reorders deeper than the track already declared.
-#[derive(Debug, thiserror::Error)]
-#[error("video reorder depth {reorder} exceeds the {declared} the track declared")]
-struct Deepened {
-	declared: u8,
-	reorder: u8,
-}
-
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
 ///
 /// Holds the caller's hint and the last config published (to dedupe re-publishes). Not generic
@@ -265,7 +257,7 @@ impl Catalog {
 		if let Some(declared) = declared {
 			match config.reorder {
 				Some(reorder) if reorder > declared => {
-					return Err(anyhow::Error::new(Deepened { declared, reorder }).into());
+					return Err(crate::container::ReorderError::Deepened { declared, reorder }.into());
 				}
 				_ => config.reorder = Some(declared),
 			}

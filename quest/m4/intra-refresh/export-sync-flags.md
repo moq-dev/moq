@@ -14,13 +14,13 @@ Audio `warmup` is Opus pre-roll and changes no export flag.
 
 ## Plan
 
-- `rs/moq-mux/src/container/fmp4/fragmenter.rs` decides `independent` from
-  `frame.keyframe`, which is positional; when a video rendition declares `warmup`
+- `rs/moq-mux/src/container/fmp4/export.rs` decides a `Fragment`'s
+  `independent` from `frame.keyframe`, which is positional; when a video rendition declares `warmup`
   the decision also needs the IDR check the consumer quest adds to the codec
   modules. The fMP4 and MKV exporters set their sample flags from the same
   answer.
 - `rs/moq-hls` derives the playlist tags and DASH `startWithSAP` from the
-  fragmenter's `independent`.
+  same `independent` answer.
 - Tests: a synthetic refresh rendition exports with non-sync group starts and
   an IDR group with sync flags, in fMP4 and MKV; the HLS playlist and DASH
   manifest tests cover the tags.
