@@ -48,8 +48,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
-  [the hole wait](/quest/m2/delay-hole-wait.md),
-  [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
+  [the hole wait](/quest/m2/delay-hole-wait.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
