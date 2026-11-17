@@ -23,6 +23,8 @@ fn arms() -> Vec<Arm> {
 			stay: false,
 			rejoin: false,
 			reroute: false,
+			order: None,
+			summed: false,
 		});
 	}
 	for mode in [
@@ -42,6 +44,8 @@ fn arms() -> Vec<Arm> {
 					stay: false,
 					rejoin: false,
 					reroute: false,
+					order: None,
+					summed: false,
 				});
 			}
 		}
@@ -58,6 +62,8 @@ const fn arm(mode: Mode, merge: bool) -> Arm {
 		stay: false,
 		rejoin: false,
 		reroute: false,
+		order: None,
+		summed: false,
 	}
 }
 
@@ -419,7 +425,10 @@ fn a_join_skips_pops_without_demand_and_warm_ones_draw_it() {
 		// pop, settled on its long link, never moves for the warm pops beside it.
 		let stayed = BTreeSet::from([(4, 0), (0, 1), (1, 2), (0, 3)]);
 		match arm.mode {
+			// Ranked by hash, the middle pop ranks below the near one, whose route beats the
+			// middle pop's copy priced from the publisher, so nothing is advertised to it.
 			Mode::Path => assert_eq!(edges, skip, "{case}"),
+			_ if arm.order == Some(Order::Hash) => assert_eq!(edges, skip, "{case}"),
 			_ if arm.stay => assert_eq!(edges, stayed, "{case}"),
 			// One query goes to the cheapest link, which for the middle pop is the near
 			// pop's and for the far pop the middle's.
@@ -525,6 +534,34 @@ const REROUTE_UNQUERIED: Arm = Arm {
 	..NOT_DOWN
 };
 
+/// Adverts and the path, with readers ranked by route cost: a relay takes a warm copy
+/// only from a lower rank, and moves whenever the cheapest such copy or its route
+/// changes.
+const ORDER_ROUTE: Arm = Arm {
+	order: Some(Order::Route),
+	..NOT_DOWN
+};
+
+/// [`ORDER_ROUTE`], ranked by the rendezvous hash instead.
+const ORDER_HASH: Arm = Arm {
+	order: Some(Order::Hash),
+	..NOT_DOWN
+};
+
+/// [`ORDER_ROUTE`] without the path in its offers: only a rank keeps a relay off a
+/// copy that runs through it.
+const ORDER_PATHLESS: Arm = Arm {
+	hops: false,
+	..ORDER_ROUTE
+};
+
+/// [`ORDER_ROUTE`], pricing a copy from the publisher and keeping a live pull unless
+/// another source is strictly cheaper.
+const ORDER_SUMMED: Arm = Arm {
+	summed: true,
+	..ORDER_ROUTE
+};
+
 /// The narrower audiences for useful adverts, which keep them off a CDN's edges.
 /// [`NOT_DOWN_QUERY`] is the pick, [`CHAIN`] the pick with the chain, [`STAY`] the
 /// pick whose settled pulls stay, [`REJOIN`] and [`REROUTE`] that, choosing again
@@ -542,6 +579,10 @@ fn narrower() -> Vec<Arm> {
 		REJOIN,
 		REROUTE,
 		REROUTE_UNQUERIED,
+		ORDER_ROUTE,
+		ORDER_HASH,
+		ORDER_SUMMED,
+		ORDER_PATHLESS,
 	]
 }
 
@@ -568,7 +609,13 @@ fn growing() -> Vec<Arm> {
 		ADVERTISE,
 		USEFUL,
 	];
-	arms.extend(audiences());
+	// Of ranked readers only the one measured against the others: its variants change
+	// trees, not how adverts grow, and each arm adds about a minute to the sweep.
+	arms.extend(
+		audiences()
+			.into_iter()
+			.filter(|arm| arm.order.is_none() || *arm == ORDER_ROUTE),
+	);
 	arms
 }
 
@@ -710,20 +757,36 @@ fn grow(shape: &Shape, readers: &[(Node, usize)], in_turn: bool, arm: Arm, cheap
 	}
 }
 
-/// A first viewer's adverts on a CDN: told to every neighbour they grow with the
-/// core mesh, and told only where they could be taken they do not, since a core
-/// with demand is never cheaper for another core than its own route.
+/// A first viewer's adverts on a CDN, and a crowd's under ranked readers: told to
+/// every neighbour they grow with the core mesh, and told only where they could be
+/// taken they do not, since a core with demand is never cheaper for another core
+/// than its own route.
 #[test]
 fn useful_adverts_do_not_grow_with_the_core_mesh() {
-	let warm = |arm: Arm, regions: usize| {
+	let warm = |arm: Arm, regions: usize, crowd: bool| {
 		let shape = cdn(regions, 3, false, 1);
-		// The first edge of region 1, which the publisher's core is not in.
-		let grown = grow(&shape, &[(2 * regions + 3, 0)], false, arm, false);
+		// The first edge of region 1, which the publisher's core is not in, then
+		// the first edge of region 2.
+		let readers = [(2 * regions + 3, 0), (2 * regions + 6, 0)];
+		let readers = match crowd {
+			true => &readers[..],
+			false => &readers[..1],
+		};
+		let grown = grow(&shape, readers, false, arm, false);
 		assert_eq!(grown.right, Ok(()), "{}", arm.name());
 		grown.sent.warm()
 	};
-	assert_eq!(warm(USEFUL, 4), warm(USEFUL, 8));
-	assert!(warm(ADVERTISE, 4) < warm(ADVERTISE, 8));
+	assert_eq!(warm(USEFUL, 4, false), warm(USEFUL, 8, false));
+	assert!(warm(ADVERTISE, 4, false) < warm(ADVERTISE, 8, false));
+	// Ranked readers price the audience from the publisher too; at the link alone
+	// a warm core told every other core.
+	for crowd in [false, true] {
+		assert_eq!(
+			warm(ORDER_ROUTE, 8, crowd),
+			warm(ORDER_ROUTE, 32, crowd),
+			"crowd {crowd}"
+		);
+	}
 }
 
 /// Under the pick a warm core tells none of its region's edges, and each edge queries
@@ -1096,6 +1159,10 @@ fn every_arm_settles_after_churn() {
 		STAY,
 		REROUTE,
 		REROUTE_UNQUERIED,
+		ORDER_ROUTE,
+		ORDER_HASH,
+		ORDER_SUMMED,
+		ORDER_PATHLESS,
 	] {
 		for shape in [random as fn(&mut XorShift) -> Shape, flying, regional] {
 			let out = churn(arm, 0..12, shape);
@@ -1269,7 +1336,7 @@ fn mean(values: &[usize]) -> f64 {
 #[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_warmth_cases() {
 	println!(
-		"case,arm,phases,tree_cost,path_cost,cheapest_cost,uplinks,max_copies,carriers,messages,warm_messages,messages_per_reader_change,warm_per_reader_change,first_frame_ms,cycle_steps,longest_cycle,unfed_reader_rounds,advert_messages,query_messages,chain_messages,right"
+		"case,arm,phases,tree_cost,path_cost,cheapest_cost,uplinks,max_copies,carriers,messages,warm_messages,messages_per_reader_change,warm_per_reader_change,first_frame_ms,cycle_steps,longest_cycle,unfed_reader_rounds,advert_messages,query_messages,chain_messages,rank_messages,right"
 	);
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
 	for base in cases().into_iter().map(Some).chain([None]) {
@@ -1289,7 +1356,7 @@ fn benchmark_warmth_cases() {
 			let end = rows.last().expect("a phase");
 			let right = rows.iter().find_map(|row| row.right.clone().err());
 			println!(
-				"{},{},{},{cost},{},{cheapest},{},{},{},{},{},{:.2},{:.2},{:.0},{},{},{},{},{},{},{}",
+				"{},{},{},{cost},{},{cheapest},{},{},{},{},{},{:.2},{:.2},{:.0},{},{},{},{},{},{},{},{}",
 				case.name,
 				arm.name(),
 				rows.len(),
@@ -1308,6 +1375,7 @@ fn benchmark_warmth_cases() {
 				sent.adverts,
 				sent.asks + sent.told,
 				sent.chains,
+				sent.ranks,
 				right.map_or("yes".into(), |err| err.replace(',', ";")),
 			);
 		}
@@ -1320,7 +1388,7 @@ fn benchmark_warmth_cases() {
 #[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_warmth_churn() {
 	println!(
-		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,advert_messages,query_messages,chain_messages,settle_rounds,settled_tree_cost,settled_cheapest_cost,failed"
+		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,advert_messages,query_messages,chain_messages,rank_messages,settle_rounds,settled_tree_cost,settled_cheapest_cost,failed"
 	);
 	let cases: usize = std::env::var("MOQ_WARMTH_CASES").map_or(400, |cases| cases.parse().expect("MOQ_WARMTH_CASES"));
 	// A comma-separated list of arm names to run, for a longer sweep of a few.
@@ -1337,7 +1405,7 @@ fn benchmark_warmth_churn() {
 		for arm in arms().into_iter().chain(audiences()).filter(picked) {
 			let out = churn(arm, 0..cases, shape);
 			println!(
-				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				"{name},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 				arm.name(),
 				out.cases,
 				out.watch.steps,
@@ -1353,6 +1421,7 @@ fn benchmark_warmth_churn() {
 				out.sent.adverts,
 				out.sent.asks + out.sent.told,
 				out.sent.chains,
+				out.sent.ranks,
 				out.settle,
 				out.tree,
 				out.cheapest,
@@ -1364,4 +1433,49 @@ fn benchmark_warmth_churn() {
 			}
 		}
 	}
+}
+
+// --- Ranked readers ---
+
+/// Ranked by route cost, a pull follows a pop that turns warm later, and leaves it
+/// once its reader goes: every phase settles on the cheapest tree, where a settled
+/// pull keeps the far pop on its long link and later on the middle pop's detour.
+#[test]
+fn a_ranked_pull_follows_a_pop_that_turns_warm_later() {
+	let rows = run(&pops(), ORDER_ROUTE, &pop_phases(), 1);
+	settles(&rows, &ORDER_ROUTE.name());
+	for row in &rows {
+		assert_eq!(row.cost(), row.cheapest.iter().sum::<Metric>(), "{}", row.phase);
+	}
+	let stayed: Metric = run(&pops(), REROUTE_UNQUERIED, &pop_phases(), 1)
+		.iter()
+		.map(Row::cost)
+		.sum();
+	assert!(rows.iter().map(Row::cost).sum::<Metric>() < stayed);
+}
+
+/// Drones that start at once each take an uplink before any is warm; ranked, every
+/// drone above the lowest then sees its copy and moves, leaving one uplink, where
+/// settled pulls keep all four.
+#[test]
+fn ranked_drones_starting_at_once_keep_one_uplink() {
+	for arm in [ORDER_ROUTE, ORDER_HASH] {
+		let rows = run(&drones(4), arm, &drone_phases(4, true), 3);
+		settles(&rows, &arm.name());
+		assert_eq!(rows.last().expect("a phase").uplinks(), 1, "{}", arm.name());
+	}
+	let rows = run(&drones(4), REROUTE_UNQUERIED, &drone_phases(4, true), 3);
+	assert_eq!(rows.last().expect("a phase").uplinks(), 4);
+}
+
+/// Churned random mesh 503, which the price-moving pick never settles: a relay's own
+/// demand comes back to it as a cheaper price two hops away. Ranked, no relay's
+/// choice reads a higher rank's demand, and it settles.
+#[test]
+fn ranked_pulls_settle_random_case_503() {
+	for arm in [ORDER_ROUTE, ORDER_HASH] {
+		let out = churn(arm, 503..504, random);
+		assert_eq!(out.failed, 0, "{}: {:?}", arm.name(), out.first);
+	}
+	assert_eq!(churn(NOT_DOWN_QUERY, 503..504, random).failed, 1);
 }
