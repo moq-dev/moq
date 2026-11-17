@@ -736,15 +736,15 @@ pub unsafe extern "C" fn moq_encode_video(
 
 /// This encoder's bandwidth reservation, or 0 if it was published without one.
 ///
-/// Closing the returned handle does not release the encoder's claim; that lasts
-/// until [moq_encode_video_finish].
+/// The handle views the encoder's claim: closing it does not release the claim, and
+/// keeping it does not hold it past [moq_encode_video_finish], after which it reads no rate.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_reservation(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		let mut state = State::lock();
 		match state.video.reservation(producer)? {
-			Some(reservation) => Ok(i32::from(state.bandwidth.hold(reservation)?)),
+			Some(reservation) => Ok(i32::from(state.bandwidth.borrow(&reservation)?)),
 			None => Ok(0),
 		}
 	})
