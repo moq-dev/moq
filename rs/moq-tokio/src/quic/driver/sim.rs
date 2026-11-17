@@ -1,4 +1,4 @@
-//! Test support, enabled by the `sim` feature: QUIC with no sockets, endpoints on kio's
+//! Test support, enabled by the `test-support` feature: QUIC with no sockets, endpoints on kio's
 //! simulator joined by seeded, impaired paths
 //!
 //! A [`Network`] binds a [`Socket`] per address for [`Endpoint::new`](super::endpoint::Endpoint::new),

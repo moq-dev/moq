@@ -21,8 +21,8 @@ const MAX_REPLY: usize = 1 << 20;
 ///
 /// `connect` admits a session and hands back the [`lease::Consumer`] it holds; a task
 /// behind it re-POSTs `revalidate` on the grant's cadence, applies each reply, revokes
-/// when the server refuses, answers an invalid grant, or the grant expires, and POSTs
-/// `end` when the session closes.
+/// when the server refuses, answers a grant it cannot read or accept, or the grant
+/// expires, and POSTs `end` when the session closes.
 #[derive(Clone)]
 pub struct Client {
 	identity: Arc<()>,
@@ -289,12 +289,21 @@ impl Post for Client {
 			let refusal = reply(response)
 				.await
 				.ok()
+				.flatten()
 				.and_then(|body| serde_json::from_slice(&body).ok());
 			return Err(Error::Refused(refusal.unwrap_or_default()));
 		}
 		check(status)?;
-		serde_json::from_slice(&reply(response).await?)
-			.map_err(|err| Error::Unavailable(format!("auth server answered an invalid grant: {err}")))
+		// The server's fault, not the client's: say so here, since the client only sees a refusal.
+		let invalid = |err: String| {
+			tracing::warn!(id = %request.id, %err, "auth server answered a grant this relay cannot read; refusing");
+			Error::InvalidGrant(err)
+		};
+		// A reply over the bound is as unreadable as one that does not parse: asking again gets the same.
+		let Some(body) = reply(response).await? else {
+			return Err(invalid(format!("reply exceeds {MAX_REPLY} bytes")));
+		};
+		serde_json::from_slice(&body).map_err(|err| invalid(err.to_string()))
 	}
 
 	async fn post_end(&self, request: &Request) -> crate::Result<()> {
@@ -316,18 +325,17 @@ fn check(status: reqwest::StatusCode) -> crate::Result<()> {
 	Ok(())
 }
 
-/// Read a reply body of at most [`MAX_REPLY`] bytes, refusing a longer one as it arrives.
-async fn reply(mut response: reqwest::Response) -> crate::Result<Vec<u8>> {
+/// Read a reply body of at most [`MAX_REPLY`] bytes, or `None` for a longer one, refused as it
+/// arrives. A body that cannot be read at all is an error: an outage, unlike an oversized reply.
+async fn reply(mut response: reqwest::Response) -> crate::Result<Option<Vec<u8>>> {
 	let mut body = Vec::new();
 	while let Some(chunk) = response.chunk().await? {
 		if body.len() + chunk.len() > MAX_REPLY {
-			return Err(Error::Unavailable(format!(
-				"auth server reply exceeds {MAX_REPLY} bytes"
-			)));
+			return Ok(None);
 		}
 		body.extend_from_slice(&chunk);
 	}
-	Ok(body)
+	Ok(Some(body))
 }
 
 /// Admit a session through `server` and spawn the driver behind its lease.
@@ -470,7 +478,8 @@ impl<S: Post> Driver<S> {
 							};
 							break producer.finish(reason, Bytes::default());
 						},
-						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
+						// The server answered a grant that can never admit: asking again gets the same.
+						Err(err) if err.is_final_grant() => {
 							break producer.finish(Reason::Invalid, Bytes::default());
 						},
 						Err(err) => {
@@ -651,7 +660,7 @@ mod tests {
 		.await;
 
 		let consumer = client(&server).connect(request()).await.unwrap();
-		assert_eq!(consumer.grant().publish, patterns(&["**"]));
+		assert_eq!(consumer.grant().publish.path, patterns(&["**"]));
 		assert_eq!(log.events(), [Event::Connect]);
 
 		consumer.close("disconnected", Bytes { sent: 7, received: 11 });
@@ -1052,9 +1061,15 @@ mod tests {
 			}
 		}
 
-		let garbage = server(Log::default(), |_| ResponseTemplate::new(200).set_body_string("nope")).await;
-		let err = client(&garbage).connect(request()).await.unwrap_err();
-		assert!(matches!(err, Error::Unavailable(_)), "{err}");
+		// A grant the relay cannot read is the server's fault and final, not an outage.
+		for body in ["nope", r#"{"publish":["**"],"publish_rate":8000}"#] {
+			let unreadable = server(Log::default(), move |_| {
+				ResponseTemplate::new(200).set_body_string(body)
+			})
+			.await;
+			let err = client(&unreadable).connect(request()).await.unwrap_err();
+			assert!(matches!(err, Error::InvalidGrant(_)), "{body}: {err}");
+		}
 
 		let nothing = server(Log::default(), |_| {
 			ResponseTemplate::new(200).set_body_json(Grant::default())
@@ -1064,7 +1079,7 @@ mod tests {
 		assert!(matches!(err, Error::Refused(_)), "{err}");
 	}
 
-	/// A reply of exactly `MAX_REPLY` bytes admits; one byte more is an outage, or a
+	/// A reply of exactly `MAX_REPLY` bytes admits; one byte more is an unreadable grant, or a
 	/// plain refusal on a 403, never read whole.
 	#[tokio::test]
 	async fn replies_are_bounded() {
@@ -1089,7 +1104,7 @@ mod tests {
 		let over = server(Log::default(), move |_| padded(200, &grant, MAX_REPLY + 1)).await;
 		let err = client(&over).connect(request()).await.unwrap_err();
 		assert!(
-			matches!(&err, Error::Unavailable(message) if message.contains("exceeds")),
+			matches!(&err, Error::InvalidGrant(message) if message.contains("exceeds")),
 			"{err}"
 		);
 
@@ -1346,7 +1361,7 @@ mod tests {
 		);
 		assert!(log.revalidates() >= 1, "the outage was answered before expires");
 		assert_eq!(
-			consumer.grant().publish,
+			consumer.grant().publish.path,
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);

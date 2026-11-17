@@ -63,15 +63,6 @@ The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
 
-A video rendition encoded with intra refresh has no keyframes, and its catalog
-`warmup` says how long a decoder takes to clean up after joining. The player
-joins such a rendition that much earlier and decodes from the group start, but
-shows nothing until the warmup has passed, after a join and after each skip.
-An H.264 group opens on a recovery point that is not an IDR, which Chromium's
-WebCodecs refuses unless it counts zero frames, so the player inserts one that
-does before the first slice. Firefox and Safari are untested, and Chromium
-refuses an H.265 group that opens without an IDR.
-
 `el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
 It reads `connecting` until a session could have announced the broadcast: while the
 connection dials, redials, or was refused (`el.connection.error` says why), and until the

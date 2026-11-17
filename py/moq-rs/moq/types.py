@@ -65,6 +65,9 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
+from moq_ffi import (
+    MoqVideoSurface as VideoSurface,
+)
 
 from ._records import (
     Anchor,
@@ -81,9 +84,6 @@ from ._records import (
     Timestamp,
     TrackInfo,
     VideoDecodedFrame,
-    VideoSurface,
-    VideoSurfacePixelBuffer,
-    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
@@ -123,8 +123,6 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoSurface",
-    "VideoSurfacePixelBuffer",
-    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "WebSocketConfig",
 ]

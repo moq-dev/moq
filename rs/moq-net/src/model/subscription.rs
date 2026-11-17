@@ -58,11 +58,19 @@ pub struct Delay {
 	/// The target latency, the playout or jitter-buffer delay held behind the live edge, or
 	/// `None` when the subscriber did not state one.
 	///
-	/// Only a peer whose wire cannot carry it leaves it unstated: moq-lite before 07 and
-	/// moq-transport. A media consumer reads an unstated minimum as zero. The aggregate
-	/// across subscribers is the smallest stated one, so an unstated minimum never pulls it
-	/// to zero, and a relay forwards it upstream as is. A publisher may use it, such as to
-	/// start a cold join that far back; nothing reads it there yet.
+	/// A [`Range::live`] join starts this far behind the live edge: at the newest group that
+	/// began at or before the live edge minus this, so a player's buffer arrives full instead
+	/// of filling in real time. The hop serving it measures from what it holds: in media time
+	/// from the newest frame on a timed track, and by arrival on its own clock on a scale-less
+	/// one. With no such group held it starts at the oldest one, and never fetches upstream for
+	/// more. [`Self::max`] still skips what has gone stale. Any other range, [`Range::oldest`]
+	/// included, and a resumed subscription ignore it, and changing it later moves nothing
+	/// already started.
+	///
+	/// A media consumer reads an unstated minimum as zero. The aggregate across subscribers is
+	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
+	/// back for the reader that buffers most; each reader's own minimum then bounds what it
+	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
 	///
 	/// This is the `Subscriber Min Age` on the moq-lite-07 wire, in milliseconds.
 	pub min: Option<Duration>,
@@ -198,7 +206,7 @@ pub enum Anchor {
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
 	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
-	/// history looks the start up there (see [`Fill::time`](crate::track::Fill::time)),
+	/// history looks the start up there (see [`FillLookup`](crate::track::FillLookup)),
 	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
 	/// reaches back to the oldest group. While no group is held at all it waits for one,
 	/// reading nothing of its range meanwhile. An end includes every group starting at or
@@ -551,7 +559,7 @@ impl Combined {
 			_ => None,
 		};
 		combined.delay.min = match (combined.delay.min, sub.delay.min) {
-			(Some(a), Some(b)) => Some(a.min(b)),
+			(Some(a), Some(b)) => Some(a.max(b)),
 			(a, b) => a.or(b),
 		};
 		combined.ranges.extend_from_slice(&sub.ranges);
@@ -769,7 +777,7 @@ mod tests {
 	/// group exists only the farthest offset resolves, since it is group 0 regardless.
 	#[test]
 	fn relative_starts_resolve_against_the_latest_group() {
-		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, latest, &Contiguous).unwrap().floor();
+		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, None, latest, &Contiguous).unwrap().floor();
 
 		let live = Subscription::default().with_ranges([Range::live()]);
 		assert_eq!(floor(&live, Some(7)), Some(7));

@@ -95,7 +95,7 @@ impl Chain {
 
 		let mut group1 = track.append_next().unwrap();
 		group1.write_frame(group1.at_start(), payload(1, 0)).unwrap();
-		group1.close().unwrap();
+		group1.finish().unwrap();
 		let mut read1 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(read1.start, 1);
 		assert_eq!(
@@ -146,7 +146,7 @@ impl Chain {
 
 	/// The publisher ends the track at group 2 while group 0 is still open.
 	async fn end(&mut self) {
-		self.track.finish_at(track::Position::group(2), None).unwrap();
+		self.track.finish_at(track::Position::group(2)).unwrap();
 		settle().await;
 	}
 
@@ -154,7 +154,7 @@ impl Chain {
 	fn finish_group0(&mut self) {
 		let mut group0 = self.group0.take().expect("finished once");
 		group0.write_frame(group0.at_start(), payload(0, 1)).unwrap();
-		group0.close().unwrap();
+		group0.finish().unwrap();
 	}
 }
 
@@ -209,21 +209,34 @@ async fn a_fetch_after_the_finished_copies_linger_goes_on_the_wire() {
 	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }
 
-/// Pins a hang that `verify/failover/EndedRelay.cfg` finds (`NoSkipWhileHeld`). `E`'s fetch
-/// of the rest of group 0 goes through `B`, which serves it through `A`. The publisher ends
-/// the track, then `A` dies: `B`'s fetch fails, and `B`'s front, whose track ended, splices
-/// no copy from `P` for it though `B` still reaches `P`, so the read waits out the
-/// subscriber's budget. A fix moves the fetch to `P`, so the frame arrives.
+/// `E`'s fetch of the rest of group 0 goes through `B`, which serves it through `A`. The
+/// publisher ends the track, then `A` dies: `B`'s fetch fails, so `B`'s front, whose track
+/// ended, moves it to `P`, which `B` still reaches, and the rest arrives (`NoSkipWhileHeld`
+/// in `verify/failover/FailoverChain.tla` with `Mesh`).
 #[kio::test]
-async fn residual_a_fetch_cannot_move_off_a_dying_route_after_the_end() {
+async fn a_fetch_moves_off_a_dying_route_after_the_end() {
 	let mut chain = Chain::mesh().await;
 	let mut rx = chain.read_on();
 	settle().await;
 	chain.end().await;
 	chain.kill_a().await;
 	chain.finish_group0();
-	assert!(
-		kio::clock::timeout(PATIENCE, rx.next()).await.is_err(),
-		"group 0 continued"
-	);
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
+}
+
+/// [`a_fetch_moves_off_a_dying_route_after_the_end`] with `A` dying only past the linger:
+/// the fetch in flight keeps `B`'s finished copy open, so `B`'s front ends the track, and
+/// starts its linger, only as `A` dies, and the fetch still moves.
+#[kio::test]
+async fn a_fetch_held_past_the_linger_moves_off_a_dying_route() {
+	let mut chain = Chain::mesh().await;
+	let mut rx = chain.read_on();
+	settle().await;
+	chain.end().await;
+	kio::clock::sleep(Duration::from_secs(40)).await;
+	chain.kill_a().await;
+	chain.finish_group0();
+	let frame = kio::clock::timeout(PATIENCE, rx.next()).await.expect("group 0 hung");
+	assert_eq!(frame.unwrap().unwrap(), Some(payload(0, 1)));
 }

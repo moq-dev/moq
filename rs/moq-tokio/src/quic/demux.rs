@@ -172,7 +172,7 @@ impl WebRtc {
 	///
 	/// A datagram sent once the listener has released its socket is lost, as UDP
 	/// allows. Errors are those of the endpoint's own sends: an unreachable destination
-	/// comes back, as [`AsyncUdpSocket::try_send`] describes, and anything else is logged.
+	/// ([`moq_sock::udp::is_unreachable_err`]) comes back, and anything else is logged.
 	#[kio::wrapper]
 	pub fn poll_send(&self, waiter: &kio::Waiter, transmit: &Transmit<'_>) -> Poll<io::Result<()>> {
 		// Any member of a reuseport group answers from the same port.

@@ -1125,6 +1125,11 @@ impl ScriptedSession {
 		self
 	}
 
+	/// Have the peer open one more unidirectional stream, after those already scripted.
+	pub fn push_incoming_uni(&self, script: Vec<u8>) {
+		self.incoming_unis.lock().unwrap().push_back(script);
+	}
+
 	/// Have the peer open one bidirectional stream per script, then go quiet.
 	pub fn with_incoming_bidis(mut self, scripts: Vec<Vec<u8>>) -> Self {
 		self.incoming_bidis = Arc::new(Mutex::new(scripts.into_iter().collect()));
@@ -1174,6 +1179,16 @@ impl ScriptedSession {
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Wakes readers only with [`Self::with_read_wakes`]; otherwise re-poll them manually.
+	/// A stream the peer sends the shared script on.
+	pub fn recv(&self) -> ScriptedRecv {
+		poll::Buffered::new(Script {
+			wake: self.wake.clone(),
+			script: self.script.clone(),
+			close: self.close.clone(),
+			log: self.log.clone(),
+		})
+	}
+
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
 		if let Some(wake) = &self.wake {

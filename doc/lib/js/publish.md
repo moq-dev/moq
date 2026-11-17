@@ -103,7 +103,7 @@ who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
 so `join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts.
 The broadcast declares the longest group among its renditions as the catalog's
-`media.join.interval` when it first lists one, which an HLS or DASH export cuts
+`sync.interval` when it first lists one, which an HLS or DASH export cuts
 its segments on. It stays fixed for the network broadcast, so raising
 `join` later overruns that grid. Size,
 bitrate, and framerate change in place, while a codec or audio format change
@@ -119,7 +119,7 @@ relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
 
 Timestamps are `@moq/clock`'s `now()` since its origin, a `Duration`, so every
-source shares one timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
+source shares one timeline. The catalog's `sync.clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks

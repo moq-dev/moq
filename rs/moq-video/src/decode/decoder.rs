@@ -87,16 +87,13 @@ pub struct Config {
 	/// [`Frame::resize`](crate::Frame::resize) to the rest; the hint only lets a
 	/// decoder that can make that a no-op do so.
 	pub scale_hint: Option<Size>,
-	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
-	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
-	/// without a copy. A named node is used even when it fails to open.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
-	/// The V4L2 M2M decoder node, such as `/dev/video10`. `None` searches every
-	/// node for one that decodes H.264, which a driver whose format enumeration
-	/// is wrong can defeat.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2: Option<std::path::PathBuf>,
+	/// The hardware the decoder opens. [`Device::Auto`](crate::Device::Auto)
+	/// (the default) picks one: VA-API the first render node that encodes,
+	/// decodes, and scales, so a DMA-BUF moves between them without a copy;
+	/// NVDEC the first CUDA device; V4L2 the first node that decodes H.264,
+	/// which a driver whose format enumeration is wrong can defeat. Name the
+	/// encoder's device so a frame passes to it without a copy.
+	pub device: crate::Device,
 }
 
 impl Config {

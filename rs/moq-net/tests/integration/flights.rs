@@ -55,7 +55,7 @@ fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 /// archive has nothing newer yet, so only wait for that.
 async fn write_paced(
 	group: &mut group::Producer,
-	fill: &track::Fill,
+	fill: &track::FillGroups,
 	demand: &mut group::Demand,
 	payload: Option<Bytes>,
 ) -> bool {
@@ -83,7 +83,7 @@ async fn write_paced(
 /// whole group, so each fill finishes after its last frame.
 fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU64>, finish: bool) {
 	drop(kio::clock::sim::spawn(async move {
-		while let Ok(fill) = requests.requested_fill().await {
+		while let Ok(track::Fill::Groups(fill)) = requests.requested_fill().await {
 			let start = fill.start();
 			let mut group = fill.accept(start.group, None).expect("accept");
 			let mut demand = group.demand();
@@ -92,7 +92,7 @@ fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU6
 				for index in start.frame as u32.. {
 					let payload = (index < FRAMES).then(|| numbered(index));
 					if payload.is_none() && finish {
-						group.close().expect("finish");
+						group.finish().expect("finish");
 						break;
 					}
 					if !write_paced(&mut group, &fill, &mut demand, payload).await {
@@ -170,7 +170,7 @@ async fn moq_transport_relays_a_cold_finished_group() {
 			.write_frame(moq_net::Timestamp::unscaled(group.start), numbered(index))
 			.unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut options = MockConnectOptions::new(version_parsed);
 	options.server_publish = Some(publisher.consume());
@@ -271,7 +271,7 @@ async fn chain(version: &str, replay: Replay) {
 	}
 
 	if replay == Replay::Finished {
-		live.close().unwrap();
+		live.finish().unwrap();
 		assert!(
 			next_end(&mut reader, version).await,
 			"{version}: the live reader sees the end"

@@ -5,9 +5,20 @@ This directory contains two packages:
 - `moq_ffi` is the generated UniFFI layer. Its version tracks `rs/moq-ffi`.
 - `moq` is the independently-versioned ergonomic API applications should use.
 
+Dart is experimental: the API may change in any release. `moq` keeps its own
+0.x version instead of the shared minor (`version.json`), until a Dart client
+joins the interop suite or the iOS library has run in an iOS app.
+
+The generated layer, `moq_ffi/lib/src/moq.dart` and `uniffi_runtime.dart`, is
+not in git. `just dart generate` writes it; run that before a bare
+`dart analyze` or `dart test` in a fresh checkout, and again after changing
+`rs/moq-ffi` or switching revisions, since the hook rebuilds the native library
+but not the bindings. `just dart check` always regenerates.
+
 Run `just dart check` from the repository root. The check rebuilds
-`moq-ffi` in the dev profile, verifies the generated source,
-analyzes and tests both packages, and validates their publish layout.
+`moq-ffi` in the dev profile, generates the bindings,
+analyzes and tests both packages, and validates their publish layout,
+including that the `moq_ffi` archive holds the generated files.
 
 `just dart bench` pins an optimized native library through the hook's existing
 `library` user define. Published packages download optimized release libraries.
@@ -25,19 +36,17 @@ WebAssembly. Browser applications should use the TypeScript packages.
 Bindings use [`kixelated/uniffi-dart`](https://github.com/kixelated/uniffi-dart)
 tag `v0.3.1-kixelated.7+v0.32.0`, which carries the UniFFI 0.32, library-mode CLI,
 disposed-argument, and allocation-failure ownership changes. The Nix development shell supplies that exact
-revision plus the `nix/uniffi-dart-*.patch` fixes. Without Nix, install it
-without those fixes:
-
-```bash
-cargo install --git https://github.com/kixelated/uniffi-dart \
-  --tag 'v0.3.1-kixelated.7+v0.32.0' --features binary uniffi-dart
-```
+revision plus the `nix/uniffi-dart-*.patch` fixes, and generation needs them:
+the wrapper relies on `UniffiRustFuture`, which the cancellation patch adds. Run
+`just dart generate` inside `nix develop`. A plain `cargo install` of the
+generator lacks the patches and produces bindings the wrapper cannot compile
+against, so it is not a supported way to generate.
 
 ## Releases
 
 The raw package follows `moq-ffi-v{{version}}` tags. Its workflow uploads one
-checksum-verified native library per supported target before publishing
-`moq_ffi`. The wrapper follows `moq-dart-v{{version}}` tags and publishes
+checksum-verified native library per supported target, generates the bindings,
+and publishes `moq_ffi` with them. The wrapper follows `moq-dart-v{{version}}` tags and publishes
 `moq` independently.
 
 Pub.dev requires the first version of each new package to be uploaded manually.
