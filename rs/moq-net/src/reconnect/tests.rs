@@ -168,7 +168,7 @@ async fn drive<A: Target>(
 							true => goaway::Goaway::new(),
 							false => goaway::Goaway::redirect(uri.clone()),
 						};
-						server.drain().send(goaway).unwrap();
+						server.goaway(goaway).unwrap();
 						run.servers.push(server);
 					}
 					_ => run.servers.push(server),
@@ -396,7 +396,7 @@ async fn a_healthy_session_establishes_the_policy() {
 /// then exits, the replacement's close and the failed walks after it retry rather than end.
 #[kio::test]
 async fn a_goaway_before_healthy_establishes_the_policy() {
-	for restart in [Restart::Redial, Restart::Wait] {
+	for restart in [Restart::Redial, Restart::Handoff] {
 		let peer = url("tcp://peer:1/");
 		let mut config = config(INITIAL, None);
 		config.restart = restart;
@@ -407,8 +407,9 @@ async fn a_goaway_before_healthy_establishes_the_policy() {
 		})
 		.await;
 
-		run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
-		// `Redial` follows it to a replacement on the draining relay; `Wait` serves on.
+		run.servers[0].goaway(goaway::Goaway::new()).unwrap();
+		// `Redial` follows it to a replacement on the draining relay; `Handoff` serves on,
+		// since the session is not yet healthy.
 		if restart == Restart::Redial {
 			drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
 				run.accepts.len() == 2
@@ -750,10 +751,7 @@ async fn a_healthy_goaway_hands_over_to_the_redirect() {
 
 	// Past the healthy bar, the GOAWAY is a handover, not a failure.
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0]
-		.drain()
-		.send(goaway::Goaway::redirect(b.to_string()))
-		.unwrap();
+	run.servers[0].goaway(goaway::Goaway::redirect(b.to_string())).unwrap();
 	let peers = [(a.clone(), Peer::Serve), (b.clone(), Peer::Serve)];
 	let migrated = kio::clock::now();
 	drive(&mut machine, &peers, &mut run, |run| run.events.contains(&"retired")).await;
@@ -798,8 +796,7 @@ async fn the_handover_takes_the_earlier_deadline() {
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	run.servers[0]
-		.drain()
-		.send(goaway::Goaway::new().with_timeout(Duration::from_secs(3600)))
+		.goaway(goaway::Goaway::new().with_timeout(Some(Duration::from_secs(3600))))
 		.unwrap();
 	let drained = kio::clock::now();
 	drive(&mut machine, &[(peer, Peer::Hang)], &mut run, |run| {
@@ -813,7 +810,7 @@ async fn the_handover_takes_the_earlier_deadline() {
 		"a longer peer deadline must not extend our cap"
 	);
 
-	let goaway = Goaway::default();
+	let goaway = Handover::default();
 	assert_eq!(goaway.handover(None), Duration::from_secs(10), "no deadline: ours");
 	assert_eq!(
 		goaway.handover(Some(Duration::from_secs(3))),
@@ -838,7 +835,7 @@ async fn a_connect_cancels_the_offline_a_retirement_queued() {
 	.await;
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	run.servers[0].goaway(goaway::Goaway::new()).unwrap();
 	assert!(matches!(next(&mut machine).await, Action::Migrating));
 	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
 	// The dial outlasts the handover, so the predecessor retires with nothing serving.
@@ -856,44 +853,11 @@ async fn a_connect_cancels_the_offline_a_retirement_queued() {
 	assert!(machine.session().is_some());
 }
 
-/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps the
-/// session: no migration and no redial. Its close then reconnects like any drop.
-#[kio::test]
-async fn a_waited_restart_redials_only_once_the_session_closes() {
-	let peer = url("tcp://peer:1/");
-	let mut config = config(INITIAL, Some(Duration::from_secs(1)));
-	config.restart = Restart::Wait;
-	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
-	let mut run = Run::default();
-	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
-		!run.accepts.is_empty()
-	})
-	.await;
-
-	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
-	kio::clock::sim::idle().await;
-	assert!(
-		matches!(
-			machine.poll(kio::clock::now(), &kio::Waiter::noop()),
-			Action::Wait(None)
-		),
-		"the policy left the session"
-	);
-
-	run.servers.remove(0).abort(Error::GoawayTimeout);
-	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
-		run.accepts.len() == 2
-	})
-	.await;
-	assert_eq!(run.events, ["offline"]);
-}
-
 /// A one-shot policy ends cleanly on a GOAWAY naming no URI, as on any other, under
 /// every restart policy and whether or not the session was healthy.
 #[kio::test]
 async fn a_one_shot_policy_ends_on_a_restart() {
-	for restart in [Restart::Redial, Restart::Wait, Restart::Handoff] {
+	for restart in [Restart::Redial, Restart::Handoff] {
 		let peer = url("tcp://peer:1/");
 		let mut config = config(INITIAL, Some(Duration::from_secs(1)));
 		config.restart = restart;
@@ -940,7 +904,7 @@ async fn a_handoff_restart_moves_to_a_replacement() {
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
 	let goaway = kio::clock::now();
-	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	run.servers[0].goaway(goaway::Goaway::new()).unwrap();
 	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
 		run.accepts.len() == 2
 	})
@@ -968,7 +932,7 @@ async fn a_handoff_restart_redials_once_until_the_session_closes() {
 	.await;
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	run.servers[0].goaway(goaway::Goaway::new()).unwrap();
 	drive(
 		&mut machine,
 		&[(peer.clone(), Peer::Goaway(String::new()))],
@@ -1096,8 +1060,7 @@ async fn a_peer_goaway_wins_over_a_probe() {
 	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
 	probe(&mut machine).await;
 	fallback_server
-		.drain()
-		.send(goaway::Goaway::new())
+		.goaway(goaway::Goaway::new())
 		.expect("the fallback peer sends a GOAWAY");
 	kio::clock::sim::idle().await;
 	assert!(
@@ -1122,8 +1085,7 @@ async fn a_redirect_after_a_probe_got_through_is_followed() {
 
 	let elsewhere = url("https://peer:2/");
 	fallback_server
-		.drain()
-		.send(goaway::Goaway::redirect(elsewhere.to_string()))
+		.goaway(goaway::Goaway::redirect(elsewhere.to_string()))
 		.expect("the fallback peer sends a GOAWAY");
 	assert!(matches!(next(&mut machine).await, Action::Abandon));
 	let Action::Dial(attempt) = next(&mut machine).await else {
@@ -1147,8 +1109,7 @@ async fn a_fallback_peer_redirect_establishes_the_policy() {
 	assert!(matches!(next(&mut machine).await, Action::Migrating));
 
 	fallback_server
-		.drain()
-		.send(goaway::Goaway::redirect(url("https://peer:2/").to_string()))
+		.goaway(goaway::Goaway::redirect(url("https://peer:2/").to_string()))
 		.expect("the fallback peer sends a GOAWAY");
 	assert!(matches!(next(&mut machine).await, Action::Abandon));
 	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
@@ -1173,8 +1134,7 @@ async fn a_redirect_during_the_backoff_after_a_probe_is_followed() {
 
 	let elsewhere = url("https://peer:2/");
 	fallback_server
-		.drain()
-		.send(goaway::Goaway::redirect(elsewhere.to_string()))
+		.goaway(goaway::Goaway::redirect(elsewhere.to_string()))
 		.expect("the fallback peer sends a GOAWAY");
 	let Action::Dial(attempt) = next(&mut machine).await else {
 		panic!("expected a redial");
@@ -1254,7 +1214,7 @@ async fn a_dropped_replacement_migrates_back_to_the_serving_predecessor() {
 	machine.connected(kio::clock::now(), client);
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	server.drain().send(goaway::Goaway::redirect(b.to_string())).unwrap();
+	server.goaway(goaway::Goaway::redirect(b.to_string())).unwrap();
 	assert!(matches!(next(&mut machine).await, Action::Migrating));
 	let Action::Dial(attempt) = next(&mut machine).await else {
 		panic!("expected the redirect's dial");
@@ -1300,7 +1260,7 @@ async fn a_dropped_replacement_goes_offline_over_a_closing_predecessor() {
 	.await;
 
 	kio::clock::sleep(Duration::from_secs(2)).await;
-	run.servers[0].drain().send(goaway::Goaway::new()).unwrap();
+	run.servers[0].goaway(goaway::Goaway::new()).unwrap();
 	assert!(matches!(next(&mut machine).await, Action::Migrating));
 	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
 	let (replacement, replacement_server) = handshake().await;
@@ -1477,6 +1437,14 @@ fn each_pacing_knob_turns_off() {
 	}
 	assert_eq!(delay, defaults.initial * 1024, "no max leaves the delay uncapped");
 	assert_eq!(pacing.settled(), defaults.healthy);
+
+	// Zero is a real cap, not "uncapped": every redial goes at once.
+	let pacing = Pacing::new(&Backoff {
+		max: Some(Duration::ZERO),
+		..defaults
+	});
+	assert_eq!(pacing.initial, Duration::ZERO);
+	assert_eq!(pacing.next(defaults.initial), Duration::ZERO, "zero max never waits");
 
 	let pacing = Pacing::new(&Backoff {
 		multiplier: 0,

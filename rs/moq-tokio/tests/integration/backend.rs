@@ -857,7 +857,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
 
-	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	first.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("the replacement never dialed")
@@ -978,7 +978,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
 
-	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	first.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 
 	let (err, elapsed) = tokio::task::spawn_blocking(move || client.join())
 		.await

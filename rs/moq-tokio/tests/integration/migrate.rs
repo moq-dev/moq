@@ -198,7 +198,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 	read(&mut upstream, GROUPS, &mut up).await;
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
 	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
@@ -233,7 +233,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
 	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
@@ -275,7 +275,7 @@ async fn a_replacement_does_not_check_what_its_predecessor_learned() {
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	let replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never redialed")

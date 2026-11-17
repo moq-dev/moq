@@ -388,8 +388,10 @@ typealias ConnectionState = uniffi.moq.MoqConnectionState
 
 /**
  * Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
- * Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
- * session, such as a refused credential, ends the connection with its error rather than retrying.
+ * A null field keeps its default, zero means zero (retry at once, or give up at the first failure),
+ * and `maxUnlimited` lifts the ceiling. Until a session has stayed up past 1s or been drained by a
+ * GOAWAY, a failed dial or a closed session, such as a refused credential, ends the connection with
+ * its error rather than retrying.
  */
 typealias Backoff = uniffi.moq.MoqBackoff
 

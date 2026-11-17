@@ -1585,11 +1585,13 @@ pub struct moq_client_config {
 	pub backoff_multiplier: u32,
 	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
-	/// The maximum reconnect delay in microseconds; zero leaves it uncapped.
+	/// The maximum reconnect delay in microseconds; zero retries at once. Absent caps it
+	/// at 5s, and `backoff_max_unlimited` lifts the cap.
 	pub backoff_max_us: u64,
 	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
-	/// How long reconnection keeps trying before giving up for good; zero retries forever.
+	/// How long reconnection keeps trying before giving up for good; zero gives up at the
+	/// first failure. Absent never gives up.
 	pub backoff_timeout_us: u64,
 	/// Whether `backoff_timeout_us` is present.
 	pub has_backoff_timeout: bool,
@@ -1649,6 +1651,10 @@ pub struct moq_client_config {
 	/// Dial once instead of redialing with backoff whenever the transport drops; the
 	/// transport's close then ends the session. False redials.
 	pub once: bool,
+
+	/// Lift the cap on the reconnect delay, which then grows without bound. Refused
+	/// with `has_backoff_max`.
+	pub backoff_max_unlimited: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1694,10 +1700,17 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max().unwrap_or_default());
-		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout().unwrap_or_default());
-		dst.has_backoff_timeout = true;
+		match config.connect.backoff.max() {
+			Some(max) => {
+				dst.backoff_max_us = micros(max);
+				dst.has_backoff_max = true;
+			}
+			None => dst.backoff_max_unlimited = true,
+		}
+		if let Some(timeout) = config.connect.backoff.timeout() {
+			dst.backoff_timeout_us = micros(timeout);
+			dst.has_backoff_timeout = true;
+		}
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;

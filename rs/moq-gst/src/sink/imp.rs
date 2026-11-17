@@ -2665,11 +2665,7 @@ mod tests {
 		sink.set_property("broadcast", "test");
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let config = super::super::session::connect_config(&resolved);
-		assert_eq!(
-			config.backoff.timeout,
-			Some((Duration::ZERO).into()),
-			"zero is unlimited"
-		);
+		assert_eq!(config.backoff.timeout, Some(moq_tokio::cli::Bound::NONE), "no give-up");
 	}
 
 	#[test]

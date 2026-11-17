@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 		output.next_line().await?.as_deref() == Some("first group"),
 		"JS did not read first group"
 	);
-	session.drain().send(moq_net::goaway::Goaway::redirect(&second_url))?;
+	session.goaway(moq_net::goaway::Goaway::redirect(&second_url))?;
 	let replacement = second.accept().await.context("replacement accept")?.ok().await?;
 	ensure!(replacement.version() == version, "wrong replacement negotiated version");
 	// First exercise the replacement while the drained route still serves. A JS
