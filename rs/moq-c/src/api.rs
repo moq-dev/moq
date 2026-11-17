@@ -4489,7 +4489,8 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 	})
 }
 
-/// Create a catalog consumer for a broadcast.
+/// Create a catalog consumer for a broadcast, for a reader playing `delay_us` microseconds
+/// behind the live edge.
 ///
 /// `on_catalog` is invoked with a positive catalog ID for each catalog update
 /// (usable to query video/audio track information), then exactly once more with
@@ -4498,6 +4499,12 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 /// touched again, so release `user_data` there. The terminal callback fires even
 /// after [moq_consume_catalog_cancel].
 ///
+/// Each update takes effect at its [moq_consume_catalog_timestamp]. A zero `delay_us` delivers
+/// only the newest catalog, for a reader that applies each on arrival. A reader that holds each
+/// update until its media reaches the update's timestamp passes its playout delay instead, and
+/// receives in order every update it may still need: one stays deliverable until it falls
+/// `delay_us` behind the live edge.
+///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4505,13 +4512,38 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
+	delay_us: u64,
 	on_catalog: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
+		let delay = std::time::Duration::from_micros(delay_us);
 		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog)? };
-		State::lock().consume.catalog(broadcast, on_catalog)
+		State::lock().consume.catalog(broadcast, delay, on_catalog)
+	})
+}
+
+/// Query the media timestamp a catalog snapshot takes effect at.
+///
+/// A reader holds a snapshot it receives before its media reaches this time, and applies one
+/// received late, or the first it receives, at once. On a scale-less catalog track `has_scale` is
+/// false and `value` is a group key with no time, so the snapshot applies on arrival.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_timestamp] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_catalog_timestamp(catalog: u32, dst: *mut moq_timestamp) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		let timestamp = State::lock().consume.catalog_timestamp(catalog)?;
+		unsafe { dst.write(timestamp) };
+		Ok(())
 	})
 }
 
