@@ -286,11 +286,12 @@ impl Session {
 						tracing::warn!(cap = cap.rate.as_bps(), "ingest exceeded its cap plus burst; closing");
 						return Err(Error::RateLimited { cap: cap.rate });
 					}
+					// Ordered on the line's own RTP time: the session timeline keeps each line
+					// strictly increasing, which would hide a late frame.
 					let media_us = media_time_to_micros(&data.time);
-					let timestamp_us = self.ingest_clock.normalize(data.mid, arrival, media_us);
 					match self
 						.ingest_order
-						.admit(data.mid, data.is_keyframe(), timestamp_us, Instant::now())
+						.admit(data.mid, data.is_keyframe(), media_us, Instant::now())
 					{
 						Admit::Forward => {}
 						Admit::Drop => return Ok(()),
@@ -303,6 +304,7 @@ impl Session {
 							return Ok(());
 						}
 					}
+					let timestamp_us = self.ingest_clock.normalize(data.mid, arrival, media_us);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -504,7 +506,8 @@ impl IngestOrder {
 		self.lines.insert(mid, line);
 	}
 
-	/// Whether a frame on `mid` at `timestamp_us` reaches the sink, and whether to ask for a keyframe.
+	/// Whether a frame on `mid` at its line's RTP time `timestamp_us` reaches the sink, and whether
+	/// to ask for a keyframe.
 	fn admit(&mut self, mid: str0m::media::Mid, keyframe: bool, timestamp_us: u64, now: Instant) -> Admit {
 		let Some(line) = self.lines.get_mut(&mid) else {
 			return Admit::Forward;

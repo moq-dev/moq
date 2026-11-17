@@ -62,7 +62,13 @@ impl Client {
 		broadcast: &moq_net::broadcast::Producer,
 		catalog: &moq_mux::catalog::Producer,
 	) -> crate::Result<()> {
-		whep::dial(self, url, broadcast.clone(), catalog.clone()).await
+		let result = whep::dial(self, url, broadcast.clone(), catalog.clone()).await;
+		// A dial that fails before its session runs leaves the catalog open; a session already
+		// aborted it with its cause, which this keeps.
+		if let Err(err) = &result {
+			catalog.clone().abort(moq_net::Error::Transport(err.to_string()));
+		}
+		result
 	}
 
 	/// `client publish`: push the broadcast `source` resolved to a remote WHIP endpoint,
@@ -99,6 +105,10 @@ mod tests {
 			.expect_err("dial a closed port");
 
 		assert!(matches!(err, crate::Error::Http(_)), "unexpected error: {err}");
+		assert!(
+			catalog.consume().unwrap().next().await.is_err(),
+			"the failed dial aborts the catalog"
+		);
 		let printed = format!("{err} {err:?}");
 		for secret in ["jwt", "secret", "user:pass"] {
 			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
