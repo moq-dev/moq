@@ -190,4 +190,3 @@ TRACKS_ADD change, and the Padding stream and datagram types go.
 - [YIELDED deferred](/quest/m2/yield-defer.md) - removes continuations, the last use of GROUP's `Frame Start`
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - reads the spans SUBSCRIBE_DROP names
 - [Refresh a track](/quest/m2/refresh-interval.md) - raises the `Wanted Group` this turns into a start time
-- [A cold join reaches back](/quest/m2/min-age-join.md) - gives SUBSCRIBE's `Subscriber Min Age` its reader

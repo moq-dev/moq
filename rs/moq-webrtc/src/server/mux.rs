@@ -19,7 +19,6 @@
 //! (session ended) evicts the address-cache entry; the ufrag entry is removed by
 //! the [`Registration`] guard the accept path holds for the session's lifetime.
 
-use crate::vendor::str0m;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

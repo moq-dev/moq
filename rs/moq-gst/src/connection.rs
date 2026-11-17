@@ -113,7 +113,7 @@ impl Settings {
 			.collect::<anyhow::Result<_>>()?;
 		connect.websocket.enabled = Some(self.websocket_enabled);
 		connect.tls.insecure = Some(self.tls_disable_verify);
-		connect.backoff.timeout = Some(Duration::ZERO.into());
+		connect.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.idle_timeout = self.quic_idle_timeout.map(Into::into);
 		quic.keep_alive = self.quic_keep_alive.map(Into::into);
@@ -194,7 +194,7 @@ mod tests {
 			["moq-transport-18".parse().unwrap(), "moq-lite-06".parse().unwrap()]
 		);
 		assert_eq!(connect.tls.insecure, Some(true));
-		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO.into()));
+		assert_eq!(connect.backoff.timeout, Some(moq_tokio::cli::Bound::NONE));
 		let quic = quic.resolve();
 		assert_eq!(quic.idle_timeout, Some(Duration::from_secs(15)));
 		assert_eq!(quic.keep_alive, None);

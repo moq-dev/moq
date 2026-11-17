@@ -19,6 +19,7 @@ import (
 	stdjson "encoding/json"
 	"fmt"
 	"iter"
+	"time"
 
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
@@ -90,6 +91,15 @@ func (p *SnapshotProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (p *SnapshotProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
+}
+
 // Finish closes the snapshot track.
 func (p *SnapshotProducer) Finish() error {
 	return p.inner.Finish()
@@ -130,6 +140,15 @@ func (p *StreamProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (p *StreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
+}
+
 // Finish closes the stream track.
 func (p *StreamProducer) Finish() error {
 	return p.inner.Finish()
@@ -161,13 +180,22 @@ type SnapshotConsumerOptions struct {
 	// Priority is the subscription's delivery priority, higher first, as
 	// moq.Subscription.Priority.
 	Priority int8
+	// Delay is the reader's playout delay behind the live edge, the subscription's
+	// Delay.Min and Delay.Max. Zero skips a snapshot the moment a newer one arrives. A
+	// reader that holds each snapshot until media reaches its timestamp sets its delay, so
+	// a superseded snapshot it may still need stays deliverable that long and Next yields it.
+	Delay time.Duration
 }
 
 // NewSnapshotConsumer subscribes to the track named name on broadcast and reads it as a
-// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max
-// and the options' priority; a read waits for it to resolve and fails if it cannot.
+// lossy latest-value JSON track. The consumer owns its subscription, at the options'
+// priority and delay; a read waits for it to resolve and fails if it cannot.
 func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string, options SnapshotConsumerOptions) (*SnapshotConsumer, error) {
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, options.Priority)
+	if err := bridge.NonNegative(&options.Delay, "snapshot delay"); err != nil {
+		return nil, err
+	}
+	config := ffi.MoqJsonSnapshotConsumerConfig{Priority: options.Priority, Delay: options.Delay}
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, &config)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +308,15 @@ func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 		return nil, err
 	}
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (p *WindowProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the window track.

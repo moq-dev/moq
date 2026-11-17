@@ -99,8 +99,8 @@ Decided 2026-10-25 (maintainer), from the spike:
 Decided 2026-11-02 (maintainer): removing the HLS records, the per-rendition
 `hls` field, and A/V segment alignment moved to m0 as the HLS grid,
 landed in [moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652), which also added
-`media.join.interval`, moved `clock` to `media.clock` (both renamed by
-[the sync section](/quest/m2/hang04/sync.md)), and settled the
+the join interval and moved `clock` under the root `media` section, since
+flattened into `sync.interval` and `sync.clock`, and settled the
 segmentation rules decided here on 2026-10-27/28. It places groups by their
 first frame's pts; this quest swaps that for the group start, without
 changing the segment numbers.
@@ -139,7 +139,5 @@ them.
 
 ## Related
 
-- [Writing a group needs no invented start, and its end has one word](/quest/m2/group-api.md) - names the call that declares a group's end
-- [The catalog's clock and join interval live under a sync section](/quest/m2/hang04/sync.md) - renames the interval the HLS grid reads
 - [The archive format ships as version 2](/quest/m2/archive-v2.md) - freezes the keys this made starts
 - [A group's frames present before the next group starts](/quest/m3/groups-never-overlap.md) - tightens the group rule a declared end relies on

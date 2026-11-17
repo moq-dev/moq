@@ -65,7 +65,7 @@ async fn a_segmented_frame_crosses_whole() {
 			}
 			group = frame.finish().unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

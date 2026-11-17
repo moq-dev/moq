@@ -64,7 +64,3 @@ description and a passthrough track is refused if they name the same track.
 
 Public API: breaking. Rust `hang::catalog::M2ts` and `Catalog::m2ts` move to
 moq-mux. Wire: the unpublished `m2ts` root section of the catalog.
-
-## Related
-
-- [One rule refuses a mis-shaped catalog section](/quest/m2/hang04/shape.md) - `m2ts` is one of the root keys its rule would otherwise cover

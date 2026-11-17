@@ -607,6 +607,8 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 		stopFirst();
 		await advance(100);
 		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		// Past the healthy bar, so the close reconnects rather than stopping the URL.
+		await advance(1_000);
 		pairs[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
 		expect(pairs).toHaveLength(2);
@@ -674,6 +676,8 @@ test("pooled viewers send their summed target to an Increase peer across a recon
 		expect(peers).toHaveLength(1);
 		expect(peers[0].targets.at(-1)).toBe(5_000_000);
 
+		// Past the healthy bar, so the close reconnects rather than stopping the URL.
+		await advance(1_000);
 		peers[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
 		expect(peers).toHaveLength(2);

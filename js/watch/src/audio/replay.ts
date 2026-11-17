@@ -289,13 +289,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	await settle();
 
 	let delay = sync.out.delay.peek();
-	const terms = () => ({
-		bound: bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch }).asMillis(),
-	});
+	const skip = () => bound({ delay, maxDelay: sync.out.maxDelay.peek(), stretch });
+	const terms = () => ({ bound: skip().asMillis() });
 	// The decode gate, and the worklet's ring on the floor it sets, the way `AudioBuffer` drives both.
-	const gate = new Backpressure(rate, buffered, delay);
+	const gate = new Backpressure(rate, buffered, delay, skip());
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor), ...terms() });
-	const observe = () => gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled);
+	// The ring's playhead is where the shared clock stands at the end of the quantum it read.
+	const observe = () =>
+		gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled, sync.now()?.asMicros());
 
 	// Arrived but not yet decoded media, read or still in the consumer, is what covers the part of the
 	// target held encoded before playback starts.
@@ -412,7 +413,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			if (!resolved.eq(delay)) {
 				delay = resolved;
 				observe();
-				gate.setLatency(delay);
+				gate.setLatency(delay, skip());
 				ring.setLatency(millis(rate, gate.floor), terms());
 			}
 

@@ -66,8 +66,8 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let (store, root) = open_store(&args.store)?;
 
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
-	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix)?;
+	let hidden = prefix.parts().any(|segment| segment.starts_with('.'));
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	// A follower per listed path, reporting each instance that serves it, stopped with the export.
 	let mut following = tokio::task::JoinSet::new();
@@ -267,12 +267,15 @@ async fn record(
 
 /// The key prefix one stream records under: its path's segments, then `@<instance>`.
 ///
-/// A path segment's key never starts with `@`, since a leading one is percent-encoded like `%`
-/// always is, so no stream's prefix lies inside another's, whatever paths a publisher picks.
+/// Each key segment is a path segment's content, percent-encoded, so one holding a `/` stays
+/// one segment. A path segment's key never starts with `@`, since a leading one is
+/// percent-encoded like `%` always is, so no stream's prefix lies inside another's, whatever
+/// paths a publisher picks.
 fn key(root: &Path, (path, instance): &Instance) -> anyhow::Result<Path> {
 	let mut key = root.clone();
-	for segment in path.as_str().split('/').filter(|segment| !segment.is_empty()) {
-		let part = PathPart::from(segment);
+	for segment in path.parts() {
+		let segment = moq_net::path::unescape(segment);
+		let part = PathPart::from(segment.as_ref());
 		key = match part.as_ref().strip_prefix('@') {
 			Some(rest) => key.join(PathPart::parse(&format!("%40{rest}"))?),
 			None => key.join(part),
@@ -410,7 +413,7 @@ mod tests {
 			let track = broadcast.broadcast().create_track("video", info.clone()).unwrap();
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			broadcast.announce().unwrap();
 			instances.push(broadcast.instance());
 			broadcasts.push((broadcast, track));
@@ -499,7 +502,7 @@ mod tests {
 			let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let _video = video.finish().unwrap();
 		let recording =
@@ -608,6 +611,16 @@ mod tests {
 				assert_eq!(reopened, key);
 			}
 		}
+	}
+
+	/// A path segment holding a `/` or `\` keys as one segment of its content.
+	#[test]
+	fn an_escaped_segment_keys_one_segment() {
+		let instance = moq_net::Instance::random();
+		let pinned = (moq_net::Path::from_static(r"live/a\/b\\c"), instance.clone());
+		let key = key(&Path::from("rec"), &pinned).unwrap();
+		assert_eq!(key.as_ref(), format!("rec/live/a%2Fb%5Cc/@{instance}"));
+		assert_eq!(key.parts().count(), 4);
 	}
 
 	/// A path segment's key never starts with `@`, so a path that spells out another instance's

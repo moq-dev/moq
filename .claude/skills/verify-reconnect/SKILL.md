@@ -18,18 +18,17 @@ Each rule is an INVARIANT; the harm says why it matters. All but `NoOrphan`, `Re
 | `OfflineMeansNothingServes` | Disconnected is reported only when no predecessor still serves (`Action::Offline`: "nothing serves anymore"); one closing gracefully carries nothing and takes no new work. | An app waiting on `established` stalls, and the UI says disconnected, while a session still carries its media. |
 | `NoOrphan` | Until the policy is done, every open session is the live one or the predecessor. | A transport and the peer's state stay open with nothing able to reach them. |
 | `PresenceBalanced` | `sessions_started - sessions_ended` is 1 while connected and 0 otherwise. | Presence counts drift on every migration. |
-| `FirstWalkFailsFast` | Nothing backs off before a session has been established: a failed first walk ends the policy (a refusal of since-replaced tokens is the exception, and tokens are not modeled). | A setup mistake (an untrusted certificate, no version in common) retries forever instead of surfacing. |
+| `FirstWalkFailsFast` | Until a session has stayed up past the healthy bar or got a GOAWAY, which no refusal sends, no failed dial or closed session backs off: either ends the policy. | A setup mistake (an untrusted certificate, no version in common) or a refused credential retries forever instead of surfacing. |
 | `RedirectFollowed` | A dial never goes elsewhere than a redirect, named to a session the policy still holds, that the policy never acted on. | The replacement lands back on the node that is leaving. |
 
 ## Run
 
 ```sh
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla
-quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartWait.cfg
 quest gate just rs tla moq-net/verify/reconnect/Handover.tla -config rs/moq-net/verify/reconnect/RestartHandoff.cfg
 ```
 
-The first checks every rule over four sessions: about 1.4M distinct states, under a minute. The second and third check the same rules under `Restart::Wait` and `Restart::Handoff` over three sessions: about 300k states each. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
+The first checks every rule over four sessions: about 1.5M distinct states, under a minute. The second checks the same rules under `Restart::Handoff` over three sessions: about 330k states. All pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. The `VIEW` counts states that differ only in what nothing reads again as one: a closed session's details unless it is still the live one, a deadline of a phase the policy left, and where no dial is headed.
 
 ## Open findings
 
@@ -37,22 +36,22 @@ None.
 
 ## Reading a failure
 
-Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the policy with the helpers in `reconnect/tests.rs` (`next`, `handshake`, `on_fallback`, `probe`, `connected`, `failed`, `probed`, a server's `drain().send(..)`), one call per step, on the simulated clock. A path through `Shared` needs `moq-tokio`'s connection tests instead.
+Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on the policy with the helpers in `reconnect/tests.rs` (`next`, `handshake`, `on_fallback`, `probe`, `connected`, `failed`, `probed`, a server's `goaway(..)`), one call per step, on the simulated clock. A path through `Shared` needs `moq-tokio`'s connection tests instead.
 
 ## Coverage
 
-Sync commit: `c3682eae32c19362b99292d2a1c2ddb80679dd2f`. Run `git log c3682eae32.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `27b46ef35bdf284ba61158521723768436cd8460`. Run `git log 27b46ef35b.. -- rs/moq-net/src/reconnect.rs rs/moq-net/src/reconnect/ rs/moq-tokio/src/connection.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/reconnect.rs` `Reconnect::poll` (queue, predecessor, phases), `follow` | `Pop`, `Retire`, `IdleClose`, `FollowPred`, `Dial`, `Abandon`, `BackoffEnds`, `LiveEnds`, `ProbeAsk`, `ProbeAbandon` |
-| `rs/moq-net/src/reconnect.rs` `established`, and `walk_failed` ending the first walk | `Established`, `Failed`, `Abandon` |
+| `rs/moq-net/src/reconnect.rs` `established`, set by `end` and by a GOAWAY in `poll`, and `walk_failed` and `closed` failing fast until it is set | `established`, `EndGoaway`, `LiveEnds`, `Failed`, `Abandon`, `EndClosed` |
 | `rs/moq-net/src/reconnect.rs` `connected`, `fallback`, `failed`, `probed` | `Connected`, `Failed`, `ProbeFails`, `ProbeGetsThrough` |
 | `rs/moq-net/src/reconnect.rs` `end`, `closed`, `done`, `Predecessor` | `EndGoaway`, `EndClosed`, `Done`, `Retire`, `IdleClose` |
-| `rs/moq-net/src/reconnect.rs` `Restart::Wait`, `Restart::Handoff` | `LiveEnds` and `WaitOut` with `Restart = "wait"` (`RestartWait.cfg`) and `"handoff"` (`RestartHandoff.cfg`) |
+| `rs/moq-net/src/reconnect.rs` `Restart::Handoff` | `LiveEnds` and `WaitOut` with `Restart = "handoff"` (`RestartHandoff.cfg`) |
 | `rs/moq-net/src/reconnect/redirect.rs` `Redirect::target` | `Refused` and `Endpoints` |
 | `rs/moq-tokio/src/connection.rs` `run`, `Shared::connected`, `migrating`, `retired`, `offline`, `end` | `Connected`, `Apply`, `OnMigrating`, `OnRetired`, `OnOffline`, `OnDone` |
 
 ## Not covered
 
-One configured address, so the walk across several, `ATTEMPT`, and `Verdict::Settled` and `Unusable` are left out. So are the retry window and `Failure::Exhausted`, tokens, connecting once, fixed targets, and redirect-loop scoring (`Redirects`): a session's healthiness is chosen freely instead, which covers a looped one. Backoff delays and jitter are left out; every deadline can pass in any order. `Connection::close`, `Monitor`, bandwidth forwarding, and the QUIC fresh-port retry are left out, and a session's subscriptions reduce to whether the predecessor is idle. A pass covers four sessions under `Restart::Redial` and three under `Restart::Wait` and `Restart::Handoff`, with two endpoints a GOAWAY may name and one it may not. The tests in `reconnect/tests.rs` and `moq-tokio`'s connection tests own the timing.
+One configured address, so the walk across several, `ATTEMPT`, and `Verdict::Settled` and `Unusable` are left out. So are the retry window and `Failure::Exhausted`, tokens, connecting once, fixed targets, and redirect-loop scoring (`Redirects`): a session's healthiness is chosen freely instead, which covers a looped one. Backoff delays and jitter are left out; every deadline can pass in any order. `Connection::close`, `Monitor`, bandwidth forwarding, and the QUIC fresh-port retry are left out, and a session's subscriptions reduce to whether the predecessor is idle. A pass covers four sessions under `Restart::Redial` and three under `Restart::Handoff`, with two endpoints a GOAWAY may name and one it may not. The tests in `reconnect/tests.rs` and `moq-tokio`'s connection tests own the timing.
