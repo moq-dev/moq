@@ -179,6 +179,26 @@ reserved-prefix rule). Not reopened by the audit: AUTH_ERROR's retry codes
 (the 2026-11-14 pick stands), and AUTH_OK's rate fields, which wait for
 lite-08 with [the rate grant](/quest/m5/rate-grant.md).
 
+Found by the 2026-11-17 pre-cut correctness audit, from source, in the
+range machinery this rewrite keeps (it changes the ranges' units, not how
+they merge); fix both here, since lite-07 freezes with this quest:
+
+- A relay asks upstream for the exact union of its viewers' ranges
+  (`model/track/demand/ranges.rs` merges only touching ranges), so one session
+  sending two SUBSCRIBEs of about 10k interleaved single-group ranges, each
+  fitting a message, makes a union that does not, and the shared upstream
+  copy every viewer reads through is given back (`lite/subscriber.rs`); gap
+  fills across many viewers can fragment it the same way. `edit_keyed` in
+  `lite/subscribe.rs` also changes its stored ranges before the size check.
+  Recommended: when the exact union cannot fit, ask for a covering superset
+  by merging the smallest gaps, and size-check before mutating. From
+  [moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872).
+- Each SUBSCRIBE_UPDATE costs work proportional to every range the
+  subscription holds: `LiveRanges::apply` clones them all and
+  `TrackRun::update` rebuilds its lookups under the track lock. Apply only
+  the edit, keyed by Range ID, and skip the track call when nothing changed.
+  From #7872.
+
 Public API: none beyond [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md).
 `@moq/net` and the bindings' track listing gain a kind. Wire: lite-07-wip
 GROUP, GROUP_END, SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK,

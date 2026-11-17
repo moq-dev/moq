@@ -240,3 +240,4 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
 - [The Playwright bump](/quest/m1/playwright-pin.md) - the cut PR's interop lane runs with `CI_STRICT`, which fails the route key lane on a Chromium below 158
+- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - the cut publishes none of the regressions the 2026-11-17 correctness audit found
