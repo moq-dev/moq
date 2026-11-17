@@ -424,13 +424,12 @@ fn a_join_skips_pops_without_demand_and_warm_ones_draw_it() {
 		// A settled pull stays: the middle pop joins the near pop's copy, but the far
 		// pop, settled on its long link, never moves for the warm pops beside it.
 		let stayed = BTreeSet::from([(4, 0), (0, 1), (1, 2), (0, 3)]);
-		// Ranked by hash, the middle pop ranks below the near one, so the near pop takes
-		// the middle pop's copy instead, at the same cost.
-		let hashed = BTreeSet::from([(4, 0), (0, 2), (2, 1), (2, 3)]);
 		match arm.mode {
+			// Ranked by hash, the middle pop ranks below the near one, whose route beats the
+			// middle pop's copy priced from the publisher, so nothing is advertised to it.
 			Mode::Path => assert_eq!(edges, skip, "{case}"),
+			_ if arm.order == Some(Order::Hash) => assert_eq!(edges, skip, "{case}"),
 			_ if arm.stay => assert_eq!(edges, stayed, "{case}"),
-			_ if arm.order == Some(Order::Hash) => assert_eq!(edges, hashed, "{case}"),
 			// One query goes to the cheapest link, which for the middle pop is the near
 			// pop's and for the far pop the middle's.
 			_ => assert_eq!(edges, joined, "{case}"),
@@ -549,6 +548,13 @@ const ORDER_HASH: Arm = Arm {
 	..NOT_DOWN
 };
 
+/// [`ORDER_ROUTE`] without the path in its offers: only a rank keeps a relay off a
+/// copy that runs through it.
+const ORDER_PATHLESS: Arm = Arm {
+	hops: false,
+	..ORDER_ROUTE
+};
+
 /// [`ORDER_ROUTE`], pricing a copy from the publisher and keeping a live pull unless
 /// another source is strictly cheaper.
 const ORDER_SUMMED: Arm = Arm {
@@ -576,6 +582,7 @@ fn narrower() -> Vec<Arm> {
 		ORDER_ROUTE,
 		ORDER_HASH,
 		ORDER_SUMMED,
+		ORDER_PATHLESS,
 	]
 }
 
@@ -744,20 +751,36 @@ fn grow(shape: &Shape, readers: &[(Node, usize)], in_turn: bool, arm: Arm, cheap
 	}
 }
 
-/// A first viewer's adverts on a CDN: told to every neighbour they grow with the
-/// core mesh, and told only where they could be taken they do not, since a core
-/// with demand is never cheaper for another core than its own route.
+/// A first viewer's adverts on a CDN, and a crowd's under ranked readers: told to
+/// every neighbour they grow with the core mesh, and told only where they could be
+/// taken they do not, since a core with demand is never cheaper for another core
+/// than its own route.
 #[test]
 fn useful_adverts_do_not_grow_with_the_core_mesh() {
-	let warm = |arm: Arm, regions: usize| {
+	let warm = |arm: Arm, regions: usize, crowd: bool| {
 		let shape = cdn(regions, 3, false, 1);
-		// The first edge of region 1, which the publisher's core is not in.
-		let grown = grow(&shape, &[(2 * regions + 3, 0)], false, arm, false);
+		// The first edge of region 1, which the publisher's core is not in, then
+		// the first edge of region 2.
+		let readers = [(2 * regions + 3, 0), (2 * regions + 6, 0)];
+		let readers = match crowd {
+			true => &readers[..],
+			false => &readers[..1],
+		};
+		let grown = grow(&shape, readers, false, arm, false);
 		assert_eq!(grown.right, Ok(()), "{}", arm.name());
 		grown.sent.warm()
 	};
-	assert_eq!(warm(USEFUL, 4), warm(USEFUL, 8));
-	assert!(warm(ADVERTISE, 4) < warm(ADVERTISE, 8));
+	assert_eq!(warm(USEFUL, 4, false), warm(USEFUL, 8, false));
+	assert!(warm(ADVERTISE, 4, false) < warm(ADVERTISE, 8, false));
+	// Ranked readers price the audience from the publisher too; at the link alone
+	// a warm core told every other core.
+	for crowd in [false, true] {
+		assert_eq!(
+			warm(ORDER_ROUTE, 8, crowd),
+			warm(ORDER_ROUTE, 32, crowd),
+			"crowd {crowd}"
+		);
+	}
 }
 
 /// Under the pick a warm core tells none of its region's edges, and each edge queries
@@ -1133,6 +1156,7 @@ fn every_arm_settles_after_churn() {
 		ORDER_ROUTE,
 		ORDER_HASH,
 		ORDER_SUMMED,
+		ORDER_PATHLESS,
 	] {
 		for shape in [random as fn(&mut XorShift) -> Shape, flying, regional] {
 			let out = churn(arm, 0..12, shape);
@@ -1405,7 +1429,6 @@ fn benchmark_warmth_churn() {
 	}
 }
 
-
 // --- Ranked readers ---
 
 /// Ranked by route cost, a pull follows a pop that turns warm later, and leaves it
@@ -1418,7 +1441,10 @@ fn a_ranked_pull_follows_a_pop_that_turns_warm_later() {
 	for row in &rows {
 		assert_eq!(row.cost(), row.cheapest.iter().sum::<Metric>(), "{}", row.phase);
 	}
-	let stayed: Metric = run(&pops(), REROUTE_UNQUERIED, &pop_phases(), 1).iter().map(Row::cost).sum();
+	let stayed: Metric = run(&pops(), REROUTE_UNQUERIED, &pop_phases(), 1)
+		.iter()
+		.map(Row::cost)
+		.sum();
 	assert!(rows.iter().map(Row::cost).sum::<Metric>() < stayed);
 }
 

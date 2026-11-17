@@ -1385,7 +1385,10 @@ impl WarmSim {
 
 	/// Whether `audience` lets `node` advertise `signal` to `peer`.
 	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
-		let price = self.copy(signal, node, peer);
+		// Priced from the publisher, even where the taker prices it at the link alone: a
+		// copy at the link alone beats nearly any route, so a warm core would tell every
+		// core it meshes with. A relay already pulling keeps its parent by its answer.
+		let price = signal.cost + self.price(node, peer).cold;
 		let heard = self
 			.net
 			.router(node)

@@ -38,8 +38,9 @@
 (* links at once (`verify-route` and the route proof cover how routes      *)
 (* settle). The three words a session carries one way arrive together,    *)
 (* though the subscription, its answer, and the advert ride separate      *)
-(* streams. No link is marked upstream, no advert is withheld as useless,  *)
-(* and there is no query.                                                  *)
+(* streams. No link is marked upstream, so the mark is left out, and there *)
+(* is no query. A relay advertises to a neighbour only where the copy,     *)
+(* priced from the publisher, beats the neighbour's route (`Useful`).      *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -65,9 +66,11 @@ Links ==
             \* Pops on a line from the publisher's, with long links passing over them.
             {<<1, 2, 6, 1>>, <<2, 3, 4, 1>>, <<3, 4, 4, 1>>, <<1, 3, 6, 6>>, <<1, 4, 8, 8>>}
       [] Shape = "mesh503" ->
-            \* Churned random mesh 503's links among its relays 4, 3, 6, and the
-            \* publisher's 5, as relays 2, 3, 4, and 1.
-            {<<2, 3, 1, 1>>, <<3, 4, 2, 1>>, <<1, 2, 6, 1>>, <<2, 4, 6, 3>>, <<1, 4, 2, 1>>}
+            \* Churned random mesh 503 where the pick never settled its second
+            \* broadcast: its relays 5, 4, 3, 6, 2, and 0 as 1 to 6, over the links
+            \* open at the end.
+            {<<1, 2, 6, 1>>, <<2, 3, 1, 1>>, <<2, 4, 6, 3>>, <<3, 4, 2, 1>>,
+             <<3, 5, 2, 2>>, <<2, 5, 5, 3>>, <<4, 6, 3, 3>>}
 
 N == Cardinality(UNION {{l[1], l[2]} : l \in Links})
 Home == 1
@@ -89,8 +92,6 @@ Neighbours == [r \in Relays |-> {n \in Relays : Pair(r, n) \in AllPairs}]
 Cold(a, b) == Prices[Pair(a, b)][1]
 Warm(a, b) == Prices[Pair(a, b)][2]
 Nb(r) == Neighbours[r]
-\* Whether a rule reads what a copy costs from the publisher: the link alone needs none.
-Costed == ~(Ordered /\ ~Summed)
 
 InPath(r, path) == \E i \in 1 .. Len(path) : path[i] = r
 
@@ -106,11 +107,12 @@ VARIABLES
     up,       \* up[r]: the neighbour r pulls through, or None
     nxt,      \* nxt[r]: a move under way: it replaces up[r] once answered
     view,     \* view[r][s]: what r last heard over its session to s
+    ok,       \* ok[r]: those of r's pulls answered live once, whose silence is a loss
     chosen,   \* chosen[r]: with "stay", the route r last chose by
     reads,    \* reader starts and stops so far
     closes    \* link closes and reopens so far
 
-vars == <<reader, open, route, up, nxt, view, chosen, reads, closes>>
+vars == <<reader, open, route, up, nxt, view, ok, chosen, reads, closes>>
 
 (***************************************************************************)
 (* The route layer, as an oracle over the open links.                      *)
@@ -128,7 +130,8 @@ Dist(k, o) ==
 Routes(o) ==
     LET d == Dist(N, o) IN
     [r \in Relays |->
-        IF r = Home \/ d[r] >= Inf THEN <<None, Inf>>
+        IF r = Home THEN <<None, 0>>
+        ELSE IF d[r] >= Inf THEN <<None, Inf>>
         ELSE <<Min({n \in OpenNb(r, o) : Cold(r, n) + d[n] = d[r]}), d[r]>>]
 
 Hop(r) == route[r][1]
@@ -153,11 +156,13 @@ RankOf(r, c) ==
     ELSE Min({Own(r)} \cup {view[r][d].pull : d \in Down(r) \ {c}})
 
 Ans(r, s) == view[r][s].ans
-\* How r's pull through s stands: "live", "self" (its path names r), "lost", or "pending".
+\* How r's pull through s stands: "live", "self" (its path names r), "lost", or
+\* "pending". A parent answers once it is fed or stuck, and every change after, so
+\* one that answered live and then has nothing to offer has lost its upstream.
 State(r, s) ==
     CASE Ans(r, s).kind = "live" /\ ~InPath(r, Ans(r, s).sig.path) -> "live"
       [] Ans(r, s).kind = "live" -> "self"
-      [] Ans(r, s).kind = "lost" -> "lost"
+      [] Ans(r, s).kind = "lost" \/ s \in ok[r] -> "lost"
       [] OTHER -> "pending"
 
 Live(r) == r = Home \/ (up[r] # None /\ State(r, up[r]) = "live")
@@ -168,7 +173,7 @@ Offer(r, c) ==
     LET link == IF r = Home THEN 0
                 ELSE IF Ordered \/ Others(r, c) THEN Warm(up[r], r)
                 ELSE Cold(up[r], r)
-    IN [cost |-> IF Costed THEN Sig(r).cost + link ELSE 0,
+    IN [cost |-> Sig(r).cost + link,
         path |-> Append(Sig(r).path, r),
         rank |-> IF Ordered THEN RankOf(r, c) ELSE NoRank]
 
@@ -180,8 +185,14 @@ Answer(r, c) ==
     ELSE IF Stuck(r) THEN [kind |-> "lost", sig |-> NoSig]
     ELSE [kind |-> "wait", sig |-> NoSig]
 
+\* Whether c could take r's copy, priced from the publisher whatever c prices it at:
+\* below c's route, or, when c's route runs through r, below r's own route.
+Useful(r, c) ==
+    IF Hop(c) = r THEN Offer(r, c).cost < route[r][2]
+    ELSE Offer(r, c).cost + Cold(r, c) <= route[c][2]
+
 Advert(r, c) ==
-    IF Live(r) /\ Others(r, c) THEN [on |-> TRUE, sig |-> Offer(r, c)]
+    IF Live(r) /\ Others(r, c) /\ Useful(r, c) THEN [on |-> TRUE, sig |-> Offer(r, c)]
     ELSE Empty.adv
 
 \* What r tells c now: the rank its pull through c carries, its answer, its advert.
@@ -253,7 +264,7 @@ Decide(r, u, x) ==
                     LET cur == {o \in opts : o.via = u} IN
                     IF best = None THEN <<None, None>>
                     ELSE IF best # u /\ (cur = {} \/ \A o \in cur : Best(opts).cost < o.cost)
-                    THEN <<best, x>> ELSE <<u, x>>
+                    THEN <<best, IF x = best THEN None ELSE x>> ELSE <<u, x>>
               [] st = "live" ->
                     LET moving == IF x # None /\ \E o \in opts : o.via = x /\ o.cost <= own
                                   THEN x ELSE None
@@ -299,6 +310,7 @@ Init ==
     /\ up = [r \in Relays |-> None]
     /\ nxt = [r \in Relays |-> None]
     /\ view = [r \in Relays |-> [s \in Relays |-> Empty]]
+    /\ ok = [r \in Relays |-> {}]
     /\ chosen = [r \in Relays |-> <<None, Inf>>]
     /\ reads = 0
     /\ closes = 0
@@ -312,6 +324,8 @@ React(r) ==
           /\ up' = [up EXCEPT ![r] = pulls[1]]
           /\ nxt' = [nxt EXCEPT ![r] = pulls[2]]
           /\ chosen' = [chosen EXCEPT ![r] = c]
+          \* A pull replaced outright by one through the same neighbour starts afresh.
+          /\ ok' = [ok EXCEPT ![r] = {s \in @ : s \in {pulls[1], pulls[2]} /\ State(r, s) # "lost"}]
     /\ UNCHANGED <<reader, open, route, view, reads, closes>>
 
 \* r hears what s tells it now.
@@ -320,6 +334,8 @@ Deliver(s, r) ==
     /\ IsOpen(s, r)
     /\ view[r][s] # Pub(s, r)
     /\ view' = [view EXCEPT ![r][s] = Pub(s, r)]
+    /\ ok' = [ok EXCEPT ![r] =
+                IF s \in {up[r], nxt[r]} /\ Pub(s, r).ans.kind = "live" THEN @ \cup {s} ELSE @]
     /\ UNCHANGED <<reader, open, route, up, nxt, chosen, reads, closes>>
 
 Read(r) ==
@@ -327,7 +343,7 @@ Read(r) ==
     /\ reads < MaxReads
     /\ reads' = reads + 1
     /\ reader' = [reader EXCEPT ![r] = ~@]
-    /\ UNCHANGED <<open, route, up, nxt, view, chosen, closes>>
+    /\ UNCHANGED <<open, route, up, nxt, view, ok, chosen, closes>>
 
 \* The session over a link closes, and both ends forget what it carried.
 Close(a, b) ==
@@ -346,6 +362,7 @@ Close(a, b) ==
                    IF r \in {a, b} /\ (up[r] = other(r) \/ nxt[r] = other(r)) THEN None
                    ELSE nxt[r]]
     /\ view' = [view EXCEPT ![a][b] = Empty, ![b][a] = Empty]
+    /\ ok' = [ok EXCEPT ![a] = @ \ {b}, ![b] = @ \ {a}]
     /\ UNCHANGED <<reader, chosen, reads>>
 
 Reopen(a, b) ==
@@ -355,7 +372,7 @@ Reopen(a, b) ==
     /\ closes' = closes + 1
     /\ open' = open \cup {Pair(a, b)}
     /\ route' = Routes(open')
-    /\ UNCHANGED <<reader, up, nxt, view, chosen, reads>>
+    /\ UNCHANGED <<reader, up, nxt, view, ok, chosen, reads>>
 
 Outside ==
     \/ \E r \in Relays : Read(r)
@@ -381,6 +398,7 @@ TypeOK ==
     /\ nxt \in [Relays -> Relays \cup {None}]
     /\ \A r \in Relays : up[r] # None => up[r] \in Nb(r)
     /\ \A r \in Relays : nxt[r] # None => nxt[r] \in Nb(r) /\ nxt[r] # up[r]
+    /\ \A r \in Relays : ok[r] \subseteq {up[r], nxt[r]} \ {None}
 
 \* r's pulls lead to the publisher, each held by its parent and answered live.
 RECURSIVE FedFrom(_, _)
