@@ -438,8 +438,9 @@ criterion_build_base() {
         if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
             index=$((index + 1))
             asked=$((asked + 1))
-            # A package the base lacks is new, as its targets are.
-            if grep -qxF -- "${CRITERION_CARGO_ARGS[index]}" <<<"$present"; then
+            # A package the base lacks is new, as its targets are; a glob selects whatever the
+            # base has.
+            if [[ ${CRITERION_CARGO_ARGS[index]} == *[*?[]* ]] || grep -qxF -- "${CRITERION_CARGO_ARGS[index]}" <<<"$present"; then
                 args+=("$name" "${CRITERION_CARGO_ARGS[index]}")
             fi
         elif [[ $name == --bench ]] && ((index + 1 < count)); then

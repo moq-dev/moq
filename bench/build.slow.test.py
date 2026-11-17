@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class Builds(unittest.TestCase):
     def test_base_builds_report_errors_and_distinguish_new_targets(self):
         (ROOT / ".tmp").mkdir(exist_ok=True)
-        for base in ("broken", "existing", "new", "new-package", "log-failure", "hangs"):
+        for base in ("broken", "existing", "glob", "new", "new-package", "log-failure", "hangs"):
             with self.subTest(base=base), tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
                 repo = Path(directory) / "repo"
                 repo.mkdir()
@@ -75,7 +75,10 @@ class Builds(unittest.TestCase):
                 (package / "Cargo.toml").write_text(manifest + target)
                 bench.write_text('fn main() { println!("current catalog ran"); }\n')
                 args = ["-p", "moq-relay", "--bench", "catalog"]
-                if base == "new-package":
+                if base == "glob":
+                    # Patterns select whatever the base has.
+                    args = ["-p", "moq-rel*", "--bench", "*"]
+                elif base == "new-package":
                     # A package the base lacks: naming it would fail the base's whole build.
                     added = repo / "rs/moq-e2ee"
                     (added / "src").mkdir(parents=True)
@@ -123,7 +126,7 @@ class Builds(unittest.TestCase):
                 else:
                     self.assertEqual(report["unavailable"], [])
                     self.assertEqual(
-                        "base catalog ran" in result.stdout, base in ("existing", "new-package", "log-failure")
+                        "base catalog ran" in result.stdout, base in ("existing", "glob", "new-package", "log-failure")
                     )
                 if base == "new-package":
                     self.assertIn("current protect ran", result.stdout)
