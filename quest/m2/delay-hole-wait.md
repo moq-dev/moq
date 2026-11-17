@@ -51,6 +51,14 @@ Facts found by the audit:
   lag p95 of 808 to 946 ms against 288 to 631 ms. The estimate wait gives
   every hole the estimate from the arrival of the group past it, which a late
   burst needs.
+- Browser audio ends a hole once the group past it trails the clock by the
+  ring's stretch bound, the furthest the ring plays late audio
+  ([moq-dev/moq#8982](https://github.com/moq-dev/moq/pull/8982)): the
+  variant that lost natively on `congestion`. In the browser it graded no
+  worse than the bare clock or the wait alone on the Chromium `bursty` and
+  `congestion` rows, and the replays show the bare clock skipping holes a
+  burst fills 1 ms later. The estimate wait alone (no clock) left the Firefox
+  resume window silent longer (9 to 41 samples against 6 to 12).
 
 For the PR, settle the home of native audio's live estimate first. Two ways:
 

@@ -3,8 +3,11 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import { Peak, ringHold, ringSamples } from "./latency";
 import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset, State, Truncate } from "./render";
 
-// The stretch's 30 ms processing window, in microseconds.
-const WINDOW = 30_000;
+// The stretch's 30 ms processing window, in microseconds. @internal
+export const WINDOW = 30_000;
+
+// The least move, in milliseconds, of how far the worklet renders ahead of what sounds that is reported.
+const LEAD_STEP = 5;
 
 // How far the clock's offset from the context's time may fall per state report: far past any drift
 // between the two clocks, and well short of the render callback a reading can land within.
@@ -284,6 +287,14 @@ export class AudioBuffer {
 	 */
 	readonly output: Getter<Duration> = this.#output;
 
+	readonly #lead = new Signal<Duration>(Duration.ZERO);
+	/**
+	 * How far the worklet renders ahead of what sounds now, as the context's output position last
+	 * reported it, or `output` until it reports one. Unlike `output`, it follows an output latency
+	 * that fell at once rather than holding its peak, and moves only by a few milliseconds at a time.
+	 */
+	readonly lead: Getter<Duration> = this.#lead;
+
 	readonly #stalled = new Signal<boolean>(true);
 	/** Whether the ring is stalled (waiting to fill). */
 	readonly stalled: Getter<boolean> = this.#stalled;
@@ -365,6 +376,7 @@ export class AudioBuffer {
 
 		// The output latency the context already reports, so startup holds only what the ring must.
 		this.#observeOutput();
+		this.#lead.set(this.#output.peek());
 		const held = this.held(props.delay);
 		this.#backpressure = new Backpressure(rate, buffered, held, this.#bound);
 
@@ -388,6 +400,7 @@ export class AudioBuffer {
 			if (data?.type === "state") {
 				const heard = this.#sounding();
 				this.#observeOutput();
+				this.#observeLead(heard);
 				this.#timestamp.set(this.#heardAt(data, heard));
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
@@ -446,6 +459,15 @@ export class AudioBuffer {
 		const context = this.#context;
 		this.#heard = this.#latency.observe(Duration.secs(context.outputLatency || 0), now());
 		this.#output.set(Duration.secs(context.baseLatency || 0).add(this.#heard));
+	}
+
+	// Fold in how far the context renders ahead of the output position sounding at `heard`. The
+	// position is only as fine as a render callback, so a smaller move is left alone, since a signal
+	// that notifies on every state report would wake whatever reads it as often.
+	#observeLead(heard: number | undefined): void {
+		const lead =
+			heard === undefined ? this.#output.peek() : Duration.secs(Math.max(0, this.#context.currentTime - heard));
+		if (Math.abs(lead.asMillis() - this.#lead.peek().asMillis()) >= LEAD_STEP) this.#lead.set(lead);
 	}
 
 	// Where the playhead sounding at context time `heard` stands, from what the worklet rendered: the
