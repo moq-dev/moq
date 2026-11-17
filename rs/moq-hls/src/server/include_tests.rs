@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hang::catalog::{AudioCodec, AudioConfig, Include, Join, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Include, VideoCodec, VideoConfig};
 use moq_mux::catalog::hang::Catalog;
 use moq_net::{Instance, Timestamp, track};
 use tower::ServiceExt;
@@ -18,7 +18,7 @@ struct Published {
 
 fn catalog() -> Catalog {
 	let mut catalog = Catalog::default();
-	catalog.media.join = Join::new(Duration::from_secs(2));
+	catalog.sync.interval = Some(Duration::from_secs(2));
 	let mut video = VideoConfig::new(VideoCodec::VP8);
 	video.coded_width = Some(320);
 	video.coded_height = Some(240);
@@ -42,7 +42,7 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut catalog = moq_json::snapshot::Producer::new(track, Default::default());
-	catalog.update(moq_json::Timed::new(value, Timestamp::ZERO)).unwrap();
+	catalog.update(value, Timestamp::ZERO).unwrap();
 	let video = publication
 		.create_track("same", hang::container::track_info(1))
 		.unwrap();
@@ -73,7 +73,7 @@ fn frames(track: &track::Producer, first: u64) {
 		}
 		.write_to(&mut group)
 		.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 
@@ -165,10 +165,7 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	include
-		.catalog
-		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
-		.unwrap();
+	include.catalog.update(&value, Timestamp::ZERO).unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	// The new response lists the predecessor's retained rows while waiting for its
 	// last pending segment. Its body keeps the replacement requested past that idle window.
@@ -291,10 +288,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	include
-		.catalog
-		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
-		.unwrap();
+	include.catalog.update(&value, Timestamp::ZERO).unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	let _video = include.video.finish().unwrap();
 	let held = server
@@ -566,7 +560,7 @@ async fn includes_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 	let child = Instance::random();
 	// The include declares its own interval, which HLS ignores for the root's.
 	let mut value = catalog();
-	value.media.join = Join::new(Duration::from_secs(1));
+	value.sync.interval = Some(Duration::from_secs(1));
 	let include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, "include/", true).await;

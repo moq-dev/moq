@@ -58,8 +58,8 @@ It lived in [moq-dev/vaapi](https://github.com/moq-dev/vaapi) through 0.2.1.
   and x265 with B-frames at 320x240 and cropped at 852x478, run bit-exact as a
   test wherever ffmpeg and a VA-API device are both present, and pass on Intel
   Arrow Lake (iHD 26.1.2) and AMD Radeon RX 9070 (radeonsi, Mesa 26.0.8).
-- **Checked-in bindings from pinned headers.** libva's headers are vendored
-  into [`libva/`](./libva), and [`bindgen.sh`](./bindgen.sh) generates
+- **Checked-in bindings from pinned headers.** [`bindgen.sh`](./bindgen.sh)
+  fetches the headers of the libva release it pins and generates
   [`src/bindings/libva.rs`](./src/bindings/libva.rs) from them. The output is
   checked in, so building the crate needs **no libclang, no libva-dev, and no
   build script**, and the pinned version means a system libva bump can't drift
@@ -110,19 +110,18 @@ advisories checked, not a guarantee that no undisclosed vulnerabilities exist.
   `codec::h265`), the H.265 header writer (`encode/h265.rs`), the thin encode
   and decode drivers (`encode`, `decode`), DMA-BUF import (`dmabuf`), video
   post-processing (`vpp`), and the color space both share (`color`).
-- `libva/`: vendored libva headers.
 - `libva-wrapper.h` and [`bindgen.sh`](./bindgen.sh): what generates
   `src/bindings/libva.rs`.
 
-Regenerate the bindings with bindgen-cli on the PATH:
+Regenerate the bindings with bindgen-cli on the PATH, after bumping the script's
+`tag` to move to a newer libva:
 
 ```sh
-nix shell nixpkgs#rust-bindgen --command ./bindgen.sh         # from libva/
-nix shell nixpkgs#rust-bindgen --command ./bindgen.sh 2.23.0  # refresh libva/ from that release first
+nix shell nixpkgs#rust-bindgen --command ./bindgen.sh
 ```
 
 ## Licensing
 
 BSD-3-Clause (see [`LICENSE`](./LICENSE)). Vendored upstreams keep their notices:
-[`LICENSE.cros-codecs`](./LICENSE.cros-codecs) and the vendored libva headers
-under [`LICENSE.libva`](./LICENSE.libva) (MIT).
+[`LICENSE.cros-codecs`](./LICENSE.cros-codecs), and the libva headers the
+bindings are generated from under [`LICENSE.libva`](./LICENSE.libva) (MIT).

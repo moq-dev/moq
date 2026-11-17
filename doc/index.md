@@ -53,7 +53,7 @@ features:
   - icon:
       src: /emoji/lock.svg
     title: Secure
-    details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN or end-to-end encrypt your content.
+    details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN.
 
   - icon:
       src: /emoji/back.svg
@@ -83,7 +83,7 @@ See the [concepts](/concept/) page for a breakdown of the layering, rationale, a
 | Use case | Reach for |
 | --- | --- |
 | Live streaming | Ingest with [OBS](/bin/obs), [RTMP](/bin/rtmp), or [SRT](/bin/srt); distribute with [moq-relay](/bin/relay/); watch with [`<moq-watch>`](/lib/js/watch); keep legacy players via [HLS](/bin/hls). |
-| Conferencing | [`@moq/room`](/lib/js/room) for the roster, [`<moq-publish>`](/lib/js/publish) and [`<moq-watch>`](/lib/js/watch) in the browser, plus [WebRTC](/bin/rtc) for WHIP/WHEP clients. |
+| Conferencing | [`@moq/room`](/lib/js/room) for the roster, [`<moq-publish>`](/lib/js/publish) and [`<moq-watch>`](/lib/js/watch) in the browser, plus [WebRTC](/bin/webrtc) for WHIP/WHEP clients. |
 | Voice and video AI | Server-side media in [Rust](/lib/rs/) or [Python](/lib/py/), faster-than-real-time playback in the browser. See [MoQ for AI](/concept/use-case/ai). |
 | Real-time data | Chat, game state, telemetry, and control channels over the same relays with [`moq-net`](/lib/rs/moq-net) or [`@moq/net`](/lib/js/net). |
 | Interactive streams | Media down, input up. [MoQ Boy](/bin/demo) is a crowd-controlled Game Boy built this way. |

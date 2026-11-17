@@ -1,4 +1,4 @@
-//! `client subscribe`: dial a remote WHEP endpoint, ingest RTP into a
+//! `client pull`: dial a remote WHEP endpoint, ingest RTP into a
 //! local moq-net broadcast.
 //!
 //! Mints an SDP offer with `recvonly` audio and video, POSTs it to the
@@ -19,11 +19,11 @@ pub(crate) async fn dial(
 	client: &Client,
 	url: Url,
 	broadcast: moq_net::broadcast::Producer,
-	catalog: moq_mux::catalog::Config,
+	catalog: moq_mux::catalog::Producer,
 ) -> Result<()> {
-	let sink = Box::new(IngestSink::new(broadcast, catalog)?);
+	let sink = Box::new(IngestSink::new(broadcast, catalog));
 
-	let socket = session::bind_udp(&client.config().ice_candidates).await?;
+	let socket = session::bind_udp().await?;
 	let mut rtc = session::rtc_config()?.build(kio::clock::now().into_std());
 	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;

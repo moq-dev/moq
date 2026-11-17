@@ -161,7 +161,7 @@ typealias TrackRequests = uniffi.moq.MoqTrackRequests
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 
 /**
- * The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
+ * The read side of a raw track: yields groups in start order, skipping ahead if it falls behind.
  */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 
@@ -258,10 +258,10 @@ typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
 
-/** A location within a track: a group sequence and a frame index in it. */
+/** A location within a track: a group start and a frame index in it. */
 typealias Position = uniffi.moq.MoqPosition
 
-/** Options for fetching one past group by sequence. */
+/** Options for fetching one past group by start. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */

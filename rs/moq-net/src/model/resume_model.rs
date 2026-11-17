@@ -305,6 +305,20 @@ impl Reader {
 		ranges && self.bounds.is_none_or(|(start, end)| (start..end).contains(&group))
 	}
 
+	/// Record a run this reader gave up, failing if it handed one of its groups out.
+	fn report_drop(&mut self, index: usize, range: std::ops::Range<u64>, why: &str) -> Result<(), TestCaseError> {
+		for group in range.clone() {
+			if self.reading.contains_key(&group) {
+				return Err(fail(
+					index,
+					format!("dropped {range:?} ({why}) after handing out {group}"),
+				));
+			}
+		}
+		self.dropped.extend(range.start..range.end.min(GROUPS));
+		Ok(())
+	}
+
 	/// Everything observed, to tell whether a poll found anything new.
 	fn observed(&self) -> (usize, usize, bool, usize) {
 		let frames = self
@@ -338,7 +352,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			hop: std::num::NonZeroU64::MIN,
+			node: std::num::NonZeroU64::MIN,
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};
@@ -525,7 +539,7 @@ impl Model {
 				part.written += 1;
 			}
 			if part.written == frames(group) {
-				part.writer.take().unwrap().close().unwrap();
+				part.writer.take().unwrap().finish().unwrap();
 				publisher.complete.insert(group);
 			}
 			let most = publisher.written.entry(group).or_default();
@@ -541,7 +555,7 @@ impl Model {
 			for slot in 0..SLOTS {
 				while let Some(Poll::Ready(Ok(fill))) = self.instances[instance].routes[slot]
 					.as_ref()
-					.map(|copy| copy.fills.poll_requested_fill(&kio::Waiter::noop()))
+					.map(|copy| copy.fills.poll_requested_groups(&kio::Waiter::noop()))
 				{
 					filled = true;
 					let (start, end) = (fill.start().group, fill.end());
@@ -653,7 +667,14 @@ impl Model {
 		while reader.end.is_none() {
 			let polled = match reader.cursor.as_mut().unwrap() {
 				Cursor::Arrival(sub) => sub.poll_recv_group(&waiter),
-				Cursor::Ordered(sub) => sub.poll_next_group(&waiter),
+				Cursor::Ordered(sub) => match sub.poll_next_group(&waiter) {
+					// An ordered read reports its drops in turn.
+					Poll::Ready(Ok(Some(track::Item::Gap { range, error }))) => {
+						reader.report_drop(index, range, &format!("{error:?}"))?;
+						continue;
+					}
+					polled => polled.map(|res| res.map(|item| item.map(|item| item.group().expect("a group")))),
+				},
 			};
 			match polled {
 				Poll::Pending => break,
@@ -728,19 +749,15 @@ impl Model {
 			}
 		}
 
-		if reader.spec.drops
-			&& let Some(Cursor::Arrival(sub)) = &mut reader.cursor
-		{
-			while let Poll::Ready((range, err)) = sub.poll_drop(&waiter) {
-				for group in range.clone() {
-					if reader.reading.contains_key(&group) {
-						return Err(fail(
-							index,
-							format!("dropped {range:?} ({err:?}) after handing out {group}"),
-						));
-					}
-				}
-				reader.dropped.extend(range.start..range.end.min(GROUPS));
+		if reader.spec.drops && matches!(reader.cursor, Some(Cursor::Arrival(_))) {
+			loop {
+				let Some(Cursor::Arrival(sub)) = &mut reader.cursor else {
+					unreachable!("matched above")
+				};
+				let Poll::Ready((range, err)) = sub.poll_drop(&waiter) else {
+					break;
+				};
+				reader.report_drop(index, range, &format!("{err:?}"))?;
 			}
 		}
 

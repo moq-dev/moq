@@ -18,9 +18,10 @@ export default defineConfig({
 			formats: ["es"],
 		},
 		rollupOptions: {
-			// Keep every @moq workspace dep (and its subpaths, e.g. @moq/signals/dom)
-			// external so consumers dedupe against their own copy instead of bundling ours.
-			external: (id) => id.startsWith("@moq/"),
+			// Keep every published @moq dep (and its subpaths, e.g. @moq/signals/dom) external
+			// so consumers dedupe against their own copy instead of bundling ours. The private
+			// @moq/ui is never published, so it is bundled.
+			external: (id) => id.startsWith("@moq/") && id !== "@moq/ui",
 		},
 		sourcemap: true,
 		target: "esnext",

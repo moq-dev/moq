@@ -64,3 +64,19 @@ After #8635 landed, run
 failed the firefox resume, now on audio arriving late rather than trailing:
 [moq-dev/moq#8799](https://github.com/moq-dev/moq/pull/8799) fixed that.
 
+
+Decided 2026-11-17 (maintainer, /quest-plan), from the triage of runs
+[43909101837](https://github.com/moq-dev/moq/actions/runs/43909101837) and
+[44127032469](https://github.com/moq-dev/moq/actions/runs/44127032469): two
+more children, the lite-07 route hang and the credential-established reconnect
+signal. Fixed in PRs from the same triage: fuzz path
+([moq-dev/moq#9015](https://github.com/moq-dev/moq/pull/9015)), cli-export
+([moq-dev/moq#9017](https://github.com/moq-dev/moq/pull/9017)), audit ignores
+([moq-dev/moq#9012](https://github.com/moq-dev/moq/pull/9012)), JS coverage
+([moq-dev/moq#9013](https://github.com/moq-dev/moq/pull/9013)), Gate cost
+([moq-dev/moq#9014](https://github.com/moq-dev/moq/pull/9014)), Tests (gate)
+disk ([moq-dev/moq#9033](https://github.com/moq-dev/moq/pull/9033)), benches
+([moq-dev/moq#9020](https://github.com/moq-dev/moq/pull/9020),
+[moq-dev/moq#9021](https://github.com/moq-dev/moq/pull/9021),
+[moq-dev/moq#9022](https://github.com/moq-dev/moq/pull/9022)), and mutants
+([moq-dev/moq#9019](https://github.com/moq-dev/moq/pull/9019)).

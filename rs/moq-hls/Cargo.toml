@@ -1,6 +1,6 @@
 [package]
 name = "moq-hls"
-description = "HLS / LL-HLS / DASH gateway for Media over QUIC"
+description = "HLS and DASH gateway for Media over QUIC"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -9,7 +9,7 @@ version = "0.5.11"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["hls", "ll-hls", "moq", "media", "cmaf"]
+keywords = ["hls", "dash", "moq", "media", "cmaf"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]

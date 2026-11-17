@@ -46,7 +46,7 @@ final class FfiBench: XCTestCase {
         }
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "calls")
-        let producer = try track.appendGroup()
+        let producer = try track.appendGroup(start: .unscaled(0))
         let group = try producer.consume()
         let consumer = try track.consume()
         func call(_ name: String, _ fn: () throws -> Void) rethrows -> Result {
@@ -60,7 +60,7 @@ final class FfiBench: XCTestCase {
                 name: "call/\(name)", unit: "ns",
                 value: (ProcessInfo.processInfo.systemUptime - start) * 1e9 / Double(calls))
         }
-        results.append(call("sequence") { _ = group.sequence })
+        results.append(call("start") { _ = group.start })
         results.append(try call("info") { _ = consumer.info() })
         try broadcast.close()
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
@@ -97,7 +97,7 @@ final class FfiBench: XCTestCase {
                     }
                 }
                 for track in tracks {
-                    let group = try track.appendGroup()
+                    let group = try track.appendGroup(start: Timestamp(value: UInt64(n * c.frames), scale: 1_000_000))
                     for f in 0..<c.frames {
                         try group.writeFrame(
                             payload, timestamp: Timestamp(value: UInt64(n * c.frames + f), scale: 1_000_000))

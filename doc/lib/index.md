@@ -16,7 +16,7 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | <img class="language-icon" src="/icons/languages/kotlin.svg" alt="" /> [Kotlin](/lib/kt/) | `dev.moq:moq` on Maven Central | Android and the JVM. |
 | <img class="language-icon" src="/icons/languages/python.svg" alt="" /> [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
 | <img class="language-icon" src="/icons/languages/go.svg" alt="" /> [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
-| <img class="language-icon" src="/icons/languages/dart.svg" alt="" /> [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
+| <img class="language-icon" src="/icons/languages/dart.svg" alt="" /> [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps (experimental). |
 | [C++](/lib/cpp/) | `moq-cpp` via CMake or pkg-config | C++ apps, engines, and plugins. |
 | <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `libmoq` | The plain-C ABI, for C and any language with a C FFI; C++ should use the package above. |
 
@@ -72,13 +72,13 @@ how it looks in that language:
 - **Publish and subscribe to media** with the hang catalog filled in from the bitstream, or hand over raw pixels and PCM and let the binding encode and decode (VideoToolbox, Media Foundation, NVENC, openh264, Opus). The built-in video encoder can follow the connection's send estimate. The audio decoder reports the playout delay to buffer ahead of the playhead, fixed or estimated from arrivals, so read each frame as soon as the last is handled rather than pacing reads to the speaker.
 - **Raw stream tracks** of arbitrary bytes, with per-subscriber priority and max delay, and separate live datagram tracks without groups or caching.
 - **JSON tracks** as a latest value with merge-patch deltas, an append log, or a sliding window of records. Each value reads back with its frame timestamp, and a snapshot reader either replays every state or skips to the newest.
-- **Fetch** a single cached group by sequence.
+- **Fetch** a single cached group by start.
 - **Catalog extensions**: write your own section next to `video` and `audio`, and read others' back.
 - **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
 - **Connection stats** and **errors** that tell an auth rejection (don't retry) from a shutdown or a transport failure.
 - **Authorization in band**: read the grant the relay sent back (the patterns this side may publish and subscribe to, and when it lapses), and present a fresh token before the current one expires, without reconnecting. It needs `moq-lite-07-wip`, which is opt-in.
 
-C cannot fetch a single group by sequence.
+C cannot fetch a single group by start.
 
 ## Upgrading
 

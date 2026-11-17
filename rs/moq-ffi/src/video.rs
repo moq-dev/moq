@@ -319,14 +319,13 @@ fn drain(
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
 	children: &crate::producer::Children,
 ) -> Result<(), MoqError> {
 	match drained {
 		Ok(()) => {
-			producer.finish()?;
-			children.keep(producer);
+			children.keep(producer.finish()?);
 			Ok(())
 		}
 		Err(err) => {
@@ -946,12 +945,7 @@ fn video_ceiling(
 	config
 		.bitrate
 		.or_else(|| rendition.bitrate.map(moq_net::bandwidth::Rate::from_bps))
-		.unwrap_or_else(|| {
-			// Same 0.07 bits/pixel/s default moq-video uses when neither is set.
-			moq_net::bandwidth::Rate::from_bps(
-				(config.size().pixels() as f64 * config.framerate.as_f64() * 0.07) as u64,
-			)
-		})
+		.unwrap_or_else(|| config.resolved_bitrate())
 }
 
 /// The rendition behind a [`MoqVideoProducer`], `None` once finished or aborted.

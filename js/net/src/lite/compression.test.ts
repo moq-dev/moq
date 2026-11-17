@@ -40,9 +40,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		try {
 			await link(source, destination, downstream);
 			const request = destination.request(Path.from("compressed"));
-			while (request.active.peek() === undefined) await request.active.changed();
-			const active = request.active.peek();
-			if (!active) throw new Error("broadcast did not resolve");
+			const active = await request.broadcast();
 			const remote = active.track("data");
 			expect((await remote.info()).compression).toBe(downstream === ALPN_07_WIP ? "deflate" : "none");
 			const reader = remote.subscribe({ delay: { max: Duration.millis(1000) } });

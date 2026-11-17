@@ -73,11 +73,11 @@ pub struct MoqJsonWindowConfig {
 	pub checkpoint_records: Option<u64>,
 }
 
-impl TryFrom<MoqJsonWindowConfig> for moq_json::window::ProducerConfig {
+impl TryFrom<MoqJsonWindowConfig> for moq_json::window::Config {
 	type Error = MoqError;
 
 	fn try_from(config: MoqJsonWindowConfig) -> Result<Self, MoqError> {
-		let mut out = moq_json::window::ProducerConfig::default();
+		let mut out = moq_json::window::Config::default();
 		if let Some(records) = config.checkpoint_records {
 			let records = usize::try_from(records)
 				.ok()
@@ -102,7 +102,7 @@ mod tests {
 		assert!(snapshot.deltas, "update #[uniffi(default)] on deltas");
 		let consumer = moq_json::snapshot::consumer::Config::default();
 		assert_eq!(consumer.priority, 0, "update #[uniffi(default)] on priority");
-		let window = moq_json::window::ProducerConfig::default();
+		let window = moq_json::window::Config::default();
 		assert_eq!(
 			window.checkpoint_records, None,
 			"update #[uniffi(default)] on MoqJsonWindowConfig::checkpoint_records"
@@ -583,7 +583,7 @@ impl MoqJsonWindowProducer {
 	pub fn push(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let value: Value = serde_json::from_str(&value)?;
 		let at = timestamp.try_into()?;
-		self.edit(|producer| producer.push(moq_json::Timed::new(&value, at)))
+		self.edit(|producer| producer.push(&value, at))
 	}
 
 	/// Drop `count` records from the front of the window, clamped to what it holds.
@@ -591,7 +591,7 @@ impl MoqJsonWindowProducer {
 	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
 	pub fn pop(&self, count: u64, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let at = timestamp.try_into()?;
-		self.edit(|producer| producer.pop(moq_json::Timed::new(count, at)))
+		self.edit(|producer| producer.pop(count, at))
 	}
 
 	/// Close the open group, so the next push or pop opens a new one whose header restates the

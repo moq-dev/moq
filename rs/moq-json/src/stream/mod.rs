@@ -50,13 +50,8 @@ mod test {
 
 	use super::*;
 
-	/// `value` at the next key of a scale-less track, whose writes name their group keys: keys
-	/// only have to increase, so one counter serves every track a test writes.
-	fn next<V>(value: V) -> crate::Timed<V> {
-		crate::Timed::new(value, key())
-	}
-
-	/// The next key of a scale-less track; see [`next`].
+	/// The next key of a scale-less track, whose writes name their group keys: keys only have to
+	/// increase, so one counter serves every track a test writes.
 	fn key() -> moq_net::Timestamp {
 		thread_local!(static KEY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
 		moq_net::Timestamp::unscaled(KEY.with(|key| key.replace(key.get() + 1)))
@@ -67,16 +62,16 @@ mod test {
 	fn a_timed_track_refuses_a_bare_publish() {
 		let (mut producer, track) = producer_on(Config::default(), timed());
 		assert!(matches!(
-			producer.append(next(&json!({ "n": 0 }))),
+			producer.append(&json!({ "n": 0 }), key()),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
-		producer.append(crate::Timed::new(&json!({ "n": 1 }), at)).unwrap();
+		producer.append(&json!({ "n": 1 }), at).unwrap();
 		assert!(matches!(
-			producer.append(next(&json!({ "n": 2 }))),
+			producer.append(&json!({ "n": 2 }), key()),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
-		producer.append(crate::Timed::new(&json!({ "n": 3 }), at)).unwrap();
+		producer.append(&json!({ "n": 3 }), at).unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
@@ -88,12 +83,12 @@ mod test {
 		let (mut producer, track) = producer_on(Config::default(), timed());
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
-		producer.append(crate::Timed::new(&json!({ "n": 1 }), at)).unwrap();
+		producer.append(&json!({ "n": 1 }), at).unwrap();
 		assert!(matches!(
-			producer.append(crate::Timed::new(&json!({ "n": 2 }), huge)),
+			producer.append(&json!({ "n": 2 }), huge),
 			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
 		));
-		producer.append(crate::Timed::new(&json!({ "n": 3 }), at)).unwrap();
+		producer.append(&json!({ "n": 3 }), at).unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
@@ -106,7 +101,7 @@ mod test {
 			.unwrap();
 		let mut groups = track.subscribe(None);
 		let mut producer = Producer::new(track, Config::default());
-		producer.append(next(&json!({ "n": 1 }))).unwrap();
+		producer.append(&json!({ "n": 1 }), key()).unwrap();
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
 			panic!("expected an untimed group");
@@ -172,7 +167,7 @@ mod test {
 	fn plaintext_roundtrip_in_order() {
 		let (mut producer, track) = producer(Config::default());
 		for n in 0..5 {
-			producer.append(next(&json!({ "n": n }))).unwrap();
+			producer.append(&json!({ "n": n }), key()).unwrap();
 		}
 		let _finished = producer.finish().unwrap();
 
@@ -190,7 +185,7 @@ mod test {
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });
-		let size = producer.append(crate::Timed::new(&record, captured)).unwrap();
+		let size = producer.append(&record, captured).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
@@ -207,7 +202,7 @@ mod test {
 	fn all_records_ride_one_group() {
 		let (mut producer, mut track) = producer_on(Config::default(), compressed());
 		for n in 0..50 {
-			producer.append(next(&json!({ "n": n }))).unwrap();
+			producer.append(&json!({ "n": n }), key()).unwrap();
 		}
 		let _finished = producer.finish().unwrap();
 
@@ -226,7 +221,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 
 		for n in 0..3 {
-			producer.append(next(&json!({ "n": n }))).unwrap();
+			producer.append(&json!({ "n": n }), key()).unwrap();
 			match consumer.poll_next(&waiter) {
 				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "n": n })),
 				other => panic!("expected record, got {other:?}"),
@@ -253,7 +248,7 @@ mod test {
 		bad.insert((1, 2), 3);
 		assert!(
 			producer
-				.append(crate::Timed::new(&bad, moq_net::Timestamp::from_millis(0).unwrap()))
+				.append(&bad, moq_net::Timestamp::from_millis(0).unwrap())
 				.is_err()
 		);
 
@@ -284,26 +279,21 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		track
 	}
 
-	/// Past [`rejecting_track`]'s first group start but before its first frame, so a group opened
-	/// at it is refused.
+	/// Past [`rejecting_track`]'s first group start but before its first frame, so an append at it
+	/// gets as far as a published group before it fails.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
-	}
-
-	/// `value` at [`rewound`], so the append gets as far as a published group before it fails.
-	fn late(value: &Value) -> crate::Timed<&Value> {
-		crate::Timed::new(value, rewound())
 	}
 
 	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
@@ -316,7 +306,7 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, Config::default());
 
 		assert!(matches!(
-			producer.append(late(&json!({ "n": 1 }))),
+			producer.append(&json!({ "n": 1 }), rewound()),
 			Err(crate::Error::Net(_))
 		));
 
@@ -333,12 +323,15 @@ mod test {
 		let mut producer = Producer::<Value>::new(track, Config::default());
 
 		assert!(matches!(
-			producer.append(late(&json!({ "n": 1 }))),
+			producer.append(&json!({ "n": 1 }), rewound()),
 			Err(crate::Error::Net(_))
 		));
 
 		assert!(
-			matches!(producer.append(late(&json!({ "n": 2 }))), Err(crate::Error::Net(_))),
+			matches!(
+				producer.append(&json!({ "n": 2 }), rewound()),
+				Err(crate::Error::Net(_))
+			),
 			"a second append must fail on the ended track rather than open another group"
 		);
 
@@ -364,10 +357,10 @@ mod test {
 	#[test]
 	fn appending_after_finish_fails_without_aborting() {
 		let (mut producer, _track) = producer_on(Config::default(), compressed());
-		producer.append(next(&json!({ "n": 0 }))).unwrap();
+		producer.append(&json!({ "n": 0 }), key()).unwrap();
 		let _finished = producer.clone().finish().unwrap();
 
-		assert!(producer.append(next(&json!({ "n": 1 }))).is_err());
+		assert!(producer.append(&json!({ "n": 1 }), key()).is_err());
 		assert_eq!(drain(consume(producer.consume())), vec![json!({ "n": 0 })]);
 	}
 
@@ -390,11 +383,11 @@ mod test {
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.
-		let mut first = track.append_group(0).unwrap();
+		let mut first = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		first
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), br#"{"n":0}"#.as_slice())
 			.unwrap();
-		let mut second = track.append_group(1).unwrap();
+		let mut second = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 		second
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), br#"{"n":1}"#.as_slice())
 			.unwrap();
@@ -439,15 +432,15 @@ mod test {
 		for compression in [moq_net::track::Compression::None, moq_net::track::Compression::Deflate] {
 			let (mut producer, track) = producer_on(Config::default(), info(compression));
 			producer.set_max_frame_bytes(BUDGET);
-			producer.append(next(&json!({ "n": 0 }))).unwrap();
+			producer.append(&json!({ "n": 0 }), key()).unwrap();
 
 			let oversized = Value::String("x".repeat(BUDGET as usize));
 			assert!(
-				refused(producer.append(next(&oversized))),
+				refused(producer.append(&oversized, key())),
 				"compression={compression:?}"
 			);
 
-			producer.append(next(&json!({ "n": 1 }))).unwrap();
+			producer.append(&json!({ "n": 1 }), key()).unwrap();
 			let _finished = producer.finish().unwrap();
 
 			assert_eq!(
@@ -464,7 +457,7 @@ mod test {
 		for compression in [moq_net::track::Compression::None, moq_net::track::Compression::Deflate] {
 			let (mut producer, track) = producer_on(Config::default(), info(compression));
 			for n in 0..10_000 {
-				producer.append(next(&json!({ "n": n }))).unwrap();
+				producer.append(&json!({ "n": n }), key()).unwrap();
 			}
 			let _finished = producer.finish().unwrap();
 
@@ -481,7 +474,7 @@ mod test {
 		let (mut producer, track) = producer_on(Config::default(), compressed());
 		let value = json!({ "s": "line1\nline2\ttab", "u": "a\u{000a}b" });
 		for _ in 0..4 {
-			producer.append(next(&value)).unwrap();
+			producer.append(&value, key()).unwrap();
 		}
 		let _finished = producer.finish().unwrap();
 

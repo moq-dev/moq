@@ -8,7 +8,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
-use crate::Timed;
 use crate::refresh::Refresh;
 
 use crate::{Error, Result};
@@ -104,18 +103,15 @@ impl<T: Serialize> Producer<T> {
 		take(&self.inner).poll_refresh(waiter)
 	}
 
-	/// Publish a new value, emitting a snapshot or a delta automatically.
+	/// Publish a new value at `at` (see [`Timed::at`](crate::Timed::at)), emitting a snapshot or a delta automatically.
 	///
 	/// Returns the encoded size of the frame written, or `None` if the value is unchanged from the
 	/// previous publish and nothing was written.
-	pub fn update<'a>(&mut self, value: Timed<&'a T>) -> Result<Option<usize>>
-	where
-		T: 'a,
-	{
-		take(&self.inner).update(value)
+	pub fn update(&mut self, value: &T, at: moq_net::Timestamp) -> Result<Option<usize>> {
+		take(&self.inner).update(value, at)
 	}
 
-	/// Edit the current value in place and publish it at `at` (see [`Timed::at`]).
+	/// Edit the current value in place and publish it at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// The closure receives the current value: everything published through this producer so far,
 	/// composed, or `T::default()` if nothing has been. Edit it in place; on return the result is
@@ -142,7 +138,7 @@ impl<T: Serialize> Producer<T> {
 		guard.commit()
 	}
 
-	/// Edit the current value, publishing on drop at `at` (see [`Timed::at`]).
+	/// Edit the current value, publishing on drop at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// The returned [`Guard`] derefs to the current value: everything published through this producer
 	/// so far, composed, or `T::default()` if nothing has been. Editing it through [`DerefMut`] marks
@@ -250,7 +246,7 @@ impl<T: Serialize> Producer<T> {
 ///
 /// ```compile_fail,E0599
 /// # fn cannot_update(value: moq_json::snapshot::Finished<u32>) {
-/// value.update(&1).unwrap();
+/// value.update(&1, moq_net::Timestamp::unscaled(0)).unwrap();
 /// # }
 /// ```
 #[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
@@ -311,10 +307,7 @@ impl<T: Serialize> Guard<'_, T> {
 		self.dirty = false;
 
 		// We already hold the lock, so publish through the held guard rather than re-locking.
-		self.inner.update(Timed {
-			value: &self.value,
-			at: self.at,
-		})?;
+		self.inner.update(&self.value, self.at)?;
 		Ok(())
 	}
 }
@@ -417,13 +410,13 @@ impl<T> Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
+	fn update(&mut self, value: &T, at: moq_net::Timestamp) -> Result<Option<usize>> {
 		self.open()?;
-		let timestamp = self.track.rescale(payload.at)?;
+		let timestamp = self.track.rescale(at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
-		let Some(frame) = encoder.update(payload.value)? else {
+		let Some(frame) = encoder.update(value)? else {
 			return Ok(None);
 		};
 
@@ -510,7 +503,7 @@ impl Track {
 	/// Close the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		Ok(())
 	}
@@ -548,20 +541,19 @@ impl Track {
 	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
 	/// before the previous group closes.
 	fn write_snapshot(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
-		let start = timestamp.value();
-		let mut group = self.inner.append_group(start)?;
-		self.largest = Some(start);
+		let mut group = self.inner.append_group(timestamp)?;
+		self.largest = Some(group.start);
 
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(previous) = self.group.take() {
-			previous.close()?;
+			previous.finish()?;
 		}
 
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
-			let _ = group.close();
+			let _ = group.finish();
 			return Err(err.into());
 		}
 
@@ -569,7 +561,7 @@ impl Track {
 			// Keep the group open so future deltas can be appended to it.
 			true => self.group = Some(group),
 			// One frame per group, identical to a plain JSON track.
-			false => drop(group.close()?),
+			false => drop(group.finish()?),
 		}
 
 		Ok(())
@@ -587,7 +579,7 @@ impl Track {
 
 	fn finish(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		// Another handle may have declared the end already, which stands. This shared state
 		// keeps its own clone, whose appends the end refuses.

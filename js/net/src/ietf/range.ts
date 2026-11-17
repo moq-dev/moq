@@ -1,17 +1,17 @@
 import { race, Signal } from "@moq/signals";
 import { error, NotFound, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
-import { type Fill, fillChanged, wantedRuns } from "../fill.ts";
+import { type FillGroups, fillChanged, wantedRuns } from "../fill.ts";
 import type * as group from "../group.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
-import { received, type Timescale } from "../time.ts";
+import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { decodeFetchObject, EndOfRange } from "./object.ts";
+import { decodeFetchObject, EndOfRange, objectTime } from "./object.ts";
 
 /** The groups one standalone FETCH writes, sharing the joining FETCH's object and payload decoder. @internal */
 export class RangeFetch {
-	readonly fill: Fill;
+	readonly fill: FillGroups;
 	readonly first: bigint;
 	readonly last: bigint;
 	readonly bound?: number;
@@ -27,7 +27,7 @@ export class RangeFetch {
 	#finished = false;
 
 	constructor(options: {
-		fill: Fill;
+		fill: FillGroups;
 		first: bigint;
 		track: track.Producer;
 		timescale?: Timescale;
@@ -108,7 +108,7 @@ export class RangeFetch {
 		let first = true;
 		let trailing = false;
 		try {
-			const decode = (c: Cursor) => decodeFetchObject(c, this.#timescale);
+			const decode = (c: Cursor) => decodeFetchObject(c);
 			for (;;) {
 				const object = await untilAborted(
 					Promise.resolve(stream.tryDecode(decode) ?? stream.decodeMaybe(decode)),
@@ -178,18 +178,16 @@ export class RangeFetch {
 					throw new Error("FETCH object gap is unsupported");
 				if (sequence === this.last && this.bound !== undefined && id >= this.bound)
 					throw new ProtocolViolation("FETCH continued past FETCH_OK's End Location");
-				if (this.#timescale !== undefined && object.timestamp === undefined)
-					throw new StreamError(StreamCode.MalformedTrack, {
-						message: `object without a Timestamp on a track with TIMESCALE: group=${sequence}`,
-					});
 				const producer = this.#current?.producer;
 				if (producer) {
-					if (object.payload)
-						producer.writeFrame({
-							payload: object.payload,
-							timestamp: received(object.timestamp, producer.sequence),
-						});
-					else if (!(await untilAborted(receiveFrame(stream, producer, object), this.#stop.signal)))
+					const timestamp = objectTime(this.#timescale, producer.sequence);
+					if (object.payload) producer.writeFrame({ payload: object.payload, timestamp });
+					else if (
+						!(await untilAborted(
+							receiveFrame(stream, producer, { size: object.size, timestamp }),
+							this.#stop.signal,
+						))
+					)
 						throw new Error("FETCH group was abandoned");
 				} else if (!object.payload) await untilAborted(skipPayload(stream, object.size), this.#stop.signal);
 				prior = sequence;

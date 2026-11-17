@@ -4,6 +4,7 @@ import { TruckStatusSchema } from "./schemas.ts";
 const status = {
 	accepted: { steering: 0, throttle: 0, brake: 1, gear: "neutral" },
 	estopped: false,
+	media_pipeline: {},
 };
 
 describe("TruckStatusSchema", () => {

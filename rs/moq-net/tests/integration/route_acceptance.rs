@@ -36,7 +36,7 @@ async fn join(version: Version, a: &origin::Producer, b: &origin::Producer, join
 	let [a, b] = [(a, join.preference[0]), (b, join.preference[1])].map(|(node, preference)| {
 		node.clone()
 			.with_link(origin::Link::Peer)
-			.with_preference(origin::Preference::new(preference))
+			.with_priority(origin::Priority::new(preference))
 	});
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(a.consume().with_hidden(true));

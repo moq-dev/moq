@@ -15,7 +15,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { rotateVideoDimensions } from "@moq/video";
+import { rotateDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -24,7 +24,7 @@ import { type DecoderConfig, hardwareAcceleration, type PlaybackIdentity, playba
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
 import type { Source } from "./source";
-import { accepted, supported } from "./supported";
+import { accepted } from "./supported";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Duration.millis(500);
@@ -471,7 +471,7 @@ export class Decoder {
 
 		effect.set(
 			this.#out.display,
-			rotateVideoDimensions({ width: frame.displayWidth, height: frame.displayHeight }, catalog.rotation),
+			rotateDimensions({ width: frame.displayWidth, height: frame.displayHeight }, catalog.rotation),
 		);
 	}
 
@@ -547,9 +547,6 @@ export class Decoder {
 
 		this.#signals.close();
 	}
-
-	/** Whether the WebCodecs video decoder can play this config. */
-	static supported = supported;
 }
 
 interface RenditionProps {
@@ -1043,9 +1040,8 @@ class Rendition {
 		return rendered !== undefined && timestamp.lt(rendered);
 	}
 
-	// Resolve the codec string WebCodecs accepts once per track, from the same probe as `supported`, so a
-	// custom `supported` that skipped the probe still opens an `avc3.*` rendition on Safari. False when
-	// torn down meanwhile.
+	// Resolve the codec string WebCodecs accepts once per track, from the probe the source ran, so Safari
+	// opens an `avc3.*` rendition as `avc1.*`. False when torn down meanwhile.
 	async #accept(effect: Effect): Promise<boolean> {
 		if (this.#codec !== undefined) return true;
 		const codec = await accepted(this.config);
@@ -1074,31 +1070,26 @@ class Rendition {
 	#addBuffered(start: Duration, end: Duration): void {
 		if (start.gt(end)) return;
 
-		this.#buffered.mutate((current) => {
-			for (const range of current) {
-				// Check if there's any overlap, then merge
-				if (range.start.le(end) && range.end.ge(start)) {
-					range.start = range.start.min(start);
-					range.end = range.end.max(end);
-					return;
-				}
+		// A new array of new ranges, since the merged copy hands them to `buffered` by reference.
+		this.#buffered.update((current) => {
+			// Merge into the first range it overlaps.
+			const i = current.findIndex((range) => range.start.le(end) && range.end.ge(start));
+			if (i >= 0) {
+				const range = current[i];
+				return current.with(i, { start: range.start.min(start), end: range.end.max(end) });
 			}
-
-			current.push({ start, end });
-			current.sort((a, b) => a.start.cmp(b.start));
+			return [...current, { start, end }].sort((a, b) => a.start.cmp(b.start));
 		});
 	}
 
 	// Trim the decode buffer up to the rendered timestamp
 	#trimBuffered(timestamp: Duration): void {
-		this.#buffered.mutate((current) => {
-			while (current.length > 0) {
-				if (current[0].end.ge(timestamp)) {
-					current[0].start = current[0].start.max(timestamp);
-					break;
-				}
-				current.shift();
-			}
+		this.#buffered.update((current) => {
+			// Drop the ranges that ended before `timestamp` and clip the first one left.
+			const i = current.findIndex((range) => range.end.ge(timestamp));
+			if (i < 0) return [];
+			const first = current[i];
+			return [{ start: first.start.max(timestamp), end: first.end }, ...current.slice(i + 1)];
 		});
 	}
 

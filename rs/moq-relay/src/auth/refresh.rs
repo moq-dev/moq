@@ -84,10 +84,10 @@ impl Credential {
 	fn wire(&self, role: Option<Role>) -> auth::Grant {
 		let mut grant = auth::Grant::default();
 		if role != Some(Role::Subscriber) {
-			grant.publish = self.grant.publish.clone();
+			grant.publish = self.grant.publish.path.clone();
 		}
 		if role != Some(Role::Publisher) {
-			grant.subscribe = self.grant.subscribe.clone();
+			grant.subscribe = self.grant.subscribe.path.clone();
 		}
 		grant.expires = self.expires;
 		grant
@@ -169,13 +169,12 @@ impl Refresh {
 			&& super::still_valid(grant).is_ok()
 			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
-			&& fresh.peer == self.admitted.peer
-			&& fresh.upstream == self.admitted.upstream
+			&& fresh.link == self.admitted.link
 			&& match self.role {
-				Some(Role::Publisher) => !grant.publish.is_empty(),
-				Some(Role::Subscriber) => !grant.subscribe.is_empty(),
+				Some(Role::Publisher) => !grant.publish.path.is_empty(),
+				Some(Role::Subscriber) => !grant.subscribe.path.is_empty(),
 				Some(_) => false,
-				None => !grant.publish.is_empty() || !grant.subscribe.is_empty(),
+				None => !grant.publish.path.is_empty() || !grant.subscribe.path.is_empty(),
 			}
 	}
 
@@ -256,13 +255,13 @@ impl Refresh {
 			request.reject(SessionError::Unsupported, "a certificate cannot be renewed in band");
 			return;
 		}
-		let Ok(token) = std::str::from_utf8(request.token()) else {
-			request.reject(SessionError::MalformedAuthToken, "token is not UTF-8");
-			return;
-		};
+		// The dialed query stays as dialed: the attached credential rides `token`,
+		// whatever bytes it holds.
 		let mut facts = source.request.clone();
-		facts.query = Some(with_jwt(facts.query.as_deref(), token));
-		facts.token = None;
+		facts.token = Some(moq_auth::Token {
+			kind: moq_auth::Token::OUT_OF_BAND,
+			value: request.token().to_vec(),
+		});
 		if self.waiting.len() >= 2 * self.survivors.max(1) {
 			self.waiting.retain(|waiting| !waiting.withdrawn());
 			self.survivors = self.waiting.len();
@@ -494,34 +493,6 @@ fn refuse(request: auth::Request, err: super::Error) {
 	}
 }
 
-/// Replace the `jwt` pair, leaving every other byte of the dialed query as it was,
-/// since the auth server may interpret or authenticate its raw form.
-fn with_jwt(query: Option<&str>, token: &str) -> String {
-	let jwt = format!(
-		"jwt={}",
-		url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>()
-	);
-	let mut pairs = Vec::new();
-	let mut replaced = false;
-	let query = query.unwrap_or_default();
-	let segments = query.split('&').filter(|_| !query.is_empty());
-	for pair in segments {
-		let is_jwt = url::form_urlencoded::parse(pair.as_bytes())
-			.next()
-			.is_some_and(|(key, _)| key == "jwt");
-		if !is_jwt {
-			pairs.push(pair);
-		} else if !replaced {
-			pairs.push(&jwt);
-			replaced = true;
-		}
-	}
-	if !replaced {
-		pairs.push(&jwt);
-	}
-	pairs.join("&")
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -605,7 +576,7 @@ mod tests {
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
 				.with_stats(lease.stats.clone())
-				.accept_request(now, server)
+				.handshake(now, server)
 				.await
 				.unwrap();
 			let lease = lease
@@ -630,6 +601,17 @@ mod tests {
 		(client, server)
 	}
 
+	/// What the connection dialed, with an expired credential an attachment must not touch.
+	const DIALED: &str = "a=1&jwt=expired";
+
+	/// The credential an attachment carries, asserting the dialed query rode through untouched.
+	fn presented(admission: &super::super::Admission) -> &[u8] {
+		assert_eq!(admission.request.query.as_deref(), Some(DIALED));
+		let token = admission.request.token.as_ref().expect("an attachment carries a token");
+		assert_eq!(token.kind, moq_auth::Token::OUT_OF_BAND);
+		&token.value
+	}
+
 	async fn admission(initial: Grant) -> (super::super::Lease, super::super::Admissions) {
 		admission_with(initial, super::super::VERIFICATIONS).await
 	}
@@ -638,7 +620,8 @@ mod tests {
 	async fn admission_with(initial: Grant, verifications: usize) -> (super::super::Lease, super::super::Admissions) {
 		let (auth, mut admissions) = super::super::Auth::embedded("test");
 		let auth = auth.with_verifications(verifications);
-		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let mut request = auth.request(moq_auth::Transport::Quic, "/room");
+		request.query = Some(DIALED.into());
 		let (lease, ()) = tokio::join!(auth.admit(request), async {
 			let admission = admissions.next().await.unwrap();
 			assert!(!admission.attached(), "a new session arrived as an attachment");
@@ -713,7 +696,7 @@ mod tests {
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
 				.with_stats(stats.clone())
-				.accept_request(now, server)
+				.handshake(now, server)
 				.await
 				.unwrap();
 			let mut changed = initial;
@@ -753,25 +736,21 @@ mod tests {
 		let mut label = grant("a/**", 3000);
 		label.label = Some("project/*".into());
 		admissions.next().await.unwrap().grant(lease::Consumer::fixed(label));
-		// Refused as an auth server fault, which may pass, so the client presents it again.
-		let retried = admissions.next().await.unwrap();
-		assert_eq!(retried.request.query.as_deref(), Some("jwt=invalid"));
+		// A grant the relay cannot use is the decider's fault, and asking again gets the
+		// same answer, so the token is refused for good rather than as an outage.
+		let refused = invalid.await.unwrap();
 		assert!(
-			!invalid.is_finished(),
-			"the invalid label was accepted or ended the token"
+			matches!(refused, Err(moq_net::Error::Session(SessionError::Unauthorized))),
+			"{refused:?}"
 		);
 		assert!(
 			!supervising.is_finished(),
 			"a refused attachment ended the initial grant"
 		);
-		// Withdrawn, the retried token leaves the queue.
-		invalid.abort();
-		let _ = invalid.await;
-		drop(retried);
 		let auth = client.auth();
 		let (result, ()) = tokio::join!(added(&auth, "valid"), async {
 			let admission = admissions.next().await.unwrap();
-			assert_eq!(admission.request.query.as_deref(), Some("jwt=valid"));
+			assert_eq!(presented(&admission), b"valid");
 			admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
 		});
 		result.unwrap();
@@ -798,8 +777,8 @@ mod tests {
 
 	fn capped(prefix: &str, publish: Option<u64>, subscribe: Option<u64>) -> Grant {
 		let mut grant = grant(prefix, 3000);
-		grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
-		grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 		grant
 	}
 
@@ -975,11 +954,7 @@ mod tests {
 		let mut adding = present(&client, "replacement");
 		for attempt in 0..3 {
 			let admission = admissions.next().await.unwrap();
-			assert_eq!(
-				admission.request.query.as_deref(),
-				Some("jwt=replacement"),
-				"attempt {attempt}"
-			);
+			assert_eq!(presented(&admission), b"replacement", "attempt {attempt}");
 			admission.refuse(super::super::Error::Unavailable("auth server down".into()));
 			// The refusal may pass, so the client presents the token again after a backoff
 			// shorter than each step below, rather than ending it.
@@ -1035,7 +1010,7 @@ mod tests {
 		held.remove(0).grant(lease::Consumer::fixed(grant("a/**", 3000)));
 		first.await.unwrap().unwrap();
 		let admission = admissions.next().await.unwrap();
-		assert_eq!(admission.request.query.as_deref(), Some("jwt=third"));
+		assert_eq!(presented(&admission), b"third");
 		admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
 		third.await.unwrap().unwrap();
 		client.abort(moq_net::Error::Cancel);
@@ -1073,7 +1048,7 @@ mod tests {
 		drop(held);
 		let _next = present(&client, "next");
 		let admission = admissions.next().await.unwrap();
-		assert_eq!(admission.request.query.as_deref(), Some("jwt=next"));
+		assert_eq!(presented(&admission), b"next");
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();
 		let _ = supervising.await;
@@ -1087,7 +1062,7 @@ mod tests {
 		let auth = client.auth();
 		let (token, ()) = tokio::join!(added(&auth, "replacement"), async {
 			let admission = admissions.next().await.unwrap();
-			assert_eq!(admission.request.query.as_deref(), Some("jwt=replacement"));
+			assert_eq!(presented(&admission), b"replacement");
 			admission.grant(lease::Consumer::fixed(grant("a/**", 20)));
 		});
 		let token = token.unwrap();
@@ -1230,7 +1205,7 @@ mod tests {
 		let (client, supervising) = sessions(lease).await;
 		let auth = client.auth();
 		let mut wider = grant("b/**", 30);
-		wider.subscribe = ["**".parse().unwrap()].into_iter().collect();
+		wider.subscribe.path = ["**".parse().unwrap()].into_iter().collect();
 		let (producer, consumer) = lease::Producer::new(wider);
 		let (token, ()) = tokio::join!(added(&auth, "replacement"), async {
 			admissions.next().await.unwrap().grant(consumer);
@@ -1317,7 +1292,7 @@ mod tests {
 
 		held.grant(lease::Consumer::fixed(grant("a/**", 3000)));
 		let admission = admissions.next().await.unwrap();
-		assert_eq!(admission.request.query.as_deref(), Some("jwt=next"));
+		assert_eq!(presented(&admission), b"next");
 		admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
 		next.await.unwrap().unwrap();
 		client.abort(moq_net::Error::Cancel);
@@ -1325,16 +1300,23 @@ mod tests {
 		let _ = supervising.await;
 	}
 
-	#[test]
-	fn renewal_replaces_only_the_jwt_pair() {
-		assert_eq!(
-			with_jwt(Some("flag&a=%2f&jwt=old&b=x+y&j%77t=dup"), "new token"),
-			"flag&a=%2f&jwt=new+token&b=x+y"
-		);
-		assert_eq!(with_jwt(Some("flag&&jwt=old&"), "t"), "flag&&jwt=t&");
-		assert_eq!(with_jwt(Some("a=1"), "t"), "a=1&jwt=t");
-		assert_eq!(with_jwt(Some(""), "t"), "jwt=t");
-		assert_eq!(with_jwt(None, "t"), "jwt=t");
+	/// A credential that is not UTF-8 reaches the decider unchanged.
+	#[tokio::test(start_paused = true)]
+	async fn a_binary_token_is_attached_unchanged() {
+		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+		let (client, supervising) = sessions(lease).await;
+		let auth = client.auth();
+		let binary: &[u8] = &[0xff, 0x00, 0xfe, b'&', b'=', 0x80];
+		let (token, ()) = tokio::join!(added(&auth, binary.to_vec()), async {
+			let admission = admissions.next().await.unwrap();
+			assert!(admission.attached());
+			assert_eq!(presented(&admission), binary);
+			admission.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		});
+		token.unwrap();
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
 	}
 
 	#[tokio::test(start_paused = true)]

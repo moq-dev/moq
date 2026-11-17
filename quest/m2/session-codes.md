@@ -62,7 +62,3 @@ holds its pads on a lost source and fails on a refusal, as today.
 Public API: breaking in Rust (`SessionError` variants), moq-ffi
 (`MoqProtocolKind`), moq-c (`moq.h` constants), the wrappers, and JS; adds
 the classification method. Wire: none.
-
-## Related
-
-- [moq-net's node, version, handshake, and route priority](/quest/m2/net-renames.md) - the renames beside this in the same crate

@@ -47,8 +47,9 @@ pub struct Config {
 	/// with `UDP_GRO`, `UDP_SEGMENT` send), userspace timers, and a local task
 	/// set; sessions get every configured version (native raw QUIC and browser
 	/// WebTransport alike), and everything else (HTTP, WebSocket, cluster
-	/// dials, stats) stays on the shared runtime. Requires `runtime-workers`,
-	/// Linux 6.12+, and refuses to start anywhere it cannot deliver.
+	/// dials, stats) stays on the shared runtime. Requires `runtime-workers` and
+	/// Linux 6.12+ on a 64-bit CPU io-uring has bindings for, and refuses to
+	/// start anywhere it cannot deliver.
 	#[usage(
 		long = "runtime-io-uring",
 		env = "MOQ_RUNTIME_IO_URING",

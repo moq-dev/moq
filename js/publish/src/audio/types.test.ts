@@ -16,7 +16,6 @@ const samples: SampleSource = {
 	samples: new ReadableStream<AudioData>(),
 	sampleRate: 44_100,
 	channelCount: 2,
-	kind: "auto",
 };
 
 describe("isSampleSource", () => {
@@ -29,20 +28,20 @@ describe("isSampleSource", () => {
 
 describe("sourceKind", () => {
 	test("reads the kind off either source shape", () => {
-		expect(sourceKind(samples)).toBe("auto");
+		expect(sourceKind(samples)).toBeUndefined();
 		expect(sourceKind({ track, kind: "voice" })).toBe("voice");
 		expect(sourceKind({ ...samples, kind: "music" })).toBe("music");
 	});
 
 	// A bare track says nothing about its content, so the encoder leaves the Opus knobs alone.
-	test("defaults a bare track to auto", () => {
-		expect(sourceKind(track)).toBe("auto");
+	test("a bare track has no kind", () => {
+		expect(sourceKind(track)).toBeUndefined();
 	});
 });
 
 describe("normalizeSource", () => {
-	test("treats a bare track as kind auto", () => {
-		expect(normalizeSource(track)).toEqual({ track, kind: "auto" });
+	test("gives a bare track no kind", () => {
+		expect(normalizeSource(track)).toEqual({ track });
 	});
 
 	test("passes a config through untouched", () => {

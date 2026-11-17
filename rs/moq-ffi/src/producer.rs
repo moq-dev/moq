@@ -9,12 +9,12 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubsc
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, OneShot, Polled};
-use crate::media::MoqFrame;
+use crate::media::{MoqFrame, MoqTimestamp};
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqPosition {
-	/// The group sequence.
+	/// The group start.
 	pub group: u64,
 	/// The frame index within the group, numbered from 0 in write order.
 	pub frame: u64,
@@ -107,12 +107,6 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			.map_or(moq_net::track::Compression::None, |compression| compression.0);
 		Ok(out.with_compression(compression))
 	}
-}
-
-/// One past the newest group's start, or 0 on an empty track: where a group the caller gave
-/// no start for begins.
-fn next_start(track: &moq_net::track::Producer) -> u64 {
-	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
 }
 
 fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, MoqError> {
@@ -497,8 +491,7 @@ impl MoqTrackRequests {
 			.reads
 			.wait(|requests, waiter| {
 				loop {
-					let fill = ready!(requests.poll_requested_fill(waiter))?;
-					if fill.time().is_none() {
+					if let moq_net::track::Fill::Groups(fill) = ready!(requests.poll_requested_fill(waiter))? {
 						return Poll::Ready(Ok(fill));
 					}
 				}
@@ -516,7 +509,7 @@ impl MoqTrackRequests {
 	}
 }
 
-/// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
+/// A run of groups readers miss, mirroring [`moq_net::track::FillGroups`].
 ///
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
 /// for the rest, one group at a time as [`wanted_changed`](Self::wanted_changed) yields them;
@@ -527,13 +520,13 @@ impl MoqTrackRequests {
 /// fills you take concurrently: each waits on its own readers.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
-	inner: moq_net::track::Fill,
+	inner: moq_net::track::FillGroups,
 	/// The watcher `wanted_changed` advances, kept apart from `inner` so its cursor is its own.
-	changes: Polled<moq_net::track::Fill>,
+	changes: Polled<moq_net::track::FillGroups>,
 }
 
 impl MoqFill {
-	fn new(inner: moq_net::track::Fill) -> Self {
+	fn new(inner: moq_net::track::FillGroups) -> Self {
 		let changes = Polled::new(inner.clone());
 		Self { inner, changes }
 	}
@@ -585,11 +578,11 @@ impl MoqFill {
 			.await
 	}
 
-	/// Insert group `sequence` and return a producer for filling it. The first group starts
+	/// Insert group `start` and return a producer for filling it. The first group starts
 	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
-	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	pub fn accept(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.inner.accept(sequence, None)?;
+		let group = self.inner.accept(start, None)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -599,16 +592,16 @@ impl MoqFill {
 		self.inner.drop_groups(start..end);
 	}
 
-	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// Whether a reader still waits for group `start` from this fill: false once every
 	/// reader took it or narrowed past it, or nobody waits on the fill.
-	pub fn is_wanted(&self, sequence: u64) -> bool {
-		self.inner.is_wanted(sequence)
+	pub fn is_wanted(&self, start: u64) -> bool {
+		self.inner.is_wanted(start)
 	}
 
-	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
-	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
+	/// Wait until no reader waits for group `start` from this fill, so stop serving it.
+	pub async fn unwanted(&self, start: u64) -> Result<(), MoqError> {
 		crate::ffi::run(async {
-			self.inner.unwanted(sequence).await;
+			self.inner.unwanted(start).await;
 			Ok::<_, MoqError>(())
 		})
 		.await
@@ -851,25 +844,30 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackConsumer::new(track, Background::default())))
 	}
 
-	/// Append a new group to the track, one past the newest group's start, returning a
-	/// producer for writing frames into it.
-	pub fn append_group(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// Append the next group, starting at `start`, returning a producer for writing frames into it.
+	///
+	/// A timed track converts `start` into its timescale, as [`write_frame`](Self::write_frame)
+	/// does; a scale-less track takes the [unscaled](MoqTimestamp::unscaled) group key. A start
+	/// at or before a group the track holds, or one that doesn't match the track, is refused with
+	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
+	pub fn append_group(&self, start: MoqTimestamp) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		let start: moq_net::Timestamp = start.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group(next_start(raw))?;
+		let group = raw.append_group(start)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
-	/// Create a group starting at `sequence`, in the track's timescale, which names it.
+	/// Create a group starting at `start`, in the track's timescale, which names it.
 	///
-	/// Use this for sparse or replayed tracks. [`append_group`](Self::append_group)
-	/// remains the convenient live-stream path.
-	pub fn create_group(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// Use this for sparse or replayed tracks: unlike [`append_group`](Self::append_group), it
+	/// declares nothing below it skipped.
+	pub fn create_group(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.create_group(moq_net::group::Info { start: sequence })?;
+		let group = raw.create_group(moq_net::group::Info { start })?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -978,16 +976,16 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
-	/// Declare the exclusive final group sequence, possibly ahead of the live edge.
+	/// Declare the exclusive final group start, possibly ahead of the live edge.
 	///
-	/// Groups below `final_sequence` may still be created afterwards. Groups at or
+	/// Groups below `final_start` may still be created afterwards. Groups at or
 	/// above it are rejected. The producer remains open for groups below the boundary;
 	/// call [`finish`](Self::finish) after producing the remaining groups.
-	pub fn finish_at(&self, final_sequence: u64) -> Result<(), MoqError> {
+	pub fn finish_at(&self, final_start: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		raw.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		raw.finish_at(moq_net::track::Position::group(final_start))?;
 		Ok(())
 	}
 }
@@ -995,7 +993,7 @@ impl MoqTrackProducer {
 /// A group to which frames can be published.
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
-	sequence: u64,
+	start: u64,
 	/// The group keeps one writer waker, so every [`ready`](Self::ready) call polls it with the
 	/// bridge's, which wakes them all. Every other call locks it through the bridge too, so a
 	/// wake it causes reaches a foreign continuation only after the lock is released.
@@ -1026,7 +1024,7 @@ impl MoqGroupProducer {
 	/// Wrap `group`, for a track's writer.
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
-			sequence: group.start,
+			start: group.start,
 			inner: kio::Bridge::new(GroupPhase::Writing(group)),
 		}
 	}
@@ -1035,8 +1033,8 @@ impl MoqGroupProducer {
 #[uniffi::export]
 impl MoqGroupProducer {
 	/// The start of this group, in its track's timescale, which names it within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// Create a consumer that reads frames from this group.
@@ -1102,7 +1100,7 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock();
 		match std::mem::take(&mut *guard) {
-			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.close()?),
+			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.finish()?),
 			GroupPhase::Finished(group) => *guard = GroupPhase::Finished(group),
 			GroupPhase::Closed => return Err(MoqError::Closed),
 		}
@@ -1143,7 +1141,7 @@ mod metadata_tests {
 	fn dropping_a_group_binding_ends_its_unfinished_group() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.append_group(0).unwrap();
+		let group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		let mut consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);

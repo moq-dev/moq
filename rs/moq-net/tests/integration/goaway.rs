@@ -382,7 +382,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		audio_group
 			.write_frame(audio_group.at_start(), b"audio".as_ref())
 			.expect("write frame");
-		audio_group.close().expect("finish group");
+		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
 		let sub_origin = produce_origin();
@@ -407,7 +407,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		group
 			.write_frame(group.at_start(), b"before".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()
@@ -445,7 +445,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		group
 			.write_frame(group.at_start(), b"after".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()
@@ -504,7 +504,7 @@ async fn goaway_drains_routes(version: Version) {
 		let (standby_origin, _standby) = publish();
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(standby_origin.consume());
-		opts.client_subscribe = Some(sub_origin.clone().with_preference(moq_net::origin::Preference::new(-1)));
+		opts.client_subscribe = Some(sub_origin.clone().with_priority(moq_net::origin::Priority::new(-1)));
 		let _standby_pair = connect_mock(opts).await;
 		let standby = route_at(&mut announced, |_| true).await.instance().clone();
 

@@ -717,7 +717,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cached, err := track.AppendGroup()
+	cached, err := track.AppendGroup(ts(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,7 +933,7 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
 	}
 
-	group, err := track.AppendGroup()
+	group, err := track.AppendGroup(ts(23_456))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -976,7 +976,7 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		group, err := track.AppendGroup()
+		group, err := track.AppendGroup(ts(uint64(i) * 1000))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -999,7 +999,7 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	var sequences []uint64
+	var starts []uint64
 	for range 3 {
 		group, err := consumer.RecvGroup(ctx)
 		if err != nil {
@@ -1008,10 +1008,10 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 		if group == nil {
 			t.Fatal("expected a group")
 		}
-		sequences = append(sequences, group.Sequence())
+		starts = append(starts, group.Start())
 	}
-	if !slices.Equal(sequences, []uint64{0, 1, 2}) {
-		t.Fatalf("sequences = %v, want [0 1 2]", sequences)
+	if !slices.Equal(starts, []uint64{0, 1_000, 2_000}) {
+		t.Fatalf("starts = %v, want [0 1000 2000]", starts)
 	}
 }
 
@@ -1033,7 +1033,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	empty, err := track.AppendGroup()
+	empty, err := track.AppendGroup(ts(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1066,8 +1066,8 @@ func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if group.Sequence() != 2 {
-		t.Fatalf("sequence = %d, want 2", group.Sequence())
+	if group.Start() != 2 {
+		t.Fatalf("start = %d, want 2", group.Start())
 	}
 	if err := group.Finish(); err != nil {
 		t.Fatal(err)
@@ -1083,7 +1083,7 @@ func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := track.CreateGroup(5); err == nil {
-		t.Fatal("expected group at final sequence to fail")
+		t.Fatal("expected group at final start to fail")
 	}
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)
@@ -1333,7 +1333,7 @@ func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
 		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
 	}
 
-	group, err := track.AppendGroup()
+	group, err := track.AppendGroup(moq.Unscaled(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1343,8 +1343,8 @@ func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecvGroup after cancel = %v", err)
 	}
-	if got == nil || got.Sequence() != group.Sequence() {
-		t.Fatalf("RecvGroup after cancel = %v, want group %d", got, group.Sequence())
+	if got == nil || got.Start() != group.Start() {
+		t.Fatalf("RecvGroup after cancel = %v, want group %d", got, group.Start())
 	}
 }
 

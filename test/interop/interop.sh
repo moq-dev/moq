@@ -1047,8 +1047,10 @@ AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 # The `auth granted` line a token minted with at most one publish and one
 # subscribe pattern implies. Every client that prints one dials $AUTH_VERSION,
 # which carries AUTH, so a client that prints nothing never got its grant.
+# Each pattern is a JSON string, so a `\` in one reads `\\`.
 grant_line() {
-    local publish="${1:+\"$1\"}" subscribe="${2:+\"$2\"}"
+    local publish="${1//\\/\\\\}" subscribe="${2//\\/\\\\}"
+    publish="${publish:+\"$publish\"}" subscribe="${subscribe:+\"$subscribe\"}"
     printf 'auth granted publish=[%s] subscribe=[%s]' "$publish" "$subscribe"
 }
 
@@ -1278,9 +1280,10 @@ run_gst_audio() {
         pads+=("s.audio_$i" ! decodebin "name=decode$i" ! audioconvert ! "audio/x-raw,format=F32LE,layout=interleaved"
             ! identity "name=frames$i" ! filesink "location=$out.$i.pcm" buffer-mode=2)
     done
+    # gst-launch unescapes a `\` in a property value, so the name's are doubled to survive it.
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
         GST_TRACERS=log GST_DEBUG=GST_BUFFER:7,GST_EVENT:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
-        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" max-delay=5000 ${version:+connect-version="$version"} \
+        gst-launch-1.0 moqsrc name=s url="$url" broadcast="${broadcast//\\/\\\\}" max-delay=5000 ${version:+connect-version="$version"} \
         s.video_0 ! filesink location="$out.video" buffer-mode=2 "${pads[@]}" >"$out.gst" 2>&1 &
     pid=$!
     while :; do
@@ -1416,10 +1419,10 @@ PYCODE
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
                     ffmpeg -hide_banner -loglevel error -copyts -i - \
-                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
+                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/${broadcast//[^[:alnum:]._-]/-}.raw" \
                         -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
                         -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
-                [[ -s "$HARNESS_RUN/$broadcast.raw" ]] || return
+                [[ -s "$HARNESS_RUN/${broadcast//[^[:alnum:]._-]/-}.raw" ]] || return
                 python3 - "$audio_out" "$codecs" <<'PYCODE'
 import struct, sys
 out, codec = sys.argv[1:]
@@ -1496,7 +1499,7 @@ PYCODE
                 trap '' PIPE
                 GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
                     timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
+                    moqsrc name=s url="$url" broadcast="${broadcast//\\/\\\\}" ${version:+connect-version="$version"} \
                     s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                     2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
             )
@@ -2258,7 +2261,11 @@ check_denied() {
 run_matrix() {
     local pub sub broadcast from why allowed log started
     for pub in "${PUB_LIST[@]}"; do
-        broadcast="interop-${pub}-$$-${RANDOM}.hang"
+        # An escaped `/` in the name, one segment holding a slash (one moq-transport namespace
+        # field), so every client, grant, and relay carries it whole. Compat may run released
+        # binaries that split it, and names scratch files after the broadcast, so it keeps a plain one.
+        broadcast="interop-${pub}\\/$$-${RANDOM}.hang"
+        [[ "$COMPAT" -eq 0 ]] || broadcast="interop-${pub}-$$-${RANDOM}.hang"
         echo "=== publisher: $pub  broadcast: $broadcast ==="
         if is_broken "$pub"; then
             for sub in "${SUB_LIST[@]}"; do

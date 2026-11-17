@@ -63,7 +63,7 @@ retired in favor of moq-crypto, gets no trusted publisher;
 a later change took it out of the
 workspace instead. Reversed 2026-11-16 (maintainer, /quest-plan of the
 pre-cut audit): moq-e2ee is a crate again, unpublished at the cut
-([the crate move](/quest/m2/e2ee-crate.md)), and gets its trusted publisher
+([the crate move](https://github.com/moq-dev/moq/pull/8947)), and gets its trusted publisher
 when [the finished format](/quest/m3/e2ee-format.md) publishes it, which
 that quest's `Waiting` item tracks.
 

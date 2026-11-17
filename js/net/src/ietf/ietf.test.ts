@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, Writer } from "../stream.ts";
-import { Timescale, Timestamp } from "../time.ts";
+import { Timescale } from "../time.ts";
 import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
@@ -74,15 +74,10 @@ async function decodeVersioned<T>(
 	return await decoder(reader, version);
 }
 
-async function encodeFrameVersioned(
-	frame: Frame,
-	flags: GroupFlags,
-	version: IetfVersion,
-	timescale: Timescale = Timescale.MILLI,
-): Promise<Uint8Array> {
+async function encodeFrameVersioned(frame: Frame, flags: GroupFlags, version: IetfVersion): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream, version);
-	await frame.encode(writer, flags, timescale, version);
+	await frame.encode(writer, flags, version);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
@@ -92,11 +87,10 @@ async function encodeFetchFrameVersioned(
 	frame: FetchFrame,
 	position: FetchPosition,
 	version: IetfVersion,
-	timescale: Timescale = Timescale.MILLI,
 ): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream, version);
-	await frame.encode(writer, position, timescale, version);
+	await frame.encode(writer, position, version);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
@@ -444,17 +438,32 @@ test("Namespace: literal backslash round trips", async () => {
 	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
-test("Namespace: slashes at tuple part boundaries", async () => {
-	// A leading slash escapes to a non-empty `\` segment.
-	const tuple = await encodeNamespaceTuple(["/foo", "/bar"]);
-	const decoded = await decodeNamespace(tuple);
-	expect(decoded).toBe("\\/foo/\\/bar" as Path.Valid);
-	expect(await encodeNamespace(decoded)).toEqual(tuple);
-
-	// A trailing slash escapes to an empty segment, which every later path operation assumes away.
-	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"]]) {
-		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow(ProtocolViolation);
+test("Namespace: slashes at field boundaries", async () => {
+	// A slash anywhere in a field escapes to content of one segment, never an empty one.
+	for (const fields of [
+		["/foo", "/bar"],
+		["/foo", "b/ar", "/baz"],
+	]) {
+		const tuple = await encodeNamespaceTuple(fields);
+		const decoded = await decodeNamespace(tuple);
+		expect(Path.parts(decoded).map(Path.unescape)).toEqual(fields);
+		expect(await encodeNamespace(decoded)).toEqual(tuple);
 	}
+	expect(await decodeNamespace(await encodeNamespaceTuple(["/a/b", "c"]))).toBe("\\/a\\/b/c" as Path.Valid);
+
+	// TEMPORARY MIGRATION, delete at the next version cut and move these up: a field ending in a
+	// slash, or holding `//`, spells a bare slash beside an escaped one, which the previous release
+	// would trim or collapse into another path, so it is refused until it is gone.
+	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"], ["//", "/"]]) {
+		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow();
+	}
+
+	// A namespace of 32 fields stays 32 segments however many of them hold a slash.
+	const fields = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}/${i}`);
+	const tuple = await encodeNamespaceTuple(fields);
+	const decoded = await decodeNamespace(tuple);
+	expect(Path.parts(decoded)).toHaveLength(Path.MAX_PARTS);
+	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
 test("Namespace: Subscribe with empty namespace round trip", async () => {
@@ -725,7 +734,7 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 
 	for (const hasEnd of [false, true]) {
 		const decoded = await new Reader(undefined, wire, Version.DRAFT_22).decode((c) =>
-			Frame.decode(c, makeFlags(hasEnd), Timescale.MILLI),
+			Frame.decode(c, makeFlags(hasEnd)),
 		);
 
 		// No payload is the group-end signal the subscriber breaks its read loop on.
@@ -735,7 +744,7 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 
 	// Status 0 on a marked stream is still an empty frame, not a group end.
 	const empty = await new Reader(undefined, new Uint8Array([0x00, 0x00, 0x00]), Version.DRAFT_22).decode((c) =>
-		Frame.decode(c, makeFlags(true), Timescale.MILLI),
+		Frame.decode(c, makeFlags(true)),
 	);
 	expect(empty.payload).toEqual(new Uint8Array(0));
 	expect(empty.endOfTrack).toBe(false);
@@ -751,8 +760,8 @@ test("Frame decodes objects split at every byte", async () => {
 		firstObject: true,
 	};
 	const frames = [
-		new Frame({ payload: new Uint8Array([1]), timestamp: new Timestamp(96_000, Timescale.MILLI) }),
-		new Frame({ payload: new Uint8Array(300).fill(2), timestamp: new Timestamp(96_033, Timescale.MILLI) }),
+		new Frame({ payload: new Uint8Array([1]), groupGap: 300n }),
+		new Frame({ payload: new Uint8Array(300).fill(2) }),
 	];
 	const bytes = concatChunks(await Promise.all(frames.map((f) => encodeFrameVersioned(f, flags, Version.DRAFT_22))));
 	const reader = new Reader(
@@ -766,11 +775,11 @@ test("Frame decodes objects split at every byte", async () => {
 		Version.DRAFT_22,
 	);
 
-	const decode = (c: Cursor) => Frame.decode(c, flags, Timescale.MILLI);
+	const decode = (c: Cursor) => Frame.decode(c, flags);
 	for (const frame of frames) {
 		const decoded = await reader.decodeMaybe(decode);
 		expect(decoded?.payload).toEqual(frame.payload);
-		expect(decoded?.timestamp?.value).toBe(frame.timestamp?.value);
+		expect(decoded?.groupGap).toBe(frame.groupGap);
 	}
 	expect(await reader.decodeMaybe(decode)).toBeUndefined();
 });
@@ -789,12 +798,10 @@ test("Frame rejects a property that runs past its block", async () => {
 	// Delta 0, a 2-byte block holding a Timestamp id and the first byte of a 2-byte value, a
 	// 1-byte payload, then bytes the block must not borrow.
 	const reader = new Reader(undefined, new Uint8Array([0, 2, 0x10, 0x80, 1, 0xaa, 0x01]), Version.DRAFT_22);
-	await expect(reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI))).rejects.toThrow(
-		"message is shorter than its fields",
-	);
+	await expect(reader.decode((c) => Frame.decode(c, flags))).rejects.toThrow("message is shorter than its fields");
 });
 
-test("Frame reads only the current LOC Timestamp ID on every draft", async () => {
+test("Frame reads no time from a Timestamp, only a Prior Group ID Gap, on every draft", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
 		hasSubgroup: false,
@@ -804,10 +811,11 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 		firstObject: true,
 	};
 	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
-		for (const id of [0x06, 0x10]) {
+		for (const id of [0x06, 0x10, 0x3c]) {
 			const reader = new Reader(undefined, new Uint8Array([0, 2, id, 42, 1, 0xaa]), version);
-			const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
-			expect(frame.timestamp?.value).toBe(id === 0x10 ? 42 : undefined);
+			const frame = await reader.decode((c) => Frame.decode(c, flags));
+			expect(frame.payload).toEqual(new Uint8Array([0xaa]));
+			expect(frame.groupGap).toBe(id === 0x3c ? 42n : undefined);
 		}
 	}
 });
@@ -817,35 +825,25 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 // for a served fill. Its priority is the track's, as a subgroup header's is: model priority
 // 72 is wire 55, lower first.
 test("FetchFrame: the first object carries its absolute ids and the rest inherit them", async () => {
-	const timestamp = new Timestamp(96_000, Timescale.MILLI);
-	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp, priority: 55 });
+	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), priority: 55 });
 
+	// No properties: a fetch object sends no Timestamp.
 	const first = await encodeFetchFrameVersioned(frame, { group: 7n, object: 3, first: true }, Version.DRAFT_22);
 	expect(Array.from(first)).toEqual([
-		0x3c, // GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES
+		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES
 		7, // group id
 		3, // object id
 		55, // publisher priority
-		0x04, // properties length
-		0x10, // TIMESTAMP
-		0xc1,
-		0x77,
-		0x00, // 96000 as a three byte leading-ones varint
 		0x02, // payload length
 		0xaa,
 		0xbb,
 	]);
 
 	// Same group and priority, and the object id is the prior one plus one, so only the
-	// properties and the payload go on the wire.
+	// payload goes on the wire.
 	const next = await encodeFetchFrameVersioned(frame, { group: 7n, object: 4, first: false }, Version.DRAFT_22);
 	expect(Array.from(next)).toEqual([
-		0x20, // PROPERTIES
-		0x04,
-		0x10,
-		0xc1,
-		0x77,
-		0x00,
+		0x00, // subgroup zero, no fields present
 		0x02,
 		0xaa,
 		0xbb,
@@ -893,48 +891,15 @@ test("FetchFrame: the first object after an End of Range", async () => {
 // A fetch object has no status field, unlike a subgroup object: a zero payload length is
 // simply an empty object, and writing a status after it would desync the stream.
 test("FetchFrame: an empty payload is a zero length, with no status byte", async () => {
-	const frame = new FetchFrame({
-		payload: new Uint8Array(),
-		timestamp: new Timestamp(0, Timescale.MILLI),
-		priority: 0,
-	});
+	const frame = new FetchFrame({ payload: new Uint8Array(), priority: 0 });
 	const encoded = await encodeFetchFrameVersioned(frame, { group: 1n, object: 0, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
-		0x3c,
+		0x1c,
 		1, // group id
 		0, // object id
 		0, // publisher priority
-		0x02, // properties length
-		0x10, // TIMESTAMP
-		0x00, // 0
 		0x00, // payload length, and nothing follows
-	]);
-});
-
-// A track that declared no timescale opted out of timestamps, so the properties field is
-// omitted rather than carrying a value in units the peer was never told. This is what a
-// subscriber that sent INCLUDE_PROPERTIES=0 gets.
-test("FetchFrame: an unstamped object omits the properties field", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 0n, object: 0, first: false }, Version.DRAFT_22);
-
-	// Flags 0 (subgroup zero, no fields present), then the payload.
-	expect(Array.from(encoded)).toEqual([0x00, 0x01, 0x01]);
-});
-
-// The first object still carries its absolute ids and priority; only the properties go.
-test("FetchFrame: an unstamped first object keeps its ids", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 4n, object: 2, first: true }, Version.DRAFT_22);
-
-	expect(Array.from(encoded)).toEqual([
-		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES
-		4,
-		2,
-		0,
-		0x01,
-		0x01,
 	]);
 });
 

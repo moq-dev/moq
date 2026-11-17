@@ -36,7 +36,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 	let timestamp = millis(key);
 	group.write_frame(timestamp, &b"x"[..]).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The groups at one second then at zero of a millisecond track, into a relay over

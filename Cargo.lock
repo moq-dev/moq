@@ -4422,13 +4422,8 @@ dependencies = [
 name = "moq-crypto"
 version = "0.0.11"
 dependencies = [
- "base64 0.23.1",
- "bench-harness",
- "bytes",
  "data-encoding",
  "hex",
- "kio",
- "moq-crypto",
  "moq-net",
  "rind",
  "rind-rustls",
@@ -4436,6 +4431,25 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
+ "workspace-hack",
+ "zeroize",
+]
+
+[[package]]
+name = "moq-e2ee"
+version = "0.0.26"
+dependencies = [
+ "base64 0.23.1",
+ "bench-harness",
+ "bytes",
+ "hex",
+ "kio",
+ "moq-crypto",
+ "moq-e2ee",
+ "moq-net",
+ "rind",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "uuid",
@@ -4638,6 +4652,7 @@ dependencies = [
  "hashlink",
  "kio",
  "libc",
+ "moq-net",
  "moq-pattern",
  "num_enum",
  "proptest",
@@ -4714,6 +4729,7 @@ dependencies = [
  "lru-slab",
  "moq-congestion",
  "moq-crypto",
+ "moq-quic",
  "proptest",
  "qlog",
  "rand 0.10.3",

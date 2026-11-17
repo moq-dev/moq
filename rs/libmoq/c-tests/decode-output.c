@@ -267,7 +267,7 @@ int main(void) {
     int32_t consume = c.broadcast;
     pthread_mutex_unlock(&c.mu);
 
-    int32_t catalog_sub = moq_consume_catalog((uint32_t)consume, on_catalog, &c);
+    int32_t catalog_sub = moq_consume_catalog((uint32_t)consume, 0, on_catalog, &c);
     if (catalog_sub <= 0) fail("error: moq_consume_catalog failed: %d\n", catalog_sub);
 
     pthread_mutex_lock(&c.mu);

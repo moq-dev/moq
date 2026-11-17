@@ -46,7 +46,6 @@ key = "key.pem"
 #   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
 #     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
 #     --public-publish 'anon/**' --public-publish 'demo/viewer/**' \
-#     --public-publish 'demo/carla/.client/*' \
 #     --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer
 #
 # Anonymous MoQ Boy viewers publish their commands under `demo/viewer/`, while only the
@@ -54,11 +53,9 @@ key = "key.pem"
 # publish under another viewer's id; the emulator trusts nothing in a command beyond a
 # button state.
 #
-# Anonymous CARLA drivers get one shared grant covering only client socket endpoints: a
-# truck's server endpoint, `.server/<name>`, stays its publisher's. `demo/**` lets drivers
-# dial those servers, and also read another driver's client endpoint, which yields nothing
-# without a session's secret id. Each driver's id is 128 random bits, so no driver can
-# guess another's.
+# Anonymous CARLA drivers share the same `demo/viewer/**`, under which each one publishes
+# its controls: a truck's broadcasts stay under `demo/carla/`, its worker's, which signs in
+# with a token.
 #
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.

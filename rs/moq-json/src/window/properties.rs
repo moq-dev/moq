@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngSeed, TestCaseResult, TestRunner};
+use proptest::test_runner::{Config as RunnerConfig, RngSeed, TestCaseResult, TestRunner};
 use serde_json::Value;
 
-use super::{ConsumerConfig, Decoder, Encoded, Encoder, Event, ProducerConfig};
+use super::{Config, Decoder, Encoded, Encoder, Event, consumer};
 
 // Mirror the JS generator, including nulls and keys that are special to JS objects.
 fn value() -> BoxedStrategy<Value> {
@@ -83,7 +83,7 @@ fn ranges(indices: impl IntoIterator<Item = u64>) -> Vec<Range<u64>> {
 	result
 }
 
-fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResult {
+fn check(config: Config, steps: Vec<Step>, join: usize) -> TestCaseResult {
 	let mut encoder = Encoder::<Value>::new(config.clone());
 	let mut groups: Vec<Group> = Vec::new();
 	let mut offset = 0;
@@ -139,7 +139,7 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 	}
 
 	for mode in ["following", "late", "lagging"] {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(consumer::Config::default());
 		let mut notified = BTreeSet::new();
 		let mut received = BTreeSet::new();
 		let mut contents = BTreeMap::new();
@@ -235,7 +235,7 @@ fn window_codec_property_matches_every_readers_logical_window() {
 	let seed = setting("MOQ_JSON_SEED", 0x6d6f71, 0);
 	let cases = setting("MOQ_JSON_CASES", 256, 1);
 	eprintln!("MOQ_JSON_SEED={seed} MOQ_JSON_CASES={cases}");
-	let mut runner = TestRunner::new(Config {
+	let mut runner = TestRunner::new(RunnerConfig {
 		cases,
 		rng_seed: RngSeed::Fixed(u64::from(seed)),
 		rng_algorithm: proptest::test_runner::RngAlgorithm::XorShift,
@@ -260,7 +260,7 @@ fn window_codec_property_matches_every_readers_logical_window() {
 		1..65,
 	);
 	let sequence = (
-		(any::<bool>(), proptest::option::of(1usize..=8)).prop_map(|(ops, checkpoint_records)| ProducerConfig {
+		(any::<bool>(), proptest::option::of(1usize..=8)).prop_map(|(ops, checkpoint_records)| Config {
 			ops,
 			checkpoint_records,
 		}),

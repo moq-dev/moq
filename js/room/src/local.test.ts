@@ -61,7 +61,7 @@ test("a screen share publishes only while joined", async () => {
 	// The screen's hd, sd, and audio encoders are constructed last.
 	const screenEncoders = () => encoders.slice(-3).map((e) => (e.enabled as Signal<boolean>).peek());
 	try {
-		local.screenEnabled.set(true);
+		local.screen.enabled.set(true);
 		screen.out.state.set({ kind: "live", media: { video: {} } });
 		await flush();
 		expect(broadcasts.camera.enabled.peek()).toBe(false);
@@ -89,10 +89,10 @@ test("screen capture stays enabled while prompting and resets after a live share
 		await flush();
 		expect(encoders).toHaveLength(6);
 		expect(encoders.every((props) => props.bandwidth === bandwidth)).toBe(true);
-		local.screenEnabled.set(true);
+		local.screen.enabled.set(true);
 		screen.out.state.set({ kind: "prompting" });
 		await flush();
-		expect(local.screenEnabled.peek()).toBe(true);
+		expect(local.screen.enabled.peek()).toBe(true);
 		expect(local.preview.peek().screen).toBe(false);
 
 		screen.out.state.set({ kind: "live", media: { video: {} } });
@@ -101,7 +101,7 @@ test("screen capture stays enabled while prompting and resets after a live share
 
 		screen.out.state.set({ kind: "ended", reason: "stopped" });
 		await flush();
-		expect(local.screenEnabled.peek()).toBe(false);
+		expect(local.screen.enabled.peek()).toBe(false);
 		expect(local.preview.peek().screen).toBe(false);
 	} finally {
 		local.close();
@@ -112,12 +112,12 @@ test("screen capture stays enabled while prompting and resets after a live share
 test("a dismissed screen picker turns sharing off", async () => {
 	const { local, screen } = setup();
 	try {
-		local.screenEnabled.set(true);
+		local.screen.enabled.set(true);
 		screen.out.state.set({ kind: "prompting" });
 		await flush();
 		screen.out.state.set({ kind: "ended", reason: "dismissed" });
 		await flush();
-		expect(local.screenEnabled.peek()).toBe(false);
+		expect(local.screen.enabled.peek()).toBe(false);
 		expect(local.preview.peek().screen).toBe(false);
 	} finally {
 		local.close();

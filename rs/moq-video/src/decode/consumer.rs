@@ -844,7 +844,7 @@ mod tests {
 				})
 				.collect();
 			wire.write(&mut group, &frames).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		write(10, &[1000, 800, 900, 1100]);
 		write(11, &[2000, 1800, 1900, 2100]);
@@ -1007,7 +1007,7 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = Vec::new();
@@ -1054,7 +1054,7 @@ mod tests {
 			})
 			.collect();
 		wire.write(&mut group, &frames).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut sourced = Vec::new();
@@ -1408,7 +1408,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
 		let _track = track.finish().unwrap();
@@ -1465,7 +1465,7 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = 0;

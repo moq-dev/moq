@@ -157,7 +157,7 @@ case "$1" in
         criterion msf -p moq-msf --bench catalog
         # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls -p moq-video \
             --features moq-json/bench,moq-quic/fuzz,moq-video/openh264 \
             --bench protect --bench codec --bench table --bench allocations --bench window \

@@ -162,52 +162,6 @@ impl Ledger {
 		self.changes.insert(first..end);
 	}
 
-	/// Take `groups` back out of what is accounted for, owed again from `now`: a verdict that
-	/// accounted for them was reversed. The gap they leave opens now, so it is waited for a
-	/// fresh grace, even where it joins an older gap.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
-		if groups.is_empty() {
-			return;
-		}
-		let overlapping: Vec<u64> = self.accounted(groups.clone()).map(|run| run.start).collect();
-		if overlapping.is_empty() {
-			return;
-		}
-		for clipped in overlapping {
-			let start = self
-				.runs
-				.range(..=clipped)
-				.next_back()
-				.map(|(&start, _)| start)
-				.expect("an accounted run");
-			let run = self.remove(start);
-			if start < groups.start {
-				self.ages.insert((run.since, start));
-				self.runs.insert(
-					start,
-					Run {
-						end: groups.start,
-						since: run.since,
-					},
-				);
-				self.changes.insert(start..groups.start);
-			}
-			if groups.end < run.end {
-				self.ages.insert((now, groups.end));
-				self.runs.insert(
-					groups.end,
-					Run {
-						end: run.end,
-						since: now,
-					},
-				);
-				self.changes.insert(groups.end..run.end);
-			}
-		}
-		self.demand(groups, now);
-	}
-
 	/// Account a live arrival, refreshing a cached incarnation even if its key was
 	/// accounted before. Its gap ages stay unchanged, but readers must revisit a refusal.
 	pub fn arrive(&mut self, key: u64, now: Instant) {
@@ -553,38 +507,6 @@ mod tests {
 		ledger.expire(lowered.saturating_add(GRACE));
 		assert!(ledger.covers(1..10));
 	}
-	/// Unaccounting reopens what a reversed verdict accounted for, as a gap waited for a fresh
-	/// grace, and leaves the rest of the run accounted.
-	#[test]
-	fn unaccount_reopens_a_gap_for_a_fresh_grace() {
-		let start = Instant::now();
-		let mut ledger = Ledger::new(GRACE);
-		arrive(&mut ledger, 0..10, start);
-		ledger.unaccount(3..5, start.saturating_add(GRACE));
-		assert!(ledger.covers(0..3) && ledger.covers(5..10));
-		assert!(!ledger.covers(3..5));
-		ledger.expire(start.saturating_add(GRACE * 3 / 2));
-		assert!(!ledger.covers(3..5), "its grace runs from the reversal");
-		ledger.expire(start.saturating_add(GRACE * 2));
-		assert!(ledger.covers(0..10));
-	}
-
-	/// A reopened gap that joins an older one is waited for a fresh grace as a whole, rather
-	/// than folding with the older gap's age.
-	#[test]
-	fn unaccount_restarts_the_older_gap_it_joins() {
-		let start = Instant::now();
-		let mut ledger = Ledger::new(GRACE);
-		arrive(&mut ledger, 0..2, start);
-		arrive(&mut ledger, 4..6, start);
-		let reversed = start.saturating_add(GRACE * 9 / 10);
-		ledger.unaccount(1..2, reversed);
-		ledger.expire(start.saturating_add(GRACE));
-		assert!(!ledger.covers(1..2), "its grace runs from the reversal");
-		ledger.expire(reversed.saturating_add(GRACE));
-		assert!(ledger.covers(0..6));
-	}
-
 	#[test]
 	fn demand_can_move_an_older_gap_after_a_newer_one() {
 		let start = Instant::now();
