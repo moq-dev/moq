@@ -287,7 +287,7 @@ func NewTrackConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, con
 // GroupConfig names a catalog rendition's group and fetch delivery options.
 type GroupConfig struct {
 	Rendition Rendition
-	Sequence  uint64
+	Start     uint64
 	Options   *moq.FetchGroupOptions
 }
 
@@ -301,7 +301,7 @@ func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config Gr
 			return nil, err
 		}
 	}
-	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Sequence: config.Sequence, Options: config.Options})
+	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Start: config.Start, Options: config.Options})
 	if err != nil {
 		return nil, err
 	}
@@ -443,12 +443,21 @@ func (m *TrackProducer) Cut() error {
 	return m.inner.Cut()
 }
 
-// Seek draws a group boundary and numbers the next group sequence.
+// Seek draws a group boundary and starts the next group at start.
 //
-// Cut with an explicit sequence, for a publisher whose group numbers have to be
+// Cut with an explicit start, for a publisher whose group starts have to be
 // deterministic: two encoders aligning per GOP so a consumer can fail over between them.
-func (m *TrackProducer) Seek(sequence uint64) error {
-	return m.inner.Seek(sequence)
+func (m *TrackProducer) Seek(start uint64) error {
+	return m.inner.Seek(start)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (m *TrackProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the media track.
@@ -482,9 +491,9 @@ func (c *ContainerProducer) Cut() error {
 	return c.inner.Cut()
 }
 
-// Seek starts a new segment and numbers its groups sequence.
-func (c *ContainerProducer) Seek(sequence uint64) error {
-	return c.inner.Seek(sequence)
+// Seek starts a new segment and starts its groups at start.
+func (c *ContainerProducer) Seek(start uint64) error {
+	return c.inner.Seek(start)
 }
 
 // Finish finishes every track this container publishes.
@@ -519,6 +528,15 @@ func (m *TrackStreamProducer) Write(payload []byte) error {
 // next keyframe in the stream.
 func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 	return m.inner.SetEnabled(enabled)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (m *TrackStreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return m.inner.AbortUnwanted(errorCode)
 }
 
 // Finish closes the stream.
@@ -595,9 +613,9 @@ type GroupConsumer struct {
 	inner *ffi.MoqMediaGroupConsumer
 }
 
-// Sequence is this group's sequence number within the track.
-func (m *GroupConsumer) Sequence() uint64 {
-	return m.inner.Sequence()
+// Start is this group's start within the track.
+func (m *GroupConsumer) Start() uint64 {
+	return m.inner.Start()
 }
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.

@@ -130,7 +130,7 @@ async def test_client_reconnects_and_resumes_announcements():
                     initial=timedelta(milliseconds=50),
                     multiplier=2,
                     max=timedelta(milliseconds=200),
-                    timeout=timedelta(0),
+                    timeout=None,
                 ),
             ) as client:
                 session = client.session
@@ -191,7 +191,7 @@ async def test_session_state_names_a_failing_first_dial():
                 initial=timedelta(milliseconds=50),
                 multiplier=2,
                 max=timedelta(milliseconds=200),
-                timeout=timedelta(0),
+                timeout=None,
             ),
         )
         async with client:

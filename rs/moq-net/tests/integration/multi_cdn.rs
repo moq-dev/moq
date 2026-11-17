@@ -215,7 +215,7 @@ impl Topology {
 			group.write_frame(timestamp(key, frame), payload(key, frame)).unwrap();
 			written.push((key, payload(key, frame)));
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		written
 	}
 

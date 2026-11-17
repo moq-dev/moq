@@ -52,7 +52,7 @@ function endpointPath(prefix: Path.Valid, role: Role, id: string): Path.Valid {
  * media, so a worker that acts on every announced broadcast can skip it.
  */
 export function isEndpoint(path: Path.Valid): boolean {
-	const parent = path.split("/").at(-2);
+	const parent = Path.parts(path).at(-2);
 	return Object.values(SEGMENT).some((role) => parent === role);
 }
 

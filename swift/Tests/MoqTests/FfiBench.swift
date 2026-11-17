@@ -60,7 +60,7 @@ final class FfiBench: XCTestCase {
                 name: "call/\(name)", unit: "ns",
                 value: (ProcessInfo.processInfo.systemUptime - start) * 1e9 / Double(calls))
         }
-        results.append(call("sequence") { _ = group.sequence })
+        results.append(call("start") { _ = group.start })
         results.append(try call("info") { _ = consumer.info() })
         try broadcast.close()
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
@@ -75,7 +75,7 @@ final class FfiBench: XCTestCase {
         defer { withExtendedLifetime(route) {} }
         let broadcast = route.broadcast
         let tracks = try (0..<c.publishers).map {
-            try broadcast.publishTrack(name: "\($0)", info: TrackInfo(timescale: 1_000_000))
+            try broadcast.publishTrack(name: "\($0)", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         }
         let consumers = try tracks.flatMap { track in
             try (0..<c.subscribers).map { _ in try track.consume() }

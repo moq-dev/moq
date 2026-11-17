@@ -10,12 +10,12 @@ import MoqFFI
 /// Foundation before the swift-foundation rewrite (iOS < 18 / macOS < 15), so encode an object
 /// or array there.
 ///
-/// Compression is the track's: publish JSON with `TrackInfo(compression: .deflate)`, and a consumer reads
-/// it with no option of its own.
+/// Compression is the track's: publish JSON with `TrackInfo(maxAge: 0, compression: Compression.deflate())`,
+/// and a consumer reads it with no option of its own.
 ///
 /// Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
 /// broadcast clock, the epoch every track in the broadcast shares: read it with
-/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(timescale: 1000)`); one
+/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(maxAge: 0, timescale: 1000)`); one
 /// without is refused.
 public enum Json {}
 
@@ -74,6 +74,15 @@ extension Json {
         /// A watch-only handle to whether the track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())
+        }
+
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track, closing any open group.
@@ -150,6 +159,15 @@ extension Json {
         /// A watch-only handle to whether the track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())
+        }
+
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track, closing the group.
@@ -233,6 +251,15 @@ extension Json {
         /// A watch-only handle to whether the track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())
+        }
+
+        /// Abort the track with an application error code, but only while nobody wants it: call it
+        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
+        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
+        /// that came and went, and waits on.
+        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
+            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track, closing any open group.

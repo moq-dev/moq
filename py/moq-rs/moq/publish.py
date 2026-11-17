@@ -40,9 +40,9 @@ class GroupProducer:
         self._inner = inner
 
     @property
-    def sequence(self) -> int:
-        """The sequence number of this group within the track."""
-        return self._inner.sequence()
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
 
     def consume(self) -> GroupConsumer:
         """Create a consumer that reads frames from this group."""
@@ -65,7 +65,7 @@ class GroupProducer:
     def write_frame(self, payload: bytes, timestamp: Timestamp) -> None:
         """Write a frame with its presentation timestamp.
 
-        On a scale-less track the timestamp is ``Timestamp.unscaled(self.sequence)``.
+        On a scale-less track the timestamp is ``Timestamp.unscaled(self.start)``.
 
         Never blocks: without :meth:`ready`, a writer that outpaces its readers
         sheds the front of the group instead.
@@ -138,9 +138,9 @@ class TrackProducer:
         """Start a new group; write frames into it, then finish()."""
         return GroupProducer(self._inner.append_group())
 
-    def create_group(self, sequence: int) -> GroupProducer:
-        """Create a group with an explicit sequence number."""
-        return GroupProducer(self._inner.create_group(sequence))
+    def create_group(self, start: int) -> GroupProducer:
+        """Create a group with an explicit start."""
+        return GroupProducer(self._inner.create_group(start))
 
     def skip_groups(self, start: int, end: int) -> None:
         """Declare that groups ``start`` up to the exclusive ``end`` will never be produced.
@@ -179,7 +179,8 @@ class TrackProducer:
 
         Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None``.
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
         """
         return self._inner.abort_unwanted(error_code)
 
@@ -190,9 +191,9 @@ class TrackProducer:
         """
         self._inner.finish()
 
-    def finish_at(self, final_sequence: int) -> None:
-        """Declare the exclusive final group sequence ahead of the live edge."""
-        self._inner.finish_at(final_sequence)
+    def finish_at(self, final_start: int) -> None:
+        """Declare the exclusive final group start ahead of the live edge."""
+        self._inner.finish_at(final_start)
 
 
 class TrackRequest:
@@ -288,27 +289,27 @@ class Fill:
         """
         return await self._inner.wanted_changed()
 
-    def accept(self, sequence: int) -> GroupProducer:
-        """Insert group ``sequence`` and return a producer for it.
+    def accept(self, start: int) -> GroupProducer:
+        """Insert group ``start`` and return a producer for it.
 
         The first group starts at :attr:`start`'s frame, so its frames keep their indices.
         """
-        return GroupProducer(self._inner.accept(sequence))
+        return GroupProducer(self._inner.accept(start))
 
     def drop_groups(self, start: int, end: int) -> None:
         """Name groups ``start`` up to the exclusive ``end`` as never to be delivered."""
         self._inner.drop_groups(start, end)
 
-    def is_wanted(self, sequence: int) -> bool:
-        """Whether a reader still waits for group ``sequence`` from this fill.
+    def is_wanted(self, start: int) -> bool:
+        """Whether a reader still waits for group ``start`` from this fill.
 
         False once every reader took it or narrowed past it, or nobody waits on the fill.
         """
-        return self._inner.is_wanted(sequence)
+        return self._inner.is_wanted(start)
 
-    async def unwanted(self, sequence: int) -> None:
-        """Wait until no reader waits for group ``sequence`` from this fill, so stop serving it."""
-        await self._inner.unwanted(sequence)
+    async def unwanted(self, start: int) -> None:
+        """Wait until no reader waits for group ``start`` from this fill, so stop serving it."""
+        await self._inner.unwanted(start)
 
 
 class TrackRequests(_Stream[Fill]):

@@ -95,13 +95,15 @@ fn publish(origin: &moq_net::origin::Producer, name: &str) {
 		let _broadcast = broadcast;
 		loop {
 			let mut group = track
-				.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.expect("append group");
 			let payload = group.start.to_string().into_bytes();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 				.expect("write frame");
-			group.close().expect("finish group");
+			group.finish().expect("finish group");
 			kio::clock::sleep(Duration::from_millis(20)).await;
 		}
 	});
@@ -196,7 +198,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 	read(&mut upstream, GROUPS, &mut up).await;
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
 	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
@@ -231,7 +233,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
 	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
@@ -273,7 +275,7 @@ async fn a_replacement_does_not_check_what_its_predecessor_learned() {
 	let mut down = Vec::new();
 	read(&mut downstream, GROUPS, &mut down).await;
 
-	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	old.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	let replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never redialed")

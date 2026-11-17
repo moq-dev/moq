@@ -706,6 +706,10 @@ pub mod poll {
 		Delivered,
 		/// The transport cannot see acknowledgments, so delivery is unknown, never assumed.
 		Unsupported,
+		/// The transport handed every byte below the offset to a reliable link, such as qmux's
+		/// TCP, which delivers it unless the link fails. Not an acknowledgment: it says nothing of
+		/// when the peer got it, but a reset can no longer discard it.
+		Sent,
 	}
 
 	/// An outgoing stream with partial writes, priorities, and reset codes.
@@ -727,6 +731,7 @@ pub mod poll {
 		///
 		/// Errors once those bytes can never be acknowledged: the stream was reset by either
 		/// side or the session closed. Bytes already acknowledged stay so after a reset or stop.
+		/// A transport over a reliable link answers [`Acked::Sent`] once the link took them.
 		/// A transport that cannot see acknowledgments is ready with [`Acked::Unsupported`]
 		/// immediately, the default, on every stream, so a caller can decide once per session. An
 		/// offset minted by another stream may panic.

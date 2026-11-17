@@ -73,7 +73,7 @@ impl Worker {
 				let tag = format!("{name}{}", served.borrow().len());
 				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), tag.into_bytes()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}
@@ -92,7 +92,7 @@ impl Worker {
 		let (_, track) = outputs.last().expect("an output");
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), b"next".to_vec()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	/// End the latest output, as a worker does when the job stops.

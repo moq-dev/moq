@@ -72,9 +72,8 @@ Public API: a rate handle on moq-webrtc's WHEP server. Decided 2026-10-30
 field to it, never a
 `with_rate` setter (2026-11-07, maintainer, /quest-plan from the API sweep
 of open PRs and remaining quests). `whip::Request` had the same field until
-[the gateway alignment](/quest/m2/gateway-align.md) moved the ingest cap
-onto `moq_mux::Ingest` (2026-11-16); the WHEP cap is per viewer, so it
-stays on the request. The handle
+the ingest cap moved onto `moq_mux::Ingest` (2026-11-16); the WHEP cap is
+per viewer, so it stays on the request. The handle
 is `moq_net::bandwidth::Limit`, which replaced moq-webrtc's own
 `rate::{Cap, Limit}` (2026-11-07, maintainer, /quest-plan from the API shape
 audit). Wire: none.
