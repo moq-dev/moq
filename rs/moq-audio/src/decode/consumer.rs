@@ -411,7 +411,13 @@ impl Consumer {
 				Some(Encoded::Gap { timestamp, duration }) => {
 					self.boundary = Some(Duration::try_from(timestamp)?);
 					self.started = true;
+					// Groups lost past a declared end were the fresh encoder's, so the packet
+					// after them still starts it and its pre-skip is trimmed again.
+					let fresh = self.end.is_some();
 					self.restart()?;
+					if fresh {
+						self.decoder.reapply_delay();
+					}
 					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
@@ -2654,12 +2660,27 @@ mod tests {
 	/// stream's start, is not trimmed again off the media after the loss.
 	#[tokio::test(start_paused = true)]
 	async fn a_lost_group_does_not_trim_the_pre_skip_again() {
+		assert_eq!(first_after_loss(false).await, (1_000_000, 960));
+	}
+
+	/// Groups lost past a declared end were the fresh encoder's, so the packet after them
+	/// still starts it, and its pre-skip is trimmed.
+	#[tokio::test(start_paused = true)]
+	async fn a_loss_after_a_declared_end_trims_the_fresh_encoders_pre_skip() {
+		let (_, frames) = first_after_loss(true).await;
+		assert_eq!(frames, 960 - 312);
+	}
+
+	/// Decodes two Opus packets, then, past lost groups and a declared end if `declared`,
+	/// one more a second later, returning the stamp and length of the first frame after the loss.
+	async fn first_after_loss(declared: bool) -> (u128, usize) {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
 			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&EncodeConfig::new(input.sample_rate, input.layout)).unwrap();
+		let config = EncodeConfig::new(input.sample_rate, input.layout);
+		let mut encoder = Encoder::new(&config).unwrap();
 		let mut catalog = encoder.catalog();
 		catalog.warmup = None;
 
@@ -2671,10 +2692,13 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
-		// Two packets, then a seek skips groups the viewer never gets.
 		let pcm = vec![0.25f32; encoder.frame_size()];
 		for micros in [0, 20_000, 1_000_000] {
 			if micros == 1_000_000 {
+				if declared {
+					producer.discontinuity().unwrap();
+					encoder = Encoder::new(&config).unwrap();
+				}
 				producer.seek(1_000_000).unwrap();
 			}
 			producer
@@ -2703,22 +2727,20 @@ mod tests {
 		.await
 		.unwrap();
 
-		let mut after = None;
 		let mut lost = false;
 		while let Some(read) = consumer.read().await.unwrap() {
 			match read {
 				Read::Gap { .. } => lost = true,
 				Read::Frame(frame) if lost => {
-					after = Some((
+					return (
 						frame.timestamp.as_micros().unwrap(),
 						frame.data.len() / size_of::<f32>(),
-					));
-					break;
+					);
 				}
 				Read::Frame(_) | Read::End { .. } => {}
 			}
 		}
-		assert_eq!(after, Some((1_000_000, 960)));
+		panic!("no frame after the loss");
 	}
 
 	thread_local! {
