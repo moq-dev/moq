@@ -137,14 +137,14 @@ impl Emulator {
 	}
 
 	/// Set the full button state for a viewer, replacing any previous state.
-	pub fn set_buttons(&mut self, viewer: crate::input::ViewerId, buttons: HashSet<Button>) {
-		self.viewers.insert(viewer, buttons);
+	pub fn set_buttons(&mut self, viewer: &str, buttons: HashSet<Button>) {
+		self.viewers.insert(viewer.to_string(), buttons);
 		self.sync_buttons();
 	}
 
 	/// A viewer disconnected - remove their button state.
-	pub fn viewer_left(&mut self, viewer: crate::input::ViewerId) {
-		self.viewers.remove(&viewer);
+	pub fn viewer_left(&mut self, viewer: &str) {
+		self.viewers.remove(viewer);
 		self.sync_buttons();
 	}
 

@@ -502,13 +502,15 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
-				// The zero default max age, as Rust's catalog track takes: a viewer needs only the newest
-				// snapshot. A catalog may publish once and stay unchanged for the broadcast's whole life,
-				// and a viewer arriving long after still bootstraps from it: max age only stales a
-				// superseded group, and the cache never ages out an open track's newest group.
+				// The media's max age, as Rust's catalog track takes: a viewer holding each update until
+				// its timestamp plays as far behind as the media, so a superseded snapshot stays
+				// deliverable as long. A catalog may publish once and stay unchanged for the broadcast's
+				// whole life, and a viewer arriving long after still bootstraps from it: max age only
+				// stales a superseded group, and the cache never ages out an open track's newest group.
 				const track = broadcast.createTrack(Broadcast.CATALOG_TRACK, {
 					// Each catalog snapshot is stamped when written.
 					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: maxAge === undefined ? Container.MAX_AGE : maxAge,
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
 					compression: "deflate",

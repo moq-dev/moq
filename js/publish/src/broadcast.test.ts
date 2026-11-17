@@ -565,12 +565,24 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	broadcast.close();
 });
 
-test("the catalog track takes the zero default max age", async () => {
-	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
-	await settle();
-	const info = await broadcast.net.peek()?.track(Broadcast.CATALOG_TRACK).info();
-	expect(info?.maxAge).toEqual(Duration.ZERO);
-	broadcast.close();
+test("the catalog track stays fresh as long as the media", async () => {
+	// A viewer holding each catalog update until its timestamp plays as far behind as the media.
+	for (const [maxAge, expected] of [
+		[undefined, Container.MAX_AGE],
+		[Duration.secs(5), Duration.secs(5)],
+		[null, null],
+	] as const) {
+		const broadcast = new Broadcast({
+			enabled: true,
+			origin: new Origin.Producer(),
+			name: Path.from("test.hang"),
+			maxAge,
+		});
+		await settle();
+		const info = await broadcast.net.peek()?.track(Broadcast.CATALOG_TRACK).info();
+		expect(info?.maxAge).toEqual(expected);
+		broadcast.close();
+	}
 });
 
 test("keeps the current catalog snapshot for a reconnecting viewer", async () => {

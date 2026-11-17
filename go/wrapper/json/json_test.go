@@ -57,8 +57,7 @@ func TestTracks(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	deflate := moq.CompressionDeflate
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +137,7 @@ func TestWindow(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	deflate := moq.CompressionDeflate
-	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,6 +275,58 @@ func TestDemand(t *testing.T) {
 	}
 	if err := untilWanted(ctx, snapshotDemand, true); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("untilWanted after Finish = %v, want ErrClosed", err)
+	}
+}
+
+// TestAbortUnwantedKeepsALateReader ends an idle stream only once a reader that
+// joined after its demand went unwanted has left.
+func TestAbortUnwantedKeepsALateReader(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	broadcast, consumer := newBroadcast(t)
+
+	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	demand, err := stream.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+
+	late, err := moqjson.NewStreamConsumer(subscribeTrack(ctx, t, consumer, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aborted, err := stream.AbortUnwanted(7); err != nil || aborted {
+		t.Fatalf("AbortUnwanted = %v, %v; want false with a reader", aborted, err)
+	}
+	if err := stream.Append("still serving", moq.TimestampFromScale(0, 1_000)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := late.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || string(record.Value) != `"still serving"` {
+		t.Fatalf("record = %+v, want \"still serving\"", record)
+	}
+
+	if err := untilWanted(ctx, demand, true); err != nil {
+		t.Fatal(err)
+	}
+	late.Cancel()
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	if aborted, err := stream.AbortUnwanted(7); err != nil || !aborted {
+		t.Fatalf("AbortUnwanted = %v, %v; want true once unwanted", aborted, err)
+	}
+	if _, err := stream.AbortUnwanted(7); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("AbortUnwanted after abort = %v, want ErrClosed", err)
 	}
 }
 

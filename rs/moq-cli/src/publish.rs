@@ -1643,7 +1643,8 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert!(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty());
 		let m2ts = catalog.m2ts.expect("the m2ts section");
 		assert!(m2ts.random_access);
@@ -1778,7 +1779,8 @@ pub(crate) mod tests {
 				.await
 				.unwrap()
 				.unwrap()
-				.expect("a catalog");
+				.expect("a catalog")
+				.value;
 			let name = catalog.m2ts.expect("the m2ts section").track;
 
 			// Subscribe and take the first group, so a read starts behind anything decoded
@@ -1932,7 +1934,8 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		let clock = catalog.media.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
@@ -1986,7 +1989,8 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert_eq!(catalog.echo, Some(echo));
 		assert!(!catalog.video.renditions.is_empty(), "beside the tracks");
 	}
@@ -2102,7 +2106,7 @@ pub(crate) mod tests {
 				.await
 				.expect("the catalog track ends");
 			match next.expect("the catalog ends cleanly") {
-				Some(catalog) => last = Some(catalog),
+				Some(catalog) => last = Some(catalog.value),
 				None => break,
 			}
 		}
@@ -2140,7 +2144,7 @@ pub(crate) mod tests {
 			res = &mut import => panic!("the import returned before its linger: {res:?}"),
 			name = async {
 				loop {
-					let catalog = catalogs.next().await.unwrap().expect("a catalog before the finish");
+					let catalog = catalogs.next().await.unwrap().expect("a catalog before the finish").value;
 					if let Some(name) = catalog.video.renditions.keys().next() {
 						break name.clone();
 					}
@@ -2224,7 +2228,7 @@ pub(crate) mod tests {
 					assert!(matches!(event, moq_net::announce::Event::Present(_)), "{event:?}");
 					let broadcast = consumer.request("demo", None).await.unwrap();
 					let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
-					let catalog = catalogs.next().await.unwrap().expect("a catalog");
+					let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 					// A passthrough carries the multiplex on one track, named by its m2ts section.
 					let name = match catalog.m2ts {
 						Some(m2ts) => m2ts.track,
@@ -2342,7 +2346,7 @@ pub(crate) mod tests {
 		assert_eq!(next(&mut import).await, first);
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let rate = catalog
 			.ext
 			.mpegts
@@ -2357,7 +2361,7 @@ pub(crate) mod tests {
 		assert_ne!(next(&mut import).await, first, "the new instance has its own instance");
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		assert!(catalog.echo.is_some(), "the new instance solicits feedback too");
 		assert_eq!(
 			catalog.ext.mpegts.mux_rate,

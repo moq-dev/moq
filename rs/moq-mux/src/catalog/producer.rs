@@ -472,8 +472,9 @@ impl<E: CatalogExt> Config<E> {
 	/// further behind live -- it caps what one may ask to wait for, and a subscriber's own
 	/// budget still defaults to zero.
 	///
-	/// Applies to the media tracks the catalog mints. The catalog tracks keep moq-net's zero
-	/// default: they are read at the live edge, which never goes stale.
+	/// Applies to the media tracks the catalog mints and to the catalog tracks themselves, so a
+	/// reader playing behind the live edge still receives each catalog update it holds until its
+	/// timestamp.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<std::time::Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -512,13 +513,15 @@ impl<E: CatalogExt> Producer<E> {
 		};
 		catalog.media.clock = clock.wall();
 
-		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive.
-		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive. Fresh as
+		// long as the media, so a reader as far behind holds each update until its timestamp.
+		let info = hang::Catalog::default_track_info().with_max_age(config.max_age);
+		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, info.clone())?;
 		// The MSF track is the same catalog in another encoding, so it takes the same
 		// priority. Leaving it at the default would rank a subscriber reading MSF
 		// below every media track on a relay's upstream leg. It stays uncompressed: MSF is
 		// read by other implementations, which hang's compression decisions don't cover.
-		let msf_info = hang::Catalog::default_track_info().with_compression(moq_net::track::Compression::None);
+		let msf_info = info.with_compression(moq_net::track::Compression::None);
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
@@ -1281,9 +1284,9 @@ impl<E: CatalogExt> DerefMut for Guard<'_, E> {
 impl Guard<'_, Extra> {
 	/// Set (or replace) a top-level application catalog section, republished on drop.
 	///
-	/// Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`, `archive`, `clock`,
-	/// `json`, `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
-	/// `tracks`, or `initDataList`).
+	/// Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`, `json`, `binary`,
+	/// `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, and `timeline`) or an
+	/// MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or `initDataList`).
 	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		self.state.catalog.ext.set(name, value)?;
 		self.updated = true;
@@ -1837,6 +1840,10 @@ mod test {
 		let info = catalog.track_info(hang::catalog::PRIORITY.video);
 		assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
 		assert_eq!(info.timescale, Some(hang::container::TIMESCALE));
+		// The catalog tracks stay fresh as long, for a reader holding each update until its timestamp.
+		for track in [&catalog.outputs.hang_track, &catalog.outputs.msf_track] {
+			assert_eq!(track.info().max_age, Some(std::time::Duration::from_secs(3)));
+		}
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
 		assert_eq!(at.max_age, Some(std::time::Duration::from_secs(3)));

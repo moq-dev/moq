@@ -385,7 +385,7 @@ int subscribe(
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
     // wait for a catalog that has both video and audio. A finished fixture has video only.
-    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), read_deadline, "catalog consumer");
+    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer, {}), read_deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
     while (!catalog || catalog->video.empty() || (!finish && catalog->audio.empty())) {
         catalog = until(catalogs->next(), read_deadline, "catalog");
