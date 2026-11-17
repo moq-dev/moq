@@ -158,7 +158,8 @@ int main()
 		CHECK(settings.default_ints["quic_idle_timeout_ms"] == Ms(*library.quic.idle_timeout));
 		CHECK(!library.quic.keep_alive);
 		CHECK(settings.default_ints["quic_keep_alive_ms"] == 0);
-		CHECK(settings.default_ints["backoff_timeout_ms"] == Ms(*library.backoff.timeout));
+		CHECK(!library.backoff.timeout);
+		CHECK(settings.default_ints["backoff_timeout_ms"] == 0);
 		CHECK(settings.default_bools["websocket_enabled"] == *library.websocket.enabled);
 		CHECK(settings.default_strings["quic_gso"].empty());
 

@@ -41,7 +41,7 @@ fn burst_bytes(cap: Cap) -> f64 {
 ///
 /// It charges whole frames as str0m completes them, stamped with their first packet's
 /// arrival, so frames can be charged out of order: a frame that completes after a
-/// later-starting one is charged behind it. str0m 0.24 surfaces individual RTP packets
+/// later-starting one is charged behind it. str0m surfaces individual RTP packets
 /// only in `rtp_mode`, which gives up depacketization. The meter refills to each frame's
 /// completion, remembers the credit it discarded while full, and refunds a frame what was
 /// discarded since its arrival, up to its size. So a frame is credited for its own

@@ -11,7 +11,6 @@
 //! client). SDP negotiation lives in the matching modules; this file is
 //! transport-agnostic.
 
-use crate::vendor::str0m;
 use std::collections::VecDeque;
 use std::time::Duration;
 

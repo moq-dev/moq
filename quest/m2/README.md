@@ -23,7 +23,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
   for lite-08; [the ietf extension](/quest/m2/ietf-records-per-track.md)
   costs nothing on a moq-lite track; [the path escape](/quest/m2/path-escape.md)
-  is finished; [Subscriber Min Age](/quest/m2/min-age-join.md) stays and
+  is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
   smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
@@ -36,19 +36,16 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
 - **moq-net API.** [Groups](/quest/m2/group-api.md),
-  [reconnect](/quest/m2/reconnect-off.md), [names](/quest/m2/net-renames.md),
-  and [session codes](/quest/m2/session-codes.md).
+  [names](/quest/m2/net-renames.md), and
+  [session codes](/quest/m2/session-codes.md).
   [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [Memory](/quest/m2/relay-memory.md), which the
-  cut waits on by name; [congestion names](/quest/m2/congestion-names.md);
-  [config names](/quest/m2/relay-config-names.md),
-  [the two dial keys](/quest/m2/relay-connect-keys.md), and
-  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md);
-  [transport names](/quest/m2/transport-names.md); and
-  [stats names](/quest/m2/stats-old-names.md).
+- **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
+  memory pairing found; [congestion names](/quest/m2/congestion-names.md);
+  [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
+  [transport names](/quest/m2/transport-names.md).
 - **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
   [claims](/quest/m2/auth-claims.md), and
   [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
@@ -56,7 +53,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
-  `mpegts`, one strict rule); [dead drafts](/quest/m2/drafts-retire.md);
+  `mpegts`, one strict rule);
   [the archive as version 2](/quest/m2/archive-v2.md);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
   [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),
@@ -68,13 +65,12 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [the WebRTC bind](/quest/m2/webrtc-bind.md),
   [gateway admission](/quest/m2/gateway-align.md), and
-  [upstream str0m](/quest/m2/str0m-upstream.md), which reverses the
+  [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
   [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
-- **Bindings.** [Open selectors](/quest/m2/ffi-open-selectors.md),
-  [Dart as experimental](/quest/m2/dart-experimental.md), and
+- **Bindings.** [Dart as experimental](/quest/m2/dart-experimental.md) and
   [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
@@ -322,7 +318,7 @@ what would need a breaking release had it landed right after the cut:
   in m2.
 - ✅ Stayed in m2 though not breaking itself:
   [the interest set](https://github.com/moq-dev/moq/pull/8728), because
-  [the route stream](/quest/m2/cluster-routes/route-stream.md) needs it.
+  [the route stream](https://github.com/moq-dev/moq/pull/8835) needs it.
   The route stream stays because lite-07 would otherwise freeze with one
   router key per announce stream, which the route model doesn't check, and
   keep the reopen-and-hand-over machinery for its lifetime (rejected: moving
@@ -335,6 +331,6 @@ what would need a breaking release had it landed right after the cut:
   was its own quest, settled without a wire-format change in
   [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
   `Ordered` API waits for the model.
-  [Catalog at timestamp](/quest/m2/catalog-at-timestamp.md) no longer waits
+  Catalog at timestamp no longer waits
   for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
   shrink to a rename, since the model already fills each field with the start.

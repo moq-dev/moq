@@ -2630,10 +2630,7 @@ async fn one_shot_goaway_ends_the_connection() {
 		let session = request.ok().await?;
 
 		// No deadline, so nothing on the peer's side ever force-closes us.
-		session
-			.drain()
-			.send(moq_net::goaway::Goaway::default())
-			.expect("send goaway");
+		session.goaway(moq_net::goaway::Goaway::default()).expect("send goaway");
 
 		// Wait for the client to leave, exactly as a draining peer does. If the
 		// client ignores the GOAWAY, both sides wait here forever.
@@ -2747,7 +2744,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	client_config.tls.insecure = Some(true);
 	// Retry forever with a fast cadence: the worst case for a stale announce.
 	client_config.backoff.initial = Some((Duration::from_millis(10)).into());
-	client_config.backoff.timeout = Some((Duration::ZERO).into());
+	client_config.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = kio::clock::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
@@ -3218,8 +3215,10 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 		start_drain_rx.await.expect("drain signal");
 		session
-			.drain()
-			.send(moq_net::goaway::Goaway::redirect("https://elsewhere.example/").with_timeout(Duration::from_secs(5)))
+			.goaway(
+				moq_net::goaway::Goaway::redirect("https://elsewhere.example/")
+					.with_timeout(Some(Duration::from_secs(5))),
+			)
 			.expect("send goaway");
 
 		// Keep producers alive while the client finishes reading.
@@ -3344,8 +3343,7 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		session
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_millis(200)))
+			.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(Duration::from_millis(200))))
 			.expect("send goaway");
 		// The client deliberately overstays; this resolves via the force-close.
 		session.closed().await;
@@ -3467,10 +3465,11 @@ async fn session_close_surfaces_a_rejection_code() {
 	server_handle.abort();
 }
 
-/// The same rejection under the reconnect loop, once a session went live, redials with
-/// backoff like any other close: the loop does not judge the error's kind.
+/// The same rejection of a first session under the reconnect loop ends it with the code,
+/// as a refused first dial does: on these versions the refusal arrives after ALPN, so the
+/// session connected first, yet redialing would only present the same credential again.
 #[tokio::test]
-async fn reconnect_retries_a_session_level_rejection() {
+async fn reconnect_ends_on_a_first_session_rejection() {
 	for code in [
 		moq_net::SessionError::Unauthorized,
 		moq_net::SessionError::MalformedAuthToken,
@@ -3490,18 +3489,59 @@ async fn reconnect_retries_a_session_level_rejection() {
 		});
 
 		let connection = test_client().connect(url);
-		for _ in 0..2 {
-			tokio::select! {
-				accepted = accepts.recv() => {
-					assert_eq!(accepted, Some(()), "the server stopped accepting");
-				}
-				result = connection.closed() => panic!("{code:?} ended the loop: {result:?}"),
-				_ = kio::clock::sleep(TIMEOUT) => panic!("{code:?} was never redialed"),
-			}
-		}
-
+		kio::clock::timeout(TIMEOUT, connection.closed())
+			.await
+			.unwrap_or_else(|_| panic!("{code:?} kept the loop redialing"))
+			.expect_err("a rejected first session must surface as an error");
 		server_handle.abort();
+		let mut count = 0;
+		while accepts.try_recv().is_ok() {
+			count += 1;
+		}
+		assert_eq!(count, 1, "{code:?} was redialed");
 	}
+}
+
+/// Once a session stayed up past the healthy bar, the same rejection redials with backoff
+/// like any other close: the loop does not judge the error's kind.
+#[tokio::test]
+async fn reconnect_retries_a_rejection_after_a_healthy_session() {
+	kio::clock::host_time(); // real QUIC sockets
+	const HEALTHY: Duration = Duration::from_millis(50);
+	let (mut server, addr) = test_server().await;
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let (accepted, mut accepts) = tokio::sync::mpsc::unbounded_channel();
+	let (end_first, first_ended) = tokio::sync::oneshot::channel::<()>();
+	let server_handle = tokio::spawn(async move {
+		let first = server.accept().await.expect("no first session").ok().await?;
+		let _ = accepted.send(());
+		let _ = first_ended.await;
+		first.abort(moq_net::Error::Cancel);
+		while let Ok(request) = server.accept().await {
+			let _ = accepted.send(());
+			request.reject(moq_net::SessionError::Unauthorized).await?;
+		}
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.backoff.healthy = Some(HEALTHY.into());
+	let mut connection = config.init(Default::default()).unwrap().connect(url);
+	let status = kio::clock::timeout(TIMEOUT, connection.status()).await.unwrap();
+	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
+	kio::clock::timeout(TIMEOUT, accepts.recv()).await.unwrap().unwrap();
+	kio::clock::sleep(HEALTHY).await;
+	end_first.send(()).unwrap();
+	for _ in 0..2 {
+		tokio::select! {
+			accepted = accepts.recv() => assert_eq!(accepted, Some(()), "the server stopped accepting"),
+			result = connection.closed() => panic!("the rejection ended the loop: {result:?}"),
+			_ = kio::clock::sleep(TIMEOUT) => panic!("never redialed"),
+		}
+	}
+	server_handle.abort();
 }
 
 /// One-shot mode is the other way a caller observes the rejection: with no

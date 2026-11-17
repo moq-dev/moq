@@ -1034,7 +1034,9 @@ export class AuthSession {
 		// The peer's verdict on the credential: Unsupported is the moq-transport SETUP that
 		// carried it accepting it before the peer declined AUTH. Anything else leaves it to the close.
 		if (presented.setup && !presented.withdrawn && isVerdict(refused, granted, result)) {
-			this.#credential.set(result instanceof Unsupported ? null : result);
+			this.#credential.set(
+				result instanceof Unsupported ? null : (result ?? new Error("the peer ended the credential")),
+			);
 		}
 		presented.ended = true;
 		presented.grant = undefined;

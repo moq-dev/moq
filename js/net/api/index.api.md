@@ -166,11 +166,11 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
-	export interface Drain {
+	export interface Goaway {
 		readonly timeout?: Clock.Duration;
 		readonly uri: string;
 	}
-	export interface Goaway {
+	export interface Handover {
 		handover?: Clock.Duration;
 		redirect?: Connection.Redirect;
 	}
@@ -182,7 +182,7 @@ export namespace Connection {
 		consume?: Origin.Producer;
 		delay?: Connection.Backoff;
 		enabled?: boolean | Signals.Signal<boolean>;
-		goaway?: Connection.Goaway;
+		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
 		share?: boolean;
 		signal?: never;
@@ -201,7 +201,7 @@ export namespace Connection {
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		closed: Promise<Error | null>;
-		readonly draining: Signals.GetPromise<Connection.Drain>;
+		readonly draining: Signals.GetPromise<Connection.Goaway>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;

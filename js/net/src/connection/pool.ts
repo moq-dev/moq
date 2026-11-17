@@ -28,7 +28,7 @@ import {
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
-import type { Drain as DrainType, GoawayProps, Redirect as RedirectType } from "./goaway.ts";
+import type { Goaway as GoawayType, Handover as HandoverType, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
@@ -91,7 +91,7 @@ export interface ConnectionProps {
 	 * migrates on GOAWAY, dialing the replacement while the old session finishes its groups.
 	 * This only tunes where it may go and for how long the old session serves.
 	 */
-	goaway?: GoawayProps;
+	goaway?: HandoverType;
 
 	/** A Connection owns the abort signal for each connection attempt. */
 	signal?: never;
@@ -457,12 +457,12 @@ export namespace Connection {
 	export type AcceptProps = AcceptPropsType;
 	/** Backoff settings for a private reconnect loop. @reexport */
 	export type Backoff = ReloadDelay;
-	/** How a connection reacts to the relay's GOAWAY. @reexport */
-	export type Goaway = GoawayProps;
+	/** How a connection hands over to a new session after the relay's GOAWAY. @reexport */
+	export type Handover = HandoverType;
 	/** What to do with the URI a relay names in its GOAWAY. @reexport */
 	export type Redirect = RedirectType;
-	/** A relay's GOAWAY as a one-shot session received it. @reexport */
-	export type Drain = DrainType;
+	/** A relay's GOAWAY as a session received it. @reexport */
+	export type Goaway = GoawayType;
 	/** Current state of a {@link Connection}. @reexport */
 	export type Status = ReloadStatus;
 	/** The current connection's PROBE estimates. @reexport */

@@ -74,6 +74,17 @@ async function refusal(promise: Promise<unknown>): Promise<SessionError | undefi
 	return undefined;
 }
 
+/** Whether `promise` rejected, once everything pending has run. */
+async function rejection(promise: Promise<unknown>): Promise<void> {
+	let rejected = false;
+	try {
+		await promise;
+	} catch {
+		rejected = true;
+	}
+	expect(rejected).toBe(true);
+}
+
 test("a set granted in band answers, and a later set the peer refuses answers with its refusal", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;
@@ -104,6 +115,8 @@ test("a close that refuses the connection credential answers a session without A
 	const reload = loop(["moq-lite-06"], tokens);
 	try {
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		// A session that stayed up past the healthy bar, so its close is retried rather than ending the URL.
+		await clock.advance(Duration.millis(1500));
 		const waiting = refusal(reload.answered());
 		resolve();
 		const err = await clock.drive(waiting);
@@ -142,6 +155,33 @@ test("a kept credential counts only once the peer refuses it", async () => {
 		tokens.set(["connection"]);
 		const err = await clock.drive(refusal(reload.answered()));
 		expect(err?.code).toBe(SessionCode.Unauthorized);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a kept credential the peer ends cleanly after granting it refuses the next set", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const issued: { close(): void }[] = [];
+	globalThis.WebTransport = relay((token, request) => {
+		const grant = request.accept(GRANT);
+		if (token === "connection") issued.push(grant);
+	});
+	const tokens = new Signal<readonly string[]>(["connection", "a"]);
+	const reload = loop(["moq-lite-07-wip"], tokens);
+	try {
+		await clock.drive(reload.answered());
+
+		issued[0]?.close();
+		const session = reload.established.peek();
+		if (!session) throw new Error("not connected");
+		await clock.drive(waitFor(wireOf(session).auth.credential, (verdict) => verdict instanceof Error));
+
+		// The set keeps the dropped credential, so it is refused rather than answered by "b" alone.
+		tokens.set(["connection", "b"]);
+		await clock.drive(rejection(reload.answered()));
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
