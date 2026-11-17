@@ -986,20 +986,30 @@ fn advance<S: Shape>(
 		// listing that ends took its broadcast with it.
 		while let Some(listing) = &mut node.listing {
 			match listing.poll_next(waiter) {
-				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added { name: listed, .. }))) => {
+				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added {
+					name: listed,
+					info: broadcast::Listed::Track(_),
+				}))) => {
 					if parse_bucket_track(&listed).is_some_and(|(bucket, _)| bucket.as_str() == name) {
 						node.offered = Some(listed);
 					}
 				}
 				Poll::Ready(Ok(Some(
-					broadcast::TracksEvent::Removed { name: listed }
-					| broadcast::TracksEvent::Finished { name: listed },
+					broadcast::TracksEvent::Removed {
+						kind: broadcast::Kind::Track,
+						name: listed,
+					}
+					| broadcast::TracksEvent::Finished {
+						kind: broadcast::Kind::Track,
+						name: listed,
+					},
 				))) => {
 					if node.offered.as_ref() == Some(&listed) {
 						node.offered = None;
 					}
 				}
-				Poll::Ready(Ok(Some(broadcast::TracksEvent::Synced))) => {}
+				// SYNCED, and datagram tracks: buckets are tracks of groups.
+				Poll::Ready(Ok(Some(_))) => {}
 				Poll::Ready(result) => {
 					if let Err(err) = result {
 						tracing::debug!(?err, name, "stats: node listing ended");

@@ -320,7 +320,14 @@
 		"name": "a group sequence at 2^64-1, the largest a u64 holds",
 		"version": "moq-lite-07-wip",
 		"message": "group",
-		"hex": "0b00ffffffffffffffffff00",
+		"hex": "0c00ffffffffffffffffff0000",
+		"expect": "decoded"
+	},
+	{
+		"name": "a group naming the start just below it as the previous one, carried plus one",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "1400ffffffffffffffffffffffffffffffffffff00",
 		"expect": "decoded"
 	},
 	{
