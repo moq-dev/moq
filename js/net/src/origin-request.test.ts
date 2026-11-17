@@ -818,9 +818,9 @@ test("closing a pending request rejects its await with a cancellation", async ()
 	const blocked = aborted.request(Path.from("room/pending"));
 	const route = aborted.route(Path.from("room/served"));
 	const served = aborted.request(Path.from("room/served"));
-	await served;
-	const pendingAnswer = (async () => await pending)();
-	const blockedAnswer = (async () => await blocked)();
+	await served.broadcast();
+	const pendingAnswer = pending.broadcast();
+	const blockedAnswer = blocked.broadcast();
 	await settle();
 	const abort = new StreamError(StreamCode.Internal, { message: "shutdown" });
 	aborted.close(abort);
