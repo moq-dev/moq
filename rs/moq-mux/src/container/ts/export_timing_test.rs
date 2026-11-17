@@ -476,7 +476,7 @@ impl Leg {
 		self.busy = None;
 		self.woken.0.store(false, Ordering::Relaxed);
 		while let std::task::Poll::Ready(frame) = self.export.poll_next(&self.waiter) {
-			match frame.expect("exporter error") {
+			match frame.unwrap_or_else(|err| panic!("exporter error: {err}")) {
 				Some(frame) => {
 					let bits = frame.payload.len() as u64 * 8;
 					self.out.push((now, frame));
