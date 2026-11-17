@@ -993,8 +993,8 @@ pub(crate) unsafe fn parse_subscription(
 
 /// A borrowed UTF-8 string slice, NOT NULL terminated.
 ///
-/// Used in both directions. As an output (e.g. a JSON document moq-c hands back) the
-/// pointer borrows moq-c's own storage and is only valid until the owning resource is
+/// Used in both directions. As an output (e.g. a JSON document libmoq hands back) the
+/// pointer borrows libmoq's own storage and is only valid until the owning resource is
 /// freed; see the function that fills it for the exact lifetime. As an input (e.g. a
 /// [moq_client_config] list) the pointer borrows the caller's storage and is only read
 /// during the call.
@@ -1385,12 +1385,12 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 
 /// Human-readable reason for the most recent failed call on the calling thread.
 ///
-/// moq-c functions return only a negative code; this exposes the matching message
+/// libmoq functions return only a negative code; this exposes the matching message
 /// (including detail the code can't carry, e.g. which URL failed to parse or why a
 /// decode failed). The string is only meaningful after a call returned a negative
 /// code; check the code first.
 ///
-/// Returns a NUL-terminated, UTF-8 pointer valid until the next moq-c call **on the
+/// Returns a NUL-terminated, UTF-8 pointer valid until the next libmoq call **on the
 /// same thread**, or NULL if no error has been recorded on this thread. Copy it if you
 /// need it to outlive the next call. Errors delivered through status callbacks carry
 /// their code directly; read this from inside the callback to get their reason.
@@ -1407,7 +1407,7 @@ pub extern "C" fn moq_error() -> *const c_char {
 /// (transport, not-found, a bad handle, ...). Do not parse [moq_error] for this.
 ///
 /// The values are only meaningful after a call returned a negative code; check the
-/// code first. Same lifetime as [moq_error]: overwritten by the next moq-c call on
+/// code first. Same lifetime as [moq_error]: overwritten by the next libmoq call on
 /// this thread. Errors delivered through status callbacks are recorded before the
 /// callback runs, so read this from inside the callback.
 ///
@@ -1634,7 +1634,7 @@ pub struct moq_client_config {
 	pub quic_keylog: bool,
 
 	/// Your own `name/version` product tokens, space-separated, advertised in SETUP
-	/// ahead of this library's (`my-app/1.0 moq-c/0.7.0 moq-net-rs/0.3.10`), or NULL for none.
+	/// ahead of this library's (`my-app/1.0 libmoq/0.7.0 moq-net-rs/0.3.10`), or NULL for none.
 	pub implementation: *const c_char,
 	/// The length in bytes of `implementation`.
 	pub implementation_len: usize,
@@ -2142,7 +2142,7 @@ pub unsafe extern "C" fn moq_session_request_query(request: u32, dst: *mut moq_s
 }
 
 /// The implementation the client advertised in its SETUP, such as
-/// `moq-c/0.7.0 moq-net-rs/0.3.10`, or a NULL `data` if it advertised none.
+/// `libmoq/0.7.0 moq-net-rs/0.3.10`, or a NULL `data` if it advertised none.
 ///
 /// Peer-controlled: use it for logs and rollout counts, never to authorize. The
 /// destination borrows the request's storage, like [moq_session_request_path].

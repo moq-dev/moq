@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build and package moq-c for release.
+# Build and package libmoq for release.
 # Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR]
 #
 # Examples:
 #   ./build.sh                                    # Build for host, detect version from Cargo.toml
 #   ./build.sh --target aarch64-apple-darwin      # Native build (run on matching runner)
 #
-# On Linux and macOS this builds via `nix build .#moq-c` for reproducibility.
+# On Linux and macOS this builds via `nix build .#libmoq` for reproducibility.
 # Windows targets fall back to a direct cargo build because Nix isn't
 # practical to install on the Windows GitHub runner image.
 
@@ -55,7 +55,7 @@ if [[ -z "$TARGET" ]]; then
     echo "Detected target: $TARGET"
 fi
 
-NAME="moq-c-${VERSION}-${TARGET}"
+NAME="moq-${VERSION}-${TARGET}"
 PACKAGE_DIR="$OUTPUT_DIR/$NAME"
 
 echo "Packaging $NAME..."
@@ -63,27 +63,26 @@ rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/include" "$PACKAGE_DIR/lib"
 
 if [[ "$TARGET" == *"-windows-"* ]]; then
-    echo "Building moq-c for $TARGET via cargo (Windows path)..."
+    echo "Building libmoq for $TARGET via cargo (Windows path)..."
     BUILD_LOG="$(mktemp)"
     trap 'rm -f "$BUILD_LOG"' EXIT
     # Releases carry the OpenH264 software fallback; nix/overlay.nix selects it
     # for the other platforms.
-    cargo build --locked --release --package moq-c --features openh264 --target "$TARGET" \
+    cargo build --locked --release --package libmoq --features openh264 --target "$TARGET" \
         --manifest-path "$WORKSPACE_DIR/Cargo.toml" --message-format=json-render-diagnostics >"$BUILD_LOG"
 
     TARGET_DIR="$WORKSPACE_DIR/target/$TARGET/release"
     LIB_FILE="moq.lib"
     cp "$TARGET_DIR/$LIB_FILE" "$PACKAGE_DIR/lib/"
     # build.rs writes the header into its OUT_DIR, which only cargo's JSON names.
-    GEN_DIR=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' "$BUILD_LOG" | tail -1)
+    GEN_DIR=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/libmoq#")) | .out_dir' "$BUILD_LOG" | tail -1)
     cp "$GEN_DIR/include/moq.h" "$PACKAGE_DIR/include/"
 
     # Generate CMake config files from templates (no pkg-config on Windows).
-    mkdir -p "$PACKAGE_DIR/lib/cmake/moq-c"
-    MAJOR_VERSION="${VERSION%%.*}"
+    mkdir -p "$PACKAGE_DIR/lib/cmake/moq"
 
     # The native libraries an external linker must pass alongside moq.lib,
-    # quoted the way rs/moq-c/CMakeLists.txt and nix/overlay.nix format them.
+    # quoted the way rs/libmoq/CMakeLists.txt and nix/overlay.nix format them.
     # Windows entries are all plain library names; `framework:` is Apple-only.
     NATIVE_LIBS_QUOTED=$(awk 'NF && $1 !~ /^#/ { printf "%s\"%s\"", sep, $1; sep = " " }' \
         "$SCRIPT_DIR/native-libs/windows.txt")
@@ -91,10 +90,9 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     sed -e "s|@LIB_FILE@|${LIB_FILE}|g" \
         -e "s|@VERSION@|${VERSION}|g" \
         -e "s|@MOQ_NATIVE_LIBS_QUOTED@|${NATIVE_LIBS_QUOTED}|g" \
-        "$SCRIPT_DIR/cmake/moq-c-config.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq-c/moq-c-config.cmake"
+        "$SCRIPT_DIR/cmake/moq-config.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config.cmake"
     sed -e "s|@VERSION@|${VERSION}|g" \
-        -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
-        "$SCRIPT_DIR/cmake/moq-c-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq-c/moq-c-config-version.cmake"
+        "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
 else
     # Release builds must match the host. A mismatch would silently mislabel
     # the archive, so reject it before building.
@@ -104,11 +102,11 @@ else
         exit 1
     fi
 
-    echo "Building moq-c for $TARGET via nix..."
+    echo "Building libmoq for $TARGET via nix..."
     BUILD_TMP="$(mktemp -d)"
     trap 'rm -rf "$BUILD_TMP"' EXIT
     RESULT_LINK="$BUILD_TMP/result"
-    nix build "$WORKSPACE_DIR#moq-c" --out-link "$RESULT_LINK"
+    nix build "$WORKSPACE_DIR#libmoq" --out-link "$RESULT_LINK"
 
     # The derivation lays out everything under $out/{lib,include}; copy it
     # verbatim so the release tarball matches what nix produced.
@@ -118,11 +116,11 @@ else
 fi
 
 # A placeholder added to cmake/*.cmake.in but not to every substituter (the seds
-# above, nix/overlay.nix) ships a config whose find_package(moq-c) hands the linker
+# above, nix/overlay.nix) ships a config whose find_package(moq) hands the linker
 # a literal `@FOO@`, and the only thing that notices is a downstream build. Both
 # paths land the config here, so check them both.
-for cmake_file in moq-c-config.cmake moq-c-config-version.cmake; do
-    CMAKE_CONFIG="$PACKAGE_DIR/lib/cmake/moq-c/$cmake_file"
+for cmake_file in moq-config.cmake moq-config-version.cmake; do
+    CMAKE_CONFIG="$PACKAGE_DIR/lib/cmake/moq/$cmake_file"
     if [[ ! -f "$CMAKE_CONFIG" ]]; then
         echo "Error: $CMAKE_CONFIG missing from the package" >&2
         exit 1

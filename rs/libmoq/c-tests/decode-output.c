@@ -4,7 +4,7 @@
 //
 // Compiled and run by `just rs c-tests` against this build's generated `moq.h`
 // and `libmoq.a`, linked from outside cargo the way an embedder does, so this
-// file must only use the stable C ABI:
+// file must only use the public C ABI:
 //
 //   1. Layout: compile-time asserts pin the struct fields and the pixel-format
 //      discriminants the test below depends on.
@@ -49,7 +49,7 @@ _Static_assert(MOQ_DECODE_READ_END == 2, "end read discriminant moved");
 _Static_assert(MOQ_DECODE_START_OLDEST == 0, "oldest start discriminant moved");
 _Static_assert(MOQ_DECODE_START_LATEST == 1, "latest start discriminant moved");
 
-// Numeric codes from rs/moq-c/src/error.rs. They are the contract a C caller
+// Numeric codes from rs/libmoq/src/error.rs. They are the contract a C caller
 // matches on; if they drift, this fixture fails and the header is stale.
 #define MOQ_ERR_INVALID_POINTER -6
 #define MOQ_ERR_INVALID_CODE -15

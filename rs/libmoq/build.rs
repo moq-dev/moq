@@ -27,7 +27,7 @@ fn main() {
 	// The header lands in OUT_DIR: cargo forbids writing anywhere else, and a
 	// build cache that replays this script (mbx) restores OUT_DIR and nothing
 	// more. Consumers ask cargo for the path (`build-script-executed` in
-	// --message-format=json). moq-c.pc is not written here: its libdir has to name
+	// --message-format=json). moq.pc is not written here: its libdir has to name
 	// the directory holding libmoq.a, which only exists once packaged (see
 	// nix/overlay.nix), since cargo puts the staticlib outside OUT_DIR.
 	let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

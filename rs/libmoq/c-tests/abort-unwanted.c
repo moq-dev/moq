@@ -208,7 +208,7 @@ static int32_t join(uint32_t consume, const char *name, Queue *frames) {
 // The name of the first video rendition on `consume`'s catalog, once it has one.
 static void video_name(uint32_t consume, char *name, size_t size) {
     Queue *catalogs = queue_new();
-    int32_t task = moq_consume_catalog(consume, on_code, catalogs);
+    int32_t task = moq_consume_catalog(consume, 0, on_code, catalogs);
     CHECK(task > 0);
     int32_t catalog = next(catalogs);
     CHECK(catalog > 0);

@@ -20,7 +20,7 @@ on:
       - Docker
       - GStreamer CI image
       - Interop
-      - moq-c
+      - libmoq
       - moq-cli
       - moq-gst
       - moq-relay

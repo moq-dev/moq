@@ -1,4 +1,4 @@
-//! The binding features moq-c gained to match moq-ffi for the cut.
+//! The binding features libmoq gained to match moq-ffi for the cut.
 
 use std::sync::Arc;
 

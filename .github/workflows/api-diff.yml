@@ -65,7 +65,7 @@ jobs:
         run: nix develop --command just api-diff ${ARGS:+"$ARGS"}
         env:
           ARGS: ${{ steps.mode.outputs.args }}
-          # Lists and downloads the moq-c and moq-ffi release assets.
+          # Lists and downloads the libmoq and moq-ffi release assets.
           GH_TOKEN: ${{ github.token }}
       - name: Keep the report
         if: ${{ !cancelled() && steps.diff.outcome != 'skipped' }}

@@ -10,13 +10,13 @@ use crate::{Error, Id, moq_protocol_error};
 
 /// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
 ///
-/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+/// Runs on libmoq's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
 
 /// A callback receiving each session lifecycle change; the `MOQ_CONNECTION_PHASE_CLOSED` one is terminal.
 ///
-/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+/// Runs on libmoq's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state)>;
 
@@ -26,7 +26,7 @@ pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state
 /// `MOQ_FOLLOW_EVENT_OFFLINE`, and the terminal status for `MOQ_FOLLOW_EVENT_END`: `0`, or a
 /// negative error whose reason [crate::moq_error] reports inside the callback.
 ///
-/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+/// Runs on libmoq's runtime thread. The callback and `user_data` must be safe to use on that thread.
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_follow_callback = Option<extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32)>;
 
@@ -38,7 +38,7 @@ pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let handle = runtime.handle().clone();
 
 	std::thread::Builder::new()
-		.name("moq-c".into())
+		.name("libmoq".into())
 		.spawn(move || {
 			runtime.block_on(std::future::pending::<()>());
 		})
@@ -250,7 +250,7 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
-	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	/// - The callback and `user_data` must be safe to use on libmoq's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -270,7 +270,7 @@ impl OnStatus {
 }
 
 // SAFETY: The constructor requires the callback and user_data to remain valid and
-// safe to use on moq-c's runtime thread for the callback's lifetime.
+// safe to use on libmoq's runtime thread for the callback's lifetime.
 unsafe impl Send for OnStatus {}
 
 /// A [moq_state_callback] and its user data.
@@ -285,7 +285,7 @@ impl OnState {
 	///
 	/// # Safety
 	/// - The caller must keep `user_data` valid until the terminal callback.
-	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	/// - The callback and `user_data` must be safe to use on libmoq's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_state: moq_state_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -304,7 +304,7 @@ impl OnState {
 }
 
 // SAFETY: The constructor requires the callback and user_data to remain valid and
-// safe to use on moq-c's runtime thread until the terminal callback.
+// safe to use on libmoq's runtime thread until the terminal callback.
 unsafe impl Send for OnState {}
 
 /// A [moq_follow_callback] and its user data.
@@ -319,7 +319,7 @@ impl OnFollow {
 	///
 	/// # Safety
 	/// - The caller must keep `user_data` valid until the `MOQ_FOLLOW_EVENT_END` callback.
-	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	/// - The callback and `user_data` must be safe to use on libmoq's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_follow: moq_follow_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -356,7 +356,7 @@ impl crate::task::Terminal for OnFollow {
 }
 
 // SAFETY: The constructor requires the callback and user_data to remain valid and
-// safe to use on moq-c's runtime thread until the terminal callback.
+// safe to use on libmoq's runtime thread until the terminal callback.
 unsafe impl Send for OnFollow {}
 
 /// Types that can be converted to C-compatible return codes.
@@ -486,7 +486,7 @@ fn record(err: &Error) {
 
 /// Pointer to this thread's last error message, or null if none was recorded.
 ///
-/// The pointer is valid until the next moq-c call on the same thread.
+/// The pointer is valid until the next libmoq call on the same thread.
 pub fn last_error_ptr() -> *const c_char {
 	LAST_ERROR.with(|cell| {
 		cell.borrow()

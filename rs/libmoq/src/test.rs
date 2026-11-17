@@ -3626,7 +3626,7 @@ fn a_holding_reader_reads_every_update_within_its_delay() {
 		(999, vec![2_000, 3_000]),
 		(1_001, vec![1_000, 2_000, 3_000]),
 	] {
-		// A raw broadcast, since a moq-c one stamps its own catalog from its clock.
+		// A raw broadcast, since a libmoq one stamps its own catalog from its clock.
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track(
@@ -6926,7 +6926,7 @@ fn publish_gray(producer: u32, rgba: &[u8]) -> i32 {
 }
 
 /// Regression: an encode is a round trip to the codec thread, and a wedged codec
-/// never comes back from it. It used to run under both of moq-c's process-wide
+/// never comes back from it. It used to run under both of libmoq's process-wide
 /// locks, the `State` mutex and one wrapping the runtime handle, so a single
 /// stalled producer parked every unrelated call in the process behind it: another
 /// broadcast's publish, a consumer's frame free, a session close.
@@ -7604,7 +7604,7 @@ fn a_null_config_dials_with_the_defaults() {
 /// The caller's product tokens go ahead of the library's, and a malformed list fails the dial.
 #[test]
 fn implementation_prefixes_the_library() {
-	let core = format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	let core = format!("libmoq/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
 	assert_eq!(parsed(&client_config()).connect.implementation, Some(core.clone()));
 
 	let mut config = client_config();
@@ -9433,7 +9433,7 @@ enum TokenSeen {
 
 /// Listen over TCP for one moq-transport `version` session as a base moq-transport peer,
 /// declining the Solicit extension so only requests carry tokens, and consuming
-/// the peer's broadcasts into the moq-c origin `sink`. Returns the address and what happens
+/// the peer's broadcasts into the libmoq origin `sink`. Returns the address and what happens
 /// to each non-empty token the session presents.
 fn base_moqt_server(version: &str, sink: u32) -> (String, mpsc::Receiver<TokenSeen>) {
 	let version: moq_net::Version = version.parse().unwrap();

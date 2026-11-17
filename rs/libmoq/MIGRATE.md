@@ -1,8 +1,8 @@
-# Migrating moq-c
+# Migrating libmoq
 
 How to update your code for each breaking change, newest first.
 
-## Unreleased
+## 0.6 -> 0.22
 
 ### `moq_connection_stats` counts unrouted datagrams ([#7951](https://github.com/moq-dev/moq/pull/7951))
 
@@ -236,7 +236,7 @@ Set `moq_client_config::quic_keylog` or `moq_server_config::quic_keylog` as well
 ### OpenH264 is a build feature (#5771)
 
 The release archives and the CMake build still carry the software H.264 fallback.
-A bare `cargo build -p moq-c` leaves it out; add `--features openh264` to keep it.
+A bare `cargo build -p libmoq` leaves it out; add `--features openh264` to keep it.
 
 ### Subscriptions carry group ranges (#5732)
 
@@ -266,19 +266,6 @@ Free each handle with `moq_consume_close` once its successor arrives.
 
 A frame write fails with a protocol error of kind `MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH` when a group's first frame starts before a lower-sequence group's, or after a higher one's.
 A publisher whose timeline restarts publishes a new broadcast instead.
-
-### libmoq is moq-c (#4288)
-
-The C bindings ship as the `moq-c` crate, starting at 0.7.0.
-The header is still `moq.h` and the library is still `libmoq.a` / `moq.lib` (`-lmoq`); the C ABI did not change with the rename.
-The CMake package, pkg-config name, release tags, and archives follow the new name.
-
-| Before | After |
-| --- | --- |
-| `find_package(moq)`, target `moq` | `find_package(moq-c)`, target `moq::c` |
-| `pkg-config --libs moq` | `pkg-config --libs moq-c` |
-| nix `.#libmoq` | nix `.#moq-c` |
-| tags `libmoq-v*`, archives `libmoq-<version>-<target>` | tags `moq-c-v*`, archives `moq-c-<version>-<target>` |
 
 ### Background panics are reported (#5562)
 
@@ -329,7 +316,7 @@ To end its content first, call `moq_publish_catalog_finish`; the broadcast stays
 
 `moq_decode_video_frame` can return a conversion error for a single frame; it used to end the stream at the terminal callback.
 
-## libmoq 0.5 -> 0.6
+## 0.5 -> 0.6
 
 ### One client config
 

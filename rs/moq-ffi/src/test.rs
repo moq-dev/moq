@@ -3948,7 +3948,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	consumer.resolve(referencing(Some(""), None)).await.unwrap();
 	assert!(consumer.resolve(referencing(Some("/"), None)).await.is_err());
 
-	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
+	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(referencing(Some("./source"), None)).await {
 		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
