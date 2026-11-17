@@ -49,7 +49,7 @@ import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
 import { Delivered } from "./delivered.ts";
-import { NotFound, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
+import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
 	type DropRun,
@@ -74,17 +74,6 @@ import { max, min, UNBOUNDED } from "./util/sequence.ts";
 import { clamped, type Resolved, sameRanges, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
-// Stream codes that report the route failing to deliver rather than judging what it carried:
-// another copy may still deliver what it failed. Mirrors the Rust `Error::retryable`.
-const ROUTE_FAILURES: ReadonlySet<number> = new Set([
-	StreamCode.Internal,
-	StreamCode.Cancel,
-	StreamCode.SessionClosed,
-	StreamCode.GoingAway,
-	StreamCode.ControlTimeout,
-	StreamCode.Unroutable,
-]);
-
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
 class Incompatible extends Error {
 	constructor(name: string) {
@@ -95,14 +84,12 @@ class Incompatible extends Error {
 
 /**
  * Whether `err` is the route failing to deliver rather than judging what it carried, so a new copy
- * may fix it: its session closed or failed underneath it, or a delivery code. Anything else would
- * repeat on every copy.
+ * may fix it. Mirrors the Rust `Error::retryable`.
  *
  * @internal
  */
 export function routeFailed(err: Error): boolean {
-	if (err instanceof StreamError) return ROUTE_FAILURES.has(err.code);
-	return err instanceof SessionError || sessionClosed(err);
+	return retry(err) !== Retry.Never;
 }
 
 // Whether `err` from `source` judges its route rather than the track: a received route that lost
@@ -119,11 +106,10 @@ function closing(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-// A source losing its route to the content: only another route continues it, since asking the
-// same one again could only replace the withdrawal's cause with a refusal. Mirrors the Rust
+// A source losing its route to the content: only another route continues it. Mirrors the Rust
 // `Error::unroutable`.
 function unroutable(err: Error): boolean {
-	return err instanceof StreamError && err.code === StreamCode.Unroutable;
+	return retry(err) === Retry.Reroute;
 }
 
 // A copy's delivery failure says nothing about its content. A terminal track verdict does.

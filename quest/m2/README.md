@@ -35,8 +35,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Session codes](/quest/m2/session-codes.md).
-  [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
+- **moq-net API.** [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
@@ -319,7 +318,6 @@ what would need a breaking release had it landed right after the cut:
 
 Decided 2026-11-17 (maintainer, on
 [moq-dev/moq#8998](https://github.com/moq-dev/moq/pull/8998#issuecomment-6947837677)):
-✅ [rising background noise](/quest/m2/voice-rising-noise.md) joins m2 though
-it breaks nothing. It ports libopus's analysis step, so the browser voice gate
+✅ rising background noise joins m2 though it breaks nothing. It ports libopus's analysis step, so the browser voice gate
 that PR ships suppresses noise starting mid-call as the Rust publisher's
 libopus does (rejected: a faster SILK floor rise; dropping it).

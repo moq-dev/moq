@@ -79,6 +79,19 @@ such as `relay_auth_refresh`, is not attributable this way.
   copies; moq-quic loss recovery and real congestion controllers; HTTP
   announcement snapshots; MPEG-TS, MKV, FLV, H.265, and AV1 import with real
   media; JS watch audio ring and publish `Fanout`.
+- From the 2026-11-17 pre-cut correctness audit, from source, each needing a
+  measurement before a fix: `Lines::make_room` (`rs/moq-net/src/transport/open.rs`)
+  rebuilds the session's preemption map on every poll of a waiting open,
+  which a credit-starved viewer of K tracks re-polls per frame (O(K²), from
+  #8103); `follow_demand` in `model/origin.rs` locks every reader to rebuild
+  demand on each wake (`resume.rs`); `frame.rs` compares a second copy of a
+  group byte for byte only to catch a reused identity, which AGENTS.md says
+  not to spend cycles on; TS passthrough (`ts/passthrough.rs`) re-sums its
+  whole object queue per packet, quadratic when a sender flags every packet
+  random-access and sends rare PCRs (#5003); and payload copies: the JS CMAF
+  decoder copies each sample twice (`js/hang/src/cmaf/decode.ts`), the FLV
+  import each tag body twice, fMP4 and MKV export several times per payload,
+  and WebRTC egress twice per frame per viewer (`rs/moq-webrtc/src/egress.rs`).
 - Single-axis fan-out benches to widen: `session_delivery_paced`,
   `track_fanout_*`, `memory`, and `bench/workloads/fanout*.toml`.
 
