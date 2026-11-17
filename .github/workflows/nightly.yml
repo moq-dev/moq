@@ -845,6 +845,8 @@ jobs:
   # moq-net edit, so they take hours.
   gate-cost:
     name: Gate cost
+    # Main's reviewed code alone, as for Gate: these runners keep state the queue builds with.
+    if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, moq-queue]
     # One Nightly job on the queue's runners at a time, so this and Gate, or a
     # dispatch beside the schedule, never hold both and stall the merge queue.
