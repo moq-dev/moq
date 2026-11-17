@@ -36,7 +36,7 @@ pub struct Audio {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -174,18 +174,18 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay between a frame being ready and the publisher flushing it.
-	/// The player's jitter buffer should be larger than this value.
-	/// If not provided, the player should assume each frame is flushed immediately.
+	/// The largest media span the publisher hands to the transport behind a frame's presentation
+	/// timestamp: the reorder delay of a frame presented after frames decoded behind it, or the span
+	/// of a batch written together, such as a run of audio packets between video packets in TS. A
+	/// consumer's jitter buffer should be at least this large. Absent when the publisher measured
+	/// none.
 	///
-	/// This is measured at the publisher (encoder latency, packet packing, reordering),
-	/// never on the network a consumer sees. It only ever grows over the life of a stream.
+	/// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	/// whatever the frame rate; encoder latency and the network don't count. It only ever grows
+	/// over the life of a stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
 	/// rounds down into a promise the publisher can't keep.
-	///
-	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
-	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
@@ -261,7 +261,7 @@ impl AudioConfig {
 	}
 }
 
-impl crate::catalog::Rendition for AudioConfig {
+impl crate::catalog::Entry for AudioConfig {
 	fn check(&self) -> crate::Result<()> {
 		if self.sample_rate == 0 {
 			return Err(crate::Error::Zero("sampleRate"));

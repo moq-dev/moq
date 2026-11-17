@@ -1201,7 +1201,7 @@ fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
 		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap().unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let name = loop {
-			let catalog = catalogs.next().await.unwrap().expect("the catalog ended");
+			let catalog = catalogs.next().await.unwrap().expect("the catalog ended").value;
 			if let Some(name) = catalog.video.renditions.keys().next() {
 				break name.clone();
 			}

@@ -391,7 +391,10 @@ Finish(t) ==
     /\ UNCHANGED <<front, rd, reading>>
 
 \* The front serves another live route (`Producer::splice`), and every reader
-\* follows at once (`serve_from`). Leaving a failed route is not counted.
+\* follows at once (`serve_from`). Leaving a failed route is not counted. A
+\* copy the front serves after a clean end (`Action::Reroute`) is for group
+\* reads and fetches, not this reader, which stays on the copy the track ended
+\* on (`Route::finished`), so it is no step here.
 Serve(t) ==
     /\ front.end = "open"
     /\ Live(t) /\ t # front.cur
