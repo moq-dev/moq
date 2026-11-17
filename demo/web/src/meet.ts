@@ -135,18 +135,18 @@ function join(): void {
 		enabled: true,
 		user: { id: name, name },
 	});
-	local.cameraEnabled.set(true);
-	local.microphoneEnabled.set(true);
+	local.camera.enabled.set(true);
+	local.microphone.enabled.set(true);
 	room = new Room({ connection, identity });
 
 	const localCanvas = document.createElement("canvas");
 	tile("local", name, localCanvas, true);
 	localPreview = new Publish.Preview.Renderer({
 		canvas: localCanvas,
-		frames: local.cameraCapture.out.frames,
-		display: local.cameraCapture.out.display,
+		frames: local.camera.capture.out.frames,
+		display: local.camera.capture.out.display,
 		flip: true,
-		rotation: local.cameraCapture.out.rotation,
+		rotation: local.camera.capture.out.rotation,
 	});
 
 	$("controls").hidden = false;
@@ -223,9 +223,9 @@ function arm(id: string, pick: () => Signals.Signal<boolean> | undefined): void 
 	});
 }
 
-arm("toggle-camera", () => local?.cameraEnabled);
-arm("toggle-mic", () => local?.microphoneEnabled);
-arm("toggle-screen", () => local?.screenEnabled);
+arm("toggle-camera", () => local?.camera.enabled);
+arm("toggle-mic", () => local?.microphone.enabled);
+arm("toggle-screen", () => local?.screen.enabled);
 
 if (import.meta.hot) {
 	import.meta.hot.dispose(() => {

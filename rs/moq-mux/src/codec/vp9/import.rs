@@ -96,10 +96,14 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> crate::Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	pub fn finish(
+		self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
+		self.track.finish()
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -185,7 +189,7 @@ mod tests {
 			.decode(&[0x84, 0x00, 0x00], Some(Timestamp::from_micros(33_000).unwrap()))
 			.unwrap();
 
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]

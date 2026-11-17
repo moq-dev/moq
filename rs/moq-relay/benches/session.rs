@@ -122,7 +122,8 @@ impl Backend for Relay {
 		let task = tokio::spawn(async move {
 			let server = moq_net::Server::new()
 				.with_versions(version.into())
-				.with_extensions(extensions);
+				.with_solicit(extensions.solicit)
+				.with_ietf(extensions.ietf);
 			let handshake = server
 				.accept_request(moq_net::time::Instant::now(), server_link)
 				.await
@@ -140,7 +141,8 @@ impl Backend for Relay {
 			.map(|origin| origin.consume().routes());
 		let mut client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_extensions(options.client_extensions);
+			.with_solicit(options.client_extensions.solicit)
+			.with_ietf(options.client_extensions.ietf);
 		// Older protocols need the peer exemption to discover dot paths.
 		if peer || hidden {
 			client = client.with_url("moql://localhost/peer".parse().unwrap());

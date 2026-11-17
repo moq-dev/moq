@@ -1,17 +1,17 @@
 //! Audio decoder front end.
 //!
 //! Mirror of [`encode::Encoder`](crate::encode::Encoder): opens a
-//! [`Backend`](super::backend::Backend) for the catalog codec and trims its
+//! [backend](super::backend::Backend) for the catalog codec and trims its
 //! startup delay, producing interleaved `f32` PCM.
 
 use super::Decoded;
-use super::backend::{self, Backend};
+use super::backend;
 use crate::{Error, Layout};
 
 /// Decoder backend selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Kind {
+pub enum Backend {
 	/// Prefer a platform decoder, falling back to software.
 	#[default]
 	Auto,
@@ -24,7 +24,7 @@ pub enum Kind {
 #[non_exhaustive]
 pub struct Config {
 	/// Backend selection policy.
-	pub kind: Kind,
+	pub backend: Backend,
 }
 
 impl Config {
@@ -39,7 +39,7 @@ impl Config {
 /// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
 /// when the packets don't come from a plain track subscription.
 pub struct Decoder {
-	backend: Box<dyn Backend>,
+	backend: Box<dyn backend::Backend>,
 	/// Startup delay in native-rate frames, and how much of it is left to trim.
 	delay: usize,
 	delay_remaining: usize,
@@ -204,7 +204,7 @@ pub(crate) mod tests {
 	/// Frames of startup delay [`Pipelined`] declares.
 	const PIPELINED_DELAY: usize = 3;
 
-	impl Backend for Pipelined {
+	impl backend::Backend for Pipelined {
 		fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 			let output = Decoded {
 				samples: packet.iter().map(|&byte| f32::from(byte)).collect(),

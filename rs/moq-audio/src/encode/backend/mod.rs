@@ -15,7 +15,7 @@
 //! wired in yet.
 
 use super::Encoded;
-use super::encoder::{Codec, Config, Kind};
+use super::encoder::{Backend as Choice, Codec, Config};
 use crate::Error;
 
 mod libopus;
@@ -111,17 +111,17 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 	#[cfg(not(test))]
 	let platform = PLATFORM;
 
-	select(config, candidates(config.kind, platform, SOFTWARE))
+	select(config, candidates(config.backend, platform, SOFTWARE))
 }
 
-/// The candidates `kind` allows, in the order to try them.
+/// The candidates `choice` allows, in the order to try them.
 ///
 /// Takes the tiers as arguments so a test can supply stubs instead of whatever
 /// this host compiles in.
-fn candidates<'a>(kind: Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
-	match kind {
-		Kind::Software => software.iter().collect(),
-		Kind::Auto => platform.iter().chain(software).collect(),
+fn candidates<'a>(choice: Choice, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
+	match choice {
+		Choice::Software => software.iter().collect(),
+		Choice::Auto => platform.iter().chain(software).collect(),
 	}
 }
 
@@ -159,9 +159,9 @@ fn select(config: &Config, candidates: Vec<&Candidate>) -> Result<Box<dyn Backen
 		true => "none".to_owned(),
 		false => available.join(", "),
 	};
-	Err(Error::Unsupported(match config.kind {
-		Kind::Software => format!("no software {codec} audio encoder (this build has: {available})"),
-		Kind::Auto => format!("no {codec} audio encoder (this build has: {available})"),
+	Err(Error::Unsupported(match config.backend {
+		Choice::Software => format!("no software {codec} audio encoder (this build has: {available})"),
+		Choice::Auto => format!("no {codec} audio encoder (this build has: {available})"),
 	}))
 }
 
@@ -231,34 +231,34 @@ mod tests {
 		open: |_| panic!("opened for a codec it does not emit"),
 	};
 
-	fn aac(kind: Kind) -> Config {
+	fn aac(backend: Choice) -> Config {
 		Config {
-			kind,
+			backend,
 			..Config::from_input(Codec::Aac, &Default::default())
 		}
 	}
 
-	fn pick(kind: Kind, platform: &[Candidate], software: &[Candidate]) -> Result<String, Error> {
-		let config = aac(kind);
-		let backend = select(&config, candidates(config.kind, platform, software))?;
+	fn pick(choice: Choice, platform: &[Candidate], software: &[Candidate]) -> Result<String, Error> {
+		let config = aac(choice);
+		let backend = select(&config, candidates(config.backend, platform, software))?;
 		Ok(backend.name().to_owned())
 	}
 
 	#[test]
 	fn auto_prefers_platform() {
-		let name = pick(Kind::Auto, &[PCM_ONLY, PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
+		let name = pick(Choice::Auto, &[PCM_ONLY, PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "platform");
 	}
 
 	#[test]
 	fn auto_falls_back_to_software() {
-		let name = pick(Kind::Auto, &[REFUSING], &[SOFTWARE_STUB]).unwrap();
+		let name = pick(Choice::Auto, &[REFUSING], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "software");
 	}
 
 	#[test]
 	fn software_skips_platform() {
-		let name = pick(Kind::Software, &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
+		let name = pick(Choice::Software, &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "software");
 	}
 
@@ -269,7 +269,7 @@ mod tests {
 			..REFUSING
 		};
 
-		let err = pick(Kind::Auto, &[REFUSING], &[ALSO_REFUSING]).unwrap_err();
+		let err = pick(Choice::Auto, &[REFUSING], &[ALSO_REFUSING]).unwrap_err();
 		let message = err.to_string();
 		assert!(
 			message.contains("refusing: ") && message.contains("also-refusing: "),
@@ -282,7 +282,7 @@ mod tests {
 	/// gates this to the hosts without one.
 	#[test]
 	fn aac_without_a_platform_encoder_is_refused() {
-		let err = open(&aac(Kind::Auto)).err().expect("no AAC encoder on this host");
+		let err = open(&aac(Choice::Auto)).err().expect("no AAC encoder on this host");
 		let message = err.to_string();
 		assert!(message.contains("aac") && message.contains("none"), "{message}");
 	}
@@ -292,9 +292,9 @@ mod tests {
 	#[test]
 	fn stub_is_not_software() {
 		let _stub = stub::install();
-		assert_eq!(open(&aac(Kind::Auto)).unwrap().name(), stub::NAME);
+		assert_eq!(open(&aac(Choice::Auto)).unwrap().name(), stub::NAME);
 
-		let err = open(&aac(Kind::Software)).err().expect("no software AAC encoder");
+		let err = open(&aac(Choice::Software)).err().expect("no software AAC encoder");
 		assert!(err.to_string().contains("no software aac"), "{err}");
 	}
 }

@@ -2108,7 +2108,7 @@ mod tests {
 	#[tokio::test]
 	async fn resampling_keeps_the_activity_boundary_on_its_source() {
 		let mut encoder = Encoder::new(&EncodeConfig {
-			dtx: true,
+			kind: Some(crate::encode::Kind::Voice),
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			frame_duration: std::time::Duration::from_millis(10),
 			..EncodeConfig::new(48_000, Layout::Mono)
@@ -2418,7 +2418,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_terminal_jump_leaves_the_held_samples_alone() {
 		let mut encoder = Encoder::new(&EncodeConfig {
-			dtx: true,
+			kind: Some(crate::encode::Kind::Voice),
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			..EncodeConfig::new(48_000, Layout::Mono)
 		})
