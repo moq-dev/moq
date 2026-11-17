@@ -16594,15 +16594,14 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1);
 	}
 
-	/// A refused headless group is reported dropped, so a reader in key order, as a
-	/// `track` socket session reads, moves on to the next group rather than wait on it.
+	/// A refused headless group is reported dropped, so a reader in key order moves on to the next group rather than wait on it.
 	#[kio::test]
 	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
 		let h = Harness::new(
 			Fill::Done,
 			vec![tail_stream(KEY, 2, &[b"tail-2"]), tail_stream(KEY + 1, 0, &[b"next-0"])],
 		);
-		// Subscribed before the answer, as the socket does.
+		// Subscribed before the answer.
 		let mut ordered = h
 			.track
 			.subscribe(Some(

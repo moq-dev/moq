@@ -309,11 +309,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
-	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
-	// them unless its publish half opted in, and a socket endpoint behind it is
-	// unreachable. A server leaves it to the client, whose origin holds that endpoint.
-	let withholding =
-		(client && !version.has_hidden() && !publish.includes_hidden()).then(|| publish.hidden_withheld().hold());
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
@@ -431,7 +426,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client, route_publish),
 		session,
-		withholding,
 	};
 
 	Ok(SessionStart {
@@ -467,9 +461,6 @@ pub(crate) struct Driver {
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
 	session: Transport,
-	/// Counts this session against the publish origin while it withholds that origin's
-	/// hidden routes from the peer.
-	withholding: Option<origin::HiddenWithholding>,
 }
 
 impl Driver {
@@ -520,7 +511,6 @@ impl Driver {
 			}
 		}
 		self.ended = Some(res.clone());
-		self.withholding = None;
 		res
 	}
 

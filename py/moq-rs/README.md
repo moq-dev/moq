@@ -251,29 +251,6 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
 
 Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
 
-### Sockets
-
-`from moq import socket` exposes `socket.Endpoint(origin, prefix, id)`. Use the
-same origin as the session's publish and consume sides. Hold the endpoint while
-sessions run, or use it as an async context manager. Its first dial announces
-`<prefix>/.client/<id>` and its first accept `<prefix>/.server/<id>`, so grants
-decide whether it may be a client, a server, or both; keep each session id private.
-
-- `await endpoint.dial_track(peer, info=None)` dials a server, and `await endpoint.accept_track()` takes the next dial.
-- An incoming dial has `peer` and `session`; `await incoming.accept(info=None)` verifies
-  return routability, and `incoming.reject()` refuses it.
-- `TrackStream` exposes `producer: TrackProducer`, `consumer: TrackConsumer`, `peer`,
-  and `session`. Its subscription starts reliable and ascending, and omitted
-  `info` keeps messages without a publisher age limit. Hold or cancel the consumer
-  to retain or release that subscription. A message no hop will deliver, such as
-  one a cache reclaimed after 30 s unread or a refused fetch, is skipped rather
-  than ending the session.
-
-Cancelling a dial or its acceptance resets that dial. Cancelling an accept wait
-leaves the endpoint listening. `endpoint.close()` resets sessions and pending dials.
-The [socket convention](https://doc.moq.dev/concept/socket) needs lite-07 or
-moq-transport on every relay hop; this API does not add pre-07 capability detection.
-
 ### Origin (advanced)
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.

@@ -36,7 +36,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
 - **moq-net API.** [Session codes](/quest/m2/session-codes.md).
-  [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
+  [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.

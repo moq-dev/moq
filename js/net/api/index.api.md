@@ -604,34 +604,6 @@ export type SessionCode = number & {
 
 export * as Signals from "@moq/signals";
 
-export namespace Socket {
-	export class Endpoint {
-		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
-		acceptTrack(options?: Socket.Options): Promise<Socket.Incoming>;
-		close(): void;
-		get closed(): Signals.GetPromise<Error | null>;
-		dialTrack(peer: string, info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
-		readonly id: string;
-		readonly prefix: Path.Valid;
-	}
-	export class Incoming {
-		accept(info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
-		readonly peer: string;
-		reject(): void;
-		readonly session: string;
-	}
-	export interface Options {
-		signal?: AbortSignal;
-	}
-	export class TrackStream {
-		readonly consumer: Track.Subscriber;
-		readonly peer: string;
-		readonly producer: Track.Producer;
-		readonly session: string;
-	}
-	export function isEndpoint(path: Path.Valid): boolean;
-}
-
 export const StreamCode: ((code: number) => StreamCode) & {
 	readonly Cancel: StreamCode;
 	readonly ControlTimeout: StreamCode;
