@@ -13,8 +13,8 @@ import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
 import { renditions } from "./section";
 import { StatsSchema } from "./stats";
-import { TimelineSchema } from "./timeline";
 import { TextSchema } from "./text";
+import { TimelineSchema } from "./timeline";
 import { track } from "./track";
 import { VideoSchema } from "./video";
 

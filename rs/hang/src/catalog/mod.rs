@@ -21,8 +21,8 @@ mod priority;
 mod reference;
 mod root;
 mod stats;
-mod timeline;
 mod text;
+mod timeline;
 mod video;
 
 pub use audio::*;
@@ -39,8 +39,8 @@ pub use priority::*;
 pub use reference::*;
 pub use root::*;
 pub use stats::*;
-pub use timeline::*;
 pub use text::*;
+pub use timeline::*;
 pub use video::*;
 
 /// Serde default for a rendition's `enabled` field.

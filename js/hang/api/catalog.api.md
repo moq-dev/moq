@@ -507,16 +507,6 @@ export const StatsSchema: ZodMiniObject<{
 	track: ZodMiniString<string>;
 }, $strip>;
 
-export type Sync = infer<typeof SyncSchema>;
-
-export const SyncSchema: ZodMiniObject<{
-	clock: ZodMiniOptional<ZodMiniObject<{
-		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
-		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-	}, $strip>>;
-	interval: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-}, $strip>;
-
 export const TRACK: "catalog.json";
 
 export type Text = infer<typeof TextSchema>;
@@ -586,6 +576,16 @@ export const TextSchema: ZodMiniObject<{
 		role: string;
 		track?: string | undefined;
 	}>, Record<string, unknown>>>;
+}, $strip>;
+
+export type Timeline = infer<typeof TimelineSchema>;
+
+export const TimelineSchema: ZodMiniObject<{
+	clock: ZodMiniOptional<ZodMiniObject<{
+		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
+		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
+	}, $strip>>;
+	interval: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 }, $strip>;
 
 export type Track = infer<typeof TrackSchema>;
