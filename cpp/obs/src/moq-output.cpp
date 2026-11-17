@@ -2,6 +2,7 @@
 #include <obs.hpp>
 
 #include "moq-output.h"
+#include "moq-encoder-rate.h"
 #include "moq-error.h"
 #include "moq-implementation.h"
 #include "moq-settings.h"
@@ -72,12 +73,30 @@ const moq::Error *PhaseFailure(const moq::ConnectionPhase &phase)
 		phase.get_variant());
 }
 
-// Retune `encoder` to `bitrate_bps`, the way OBS's own RTMP dynamic bitrate does.
-void SetBitrate(obs_encoder_t *encoder, uint64_t bitrate_bps)
+// Retune `encoder` to `bitrate_bps` in its `key` setting, the way OBS's own RTMP dynamic
+// bitrate does. The key is where the encoder holds its peak: "bitrate" for most, but
+// "max_bitrate" for NVENC's constant quality.
+void SetBitrate(obs_encoder_t *encoder, const char *key, uint64_t bitrate_bps)
 {
 	OBSDataAutoRelease settings = obs_data_create();
-	obs_data_set_int(settings, "bitrate", (long long)(bitrate_bps / 1000));
+	obs_data_set_int(settings, key, (long long)(bitrate_bps / 1000));
 	obs_encoder_update(encoder, settings);
+}
+
+// The kbps this encoder is priced at: its hard peak when it has one, else its bitrate
+// setting, which a quality target (CQP, CRF) only reserves.
+int EncoderCapKbps(const MoQPeak &peak, obs_data_t *settings)
+{
+	if (peak.key)
+		return (int)peak.kbps;
+	return settings ? (int)obs_data_get_int(settings, "bitrate") : 0;
+}
+
+// The hard peak `encoder`'s settings configure, if any.
+MoQPeak PeakOf(obs_encoder_t *encoder, obs_data_t *settings)
+{
+	const char *id = obs_encoder_get_id(encoder);
+	return settings && id ? EncoderPeak(id, settings) : MoQPeak{};
 }
 
 // Whether `rate_control` lets the "bitrate" setting drive the encoder's output.
@@ -392,7 +411,12 @@ void MoQOutput::Reset()
 	// Following the grant rewrote the encoder's bitrate, which the next Start()
 	// reads back as the configured rate. Restored after media_mutex is released:
 	// an idle encoder applies the update inline.
-	std::vector<std::pair<OBSEncoder, uint64_t>> restore;
+	struct Restore {
+		OBSEncoder encoder;
+		const char *key;
+		uint64_t bitrate_bps;
+	};
+	std::vector<Restore> restore;
 
 	std::unique_lock<std::mutex> lock(media_mutex);
 	for (auto &[encoder, track] : video_tracks) {
@@ -400,7 +424,7 @@ void MoQOutput::Reset()
 			track.producer->finish();
 		if (track.rate && track.applied_bps != track.bitrate_bps) {
 			if (OBSEncoder strong = OBSGetStrongRef(track.encoder))
-				restore.emplace_back(std::move(strong), track.bitrate_bps);
+				restore.push_back({std::move(strong), track.rate_key, track.bitrate_bps});
 		}
 	}
 	video_tracks.clear();
@@ -436,8 +460,8 @@ void MoQOutput::Reset()
 
 	lock.unlock();
 
-	for (auto &[encoder, bitrate] : restore)
-		SetBitrate(encoder, bitrate);
+	for (auto &r : restore)
+		SetBitrate(r.encoder, r.key, r.bitrate_bps);
 }
 
 std::string MoQOutput::GetInstance()
@@ -738,7 +762,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 void MoQOutput::Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target)
 {
 	if (const auto *enabled = std::get_if<moq::RateTarget::kEnabled>(&target.get_variant())) {
-		SetBitrate(encoder, enabled->bitrate_bps);
+		SetBitrate(encoder, track.rate_key, enabled->bitrate_bps);
 		track.applied_bps = enabled->bitrate_bps;
 		track.enabled = true;
 		return;
@@ -788,7 +812,8 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	OBSDataAutoRelease settings = obs_encoder_get_settings(encoder);
 	const auto video_width = obs_encoder_get_width(encoder);
 	const auto video_height = obs_encoder_get_height(encoder);
-	const int video_bitrate_kbps = settings ? (int)obs_data_get_int(settings, "bitrate") : 0;
+	const MoQPeak peak = PeakOf(encoder, settings);
+	const int video_bitrate_kbps = EncoderCapKbps(peak, settings);
 
 	uint8_t *extra_data = nullptr;
 	size_t extra_size = 0;
@@ -820,13 +845,14 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		config.data.assign(extra_data, extra_data + extra_size);
 
 	// Seed catalog fields a downstream moq-transcode needs before measured rates
-	// arrive: coded size (also from SPS once parsed) and configured CBR bitrate so
-	// same-height ladder rungs can undercut the mezzanine.
+	// arrive: coded size (also from SPS once parsed) and the encoder's hard peak, which
+	// CBR and capped VBR both configure, so same-height ladder rungs can undercut the
+	// mezzanine. The catalog prices a rendition at that peak, never its measured rate.
 	moq::VideoHint hint{};
 	if (video_width > 0 && video_height > 0)
 		hint.coded = moq::Dimensions{video_width, video_height};
 	const std::string rate_control = settings ? obs_data_get_string(settings, "rate_control") : "";
-	if (video_bitrate_kbps > 0 && (rate_control == "CBR" || rate_control == "cbr"))
+	if (peak.key)
 		hint.bitrate = (uint64_t)video_bitrate_kbps * 1000ULL;
 	hint.optimize_for_latency = true;
 	config.hint = hint;
@@ -847,7 +873,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 			kbps = (int)(known->second.bitrate_bps / 1000);
 		} else {
 			OBSDataAutoRelease other_settings = obs_encoder_get_settings(other);
-			kbps = other_settings ? (int)obs_data_get_int(other_settings, "bitrate") : 0;
+			kbps = EncoderCapKbps(PeakOf(other, other_settings), other_settings);
 		}
 		if (kbps > lower_kbps && kbps < video_bitrate_kbps) {
 			lower = other;
@@ -887,10 +913,11 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	entry.producer = *track;
 	if (video_bitrate_kbps > 0) {
 		entry.bitrate_bps = (uint64_t)video_bitrate_kbps * 1000ULL;
-		// Following needs an encoder that retunes live and a rate control the
-		// bitrate drives; a quality target (CQP, CRF) only reserves.
+		// Following needs an encoder that retunes live and either holds a peak or has a
+		// rate control the bitrate drives; a quality target (CQP, CRF) only reserves.
 		const bool dynamic = obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_DYN_BITRATE;
-		if (dynamic && BitrateDriven(rate_control)) {
+		if (dynamic && (peak.key || BitrateDriven(rate_control))) {
+			entry.rate_key = peak.key ? peak.key : "bitrate";
 			entry.rate = moq::RateControl::init(moq::RatePolicy{entry.bitrate_bps, lower_bps});
 			entry.applied_bps = entry.bitrate_bps;
 			entry.encoder = OBSGetWeakRef(encoder);

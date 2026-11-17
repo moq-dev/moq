@@ -40,11 +40,21 @@ settings** off. A keyframe interval shorter than 2 s stays. Both tune x264,
 NVENC, Quick Sync, AMF, VA-API, and VideoToolbox, and leave any other encoder's
 settings alone.
 
+The dock's Custom settings profiles run x264 and NVENC at constant quality under
+a peak (capped VBR): Quality peaks at 8 Mbps and Performance at 2.5 Mbps, which
+a complex scene reaches and a calm one stays well under. Other encoders run CBR
+at that rate, since their quality modes carry no hard peak (Quick Sync's ICQ,
+AMF's QVBR) or have not been checked (VA-API, VideoToolbox). **Use OBS Output
+settings** keeps the rate control OBS configured. The catalog's `bitrate` is that
+peak (under CBR, the bitrate), never the measured rate, so viewers price the
+rendition by what it can send.
+
 The video bitrate follows the connection's bandwidth estimate, with the
-configured bitrate as the ceiling: it drops as soon as the uplink narrows and
-climbs back over a few seconds. Audio holds its configured bitrate, and video
-gets what is left. Only encoders that can retune while live, with CBR, VBR, or
-ABR rate control, follow; CQP and CRF keep their setting. The dock's Stats tab
+configured bitrate (the peak, under capped VBR) as the ceiling: it drops as soon
+as the uplink narrows and climbs back over a few seconds. Audio holds its
+configured bitrate, and video gets what is left. Only encoders that can retune
+while live, with CBR, VBR, ABR, or NVENC's CQVBR rate control, follow; CQP and
+CRF keep their setting. The dock's Stats tab
 shows the current video target beside the configured rate. An encoder shared
 with a recording follows too, so record with a separate encoder to keep the
 recording at the full rate.
@@ -52,7 +62,7 @@ recording at the full rate.
 ## Simulcast renditions
 
 Every video encoder on OBS's stream output is its own rendition of the
-broadcast, with its size, codec, and (under CBR) configured bitrate in the
+broadcast, with its size, codec, and (under CBR or capped VBR) peak bitrate in the
 catalog, so `<moq-watch>` picks between them. OBS adds encoders from its WHIP
 simulcast layer count, `Stream1` / `WHIPSimulcastTotalLayers` in the profile,
 whatever the service: `N` layers add `N - 1` copies of the stream encoder,

@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -55,10 +56,12 @@ std::atomic<bool> g_destroyed{false};
 
 std::string g_url;
 std::string g_rate_control = "CBR";
+std::string g_encoder_id = "obs_x264";
 uint32_t g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
-// Every obs_encoder_update, as the encoder and the bitrate it was told in kbps.
+// Every obs_encoder_update, as the encoder, the setting, and the kbps it was told.
+using Update = std::tuple<obs_encoder_t *, std::string, long long>;
 std::mutex g_updates_mutex;
-std::vector<std::pair<obs_encoder_t *, long long>> g_updates;
+std::vector<Update> g_updates;
 std::atomic<bool> g_settings_ok{true};
 // A reason Configure reports itself, for a setting the config cannot express.
 std::string g_settings_error;
@@ -175,6 +178,11 @@ bool obs_encoder_get_extra_data(const obs_encoder_t *encoder, uint8_t **data, si
 	return true;
 }
 
+const char *obs_encoder_get_id(const obs_encoder_t *)
+{
+	return g_encoder_id.c_str();
+}
+
 const char *obs_encoder_get_codec(const obs_encoder_t *encoder)
 {
 	return encoder == AUDIO_ENCODER ? "opus" : "h264";
@@ -210,8 +218,9 @@ long long obs_data_get_int(obs_data_t *settings, const char *)
 	return settings == reinterpret_cast<obs_data_t *>(MID_ENCODER) ? 4000 : 8000;
 }
 
-// The settings a retune builds carry only the bitrate, so the stub is that bitrate.
+// The settings a retune builds carry only the one rate, so the stub is that setting.
 struct obs_data {
+	std::string key;
 	long long bitrate = 0;
 };
 
@@ -220,8 +229,9 @@ obs_data_t *obs_data_create()
 	return new obs_data;
 }
 
-void obs_data_set_int(obs_data_t *data, const char *, long long value)
+void obs_data_set_int(obs_data_t *data, const char *key, long long value)
 {
+	data->key = key;
 	data->bitrate = value;
 }
 
@@ -233,7 +243,7 @@ uint32_t obs_encoder_get_caps(const obs_encoder_t *)
 void obs_encoder_update(obs_encoder_t *encoder, obs_data_t *settings)
 {
 	std::lock_guard<std::mutex> lock(g_updates_mutex);
-	g_updates.emplace_back(encoder, settings->bitrate);
+	g_updates.emplace_back(encoder, settings->key, settings->bitrate);
 	delete settings;
 }
 
@@ -318,6 +328,7 @@ void reset(std::string url)
 	g_settings_ok = true;
 	g_settings_error.clear();
 	g_rate_control = "CBR";
+	g_encoder_id = "obs_x264";
 	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
 	g_ladder = false;
 	g_mid = false;
@@ -504,7 +515,7 @@ struct MoQOutputStatsTest {
 	}
 };
 
-std::vector<std::pair<obs_encoder_t *, long long>> updates()
+std::vector<Update> updates()
 {
 	std::lock_guard<std::mutex> lock(g_updates_mutex);
 	return g_updates;
@@ -578,12 +589,23 @@ int main()
 	printf("retired stats never replace the accepted sample: ok\n");
 
 	// Publishes over a real session: connects, reports itself live, carries
-	// stats, and lands video and audio renditions in the relay's catalog. Only CBR
-	// publishes the configured bitrate as a hint.
-	for (const char *mode : {"CBR", "VBR"}) {
+	// stats, and lands video and audio renditions in the relay's catalog. The catalog
+	// prices a video rendition at the hard peak its encoder holds: the bitrate under
+	// CBR, and the cap under x264's and NVENC's capped VBR. An encoder that only
+	// averages, or targets a quality, advertises none.
+	struct HintCase {
+		const char *id;
+		const char *mode;
+		bool hint;
+	};
+	for (const auto &c :
+	     {HintCase{"obs_x264", "CBR", true}, HintCase{"obs_x264", "VBR", true}, HintCase{"obs_x264", "CRF", false},
+	      HintCase{"obs_nvenc_h264_tex", "CQVBR", true}, HintCase{"obs_nvenc_h264_tex", "VBR", true},
+	      HintCase{"obs_nvenc_h264_tex", "CQP", false}, HintCase{"obs_qsv11_v2", "VBR", false}}) {
 		TestRelay relay;
 		reset(relay.Url());
-		g_rate_control = mode;
+		g_encoder_id = c.id;
+		g_rate_control = c.mode;
 		{
 			MoQOutput o(nullptr, OUTPUT);
 			CHECK(o.Start());
@@ -613,7 +635,8 @@ int main()
 				CHECK(catalog->audio.size() == 1);
 				for (const auto &[name, video] : catalog->video) {
 					CHECK(video.coded.has_value());
-					CHECK(video.bitrate.has_value() == (g_rate_control == "CBR"));
+					CHECK(video.bitrate.has_value() == c.hint);
+					CHECK(!c.hint || *video.bitrate == 8'000'000);
 				}
 			}
 
@@ -626,7 +649,7 @@ int main()
 		// The destructor stops too, which OBS ignores for an output already stopped.
 		CHECK(signalCount() == 2);
 	}
-	printf("publishes, and only CBR hints its bitrate: ok\n");
+	printf("publishes, and hints the peak its encoder holds: ok\n");
 
 	// OBS reads the byte total as this stream's, so a stopped output that starts
 	// again counts from zero.
@@ -651,15 +674,21 @@ int main()
 	// Video follows the grant only when the encoder retunes live and the bitrate
 	// drives it; every track reserves either way once the session connects.
 	struct FollowCase {
+		const char *id;
 		const char *rate_control;
 		uint32_t caps;
 		bool follows;
 	};
-	for (const auto &c : {FollowCase{"CBR", OBS_ENCODER_CAP_DYN_BITRATE, true},
-			      FollowCase{"vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
-			      FollowCase{"CQP", OBS_ENCODER_CAP_DYN_BITRATE, false}, FollowCase{"CBR", 0, false}}) {
+	for (const auto &c : {FollowCase{"obs_x264", "CBR", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"obs_x264", "vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"obs_nvenc_h264_tex", "CQVBR", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"obs_qsv11_v2", "vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"obs_x264", "CQP", OBS_ENCODER_CAP_DYN_BITRATE, false},
+			      FollowCase{"obs_nvenc_h264_tex", "CQP", OBS_ENCODER_CAP_DYN_BITRATE, false},
+			      FollowCase{"obs_x264", "CBR", 0, false}}) {
 		TestRelay relay;
 		reset(relay.Url());
+		g_encoder_id = c.id;
 		g_rate_control = c.rate_control;
 		g_encoder_caps = c.caps;
 		MoQOutput o(nullptr, OUTPUT);
@@ -703,9 +732,33 @@ int main()
 		o.Stop();
 		const auto applied = updates();
 		CHECK(!applied.empty());
-		CHECK(!applied.empty() && applied.back() == std::make_pair(VIDEO_ENCODER, 8000LL));
+		CHECK(!applied.empty() && applied.back() == (Update{VIDEO_ENCODER, "bitrate", 8000}));
 	}
 	printf("stop restores the configured bitrate: ok\n");
+
+	// Capped VBR moves its peak: NVENC's constant quality ignores "bitrate" and holds
+	// its ceiling in "max_bitrate", for the grant and for the restore alike.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_encoder_id = "obs_nvenc_h264_tex";
+		g_rate_control = "CQVBR";
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		auto keyframe = TestH264Keyframe();
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		MoQOutputStatsTest::Retarget(o, VIDEO_ENCODER, moq::RateTarget::kEnabled{800'000});
+		o.Stop();
+		const auto applied = updates();
+		CHECK(applied.size() >= 2);
+		if (applied.size() >= 2) {
+			CHECK(applied[applied.size() - 2] == (Update{VIDEO_ENCODER, "max_bitrate", 800}));
+			CHECK(applied.back() == (Update{VIDEO_ENCODER, "max_bitrate", 8000}));
+		}
+	}
+	printf("capped VBR retunes its peak setting: ok\n");
 
 	// Two video encoders form a ladder: the higher rung sits one priority below the
 	// lower, and a disabled rung leaves the catalog disabled, dropping its packets
