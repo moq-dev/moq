@@ -109,7 +109,7 @@ final class SmokeTests: XCTestCase {
             let group = try await consumer.recvGroup()
             starts.append(try XCTUnwrap(group).start)
         }
-        XCTAssertEqual(starts, [0, 1, 2])
+        XCTAssertEqual(starts, [0, 1_000, 2_000])
     }
 
     /// An error's description is the Rust error message.

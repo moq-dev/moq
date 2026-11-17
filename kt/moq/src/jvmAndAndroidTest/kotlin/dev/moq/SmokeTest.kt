@@ -379,7 +379,7 @@ class SmokeTest {
                     )
                 )
             val starts = List(3) { checkNotNull(consumer.recvGroup()).start() }
-            assertEquals(listOf(0uL, 1uL, 2uL), starts)
+            assertEquals(listOf(0uL, 1_000uL, 2_000uL), starts)
         }
     }
 

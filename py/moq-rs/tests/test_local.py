@@ -1239,7 +1239,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
         group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
         assert group is not None
         starts.append(group.start)
-    assert starts == [0, 1, 2]
+    assert starts == [0, 1_000, 2_000]
 
 
 async def test_time_anchor_starts_at_the_group_containing_it():

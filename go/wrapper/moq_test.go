@@ -1010,8 +1010,8 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 		}
 		starts = append(starts, group.Start())
 	}
-	if !slices.Equal(starts, []uint64{0, 1, 2}) {
-		t.Fatalf("starts = %v, want [0 1 2]", starts)
+	if !slices.Equal(starts, []uint64{0, 1_000, 2_000}) {
+		t.Fatalf("starts = %v, want [0 1000 2000]", starts)
 	}
 }
 

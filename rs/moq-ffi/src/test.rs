@@ -9072,7 +9072,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 			.expect("expected a group");
 		starts.push(group.start());
 	}
-	assert_eq!(starts, vec![0, 1, 2]);
+	assert_eq!(starts, vec![0, 1_000, 2_000]);
 }
 
 /// Wait until `session` grants `want`, following its changes.

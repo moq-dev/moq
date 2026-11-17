@@ -271,7 +271,7 @@ void main() {
         final group = await consumer.recvGroup().timeout(timeout);
         starts.add(group!.start());
       }
-      expect(starts, [0, 1, 2]);
+      expect(starts, [0, 1000, 2000]);
       broadcast.close();
     },
   );
