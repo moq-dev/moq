@@ -15,7 +15,6 @@ mod hex;
 mod include;
 mod json;
 mod m2ts;
-mod media;
 mod millis;
 mod mode;
 mod priority;
@@ -23,6 +22,7 @@ mod reference;
 mod root;
 mod stats;
 mod text;
+mod timeline;
 mod video;
 
 pub use audio::*;
@@ -34,13 +34,13 @@ pub use echo::*;
 pub use include::*;
 pub use json::*;
 pub use m2ts::*;
-pub use media::*;
 pub use mode::*;
 pub use priority::*;
 pub use reference::*;
 pub use root::*;
 pub use stats::*;
 pub use text::*;
+pub use timeline::*;
 pub use video::*;
 
 /// Serde default for a rendition's `enabled` field.

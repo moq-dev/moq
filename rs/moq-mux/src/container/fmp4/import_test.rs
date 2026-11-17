@@ -2113,7 +2113,7 @@ async fn segmented_source_writes_one_group_per_segment_in(passthrough: bool) {
 		}
 	}
 	assert_eq!(
-		catalog.snapshot().media.interval(),
+		catalog.snapshot().sync.interval,
 		Some(std::time::Duration::from_secs(1)),
 		"passthrough={passthrough}"
 	);
@@ -2591,7 +2591,7 @@ fn live_session(start_us: u64, frames: u64) -> Vec<u8> {
 struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	video: String,
-	/// The `media.clock` the catalog advertised.
+	/// The `sync.clock` the catalog advertised.
 	clock: hang::catalog::Clock,
 	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 	/// Why a chunk was refused, if one was.
@@ -2630,7 +2630,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video,
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -2699,7 +2699,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	};
 	let mut stamps = data.as_ref().map(|stream| stream.consume());
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().media.clock;
+	let fixed = catalog.snapshot().sync.clock;
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
@@ -2715,7 +2715,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(
-		snapshot.media.clock, fixed,
+		snapshot.sync.clock, fixed,
 		"{earlier:?}: the import never moves the clock"
 	);
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
@@ -2778,7 +2778,7 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 	let _finished = fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.media.clock, clock.wall());
+	assert_eq!(snapshot.sync.clock, clock.wall());
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
 	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
@@ -2850,7 +2850,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
@@ -2858,7 +2858,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the moov alone publishes nothing");
 
 	fmp4.decode(&live_session(3_600_000_000, 20)).unwrap();
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first fragment anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first fragment publishes the catalog");
