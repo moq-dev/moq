@@ -245,7 +245,7 @@ function groupsOf(rows: unknown[][]): unknown[] {
 		.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: { absolute: 0n } }] };
+const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: { time: 0n } }] };
 
 // Groups 1 to 4 after group 0 at 0s: 1 and 2 end 3s and 4s behind the 6s edge, and 3 starts 3s
 // behind it, so a 1.5s budget gives up 1 and 2 and still takes 3.
@@ -506,7 +506,7 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 			// reader takes the stale history: no hop still holds a newer group to judge it by.
 			const narrow = chained.remote.track("video").subscribe({
 				delay: { max: Duration.millis(1500) },
-				ranges: [{ start: { absolute: 1n } }],
+				ranges: [{ start: { time: 1n } }],
 			});
 			expect(groupsOf(await drain(clock, narrow))).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();

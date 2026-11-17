@@ -81,7 +81,7 @@ test("the head of the window arriving after the live edge is delivered first", a
 		maxAge: Duration.millis(30_000),
 	});
 	const consumer = new Consumer(
-		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
+		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { time: 1n } }] }),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
 	);
 
@@ -115,7 +115,7 @@ test("a head group still downloading is not truncated", async () => {
 		maxAge: Duration.millis(30_000),
 	});
 	const consumer = new Consumer(
-		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
+		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { time: 1n } }] }),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
 	);
 
@@ -155,7 +155,7 @@ test("an excluded gap between ranges does not stall", async () => {
 	const consumer = new Consumer(
 		track.subscribe({
 			delay: { max: Duration.millis(10_000) },
-			ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }, { start: { absolute: 10n } }],
+			ranges: [{ start: { time: 0n }, end: { time: 0n } }, { start: { time: 10n } }],
 		}),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(10_000) } },
 	);

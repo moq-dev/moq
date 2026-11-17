@@ -220,7 +220,7 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 	expect(timed.ranges).toEqual([{ start: { time: 40n }, end: { time: 90n } }, { start: { relative: 3n } }]);
 	expect([timed.startGroup, timed.endGroup]).toEqual([undefined, undefined]);
 	expect(requestedRanges(timed)).toEqual([
-		{ start: { absolute: 40n }, end: { absolute: 91n } },
+		{ start: { time: 40n }, end: { time: 90n } },
 		{ start: { relative: 3n } },
 	]);
 	const bounded = await update([1, 1, 40, 1, 90]);
@@ -228,7 +228,7 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 
 	// One ending before its start covers no group there, and keeps its place.
 	const reversed = await update([1, 1, 5, 1, 3]);
-	expect(requestedRanges(reversed)).toEqual([{ start: { absolute: 5n }, end: { absolute: 5n } }]);
+	expect(requestedRanges(reversed)).toEqual([{ start: { time: 5n }, end: { time: 4n } }]);
 
 	// A time past what a JS number holds exactly reads at full width.
 	const far = 1n << 60n;
@@ -238,7 +238,7 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 		Version.DRAFT_07,
 	);
 	expect(got.ranges).toEqual([{ start: { time: far } }]);
-	expect(requestedRanges({ ...got, startFrame: 0 })).toEqual([{ start: { absolute: far } }]);
+	expect(requestedRanges({ ...got, startFrame: 0 })).toEqual([{ start: { time: far } }]);
 
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
@@ -266,7 +266,7 @@ test("lite-07 sends an absolute anchor as a time, an end as the time before it",
 test("lite-07 carries every range, relative and time anchors included, and older wires the span alone", async () => {
 	const ranges = toWireRanges(
 		[
-			{ start: { absolute: 2n }, end: { absolute: 5n } },
+			{ start: { time: 2n }, end: { time: 4n } },
 			{ start: { relative: 1n } },
 			{ end: { relative: 0n } },
 			// In the track's timescale, rounded down.

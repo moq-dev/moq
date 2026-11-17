@@ -205,7 +205,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
 		delay: { max: Duration.millis(250) },
-		ranges: [{ start: { absolute: 1n }, end: { absolute: 9n } }],
+		ranges: [{ start: { time: 1n }, end: { time: 8n } }],
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
@@ -213,20 +213,20 @@ test("integration: lite subscription options and updates reach the publisher", a
 		// The negotiated lite-06 cannot state a minimum.
 		delay: { min: null, max: Duration.millis(250) },
 		order: "descending",
-		ranges: [{ start: { absolute: 1n }, end: { absolute: 9n } }],
+		ranges: [{ start: { time: 1n }, end: { time: 8n } }],
 	});
 
 	const updated = producer.subscription.changed();
 	subscriber.update({
 		priority: 8,
 		delay: { max: Duration.millis(500) },
-		ranges: [{ start: { absolute: 2n }, end: { absolute: 12n } }],
+		ranges: [{ start: { time: 2n }, end: { time: 11n } }],
 	});
 	expect(await updated).toEqual({
 		priority: 8,
 		delay: { min: null, max: Duration.millis(500) },
 		order: "descending",
-		ranges: [{ start: { absolute: 2n }, end: { absolute: 12n } }],
+		ranges: [{ start: { time: 2n }, end: { time: 11n } }],
 	});
 
 	subscriber.close();
@@ -299,7 +299,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	// nothing resubscribes. The publisher must see the budget rounded up instead.
 	const subscriber = remote
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(38.75) }, ranges: [{ start: { absolute: 1n } }] });
+		.subscribe({ delay: { max: Duration.millis(38.75) }, ranges: [{ start: { time: 1n } }] });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -311,7 +311,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Duration.millis(500.25) }, ranges: [{ start: { absolute: 1n } }] });
+	subscriber.update({ delay: { max: Duration.millis(500.25) }, ranges: [{ start: { time: 1n } }] });
 	expect((await Promise.race([updated, failed]))?.delay?.max).toEqual(Duration.millis(501));
 
 	subscriber.close();
@@ -350,7 +350,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		.track("video")
 		.subscribe({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { absolute: INITIAL_START_GROUP }, end: { absolute: INITIAL_END_GROUP } }],
+			ranges: [{ start: { time: INITIAL_START_GROUP }, end: { time: INITIAL_END_GROUP - 1n } }],
 		})
 		.ordered();
 	try {
@@ -363,7 +363,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		// Replacing the ranges reads on from the same reader, the update going upstream.
 		subscriber.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { absolute: UPDATED_GROUP }, end: { absolute: UPDATED_END_GROUP } }],
+			ranges: [{ start: { time: UPDATED_GROUP }, end: { time: UPDATED_END_GROUP - 1n } }],
 		});
 		const updated = (pending: Promise<unknown>) =>
 			withTimeout(pending, Duration.millis(UPDATE_TIMEOUT_MS), "updated group bound timed out");
@@ -375,7 +375,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		// An open range parks at the live edge instead.
 		subscriber.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { absolute: GROUP_COUNT } }],
+			ranges: [{ start: { time: GROUP_COUNT } }],
 		});
 		expect(await settlesWithin(subscriber.nextGroup(), clock, Duration.millis(PENDING_ASSERT_MS))).toBe(false);
 	} finally {
@@ -410,7 +410,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 		// of an empty window ends at once, and the copy is refused.
 		const empty = video.subscribe({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { absolute: 2n }, end: { absolute: 2n } }],
+			ranges: [{ start: { time: 2n }, end: { time: 1n } }],
 		});
 		expect(await empty.recvGroup()).toBeUndefined();
 		expect(
@@ -422,13 +422,13 @@ test("integration: lite refuses an empty requested range on open and on update",
 		const live = video
 			.subscribe({
 				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-				ranges: [{ start: { absolute: 1n }, end: { absolute: 2n } }],
+				ranges: [{ start: { time: 1n }, end: { time: 1n } }],
 			})
 			.ordered();
 		expect((await live.nextGroup())?.start).toBe(1n);
 		live.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { absolute: 3n }, end: { absolute: 3n } }],
+			ranges: [{ start: { time: 3n }, end: { time: 2n } }],
 		});
 		expect(await live.nextGroup()).toBeUndefined();
 		expect(
@@ -465,8 +465,8 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 				delay: { max: null },
 				order: "ascending",
 				ranges: [
-					{ start: { absolute: 1n }, end: { absolute: 3n } },
-					{ start: { relative: 2n }, end: { absolute: 9n } },
+					{ start: { time: 1n }, end: { time: 2n } },
+					{ start: { relative: 2n }, end: { time: 8n } },
 				],
 			})
 			.ordered();
@@ -550,7 +550,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 		remote.track("video").subscribe({
 			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
-			ranges: [{ start: { absolute: 1n }, end: { absolute: end } }],
+			ranges: [{ start: { time: 1n }, end: { time: end - 1n } }],
 		});
 	// Arrival reads, as the Rust test's: an ordered one would wait out the missing group 3.
 	const read = async (reader: ReturnType<typeof bounded>, count: number) => {

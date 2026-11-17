@@ -109,7 +109,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	test("the source start waits for SUBSCRIBE_START where it resolves the start", async () => {
-		const { reader, respond } = await subscribed(version, GRACE, { start: { absolute: 2n } });
+		const { reader, respond } = await subscribed(version, GRACE, { start: { time: 2n } });
 		// The accepted copy registers once the SUBSCRIBE write resolves, which can trail the publisher
 		// reading it, so let that run before asking where the source starts.
 		await settle();
@@ -340,7 +340,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	test("a floor below SUBSCRIBE_START owes nothing below it", async () => {
 		using clock = manual();
 		const { subscriber, reader, respond, fin } = await subscribed(version, Duration.millis(60_000), {
-			start: { absolute: 1n },
+			start: { time: 1n },
 		});
 		await respond({ start: new SubscribeStart([3n]) });
 		const group = groupStream(subscriber, 3n);
@@ -358,7 +358,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		using clock = manual();
 		const maxDelay = Duration.millis(60_000);
 		const { subscriber, respond, update, fin } = await subscribed(version, maxDelay, {
-			start: { absolute: 3n },
+			start: { time: 3n },
 		});
 		await respond({ start: new SubscribeStart([3n]) });
 		const group = groupStream(subscriber, 3n);
@@ -370,7 +370,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const lower = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ delay: { max: maxDelay }, ranges: [{ start: { absolute: 1n } }] });
+			.subscribe({ delay: { max: maxDelay }, ranges: [{ start: { time: 1n } }] });
 		// Lite-07 retires the range and adds the lowered one, whose start SUBSCRIBE_STARTED reports.
 		const lowered = await update();
 		if (hasRanges(version)) {

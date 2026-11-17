@@ -503,7 +503,7 @@ test(`a socket preserves an early answer burst over ${Lite.ALPN_07_WIP}`, async 
 		returning = caller.track(request.name).subscribe({
 			order: "ascending",
 			delay: { max: null },
-			ranges: [{ start: { absolute: 0n } }],
+			ranges: [{ start: { time: 0n } }],
 		});
 		await returning.info();
 		// The raw peer commits metadata only after writing its entire half, so

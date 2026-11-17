@@ -179,7 +179,7 @@ test("copy fill: lite-05 fills below the live edge only what a reader's ranges n
 		expect(peer.fetches()).toBe(before);
 
 		// A floor the ranges name is filled.
-		const named = peer.remote.track("video").subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n } }] });
+		const named = peer.remote.track("video").subscribe({ ...WIDE, ranges: [{ start: { time: 0n } }] });
 		expect(sorted(await take(named, 5))).toEqual(ALL);
 		expect(peer.fetches()).toBeGreaterThan(before);
 		live.close();
@@ -199,7 +199,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const peer = await peers(alpn);
 		try {
 			const history: Subscription = {
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 				delay: { max: null },
 				order: "ascending",
 			};
@@ -272,7 +272,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		expect((await reader.ordered().nextGroup())?.start).toBe(1n);
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 		const group = await history.recvGroup();
 		expect(group?.start).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
@@ -281,7 +281,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		// A reader that has yet to reach the group keeps it downloading once the first leaves.
 		const behind = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 		group?.close();
 		history.close();
 		source.writeFrame({ payload: enc.encode("old 0 more"), timestamp: Timestamp.fromMillis(1) });
@@ -339,7 +339,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		expect((await live.nextGroup())?.start).toBe(1n);
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 		const group = await history.recvGroup();
 		expect(group?.start).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
@@ -415,7 +415,7 @@ test("copy fill: a group reset to make room ends", async () => {
 		// Two groups, so the fill rides the subscription's ranges.
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
 		const group = await history.recvGroup();
 		expect(group?.start).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
@@ -526,7 +526,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const before = fetched.length;
 
 			const bounded = remote.track("video").subscribe({
-				ranges: [{ start: { absolute: 2n }, end: { absolute: 3n } }],
+				ranges: [{ start: { time: 2n }, end: { time: 2n } }],
 				delay: { max: null },
 			});
 			const group = await bounded.recvGroup();

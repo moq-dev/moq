@@ -2141,7 +2141,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 			// Lite-06 cannot state a minimum.
 			delay: { min: null, max: Duration.millis(TEST_MAX_DELAY_MS) },
 			order: "descending",
-			ranges: [{ end: { absolute: 6n } }],
+			ranges: [{ end: { time: 5n } }],
 		});
 		expect(ranges).not.toHaveBeenCalled();
 

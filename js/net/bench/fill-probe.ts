@@ -27,7 +27,7 @@ for (const runs of [250, 1000, 4000, 16000]) {
 		const subs = Array.from({ length: readers }, () =>
 			track.subscribe({
 				// Capped, so the upstream's verdicts, judged under an open range, settle none of them.
-				ranges: [{ start: { absolute: 2n }, end: { absolute: BigInt(8 + 2 * runs) } }],
+				ranges: [{ start: { time: 2n }, end: { time: BigInt(8 + 2 * runs) - 1n } }],
 				delay: { max: Duration.millis(30_000) },
 			}),
 		);

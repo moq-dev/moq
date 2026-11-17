@@ -15,12 +15,12 @@ import {
 } from "./window.ts";
 
 const abs = (start: bigint, end?: bigint): Range =>
-	end === undefined ? { start: { absolute: start } } : { start: { absolute: start }, end: { absolute: end } };
+	end === undefined ? { start: { time: start } } : { start: { time: start }, end: { time: end - 1n } };
 
 test("union merges absolute spans and drops what an open range covers", () => {
 	expect(union([abs(4n, 6n), abs(0n, 2n), abs(2n, 3n), abs(5n, 9n)])).toEqual([abs(0n, 3n), abs(4n, 9n)]);
 	// The open absolute span drops a relative-ended range starting inside it.
-	expect(union([abs(3n), { start: { absolute: 5n }, end: { relative: 0n } }])).toEqual([abs(3n)]);
+	expect(union([abs(3n), { start: { time: 5n }, end: { relative: 0n } }])).toEqual([abs(3n)]);
 	// The farthest open relative range drops relative ranges starting no farther back.
 	expect(
 		union([
@@ -38,7 +38,7 @@ test("union merges absolute spans and drops what an open range covers", () => {
 
 test("a window reads only its ranges, counting relative anchors back from the latest group", () => {
 	const window = new Window(
-		[abs(2n, 4n), { start: { relative: 1n } }, { start: { absolute: 0n }, end: { relative: 8n } }],
+		[abs(2n, 4n), { start: { relative: 1n } }, { start: { time: 0n }, end: { relative: 8n } }],
 		10n,
 	);
 	expect([0n, 1n, 2n, 3n, 4n, 8n, 9n, 10n, 11n].map((sequence) => window.contains(sequence))).toEqual([
@@ -88,7 +88,7 @@ test("a bounded window ends past its last group, and nothing in range ends at 0"
 	expect(new Window([abs(2n, 4n), abs(6n, 9n)], undefined).end()).toBe(9n);
 	expect(new Window([], undefined).end()).toBe(0n);
 	// The oldest start names no floor, so a wire without ranges asks with none.
-	expect(new Window([{ end: { absolute: 5n } }], undefined).start()).toBeUndefined();
+	expect(new Window([{ end: { time: 4n } }], undefined).start()).toBeUndefined();
 });
 
 test("a wire without ranges carries one span covering them all", () => {
@@ -114,7 +114,7 @@ test("clamping raises starts to the floor and caps ends without widening", () =>
 });
 
 test("ranges are checked rather than served widened", () => {
-	expect(() => rangesOf([{ start: { absolute: -1n } }])).toThrow(TypeError);
+	expect(() => rangesOf([{ start: { time: -1n } }])).toThrow(TypeError);
 	expect(() => rangesOf([{ start: { absolute: 1n, relative: 2n } as never }])).toThrow(TypeError);
 	expect(() => rangesOf([{ end: { time: 5 } as never }])).toThrow(TypeError);
 	expect(joinsLive([{}])).toBe(true);
@@ -271,7 +271,7 @@ test("an unsettled time end reads one group on speculation", () => {
 		[4n, "pending"],
 		[5n, "pending"],
 	]);
-	const window = new Window([{ start: { absolute: 3n }, end: time(3500) }], 5n, groups);
+	const window = new Window([{ start: { time: 3n }, end: time(3500) }], 5n, groups);
 	expect(covered(window, 8)).toEqual([3n]);
 
 	groups.held.set(3n, started(3000));
@@ -321,7 +321,7 @@ test("a time end walks each group once behind a missing sequence", () => {
 
 test("a time anchor needs moq-lite-07, is resolved by the copy, and clamps to its group", () => {
 	expect(isWire({ start: time(1) })).toBe(false);
-	expect(isWire({ start: { absolute: 1n }, end: time(1) })).toBe(false);
+	expect(isWire({ start: { time: 1n }, end: time(1) })).toBe(false);
 	// The copy resolves a time end itself, so it asks through the live edge.
 	expect(wireRanges([{ start: time(1), end: time(5) }])).toEqual([{ start: time(1) }]);
 	expect(joinsLive([{ start: time(1) }])).toBe(false);
@@ -333,7 +333,7 @@ test("a time anchor needs moq-lite-07, is resolved by the copy, and clamps to it
 	]);
 	// Resolved anchors become their groups; an unresolved time end stays so the cap applies apart.
 	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [{ start: 3n, end: 7n, floored: true }])).toEqual([
-		{ start: { absolute: 3n }, end: { absolute: 7n } },
+		{ start: { time: 3n }, end: { time: 6n } },
 	]);
 	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [])).toEqual([{ start: time(1), end: time(5) }]);
 	expect(rangesOf([{ start: time(1) }])).toEqual([{ start: time(1) }]);

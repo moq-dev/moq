@@ -23,7 +23,7 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();
-	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null }, order: "ascending" });
+	const reader = track.subscribe({ ranges: [{ start: { time: 0n } }], delay: { max: null }, order: "ascending" });
 	// Reading is what asks.
 	void reader
 		.ordered()
@@ -200,7 +200,7 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(3n);
 	// Recorded as lost: a later reader is told so rather than waiting on them.
-	const later = peer.track.subscribe({ ranges: [{ start: { absolute: 1n } }], delay: { max: null } });
+	const later = peer.track.subscribe({ ranges: [{ start: { time: 1n } }], delay: { max: null } });
 	const next = hooks.tryRecvGroup(later, true);
 	expect(next.kind === "drop" ? [next.start, next.end] : next.kind).toEqual([1n, 3n]);
 
@@ -280,7 +280,7 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	// for them again.
 	const requests = peer.track.requests();
 	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 0n } }],
+		ranges: [{ start: { time: 0n } }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -337,7 +337,7 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 
 	const requests = peer.track.requests();
 	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 1n } }],
+		ranges: [{ start: { time: 1n } }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -409,7 +409,7 @@ test("range fills: a recovery's refusal is taken once", async () => {
 
 	const requests = peer.track.requests();
 	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 1n } }],
+		ranges: [{ start: { time: 1n } }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -457,7 +457,7 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	tail.account(1n, 2n);
 	const requests = peer.track.requests();
 	const later = peer.track.subscribe({
-		ranges: [{ start: { absolute: 1n } }],
+		ranges: [{ start: { time: 1n } }],
 		delay: { max: null },
 		order: "ascending",
 	});

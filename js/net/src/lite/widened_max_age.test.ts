@@ -136,7 +136,7 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
-	const ranges = [{ start: { absolute: 0n }, end: { absolute: 5n } }];
+	const ranges = [{ start: { time: 0n }, end: { time: 4n } }];
 	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) }, ranges });
 	expect(await received(reader, 1)).toEqual([0n]);
 	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.

@@ -316,7 +316,7 @@ function groups(range: Range): track.Groups {
 function subscription(budget: Budget, range: Range): track.Subscription {
 	return {
 		delay: { max: budget === "hour" ? HOUR : SHORT },
-		ranges: range ? [{ start: { absolute: BigInt(range[0]) }, end: { absolute: BigInt(range[1]) } }] : undefined,
+		ranges: range ? [{ start: { time: BigInt(range[0]) }, end: { time: BigInt(range[1]) - 1n } }] : undefined,
 	};
 }
 

@@ -21,7 +21,7 @@ const ALPNS = {
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
 const ranges = (start: bigint, end: bigint): Subscription => ({
-	ranges: [{ start: { absolute: start }, end: { absolute: end } }],
+	ranges: [{ start: { time: start }, end: { time: end - 1n } }],
 	delay: { max: null },
 	order: "ascending",
 });
@@ -327,7 +327,7 @@ for (const version of VERSIONS) {
 		await fx.answer(fetching.stream, 2n);
 		const live = fx.broadcast
 			.track("video")
-			.subscribe({ ranges: [{ start: { absolute: 6n } }], delay: { max: null } });
+			.subscribe({ ranges: [{ start: { time: 6n } }], delay: { max: null } });
 		fx.readers.push(live);
 		const failed = live.recvGroup().catch((error) => error);
 		const widening = await fx.next();
@@ -364,7 +364,7 @@ for (const version of VERSIONS) {
 		await fx.answer(fetching.stream, 2n);
 		const live = fx.broadcast
 			.track("video")
-			.subscribe({ ranges: [{ start: { absolute: 6n } }], delay: { max: null } });
+			.subscribe({ ranges: [{ start: { time: 6n } }], delay: { max: null } });
 		const widening = await fx.next();
 		expect(await widening.reader.u53()).toBe(Subscribe.id);
 		await Subscribe.decode(widening.reader, version);
@@ -388,7 +388,7 @@ for (const version of VERSIONS) {
 	test(`${version}: a relative end on an empty track subscribes for the first group`, async () => {
 		const fx = fixture(version);
 		const reader = fx.broadcast.track("video").subscribe({
-			ranges: [{ start: { absolute: 0n }, end: { relative: 0n } }],
+			ranges: [{ start: { time: 0n }, end: { relative: 0n } }],
 			delay: { max: null },
 			order: "ascending",
 		});

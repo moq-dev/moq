@@ -321,8 +321,6 @@ async function fetchGroup(
 		priority: options.priority,
 		ranges: [{ start: { time: sequence }, end: { time: sequence } }],
 	});
-	// The group starting there, never an earlier one containing its start.
-	subscriber.withRange({ start: { included: sequence }, end: { included: sequence } });
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);
 	try {

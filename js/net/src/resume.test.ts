@@ -341,7 +341,7 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	hooks.startTrack(tb.producer, { start: 5n, requested: 3n });
 	const front = new Front();
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: { time: 3n } }] });
 	try {
 		expect(hooks.sourceStart(sub)).toBe(3n);
 		const subscribed = tb.producer.subscription.changed();
@@ -389,10 +389,10 @@ test("a bounded read through routes ends once its window is read, across a route
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { absolute: 1n }, end: { absolute: 5n } }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1n }, end: { time: 4n } }] });
 	const floored = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { absolute: 1n }, end: { absolute: 5n } }] })
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1n }, end: { time: 4n } }] })
 		.withRange({ start: { included: 3n } });
 	try {
 		expect((await sub.recvGroup())?.start).toBe(1n);
@@ -490,7 +490,7 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 	front.serve(a.consume());
 	const parent = front.consumer.track("seq").subscribe({
 		priority: 2,
-		ranges: [{ start: { absolute: 1n } }],
+		ranges: [{ start: { time: 1n } }],
 	});
 	ta.write(0n);
 	ta.write(1n);
@@ -915,7 +915,7 @@ test("readers owed nothing below the incumbent's end end cleanly when the replac
 	const { a, b, swap, active, close } = await setup();
 	const ta = copy(a);
 	const tb = copy(b);
-	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	const later = active.track("seq").subscribe({ ranges: [{ start: { time: 3n } }] });
 	ta.write(0n);
 	ta.write(1n);
 	await swap();
@@ -1060,7 +1060,7 @@ test("a replacement that delivered is not undone by a reader whose window skippe
 	const ta = copy(a);
 	const tb = copy(b);
 	const first = active.track("seq").subscribe();
-	const later = active.track("seq").subscribe({ ranges: [{ start: { absolute: 3n } }] });
+	const later = active.track("seq").subscribe({ ranges: [{ start: { time: 3n } }] });
 	ta.write(0n);
 	expect(drain(first)).toEqual([0n]);
 	expect(drain(later)).toEqual([]);
@@ -2860,7 +2860,7 @@ test("the largest honours the reader's bounds on the serving copy", async () => 
 		.track("seq")
 		.subscribe()
 		.withRange({ end: { excluded: 3n } });
-	const floored = front.consumer.track("seq").subscribe({ ranges: [{ start: { absolute: 8n } }] });
+	const floored = front.consumer.track("seq").subscribe({ ranges: [{ start: { time: 8n } }] });
 	for (let sequence = 0n; sequence < 5n; sequence++) ta.write(sequence);
 
 	const next = capped.largest();

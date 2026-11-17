@@ -177,7 +177,7 @@ test("a forgotten stale run is asked of a fill", async () => {
 		await clock.advance(2_000);
 
 		const reader = producer.subscribe({
-			ranges: [{ start: { absolute: 1n } }],
+			ranges: [{ start: { time: 1n } }],
 			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
 		});

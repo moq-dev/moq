@@ -1170,7 +1170,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { absolute: 1n } }],
+				ranges: [{ start: { time: 1n } }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1230,7 +1230,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1293,7 +1293,7 @@ test("a bounded subscription asks upstream from its start without an end", async
 		.track("video")
 		.subscribe({
 			...track.Subscription.default(),
-			ranges: [{ start: { absolute: 4n }, end: { absolute: 10n } }],
+			ranges: [{ start: { time: 4n }, end: { time: 9n } }],
 			order: "ascending",
 			delay: { max: null },
 		});

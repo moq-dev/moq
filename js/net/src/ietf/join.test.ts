@@ -281,7 +281,7 @@ for (const version of VERSIONS) {
 			const { subscriber, consumer, answer } = await subscribed(version, {
 				order: "ascending",
 				delay: { max: null },
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 			});
 			await answer({ groupId: 0n, objectId });
 			// Largest is inclusive, including object 0: its following tail is no whole message.

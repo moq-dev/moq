@@ -3280,7 +3280,9 @@ export class Subscriber {
 		return {
 			resolves: () => true,
 			containing: (time) => {
-				if (anchors.atKeys) return { group: time };
+				// A fetch names its group by start: the one starting there, never an earlier one
+				// containing it, as a Rust fetch reads by key.
+				if (anchors.atKeys || state.fetch) return { group: time };
 				const index = keyIndex(keys, time + 1n);
 				const below = index > 0 ? keys[index - 1] : undefined;
 				// A lite-07 copy holds only part of the track: a group held before `time` contains it
@@ -4071,6 +4073,8 @@ export class Subscriber {
 			subscriber.#fetchBudget = maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY;
 			subscriber.#fetchFrom = frameStart;
 			subscriber.#state.fetch = true;
+			// Its group resolves by start now; see `#holdings`.
+			subscriber.#resolve();
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
 			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
 			const update = subscriber.#state.update.peek();
