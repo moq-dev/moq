@@ -76,8 +76,8 @@ class Builds(unittest.TestCase):
                 bench.write_text('fn main() { println!("current catalog ran"); }\n')
                 args = ["-p", "moq-relay", "--bench", "catalog"]
                 if base == "glob":
-                    # Patterns select whatever the base has.
-                    args = ["-p", "moq-rel*", "--bench", "*"]
+                    # A package pattern selects whatever the base has, and its bench targets.
+                    args = ["-p", "moq-rel*", "--bench", "catalog"]
                 elif base == "new-package":
                     # A package the base lacks: naming it would fail the base's whole build.
                     added = repo / "rs/moq-e2ee"

@@ -420,16 +420,36 @@ criterion_build() {
 # does not have yet: naming one would fail the whole build. Lists nothing in OUT when every
 # selected target is new.
 criterion_build_base() {
-    local out=$1 metadata present names name index selected=0 asked=0 count=${#CRITERION_CARGO_ARGS[@]}
-    local args=() packages=()
+    local out=$1 metadata package pattern names name index selected=0 asked=0 count=${#CRITERION_CARGO_ARGS[@]}
+    local args=() present=() packages=()
     : >"$out"
     metadata=$(cd "$WORKTREE" && cargo metadata --locked --format-version 1 --no-deps) || return 1
-    present=$(jq -r '.packages[].name' <<<"$metadata") || return 1
-    for ((index = 0; index + 1 < count; index++)); do
-        if [[ ${CRITERION_CARGO_ARGS[index]} == -p || ${CRITERION_CARGO_ARGS[index]} == --package ]]; then
-            packages+=("${CRITERION_CARGO_ARGS[index + 1]}")
+    mapfile -t present < <(jq -r '.packages[].name' <<<"$metadata") || return 1
+    for ((index = 0; index < count; index++)); do
+        name=${CRITERION_CARGO_ARGS[index]}
+        if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
+            index=$((index + 1))
+            pattern=${CRITERION_CARGO_ARGS[index]}
+            asked=$((asked + 1))
+            # A selector, literal or a pattern, that names no package of the base selects only
+            # new ones, whose targets are new too; cargo rejects a build that names it.
+            name=
+            for package in "${present[@]}"; do
+                # shellcheck disable=SC2053 # Matched as the pattern cargo reads it as.
+                if [[ $package == $pattern ]]; then
+                    packages+=("$package")
+                    name=$package
+                fi
+            done
+            if [[ -n $name ]]; then
+                args+=(--package "$pattern")
+            fi
         fi
     done
+    # Without a package left, cargo would build the whole workspace instead.
+    if ((asked)) && ((${#packages[@]} == 0)); then
+        return 0
+    fi
     # Another package's target of the same name must not count, or cargo rejects the base build.
     names=$(jq -r '.packages[] | select(($ARGS.positional | length) == 0 or (.name as $name | any($ARGS.positional[]; . == $name)))
         | .targets[] | select(any(.kind[]; . == "bench")) | .name' --args ${packages[@]+"${packages[@]}"} <<<"$metadata") || return 1
@@ -437,12 +457,6 @@ criterion_build_base() {
         name=${CRITERION_CARGO_ARGS[index]}
         if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
             index=$((index + 1))
-            asked=$((asked + 1))
-            # A package the base lacks is new, as its targets are; a glob selects whatever the
-            # base has.
-            if [[ ${CRITERION_CARGO_ARGS[index]} == *[*?[]* ]] || grep -qxF -- "${CRITERION_CARGO_ARGS[index]}" <<<"$present"; then
-                args+=("$name" "${CRITERION_CARGO_ARGS[index]}")
-            fi
         elif [[ $name == --bench ]] && ((index + 1 < count)); then
             index=$((index + 1))
             name=${CRITERION_CARGO_ARGS[index]}
@@ -456,10 +470,6 @@ criterion_build_base() {
         fi
     done
     if ((selected)) && [[ " ${args[*]} " != *" --bench "* ]]; then
-        return 0
-    fi
-    # With no package left, cargo would build the whole workspace instead.
-    if ((asked)) && [[ " ${args[*]} " != *" -p "* && " ${args[*]} " != *" --package "* ]]; then
         return 0
     fi
     criterion_build "$out" "$WORKTREE" ${args[@]+"${args[@]}"}
