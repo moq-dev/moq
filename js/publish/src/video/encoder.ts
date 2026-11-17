@@ -63,12 +63,13 @@ export interface Config {
 	 */
 	join?: Duration;
 
-	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
+	/** The highest bitrate the encoder is configured for (a target, not a hard output peak). If not provided, it is derived from the width, height, framerate, and codec. */
 	maxBitrate?: number;
 
 	/**
-	 * Multiply the number of pixels by this value to get the bitrate. (default: 0.07)
-	 * NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
+	 * Multiplies the default bitrate cap. At 30 fps H.264 that cap is 4 Mbps for 720p and levels off
+	 * toward 10 Mbps for larger pictures; 60 fps costs 1.5x, and other codecs scale it (H.265 0.7x).
+	 * `maxBitrate` still caps the result. (default: 1)
 	 */
 	bitrateScale?: number;
 
@@ -247,7 +248,7 @@ export class Encoder {
 				// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
 				framerate: user.frameRate ?? sourceFrameRate(source) ?? 30,
 				maxPixels: user.maxPixels,
-				bitrateScale: user.bitrateScale ?? 0.07,
+				bitrateScale: user.bitrateScale ?? 1,
 				maxBitrate: user.maxBitrate,
 			};
 		});
@@ -980,31 +981,25 @@ type Probe = {
 type Detected = Probe & { slot: Slot<Catalog.VideoConfig> };
 
 // The most this rendition ever sends with `codec`, before a bandwidth grant caps it.
+//
+// One formula with moq-video's default cap: `7.2 Mbps x Mpx / (1 + Mpx / 1.38)` for H.264 at 30 fps,
+// which levels off toward 10 Mbps (720p30 = 4.0, 1080p30 = 6.0, 4K30 = 8.5 Mbps), then the frame rate
+// and the codec's scale. Change them together.
 function ceiling(codec: string, dimensions: { width: number; height: number }, target: Target): number {
 	// NOTE: dimensions already factors in user provided maxPixels.
-	const maxPixels = target.maxPixels ?? dimensions.width * dimensions.height;
-
-	// TARGET BITRATE CALCULATION (h264)
-	// 480p@30 = 1.0mbps
-	// 480p@60 = 1.5mbps
-	// 720p@30 = 2.5mbps
-	// 720p@60 = 3.5mpbs
-	// 1080p@30 = 4.5mbps
-	// 1080p@60 = 6.0mbps
+	const megapixels = (target.maxPixels ?? dimensions.width * dimensions.height) / 1e6;
 
 	// 30fps is the baseline, applying a multiplier for higher framerates.
-	// Framerate does not cause a multiplicative increase in bitrate because of delta encoding.
-	// TODO Make this better.
-	const framerateFactor = 30.0 + (target.framerate - 30) / 2;
+	// Framerate does not cause a multiplicative increase in bitrate because of delta encoding:
+	// 60fps costs 1.5x.
+	const framerateFactor = (30 + (target.framerate - 30) / 2) / 30;
 
-	// ACTUAL BITRATE CALCULATION
-	// 480p@30 = 409920 * 30 * 0.07 = 0.9 Mb/s
-	// 480p@60 = 409920 * 45 * 0.07 = 1.3 Mb/s
-	// 720p@30 = 921600 * 30 * 0.07 = 1.9 Mb/s
-	// 720p@60 = 921600 * 45 * 0.07 = 2.9 Mb/s
-	// 1080p@30 = 2073600 * 30 * 0.07 = 4.4 Mb/s
-	// 1080p@60 = 2073600 * 45 * 0.07 = 6.5 Mb/s
-	const bitrate = Math.round(maxPixels * target.bitrateScale * framerateFactor * codecBitrateScale(codec));
+	const bitrate = Math.round(
+		((7_200_000 * megapixels) / (1 + megapixels / 1.38)) *
+			framerateFactor *
+			target.bitrateScale *
+			codecBitrateScale(codec),
+	);
 	const capped = Math.round(Math.min(bitrate, target.maxBitrate || bitrate));
 
 	// Refuse a bad knob here, before the browser coerces it into an unsigned bitrate.

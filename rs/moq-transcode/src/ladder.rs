@@ -129,16 +129,15 @@ impl Ladder {
 }
 
 impl Default for Ladder {
-	/// The default ladder: 240p to 1080p, filtered against the source at runtime
-	/// so only strictly-lower renditions are offered.
+	/// The default ladder: 240p to 1080p, each rung capped at `moq_video`'s default cap for a
+	/// 16:9 picture of its size at 30 fps H.264, filtered against the source at runtime so only
+	/// strictly-lower renditions are offered.
 	fn default() -> Self {
-		Self::new([
-			Rung::new(240, moq_net::bandwidth::Rate::from_bps(350_000)),
-			Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000)),
-			Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000)),
-			Rung::new(720, moq_net::bandwidth::Rate::from_bps(2_500_000)),
-			Rung::new(1080, moq_net::bandwidth::Rate::from_bps(5_000_000)),
-		])
+		Self::new([240, 360, 480, 720, 1080].map(|short_side| {
+			let width = (short_side * 16 / 9) & !1;
+			let config = moq_video::encode::Config::new(width, short_side, moq_video::FrameRate::new(30, 1).unwrap());
+			Rung::new(short_side, config.resolved_bitrate())
+		}))
 		.expect("the default ladder is ordered")
 	}
 }
@@ -243,6 +242,18 @@ mod tests {
 				bitrate: 0
 			}
 		);
+	}
+
+	/// The default rungs are the formula's 16:9 caps at 30 fps, so the ladder and a camera
+	/// encoder at the same size price a rendition alike.
+	#[test]
+	fn default_rungs_follow_the_cap_formula() {
+		let rungs: Vec<(u32, u64)> = Ladder::default()
+			.rungs()
+			.iter()
+			.map(|rung| (rung.short_side, rung.bitrate.as_bps() / 10_000))
+			.collect();
+		assert_eq!(rungs, [(240, 68), (360, 142), (480, 227), (720, 397), (1080, 596)]);
 	}
 
 	#[test]
