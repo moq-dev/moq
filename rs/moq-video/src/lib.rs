@@ -82,6 +82,7 @@ pub mod encode;
 pub mod render;
 pub mod resize;
 
+mod device;
 mod error;
 pub mod frame;
 mod frame_rate;
@@ -100,6 +101,7 @@ mod mf;
 mod v4l2;
 
 pub use color::Color;
+pub use device::Device;
 pub use error::Error;
 #[cfg(target_os = "linux")]
 pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};

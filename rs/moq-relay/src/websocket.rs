@@ -143,6 +143,16 @@ async fn serve_upgraded(
 	}
 }
 
+/// Establish QMux on `io` with its driver on the shared runtime, then read SETUP.
+async fn accept<S>(io: S, options: moq_tokio::websocket::Options) -> moq_tokio::Result<moq_tokio::server::Request>
+where
+	S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+	let (setup, driver) = moq_tokio::websocket::accept(io, options).await?;
+	tokio::spawn(driver);
+	setup.read().await
+}
+
 /// Run a MoQ session over the WebSocket on `io`, after `read`, the bytes hyper already
 /// read past the request.
 ///
@@ -159,8 +169,7 @@ where
 		);
 		return;
 	}
-	let handshake = moq_tokio::websocket::accept(io, options);
-	let Some(request) = state.shutdown.until_deadline(handshake).await else {
+	let Some(request) = state.shutdown.until_deadline(accept(io, options)).await else {
 		return;
 	};
 	let request = match request {
@@ -687,10 +696,7 @@ mod tests {
 			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		let server = tokio::spawn(moq_tokio::websocket::accept(
-			Pipe::new(server_io, frozen.clone()),
-			options,
-		));
+		let server = tokio::spawn(accept(Pipe::new(server_io, frozen.clone()), options));
 
 		// A real qmux peer, so the transport handshake completes and its 10s
 		// timeout is out of the picture before we go silent. It never speaks moq,
@@ -738,10 +744,7 @@ mod tests {
 		);
 		options.link.alpn = Some(alpn.clone());
 		let start = kio::clock::now();
-		let server = tokio::spawn(moq_tokio::websocket::accept(
-			Pipe::new(server_io, Arc::new(AtomicBool::new(false))),
-			options,
-		));
+		let server = tokio::spawn(accept(Pipe::new(server_io, Arc::new(AtomicBool::new(false))), options));
 
 		// A live qmux peer that answers keep-alives but never speaks moq.
 		let (client, driver) = qmux::ws::Upgraded::new(Pipe::new(client_io, Arc::new(AtomicBool::new(false))), &alpn)
