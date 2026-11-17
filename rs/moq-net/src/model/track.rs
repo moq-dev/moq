@@ -1005,8 +1005,8 @@ pub(super) const CACHE_OVERHEAD: u64 =
 /// one coalesced run in `dropped`, and its two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
 /// [`CACHE_OVERHEAD`] is. Billed to the pool, so a peer fragmenting its drops into runs costs
 /// what the cache would hold, never more.
-pub(super) const RUN_OVERHEAD: u64 =
-	2 * (size_of::<(ops::Range<u64>, Hole)>()
+pub(super) const RUN_OVERHEAD: u64 = 2
+	* (size_of::<(ops::Range<u64>, Hole)>()
 		+ size_of::<ops::Range<u64>>()
 		+ size_of::<(u64, (u64, u64))>()
 		+ size_of::<(u64, u64)>()) as u64;
