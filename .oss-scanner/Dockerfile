@@ -22,7 +22,7 @@ RUN rustup show active-toolchain || rustup toolchain install \
     && curl -LsSf "https://get.nexte.st/$NEXTEST_VERSION/$nextest" | tar zxf - -C "$CARGO_HOME/bin" \
     && cargo nextest --version
 
-ARG CRATES="kio hang moq-auth moq-crypto moq-hls moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-webrtc moq-cli"
+ARG CRATES="kio hang moq-auth moq-crypto moq-e2ee moq-hls moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-webrtc moq-cli"
 
 # Path specs, because the lockfile also has published copies of some workspace crates.
 RUN cargo fetch --locked \

@@ -35,15 +35,14 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Names](/quest/m2/net-renames.md) and
-  [session codes](/quest/m2/session-codes.md).
+- **moq-net API.** [Session codes](/quest/m2/session-codes.md).
   [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
 - **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md).
-- **Auth and crypto.** End-to-end encryption
-  [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
+- **Auth and crypto.** End-to-end encryption is its own unpublished crate again
+  ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
@@ -52,7 +51,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
-  [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.

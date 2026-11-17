@@ -145,7 +145,6 @@ export class Truck {
 		this.videoSource = new Watch.Video.Source({
 			broadcast: this.broadcast,
 			target: videoTarget,
-			supported: Watch.Video.Decoder.supported,
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 

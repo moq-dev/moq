@@ -239,9 +239,13 @@ export type BroadcastInput = {
 	// ignored otherwise. Read `output.catalog` for the effective catalog in any mode.
 	catalog: Getter<Catalog.Root | undefined>;
 
-	// Whether playback still has media of the broadcast left to play once its publisher finished it.
-	// A finished broadcast reads "live" until this is false. Defaults to true, so a broadcast nothing
-	// plays out (one no Player drives, or an included one) reads "live" until it closes.
+	/**
+	 * Whether playback still has media of the broadcast left to play once its publisher finished it.
+	 * A finished broadcast reads "live" until this is false. Defaults to true, so a broadcast nothing
+	 * plays out (one no Player drives, or an included one) reads "live" until it closes.
+	 *
+	 * @internal Driven by the `Player`, which knows what its playout has left.
+	 */
 	tail: Getter<boolean>;
 };
 
@@ -250,7 +254,7 @@ export type BroadcastOutput = {
 	// "connecting" means no session can answer yet: none is attached, as while the connection
 	// dials, redials, or was refused, or one is still delivering its initial announcements.
 	// "offline" means one could answer and the broadcast is not there, or its publisher finished it
-	// and `tail` says nothing is left to play.
+	// and playback has nothing of it left to play.
 	// "error" means the origin refused the broadcast; `error` says why.
 	// "unsupported" means its catalog requires a newer player.
 	status: Signal<"connecting" | "offline" | "loading" | "live" | "error" | "unsupported">;
@@ -768,7 +772,7 @@ export class Broadcast {
 	 * ```ts
 	 * effects.run((effect) => {
 	 *   const child = broadcast.include(effect, "alice");
-	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
+	 *   const source = new Video.Source({ broadcast: child });
 	 *   effect.cleanup(() => source.close());
 	 *   // Feed source into a decoder as with any broadcast.
 	 * });

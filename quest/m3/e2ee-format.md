@@ -46,10 +46,10 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   the scheme and dropped it: a relay that strips the tag to transcode has
   defeated the purpose.
 - ✅ The finished format is `moq-e2ee-01`, and the crate stays unpublished
-  until it is (see [the crate move](/quest/m2/e2ee-crate.md)).
+  until it is (see [the crate move](https://github.com/moq-dev/moq/pull/8947)).
 
-Facts found by the audit (paths as of 2026-11-16, before the crate move, so
-under `rs/moq-crypto/src/e2ee`):
+Facts found by the audit (paths as of 2026-11-16, under `rs/moq-e2ee/src`
+since the crate move):
 
 - Broadcast swap. `scope` is `context || epoch || kid`
   (`generation.rs:171-176`), and the semantic broadcast name enters only the
@@ -142,13 +142,18 @@ types, and the vectors regenerate once):
   and a credential naming another profile is refused. Delete the draft's
   compression rule and the Catalogs section's `.z` sibling rule; an
   application compresses its own plaintext.
-- Label: rename to `moq-e2ee-01` everywhere (constant, salt, labels, the
-  vector file and its `profile` field, `drafts/moq-e2ee-00.ts`, both
+- Label: drop the `-wip` suffix from `moq-e2ee-01-wip` everywhere
+  (constant, salt, labels, the vector file's name and its `profile` field,
+  `drafts/moq-e2ee-01-wip.ts`, the draft's Profile Version section, both
   READMEs, [the epic](/quest/m5/e2ee/README.md)). While in the draft: it
   still says "the group's sequence" for the nonce, `invalid_secret` has no
   Rust form, and the datagram allowance is 28 bytes, not the epic's 24.
-- Publish: remove `publish = false`, and restore the doc rows
-  [the crate move](/quest/m2/e2ee-crate.md) dropped, still marked
+- Publish: remove `publish = false` and the READMEs' unpublished notes,
+  give `rs/moq-e2ee` a `MIGRATE.md` for users of crates.io's 0.0.25 (the
+  entries `rs/moq-crypto/MIGRATE.md` held before the crate move, in
+  `git show 6488ce6b87:rs/moq-crypto/MIGRATE.md`, with their paths back to
+  `moq_e2ee::`, plus this format's breaks), and restore the doc rows
+  [the crate move](https://github.com/moq-dev/moq/pull/8947) dropped, still marked
   experimental. Submitting the draft's -01 revision to the datatracker is
   the maintainer's, below.
 
@@ -160,10 +165,6 @@ and moq-lite: none.
 ## Waiting
 
 - Maintainer: submit `draft-lcurley-moq-e2ee-01` to the datatracker once the PR merges, and add a crates.io trusted publisher for `moq-e2ee` (repository `moq-dev/moq`, workflow `release-rs.yml`, environment `publish`); both need a login an agent does not hold. Done when the datatracker shows -01 and a `release-rs.yml` run publishes `moq-e2ee` through OIDC.
-
-## Required
-
-- [End-to-end encryption is its own unpublished crate again](/quest/m2/e2ee-crate.md) - the `moq-e2ee` crate this changes and publishes
 
 ## Related
 

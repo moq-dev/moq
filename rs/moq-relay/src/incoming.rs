@@ -85,7 +85,7 @@ pub trait Sealed: Sized {
 	fn requests(&mut self) -> moq_net::auth::Requests;
 	fn role(&self) -> Option<moq_net::setup::Role>;
 	/// The identity the peer declared in its SETUP, if any: its Hop ID, or from moq-lite-07 its Node ID.
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64>;
+	fn peer_node(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
@@ -147,8 +147,8 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::role(self)
 	}
 
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		moq_tokio::server::Request::peer_hop(self)
+	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		moq_tokio::server::Request::peer_node(self)
 	}
 
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self {
@@ -217,8 +217,8 @@ impl Sealed for Accepted {
 		self.handshake.role()
 	}
 
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		self.handshake.peer_hop()
+	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_node()
 	}
 
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {

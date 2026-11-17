@@ -1652,7 +1652,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	let timestamp_us = 42_000;
 	let payload = b"codec frame";
 	let loc = moq_loc::encode(timestamp_us, payload).unwrap();
-	let group = id(moq_publish_track_group(track));
+	let group = id(unsafe { moq_publish_track_group(track, &micros(timestamp_us)) });
 	assert_eq!(
 		unsafe { moq_publish_group_frame(group, loc.as_ptr(), loc.len(), &micros(timestamp_us)) },
 		0
@@ -2011,7 +2011,7 @@ fn publish_track_invalid_broadcast() {
 		compression: 0,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
-	assert!(moq_publish_track_group(9999) < 0);
+	assert!(unsafe { moq_publish_track_group(9999, &micros(0)) } < 0);
 	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len(), &micros(0)) } < 0);
 	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len(), &micros(0)) } < 0);
 	assert!(moq_publish_track_finish(9999) < 0);
@@ -2354,8 +2354,19 @@ fn raw_track_publish_consume() {
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-	// Multi-frame group via the explicit group API.
-	let group = id(moq_publish_track_group(track));
+	// Multi-frame group via the explicit group API, starting at a time converted to the
+	// track's microseconds. A start that doesn't move past the last group is refused.
+	assert!(unsafe { moq_publish_track_group(track, std::ptr::null()) } < 0);
+	assert!(unsafe { moq_publish_track_group(track, &micros(timestamp_us)) } < 0);
+	let start = moq_timestamp {
+		value: 20,
+		scale: 1_000,
+		has_scale: true,
+	};
+	let group = id(unsafe { moq_publish_track_group(track, &start) });
+	let mut key = 0;
+	assert_eq!(unsafe { moq_publish_group_start(group, &mut key) }, 0);
+	assert_eq!(key, 20_000);
 	let parts: [(&[u8], u64); 2] = [(b"part-0", 20_000), (b"part-1", 30_000)];
 	for (part, timestamp_us) in parts {
 		assert_eq!(
@@ -2666,7 +2677,7 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	let name = b"aborted";
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
-	let group = id(moq_publish_track_group(track));
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
 	assert!(moq_publish_group_finish(group) < 0);
 	assert_eq!(moq_publish_track_abort(track, 410), 0);
@@ -4634,7 +4645,7 @@ fn track_demand_reports_the_wanted_group() {
 	assert_eq!(demand_wanted(watcher), Some(0));
 
 	// A delta after the first frame puts the group past a `refresh` of 0.
-	let group = id(moq_publish_track_group(track));
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
 	for timestamp_us in [0, 1_000] {
 		assert_eq!(
 			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
@@ -4800,7 +4811,7 @@ fn track_abort_unwanted_keeps_a_late_reader() {
 		&demand_cb,
 		|| moq_publish_track_abort_unwanted(track, 7),
 		|| {
-			let group = id(moq_publish_track_group(track));
+			let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
 			assert_eq!(
 				unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(0)) },
 				0

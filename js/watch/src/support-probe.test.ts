@@ -3,7 +3,7 @@ import { Effect } from "@moq/signals";
 import { SupportProbe } from "./support-probe";
 
 test("a supported rendition named __proto__ is published as its own ID", async () => {
-	const probe = new SupportProbe<{ codec: string }>("video");
+	const probe = new SupportProbe<{ codec: string }>("video", { supported: async () => true, key: (c) => c.codec });
 	const effect = new Effect();
 	// JSON.parse keeps `__proto__` as an own key, as the catalog parser does.
 	const renditions = JSON.parse('{"__proto__":{"codec":"avc1"},"hd":{"codec":"avc1"}}') as Record<
@@ -11,7 +11,7 @@ test("a supported rendition named __proto__ is published as its own ID", async (
 		{ codec: string }
 	>;
 	const published = Promise.withResolvers<Record<string, { codec: string }>>();
-	probe.run(effect, async () => true, renditions, published.resolve);
+	probe.run(effect, renditions, published.resolve);
 	const available = await published.promise;
 	expect(Object.keys(available).sort()).toEqual(["__proto__", "hd"]);
 	expect(Object.hasOwn(available, "__proto__")).toBe(true);

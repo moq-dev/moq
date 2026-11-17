@@ -30,4 +30,3 @@ Public API: breaking, removals only. Wire: none.
 ## Related
 
 - [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - the browser counterpart of the reader moving onto `Gap`
-- [moq-net's node, version, handshake, and route priority](/quest/m2/net-renames.md) - makes `Version` opaque

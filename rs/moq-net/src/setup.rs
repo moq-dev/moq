@@ -164,7 +164,7 @@ impl<'a> Decode<'a, Version> for Setup {
 /// Whether `v` encodes the `moql` bidi SETUP exchange: moq-lite 01/02, whose draft-14 framing
 /// and QUIC varints it keeps whichever moq-lite version it negotiates.
 fn framed(v: Version) -> bool {
-	matches!(v, Version::Lite(lite::Version::Lite01 | lite::Version::Lite02))
+	matches!(v.0, crate::Draft::Lite(lite::Version::Lite01 | lite::Version::Lite02))
 }
 
 /// The client half of the `moql` bidi SETUP exchange, offering moq-lite versions.
@@ -199,7 +199,7 @@ impl Client {
 			.flat_map(|v| Version::try_from(*v).ok())
 			.find(|v| supported.contains(v));
 		match version {
-			Some(Version::Lite(version)) => Ok(version),
+			Some(Version(crate::Draft::Lite(version))) => Ok(version),
 			_ => {
 				// The client only learns that the session closed, so this is the one place
 				// that can name both sides of the mismatch.
@@ -357,8 +357,8 @@ mod tests {
 			let setup = Setup {
 				parameters: params.encode_bytes(version).unwrap(),
 			};
-			let wire = setup.encode_bytes(crate::Version::Ietf(version)).unwrap();
-			let decoded = Setup::decode_slice(&wire, crate::Version::Ietf(version)).unwrap().0;
+			let wire = setup.encode_bytes(crate::Version::ietf(version)).unwrap();
+			let decoded = Setup::decode_slice(&wire, crate::Version::ietf(version)).unwrap().0;
 			let (params, _) = crate::ietf::Parameters::decode_slice(&decoded.parameters, version).unwrap();
 			assert_eq!(crate::ietf::token::from_setup(&params, version).unwrap(), Some(token));
 			tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
@@ -394,7 +394,7 @@ mod tests {
 	#[test]
 	fn the_moql_setup_has_a_u16_size() {
 		for v in [lite::Version::Lite01, lite::Version::Lite02] {
-			let v = Version::Lite(v);
+			let v = Version::lite(v);
 			let client = Client {
 				versions: coding::Versions::from([v.into()]),
 				parameters: Bytes::from_static(&[0]),
@@ -416,7 +416,7 @@ mod tests {
 	/// Never emit a legacy SETUP our own receiver would refuse.
 	#[test]
 	fn encode_enforces_the_setup_limit() {
-		let v = Version::Lite(lite::Version::Lite01);
+		let v = Version::lite(lite::Version::Lite01);
 		let parameters = Bytes::from(vec![0; MAX_SETUP_SIZE]);
 
 		let client = Client {
