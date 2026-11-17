@@ -518,9 +518,7 @@ impl IngestOrder {
 				_ => Admit::Drop,
 			},
 			IngestLine::Keyless { .. } => {
-				*line = IngestLine::Video {
-					keyframe: timestamp_us,
-				};
+				*line = IngestLine::Video { keyframe: timestamp_us };
 				Admit::Forward
 			}
 			IngestLine::Video { keyframe: floor } if timestamp_us < *floor => Admit::Drop,

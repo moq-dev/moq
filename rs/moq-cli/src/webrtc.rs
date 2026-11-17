@@ -92,10 +92,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::I
 	// would find no catalog track. Held until the pull ends.
 	let route = target
 		.origin
-		.route(
-			name,
-			moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
-		)
+		.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
 		.context("failed to create broadcast")?;
 	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), target.ingest.catalog())?;
 	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
@@ -195,6 +192,9 @@ mod tests {
 		drop(offer);
 		pull.await.unwrap().expect_err("the endpoint hung up without an answer");
 		// The origin ends with the pull, so the only announcement left would be the pull's.
-		assert!(announced.next().now_or_never().flatten().is_none(), "announced a failed pull");
+		assert!(
+			announced.next().now_or_never().flatten().is_none(),
+			"announced a failed pull"
+		);
 	}
 }
