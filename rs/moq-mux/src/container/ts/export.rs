@@ -1481,9 +1481,11 @@ impl SiTrack {
 				// Ordinary SI uses the latest snapshot. A clock revision must stay in
 				// order until media reaches its stamp, including an incomplete group.
 				match track.poll_next_group(waiter) {
-					Poll::Ready(Ok(Some(group))) => {
+					Poll::Ready(Ok(Some(moq_net::track::Item::Group(group)))) => {
 						self.pending = Some((group, Default::default(), Timestamp::ZERO));
 					}
+					// SI carries the last snapshot over a group given up on.
+					Poll::Ready(Ok(Some(moq_net::track::Item::Gap { .. }))) => {}
 					Poll::Ready(Ok(None)) => {
 						ended = true;
 						break;

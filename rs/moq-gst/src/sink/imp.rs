@@ -2076,6 +2076,7 @@ mod tests {
 				.now_or_never()
 				.expect("a group is ready")
 				.unwrap()
+				.and_then(moq_net::track::Item::group)
 				.expect("the resumed keyframe opens a group");
 			let frame = group
 				.read_frame()
