@@ -2146,7 +2146,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 				},
 			},
 			output: crate::video::MoqVideoEncoderOutput {
-				codec: crate::video::MoqVideoCodec::H264,
+				codec: crate::video::MoqVideoCodec::h264(),
 				bitrate: None,
 				join: None,
 				kind: crate::video::MoqVideoEncoderKind::Software,
