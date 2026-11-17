@@ -22,4 +22,6 @@ connect races the server's accept, that is a bug in `py/moq-rs` or moq-ffi,
 fixed there with a regression test. Only if the trace shows the test reads a
 session it does not yet hold is the fix in the test, by the epic's rules.
 
+Kept as a follow-up by the maintainer's 2026-11-17 pick of #9029.
+
 Public API: none. Wire: none.
