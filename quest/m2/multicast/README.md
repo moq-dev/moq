@@ -106,7 +106,7 @@ Settled:
    27's doubt (rejected: keeping holds and doubt with the doubt tied to the
    idle timeout; a doubt lifted by an epoch the surviving node floods).
 5. ✅ **Three ways to find a warm copy are measured before one is picked**
-   ([warmth](/quest/m2/multicast/warmth.md)): joins that stop at the first
+   ([warmth](https://github.com/moq-dev/moq/pull/8903)): joins that stop at the first
    node carrying the Instance and nothing more; that plus a neighbour saying
    on each SUBSCRIBE answer whether it carries the Instance and at what cost;
    and carrying nodes advertising it. One constraint binds all three: a warm
@@ -146,7 +146,7 @@ flagged as costly, on
    uplink each, "the warm cost to a drone beats the cold cost to the CDN"
    and one uplink carries the broadcast (rejected: narrowing 8 to joins that
    stop at a carrier already on the path, which delivers neither case).
-   [Warmth](/quest/m2/multicast/warmth.md) measures both.
+   [Warmth](https://github.com/moq-dev/moq/pull/8903) measured both.
 10. ✅ **A moq-transport session is an endpoint, never transit.** Its wire
     has no path, chain, or Instance, so a moq-transport relay announcing
     back a name it learned from us cannot be told from a nearer publisher.
@@ -210,7 +210,8 @@ publishers, in route messages, unless noted):
       withdrawing it, which races the claim's own end and would show a
       reader offline where the publisher ended cleanly).
     - Order at equal rank, decided by the coordinator on 2026-11-16 while
-      the maintainer was away, pending their confirmation: a route with no
+      the maintainer was away and confirmed that day by their merge pick of
+      [moq-dev/moq#8904](https://github.com/moq-dev/moq/pull/8904): a route with no
       marked link on its path beats a marked one, then the next hop in use,
       the shorter path, and the neighbour. A relay holding two routes of
       equal rank, one learned over a marked link, had kept whichever came

@@ -1136,6 +1136,36 @@ impl<N: Key> Router<N> {
 			.map(|((_, _, origin), claim)| (origin, claim))
 	}
 
+	/// The summed cost from here to the claim [`Self::pick`] names, as it ranks it.
+	pub fn cost(&self, broadcast: &Broadcast) -> Option<Metric> {
+		let (origin, claim) = self.closest(broadcast)?;
+		match origin == self.me {
+			true => Some(claim.cost),
+			false => Some(self.best.get(&origin)?.offer.cost + claim.cost),
+		}
+	}
+
+	/// What `via` last offered this node toward `broadcast`'s closest claim: its own
+	/// summed cost to the broadcast, and whether its route runs through this node.
+	/// `None` when it offered nothing.
+	pub fn heard(&self, broadcast: &Broadcast, via: N) -> Option<(Metric, bool)> {
+		let (origin, claim) = self.closest(broadcast)?;
+		let heard = self.heard.get(&origin)?.get(&via)?;
+		Some((heard.offer.cost + claim.cost, heard.offer.names(self.me)))
+	}
+
+	/// Every neighbour whose route to `origin` ranks with the one in use, mark
+	/// included: the equal next hops a request may take.
+	pub fn ties(&self, origin: Id) -> Vec<N> {
+		let Some(best) = self.best.get(&origin) else {
+			return Vec::new();
+		};
+		(self.candidates(origin).into_iter())
+			.filter(|candidate| candidate.rank() == best.rank() && candidate.offer.marked == best.offer.marked)
+			.map(|candidate| candidate.via)
+			.collect()
+	}
+
 	/// Where a request for `broadcast` naming `origin` goes from here. `None` fails it.
 	pub fn step(&self, origin: Id, broadcast: &Broadcast) -> Option<Next<N>> {
 		match origin == self.me {
@@ -1294,7 +1324,10 @@ pub(super) struct MultiSim {
 	restarts: Vec<u32>,
 	ports: BTreeMap<(Node, Node), Port>,
 	up: BTreeSet<(Node, Node)>,
-	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
+	/// Each message with the clock when it was queued, so another queue on the same
+	/// session can keep their order.
+	queues: BTreeMap<(Node, Node), VecDeque<(u64, Msg)>>,
+	clock: u64,
 	held: BTreeSet<(Node, Node)>,
 	lives: BTreeMap<Broadcast, u64>,
 	pub stats: Stats,
@@ -1313,6 +1346,7 @@ impl MultiSim {
 			ports: BTreeMap::new(),
 			up: BTreeSet::new(),
 			queues: BTreeMap::new(),
+			clock: 0,
 			held: BTreeSet::new(),
 			lives: BTreeMap::new(),
 			stats: Stats::default(),
@@ -1497,7 +1531,19 @@ impl MultiSim {
 				self.stats.claim_items += changes.len();
 			}
 		}
-		self.queues.entry((from, to)).or_default().push_back(msg);
+		let at = self.stamp();
+		self.queues.entry((from, to)).or_default().push_back((at, msg));
+	}
+
+	/// The next tick of the clock queued messages carry.
+	pub fn stamp(&mut self) -> u64 {
+		self.clock += 1;
+		self.clock
+	}
+
+	/// When the next message from `from` to `to` was queued, if one waits.
+	pub fn head(&self, from: Node, to: Node) -> Option<u64> {
+		self.queues.get(&(from, to))?.front().map(|&(at, _)| at)
 	}
 
 	pub fn hold(&mut self, from: Node, to: Node) {
@@ -1521,7 +1567,7 @@ impl MultiSim {
 	}
 
 	pub fn deliver(&mut self, from: Node, to: Node) -> bool {
-		let Some(msg) = self.queues.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
+		let Some((_, msg)) = self.queues.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
 			return false;
 		};
 		if let Some(router) = self.relay(to) {

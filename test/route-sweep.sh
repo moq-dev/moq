@@ -18,3 +18,5 @@ just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^
 MOQ_ROUTE_CASES=3000 just rs test -P sweep -p moq-net --release --run-ignored only -E 'test(=route::tests::cache::sweep_cache_routing_long)'
 # The multicast bake-off: its prototype carries every failure on every shape at 32 relays, and its tables against the path rule at 12.
 MOQ_BAKEOFF_RELAYS=12 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::bakeoff::(sweep|benchmark)_/)'
+# Warmth: path joins, asking, and advertising over fixed shapes, 400 churned meshes per arm on three kinds of mesh, and growth over cores, edges per core, drones, and up to 4096 broadcasts, about 10 minutes.
+just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::warmth::benchmark_/)'
