@@ -45,9 +45,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
-- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
-  [claims](/quest/m2/auth-claims.md), and
-  [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
+- **Auth and crypto.** [Claims](/quest/m2/auth-claims.md). End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
@@ -59,7 +57,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
-  [device and cursor](/quest/m2/native-media-config.md),
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [the WebRTC bind](/quest/m2/webrtc-bind.md),
@@ -330,5 +327,5 @@ what would need a breaking release had it landed right after the cut:
   [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
   `Ordered` API waits for the model.
   Catalog at timestamp no longer waits
-  for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
-  shrink to a rename, since the model already fills each field with the start.
+  for `@moq/net` by start, and the bindings shrank to a rename, since the model
+  already filled each field with the start.

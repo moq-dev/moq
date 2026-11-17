@@ -117,7 +117,7 @@ public enum Media {
     public typealias Rendition = MoqRendition
     /// A catalog rendition and live delivery options.
     public typealias TrackConfig = MoqMediaTrackConfig
-    /// A catalog rendition's group sequence and fetch delivery options.
+    /// A catalog rendition's group start and fetch delivery options.
     public typealias GroupConfig = MoqMediaGroupConfig
 
     /// Updates a catalog without keeping its broadcast open.
@@ -246,9 +246,9 @@ public enum Media {
             self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
         }
 
-        /// The sequence number of this group within the track.
-        public var sequence: UInt64 {
-            ffi.sequence()
+        /// The start of this group within the track.
+        public var start: UInt64 {
+            ffi.start()
         }
 
         /// The next frame, or `nil` once the group ends.
@@ -326,12 +326,12 @@ public enum Media {
             try ffi.cut()
         }
 
-        /// Draw a group boundary and number the next group `sequence`.
+        /// Draw a group boundary and start the next group at `start`.
         ///
-        /// ``cut()`` with an explicit sequence, for a publisher whose group numbers have to be
+        /// ``cut()`` with an explicit start, for a publisher whose group starts have to be
         /// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
-        public func seek(_ sequence: UInt64) throws {
-            try ffi.seek(sequence: sequence)
+        public func seek(_ start: UInt64) throws {
+            try ffi.seek(start: start)
         }
 
         /// Abort the track with an application error code, but only while nobody wants it: call it
@@ -377,9 +377,9 @@ public enum Media {
             try ffi.cut()
         }
 
-        /// Start a new segment and number its groups `sequence`.
-        public func seek(_ sequence: UInt64) throws {
-            try ffi.seek(sequence: sequence)
+        /// Start a new segment and start its groups at `start`.
+        public func seek(_ start: UInt64) throws {
+            try ffi.seek(start: start)
         }
 
         /// Finish every track this container publishes.

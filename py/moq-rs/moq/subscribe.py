@@ -37,9 +37,9 @@ class GroupConsumer(_Stream[Frame]):
         self._inner = inner
 
     @property
-    def sequence(self) -> int:
-        """The sequence number of this group within the track."""
-        return self._inner.sequence()
+    def start(self) -> int:
+        """The start of this group within the track."""
+        return self._inner.start()
 
     async def _next(self) -> Frame | None:
         return await self.read_frame()
@@ -54,7 +54,7 @@ class GroupConsumer(_Stream[Frame]):
 
 
 class TrackConsumer(_Stream[GroupConsumer]):
-    """Async iterator of groups from a track, in sequence order.
+    """Async iterator of groups from a track, in start order.
 
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
     :meth:`groups_as_arrived`) for arrival order instead.
@@ -71,9 +71,9 @@ class TrackConsumer(_Stream[GroupConsumer]):
         return await self.next_group()
 
     async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
-        """Iterate groups in arrival order, including out-of-sequence deliveries.
+        """Iterate groups in arrival order, including out-of-order deliveries.
 
-        The default iteration uses sequence order instead. Use this for live
+        The default iteration uses start order instead. Use this for live
         consumption where latency matters more than order.
         """
         while True:
@@ -85,7 +85,7 @@ class TrackConsumer(_Stream[GroupConsumer]):
     async def recv_group(self) -> GroupConsumer | None:
         """Return the next group in arrival order. Returns `None` when the track ends.
 
-        Groups are returned as they arrive on the wire, which may be out of sequence
+        Groups are returned as they arrive on the wire, which may be out of start
         order. Use this for live consumption where latency matters more than order.
         """
         group = await self._inner.recv_group()
@@ -94,9 +94,9 @@ class TrackConsumer(_Stream[GroupConsumer]):
         return GroupConsumer(group)
 
     async def next_group(self) -> GroupConsumer | None:
-        """Return the next group in sequence order, skipping forward if behind.
+        """Return the next group in start order, skipping forward if behind.
 
-        Returns `None` when the track ends. Shares the sequence cursor with
+        Returns `None` when the track ends. Shares the ordered cursor with
         :meth:`read_frame`: a group one method has already taken is not
         returned by the other. This is what the default iteration yields; use
         `recv_group` when latency matters more than order.
@@ -162,15 +162,15 @@ class BroadcastConsumer:
     async def fetch_group(
         self,
         name: str,
-        sequence: int,
+        start: int,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
-        """Fetch one complete group by track name and group sequence.
+        """Fetch one complete group by track name and group start.
 
         This does not hold a live subscription. The returned group may still be
         receiving frames, so iterate it until completion.
         """
-        return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
+        return GroupConsumer(await self._inner.fetch_group(name, start, options))
 
     async def resolve(self, id: str, rendition: Video | Audio) -> "BroadcastConsumer":
         """Resolve the catalog rendition ``id`` to the broadcast serving its track.

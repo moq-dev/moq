@@ -40,6 +40,17 @@ use tokio_util::sync::CancellationToken;
 #[global_allocator]
 static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
+/// The device a render node flag (`--vaapi-device`) and a V4L2 node flag name.
+/// Each command declares the two in conflict, so at most one is set.
+#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
+fn device(render: &Option<std::path::PathBuf>, video: &Option<std::path::PathBuf>) -> moq_video::Device {
+	match (render, video) {
+		(Some(node), _) => moq_video::Device::Render(node.clone()),
+		(None, Some(node)) => moq_video::Device::Video(node.clone()),
+		(None, None) => moq_video::Device::Auto,
+	}
+}
+
 /// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
 struct Net {
@@ -194,11 +205,11 @@ impl Serving {
 		let token = lease.token();
 		let publish = directions
 			.publish
-			.then(|| origin.scope(&token.root, &token.subscribe).ok())
+			.then(|| origin.scope(&token.root, &token.subscribe.path).ok())
 			.flatten();
 		let subscribe = directions
 			.consume
-			.then(|| origin.scope(&token.root, &token.publish).ok())
+			.then(|| origin.scope(&token.root, &token.publish.path).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
 			request.reject(moq_net::SessionError::Unauthorized).await.ok();
