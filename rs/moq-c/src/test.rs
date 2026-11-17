@@ -3582,6 +3582,31 @@ fn named_consumers_cancel_while_subscribing() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A lost catalog track ends the reader with the transport code other consumers report, so a
+/// player can wait for the source to return instead of treating the catalog as malformed.
+#[test]
+fn a_lost_catalog_track_is_a_transport_error() {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let track = broadcast
+		.create_track(
+			hang::catalog::Catalog::DEFAULT_NAME,
+			hang::catalog::Catalog::default_track_info(),
+		)
+		.unwrap();
+	let at = moq_net::Timestamp::from_millis(1_000).unwrap();
+	let mut group = track.append_group(at).unwrap();
+	group.write_frame(at, "{}").unwrap();
+	group.finish().unwrap();
+	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+	let cb = Callback::new();
+	id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), cb.ptr) });
+	assert_eq!(moq_consume_catalog_free(id(cb.recv())), 0);
+	track.abort(moq_net::Error::Cancel).unwrap();
+	assert_eq!(cb.recv_terminal(), crate::error::MOQ_ERROR_MOQ);
+	assert_eq!(moq_consume_close(consume), 0);
+}
+
 #[test]
 fn catalog_cancel_while_subscribing() {
 	// A bare moq-net broadcast has no catalog track, so its subscribe waits on the handler.
