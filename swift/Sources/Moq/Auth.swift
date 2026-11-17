@@ -77,7 +77,6 @@ public final class Tokens: Sendable {
     /// each other one widens the grant over in-band AUTH. The next dial presents them,
     /// and a live session with in-band AUTH presents them at once, withdrawing each
     /// replaced token once its replacements are answered, even when one is refused.
-    /// After an authorization refusal the session redials only if they changed.
     /// - Throws: `MoqError.Config` for an empty token.
     public func set(_ tokens: [String]) throws {
         try ffi.set(tokens: tokens)

@@ -117,7 +117,7 @@ async fn drained_claim(version: &str) {
 		.borrow()
 		.iter()
 		.for_each(|(output, _)| output.broadcast().close());
-	a_link.server.drain().send(Goaway::new()).unwrap();
+	a_link.server.goaway(Goaway::new()).unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.
 	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;

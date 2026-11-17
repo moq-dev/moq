@@ -104,6 +104,7 @@ void throughput(Case c, double budget, std::vector<Result> &results)
 	std::vector<std::shared_ptr<moq::TrackProducer>> tracks;
 	std::vector<std::shared_ptr<moq::TrackConsumer>> consumers;
 	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
 	info.timescale = 1000000;
 	for (int p = 0; p < c.publishers; ++p) {
 		auto track = ok(broadcast->publish_track(std::to_string(p), info));

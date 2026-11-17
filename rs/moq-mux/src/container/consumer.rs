@@ -74,7 +74,9 @@ pub(crate) enum Item {
 /// group in the same burst as the ones past it. Its wait, [`set_wait`](Self::set_wait) or the
 /// max delay, also expires that much monotonic time after the first group past it arrived, so a
 /// marker behind a hole is delivered even when the track is paused, and the holes a stalled
-/// source left behind expire together rather than one wait each.
+/// source left behind expire together rather than one wait each. A reader feeding a playout clock
+/// ([`set_playhead`](Self::set_playhead)) also skips a hole once that clock reaches where the
+/// first group past it begins.
 ///
 /// Delivery starts at the floor the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) name, raised to where the
@@ -179,6 +181,9 @@ pub struct Consumer<F: Container> {
 
 	// Wakes the reader once the hole at the cursor, or the start's wait, expires.
 	hole_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
+
+	// The playout clock this reader feeds, which ends a hole once it reaches the group past it.
+	playhead: Option<crate::sync::Consumer>,
 
 	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
 	// included. `None` until the first item, so a loss before it is no gap.
@@ -318,12 +323,12 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Er
 /// A [`Consumer`]'s [`Delay`] and the catalog rendition's warmup, applied together.
 ///
 /// The warmup is how much media a decoder needs before its output is clean, such as an Opus
-/// decoder or an intra-refresh video decoder: pass the catalog rendition's
-/// `warmup`. Subscribe with [`subscription`](Self::subscription), then build the consumer with
-/// [`consumer`](Self::consumer).
+/// decoder's pre-roll: pass the catalog audio rendition's `warmup`. Subscribe with
+/// [`subscription`](Self::subscription), then build the consumer with [`consumer`](Self::consumer).
 ///
-/// The subscription carries the max delay plus the warmup, since the publisher and the transport
-/// skip what falls outside that budget, while the consumer skips at the max delay alone.
+/// The subscription carries the min and max delay plus the warmup: the publisher starts a live
+/// join that far back, and it and the transport skip what falls outside that budget, while the
+/// consumer skips at the max delay alone.
 ///
 /// Where delivery would start wherever the publisher does, it starts no later than the group
 /// covering the live edge less [`Delay::min`] and the warmup: one that starts at or before that
@@ -350,13 +355,27 @@ pub struct Playout {
 /// so a publisher cannot hold a reader's media without bound. Mirrored by `@moq/hang`'s `DELAY_MAX`.
 pub const DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The delay a subscription carries for a reader starting `warmup` further back than `delay`:
+/// both bounds widened, so a live join reaches back far enough and the budget keeps what it reaches.
+fn warmed(delay: Delay, warmup: std::time::Duration) -> Delay {
+	Delay {
+		// An unstated minimum reads as zero, so a warmup still reaches back for it.
+		min: match delay.min {
+			Some(min) => Some(min.saturating_add(warmup)),
+			None if warmup.is_zero() => None,
+			None => Some(warmup),
+		},
+		max: delay.max.map(|max| max.saturating_add(warmup)),
+	}
+}
+
 impl Playout {
 	/// Play at `delay`, starting `warmup` further back.
 	pub fn new(delay: Delay, warmup: std::time::Duration) -> Self {
 		Self { delay, warmup }
 	}
 
-	/// `subscription` with this playout's delay, its max widened by the warmup.
+	/// `subscription` with this playout's delay, both bounds widened by the warmup.
 	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
 		subscription.with_delay(self.subscribed())
 	}
@@ -375,8 +394,7 @@ impl Playout {
 
 	/// The delay the subscription carries.
 	fn subscribed(&self) -> Delay {
-		self.delay
-			.with_max(self.delay.max.map(|max| max.saturating_add(self.reach())))
+		warmed(self.delay, self.reach())
 	}
 
 	/// The warmup, capped at [`DELAY_MAX`].
@@ -425,6 +443,7 @@ impl<F: Container> Consumer<F> {
 			max_delay,
 			wait: None,
 			hole_timer: None,
+			playhead: None,
 			edge: None,
 			start: None,
 			floor: None,
@@ -847,6 +866,13 @@ impl<F: Container> Consumer<F> {
 				let wait = self.wait.map_or(self.max_delay, |wait| wait.min(self.max_delay));
 				let elapsed = since.elapsed() >= wait;
 				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
+				// Once the playout clock reaches where the first group past it begins, that group's
+				// media is due, and it replaces whatever the missing one held.
+				let schedule = self.playhead.as_ref().map(|playhead| playhead.schedule());
+				let reached = schedule
+					.zip(next_group)
+					.and_then(|(schedule, (_, start))| schedule.due(Timestamp::try_from(start).ok()?));
+				let passed = reached.is_some_and(|at| at <= kio::clock::now());
 				let excluded = match &self.reader {
 					Reader::Reading(track) | Reader::Failed(track, _) => {
 						track.next_in_range(self.current).is_none_or(|next| next >= sequence)
@@ -861,7 +887,7 @@ impl<F: Container> Consumer<F> {
 				// skipped, still waits for the group past it to show where it starts: stepping
 				// before that frame lands would call a contiguous timeline a loss.
 				let excluded = excluded && first.is_ready();
-				if finished || elapsed || aged || excluded || full || continues {
+				if finished || elapsed || aged || passed || excluded || full || continues {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
 					let empty = front.is_empty() && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
@@ -878,6 +904,7 @@ impl<F: Container> Consumer<F> {
 						finished,
 						elapsed,
 						aged,
+						passed,
 						excluded,
 						full,
 						continues,
@@ -887,12 +914,21 @@ impl<F: Container> Consumer<F> {
 					self.note_group_edge();
 					continue;
 				}
-				if let Some(wake) = since.checked_add(wait) {
+				// The wait expires, or the clock reaches the group past the hole, whichever is first.
+				let expires = since.checked_add(wait);
+				if let Some(wake) = expires.into_iter().chain(reached).min() {
 					let timer = self
 						.hole_timer
 						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
 					timer.as_mut().reset(wake);
 					let _ = waiter.poll_future(timer.as_mut());
+				}
+				// A clock that jumps, re-anchoring or changing its delay, moves when it gets there.
+				if let Some((playhead, schedule)) = self.playhead.as_ref().zip(schedule)
+					&& next_group.is_some()
+					&& playhead.poll_changed(waiter, schedule).is_ready()
+				{
+					continue;
 				}
 			}
 
@@ -1377,7 +1413,7 @@ impl<F: Container> Consumer<F> {
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
 		// warmup too, as [`Playout::subscription`] does.
-		let delay = delay.with_max(delay.max.map(|max| max.saturating_add(self.warmup)));
+		let delay = warmed(delay, self.warmup);
 		if track.subscription().delay != delay {
 			let subscription = track.subscription().with_delay(delay);
 			let _ = track.update(subscription);
@@ -1393,6 +1429,15 @@ impl<F: Container> Consumer<F> {
 	/// the late media it catches up on.
 	pub fn set_wait(&mut self, wait: std::time::Duration) {
 		self.wait = Some(wait);
+	}
+
+	/// Skip a missing group once `playhead`, the playout clock this reader feeds, reaches where the
+	/// first group past it begins (default: no clock), rather than waiting out the whole
+	/// [`set_wait`](Self::set_wait). Suits media where a late item is worthless once the next is due,
+	/// such as video, whose next due picture replaces it. Audio that still plays late, catching up
+	/// by time stretch, keeps the wait.
+	pub fn set_playhead(&mut self, playhead: crate::sync::Consumer) {
+		self.playhead = Some(playhead);
 	}
 
 	/// Cap the bytes of decoded frames held ahead of the reader, counting the wire payload they share
@@ -2433,6 +2478,140 @@ mod tests {
 		write_group(&mut track, 8, &[ts(900_000)]);
 		write_group(&mut track, 9, &[ts(1_900_000)]);
 		assert_eq!(drain(&mut reader), ["gap", "frame 8", "frame 9"]);
+	}
+
+	/// Everything `reader` hands over now, polled with `waiter`.
+	fn drain_with(reader: &mut Consumer<Container>, waiter: &kio::Waiter) -> Vec<String> {
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(waiter) {
+			read.push(match item {
+				Read::Frame { group, .. } => format!("frame {group}"),
+				Read::Gap { .. } => "gap".to_string(),
+				Read::End { .. } => "end".to_string(),
+			});
+		}
+		read
+	}
+
+	/// A waker that records whether it was woken.
+	#[derive(Default)]
+	struct Woken(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::SeqCst);
+		}
+	}
+
+	impl Woken {
+		fn waiter(self: &Arc<Self>) -> kio::Waiter {
+			kio::Waiter::new(std::task::Waker::from(self.clone()))
+		}
+
+		fn take(&self) -> bool {
+			self.0.swap(false, Ordering::SeqCst)
+		}
+	}
+
+	/// A reader that delivered group 0, waiting 500 ms on a hole within a 2 s max delay, and fed
+	/// to `playhead` when given.
+	fn holed(track: &mut moq_net::track::Producer, playhead: Option<crate::sync::Consumer>) -> Consumer<Container> {
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		reader.set_wait(Duration::from_millis(500));
+		if let Some(playhead) = playhead {
+			reader.set_playhead(playhead);
+		}
+		write_group(track, 0, &[ts(0)]);
+		assert_eq!(drain_with(&mut reader, &kio::Waiter::noop()), ["frame 0"]);
+		reader
+	}
+
+	/// A hole ends once the playout clock reaches where the group past it begins, rather than at
+	/// the wait, which still ends one the clock trails or a reader without a clock.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_ends_once_the_playout_clock_reaches_the_group_past_it() {
+		// The media presenting as the group past the hole arrives, and how long until the hole ends.
+		for (presenting, ends) in [(Some(900), 100), (Some(0), 500), (None, 500)] {
+			let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+			let clock = crate::sync::Producer::new(Duration::ZERO);
+			// Another track drives the clock, which presents `presenting` ms of media now.
+			let video = clock.track(crate::container::Kind::Video);
+			if let Some(millis) = presenting {
+				video.received(ts(millis * 1_000), kio::clock::now());
+			}
+			let mut reader = holed(&mut track, presenting.map(|_| clock.consume()));
+			// A resume: the group past the hole starts a second of media later, inside the max delay.
+			write_group(&mut track, 50, &[ts(1_000_000)]);
+			let woken = Arc::new(Woken::default());
+			let waiter = woken.waiter();
+			assert!(drain_with(&mut reader, &waiter).is_empty());
+			tokio::time::advance(Duration::from_millis(ends - 1)).await;
+			assert!(drain_with(&mut reader, &waiter).is_empty(), "{presenting:?}");
+			woken.take();
+			tokio::time::advance(Duration::from_millis(1)).await;
+			assert!(woken.take(), "{presenting:?}: the hole's end did not wake the reader");
+			assert_eq!(drain_with(&mut reader, &waiter), ["gap", "frame 50"], "{presenting:?}");
+		}
+	}
+
+	/// A hole the playout clock trails ends as soon as the clock jumps past the group after it, which
+	/// wakes the reader: a re-anchor here, as a raised or lowered delay would.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_ends_once_the_playout_clock_jumps_past_the_group_past_it() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let clock = crate::sync::Producer::new(Duration::ZERO);
+		let video = clock.track(crate::container::Kind::Video);
+		video.received(ts(0), kio::clock::now());
+		let mut reader = holed(&mut track, Some(clock.consume()));
+		write_group(&mut track, 50, &[ts(1_000_000)]);
+		let woken = Arc::new(Woken::default());
+		let waiter = woken.waiter();
+		assert!(drain_with(&mut reader, &waiter).is_empty());
+		tokio::time::advance(Duration::from_millis(10)).await;
+		assert!(drain_with(&mut reader, &waiter).is_empty());
+		woken.take();
+		// Video arrives a second of media ahead, which re-pins the clock past the group.
+		assert!(video.received(ts(1_000_000), kio::clock::now()));
+		assert!(woken.take(), "the clock's jump did not wake the reader");
+		assert_eq!(drain_with(&mut reader, &waiter), ["gap", "frame 50"]);
+	}
+
+	/// The browser's resume: a reader that delivered a tail before a pause, then a replayed backlog
+	/// arriving newest first behind a hole. The clock kept running through the pause, so the reader
+	/// moves on to the oldest group that arrived as soon as the clock passes it, rather than
+	/// waiting for the backlog's oldest group, which lands last.
+	#[tokio::test(start_paused = true)]
+	async fn a_backlog_replayed_newest_first_plays_from_where_the_clock_passed() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let clock = crate::sync::Producer::new(Duration::from_millis(100));
+		let audio = clock.track(crate::container::Kind::Audio);
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2))),
+		);
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		reader.set_wait(Duration::from_millis(500));
+		reader.set_playhead(clock.consume());
+		let waiter = kio::Waiter::noop();
+		// The tail before the pause, a group per 100 ms of media and of wall time.
+		for sequence in 0..5 {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			assert_eq!(drain_with(&mut reader, &waiter), [format!("frame {sequence}")]);
+			audio.received(ts(sequence * 100_000), kio::clock::now());
+			tokio::time::advance(Duration::from_millis(100)).await;
+		}
+		// Paused until 1.4 s, when the publisher replays groups 14 down to 5, one every 50 ms.
+		tokio::time::advance(Duration::from_millis(900)).await;
+		let mut read = Vec::new();
+		for sequence in (5..15).rev() {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			read.extend(drain_with(&mut reader, &waiter));
+			tokio::time::advance(Duration::from_millis(50)).await;
+		}
+		// At 1.45 s the clock presents 1.35 s, past group 13, which landed then.
+		assert_eq!(read, ["gap", "frame 13", "frame 14"]);
 	}
 
 	/// A malformed data marker group found while looking ahead fails the reader, rather than
@@ -4026,6 +4205,17 @@ mod tests {
 		);
 	}
 
+	/// An unstated min delay reads as zero, so the warmup still reaches a live join back for it;
+	/// without a warmup it stays unstated.
+	#[test]
+	fn the_warmup_widens_an_unstated_min() {
+		let warmup = Duration::from_millis(300);
+		let unstated = Delay::default().with_min(None);
+		assert_eq!(warmed(unstated, warmup).min, Some(warmup));
+		assert_eq!(warmed(unstated, Duration::ZERO).min, None);
+		assert_eq!(warmed(unstated.with_min(Duration::ZERO), warmup).min, Some(warmup));
+	}
+
 	/// The warmup reaches past the min delay for the start, waiting for the group covering the live
 	/// edge less both.
 	#[tokio::test]
@@ -4321,9 +4511,10 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(5_000_000));
 	}
 
-	/// The subscription carries the min delay as is and the max delay plus the warmup.
+	/// The subscription carries the min and max delay, each plus the warmup, so a live join
+	/// reaches back far enough to warm the decoder before its first played frame.
 	#[tokio::test]
-	async fn the_subscription_carries_the_min_delay_and_the_warmed_max_delay() {
+	async fn the_subscription_carries_the_warmed_min_and_max_delay() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = reach_consumer(
 			&mut track,
@@ -4332,7 +4523,7 @@ mod tests {
 			Duration::from_millis(300),
 		);
 		let subscription = subscribed(&consumer).subscription();
-		assert_eq!(subscription.delay.min, Some(Duration::from_secs(2)));
+		assert_eq!(subscription.delay.min, Some(Duration::from_millis(2_300)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 	}
@@ -4350,7 +4541,7 @@ mod tests {
 		let consumer = Playout::new(delay, Duration::from_millis(300))
 			.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		let subscription = subscribed(&consumer).subscription();
-		assert_eq!(subscription.delay.min, Some(Duration::from_millis(100)));
+		assert_eq!(subscription.delay.min, Some(Duration::from_millis(400)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 		assert_eq!(consumer.warmup, Duration::from_millis(300));

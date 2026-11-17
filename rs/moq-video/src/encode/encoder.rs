@@ -85,7 +85,7 @@ pub struct Applied {
 	/// not confirm them (a refused or advisory low-latency setting).
 	pub preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
-	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
+	/// `"p1, low-latency tuning, no B-frames, CQ 30 under the cap, 3-frame VBV"`. Not a parse target.
 	pub controls: String,
 	/// Whether [`Encoder::cut`] can force a group boundary; one that cannot (a V4L2
 	/// driver without the force-keyframe control) refuses every cut.

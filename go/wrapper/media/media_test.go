@@ -3,6 +3,7 @@ package media_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -62,13 +63,9 @@ func TestRefusesNegativeDurations(t *testing.T) {
 	if _, err := (&moq.BroadcastConsumer{}).Resolve(ctx, rendition); err == nil {
 		t.Fatal("a negative jitter was resolved, want an error")
 	}
-	for _, warmup := range []media.Rendition{
-		media.AudioRendition("audio", media.Audio{Warmup: &negative}),
-		media.VideoRendition("video", media.Video{Warmup: &negative}),
-	} {
-		if _, err := media.NewTrackConsumer(ctx, nil, media.TrackConfig{Rendition: warmup}); err == nil {
-			t.Fatal("a negative warmup was subscribed, want an error")
-		}
+	warmup := media.AudioRendition("audio", media.Audio{Warmup: &negative})
+	if _, err := media.NewTrackConsumer(ctx, nil, media.TrackConfig{Rendition: warmup}); err == nil {
+		t.Fatal("a negative warmup was subscribed, want an error")
 	}
 }
 
@@ -96,5 +93,63 @@ func TestContainerTimebaseBelongsToOneBroadcast(t *testing.T) {
 	}
 	if _, err := media.NewTimebase(owner); !errors.Is(err, moq.ErrClosed) {
 		t.Fatalf("closed owner: %v", err)
+	}
+}
+
+// Updates published before the reader joins reach a holding reader in order, each with its
+// timestamp; an arrival reader takes only the newest.
+func TestHoldingCatalogReaderReadsEveryUpdateWithinItsDelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+	catalog, err := media.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []int{1, 2} {
+		if err := catalog.SetSection("app", value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		delay time.Duration
+		want  []string
+	}{
+		{0, []string{"2"}},
+		{time.Minute, []string{"1", "2"}},
+	} {
+		reader, err := media.NewCatalogConsumer(ctx, consumer, tc.delay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var read []string
+		var last uint64
+		for len(read) == 0 || read[len(read)-1] != "2" {
+			update, err := reader.Next(ctx)
+			if err != nil || update == nil {
+				t.Fatalf("%v delay: next = %v, %v", tc.delay, update, err)
+			}
+			if update.Timestamp.Scale == nil || update.Timestamp.Value <= last {
+				t.Fatalf("%v delay: timestamp %+v after %d", tc.delay, update.Timestamp, last)
+			}
+			last = update.Timestamp.Value
+			// The broadcast's first catalog, published before any section, is not one of ours.
+			if app, ok := update.Sections["app"]; ok {
+				read = append(read, app)
+			}
+		}
+		reader.Cancel()
+		if !slices.Equal(read, tc.want) {
+			t.Fatalf("%v delay read %v, want %v", tc.delay, read, tc.want)
+		}
 	}
 }
