@@ -243,8 +243,8 @@ int main()
 		settings.strings["quic_congestion_control"] = algorithm;
 		moq::ClientConfig config;
 		const std::string refused = MoQSettings::Configure(&settings, config);
-		CHECK(refused.find("congestion") != std::string::npos);
-		CHECK(refused.find("bbr") != std::string::npos);
+		CHECK(refused.find(algorithm) != std::string::npos);
+		CHECK(refused.find("pick BBR or CUBIC") != std::string::npos);
 	}
 	printf("unknown congestion control refused: ok\n");
 

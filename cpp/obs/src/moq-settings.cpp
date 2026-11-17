@@ -346,16 +346,17 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 		config.backoff.timeout = timeout;
 
 	// Automatic leaves the tri-states and the congestion control unset, which keeps the
-	// library default. A released family name (`delay`, `loss`) is refused like any
-	// unknown word, so the message names the algorithms to pick instead.
+	// library default. A scene saved with a released family name (`delay`, `loss`) is
+	// refused rather than mapped, and the message tells the user how to fix it.
 	if (const char *algorithm = OptionalString(settings, QUIC_CONGESTION_CONTROL)) {
 		if (strcmp(algorithm, "bbr") == 0)
 			config.quic.congestion_control = moq::CongestionControl::bbr();
 		else if (strcmp(algorithm, "cubic") == 0)
 			config.quic.congestion_control = moq::CongestionControl::cubic();
 		else
-			Refuse(error,
-			       std::string("unknown congestion control: ") + algorithm + " (expected bbr or cubic)");
+			Refuse(error, std::string("congestion control '") + algorithm +
+					      "' is not supported: pick BBR or CUBIC for Congestion control in "
+					      "the output's Advanced settings");
 	}
 	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS, error);
 	config.quic.idle_timeout = Milliseconds(settings, QUIC_IDLE_TIMEOUT, error);
