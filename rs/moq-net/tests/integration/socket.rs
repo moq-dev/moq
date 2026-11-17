@@ -186,8 +186,9 @@ async fn track_messages_are_read_in_key() {
 		group.finish().unwrap();
 	};
 	write(1, b"second");
-	// Let the later message arrive first.
-	assert!(kio::clock::timeout(SETTLE, reader.next_group()).await.is_err());
+	// Let the later message arrive first. A reader with no delay limit waits a second for a
+	// missing message the publisher may still write, then gives it up, so this stays under it.
+	assert!(kio::clock::timeout(SETTLE / 2, reader.next_group()).await.is_err());
 	write(0, b"first");
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"first");
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"second");

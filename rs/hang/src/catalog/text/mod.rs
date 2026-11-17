@@ -28,11 +28,18 @@ pub struct Text {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
-	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub renditions: BTreeMap<String, TextConfig>,
 }
 
-impl crate::catalog::Entry for TextConfig {}
+impl crate::catalog::Entry for TextConfig {
+	fn version(&self, id: &str) -> Option<u64> {
+		crate::catalog::renamed_version(self, id)
+	}
+}
 
 impl Text {
 	/// Insert a track config, returning an error if the name already exists.

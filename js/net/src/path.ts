@@ -59,6 +59,8 @@ export type Relative = string & { __brand: "Relative" };
  *
  * Matches the IETF moq-transport limit of 32 fields in a namespace tuple.
  * moq-lite enforces the same bound when decoding paths off the wire.
+ *
+ * @internal
  */
 export const MAX_PARTS = 32;
 
@@ -127,6 +129,8 @@ export function head(path: Valid, n: number): Valid | undefined {
  * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and a 4096 byte limit.
  *
  * Throws when the path has an empty segment or is too deep or too long; use at wire decode sites.
+ *
+ * @internal
  */
 export function decode(raw: string): Valid {
 	// The limits first, so a hostile path is refused before its spelling is split.
@@ -146,6 +150,8 @@ export function tryDecode(raw: string): Valid | undefined {
  *
  * Throws when the path is too deep or too long; use at wire encode sites so we never
  * emit a path the remote side is required to reject.
+ *
+ * @internal
  */
 export function encode(path: Valid): Valid {
 	const error = check(path);

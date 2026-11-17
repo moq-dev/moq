@@ -3090,9 +3090,19 @@ mod tests {
 				.expect("listing")
 				.expect("live");
 			let (name, listed) = match event {
-				broadcast::TracksEvent::Added { name, .. } => (name, true),
-				broadcast::TracksEvent::Removed { name } | broadcast::TracksEvent::Finished { name } => (name, false),
-				broadcast::TracksEvent::Synced => continue,
+				broadcast::TracksEvent::Added {
+					name,
+					info: broadcast::Listed::Track(_),
+				} => (name, true),
+				broadcast::TracksEvent::Removed {
+					kind: broadcast::Kind::Track,
+					name,
+				}
+				| broadcast::TracksEvent::Finished {
+					kind: broadcast::Kind::Track,
+					name,
+				} => (name, false),
+				_ => continue,
 			};
 			if let Some((bucket, _)) = crate::parse_bucket_track(&name) {
 				return (bucket.as_str().to_string(), listed);

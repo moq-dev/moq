@@ -19,4 +19,8 @@ instead and can collapse to one once this lands. Today the request pull
 layers, and only the origin has a public `requests()`; keep the internal
 wire path on the new handler.
 
+`Track.Request`, which a handler hands out, is `@internal` until then
+([moq-dev/moq#8929](https://github.com/moq-dev/moq/pull/8929)): drop the tag
+when `requests()` publishes it.
+
 Moved to m4 2026-11-12 (maintainer, /quest-audit): the downstream host it was ranked for is parked.

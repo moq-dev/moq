@@ -654,6 +654,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		rtmp: "rtmp";
 		srt: "srt";
 		tcp: "tcp";
+		tls: "tls";
 		unix: "unix";
 		unknown: "unknown";
 		webrtc: "webrtc";
@@ -695,6 +696,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		rtmp: "rtmp";
 		srt: "srt";
 		tcp: "tcp";
+		tls: "tls";
 		unix: "unix";
 		unknown: "unknown";
 		webrtc: "webrtc";
@@ -736,6 +738,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		rtmp: "rtmp";
 		srt: "srt";
 		tcp: "tcp";
+		tls: "tls";
 		unix: "unix";
 		unknown: "unknown";
 		webrtc: "webrtc";
@@ -783,6 +786,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		rtmp: "rtmp";
 		srt: "srt";
 		tcp: "tcp";
+		tls: "tls";
 		unix: "unix";
 		unknown: "unknown";
 		webrtc: "webrtc";
@@ -851,6 +855,7 @@ export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<Zo
 	rtmp: "rtmp";
 	srt: "srt";
 	tcp: "tcp";
+	tls: "tls";
 	unix: "unix";
 	unknown: "unknown";
 	webrtc: "webrtc";

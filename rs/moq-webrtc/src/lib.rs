@@ -225,8 +225,9 @@ mod tests {
 		let output_consumer = output.broadcast().consume();
 		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
-		let fill = output.broadcast().clone();
-		let viewer = tokio::spawn(async move { client.pull(url, fill, Default::default()).await });
+		let mut fill = output.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut fill, Default::default()).unwrap();
+		let viewer = tokio::spawn(async move { client.pull(url, &fill, &catalog).await });
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -554,8 +555,9 @@ mod tests {
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=canary-7f3e")
 			.parse()
 			.expect("WHEP URL");
-		let fill = output.broadcast().clone();
-		let whep_client = tokio::spawn(async move { client.pull(whep, fill, Default::default()).await });
+		let mut fill = output.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut fill, Default::default()).unwrap();
+		let whep_client = tokio::spawn(async move { client.pull(whep, &fill, &catalog).await });
 		let (whep_id, whep_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")

@@ -61,7 +61,7 @@ function closing(refused: string, release: Promise<void>) {
 }
 
 function loop(versions: string[], tokens: Signal<readonly string[]>) {
-	return new Reload({ url: URL_, versions, websocket: { enabled: false }, tokens, delay: DELAY });
+	return new Reload({ url: URL_, versions, websocket: { enabled: false }, tokens, backoff: DELAY });
 }
 
 /** Whether `promise` rejected with a session close of `code`, once everything pending has run. */
@@ -229,7 +229,7 @@ test("a connection answers once its loop ends with the abort's error", async () 
 		versions: ["moq-lite-07-wip"],
 		websocket: { enabled: false },
 		tokens,
-		delay: DELAY,
+		backoff: DELAY,
 	});
 	try {
 		await clock.advance(Duration.millis(10));
