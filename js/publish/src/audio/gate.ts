@@ -36,13 +36,10 @@ export class Gate {
 	// What reopening sends ahead of the speech: one analysis block of held frames.
 	readonly #preroll: Duration;
 
-	#open = false;
+	// Open counts how long the talker has been silent; shut keeps the newest dropped frames as pre-roll.
+	#state: { open: true; quiet: Duration } | { open: false; held: Gated[] } = { open: false, held: [] };
 	// The newest score, which a frame shorter than a block inherits until the next one completes.
 	#speech = false;
-	// How long the talker has been silent while the gate was open.
-	#quiet = Duration.ZERO;
-	// The newest frames dropped while shut, kept as pre-roll.
-	#held: Gated[] = [];
 	// Where the previous frame ended, to tell a gap in the timeline.
 	#end: Duration | undefined;
 
@@ -55,7 +52,7 @@ export class Gate {
 
 	/** Whether frames are passing. A transition from open to shut is where the talker fell silent. */
 	get open(): boolean {
-		return this.#open;
+		return this.#state.open;
 	}
 
 	/** Score one codec frame ending at `end`, returning the frames to encode now, in order. */
@@ -67,28 +64,32 @@ export class Gate {
 		const gated = { frame, end };
 
 		if (this.#speech) {
-			this.#quiet = Duration.ZERO;
-			const out = [...this.#held, gated];
-			this.#held = [];
-			this.#open = true;
+			const out = this.#state.open ? [gated] : [...this.#state.held, gated];
+			this.#state = { open: true, quiet: Duration.ZERO };
 			return out;
 		}
 
-		this.#quiet = this.#quiet.add(end.sub(frame.timestamp));
-		if (this.#open && this.#quiet.le(HANGOVER)) return [gated];
+		if (this.#state.open) {
+			const quiet = this.#state.quiet.add(end.sub(frame.timestamp));
+			if (quiet.le(HANGOVER)) {
+				this.#state.quiet = quiet;
+				return [gated];
+			}
+			this.#state = { open: false, held: [gated] };
+			return [];
+		}
 
-		this.#open = false;
-		this.#held.push(gated);
+		const held = this.#state.held;
+		held.push(gated);
 		// Keep only the newest frames that cover the pre-roll.
-		while (this.#held.length > 1 && end.sub(this.#held[1].frame.timestamp).ge(this.#preroll)) this.#held.shift();
+		while (held.length > 1 && end.sub(held[1].frame.timestamp).ge(this.#preroll)) held.shift();
 		return [];
 	}
 
 	// A new timeline starts shut, with nothing held from the old one.
 	#reset(): void {
-		this.#open = false;
+		this.#state = { open: false, held: [] };
 		this.#speech = false;
-		this.#held = [];
 		this.#vad.reset();
 	}
 }

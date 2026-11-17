@@ -92,9 +92,12 @@ as intentional silence.
 
 A `voice` source, which the microphone is, does the same on its own while its
 talker is silent: SILK's voice activity detector (from libopus) scores each
-frame, and 200 ms after speech stops nothing more is sent and the end is
-declared, so listeners play comfort noise instead of receiving encoded silence.
-Speech reopens it with the frame before it, so a soft onset is not clipped.
+frame, and once it has scored 200 ms of silence nothing more is sent and the
+end is declared, so listeners play comfort noise instead of receiving encoded
+silence. Background noise that rises mid-call, such as a fan switched on, can
+keep scoring as speech, so the talker's silence over it is still sent. Speech
+reopens the gate with the frame before it, which keeps most soft onsets the
+detector scores late; a faint one it misses entirely is still clipped.
 Music and sources without a kind always send.
 
 Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
