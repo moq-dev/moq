@@ -219,15 +219,25 @@ pub fn parse_bucket_track(name: &str) -> Option<(Path, Epoch)> {
 /// list, whose subscription fails like any unlisted track's.
 #[cfg(test)]
 pub(crate) async fn listed_bucket_track(broadcast: &moq_net::broadcast::Consumer, bucket: &Path) -> String {
-	use moq_net::broadcast::TracksEvent;
+	use moq_net::broadcast::{Kind, Listed, TracksEvent};
 	let mut listed = None;
 	if let Ok(mut tracks) = broadcast.tracks() {
 		while let Ok(Some(event)) = tracks.next().await {
 			match event {
-				TracksEvent::Added { name, .. } if parse_bucket_track(&name).is_some_and(|(b, _)| b == *bucket) => {
+				TracksEvent::Added {
+					name,
+					info: Listed::Track(_),
+				} if parse_bucket_track(&name).is_some_and(|(b, _)| b == *bucket) => {
 					listed = Some(name.to_string());
 				}
-				TracksEvent::Removed { name } | TracksEvent::Finished { name } if listed.as_deref() == Some(&*name) => {
+				TracksEvent::Removed {
+					kind: Kind::Track,
+					name,
+				}
+				| TracksEvent::Finished {
+					kind: Kind::Track,
+					name,
+				} if listed.as_deref() == Some(&*name) => {
 					listed = None;
 				}
 				TracksEvent::Synced => break,

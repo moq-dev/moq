@@ -338,7 +338,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: null } },
+			{ backoff: { timeout: null } },
 			{ timeout: Duration.millis(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
@@ -373,7 +373,7 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: null } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, backoff: { timeout: null } })).toThrow(/share: false/);
 		expect(() => new Connection({ share: true, timeout: Duration.millis(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();
@@ -475,7 +475,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
 	});
 	try {
 		await advance(2);
@@ -492,14 +492,14 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 	}
 });
 
-test("a private partial delay keeps the unlimited retry timeout", async () => {
+test("a private partial backoff keeps the unlimited retry timeout", async () => {
 	const relay = stubOutage("throw");
 
 	const handle = new Connection({
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
+		backoff: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
 	});
 	try {
 		await relay.outage(handle);
@@ -517,7 +517,12 @@ test("a private handle with an explicitly undefined timeout outlasts the outage"
 
 	// What a caller building options from optional values produces: the undefined means "the
 	// default", which for a Connection is to retry for as long as the handle is held.
-	const handle = new Connection({ url, share: false, websocket: { enabled: false }, delay: { timeout: undefined } });
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		backoff: { timeout: undefined },
+	});
 	try {
 		await relay.outage(handle);
 		const before = relay.attempts();
@@ -868,7 +873,7 @@ test("a private handle's timeout bounds each attempt", async () => {
 		share: false,
 		websocket: { enabled: false },
 		timeout: Duration.millis(50),
-		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 	});
 	try {
 		await relay.outage(handle);

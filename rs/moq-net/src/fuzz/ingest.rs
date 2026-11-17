@@ -171,8 +171,9 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 		Session::Lite { records, .. } => {
 			// Timing, inflated size, and size; a record adds its code and block length.
 			let fields = 3 + 2 * records as usize;
-			// The Group State, and an END_OF_GROUP record with its block length.
-			let trailer = (1 + 2 * records as usize) * MAX_VARINT;
+			// The Group State, and an END_OF_GROUP record with its block length; or a
+			// GROUP_END's zero length and End.
+			let trailer = 3 * MAX_VARINT;
 			let blocks: usize = ingested
 				.frames
 				.iter()
@@ -215,7 +216,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	let broadcast = broadcast.produce();
 	let track = broadcast.create_track("ingest", info.clone()).ok()?;
 
-	let (end, group) = match session {
+	let (end, fin, group) = match session {
 		Session::Lite {
 			version,
 			records,
@@ -233,7 +234,9 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				keep_up(&mut viewer);
 				res
 			});
-			(end.map(|()| "fin".to_string()), (group, consumer))
+			let fin = end.as_ref().ok().copied().flatten();
+			let end = end.map(|end| end.map_or_else(|| "fin".to_string(), |end| format!("end {end}")));
+			(end, fin, (group, consumer))
 		}
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
@@ -259,7 +262,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				keep_up(&mut viewer);
 				res
 			});
-			(end.map(|ended| format!("{ended:?}")), (group, consumer))
+			(end.map(|ended| format!("{ended:?}")), None, (group, consumer))
 		}
 	};
 
@@ -267,7 +270,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	// Settle the group as the session does, so the reader below never waits.
 	match &end {
 		Ok(_) => {
-			let _ = group.finish();
+			let _ = group.end(fin);
 		}
 		Err(err) => {
 			let _ = group.abort(err.clone());
@@ -360,11 +363,14 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	};
 
 	// moq-lite: three plain frames, at every version, timed and untimed. The timing
-	// prefix is a zigzag delta, so 0x02 steps the clock forward by one.
+	// prefix is a zigzag delta, so 0x02 steps the clock forward by one; an untimed lite-07
+	// frame carries one too, which keeps its group's start. Lite-07 also ends the group
+	// whole with a GROUP_END.
 	for (index, version) in super::LITE_VERSIONS.iter().enumerate() {
 		for timed in [false, true] {
 			let mut data = vec![(index * 2) as u8, timed as u8, 3];
-			let timing = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
+			let framing = lite::Framing::new(&track_info(timed, false, None), *version);
+			let timing = framing.stamped();
 			// Lite-07 leads with the size plus one; earlier versions end the header with it.
 			let length_first = version.has_length_first();
 			for (n, payload) in [&b"abc"[..], b"", b"defgh"].into_iter().enumerate() {
@@ -372,12 +378,19 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 					data.push(payload.len() as u8 + 1);
 				}
 				if timing {
-					data.push(if n == 0 { 0 } else { 2 });
+					data.push(if n == 0 || !timed { 0 } else { 2 });
 				}
 				if !length_first {
 					data.push(payload.len() as u8);
 				}
 				data.extend_from_slice(payload);
+			}
+			if version.has_group_end() {
+				// A zero length, then the End: past the last frame's 2ms, or the start's next
+				// unit when untimed.
+				let mut whole = data.clone();
+				whole.extend_from_slice(&[0, if timed { 3 } else { 1 }]);
+				push(whole);
 			}
 			push(data);
 		}
@@ -389,8 +402,9 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	let mut data = vec![(lite07 * 2) as u8, 0x10, 2, 0];
 	for payload in [&b"ab"[..], b"c"] {
 		// Object 0 is the first record's absolute ID, then each next one is a zero delta,
-		// and neither has a property block. The frame's size follows, plus one.
-		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1]);
+		// and neither has a property block. The frame's size follows, plus one, then a zero
+		// timestamp delta, which keeps the untimed group's start.
+		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1, 0]);
 		data.extend_from_slice(payload);
 	}
 	push(data);

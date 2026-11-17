@@ -16,7 +16,7 @@ import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
 import { registerWire, trackOf, wireOf } from "./wire.ts";
 
-export { Tracks, type TracksEvent } from "./listing.ts";
+export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
 
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
@@ -67,7 +67,7 @@ function createProducer(state: BroadcastState, name: string): track.Producer {
 	return producer;
 }
 
-// Datagram tracks never enter the stream listing or cache.
+// Datagram tracks never enter the stream cache.
 function liveDatagrams(state: BroadcastState, name: string, passive = false): datagram.Consumer | undefined {
 	const producer = state.datagrams.get(name);
 	if (!producer) return;
@@ -78,23 +78,38 @@ function liveDatagrams(state: BroadcastState, name: string, passive = false): da
 	return passive ? hooks.observeDatagrams(producer) : producer.consume();
 }
 
-function createDatagrams(state: BroadcastState, name: string, info: Partial<datagram.Info>): datagram.Producer {
+// Create the datagram track `name`, listed until it ends unless `listed` is false: a session's
+// datagram track riding a stream track's subscription serves a request, not the inventory.
+function createDatagrams(
+	state: BroadcastState,
+	name: string,
+	info: Partial<datagram.Info>,
+	listed = true,
+): datagram.Producer {
 	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
 	// A request its readers closed waits for async cleanup; serve the name fresh instead.
 	const queued = state.datagramRequested
 		.peek()
 		.find((request) => request.name === name && request.closed.peek() === undefined);
+	let producer: datagram.Producer;
 	if (queued) {
 		state.datagramRequested.mutate((requests) => requests.splice(requests.indexOf(queued), 1));
-		return queued.accept(info);
+		producer = queued.accept(info);
+	} else {
+		const existing = state.datagrams.get(name);
+		if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
+		producer = new datagram.Producer(name).accept(info);
+		state.datagrams.set(name, producer);
+		void producer.closed.then(() => {
+			if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
+		});
 	}
-	const existing = state.datagrams.get(name);
-	if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
-	const producer = new datagram.Producer(name).accept(info);
-	state.datagrams.set(name, producer);
-	void producer.closed.then(() => {
-		if (state.datagrams.get(name) === producer) state.datagrams.delete(name);
-	});
+	if (listed) {
+		const accepted = hooks.datagramInfo(producer);
+		if (!accepted) throw new Error("datagram track has not been accepted");
+		state.listing.listDatagrams(producer, accepted);
+		void producer.closed.then(() => state.listing.unlistOwn(producer, true));
+	}
 	return producer;
 }
 
@@ -380,13 +395,13 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 	const lookups = state.lookups.get(producer) ?? new Lookups();
 	state.lookups.set(producer, lookups);
 	state.tracks.set(producer.name, producer);
-	state.listing.listOwn(producer.name, producer, info);
+	state.listing.listTrack(producer, info);
 
 	// A finished track keeps serving its cache, so only an abort evicts it.
 	void hooks.trackReleased(producer).then((closed) => {
 		if (!(closed instanceof Error)) return;
 		if (state.tracks.get(producer.name) === producer) state.tracks.delete(producer.name);
-		state.listing.unlistOwn(producer.name, producer);
+		state.listing.unlistOwn(producer);
 	});
 }
 
@@ -409,7 +424,7 @@ export class Producer {
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
 			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
-			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			createDatagrams: (name, info, listed) => createDatagrams(this.#state, name, info, listed),
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
 			lister: () => makeLister(this.#state.listing),
@@ -503,7 +518,7 @@ export class Producer {
 		const track = this.#state.tracks.get(name);
 		if (!track) return;
 		this.#state.tracks.delete(name);
-		this.#state.listing.unlistOwn(name, track);
+		this.#state.listing.unlistOwn(track);
 	}
 
 	/** A lazy read handle for a track on this broadcast. */
@@ -571,7 +586,7 @@ export class Consumer {
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
 			liveDatagrams: (name) => liveDatagrams(this.#state, name, true),
-			createDatagrams: (name, info) => createDatagrams(this.#state, name, info),
+			createDatagrams: (name, info, listed) => createDatagrams(this.#state, name, info, listed),
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => this.#tracks(owner),
 			lister: () => makeLister(this.#state.listing),

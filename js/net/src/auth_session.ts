@@ -1,5 +1,5 @@
 import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
-import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
@@ -171,7 +171,6 @@ export interface Pending extends Credential {
 /** A token the application added to a {@link Handle}, presented on every session of it. */
 class Token implements Pending {
 	readonly grant = new Signal<Grant | undefined>(undefined);
-	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
 	readonly bytes: Uint8Array;
 
@@ -180,16 +179,13 @@ class Token implements Pending {
 	inband = false;
 
 	#state: HandleState;
-	#close!: (err: Error | null) => void;
+	#closed = new Once<Error | null>();
 	#answer!: () => void;
 	#refuse!: (err: Error) => void;
 
 	constructor(bytes: Uint8Array, state: HandleState) {
 		this.bytes = bytes;
 		this.#state = state;
-		this.closed = new Promise((resolve) => {
-			this.#close = resolve;
-		});
 		this.answered = new Promise((resolve, reject) => {
 			this.#answer = resolve;
 			this.#refuse = reject;
@@ -212,7 +208,11 @@ class Token implements Pending {
 			this.isAnswered = true;
 			this.#refuse(err ?? new Error("withdrawn"));
 		}
-		this.#close(err);
+		this.#closed.set(err);
+	}
+
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 
 	get held(): boolean {
@@ -451,7 +451,7 @@ class PeerRequest implements Request {
 		this.#issued = issued;
 	}
 
-	get closed(): Promise<Error | null> {
+	get closed(): GetPromise<Error | null> {
 		return this.#issued.closed;
 	}
 
@@ -475,8 +475,7 @@ class PeerRequest implements Request {
 
 /** Our side of one of the peer's tokens: the grant we issued and its stream. */
 class IssuedGrant implements Issued {
-	ended = false;
-	readonly closed: Promise<Error | null>;
+	readonly #closed = new Once<Error | null>();
 	#stream: Stream;
 	#wire: AuthWire;
 	#writes = Promise.resolve();
@@ -490,15 +489,19 @@ class IssuedGrant implements Issued {
 		this.#stream = stream;
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
-		this.closed = wire
-			.withdrawn(stream)
-			.then(
-				() => null,
-				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
-			)
-			.finally(() => {
-				this.ended = true;
-			});
+		void wire.withdrawn(stream).then(
+			() => this.#closed.set(null),
+			(err: unknown) =>
+				this.#closed.set(err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
+		);
+	}
+
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
+	}
+
+	get ended(): boolean {
+		return this.#closed.peek() !== undefined;
 	}
 
 	#write(write: () => Promise<void>) {

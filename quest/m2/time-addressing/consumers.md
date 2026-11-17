@@ -135,7 +135,6 @@ them.
 ## Required
 
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - the JS API these consume
-- [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - GROUP_END carries the end the duration marker did
 
 ## Related
 

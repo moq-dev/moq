@@ -41,8 +41,6 @@ pub enum DataType {
 	Group = 0,
 	/// The lite-05+ SETUP stream: one SETUP message, then FIN.
 	Setup = 1,
-	/// Arbitrary bytes discarded by lite-07+ receivers.
-	Padding = 2,
 	/// The lite-07+ Announce Stream: everything an endpoint says about routing.
 	Announce = 3,
 }
