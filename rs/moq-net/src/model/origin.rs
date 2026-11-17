@@ -4698,8 +4698,9 @@ impl FrontServe {
 		{
 			pending.selected = entry.instance.clone();
 		}
-		// Only a received route carries a hop chain: a local one needs no discovery.
-		let received = best.is_some_and(|entry| !entry.hops.is_empty());
+		// Only a received route carries a hop chain or a claiming node: a local one needs
+		// no discovery.
+		let received = best.is_some_and(|entry| !entry.hops.is_empty() || entry.node.is_some());
 		let best = best.map(|entry| Candidate {
 			route: entry.id,
 			local: entry.local,

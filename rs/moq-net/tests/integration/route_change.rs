@@ -1246,8 +1246,13 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	if compress {
 		assert!(rest.is_empty(), "trailing delivery: {rest:?}");
 	} else {
+		// The relay holds both copies and refuses the second itself, which reaches the
+		// reader as the reset of its subscription.
 		assert!(
-			matches!(rest.as_slice(), [(u64::MAX, Err(Error::Unsupported))]),
+			matches!(
+				rest.as_slice(),
+				[(u64::MAX, Err(Error::Stream(moq_net::StreamError::Internal)))]
+			),
 			"the track did not end with the refusal: {rest:?}"
 		);
 	}

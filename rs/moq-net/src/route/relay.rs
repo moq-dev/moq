@@ -884,8 +884,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	}
 
 	/// `peer` edited what it asks this node for. The edit takes effect behind the marker
-	/// this node sends first: what both sets cover stays, and what the added prefixes newly
-	/// cover follows, closed by SYNCED for each. A routing neighbour asks for the whole
+	/// this node sends first: both sides drop what the removed prefixes covered there, and
+	/// what the added prefixes cover follows, closed by SYNCED for each. A routing neighbour asks for the whole
 	/// tree or nothing, since it forwards for every node behind it.
 	pub fn edit(&mut self, peer: N, edit: Edit) -> Result<(), Error> {
 		let state = self.peers.get(&peer).ok_or(Error::UnknownNeighbor)?;
@@ -1369,9 +1369,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	}
 
 	/// Pick the route to `origin`, and mark it stale for the neighbours if it changed.
-	fn reselect(&mut self, origin: NodeId) {
-		let current = self.best.get(&origin).map(|best| best.via);
-		let mut pick: Option<(Best<N>, Order<N>)> = None;
+	/// Every route to `origin` a neighbour offers that this node may use, as it would
+	/// hold it: priced and ranked over the link it came on.
+	fn usable(&self, origin: NodeId) -> Vec<Best<N>> {
+		let mut usable = Vec::new();
 		for (&via, heard) in self.heard.get(&origin).into_iter().flatten() {
 			self.visit();
 			let peer = &self.peers[&via];
@@ -1389,7 +1390,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			};
 			let draining =
 				offer.draining || peer.draining || offer.path.iter().any(|hop| self.draining.contains(&hop.node));
-			let mine = Best {
+			usable.push(Best {
 				via,
 				offer: Offer {
 					path: offer.path.clone(),
@@ -1398,7 +1399,22 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					cost,
 					marked: offer.marked || peer.port.upstream,
 				},
-			};
+			});
+		}
+		usable
+	}
+
+	fn reselect(&mut self, origin: NodeId) {
+		let current = self.best.get(&origin).map(|best| best.via);
+		let mut pick: Option<(Best<N>, Order<N>)> = None;
+		// A route that is not the best still serves the origin's claims, so each change
+		// to one reaches whoever follows them.
+		if let Some(log) = &mut self.log {
+			log.routes.insert(origin);
+		}
+		for mine in self.usable(origin) {
+			let via = mine.via;
+			let offer = mine.offer.clone();
 			let (draining, priority, cost) = mine.offer.rank();
 			// Among equal ranks one with no marked link, which more neighbours may be sent,
 			// and then the next hop in use.
@@ -1539,6 +1555,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		{
 			self.count(known.items.len());
 			let changes = (known.items.iter())
+				.filter(|(broadcast, _)| !self.withheld(peer, origin, broadcast))
 				.map(|(broadcast, claim)| (broadcast.clone(), Change::Live(claim.clone())))
 				.collect();
 			let floor = known.floor;
@@ -1677,9 +1694,24 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		// Even with nothing changed: the floor alone outranks an older copy elsewhere.
 		for &peer in self.sent_to.get(&origin).into_iter().flatten() {
 			self.visit();
-			let changes = changes.clone();
+			// A claim withheld from it is lost to it, if it was ever told.
+			let changes = (changes.iter().cloned())
+				.map(|(broadcast, change)| match self.withheld(peer, origin, &broadcast) {
+					true => (broadcast, Change::Lost),
+					false => (broadcast, change),
+				})
+				.collect();
 			self.out.push((peer, Msg::Claims { origin, changes, floor }));
 		}
+	}
+
+	/// Whether `peer` is never told `origin`'s claim of `broadcast`: this node's own, which
+	/// reached it over a marked link, when `peer`'s is marked too. A neighbour gave it as
+	/// a claim and not a route, so the mark the route would carry is kept here.
+	fn withheld(&self, peer: N, origin: NodeId, broadcast: &Broadcast<I>) -> bool {
+		origin == self.me
+			&& self.peers.get(&peer).is_some_and(|peer| peer.port.upstream)
+			&& self.crossed_mark(origin, broadcast)
 	}
 
 	fn claim(&mut self, broadcast: &Broadcast<I>, origin: NodeId) {
@@ -1885,8 +1917,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let was = self.known.get(&me).and_then(|known| known.items.get(&broadcast));
 		let change = match cheapest {
 			Some((claim, peer)) => {
+				let crossed = self.crossed_mark(me, &broadcast);
 				self.sources.insert(broadcast.clone(), peer);
-				if was == Some(&claim) {
+				// A source across the mark changes which neighbours are told the claim.
+				if was == Some(&claim) && crossed == self.crossed_mark(me, &broadcast) {
 					// The source alone moved, which a scoped neighbour must hear of.
 					self.dirty.insert(broadcast);
 					return;
@@ -1995,24 +2029,30 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 				continue;
 			}
-			let way = match origin == self.me {
-				true => self.sources.get(broadcast).map(|source| (Next::Local(*source), claim.clone())),
-				false => self.best.get(&origin).map(|best| {
-					let claim = Claim {
-						cost: claim.cost.saturating_add(best.offer.cost),
-						priority: claim.priority.min(best.offer.priority),
-						draining: claim.draining || best.offer.draining,
-						..claim.clone()
-					};
-					(Next::Via(best.via), claim)
-				}),
-			};
-			if let Some((next, claim)) = way {
+			if origin == self.me {
+				if let Some(source) = self.sources.get(broadcast) {
+					ways.push(Way {
+						origin,
+						next: Next::Local(*source),
+						claim: claim.clone(),
+						closest: closest == Some(origin),
+					});
+				}
+				continue;
+			}
+			// Every usable route to its claimant serves it, for the same reason.
+			let best = self.best.get(&origin).map(|best| best.via);
+			for route in self.usable(origin) {
 				ways.push(Way {
 					origin,
-					next,
-					claim,
-					closest: closest == Some(origin),
+					next: Next::Via(route.via),
+					claim: Claim {
+						cost: claim.cost.saturating_add(route.offer.cost),
+						priority: claim.priority.min(route.offer.priority),
+						draining: claim.draining || route.offer.draining,
+						..claim.clone()
+					},
+					closest: closest == Some(origin) && best == Some(route.via),
 				});
 			}
 		}

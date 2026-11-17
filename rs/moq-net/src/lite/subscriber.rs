@@ -10285,6 +10285,11 @@ mod tests {
 		session.close(Close::Fin);
 		assert!(routes.poll(&waiter).is_pending());
 		assert!(session.log.closes().is_empty(), "{:?}", session.log.closes());
+		// Unavailable until the reader's debounce runs out, on a timer the origin's driver
+		// fires.
+		kio::clock::sleep(crate::route::relay::debounce(crate::route::relay::HOP) * 2).await;
+		consumer.route_node().timeout();
+		assert!(routes.poll(&waiter).is_pending());
 		cursor.expect_next_offline("room").await;
 	}
 

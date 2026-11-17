@@ -379,8 +379,7 @@ const MOVE: u64 = 75;
 ///
 /// Proves the reader gets every frame once, in order, with its subscription intact; that
 /// `R` and `D` each show the moves as updates in place, never a retraction, a restart, or
-/// an unavailable route; and that each move costs `D` one ROUTE_UPDATE, behind a DEAD when
-/// a closed session caused it.
+/// an unavailable route; and that each move costs `D` one ANNOUNCE_UPDATE.
 #[kio::test]
 async fn next_hop_moves_keep_a_live_reader() {
 	let links = Links::new();
@@ -432,8 +431,8 @@ async fn next_hop_moves_keep_a_live_reader() {
 		);
 		assert_eq!(seen.len(), 5, "{node}: one update per move: {seen:?}");
 	}
-	// Four ROUTE_UPDATEs, and a DEAD before each of the two moves a closed session caused.
-	assert_eq!(sent.get("r-d"), Some(&6), "one ROUTE_UPDATE per move: {sent:?}");
+	// `D` is told the claim, so each move is one ANNOUNCE_UPDATE and nothing else.
+	assert_eq!(sent.get("r-d"), Some(&4), "one ANNOUNCE_UPDATE per move: {sent:?}");
 	drop(broadcast);
 }
 
@@ -758,9 +757,15 @@ async fn stale_route_case(seed: u64) {
 		readers.push((relay, reader(node, "live", start).await));
 	}
 	feed.run(5).await;
+	// A relay whose own session closed may have lost its only route for a moment, too
+	// short for its announcement to show it.
+	let mut severed = vec![false; n];
 	for _ in 0..rng.range(1, 2) {
-		if let Some(pair) = links[rng.pick(edges.len())].take() {
+		let edge = rng.pick(edges.len());
+		if let Some(pair) = links[edge].take() {
 			cut(&pair);
+			severed[edges[edge].0] = true;
+			severed[edges[edge].1] = true;
 		}
 	}
 	feed.run(30).await;
@@ -777,7 +782,10 @@ async fn stale_route_case(seed: u64) {
 		let live = Liveness::of(rx, &feed);
 		match &live.ended {
 			// A relay that lost every route may end its readers.
-			Some(_) => assert!(dark[*relay], "seed {seed}: relay {relay} stayed available: {live:?}"),
+			Some(_) => assert!(
+				dark[*relay] || severed[*relay],
+				"seed {seed}: relay {relay} stayed available: {live:?}"
+			),
 			None => assert!(live.seamless(), "seed {seed}: relay {relay}: {live:?}"),
 		}
 	}
@@ -785,8 +793,8 @@ async fn stale_route_case(seed: u64) {
 }
 
 /// `P` publishes `live` to `U` and `B`, and `D` pulls both, preferring `U`, whose link takes
-/// two seconds each way; `E` pulls `D`. `U`'s link to `P` times out and comes back at once,
-/// and `U` serves `live` again a second later, faster than its news reaches `D`.
+/// two seconds each way; `E` pulls `D`. `U`'s link to `P` times out and comes back as soon
+/// as `U` let the claim go, so `U` serves `live` again faster than its news reaches `D`.
 ///
 /// `U` resets the subscription below it `Unroutable` only once it lost every route, and it
 /// sends that loss to `D` on the same session as a retraction, which the announce cursor
@@ -820,11 +828,16 @@ async fn an_upstream_flapping_faster_than_its_news_strands_no_reader() {
 	feed.run(MOVE).await;
 	p_u.server.abort(Error::IdleTimeout);
 	p_u.client.abort(Error::IdleTimeout);
+	// Long enough for `U` to let the claim go, and no longer.
+	kio::clock::sleep(DEBOUNCE + STEP).await;
 	let _p_u = links.link("p-u2", &p, &u, 1).await;
 	feed.run(MOVE * 4).await;
 	kio::clock::sleep(Duration::from_secs(5)).await;
 
-	let seen = at_u.seen();
+	// Unavailable first, which is an update in place.
+	let seen: Vec<_> = (at_u.seen().into_iter())
+		.filter(|seen| seen.kind != Kind::Update)
+		.collect();
 	let kinds: Vec<_> = seen.iter().map(|seen| seen.kind).collect();
 	assert_eq!(kinds, [Kind::Start, Kind::Offline, Kind::Start], "U flapped: {seen:?}");
 	assert!(

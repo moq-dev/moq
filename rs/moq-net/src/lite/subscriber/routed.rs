@@ -278,7 +278,19 @@ impl Routed {
 	/// The peer finished its stream: it is leaving, and answers nothing more.
 	pub(in crate::lite) fn finish(&mut self) {
 		self.finished = true;
+		self.orphan();
 		self.stream.finished();
+	}
+
+	/// Leave what the session served in the origin, serving nothing, until another
+	/// session serves it or the node's reader lets it go.
+	fn orphan(&mut self) {
+		for ((origin, path, instance), mut served) in self.served.drain() {
+			let unavailable = served.route.route.clone().with_available(false);
+			served.route.update(unavailable);
+			let left = Left(served.route.dynamic.clone());
+			self.stream.orphan(origin, &(path, instance), Box::new(left));
+		}
 	}
 
 	/// This side finished its stream: the prefixes asked of the peer stay as they are.
@@ -710,14 +722,8 @@ impl Routed {
 
 impl Drop for Routed {
 	fn drop(&mut self) {
-		// The session closed: what it served stays in the origin, serving nothing, until
-		// another session serves it or the node's reader lets it go.
-		for ((origin, path, instance), mut served) in self.served.drain() {
-			let unavailable = served.route.route.clone().with_available(false);
-			served.route.update(unavailable);
-			let left = Left(served.route.dynamic.clone());
-			self.stream.orphan(origin, &(path, instance), Box::new(left));
-		}
+		// The session closed.
+		self.orphan();
 	}
 }
 

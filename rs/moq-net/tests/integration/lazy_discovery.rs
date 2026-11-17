@@ -306,11 +306,12 @@ async fn a_broader_request_holds_a_lingering_narrower_open() {
 	}
 }
 
-/// Lite-07 swaps a narrower request for a broader one, and back, in one edit each. The
-/// claim both sets cover is never retracted and never sent again, and the narrowing
-/// drops only what it uncovers.
+/// Lite-07 swaps a narrower request for a broader one, and back, in one edit each. Both
+/// ends drop what the removed prefix covered at the edit's answer and the peer tells it
+/// again under the added one, so a reader never sees the claim both sets cover retracted,
+/// and the narrowing drops only what it uncovers.
 #[kio::test]
-async fn a_swap_edit_keeps_what_both_sets_cover() {
+async fn a_swap_edit_retracts_nothing_both_sets_cover() {
 	let lazy = Lazy::new("moq-lite-07-wip").await;
 	let server = &lazy.pair.server_transport;
 	let mut narrower = lazy.watch("a");
@@ -321,7 +322,7 @@ async fn a_swap_edit_keeps_what_both_sets_cover() {
 	let mut root = lazy.watch("");
 	assert_eq!(synced(&mut root).await, ["a/x", "b/y"]);
 	assert_eq!(lazy.requests(), 2, "one edit swaps the narrower prefix for the broader");
-	assert_eq!(sent(server, ANNOUNCE_START), 2, "only b/y is new");
+	assert_eq!(sent(server, ANNOUNCE_START), 3, "a/x is told again, and b/y is new");
 	assert!(narrower.try_next().is_none(), "nothing retracted");
 
 	// The broader request holds the narrower one open, and lingers out first.
@@ -333,7 +334,7 @@ async fn a_swap_edit_keeps_what_both_sets_cover() {
 	assert_eq!(lazy.requests(), 3, "one edit swaps back");
 	assert!(!lazy.routes("b/y").await);
 	assert!(lazy.routes("a/x").await);
-	assert_eq!(sent(server, ANNOUNCE_START), 2, "nothing is sent again");
+	assert_eq!(sent(server, ANNOUNCE_START), 4, "a/x is told again");
 	assert_eq!(lazy.pair.client_transport.close_reason(), None);
 	assert_eq!(server.close_reason(), None);
 }
