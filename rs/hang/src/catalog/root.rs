@@ -401,10 +401,10 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
 	/// needs a newer moq-hang draft than this crate reads.
 	pub fn from_slice(v: &[u8]) -> Result<Self> {
-		// Probed straight from the bytes as well, since a `Value` keeps only the last of two
-		// `version` members instead of refusing them.
+		// Probed straight from the bytes first, so an unsupported root `version` is reported before
+		// any other fault; `Strict` then refuses a repeated member, which a `Value` would collapse.
 		serde_json::from_slice::<Probe>(v)?.check()?;
-		Self::from_value(serde_json::from_slice(v)?)
+		Self::from_value(serde_json::from_slice::<Strict>(v)?.0)
 	}
 
 	/// Parse a catalog from a reader.
@@ -1472,6 +1472,11 @@ mod test {
 		let entry = r#"{"video":{"renditions":{"hd":{"version":5,"version":3,"codec":"avc1.64001f"}}}}"#;
 		assert!(Catalog::<()>::from_str(entry).is_err(), "{entry}");
 		assert!(serde_json::from_str::<Catalog>(entry).is_err(), "{entry}");
+
+		// Any repeated member, not only `version`.
+		let repeated = r#"{"video":{"renditions":{"hd":{"codec":"avc1.64001f","codec":"vp8"}}}}"#;
+		assert!(Catalog::<()>::from_str(repeated).is_err(), "{repeated}");
+		assert!(serde_json::from_str::<Catalog>(repeated).is_err(), "{repeated}");
 	}
 
 	#[test]
