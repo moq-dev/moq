@@ -46,7 +46,7 @@ a later rename; keeping `sequence`). Once groups are keyed by `start`,
 `Frame.Consumer.sequence` (`js/net/src/frame.ts:251`), and
 `Group.Consumer.readFrameSequence` and `tryReadFrameSequence`
 (`js/net/src/group.ts:1406`, `:1363`), whose result field is `sequence`.
-Callers outside `js/net/src`: `js/crypto/src/e2ee/group.ts` (2) and two
+Callers outside `js/net/src`: `js/e2ee/src/group.ts` (2) and two
 benches. ✅ In the same PR, `Time.keyOf` becomes a getter on `Timestamp`
 (rejected: keeping the free function). It is an `export let` assigned from
 inside the class (`js/net/src/time.ts:53`, `:128`) with one caller,

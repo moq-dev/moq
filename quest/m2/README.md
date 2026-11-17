@@ -42,8 +42,8 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
 - **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md).
-- **Auth and crypto.** End-to-end encryption
-  [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
+- **Auth and crypto.** End-to-end encryption is its own unpublished crate again
+  ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
